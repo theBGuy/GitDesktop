@@ -57,13 +57,15 @@ import {
 } from "@/features/pulls/CommitComments";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
-import type { CommitParent } from "@/lib/git/api";
+import { type CommitParent, headBranchPin } from "@/lib/git/api";
 import { sameDiffContent } from "@/lib/git/diff-content";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
   commitParentsOptions,
+  opStateOptions,
   repoStatusOptions,
   useCheckoutCommit,
   useCherryPick,
@@ -88,10 +90,14 @@ import {
   providerLabel,
   type RepoStatus,
 } from "@/lib/git/types";
+import { dispatchAction } from "@/lib/hotkeys/handler-registry";
+import { useAvailableActions } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -102,8 +108,10 @@ import {
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
   type MergeParentOp,
+  OP_IN_PROGRESS_HINT,
   revertCommitConfirm,
 } from "./commit-confirms";
+import { EditDatesDialog, type EditDatesTarget } from "./EditDatesDialog";
 import { headAgrees } from "./editable-set";
 import { FileRowActions } from "./FileRowActions";
 import { MergeParentDialog, type MergePickTarget } from "./HistoryDialogs";
@@ -112,6 +120,36 @@ import { useAmendWithConfirm } from "./useAmendCommit";
 /** Where a revert or cherry-pick from the detail view goes once the commit's
  *  parents are read. */
 type MergeRoute = "dialog" | "plain" | "stale";
+
+/** Whether the meta row also shows the committer date: both dates parse and
+ *  their instants (one instant can carry two offsets) differ by at least one
+ *  minute, either way. Otherwise the row shows the author date alone, or no
+ *  date when that doesn't parse. */
+function datesDiffer(authored: string, committed: string): boolean {
+  if (!parseableDate(authored) || !parseableDate(committed)) return false;
+  return Math.abs(Date.parse(committed) - Date.parse(authored)) >= 60_000;
+}
+
+/** A meta-row item's leading separator, hung in the item's left padding. */
+function MetaSeparator({ className }: { className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn("absolute left-0 w-5 text-center", className)}
+    >
+      •
+    </span>
+  );
+}
+
+/** Edit dates' reason off HEAD where History's route isn't live for this
+ *  commit (it isn't History's selection, or no History panel is showing). */
+const EDIT_DATES_ELSEWHERE_HINT =
+  " (only the latest commit, or an unpushed commit in History)";
+
+/** Edit dates' reason off HEAD for History's own selection while History
+ *  holds the route: the commit's row there says why. */
+const EDIT_DATES_HISTORY_ROW_HINT = " (see its row in History)";
 
 /** Module-level so the selector's identity is stable; structural sharing keeps
  *  an equal result stable too, so working-tree edits in the polled status don't
@@ -333,6 +371,27 @@ export function CommitDetailView({
     select: selectHead,
   }).data;
   const { requestAmend, forcePushDialog } = useAmendWithConfirm(repoPath);
+  // HEAD's dates change here; any other commit routes through History's
+  // palette action, which owns the editable set, and only for the commit
+  // History has selected.
+  const [editDates, setEditDates] = useState<EditDatesTarget | null>(null);
+  const datesRouteLive = useAvailableActions().has("edit-commit-dates");
+  const storeSelectedHash = useUiStore((s) => s.selectedCommitHash);
+  // Edit dates holds through a merge/rebase/cherry-pick/revert, as History's
+  // row does. Fetched only while the actions menu is open; otherwise it serves
+  // whatever the cache holds. A pending or failed read holds nothing (the
+  // dialog still refuses).
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const opState = useQuery({
+    ...opStateOptions(repoPath),
+    enabled: actionsOpen,
+  }).data;
+  const opInProgress = Boolean(
+    opState?.merging ||
+      opState?.rebasing ||
+      opState?.cherryPicking ||
+      opState?.reverting,
+  );
   const checkoutCommit = useCheckoutCommit(repoPath);
   const revertCommit = useRevertCommit(repoPath);
   const cherryPick = useCherryPick(repoPath);
@@ -351,7 +410,42 @@ export function CommitDetailView({
   // Amend needs the log top AND status HEAD: an outside commit reaches status
   // first, and an amend chosen in that window would land already held.
   const isHead = isLatest && headAgrees(logTop, head?.oid);
+  const datesViaHistory = datesRouteLive && storeSelectedHash === hash;
+  // After Edit dates changes the commit, focus lands on the actions trigger:
+  // the dialog's close lands it when the trigger is mounted, else the
+  // trigger's ref does once the rewritten commit's view renders it.
+  const actionsTrigger = useRef<HTMLButtonElement | null>(null);
+  const landOnActions = useRef(false);
+  const actionsTriggerRef = (node: HTMLButtonElement | null) => {
+    actionsTrigger.current = node;
+    if (node === null || !landOnActions.current) return;
+    const active = document.activeElement;
+    if (active !== document.body && active !== focusHost.current) return;
+    landOnActions.current = false;
+    node.focus();
+  };
   const onError = (e: unknown) => toastError(e);
+
+  function openEditDates() {
+    if (opInProgress) return;
+    if (!isHead) {
+      dispatchAction("edit-commit-dates");
+      return;
+    }
+    // The pin comes from the cached status branch: `head` above has no
+    // detached flag to build one from. The cache can already name a newer HEAD
+    // than this render's, and a pin on it would amend a commit never shown.
+    const shownHead = queryClient.getQueryData<RepoStatus>(
+      repoStatusOptions(repoPath).queryKey,
+    )?.branch;
+    if (!shownHead?.oid || shownHead.oid !== hash) return;
+    setEditDates({
+      hash,
+      repo: repoPath,
+      expectedHead: shownHead.oid,
+      expectedBranch: headBranchPin(shownHead),
+    });
+  }
 
   // The commit renders only with both reads loaded, so the ladder merges them:
   // a failure beside the other read's refetch in flight hasn't settled.
@@ -601,91 +695,171 @@ export function CommitDetailView({
               {commit.body}
             </p>
           )}
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span
-              className={cn(
-                "flex items-center gap-2",
-                PLACEHOLDER_FADE,
-                staleDim,
-              )}
-            >
-              <CommitAuthorAvatar
-                name={commit.author}
-                email={commit.authorEmail}
-              />
-              <span>{commit.author}</span>
-              <span>•</span>
-              <span>
-                <RelativeTime date={commit.date} />
-              </span>
-              <span>•</span>
-            </span>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 font-mono hover:text-foreground"
-              onClick={copyHash}
-              title="Copy full hash"
-            >
-              {hash.slice(0, 7)}
-              <CopyIcon className="size-3" />
-            </button>
-            <span className="flex-1" />
-            <DiffStat
-              added={totalAdded}
-              deleted={totalDeleted}
-              className={cn(
-                "flex items-center gap-2",
-                PLACEHOLDER_FADE,
-                staleDim,
-              )}
-            />
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Commit actions"
-                  />
-                }
+          {/* The row wraps by item. Each separator hangs in its item's leading
+            slot and the lane is pulled left by that slot inside a clip box, so a
+            line-starting item's separator never paints and none ends a line.
+            The clip box's 4px pad keeps focus rings inside it. */}
+          <div className="-m-1 overflow-hidden p-1">
+            <div className="-ml-5 flex flex-wrap items-center gap-y-1 text-xs text-muted-foreground">
+              <span
+                className={cn(
+                  "relative flex min-w-0 items-center gap-2 pl-5",
+                  PLACEHOLDER_FADE,
+                  staleDim,
+                )}
               >
-                <DotsThreeVerticalIcon />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent className="min-w-56" align="end">
-                <DropdownMenuItem
-                  className={MENU_HELD_ROW_CLASS}
-                  disabled={!isHead}
-                  onClick={() => requestAmend(hash)}
+                <MetaSeparator />
+                <CommitAuthorAvatar
+                  name={commit.author}
+                  email={commit.authorEmail}
+                />
+                <span
+                  className="min-w-0 truncate"
+                  onMouseEnter={clipTitleFromText}
                 >
-                  Amend commit…
-                  {(() => {
-                    // Only HEAD can be amended; until the log and status agree
-                    // on it, the row waits rather than claiming out of reach.
-                    // A log that failed with nothing loaded (and isn't retrying)
-                    // isn't refreshing.
-                    if (isHead) return null;
-                    if (log.data === undefined && refreshFailed(log))
-                      return AMEND_HOLD_HINT["log-unread"];
-                    if (logTop === undefined || isLatest || hash === head?.oid)
-                      return AMEND_HOLD_HINT.refreshing;
-                    return AMEND_HOLD_HINT["not-latest"];
-                  })()}
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={doCheckoutCommit}>
-                  Checkout commit
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={doRevertCommit}>
-                  Revert changes in commit
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={doCherryPick}>
-                  Cherry-pick commit
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => copyText(hash, "SHA copied")}>
-                  Copy SHA
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  {commit.author}
+                </span>
+              </span>
+              {parseableDate(commit.date) &&
+                (datesDiffer(commit.date, commit.committerDate) ? (
+                  <div
+                    className={cn(
+                      "relative min-w-0 pl-5",
+                      PLACEHOLDER_FADE,
+                      staleDim,
+                    )}
+                  >
+                    <MetaSeparator />
+                    <div className="overflow-hidden">
+                      <div className="-ml-5 flex flex-wrap gap-y-1">
+                        <span className="relative whitespace-nowrap pl-5">
+                          <MetaSeparator />
+                          authored <RelativeTime date={commit.date} />
+                        </span>
+                        <span className="relative whitespace-nowrap pl-5">
+                          <MetaSeparator />
+                          committed <RelativeTime date={commit.committerDate} />
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <span
+                    className={cn(
+                      "relative shrink-0 whitespace-nowrap pl-5",
+                      PLACEHOLDER_FADE,
+                      staleDim,
+                    )}
+                  >
+                    <MetaSeparator />
+                    <RelativeTime date={commit.date} />
+                  </span>
+                ))}
+              <span className="relative shrink-0 pl-5">
+                <MetaSeparator className={cn(PLACEHOLDER_FADE, staleDim)} />
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+                  onClick={copyHash}
+                  title="Copy full hash"
+                >
+                  {hash.slice(0, 7)}
+                  <CopyIcon className="size-3" />
+                </button>
+              </span>
+              <div className="ml-auto flex shrink-0 items-center gap-2 pl-2">
+                <DiffStat
+                  added={totalAdded}
+                  deleted={totalDeleted}
+                  className={cn(
+                    "flex items-center gap-2",
+                    PLACEHOLDER_FADE,
+                    staleDim,
+                  )}
+                />
+                <DropdownMenu onOpenChange={setActionsOpen}>
+                  <DropdownMenuTrigger
+                    ref={actionsTriggerRef}
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label="Commit actions"
+                      />
+                    }
+                  >
+                    <DotsThreeVerticalIcon />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="min-w-56" align="end">
+                    <DropdownMenuItem
+                      className={MENU_HELD_ROW_CLASS}
+                      disabled={!isHead}
+                      onClick={() => requestAmend(hash)}
+                    >
+                      Amend commit…
+                      {(() => {
+                        // Only HEAD can be amended; until the log and status agree
+                        // on it, the row waits rather than claiming out of reach.
+                        // A log that failed with nothing loaded (and isn't retrying)
+                        // isn't refreshing.
+                        if (isHead) return null;
+                        if (log.data === undefined && refreshFailed(log))
+                          return AMEND_HOLD_HINT["log-unread"];
+                        if (
+                          logTop === undefined ||
+                          isLatest ||
+                          hash === head?.oid
+                        )
+                          return AMEND_HOLD_HINT.refreshing;
+                        return AMEND_HOLD_HINT["not-latest"];
+                      })()}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className={MENU_HELD_ROW_CLASS}
+                      disabled={opInProgress || (!isHead && !datesViaHistory)}
+                      onClick={openEditDates}
+                    >
+                      Edit dates…
+                      {(() => {
+                        // The operation first, as History orders it; then
+                        // Amend's own log and HEAD holds, then the route's.
+                        switch (true) {
+                          case opInProgress:
+                            return OP_IN_PROGRESS_HINT;
+                          case isHead || datesViaHistory:
+                            return null;
+                          case log.data === undefined && refreshFailed(log):
+                            return AMEND_HOLD_HINT["log-unread"];
+                          case logTop === undefined ||
+                            isLatest ||
+                            hash === head?.oid:
+                            return AMEND_HOLD_HINT.refreshing;
+                          case storeSelectedHash === hash && !datesRouteLive:
+                            return EDIT_DATES_HISTORY_ROW_HINT;
+                          default:
+                            return EDIT_DATES_ELSEWHERE_HINT;
+                        }
+                      })()}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={doCheckoutCommit}>
+                      Checkout commit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={doRevertCommit}>
+                      Revert changes in commit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={doCherryPick}>
+                      Cherry-pick commit
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={() => copyText(hash, "SHA copied")}
+                    >
+                      Copy SHA
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
           </div>
           {/* Inert as well as faded while the details are a placeholder: these
             are CLICKABLE links mined from the previous commit's message, kept
@@ -831,6 +1005,21 @@ export function CommitDetailView({
         />
 
         <AmendForcePushDialog {...forcePushDialog} />
+        <EditDatesDialog
+          key={`edit-dates:${repoPath}`}
+          repoPath={repoPath}
+          target={editDates}
+          onClose={() => setEditDates((t) => (t === editDates ? null : t))}
+          onDatesChanged={() => {
+            landOnActions.current = true;
+          }}
+          landFocus={() => {
+            const trigger = actionsTrigger.current;
+            if (!landOnActions.current || !trigger?.isConnected) return null;
+            landOnActions.current = false;
+            return trigger;
+          }}
+        />
         <MergeParentDialog
           repoPath={repoPath}
           target={mergePick}

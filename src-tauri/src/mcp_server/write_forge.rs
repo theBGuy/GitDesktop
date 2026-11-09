@@ -657,7 +657,8 @@ impl GitDesktopMcp {
                        `head` to origin first, then opens `head` → `base`. Labels/assignees are \
                        GitHub/GitLab-only; create-time reviewers are Bitbucket-only (elsewhere use \
                        request_reviewers after creation) — the forge layer rejects an unsupported \
-                       combination. Returns the created PR ref (number + URL) as JSON. Requires \
+                       combination. Refuses a GitDesktop agent-session `head` (gd/session/*, in any \
+                       letter case). Returns the created PR ref (number + URL) as JSON. Requires \
                        BOTH --allow-remote-write AND --allow-git-write, because it pushes `head` to \
                        origin first.",
         annotations(read_only_hint = false, destructive_hint = false)
@@ -671,6 +672,7 @@ impl GitDesktopMcp {
         // --allow-git-write-tier action, so require that tier too (a tier never
         // grants another).
         self.ensure_git_write()?;
+        super::write_git::ensure_not_publishing_session_branch(&args.head)?;
         // Branch names reach a git/CLI argv position, but every provider arm already
         // rejects an empty or '-'-leading branch, so no extra guard is needed here.
         let pr_ref = crate::forge::forge_pr_create_core(
@@ -1712,6 +1714,34 @@ mod tests {
     use super::super::CiId;
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
+
+    #[tokio::test]
+    async fn create_pull_request_refuses_session_publish_before_repo_access() {
+        let h = GitDesktopMcp::with_options("/tmp/x".into(), false, true, true, false);
+        for head in ["gd/session/x", "GD/Session/x", "feature/x"] {
+            let error = h
+                .create_pull_request(Parameters(CreatePullRequestArgs {
+                    base: "main".into(),
+                    head: head.into(),
+                    title: "t".into(),
+                    body: String::new(),
+                    draft: false,
+                    labels: None,
+                    assignees: None,
+                    reviewers: None,
+                }))
+                .await
+                .expect_err("the bound path is not a repository");
+            if head == "feature/x" {
+                assert!(!error.message.contains("reserved for agent sessions"));
+                assert!(!error.message.contains("won't push or publish it"));
+            } else {
+                assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+                assert!(error.message.contains("reserved for agent sessions"));
+                assert!(error.message.contains("won't push or publish it"));
+            }
+        }
+    }
 
     #[test]
     fn lean_reads_branch_on_the_github_arm() {

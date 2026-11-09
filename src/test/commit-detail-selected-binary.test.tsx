@@ -109,6 +109,7 @@ const details = (hash: string): CommitDetails => ({
   author: "Ada",
   authorEmail: "ada@example.com",
   date: "2026-11-01T10:00:00Z",
+  committerDate: "2026-11-01T10:00:00Z",
 });
 
 const bin = (path: string): DiffStatEntry => ({

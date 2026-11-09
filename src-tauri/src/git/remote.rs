@@ -1002,6 +1002,16 @@ enum CrossNameUpstream {
     Refuse,
 }
 
+/// Refuses publishing a branch reserved for agent-session work.
+pub(crate) fn refuse_publishing_session_branch(name: &str) -> AppResult<()> {
+    if crate::git::branches::is_session_branch_name(name) {
+        return Err(AppError::InvalidArgument(format!(
+            "\"{name}\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)] // existing push inputs plus the caller's policy
 async fn git_push_with_policy(
     state: &AppState,
@@ -1034,6 +1044,12 @@ async fn git_push_with_policy(
                     "remote requires an explicit branch".to_string(),
                 ));
             }
+            // Bare and force pushes resolve HEAD after the repo-lock wait, so a branch
+            // switch can race this check; pinning them would change push.default semantics.
+            let head = crate::git::branches::current_branch_name(&repo_path).await?;
+            if let Some(b) = &head {
+                refuse_publishing_session_branch(b)?;
+            }
             if set_upstream && crate::git::branches::head_is_unborn(&repo_path).await? {
                 return Err(crate::git::branches::unborn_head_error());
             }
@@ -1046,13 +1062,10 @@ async fn git_push_with_policy(
                 a.push(FORCE_IF_INCLUDES.to_string());
             }
             if set_upstream {
-                // Pinned to the branch checked out NOW, the one the press named, as the
-                // explicit same-name pair: a literal `HEAD` resolves only at spawn,
-                // after the network-lock wait, so the push and its upstream repair could
-                // name different branches. Detached (or unpinnable) keeps `HEAD`.
-                head_branch = pushed_branch(&repo_path, None)
-                    .await
-                    .filter(|b| crate::git::branches::validate_ref_name(b).is_ok());
+                // Pin the branch read above as an explicit same-name pair so the push and
+                // upstream repair agree after the lock wait. Detached HEAD or a name
+                // failing validate_ref_name keeps the literal `HEAD` fallback.
+                head_branch = head.filter(|b| crate::git::branches::validate_ref_name(b).is_ok());
                 let target = head_branch
                     .as_deref()
                     .map_or("HEAD".to_string(), publish_refspec);
@@ -1062,6 +1075,7 @@ async fn git_push_with_policy(
         }
         Some(b) => {
             crate::git::branches::validate_ref_name(b)?;
+            refuse_publishing_session_branch(b)?;
             // A caller-chosen remote is validated for shape AND verified to exist
             // BEFORE any mutation: the existence check is the primary guard (a URL
             // can never appear in `git remote` output — and it requires `:`, which
@@ -2847,6 +2861,88 @@ mod tests {
         run(&work_s, &["remote", "add", "origin", &url]).await;
         run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
         (guard, base, origin.to_string_lossy().into_owned(), url)
+    }
+
+    #[tokio::test]
+    async fn head_push_refuses_session_publish_in_core() {
+        let (_guard, base, _origin, _url) = seeded_origin("session-publish").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["checkout", "-q", "-b", "GD/Session/Mixed"]).await;
+        run(&work, &["config", "push.autoSetupRemote", "true"]).await;
+        let state = AppState::default();
+        for (set_upstream, force, mcp_core) in [
+            (true, false, false),
+            (false, false, false),
+            (false, true, false),
+            (false, true, true),
+        ] {
+            let result = if mcp_core {
+                super::git_force_push_head_core(&state, work.clone()).await
+            } else {
+                git_push_core(&state, work.clone(), set_upstream, force, None, None, None).await
+            };
+            match result.expect_err("session HEAD must not publish") {
+                AppError::InvalidArgument(message) => assert_eq!(
+                    message,
+                    "\"GD/Session/Mixed\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
+                ),
+                other => panic!("expected the publishing refusal, got {other:?}"),
+            }
+            assert!(!run(&work, &["ls-remote", "origin"])
+                .await
+                .to_ascii_lowercase()
+                .contains("gd/session/"));
+        }
+    }
+
+    #[tokio::test]
+    async fn named_push_refuses_session_publish_in_core() {
+        let (_guard, base, _origin, _url) = seeded_origin("session-publish-named").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["branch", "gd/session/abc"]).await;
+        let error = git_push_core(
+            &AppState::default(),
+            work.clone(),
+            true,
+            false,
+            Some("gd/session/abc".into()),
+            None,
+            None,
+        )
+        .await
+        .expect_err("named session branch must not publish");
+        match error {
+            AppError::InvalidArgument(message) => assert_eq!(
+                message,
+                "\"gd/session/abc\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
+            ),
+            other => panic!("expected the publishing refusal, got {other:?}"),
+        }
+        assert!(!run(&work, &["ls-remote", "origin"])
+            .await
+            .to_ascii_lowercase()
+            .contains("gd/session/"));
+    }
+
+    #[tokio::test]
+    async fn session_publish_guard_lets_feature_publish() {
+        let (_guard, base, _origin, _url) = seeded_origin("session-publish-feature").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["checkout", "-q", "-b", "feature/y"]).await;
+        git_push_core(
+            &AppState::default(),
+            work.clone(),
+            true,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("ordinary feature HEAD publishes");
+        assert!(run(&work, &["ls-remote", "origin"])
+            .await
+            .contains("refs/heads/feature/y"));
     }
 
     /// The forge publishes push HEAD's branch by NAME, so a tag sharing it (or a branch

@@ -1,4 +1,4 @@
-import type { RewriteStep } from "@/lib/git/types";
+import type { CommitDate, RewriteStep } from "@/lib/git/types";
 
 /**
  * The interactive-rebase vocabulary for one unpushed commit. Mirrors
@@ -24,6 +24,9 @@ export interface EditRow {
    *  as the default. Used as the leader's part for a reword or a squash leader,
    *  and as a squash row's contribution; ignored for pick/fixup/drop. */
   message: string;
+  /** The row's new dates, set only for a row whose date draft changed with no
+   *  error. They ride a LEADER's step; fold members and drop rows ignore them. */
+  dates?: { authorDate?: CommitDate; committerDate?: CommitDate };
 }
 
 export interface RowView {
@@ -50,8 +53,11 @@ export interface CompiledPlan {
   error: string | null;
   /** The hash of the row `error` is about, or null when it names no row. */
   errorHash: string | null;
-  /** Whether the plan differs from the no-op (original order, all picked). */
+  /** Whether the plan differs from the no-op (original order, all picked, no
+   *  dates). */
   changed: boolean;
+  /** How many steps carry a date. */
+  datedCount: number;
   /** Whether any commit is set to `edit` — routes the apply to the resumable
    *  interactive rebase instead of the atomic replay engine. */
   hasEdit: boolean;
@@ -114,6 +120,10 @@ export function compilePlan(
       currentLeader = i;
       const step: RewriteStep = { hashes: [rows[i].hash] };
       if (action === "edit") step.edit = true;
+      // Only keys that carry a value: an absent key means "no change".
+      const dates = rows[i].dates;
+      if (dates?.authorDate) step.authorDate = dates.authorDate;
+      if (dates?.committerDate) step.committerDate = dates.committerDate;
       steps.push(step);
       stepByLeader.set(i, step);
     } else if (currentLeader === -1) {
@@ -176,7 +186,11 @@ export function compilePlan(
   const reordered =
     rows.length !== originalHashes.length ||
     rows.some((r, i) => r.hash !== originalHashes[i]);
-  const changed = reordered || rows.some((r) => r.action !== "pick");
+  const datedCount = steps.filter(
+    (s) => s.authorDate !== undefined || s.committerDate !== undefined,
+  ).length;
+  const changed =
+    reordered || datedCount > 0 || rows.some((r) => r.action !== "pick");
   const hasEdit = rows.some((r) => r.action === "edit");
 
   return {
@@ -187,8 +201,68 @@ export function compilePlan(
     error,
     errorHash,
     changed,
+    datedCount,
     hasEdit,
   };
+}
+
+/**
+ * The planned commits whose AUTHOR date falls strictly before their planned
+ * parent's. The parent comes from the compiled plan (step k's parent is step
+ * k-1, step 0's is `base`), so reorders, drops and folds are covered by
+ * construction. A pair is judged only when a date edit takes part in it (the
+ * child's or the parent's planned author date differs from its original), so a
+ * pure reorder or an inversion that already exists is not flagged. A step whose
+ * leader has no original author date (unread, unreadable) is not judged, nor is
+ * the oldest step while `base` is null.
+ */
+export function beforeParentSteps({
+  steps,
+  originalAuthor,
+  base,
+}: {
+  steps: RewriteStep[];
+  /** By commit hash. */
+  originalAuthor: Record<string, CommitDate>;
+  /** The base commit's author date; null = not read. */
+  base: { hash: string; author: CommitDate } | null;
+}): { hash: string; parentHash: string; parentDate: CommitDate }[] {
+  // Inlined rather than imported: this module stays free of runtime imports.
+  const edited = (step: RewriteStep, original: CommitDate) =>
+    step.authorDate !== undefined &&
+    (step.authorDate.epochSeconds !== original.epochSeconds ||
+      step.authorDate.offsetMinutes !== original.offsetMinutes);
+
+  const out: { hash: string; parentHash: string; parentDate: CommitDate }[] =
+    [];
+  for (let k = 0; k < steps.length; k++) {
+    const step = steps[k];
+    const hash = step.hashes[0];
+    const childOriginal = originalAuthor[hash];
+    if (childOriginal === undefined) continue;
+    const child = step.authorDate ?? childOriginal;
+    let parentHash: string;
+    let parent: CommitDate;
+    let parentEdited: boolean;
+    if (k === 0) {
+      if (base === null) continue;
+      parentHash = base.hash;
+      parent = base.author;
+      parentEdited = false;
+    } else {
+      const prev = steps[k - 1];
+      parentHash = prev.hashes[0];
+      const parentOriginal = originalAuthor[parentHash];
+      if (parentOriginal === undefined) continue;
+      parent = prev.authorDate ?? parentOriginal;
+      parentEdited = edited(prev, parentOriginal);
+    }
+    if (!edited(step, childOriginal) && !parentEdited) continue;
+    if (child.epochSeconds < parent.epochSeconds) {
+      out.push({ hash, parentHash, parentDate: parent });
+    }
+  }
+  return out;
 }
 
 /** Maps an index between data order (newest-first) and display order. Its own

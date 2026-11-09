@@ -256,7 +256,11 @@ pub struct CommitDetails {
     pub body: String,
     pub author: String,
     pub author_email: String,
+    /// Author date, strict ISO 8601 (%aI).
     pub date: String,
+    /// Committer date, strict ISO 8601 (%cI); may differ from `date` after a
+    /// rewrite, a cherry-pick or an applied patch.
+    pub committer_date: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,11 +293,21 @@ pub struct CommitAuthor {
     pub email: String,
 }
 
+/// A commit timestamp as git records it: seconds since the Unix epoch plus the UTC offset in minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDate {
+    pub epoch_seconds: i64,
+    pub offset_minutes: i32,
+}
+
 /// One resulting commit in a history rewrite: a single hash is a plain
 /// pick; several hashes squash into one commit carrying `message`. `edit`
 /// flags the commit to pause at (only the interactive-rebase path honors it;
-/// the atomic replay engine ignores it).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// the atomic replay engine ignores it). A date left `None` keeps git's own
+/// behaviour (author date kept, committer date = now); a fold group's dates apply
+/// to the one commit it makes.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RewriteStep {
     pub hashes: Vec<String>,
@@ -301,6 +315,10 @@ pub struct RewriteStep {
     pub message: Option<String>,
     #[serde(default)]
     pub edit: bool,
+    #[serde(default)]
+    pub author_date: Option<CommitDate>,
+    #[serde(default)]
+    pub committer_date: Option<CommitDate>,
 }
 
 #[derive(Debug, Clone, Serialize)]

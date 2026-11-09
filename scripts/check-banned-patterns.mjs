@@ -5730,11 +5730,13 @@ export const CHECKS = [
       // editable or typeahead targets for the guards to protect.
       "src/features/projects/ProjectsBoardPanel.tsx",
       // Same shape as the board entry above: its `eventToBinding` call
-      // tests a hardcoded set (the four Alt move chords plus unmodified
-      // Enter/Space and Home/End), never a user binding, and acts only when
-      // the event target is a [data-row] commit row, never an editable or
-      // typeahead surface. A rebindable binding dispatched here would need
-      // the three predicates, or this entry must go.
+      // tests a hardcoded set (the four Alt move chords, unmodified
+      // Enter/Space, Home/End, Up/Down and D, and Shift+Up/Down), never a
+      // user binding, and acts only when the event target is a [data-row]
+      // commit row, never an editable or typeahead surface. Escape in the
+      // date editor and the selection strip is matched by `e.key` on those
+      // containers, outside this handler. A rebindable binding dispatched
+      // here would need the three predicates, or this entry must go.
       "src/features/history/EditHistoryDialog.tsx",
     ],
     message:

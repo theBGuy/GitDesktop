@@ -236,7 +236,12 @@ beforeEach(() => {
   resetOrderBaselineForTests();
   vi.mocked(gitUnpushedMessages).mockReset();
   vi.mocked(gitUnpushedMessages).mockResolvedValue(
-    COMMITS.map((c) => ({ hash: c.hash, message: c.subject })),
+    COMMITS.map((c) => ({
+      hash: c.hash,
+      message: c.subject,
+      authorDate: { epochSeconds: 1_762_000_000, offsetMinutes: 60 },
+      committerDate: { epochSeconds: 1_762_000_000, offsetMinutes: 60 },
+    })),
   );
   vi.mocked(loadSettings).mockReset();
   vi.mocked(loadSettings).mockImplementation(async () =>

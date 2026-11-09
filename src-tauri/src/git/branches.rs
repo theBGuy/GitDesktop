@@ -3022,6 +3022,9 @@ pub struct UnpushedCount {
     pub basis: UnpushedBasis,
     /// Some only for DefaultBranch and OnDefaultBranch.
     pub default_branch: Option<String>,
+    /// The full oid HEAD resolved to when the count was taken, the identity the
+    /// frontend pairs the count with its log by; `None` only on an unborn HEAD.
+    pub head_oid: Option<String>,
 }
 
 /// Commits on `HEAD` the History tab marks "not pushed" on a branch with NO upstream,
@@ -3032,7 +3035,8 @@ pub struct UnpushedCount {
 /// branch itself, or with no verifiable default, every `HEAD` commit counts
 /// (`OnDefaultBranch` hides the arrows only; `Unresolved` keeps them). Only an unborn
 /// `HEAD` answers 0; any failed run, the remote listing included, is an Err. Spawns:
-/// the ref probe and rev-list, plus the remote listing when no remote ref resolved.
+/// the ref probe, the HEAD read and rev-list, plus the remote listing when no remote
+/// ref resolved.
 /// The no-remote paths add git_default_branch's up to 4 (no remote to sweep), run
 /// concurrently with the HEAD-branch read, then the verify (only when a default
 /// resolved).
@@ -3107,25 +3111,42 @@ pub async fn git_unpushed_count(repo_path: String) -> AppResult<UnpushedCount> {
         }
     };
 
-    let mut args = vec!["rev-list", "--count", "HEAD"];
+    // HEAD resolves ONCE and the count runs from that oid, so the oid returned is the
+    // commit counted from even when HEAD moves mid-read. Only an unborn HEAD answers 0.
+    let resolved = match crate::git::history::read_unless_unborn(
+        &repo_path,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(Some(out)) => out,
+        Ok(None) => {
+            return Ok(UnpushedCount {
+                count: 0,
+                basis,
+                default_branch,
+                head_oid: None,
+            })
+        }
+        Err(e) => return Err(failed(e.to_string())),
+    };
+    let head_oid = resolved.stdout_lossy().trim().to_string();
+    if head_oid.is_empty() {
+        return Err(failed("HEAD resolved to nothing".into()));
+    }
+    let mut args = vec!["rev-list", "--count", head_oid.as_str()];
     match (&basis, &default_ref) {
         (UnpushedBasis::Remotes, _) => args.extend(["--not", "--remotes"]),
         (_, Some(full)) => args.extend(["--not", full.as_str()]),
         _ => {}
     }
-    // Only an unborn HEAD answers 0.
-    let out =
-        match crate::git::history::read_unless_unborn(&repo_path, &args, DEFAULT_TIMEOUT).await {
-            Ok(Some(out)) => out,
-            Ok(None) => {
-                return Ok(UnpushedCount {
-                    count: 0,
-                    basis,
-                    default_branch,
-                })
-            }
-            Err(e) => return Err(failed(e.to_string())),
-        };
+    let out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT)
+        .await
+        .map_err(|e| failed(e.to_string()))?;
+    if out.code != 0 {
+        return Err(failed(out.full_failure_text()));
+    }
     let stdout = out.stdout_lossy();
     let count = stdout
         .trim()
@@ -3135,6 +3156,7 @@ pub async fn git_unpushed_count(repo_path: String) -> AppResult<UnpushedCount> {
         count,
         basis,
         default_branch,
+        head_oid: Some(head_oid),
     })
 }
 
@@ -9390,8 +9412,17 @@ mod tests {
         assert!(!super::commit_on_remote(repo.clone(), local).await.unwrap());
     }
 
-    /// Expected `git_unpushed_count` answer: (count, basis, default branch).
+    /// Expected `git_unpushed_count` answer: (count, basis, default branch), with the
+    /// head oid read here (`None` where HEAD doesn't verify: unborn).
     async fn assert_unpushed(repo: &str, count: u32, basis: UnpushedBasis, default: Option<&str>) {
+        let head = run_git_raw(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let head_oid = (head.code == 0).then(|| head.stdout_lossy().trim().to_string());
         let got = super::git_unpushed_count(repo.to_string()).await.unwrap();
         assert_eq!(
             got,
@@ -9399,6 +9430,7 @@ mod tests {
                 count,
                 basis,
                 default_branch: default.map(str::to_string),
+                head_oid,
             }
         );
     }
@@ -9421,6 +9453,31 @@ mod tests {
         run(&repo, &["init", "-q"]).await;
         // No main/master ref exists before the first commit.
         assert_unpushed(&repo, 0, UnpushedBasis::Unresolved, None).await;
+        let got = super::git_unpushed_count(repo).await.unwrap();
+        assert_eq!(got.head_oid, None);
+    }
+
+    /// The count carries the commit it was counted from: the detached commit on a
+    /// detached HEAD, the branch tip otherwise, on the remotes basis too.
+    #[tokio::test]
+    async fn unpushed_count_returns_the_head_oid_it_counted_from() {
+        let (_base, base) = temp_base("unpushed-head-oid");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        let tip = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        run(&repo, &["checkout", "-q", "--detach", "HEAD~1"]).await;
+        let detached = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        assert_ne!(detached, tip, "fixture: the detached commit is not the tip");
+        let got = super::git_unpushed_count(repo.clone()).await.unwrap();
+        assert_eq!(got.head_oid.as_deref(), Some(detached.as_str()));
+        assert_eq!(got.basis, UnpushedBasis::DefaultBranch);
+        assert_eq!(got.count, 0);
+
+        run(&repo, &["switch", "-q", "master"]).await;
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD~1"]).await;
+        let got = super::git_unpushed_count(repo).await.unwrap();
+        assert_eq!(got.head_oid.as_deref(), Some(tip.as_str()));
+        assert_eq!((got.basis, got.count), (UnpushedBasis::Remotes, 1));
     }
 
     #[tokio::test]
@@ -9600,33 +9657,49 @@ mod tests {
             (
                 UnpushedBasis::Remotes,
                 None,
-                r#"{"count":4,"basis":"remotes","defaultBranch":null}"#,
+                Some("abc"),
+                r#"{"count":4,"basis":"remotes","defaultBranch":null,"headOid":"abc"}"#,
             ),
             (
                 UnpushedBasis::DefaultBranch,
                 Some("main"),
-                r#"{"count":4,"basis":"default-branch","defaultBranch":"main"}"#,
+                Some("abc"),
+                r#"{"count":4,"basis":"default-branch","defaultBranch":"main","headOid":"abc"}"#,
             ),
             (
                 UnpushedBasis::OnDefaultBranch,
                 Some("main"),
-                r#"{"count":4,"basis":"on-default-branch","defaultBranch":"main"}"#,
+                Some("abc"),
+                r#"{"count":4,"basis":"on-default-branch","defaultBranch":"main","headOid":"abc"}"#,
             ),
             (
                 UnpushedBasis::Unresolved,
                 None,
-                r#"{"count":4,"basis":"unresolved","defaultBranch":null}"#,
+                Some("abc"),
+                r#"{"count":4,"basis":"unresolved","defaultBranch":null,"headOid":"abc"}"#,
+            ),
+            (
+                UnpushedBasis::Unresolved,
+                None,
+                None,
+                r#"{"count":4,"basis":"unresolved","defaultBranch":null,"headOid":null}"#,
             ),
         ];
-        for (basis, default, want) in cases {
+        for (basis, default, head, want) in cases {
             let json = serde_json::to_string(&UnpushedCount {
                 count: 4,
                 basis,
                 default_branch: default.map(str::to_string),
+                head_oid: head.map(str::to_string),
             })
             .unwrap();
             assert_eq!(json, want);
-            for snake in ["default_branch", "on_default_branch", "OnDefaultBranch"] {
+            for snake in [
+                "default_branch",
+                "on_default_branch",
+                "OnDefaultBranch",
+                "head_oid",
+            ] {
                 assert!(!json.contains(snake), "{json}");
             }
         }

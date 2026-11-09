@@ -15,7 +15,8 @@
 //! per-repo lock (`run_git_mutating`) so concurrent MCP calls don't fight over
 //! `.git/index.lock`. User-supplied branch/rev/path strings go through
 //! [`ensure_not_flag`] before reaching git argv, and the branch-TARGETING tools —
-//! create_branch (name), checkout_branch, rename_branch (from AND to), push (branch),
+//! create_branch (name), checkout_branch, rename_branch (from AND to),
+//! push (with or without `branch`), force_push,
 //! delete_branch, delete_remote_branch — refuse `gd/session/*` in any letter case
 //! to protect Resume. Lowercase `gd/session/` names are hidden from every branch
 //! list; other casing shares real session branches' loose-ref folder on
@@ -45,6 +46,21 @@ use crate::git::remote::PushGuard;
 fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
     crate::git::branches::refuse_session_branch_name(name)
         .map_err(|e| McpError::invalid_params(e.to_string(), None))
+}
+
+/// Maps the shared publishing refusal to an MCP invalid-params error.
+pub(super) fn ensure_not_publishing_session_branch(name: &str) -> Result<(), McpError> {
+    crate::git::remote::refuse_publishing_session_branch(name)
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))
+}
+
+/// Refuses session HEADs and unreadable HEADs before an MCP push reaches the core.
+async fn ensure_head_not_session_branch(repo: &str) -> Result<(), McpError> {
+    match crate::git::branches::current_branch_name(repo).await {
+        Ok(Some(b)) => ensure_not_publishing_session_branch(&b),
+        Ok(None) => Ok(()),
+        Err(e) => Err(app_err(e)),
+    }
 }
 
 /// Rewords a push refused for an upstream name mismatch with this tool's own remedy in
@@ -774,7 +790,8 @@ impl GitDesktopMcp {
                        so its branch ref is removed instead; with HEAD detached there, or at a \
                        shallow clone's boundary commit, it refuses: there is nothing to undo \
                        onto. It also refuses while a merge, cherry-pick or revert is in \
-                       progress or conflicts are unresolved. An optional `expectedHead` (a full \
+                       progress or conflicts are unresolved. Also refuses, undoing nothing, \
+                       when the repository's state can't be read. An optional `expectedHead` (a full \
                        commit id) makes the undo run only while the latest commit is still that \
                        id; it pins the commit id only, not which branch HEAD is on. Requires \
                        --allow-git-write.",
@@ -899,9 +916,10 @@ impl GitDesktopMcp {
                        on that remote has a different name is refused; \
                        set_upstream: true publishes it under its own \
                        name instead. Uses git's native credential flow. Never force-pushes — use \
-                       force_push (destructive) for that. When `branch` is given, refuses a \
-                       GitDesktop agent-session branch (gd/session/*, in any letter case). \
-                       Requires --allow-git-write.",
+                       force_push (destructive) for that. Refuses a GitDesktop agent-session branch \
+                       (gd/session/*, in any letter case), whether named in `branch` or checked out \
+                       when `branch` is omitted, and refuses when the checked-out branch can't be \
+                       read. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -916,6 +934,9 @@ impl GitDesktopMcp {
         }
         if let Some(r) = &args.remote {
             ensure_not_flag(r, "remote")?;
+        }
+        if args.branch.is_none() {
+            ensure_head_not_session_branch(&self.repo).await?;
         }
         if let Err(e) = crate::git::remote::git_push_same_name_core(
             &self.state,
@@ -1373,12 +1394,15 @@ impl GitDesktopMcp {
                        that isn't already incorporated into your local branch, even when a \
                        background fetch has updated the remote-tracking ref; on a Git older than \
                        2.30, or a branch with no reflog for the check to read, the push falls back \
-                       to the lease alone). Rewrites the remote branch. Requires --allow-git-write \
+                       to the lease alone). Rewrites the remote branch. Refuses when the checked-out \
+                       branch is a GitDesktop agent-session branch (gd/session/*, in any letter case) \
+                       or can't be read. Requires --allow-git-write \
                        AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
+        ensure_head_not_session_branch(&self.repo).await?;
         let guard = match crate::git::remote::git_force_push_head_core(
             &self.state,
             self.repo.clone(),
@@ -2818,6 +2842,105 @@ mod tests {
                 .trim(),
             "refs/remotes/origin/x",
         );
+    }
+
+    #[tokio::test]
+    async fn head_push_and_force_push_refuse_session_publish() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-session-publish-")
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let origin = dir.path().join("origin.git").to_string_lossy().into_owned();
+        let work = dir.path().join("work").to_string_lossy().into_owned();
+        let sess = dir.path().join("sess").to_string_lossy().into_owned();
+        configure(&work).await;
+        git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
+        git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "gd/session/abc", &sess],
+        )
+        .await;
+        git(&sess, &["config", "push.autoSetupRemote", "true"]).await;
+        let h = GitDesktopMcp::with_options(sess.clone(), false, false, true, true);
+        for (set_upstream, force) in [(true, false), (false, false), (false, true)] {
+            let result = if force {
+                h.force_push().await
+            } else {
+                h.push(Parameters(PushArgs {
+                    branch: None,
+                    remote: None,
+                    set_upstream,
+                }))
+                .await
+            };
+            let error = result.expect_err("session worktree must not publish");
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert!(error.message.contains("reserved for agent sessions"));
+            assert!(error.message.contains("won't push or publish it"));
+            assert!(!git(&sess, &["ls-remote", "origin"])
+                .await
+                .to_ascii_lowercase()
+                .contains("gd/session/"));
+        }
+    }
+
+    #[tokio::test]
+    async fn session_publish_guard_passes_feature_and_detached() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-session-publish-control-")
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let origin = dir.path().join("origin.git").to_string_lossy().into_owned();
+        let work = dir.path().join("work").to_string_lossy().into_owned();
+        let sess = dir.path().join("sess").to_string_lossy().into_owned();
+        configure(&work).await;
+        git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
+        git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "gd/session/abc", &sess],
+        )
+        .await;
+        git(&work, &["config", "push.autoSetupRemote", "true"]).await;
+        git(&work, &["checkout", "-q", "-b", "feature/x"]).await;
+        let h = GitDesktopMcp::with_options(work.clone(), false, false, true, false);
+        let result = h
+            .push(Parameters(PushArgs {
+                branch: None,
+                remote: None,
+                set_upstream: true,
+            }))
+            .await
+            .expect("ordinary feature HEAD publishes");
+        assert_eq!(text_of(&result), "pushed");
+        let refs = git(&work, &["ls-remote", "origin"]).await;
+        assert!(refs.contains("refs/heads/feature/x"));
+        assert!(!refs.to_ascii_lowercase().contains("gd/session/"));
+
+        git(&work, &["checkout", "-q", "--detach"]).await;
+        if let Err(error) = h
+            .push(Parameters(PushArgs {
+                branch: None,
+                remote: None,
+                set_upstream: true,
+            }))
+            .await
+        {
+            assert!(!error.message.contains("reserved for agent sessions"));
+        }
+        assert!(!git(&work, &["ls-remote", "origin"])
+            .await
+            .to_ascii_lowercase()
+            .contains("gd/session/"));
     }
 
     /// A bare origin, a teammate's `work` clone, and the clone the handler binds to —

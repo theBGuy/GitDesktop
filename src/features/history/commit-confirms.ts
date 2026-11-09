@@ -143,6 +143,15 @@ export const AMEND_HOLD_HINT: Record<
 export const UNPUSHED_UNCHECKED_HINT =
   " (couldn't check which commits are pushed)";
 
+/** The one spelling of a pushed commit's menu-row reason: Undo's and Edit
+ *  dates' rows both say it. */
+export const ALREADY_PUSHED_HINT = " (already pushed)";
+
+/** Edit dates on an unpushed commit that Edit history's range doesn't cover
+ *  (past its cap, or below a merge). */
+export const EDIT_DATES_OUT_OF_RANGE_HINT =
+  " (Edit history can't reach this commit)";
+
 /** Menu-row reason while a merge/rebase/cherry-pick/revert is mid-flight —
  *  Edit history, Squash and Cherry-pick to branch all say it. */
 export const OP_IN_PROGRESS_HINT = " (finish the operation in Changes first)";
@@ -157,6 +166,17 @@ export const UNDO_ROOT_COMMIT_CONFIRM = {
   confirmLabel: "Undo first commit",
   confirmVariant: "destructive",
 } as const;
+
+/** Edit history's one prompt for a plan that dates commits before their planned
+ *  parents. It warns and never blocks: git stores such dates as given.
+ *  `confirmLabel` is the footer button's own label. */
+export const datesBeforeParentConfirm = (count: number, confirmLabel: string) =>
+  ({
+    title: "Rewrite with out-of-order dates?",
+    body: `${count === 1 ? "1 commit will be dated before its parent." : `${count} commits will be dated before their parents.`} Git allows this; views sorted by date will list them out of order.`,
+    confirmLabel,
+    confirmVariant: "default",
+  }) as const;
 
 /** The routes that write a commit's message into the commit box over whatever
  *  the user typed there. */

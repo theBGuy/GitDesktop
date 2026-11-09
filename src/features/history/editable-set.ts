@@ -28,15 +28,69 @@ export function isNoUpstream(
   return head != null && (head.upstream === null || head.upstreamGone);
 }
 
-/** One observation of status's HEAD oid against the last one seen. Only
- *  non-null oids are stored (an unborn or pending read keeps the previous
- *  one), and the first observed oid seeds without counting as a change. */
+/** One observation of a polled value against the last one seen. Only non-null
+ *  values are stored (a pending or failed read keeps the previous one; `""` is
+ *  a value), and the first value seeds without counting as a change. */
+export function observeSeeded(
+  prev: string | null,
+  value: string | null | undefined,
+): { next: string | null; changed: boolean } {
+  if (value == null) return { next: prev, changed: false };
+  return { next: value, changed: prev !== null && value !== prev };
+}
+
+/** {@link observeSeeded} over status's HEAD oid: an unborn or pending read
+ *  keeps the previous oid. */
 export function observeHeadOid(
   prev: string | null,
   oid: string | null | undefined,
 ): { next: string | null; changed: boolean } {
-  if (oid == null) return { next: prev, changed: false };
-  return { next: oid, changed: prev !== null && oid !== prev };
+  return observeSeeded(prev, oid);
+}
+
+const SIG_FIELD_SEP = String.fromCharCode(0);
+const SIG_NULL = String.fromCharCode(1);
+
+function codeUnitOrder(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function fnv1a32(text: string, offset: number): string {
+  let h = offset >>> 0;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/** A short signature of status's entries (path, staged, unstaged; never the
+ *  branch or oid, which `refresh-side-keys` already follows), so the sync can
+ *  re-read op state when a stop or abort from a terminal moves no HEAD.
+ *  `<entry count>:<64-bit hash>` over the triples sorted by path in code-unit
+ *  order; null while status is pending. Unseen by design (no op-state poll;
+ *  each heals on refocus, a tab show or a menu open): any `--quit` (index and
+ *  tree kept, so no entry changes), a stop that changes no entry and moves no
+ *  HEAD (a pick stopped on a commit that became empty), and a stop plus its
+ *  abort inside one 5 s status poll (which needs no heal). */
+export function statusContentSignature(
+  entries:
+    | readonly {
+        path: string;
+        staged: string | null;
+        unstaged: string | null;
+      }[]
+    | undefined,
+): string | null {
+  if (entries === undefined) return null;
+  const rows = entries.map((e) =>
+    [e.path, e.staged ?? SIG_NULL, e.unstaged ?? SIG_NULL].join(SIG_FIELD_SEP),
+  );
+  rows.sort(codeUnitOrder);
+  const text = rows.join(SIG_FIELD_SEP + SIG_FIELD_SEP);
+  return `${entries.length}:${fnv1a32(text, 0x811c9dc5)}${fnv1a32(text, 0x01c9dc58)}`;
 }
 
 export type UnpushedSnapshot<C> = {
@@ -74,16 +128,17 @@ export function countBasisAgrees(
 
 /** The agreement predicate the unpushed set and the squash / Edit history
  *  gates read: the log's head equals status's oid, and in no-upstream mode
- *  the count read is not errored, at least as fresh as the log, and taken on
- *  the branch status reports ({@link countBasisAgrees}); it carries no HEAD
- *  oid, so freshness and that branch axis are what tie it to the log. */
+ *  the count read was taken on that same HEAD (`countHead`, the oid it
+ *  counted from), is not errored (retained data carries an old success's
+ *  head), and was taken on the branch status reports ({@link countBasisAgrees}:
+ *  a same-tip switch moves no oid). Read order between the count and the log
+ *  never matters. */
 export function viewAgrees(args: {
   logHead: string | undefined;
   statusOid: string | null | undefined;
   noUpstream: boolean;
   countIsError: boolean;
-  countAt: number;
-  logAt: number;
+  countHead: string | null | undefined;
   countBasis: UnpushedBasis | null | undefined;
   countDefault: string | null | undefined;
   statusBranch: string | null | undefined;
@@ -92,7 +147,7 @@ export function viewAgrees(args: {
   return (
     !args.noUpstream ||
     (!args.countIsError &&
-      args.countAt >= args.logAt &&
+      args.countHead === args.statusOid &&
       countBasisAgrees(args.countBasis, args.countDefault, args.statusBranch))
   );
 }
@@ -101,6 +156,8 @@ export type StatusLogAction =
   | "refetch-log"
   | "refresh-side-keys"
   | "refresh-head-set"
+  | "refresh-ref-set"
+  | "refresh-op-state"
   | "refresh-count";
 
 /** How old a no-upstream count read may get against the status tick before the
@@ -113,30 +170,44 @@ export const NO_UPSTREAM_COUNT_RECHECK_MS = 30_000;
  *    stale — those families don't heal through the log refetch.
  *  - 'refresh-head-set': on the same trigger, the rest of the HEAD-dependent
  *    families; the caller re-reads only the ones {@link preMoveStale} passes.
+ *  - 'refresh-ref-set': the refs stamp moved; the caller re-reads only the
+ *    ref-derived reads {@link preMoveStale} passes.
+ *  - 'refresh-op-state': status's entries changed with the oid held (a stop or
+ *    abort from a terminal moves no HEAD); an oid change already covers it.
  *  - 'refetch-log': a non-null oid (an unborn repo's settled-empty log must
  *    never refetch per poll), heads differ, the log has data, the LOG is the
- *    stale side and isn't already fetching — at most one call per status
- *    reading, so a log-first window can't loop.
- *  - 'refresh-count': heads agree in no-upstream mode and the count is
- *    errored, older than the log, {@link NO_UPSTREAM_COUNT_RECHECK_MS} older
- *    than the status reading, or older than a status reading whose branch its
- *    basis contradicts ({@link countBasisAgrees}; a status lagging a fresher
- *    count must not loop refetches); never while the count is fetching (a read
- *    slower than one poll must land) or beside 'refresh-side-keys' (which
- *    already covers it).
+ *    stale side (its last success AND last failure both predate the status
+ *    reading) and isn't already fetching: at most one call per status reading
+ *    whatever else runs the sync, so a log-first window can't loop.
+ *  - 'refresh-count': heads agree in no-upstream mode, the count's last success
+ *    and last failure both predate the status reading (a count that read a
+ *    newer HEAD than a lagging status must not re-fire itself), and the count is
+ *    errored, taken on another head, {@link NO_UPSTREAM_COUNT_RECHECK_MS} older
+ *    than the status reading, or on a basis the status branch contradicts
+ *    ({@link countBasisAgrees}); never while the count is fetching (a read
+ *    slower than one poll must land), nor beside 'refresh-side-keys' or
+ *    'refresh-ref-set'. The one accepted slip: any count refreshed since the
+ *    previous stamp reading is skipped by the ref set's {@link preMoveStale} and
+ *    suppressed for 'refresh-count' in the same run; it heals on the next
+ *    status reading.
  *  Null when nothing fires. */
 export function statusLogAction(args: {
   oid: string | null | undefined;
   oidChanged: boolean;
+  refsChanged: boolean;
+  contentChanged: boolean;
   logHead: string | undefined;
   logHasData: boolean;
   logIsFetching: boolean;
   logAt: number;
+  logErrorAt: number;
   statusAt: number;
   noUpstream: boolean;
   countIsError: boolean;
   countIsFetching: boolean;
   countAt: number;
+  countErrorAt: number;
+  countHead: string | null | undefined;
   countBasis: UnpushedBasis | null | undefined;
   countDefault: string | null | undefined;
   statusBranch: string | null | undefined;
@@ -147,11 +218,16 @@ export function statusLogAction(args: {
     actions.add("refresh-side-keys");
     actions.add("refresh-head-set");
   }
+  if (args.refsChanged) actions.add("refresh-ref-set");
+  if (args.contentChanged && !args.oidChanged) {
+    actions.add("refresh-op-state");
+  }
   if (
     args.oid != null &&
     !heads &&
     args.logHasData &&
     args.logAt < args.statusAt &&
+    args.logErrorAt < args.statusAt &&
     !args.logIsFetching
   ) {
     actions.add("refetch-log");
@@ -159,17 +235,18 @@ export function statusLogAction(args: {
   if (
     heads &&
     args.noUpstream &&
+    Math.max(args.countAt, args.countErrorAt) < args.statusAt &&
     (args.countIsError ||
-      args.countAt < args.logAt ||
+      args.countHead !== args.oid ||
       args.statusAt - args.countAt >= NO_UPSTREAM_COUNT_RECHECK_MS ||
-      (!countBasisAgrees(
+      !countBasisAgrees(
         args.countBasis,
         args.countDefault,
         args.statusBranch,
-      ) &&
-        args.countAt < args.statusAt)) &&
+      )) &&
     !args.countIsFetching &&
-    !args.oidChanged
+    !args.oidChanged &&
+    !args.refsChanged
   ) {
     actions.add("refresh-count");
   }
@@ -227,7 +304,8 @@ export function advanceSnapshot<C>(
 /** The commits+count+hasNextPage the unpushed markers, squash and Edit
  *  history read: live when the view agrees; during a mismatch, the last
  *  agreeing snapshot only while the live log's head is still the snapshot's
- *  head (status moved first, or a no-upstream count read trails the log) in
+ *  head (status moved first, or the no-upstream count read is errored, names
+ *  another head, or rests on a basis the status branch contradicts) in
  *  the same repo and status branch. Once the log has moved (commits added on
  *  top, a reset, rebase, checkout or rewrite), the live commits with count 0:
  *  nothing marked or editable, so an open Edit history can't replay a set
@@ -454,4 +532,32 @@ export function editHistoryHold(input: {
   if (input.headIsMerge) return "merge-on-top";
   if (input.shallowBoundary) return "shallow-boundary";
   return "lone-commit";
+}
+
+/** Why Undo is held over what's published; null = nothing published blocks it. */
+export type UndoPushedHold =
+  | "refreshing" // the count is unread, or the reads don't agree
+  | "unpushed-unchecked" // the count read failed (even after an earlier success)
+  | "already-pushed"; // HEAD's commit is on the upstream or a remote branch
+
+/** Undo's published-commit gate. An upstream branch reads `ahead`. A
+ *  no-upstream branch reads the LIVE count read, never a served snapshot
+ *  (whose basis can predate it): only the "remotes" basis can say HEAD's
+ *  commit is published, so the other bases offer Undo without waiting for
+ *  agreement. */
+export function undoPushedHold(args: {
+  noUpstream: boolean;
+  ahead: number;
+  countLoaded: boolean;
+  countFailed: boolean;
+  basis: UnpushedBasis | null;
+  count: number;
+  agreed: boolean;
+}): UndoPushedHold | null {
+  if (!args.noUpstream) return args.ahead > 0 ? null : "already-pushed";
+  if (args.countFailed) return "unpushed-unchecked";
+  if (!args.countLoaded) return "refreshing";
+  if (args.basis !== "remotes") return null;
+  if (!args.agreed) return "refreshing";
+  return args.count > 0 ? null : "already-pushed";
 }

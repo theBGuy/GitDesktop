@@ -13,7 +13,9 @@ use crate::git::runner::{
     subcommand_of, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
     WORKTREE_OP_TIMEOUT,
 };
-use crate::git::types::{FileDiff, RebaseStop, RepoOpState, RewriteStep, StashEntry, TagInfo};
+use crate::git::types::{
+    CommitDate, FileDiff, RebaseStop, RepoOpState, RewriteStep, StashEntry, TagInfo,
+};
 use crate::state::AppState;
 
 /// Refuses when the working tree has **tracked** changes (staged or unstaged).
@@ -175,8 +177,13 @@ async fn git_path_exists(repo: &str, name: &str) -> bool {
 /// `<main>/.git/worktrees/<name>/`, and the common dir names the MAIN checkout's
 /// `.git` — reading markers there would report the wrong tree's operation
 /// (measured, git 2.51.1; same call as `git::stats`). `None` for anything that
-/// isn't a repo, which callers must read as "no operation", not as an error.
+/// isn't a repo: [`op_state`] reads it as "no operation", while a caller about to
+/// move a ref ([`op_state_strict`]) refuses on it.
 async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if GIT_DIR_PROBE_FAULT.try_with(|_| ()).is_ok() {
+        return None;
+    }
     let out = run_git(
         Some(repo),
         &["rev-parse", "--absolute-git-dir"],
@@ -189,6 +196,20 @@ async fn absolute_git_dir(repo: &str) -> Option<std::path::PathBuf> {
     // `trim()` would strip it into a path that does not exist.
     let dir = raw.trim_end_matches(['\r', '\n']);
     (!dir.is_empty()).then(|| std::path::PathBuf::from(dir))
+}
+
+// Test-only fault: a task scoped to it reads every git-dir probe as failed, the one
+// failure the fail-closed callers must refuse on that no on-disk fixture produces.
+#[cfg(test)]
+tokio::task_local! {
+    static GIT_DIR_PROBE_FAULT: ();
+}
+
+/// Runs `fut` with [`absolute_git_dir`] failing, for other modules' tests. The fault
+/// is a task-local, so it does not reach work `fut` hands to `spawn`/`spawn_blocking`.
+#[cfg(test)]
+pub(crate) async fn with_git_dir_probe_fault<F: std::future::Future>(fut: F) -> F::Output {
+    GIT_DIR_PROBE_FAULT.scope((), fut).await
 }
 
 /// The target of a linked worktree's or submodule's `.git` pointer file
@@ -312,25 +333,41 @@ pub async fn git_op_state(repo_path: String) -> AppResult<RepoOpState> {
 /// touch a tree with in-progress state gate on the SAME marker files the banner
 /// reports on.
 pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
-    let quiet = RepoOpState {
-        merging: false,
-        rebasing: false,
-        cherry_picking: false,
-        reverting: false,
-        edit_paused: false,
-        rebase_stop: None,
-    };
     // An unresolvable git dir reads as "nothing in flight", NEVER an error:
     // `op_in_progress` maps `Err` to true, so failing here would fail-close every
     // stash / history-edit / promotion guard in the app.
     let Some(git_dir) = absolute_git_dir(repo_path).await else {
-        return Ok(quiet);
+        return Ok(RepoOpState {
+            merging: false,
+            rebasing: false,
+            cherry_picking: false,
+            reverting: false,
+            edit_paused: false,
+            rebase_stop: None,
+        });
     };
+    Ok(op_state_at(&git_dir))
+}
+
+/// [`op_state`] for a caller that must refuse when the state can't be read: an
+/// unresolvable git dir is an Err instead of "nothing in flight". Strict on that probe
+/// only: a marker that exists but can't be stat-ed still reads as absent.
+pub(crate) async fn op_state_strict(repo_path: &str) -> AppResult<RepoOpState> {
+    let git_dir = absolute_git_dir(repo_path)
+        .await
+        .ok_or_else(|| AppError::InvalidArgument("couldn't resolve the git dir".into()))?;
+    Ok(op_state_at(&git_dir))
+}
+
+/// The marker reads behind [`op_state`], on a git dir the caller already resolved, so
+/// one resolve decides both the dir and the verdict. A marker that exists but can't be
+/// stat-ed reads as absent (`Path::exists`).
+pub(crate) fn op_state_at(git_dir: &Path) -> RepoOpState {
     let exists = |name: &str| git_dir.join(name).exists();
 
     let rebasing = exists("rebase-merge") || exists("rebase-apply");
     let rebase_stop = if rebasing {
-        rebase_stop_kind(&git_dir)
+        rebase_stop_kind(git_dir)
     } else {
         None
     };
@@ -343,16 +380,16 @@ pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
     let sequencer = if cherry_head || revert_head {
         None
     } else {
-        sequencer_reverting(&git_dir)
+        sequencer_reverting(git_dir)
     };
-    Ok(RepoOpState {
+    RepoOpState {
         merging: exists("MERGE_HEAD"),
         rebasing,
         cherry_picking: cherry_head || sequencer == Some(false),
         reverting: revert_head || sequencer == Some(true),
         edit_paused,
         rebase_stop,
-    })
+    }
 }
 
 /// Non-empty `git ls-files --unmerged` — the conflicted entries the changes list
@@ -5672,6 +5709,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         for h in &step.hashes {
             validate_hash(h)?;
         }
+        validate_step_dates(step)?;
         // A multi-hash step with no message is a valid fixup (reuse the leader's
         // message), so no message requirement here — pick/reword/squash/fixup
         // are all expressible.
@@ -5850,7 +5888,21 @@ pub(crate) async fn rebase_edit(
     steps: Vec<RewriteStep>,
     dropped: Option<Vec<String>>,
 ) -> AppResult<()> {
-    rebase_edit_with_timeout(state, repo_path, base, steps, dropped, DEFAULT_TIMEOUT).await
+    let first_continue = edit_first_continue_timeout(&steps);
+    rebase_edit_with_timeout(state, repo_path, base, steps, dropped, first_continue).await
+}
+
+/// The edit route's first `rebase --continue` budget: one `DEFAULT_TIMEOUT` plus one per
+/// exec line the todo carries before its first `edit` line (a step with a composed
+/// message or any date), since an exec killed mid-run has already left the todo. An edit
+/// step's own exec runs after its pause, on the banner's continue.
+fn edit_first_continue_timeout(steps: &[RewriteStep]) -> std::time::Duration {
+    let execs = steps
+        .iter()
+        .take_while(|s| !s.edit)
+        .filter(|s| step_has_message(s) || step_has_date(s))
+        .count() as u32;
+    DEFAULT_TIMEOUT + DEFAULT_TIMEOUT * execs
 }
 
 /// [`rebase_edit`] with an injectable timeout for the plan's continue and each
@@ -5874,6 +5926,7 @@ pub(crate) async fn rebase_edit_with_timeout(
         for h in &step.hashes {
             validate_hash(h)?;
         }
+        validate_step_dates(step)?;
     }
     let dropped = dropped.unwrap_or_default();
     for h in &dropped {
@@ -6168,8 +6221,9 @@ async fn read_head_name(repo: &str) -> AppResult<String> {
 /// generated script ([`group_script`]) instead of picking its leader: a picked leader
 /// whose change is already present stops as an empty pick, and an inline exec chain
 /// is cut by git's `sh -c` at ~8 KiB (87+ folds, measured on Windows). A replay
-/// reword amends through its own script too ([`reword_script`]). The edit route
-/// keeps native folds and uses reword scripts for every composed message.
+/// reword or date change amends through its own [`amend_script`] (`reword-{i}.sh`, or
+/// `dates-{i}.sh` with no message). The edit route keeps native folds and runs the same
+/// amend scripts after them.
 fn rebase_todo(
     route: TodoRoute,
     steps: &[RewriteStep],
@@ -6196,22 +6250,33 @@ fn rebase_todo(
             files.push((path, message.to_string()));
             Some(quoted)
         };
+        let dates = DateArgs::of(step);
+        // One amend per step, so each step keeps one rewritten-list repoint; a step with
+        // neither a message nor a date gets no script at all.
+        let amend = || {
+            let name = match (&message_file, dates.any()) {
+                (Some(_), _) => format!("reword-{i}.sh"),
+                (None, true) => format!("dates-{i}.sh"),
+                (None, false) => return None,
+            };
+            let body = amend_script(&git, message_file.as_deref(), route, &dates);
+            Some((dir.join(name), body))
+        };
         match route {
             TodoRoute::Replay if !folds.is_empty() => {
                 for h in &step.hashes {
                     todo.push_str(&format!("drop {h}\n"));
                 }
                 let script = dir.join(format!("group-{i}.sh"));
-                let body = group_script(&git, leader, folds, message_file.as_deref());
+                let body = group_script(&git, leader, folds, message_file.as_deref(), &dates);
                 todo.push_str(&format!("exec sh {}\n", sh_quote(&shell_path(&script))));
                 files.push((script, body));
             }
             TodoRoute::Replay => {
                 todo.push_str(&format!("pick {leader}\n"));
-                if let Some(file) = message_file {
-                    let script = dir.join(format!("reword-{i}.sh"));
+                if let Some((script, body)) = amend() {
                     todo.push_str(&format!("exec sh {}\n", sh_quote(&shell_path(&script))));
-                    files.push((script, reword_script(&git, &file, route)));
+                    files.push((script, body));
                 }
             }
             TodoRoute::Edit => {
@@ -6220,17 +6285,141 @@ fn rebase_todo(
                 for fold in folds {
                     todo.push_str(&format!("fixup {fold}\n"));
                 }
-                // The edit path's message is already composed: a hook must not stall
-                // a rebase the user resumes from the banner.
-                if let Some(file) = message_file {
-                    let script = dir.join(format!("reword-{i}.sh"));
+                // After the `edit` line and its fixups, so planned dates override
+                // anything set by hand at the pause.
+                if let Some((script, body)) = amend() {
                     todo.push_str(&format!("exec sh {}\n", sh_quote(&shell_path(&script))));
-                    files.push((script, reword_script(&git, &file, route)));
+                    files.push((script, body));
                 }
             }
         }
     }
     (todo, files)
+}
+
+/// Whether a step carries a composed message (non-blank once trimmed).
+fn step_has_message(step: &RewriteStep) -> bool {
+    !step
+        .message
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+}
+
+/// Whether a step sets either date.
+fn step_has_date(step: &RewriteStep) -> bool {
+    step.author_date.is_some() || step.committer_date.is_some()
+}
+
+/// A step's dates as shell fragments for its one commit line: a
+/// `GIT_COMMITTER_DATE=… ` prefix and a ` --date=…` suffix, each empty when unset. The
+/// values come only from [`git_date_arg`] over validated integers and are still quoted.
+struct DateArgs {
+    committer_prefix: String,
+    author_suffix: String,
+}
+
+impl DateArgs {
+    fn of(step: &RewriteStep) -> Self {
+        Self {
+            committer_prefix: step.committer_date.map_or(String::new(), |d| {
+                format!("GIT_COMMITTER_DATE={} ", sh_quote(&git_date_arg(d)))
+            }),
+            author_suffix: step.author_date.map_or(String::new(), |d| {
+                format!(" --date={}", sh_quote(&git_date_arg(d)))
+            }),
+        }
+    }
+
+    fn any(&self) -> bool {
+        !self.committer_prefix.is_empty() || !self.author_suffix.is_empty()
+    }
+}
+
+/// Earliest date an edit may set: the Unix epoch (git refuses a negative `@` date).
+const COMMIT_DATE_MIN_EPOCH: i64 = 0;
+/// Latest date an edit may set: the last second of 2099 at -12:00.
+const COMMIT_DATE_MAX_EPOCH: i64 = 4_102_487_999;
+/// UTC offsets an edit may set, in minutes; git silently renormalizes or accepts values
+/// outside real zones, so the range is enforced here.
+const COMMIT_DATE_OFFSET_RANGE: std::ops::RangeInclusive<i32> = -720..=840;
+/// The JS `Date` range in seconds, before any offset shift.
+const JS_DATE_MAX_EPOCH: i64 = 8_640_000_000_000;
+/// The largest shift a parsed `±HHMM` offset carries (99:59), in seconds.
+const RAW_OFFSET_MAX_SECONDS: i64 = (99 * 60 + 59) * 60;
+
+/// Refuses a date an edit may not set; runs before any lock or git call.
+fn validate_commit_date(date: &CommitDate) -> AppResult<()> {
+    if !(COMMIT_DATE_MIN_EPOCH..=COMMIT_DATE_MAX_EPOCH).contains(&date.epoch_seconds) {
+        return Err(AppError::InvalidArgument(
+            "commit date is out of range (1970-01-01 to 2099-12-31)".into(),
+        ));
+    }
+    if !COMMIT_DATE_OFFSET_RANGE.contains(&date.offset_minutes) {
+        return Err(AppError::InvalidArgument(
+            "commit date offset is out of range (-12:00 to +14:00)".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_step_dates(step: &RewriteStep) -> AppResult<()> {
+    for date in [step.author_date, step.committer_date].iter().flatten() {
+        validate_commit_date(date)?;
+    }
+    Ok(())
+}
+
+/// git's `@<epoch> <±HHMM>` date form. The sign applies to the whole offset, and the
+/// hours and minutes render from its absolute value.
+fn git_date_arg(date: CommitDate) -> String {
+    let sign = if date.offset_minutes < 0 { '-' } else { '+' };
+    let abs = date.offset_minutes.unsigned_abs();
+    format!(
+        "@{} {sign}{:02}{:02}",
+        date.epoch_seconds,
+        abs / 60,
+        abs % 60
+    )
+}
+
+/// Parses git's raw date (`<epoch> <±HHMM>`) with no editable-range check, so an
+/// existing commit's out-of-range date still round-trips. `None` for any other shape,
+/// an offset minute past 59, or an epoch that would leave the JS `Date` range once
+/// shifted by any parsable offset (the bound is `JS_DATE_MAX_EPOCH -
+/// RAW_OFFSET_MAX_SECONDS`).
+fn parse_raw_date(raw: &str) -> Option<CommitDate> {
+    let (epoch, offset) = raw.trim().split_once(' ')?;
+    let digits = epoch.strip_prefix('-').unwrap_or(epoch);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let epoch_seconds: i64 = epoch.parse().ok()?;
+    // The frontend shifts the epoch by the offset before building a `Date`, so the
+    // range shrinks by the largest shift to keep that result a valid `Date` too.
+    let bound = JS_DATE_MAX_EPOCH - RAW_OFFSET_MAX_SECONDS;
+    if !(-bound..=bound).contains(&epoch_seconds) {
+        return None;
+    }
+    let bytes = offset.as_bytes();
+    if bytes.len() != 5 || !bytes[1..].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let hh: i32 = offset[1..3].parse().ok()?;
+    let mm: i32 = offset[3..5].parse().ok()?;
+    if mm > 59 {
+        return None;
+    }
+    Some(CommitDate {
+        epoch_seconds,
+        offset_minutes: sign * (hh * 60 + mm),
+    })
 }
 
 /// What a replay fold group's script reports when its commits add up to nothing.
@@ -6252,8 +6441,20 @@ const EMPTY_GROUP_ERROR: &str =
 /// - Each member's old → new line goes to the sequencer's rewritten-list, which git
 ///   reads at the finish for notes rewriting and post-rewrite; dropped members are
 ///   otherwise missing from it.
-fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<&str>) -> String {
+/// - The step's dates ride the one commit: `--date` outranks both `-C`'s copied author
+///   date and `GIT_AUTHOR_DATE`, so one spelling serves both arms.
+fn group_script(
+    git: &str,
+    leader: &str,
+    folds: &[String],
+    message_file: Option<&str>,
+    dates: &DateArgs,
+) -> String {
     let members = || std::iter::once(leader).chain(folds.iter().map(String::as_str));
+    let DateArgs {
+        committer_prefix: committer,
+        author_suffix: author,
+    } = dates;
     let mut script = String::from("set -e\n");
     for h in members() {
         script.push_str(&format!("{git} cherry-pick -n {h}\n"));
@@ -6262,13 +6463,13 @@ fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<
         "if {git} diff --cached --quiet --ignore-submodules=none; then echo '{EMPTY_GROUP_ERROR}' >&2; exit 1; fi\n"
     ));
     match message_file {
-        None => script.push_str(&format!("{git} commit -C {leader}\n")),
+        None => script.push_str(&format!("{committer}{git} commit -C {leader}{author}\n")),
         Some(file) => script.push_str(&format!(
             "n=$({git} log -1 --no-show-signature --format=%an {leader})\n\
              e=$({git} log -1 --no-show-signature --format=%ae {leader})\n\
              d=$({git} log -1 --no-show-signature --date=raw --format=@%ad {leader})\n\
-             GIT_AUTHOR_NAME=\"$n\" GIT_AUTHOR_EMAIL=\"$e\" GIT_AUTHOR_DATE=\"$d\" \
-             {git} commit -F {file}\n"
+             {committer}GIT_AUTHOR_NAME=\"$n\" GIT_AUTHOR_EMAIL=\"$e\" GIT_AUTHOR_DATE=\"$d\" \
+             {git} commit -F {file}{author}\n"
         )),
     }
     script.push_str(&format!("new=$({git} rev-parse HEAD)\n"));
@@ -6283,20 +6484,36 @@ fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<
     script
 }
 
-/// The LF-only reword script runs after its pick or, on the edit route, after
-/// a group's native fixups. Every rewritten-list line naming the pre-amend commit
-/// must point at the amended one, so notes and rebase-finish mappings reach it.
-/// This amend emits no post-rewrite event; only replay runs commit hooks. A temp
-/// file and `mv` stand in for `sed -i`, whose syntax differs between GNU and BSD sed.
-fn reword_script(git: &str, message_file: &str, route: TodoRoute) -> String {
-    let verify = match route {
-        TodoRoute::Replay => "",
-        TodoRoute::Edit => " --no-verify",
+/// The LF-only amend for one step (a reword, a date change, or both), run after its
+/// pick or the edit route's native fixups. It repoints the pre-amend commit's
+/// rewritten-list lines at the amended one, so notes and the rebase finish reach it
+/// (the amend emits no post-rewrite). Only a replay reword runs the commit hooks (a
+/// dates-only amend skips them like a pick; the edit route's must not stall a resumed
+/// rebase), `--allow-empty` lets an empty commit take its dates, and `mv` replaces
+/// `sed -i`, which GNU and BSD spell differently.
+fn amend_script(
+    git: &str,
+    message_file: Option<&str>,
+    route: TodoRoute,
+    dates: &DateArgs,
+) -> String {
+    let verify = match (route, message_file) {
+        (TodoRoute::Replay, Some(_)) => "",
+        _ => " --no-verify",
     };
+    let source = match message_file {
+        Some(file) if dates.any() => format!("-F {file} --allow-empty"),
+        Some(file) => format!("-F {file}"),
+        None => "--no-edit --cleanup=verbatim --allow-empty".to_string(),
+    };
+    let DateArgs {
+        committer_prefix: committer,
+        author_suffix: author,
+    } = dates;
     format!(
         "set -e\n\
          pre=$({git} rev-parse HEAD)\n\
-         {git} commit --amend{verify} --no-post-rewrite -F {message_file}\n\
+         {committer}{git} commit --amend{verify} --no-post-rewrite {source}{author}\n\
          new=$({git} rev-parse HEAD)\n\
          list=$({git} rev-parse --git-path rebase-merge/rewritten-list)\n\
          if [ -f \"$list\" ]; then sed \"s/ $pre\\$/ $new/\" \"$list\" > \"$list.gd-tmp\" \
@@ -6311,9 +6528,7 @@ fn reword_script(git: &str, message_file: &str, route: TodoRoute) -> String {
 fn replay_timeout(steps: &[RewriteStep], dropped: &[String]) -> std::time::Duration {
     let execs = steps
         .iter()
-        .filter(|s| {
-            !s.message.as_deref().map(str::trim).unwrap_or("").is_empty() || s.hashes.len() > 1
-        })
+        .filter(|s| step_has_message(s) || s.hashes.len() > 1 || step_has_date(s))
         .count() as u32;
     let lines = dropped.len() + steps.iter().map(|s| s.hashes.len()).sum::<usize>();
     DEFAULT_TIMEOUT + std::time::Duration::from_secs(2 * lines as u64) + DEFAULT_TIMEOUT * execs
@@ -6907,10 +7122,14 @@ pub struct CommitMessage {
     /// The full commit message (subject + body), so the Edit-history editor can
     /// pre-fill reword/squash fields without truncating multi-line bodies.
     pub message: String,
+    /// `None` when git's date line doesn't parse: that row's date only, never the read.
+    pub author_date: Option<CommitDate>,
+    pub committer_date: Option<CommitDate>,
 }
 
-/// Full messages for the unpushed commits `base..HEAD`. NUL-delimited so
-/// multi-line bodies survive intact.
+/// Full messages and raw dates for the unpushed commits `base..HEAD`. NUL-delimited so
+/// multi-line bodies survive intact; the two date lines are positional (lines 2 and 3
+/// of each record), so a body line shaped like a date is never read as one.
 #[tauri::command]
 pub async fn git_unpushed_messages(
     repo_path: String,
@@ -6920,29 +7139,147 @@ pub async fn git_unpushed_messages(
     let range = format!("{base}..HEAD");
     let out = run_git(
         Some(&repo_path),
-        &["log", "-z", "--format=%H%n%B", &range],
+        &[
+            "log",
+            "-z",
+            "--no-show-signature",
+            "--date=raw",
+            "--format=%H%n%ad%n%cd%n%B",
+            &range,
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let text = out.stdout_lossy();
+    Ok(parse_unpushed_records(&out.stdout_lossy()))
+}
+
+/// Parses `git_unpushed_messages`'s `%H%n%ad%n%cd%n%B` NUL records.
+fn parse_unpushed_records(text: &str) -> Vec<CommitMessage> {
     let mut messages = Vec::new();
     for record in text.split('\0') {
         let record = record.trim_start_matches('\n');
         if record.is_empty() {
             continue;
         }
-        match record.split_once('\n') {
-            Some((hash, message)) => messages.push(CommitMessage {
-                hash: hash.trim().to_string(),
-                message: message.trim_end().to_string(),
-            }),
-            None => messages.push(CommitMessage {
-                hash: record.trim().to_string(),
-                message: String::new(),
-            }),
-        }
+        let mut lines = record.splitn(4, '\n');
+        let hash = lines.next().unwrap_or("").trim().to_string();
+        let author_date = lines.next().and_then(parse_raw_date);
+        let committer_date = lines.next().and_then(parse_raw_date);
+        messages.push(CommitMessage {
+            hash,
+            message: lines.next().unwrap_or("").trim_end().to_string(),
+            author_date,
+            committer_date,
+        });
     }
-    Ok(messages)
+    messages
+}
+
+/// A dates-only change refused while an operation is in progress.
+const DATES_MID_OP: &str = "Can't change dates while a merge, rebase, cherry-pick or revert is in progress — finish or abort it from the banner first.";
+/// A dates-only change refused over unmerged index entries with no operation.
+const DATES_UNRESOLVED: &str = "Resolve the conflicts first; no dates were changed.";
+/// KEEP IN STEP with commit.rs's amend pair ("… — nothing was amended.").
+const DATES_BRANCH_SWITCHED: &str = "The checked-out branch changed — no dates were changed.";
+const DATES_HEAD_MOVED: &str = "The latest commit changed — no dates were changed.";
+
+/// Changes only the author and/or committer date of HEAD and returns the new HEAD oid.
+/// Runs only while HEAD is still `expected_head` on `expected_branch` (`"HEAD"` when
+/// detached, absent = unpinned).
+#[tauri::command]
+pub async fn git_amend_commit_dates(
+    state: State<'_, AppState>,
+    repo_path: String,
+    expected_head: String,
+    expected_branch: Option<String>,
+    author_date: Option<CommitDate>,
+    committer_date: Option<CommitDate>,
+) -> AppResult<String> {
+    amend_commit_dates_core(
+        &state,
+        &repo_path,
+        &expected_head,
+        expected_branch,
+        author_date,
+        committer_date,
+    )
+    .await
+}
+
+/// Testable core of [`git_amend_commit_dates`]. `--only` with no pathspec amends from
+/// HEAD's own tree, so staged, unstaged and untracked changes stay where they are; the
+/// message keeps its bytes (`--cleanup=verbatim`), an empty HEAD can take dates
+/// (`--allow-empty`), and the hooks are skipped like a plain pick. One atomic amend, so
+/// no oplog entry: the reflog keeps the old commit. Another process moving HEAD between
+/// the pin checks and the spawn is out of reach of this process's hold.
+pub(crate) async fn amend_commit_dates_core(
+    state: &AppState,
+    repo_path: &str,
+    expected_head: &str,
+    expected_branch: Option<String>,
+    author_date: Option<CommitDate>,
+    committer_date: Option<CommitDate>,
+) -> AppResult<String> {
+    if author_date.is_none() && committer_date.is_none() {
+        return Err(AppError::InvalidArgument("no date change was given".into()));
+    }
+    for date in [author_date, committer_date].iter().flatten() {
+        validate_commit_date(date)?;
+    }
+    validate_hash(expected_head)?;
+    let expected_ref = ExpectedRef::from_wire(expected_branch)?;
+    let refused = |stderr: &str| AppError::Git {
+        code: 1,
+        stderr: stderr.to_string(),
+    };
+
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a date change").await?;
+    // Fail CLOSED: `op_state` reads an unresolvable git dir as "nothing in flight".
+    let git_dir = absolute_git_dir(repo_path)
+        .await
+        .ok_or_else(|| AppError::InvalidArgument("couldn't resolve the git dir".into()))?;
+    if op_state_at(&git_dir).mid_op() {
+        return Err(refused(DATES_MID_OP));
+    }
+    if has_unmerged(repo_path).await? {
+        return Err(refused(DATES_UNRESOLVED));
+    }
+    if expected_ref.moved(repo_path).await? {
+        return Err(refused(DATES_BRANCH_SWITCHED));
+    }
+    let current = run_git_raw(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+    // A non-zero exit is an unborn HEAD: nothing the user chose is there.
+    if current.code != 0 || current.stdout_lossy().trim() != expected_head {
+        return Err(refused(DATES_HEAD_MOVED));
+    }
+
+    let author_arg = author_date.map(|d| format!("--date={}", git_date_arg(d)));
+    let committer_env = committer_date.map(git_date_arg);
+    let mut args = vec![
+        "commit",
+        "--amend",
+        "--only",
+        "--no-edit",
+        "--no-verify",
+        "--cleanup=verbatim",
+        "--allow-empty",
+    ];
+    args.extend(author_arg.as_deref());
+    let envs: Vec<(&str, &str)> = committer_env
+        .as_deref()
+        .map(|d| ("GIT_COMMITTER_DATE", d))
+        .into_iter()
+        .collect();
+    let out = run_git_raw_env(Some(repo_path), &args, &envs, DEFAULT_TIMEOUT).await?;
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    let head = run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+    Ok(head.stdout_lossy().trim().to_string())
 }
 
 /// The tag-name rules for every path a tag rides: `refs/tags/<name>` push and
@@ -7424,6 +7761,7 @@ mod tests {
             hashes: vec![hash.to_string()],
             message: None,
             edit: false,
+            ..Default::default()
         }
     }
 
@@ -8720,6 +9058,7 @@ mod tests {
                 hashes: vec![c1, c2],
                 message: Some("combined".into()),
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -8751,6 +9090,7 @@ mod tests {
                 hashes: vec![c1, c2],
                 message: None,
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -8831,6 +9171,7 @@ mod tests {
                 hashes: vec![c2, c1],
                 message: Some("combined".into()),
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -8876,6 +9217,7 @@ mod tests {
                 hashes: vec![c1, c2],
                 message: Some("combined".into()),
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -9003,6 +9345,7 @@ mod tests {
                     hashes: group.clone(),
                     message: message.map(str::to_string),
                     edit: false,
+                    ..Default::default()
                 }],
                 &[],
             )
@@ -9065,6 +9408,7 @@ mod tests {
                     hashes: vec![add_z, leader],
                     message: None,
                     edit: false,
+                    ..Default::default()
                 },
                 pick(&revert),
                 pick(&other),
@@ -9118,6 +9462,7 @@ mod tests {
                     hashes: vec![c, d],
                     message: None,
                     edit: false,
+                    ..Default::default()
                 },
             ],
             &[b],
@@ -9180,6 +9525,7 @@ mod tests {
                 hashes: chain,
                 message: None,
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -9225,6 +9571,7 @@ mod tests {
                 hashes: group,
                 message: None,
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -9275,6 +9622,7 @@ mod tests {
                     hashes: vec![c2.clone(), c3.clone()],
                     message: None,
                     edit: false,
+                    ..Default::default()
                 },
                 pick(&c1),
             ],
@@ -9323,6 +9671,7 @@ mod tests {
                 hashes: vec![c1.clone(), c2.clone()],
                 message: Some("combined".into()),
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -9372,6 +9721,7 @@ mod tests {
                 hashes: bumps,
                 message: None,
                 edit: false,
+                ..Default::default()
             }],
             &[],
         )
@@ -9432,6 +9782,7 @@ mod tests {
                     hashes: vec![leader, fold],
                     message: Some("combined".into()),
                     edit: false,
+                    ..Default::default()
                 }],
                 &[],
             )
@@ -9467,6 +9818,7 @@ mod tests {
                 hashes: vec![x.clone()],
                 message: Some("reworded".into()),
                 edit: false,
+                ..Default::default()
             };
             // Fast-forward: every pick replays onto its own parent. Otherwise "one" is
             // dropped, so "two" is picked onto a new parent.
@@ -9519,6 +9871,7 @@ mod tests {
             hashes: vec![c2],
             message: None,
             edit: true,
+            ..Default::default()
         };
         // "two"'s patch (v1→v2) can't apply onto v0 once "one" is dropped.
         rebase_edit(
@@ -9581,11 +9934,13 @@ mod tests {
                     hashes: vec![commits[0].clone(), commits[1].clone()],
                     message: Some("combined".into()),
                     edit: false,
+                    ..Default::default()
                 },
                 RewriteStep {
                     hashes: vec![commits[2].clone()],
                     message: Some("reworded".into()),
                     edit: false,
+                    ..Default::default()
                 },
             ];
             if replay {
@@ -10080,6 +10435,7 @@ mod tests {
             hashes: vec![c2],
             message: None,
             edit: true,
+            ..Default::default()
         };
         rebase_edit(
             &AppState::default(),
@@ -10137,11 +10493,13 @@ mod tests {
                 hashes: vec![bottom.clone(), below.clone()],
                 message: Some("squashed".into()),
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec![tip.clone()],
                 message: Some("reworded".into()),
                 edit: false,
+                ..Default::default()
             },
         ];
         rewrite_commits(&state, &repo, &base, &plan, &[])
@@ -10157,6 +10515,7 @@ mod tests {
             hashes: vec![below, tip.clone()],
             message: None,
             edit: false,
+            ..Default::default()
         }];
         rewrite_commits(&state, &repo, &base, &plan, &[])
             .await
@@ -11194,6 +11553,7 @@ mod tests {
             hashes: vec![tip.clone()],
             message: None,
             edit: true,
+            ..Default::default()
         };
         rebase_edit(
             &AppState::default(),
@@ -11220,11 +11580,13 @@ mod tests {
                     hashes: vec![c[0].clone(), c[1].clone()],
                     message: Some("combined".into()),
                     edit: false,
+                    ..Default::default()
                 },
                 RewriteStep {
                     hashes: vec![c[2].clone(), c[3].clone()],
                     message: None,
                     edit: false,
+                    ..Default::default()
                 },
             ]
         };
@@ -11318,6 +11680,7 @@ mod tests {
             hashes: vec![c2.clone()],
             message: None,
             edit: true,
+            ..Default::default()
         };
         rebase_edit(
             &AppState::default(),
@@ -11342,6 +11705,7 @@ mod tests {
             hashes: vec!["aaaa".into()],
             message: None,
             edit: true,
+            ..Default::default()
         };
         let dir = std::path::Path::new("scratch");
         let (replay, _) = rebase_todo(
@@ -11366,6 +11730,7 @@ mod tests {
             hashes: vec!["aaaa".into()],
             message: Some("reworded".into()),
             edit: false,
+            ..Default::default()
         };
         let dir = std::path::Path::new("C:/it's dir");
         let (todo, files) = rebase_todo(
@@ -11706,6 +12071,7 @@ mod tests {
                 hashes: vec![original.clone()],
                 message: Some("reworded".into()),
                 edit: false,
+                ..Default::default()
             };
             // Dropping the parent forces a fresh pick before the reword amend.
             let (steps, dropped) = if fast_forward {
@@ -11843,6 +12209,7 @@ mod tests {
                 hashes: vec![a, b, d, original_tip.clone()],
                 message: None,
                 edit: false,
+                ..Default::default()
             }],
             None,
         )
@@ -11920,6 +12287,7 @@ mod tests {
                     hashes: members.clone(),
                     message: message.map(str::to_string),
                     edit: phase == "edit-leader",
+                    ..Default::default()
                 });
                 if phase == "before-edit" {
                     commit_file(&repo, dir.path(), "pause", "pause\n", "pause").await;
@@ -12022,6 +12390,7 @@ mod tests {
                     hashes: members.clone(),
                     message: Some("combined".into()),
                     edit: false,
+                    ..Default::default()
                 }],
                 None,
             )
@@ -12089,6 +12458,7 @@ mod tests {
                     hashes: members,
                     message: None,
                     edit: false,
+                    ..Default::default()
                 }],
                 None,
             )
@@ -12121,6 +12491,7 @@ mod tests {
                     hashes: vec![c, b],
                     message: None,
                     edit: false,
+                    ..Default::default()
                 },
                 pick(&a),
             ],
@@ -12159,21 +12530,25 @@ mod tests {
                 hashes: vec!["a1".into(), "a2".into(), "a3".into()],
                 message: None,
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec!["b1".into(), "b2".into()],
                 message: Some("squashed".into()),
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec!["c1".into()],
                 message: None,
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec!["d1".into()],
                 message: Some("reworded".into()),
                 edit: false,
+                ..Default::default()
             },
         ];
         let dir = std::path::Path::new("d");
@@ -12315,6 +12690,7 @@ mod tests {
             hashes: vec![c2.clone()],
             message: None,
             edit: true,
+            ..Default::default()
         };
         let result = rebase_edit_with_timeout(
             &AppState::default(),
@@ -12361,6 +12737,7 @@ mod tests {
                 hashes: vec![hash.to_string()],
                 message: None,
                 edit: true,
+                ..Default::default()
             };
             let plan = if edit_first {
                 vec![edit(&c1), pick(&c2)]
@@ -12409,6 +12786,7 @@ mod tests {
             hashes: vec![c1],
             message: None,
             edit: true,
+            ..Default::default()
         };
         // "two"'s patch (v1→v2) can't apply onto v0.
         rebase_edit(
@@ -12475,21 +12853,35 @@ mod tests {
                 hashes: vec!["a1".into()],
                 message: None,
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec!["b1".into()],
                 message: Some("reword".into()),
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec!["c1".into(), "c2".into()],
                 message: None,
                 edit: false,
+                ..Default::default()
             },
             RewriteStep {
                 hashes: vec!["d1".into(), "d2".into(), "d3".into()],
                 message: Some("squash".into()),
                 edit: false,
+                ..Default::default()
+            },
+            RewriteStep {
+                hashes: vec!["f1".into()],
+                author_date: Some(date(1, 0)),
+                ..Default::default()
+            },
+            RewriteStep {
+                hashes: vec!["g1".into(), "g2".into()],
+                committer_date: Some(date(2, 60)),
+                ..Default::default()
             },
         ];
         let dropped = ["e1".to_string()];
@@ -12504,7 +12896,7 @@ mod tests {
         let (picks, drops, execs) = (count("pick "), count("drop "), count("exec "));
         assert_eq!(
             (picks, drops, execs),
-            (2, 6, 3),
+            (3, 8, 5),
             "the fixture exercises every line kind: {todo}"
         );
         assert_eq!(
@@ -12518,6 +12910,1097 @@ mod tests {
                 + std::time::Duration::from_secs(2 * u64::from(picks + drops))
                 + DEFAULT_TIMEOUT * execs
         );
+    }
+
+    fn date(epoch_seconds: i64, offset_minutes: i32) -> CommitDate {
+        CommitDate {
+            epoch_seconds,
+            offset_minutes,
+        }
+    }
+
+    fn dated(hash: &str, author: Option<CommitDate>, committer: Option<CommitDate>) -> RewriteStep {
+        RewriteStep {
+            hashes: vec![hash.to_string()],
+            author_date: author,
+            committer_date: committer,
+            ..Default::default()
+        }
+    }
+
+    /// Commits `file` (or an empty commit when `None`) with fixed raw author and
+    /// committer dates, so no assert depends on the clock or on global config.
+    async fn commit_at(
+        repo: &str,
+        file: Option<&str>,
+        msg: &str,
+        author: &str,
+        committer: &str,
+    ) -> String {
+        let mut args = vec!["commit", "-m", msg];
+        let date_arg = format!("--date={author}");
+        args.push(&date_arg);
+        match file {
+            Some(file) => {
+                std::fs::write(Path::new(repo).join(file), format!("{msg}\n")).unwrap();
+                git(repo, &["add", "."]).await;
+            }
+            None => args.push("--allow-empty"),
+        }
+        let out = run_git_raw_env(
+            Some(repo),
+            &args,
+            &[("GIT_COMMITTER_DATE", committer)],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 0, "{}", out.full_failure_text());
+        rev(repo, "HEAD").await
+    }
+
+    async fn raw_dates(repo: &str, r: &str) -> String {
+        git(
+            repo,
+            &[
+                "log",
+                "-1",
+                "--no-show-signature",
+                "--date=raw",
+                "--format=%ad|%cd",
+                r,
+            ],
+        )
+        .await
+        .trim()
+        .to_string()
+    }
+
+    async fn is_empty_commit(repo: &str, r: &str) -> bool {
+        rev(repo, &format!("{r}^{{tree}}")).await == rev(repo, &format!("{r}~1^{{tree}}")).await
+    }
+
+    fn refusal_text(e: AppError) -> String {
+        match e {
+            AppError::InvalidArgument(m) => m,
+            AppError::Git { stderr, .. } => stderr,
+            other => panic!("unexpected error kind: {other:?}"),
+        }
+    }
+
+    async fn amend_dates(
+        repo: &str,
+        head: &str,
+        pin: Option<&str>,
+        author: Option<CommitDate>,
+        committer: Option<CommitDate>,
+    ) -> AppResult<String> {
+        amend_commit_dates_core(
+            &AppState::default(),
+            repo,
+            head,
+            pin.map(str::to_string),
+            author,
+            committer,
+        )
+        .await
+    }
+
+    const FIXTURE_AUTHOR: &str = "@978307200 +0100";
+    const FIXTURE_COMMITTER: &str = "@978393600 -0500";
+
+    #[test]
+    fn commit_date_wire_shapes() {
+        let step: RewriteStep = serde_json::from_str(
+            r#"{"hashes":["a"],"authorDate":{"epochSeconds":1,"offsetMinutes":-60}}"#,
+        )
+        .unwrap();
+        assert_eq!(step.author_date, Some(date(1, -60)));
+        assert_eq!(step.committer_date, None);
+        let row = serde_json::to_value(CommitMessage {
+            hash: "h".into(),
+            message: "m".into(),
+            author_date: Some(date(5, 330)),
+            committer_date: None,
+        })
+        .unwrap();
+        let obj = row.as_object().unwrap();
+        assert_eq!(obj["authorDate"]["epochSeconds"], 5);
+        assert_eq!(obj["authorDate"]["offsetMinutes"], 330);
+        assert!(obj.contains_key("committerDate") && obj["committerDate"].is_null());
+        for snake in ["author_date", "committer_date"] {
+            assert!(!obj.contains_key(snake), "{row}");
+        }
+        let inner = obj["authorDate"].as_object().unwrap();
+        assert!(!inner.contains_key("epoch_seconds") && !inner.contains_key("offset_minutes"));
+    }
+
+    #[test]
+    fn git_date_arg_signs_the_whole_offset() {
+        for (minutes, text) in [
+            (-480, "-0800"),
+            (0, "+0000"),
+            (345, "+0545"),
+            (840, "+1400"),
+            (-210, "-0330"),
+            (-570, "-0930"),
+            (-30, "-0030"),
+        ] {
+            let arg = git_date_arg(date(1767949200, minutes));
+            assert_eq!(arg, format!("@1767949200 {text}"));
+            let parsed = parse_raw_date(&format!("1767949200 {text}")).unwrap();
+            assert_eq!(parsed, date(1767949200, minutes));
+            assert_eq!(git_date_arg(parsed), arg, "round trip");
+        }
+        assert_eq!(parse_raw_date("-86400 +0000"), Some(date(-86400, 0)));
+        assert_eq!(
+            parse_raw_date("1767949200 +1500"),
+            Some(date(1767949200, 900))
+        );
+        for bad in [
+            "",
+            "abc",
+            "1 +05",
+            "1",
+            "8640000000001 +0000",
+            "-8640000000001 +0000",
+        ] {
+            assert_eq!(parse_raw_date(bad), None, "{bad:?}");
+        }
+    }
+
+    /// Every date the parser returns stays a valid JS `Date` after the frontend shifts
+    /// it by its offset, and a minute field past 59 reads as unreadable.
+    #[test]
+    fn parse_raw_date_bounds_the_shifted_range_and_offset_minutes() {
+        let bound: i64 = 8_640_000_000_000 - 359_940;
+        for (raw, minutes) in [
+            (format!("{bound} +9959"), 5999),
+            (format!("-{bound} -9959"), -5999),
+            (format!("{bound} -9959"), -5999),
+            ("1767949200 +0559".to_string(), 359),
+        ] {
+            let parsed = parse_raw_date(&raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(parsed.offset_minutes, minutes, "{raw}");
+            let shifted = parsed.epoch_seconds + i64::from(parsed.offset_minutes) * 60;
+            assert!(shifted.abs() <= 8_640_000_000_000, "{raw}");
+        }
+        for bad in [
+            "8640000000000 +0100".to_string(),
+            "-8640000000000 -0100".to_string(),
+            "8640000000000 +0000".to_string(),
+            format!("{} +0000", bound + 1),
+            format!("-{} +0000", bound + 1),
+            "1767949200 +0575".to_string(),
+            "1767949200 -0060".to_string(),
+        ] {
+            assert_eq!(parse_raw_date(&bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn commit_dates_are_range_checked() {
+        for ok in [date(0, -720), date(4_102_487_999, 840)] {
+            assert!(validate_commit_date(&ok).is_ok());
+        }
+        for (bad, msg) in [
+            (
+                date(-1, 0),
+                "commit date is out of range (1970-01-01 to 2099-12-31)",
+            ),
+            (
+                date(4_102_488_000, 0),
+                "commit date is out of range (1970-01-01 to 2099-12-31)",
+            ),
+            (
+                date(0, -721),
+                "commit date offset is out of range (-12:00 to +14:00)",
+            ),
+            (
+                date(0, 841),
+                "commit date offset is out of range (-12:00 to +14:00)",
+            ),
+        ] {
+            assert_eq!(refusal_text(validate_commit_date(&bad).unwrap_err()), msg);
+        }
+    }
+
+    /// A message-only step keeps today's script; a dated one adds exactly one amend.
+    #[test]
+    fn amend_script_shapes_per_step_kind() {
+        let none = DateArgs::of(&RewriteStep::default());
+        let both = DateArgs::of(&dated("a", Some(date(1, 330)), Some(date(2, -480))));
+        assert_eq!(
+            amend_script("git", Some("'m'"), TodoRoute::Replay, &none),
+            "set -e\npre=$(git rev-parse HEAD)\ngit commit --amend --no-post-rewrite -F 'm'\nnew=$(git rev-parse HEAD)\nlist=$(git rev-parse --git-path rebase-merge/rewritten-list)\nif [ -f \"$list\" ]; then sed \"s/ $pre\\$/ $new/\" \"$list\" > \"$list.gd-tmp\" && mv \"$list.gd-tmp\" \"$list\"; fi\n"
+        );
+        let line = |route, file| {
+            amend_script("git", file, route, &both)
+                .lines()
+                .nth(2)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            line(TodoRoute::Replay, None),
+            "GIT_COMMITTER_DATE='@2 -0800' git commit --amend --no-verify --no-post-rewrite --no-edit --cleanup=verbatim --allow-empty --date='@1 +0530'"
+        );
+        assert_eq!(
+            line(TodoRoute::Replay, Some("'m'")),
+            "GIT_COMMITTER_DATE='@2 -0800' git commit --amend --no-post-rewrite -F 'm' --allow-empty --date='@1 +0530'"
+        );
+        assert_eq!(
+            line(TodoRoute::Edit, Some("'m'")),
+            "GIT_COMMITTER_DATE='@2 -0800' git commit --amend --no-verify --no-post-rewrite -F 'm' --allow-empty --date='@1 +0530'"
+        );
+        let (todo, files) = rebase_todo(
+            TodoRoute::Replay,
+            &[dated("a1", Some(date(1, 0)), None)],
+            &[],
+            Path::new("d"),
+            "git",
+        );
+        assert_eq!(todo, "break\npick a1\nexec sh 'd/dates-0.sh'\n");
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn edit_first_continue_budget_counts_execs_before_the_first_edit() {
+        let plain = RewriteStep {
+            hashes: vec!["p".into()],
+            ..Default::default()
+        };
+        let message = RewriteStep {
+            hashes: vec!["m".into()],
+            message: Some(" msg ".into()),
+            ..Default::default()
+        };
+        let blank = RewriteStep {
+            hashes: vec!["b".into()],
+            message: Some("  ".into()),
+            ..Default::default()
+        };
+        let dates = dated("d", None, Some(date(1, 0)));
+        let edit = RewriteStep {
+            edit: true,
+            ..dated("e", Some(date(1, 0)), None)
+        };
+        let budget = edit_first_continue_timeout;
+        let all = [plain.clone(), message.clone(), blank, dates.clone()];
+        assert_eq!(budget(&all), DEFAULT_TIMEOUT * 3);
+        let mid = [message.clone(), edit.clone(), dates.clone()];
+        assert_eq!(budget(&mid), DEFAULT_TIMEOUT * 2);
+        assert_eq!(budget(&[edit, message, dates, plain]), DEFAULT_TIMEOUT);
+    }
+
+    /// The two date lines are positional: a body line shaped like a raw date stays in
+    /// the body, and an unparseable date nulls only its own row's date.
+    #[test]
+    fn unpushed_records_parse_dates_positionally() {
+        let rows = parse_unpushed_records(
+            "a\n1 +0100\n2 -0330\nsubj\n\n3 +0000\n\0\nb\n\n4 +0000\n\0\nc\n5 +0000\n6 +0000\n",
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            (rows[0].author_date, rows[0].committer_date),
+            (Some(date(1, 60)), Some(date(2, -210)))
+        );
+        assert_eq!(rows[0].message, "subj\n\n3 +0000");
+        assert_eq!((rows[1].hash.as_str(), rows[1].author_date), ("b", None));
+        assert_eq!(rows[1].committer_date, Some(date(4, 0)));
+        assert_eq!(
+            (rows[2].message.as_str(), rows[2].committer_date),
+            ("", Some(date(6, 0)))
+        );
+    }
+
+    /// The replay route: a dates-only step sets both dates exactly, boundary
+    /// dates included, keeps the message bytes, and an empty commit takes its dates.
+    #[tokio::test]
+    async fn a_dates_only_step_sets_exact_author_and_committer_dates() {
+        let (_dir, repo) = setup_repo("dates-only").await;
+        let base = rev(&repo, "HEAD").await;
+        let msg_file = Path::new(&repo).join(".git/verbatim-msg");
+        std::fs::write(&msg_file, "subject  \n\n\nbody  \n").unwrap();
+        std::fs::write(Path::new(&repo).join("1.txt"), "1\n").unwrap();
+        git(&repo, &["add", "."]).await;
+        git(
+            &repo,
+            &[
+                "commit",
+                "--cleanup=verbatim",
+                "-F",
+                &msg_file.to_string_lossy(),
+            ],
+        )
+        .await;
+        let c1 = rev(&repo, "HEAD").await;
+        let body = |r: String| {
+            let repo = repo.clone();
+            async move {
+                let raw = git(&repo, &["cat-file", "commit", &r]).await;
+                raw.split_once("\n\n").unwrap().1.to_string()
+            }
+        };
+        let c1_body = body(c1.clone()).await;
+        let c2 = commit_at(
+            &repo,
+            Some("2.txt"),
+            "two",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        let c3 = commit_at(
+            &repo,
+            Some("3.txt"),
+            "three",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        let c4 = commit_at(&repo, None, "empty", FIXTURE_AUTHOR, FIXTURE_COMMITTER).await;
+        let steps = [
+            dated(&c1, Some(date(0, 0)), Some(date(0, 0))),
+            dated(
+                &c2,
+                Some(date(1767949200, 330)),
+                Some(date(1767999999, -480)),
+            ),
+            pick(&c3),
+            dated(
+                &c4,
+                Some(date(4_102_487_999, -720)),
+                Some(date(4_102_487_999, -720)),
+            ),
+        ];
+        rewrite_commits(&AppState::default(), &repo, &base, &steps, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            subjects(&repo).await,
+            vec!["empty", "three", "two", "subject", "base"]
+        );
+        assert_eq!(raw_dates(&repo, "HEAD~3").await, "0 +0000|0 +0000");
+        assert_eq!(
+            body(rev(&repo, "HEAD~3").await).await,
+            c1_body,
+            "message bytes kept"
+        );
+        assert_eq!(
+            raw_dates(&repo, "HEAD~2").await,
+            "1767949200 +0530|1767999999 -0800"
+        );
+        let above = raw_dates(&repo, "HEAD~1").await;
+        let (author, committer) = above.split_once('|').unwrap();
+        assert_eq!(
+            author, "978307200 +0100",
+            "the commit above keeps its author date"
+        );
+        assert_ne!(committer, "978393600 -0500", "and is re-committed");
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "4102487999 -1200|4102487999 -1200"
+        );
+        assert!(is_empty_commit(&repo, "HEAD").await, "still empty");
+    }
+
+    /// A reword with dates is ONE amend on both routes, an empty commit included.
+    #[tokio::test]
+    async fn a_reword_with_dates_is_one_amend() {
+        for replay in [true, false] {
+            let (_dir, repo) = setup_repo(&format!("reword-dates-{replay}")).await;
+            let base = rev(&repo, "HEAD").await;
+            let c1 = commit_at(
+                &repo,
+                Some("1.txt"),
+                "one",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            let c2 = commit_at(&repo, None, "empty", FIXTURE_AUTHOR, FIXTURE_COMMITTER).await;
+            let step = |hash: &str, msg: &str| RewriteStep {
+                message: Some(msg.into()),
+                ..dated(
+                    hash,
+                    Some(date(1767949200, 330)),
+                    Some(date(1767999999, -480)),
+                )
+            };
+            let steps = vec![step(&c1, "reworded"), step(&c2, "empty reworded")];
+            let route = if replay {
+                TodoRoute::Replay
+            } else {
+                TodoRoute::Edit
+            };
+            let (todo, files) = rebase_todo(route, &steps, &[], Path::new("d"), "git");
+            assert_eq!(todo.matches("exec ").count(), 2, "{todo}");
+            assert!(!todo.contains("dates-"), "{todo}");
+            for (path, body) in &files {
+                if path.to_string_lossy().ends_with(".sh") {
+                    assert_eq!(body.matches("commit --amend").count(), 1, "{body}");
+                }
+            }
+            if replay {
+                rewrite_commits(&AppState::default(), &repo, &base, &steps, &[])
+                    .await
+                    .unwrap();
+            } else {
+                rebase_edit(&AppState::default(), repo.clone(), base, steps, None)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                subjects(&repo).await,
+                vec!["empty reworded", "reworded", "base"]
+            );
+            for r in ["HEAD", "HEAD~1"] {
+                assert_eq!(
+                    raw_dates(&repo, r).await,
+                    "1767949200 +0530|1767999999 -0800",
+                    "replay={replay} {r}"
+                );
+            }
+            assert!(is_empty_commit(&repo, "HEAD").await);
+        }
+    }
+
+    /// A dated step's note and post-rewrite mapping reach its FINAL commit.
+    #[tokio::test]
+    async fn a_dated_step_maps_its_commit_to_the_final_one() {
+        for fast_forward in [true, false] {
+            let (dir, repo) = setup_repo(&format!("dates-mapping-{fast_forward}")).await;
+            let base = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+            let c1 = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "2.txt", "2\n", "two").await;
+            let x = rev(&repo, "HEAD").await;
+            git(&repo, &["notes", "add", "-m", "note-x", &x]).await;
+            let log = track_rewrites(&repo).await;
+            let step = dated(&x, Some(date(1767949200, 0)), Some(date(1767999999, 0)));
+            let (steps, dropped) = if fast_forward {
+                (vec![pick(&c1), step], vec![])
+            } else {
+                (vec![step], vec![c1.clone()])
+            };
+            rewrite_commits(&AppState::default(), &repo, &base, &steps, &dropped)
+                .await
+                .unwrap();
+            let head = rev(&repo, "HEAD").await;
+            assert_eq!(
+                raw_dates(&repo, "HEAD").await,
+                "1767949200 +0000|1767999999 +0000"
+            );
+            assert_eq!(
+                git(&repo, &["notes", "show", "HEAD"]).await.trim(),
+                "note-x"
+            );
+            let log = std::fs::read_to_string(&log).expect("post-rewrite ran");
+            let mapped: Vec<&str> = log
+                .lines()
+                .filter_map(|l| l.strip_prefix(&format!("{x} ")))
+                .collect();
+            assert_eq!(mapped, vec![head.as_str()], "ff={fast_forward}: {log}");
+            assert_eq!(log.matches("post-rewrite amend").count(), 0, "{log}");
+        }
+    }
+
+    /// A fold group's one commit takes the step's dates in both commit arms,
+    /// keeps the leader's author, and still maps every member.
+    #[tokio::test]
+    async fn a_fold_group_takes_its_steps_dates() {
+        let (dir, repo) = setup_repo("group-dates").await;
+        let base = rev(&repo, "HEAD").await;
+        let log = track_rewrites(&repo).await;
+        commit_file_by(&repo, dir.path(), "1.txt", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let c2 = commit_at(
+            &repo,
+            Some("2.txt"),
+            "two",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        commit_file_by(&repo, dir.path(), "3.txt", "three").await;
+        let c3 = rev(&repo, "HEAD").await;
+        let c4 = commit_at(
+            &repo,
+            Some("4.txt"),
+            "four",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        let leader_name = git(&repo, &["log", "-1", "--format=%an", &c1]).await;
+        let group = |hashes: [&String; 2], message: Option<&str>, a: CommitDate, c: CommitDate| {
+            RewriteStep {
+                hashes: hashes.iter().map(|h| h.to_string()).collect(),
+                message: message.map(str::to_string),
+                ..dated("", Some(a), Some(c))
+            }
+        };
+        let steps = [
+            group(
+                [&c1, &c2],
+                None,
+                date(1767949200, 330),
+                date(1767999999, -480),
+            ),
+            group(
+                [&c3, &c4],
+                Some("squashed"),
+                date(1700000000, -210),
+                date(1700000001, 840),
+            ),
+        ];
+        rewrite_commits(&AppState::default(), &repo, &base, &steps, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_dates(&repo, "HEAD~1").await,
+            "1767949200 +0530|1767999999 -0800",
+            "-C arm"
+        );
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1700000000 -0330|1700000001 +1400",
+            "-F arm"
+        );
+        for r in ["HEAD", "HEAD~1"] {
+            assert_eq!(
+                git(&repo, &["log", "-1", "--format=%an", r]).await,
+                leader_name,
+                "{r}"
+            );
+        }
+        let log = std::fs::read_to_string(&log).expect("post-rewrite ran");
+        let (head, below) = (rev(&repo, "HEAD").await, rev(&repo, "HEAD~1").await);
+        for (old, new) in [(&c1, &below), (&c2, &below), (&c3, &head), (&c4, &head)] {
+            assert!(log.contains(&format!("{old} {new}")), "{log}");
+        }
+    }
+
+    /// On the edit route a row's planned dates apply after the pause,
+    /// over a hand amend there; a non-edit dated fold group gets exact dates too.
+    #[tokio::test]
+    async fn edit_route_dates_apply_after_the_pause() {
+        let (dir, repo) = setup_repo("edit-dates").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "2.txt", "2\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "3.txt", "3\n", "three").await;
+        let c3 = rev(&repo, "HEAD").await;
+        let edit = RewriteStep {
+            edit: true,
+            ..dated(
+                &c1,
+                Some(date(1767949200, 330)),
+                Some(date(1767999999, -480)),
+            )
+        };
+        let group = RewriteStep {
+            hashes: vec![c2, c3],
+            ..dated(
+                "",
+                Some(date(1700000000, -30)),
+                Some(date(1700000001, -570)),
+            )
+        };
+        rebase_edit(
+            &AppState::default(),
+            repo.clone(),
+            base,
+            vec![edit, group],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(op_state(&repo).await.unwrap().edit_paused);
+        git(
+            &repo,
+            &["commit", "--amend", "--no-edit", "--date=@1000000000 +0000"],
+        )
+        .await;
+        op_continue(&AppState::default(), &repo, "rebase")
+            .await
+            .unwrap();
+        assert!(!rebasing(&repo).await);
+        assert_eq!(
+            raw_dates(&repo, "HEAD~1").await,
+            "1767949200 +0530|1767999999 -0800"
+        );
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1700000000 -0030|1700000001 -0930"
+        );
+        assert_eq!(subjects(&repo).await, vec!["two", "one", "base"]);
+    }
+
+    /// The amend route: only the dates change; the message bytes, tree,
+    /// parents and every working-tree change stay as they were.
+    #[tokio::test]
+    async fn amend_commit_dates_sets_dates_and_touches_nothing_else() {
+        let (dir, repo) = setup_repo("amend-dates").await;
+        let msg_file = dir.path().join(".git/verbatim-msg");
+        std::fs::write(&msg_file, "subject  \n\n\nbody  \n").unwrap();
+        commit_at(
+            &repo,
+            Some("t.txt"),
+            "seed",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        std::fs::write(dir.path().join("t.txt"), "tracked\n").unwrap();
+        git(&repo, &["add", "."]).await;
+        let out = run_git_raw_env(
+            Some(&repo),
+            &[
+                "commit",
+                "--cleanup=verbatim",
+                "-F",
+                &msg_file.to_string_lossy(),
+                "--date",
+                FIXTURE_AUTHOR,
+            ],
+            &[("GIT_COMMITTER_DATE", FIXTURE_COMMITTER)],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 0);
+        std::fs::write(dir.path().join("staged.txt"), "s\n").unwrap();
+        git(&repo, &["add", "staged.txt"]).await;
+        std::fs::write(dir.path().join("t.txt"), "unstaged\n").unwrap();
+        std::fs::write(dir.path().join("untracked.txt"), "u\n").unwrap();
+        let shape = |r: String| {
+            let repo = repo.clone();
+            async move {
+                let raw = git(&repo, &["cat-file", "commit", &r]).await;
+                let msg = raw.split_once("\n\n").unwrap().1.to_string();
+                let parents = git(&repo, &["rev-list", "--parents", "-1", &r]).await;
+                let parents: Vec<String> = parents
+                    .split_whitespace()
+                    .skip(1)
+                    .map(str::to_string)
+                    .collect();
+                (msg, rev(&repo, &format!("{r}^{{tree}}")).await, parents)
+            }
+        };
+        let branch = head_branch(&repo).await;
+        let mut head = rev(&repo, "HEAD").await;
+        let before = shape(head.clone()).await;
+        assert_eq!(before.0, "subject  \n\n\nbody  \n");
+        for (author, committer) in [
+            (Some(date(1767949200, 330)), Some(date(1767999999, -480))),
+            (Some(date(1700000000, 0)), None),
+            (None, Some(date(1700000001, 60))),
+        ] {
+            let old_dates = raw_dates(&repo, "HEAD").await;
+            let new = amend_dates(&repo, &head, Some(&branch), author, committer)
+                .await
+                .unwrap();
+            assert_eq!(new, rev(&repo, "HEAD").await);
+            assert_ne!(new, head);
+            assert_eq!(
+                shape(new.clone()).await,
+                before,
+                "message, tree and parents kept"
+            );
+            let dates = raw_dates(&repo, "HEAD").await;
+            let (a, c) = dates.split_once('|').unwrap();
+            let (old_a, old_c) = old_dates.split_once('|').unwrap();
+            match author {
+                Some(d) => assert_eq!(a, git_date_arg(d).trim_start_matches('@')),
+                None => assert_eq!(a, old_a, "committer-only keeps the author date"),
+            }
+            match committer {
+                Some(d) => assert_eq!(c, git_date_arg(d).trim_start_matches('@')),
+                None => assert_ne!(c, old_c, "author-only stamps the committer now"),
+            }
+            assert_eq!(
+                git(&repo, &["diff", "--cached", "--name-only"]).await,
+                "staged.txt\n"
+            );
+            assert_eq!(git(&repo, &["diff", "--name-only"]).await, "t.txt\n");
+            assert!(dir.path().join("untracked.txt").exists());
+            head = new;
+        }
+    }
+
+    /// Every refusal leaves HEAD alone; the allowed shapes succeed.
+    #[tokio::test]
+    async fn amend_commit_dates_refusals_and_allowed_shapes() {
+        let (dir, repo) = setup_repo("amend-dates-refusals").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "one\n", "one").await;
+        let head = rev(&repo, "HEAD").await;
+        let branch = head_branch(&repo).await;
+        let d = Some(date(1767949200, 0));
+        let refused = |head_pin: String,
+                       pin: Option<String>,
+                       a: Option<CommitDate>,
+                       c: Option<CommitDate>| {
+            let repo = repo.clone();
+            async move {
+                let before = rev(&repo, "HEAD").await;
+                let e = amend_dates(&repo, &head_pin, pin.as_deref(), a, c)
+                    .await
+                    .unwrap_err();
+                assert_eq!(rev(&repo, "HEAD").await, before, "HEAD unchanged");
+                refusal_text(e)
+            }
+        };
+        let pin = Some(branch.clone());
+        assert_eq!(
+            refused(head.clone(), pin.clone(), None, None).await,
+            "no date change was given"
+        );
+        for (bad, msg) in [
+            (
+                date(-1, 0),
+                "commit date is out of range (1970-01-01 to 2099-12-31)",
+            ),
+            (
+                date(4_102_488_000, 0),
+                "commit date is out of range (1970-01-01 to 2099-12-31)",
+            ),
+            (
+                date(0, -721),
+                "commit date offset is out of range (-12:00 to +14:00)",
+            ),
+            (
+                date(0, 841),
+                "commit date offset is out of range (-12:00 to +14:00)",
+            ),
+        ] {
+            assert_eq!(
+                refused(head.clone(), pin.clone(), Some(bad), None).await,
+                msg
+            );
+            assert_eq!(
+                refused(head.clone(), pin.clone(), None, Some(bad)).await,
+                msg
+            );
+        }
+        assert_eq!(
+            refused(base.clone(), pin.clone(), d, None).await,
+            DATES_HEAD_MOVED
+        );
+        git(&repo, &["branch", "other"]).await;
+        assert_eq!(
+            refused(head.clone(), Some("other".into()), d, None).await,
+            DATES_BRANCH_SWITCHED
+        );
+
+        // Unmerged entries with no operation: a squash merge stopped on its conflict.
+        git(&repo, &["switch", "-c", "side", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "side\n", "side").await;
+        git(&repo, &["switch", &branch]).await;
+        let squash = run_git_raw(Some(&repo), &["merge", "--squash", "side"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(squash.code, 0, "fixture: the squash stops on its conflict");
+        assert!(
+            !op_state(&repo).await.unwrap().mid_op(),
+            "fixture: no operation"
+        );
+        assert_eq!(
+            refused(head.clone(), pin.clone(), d, None).await,
+            DATES_UNRESOLVED
+        );
+        git(&repo, &["reset", "--hard"]).await;
+
+        // A stopped cherry-pick.
+        let pick = run_git_raw(Some(&repo), &["cherry-pick", "side"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(pick.code, 0, "fixture: the pick stops");
+        assert_eq!(
+            refused(head.clone(), pin.clone(), d, None).await,
+            DATES_MID_OP
+        );
+        git(&repo, &["cherry-pick", "--abort"]).await;
+
+        // A folder that is not a repository has no git dir to resolve.
+        let plain = tempfile::tempdir().unwrap();
+        let e = amend_dates(&plain.path().to_string_lossy(), &head, None, d, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, AppError::InvalidArgument(m) if m == "couldn't resolve the git dir"),
+            "{e:?}"
+        );
+
+        // An unborn HEAD has no commit the user chose, pinned to its branch or not. This
+        // pins the refusal, not the exit-code arm: an unborn `rev-parse HEAD` never
+        // prints a hex pin, so the compare refuses it either way.
+        let unborn_dir = tempfile::Builder::new()
+            .prefix("gd-amend-dates-unborn-")
+            .tempdir()
+            .expect("create temp dir");
+        let unborn = unborn_dir.path().to_string_lossy().into_owned();
+        git(&unborn, &["init"]).await;
+        let unborn_branch = git(&unborn, &["symbolic-ref", "--short", "HEAD"]).await;
+        for pin in [None, Some(unborn_branch.trim())] {
+            let e = amend_dates(&unborn, &head, pin, d, None).await.unwrap_err();
+            assert!(
+                matches!(&e, AppError::Git { code: 1, stderr } if stderr == DATES_HEAD_MOVED),
+                "{pin:?}: {e:?}"
+            );
+            let probe = run_git_raw(
+                Some(&unborn),
+                &["rev-parse", "--verify", "-q", "HEAD"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_ne!(probe.code, 0, "still unborn");
+        }
+
+        // Allowed: a merge commit, a detached HEAD, a root commit, an empty commit.
+        git(
+            &repo,
+            &["merge", "--no-ff", "-X", "ours", "-m", "merge", "side"],
+        )
+        .await;
+        let merge = rev(&repo, "HEAD").await;
+        let new = amend_dates(&repo, &merge, pin.as_deref(), d, d)
+            .await
+            .unwrap();
+        let parents = git(&repo, &["rev-list", "--parents", "-1", &new]).await;
+        assert_eq!(parents.split_whitespace().count(), 3, "still two parents");
+        git(&repo, &["switch", "--detach"]).await;
+        let detached = amend_dates(&repo, &new, Some("HEAD"), d, d).await.unwrap();
+        assert_eq!(rev(&repo, "HEAD").await, detached);
+        let empty = commit_at(&repo, None, "empty", FIXTURE_AUTHOR, FIXTURE_COMMITTER).await;
+        amend_dates(&repo, &empty, Some("HEAD"), d, Some(date(1767999999, -480)))
+            .await
+            .unwrap();
+        assert!(is_empty_commit(&repo, "HEAD").await);
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1767949200 +0000|1767999999 -0800"
+        );
+
+        let (_root_dir, root_repo) = setup_repo("amend-dates-root").await;
+        let root = rev(&root_repo, "HEAD").await;
+        let pin = head_branch(&root_repo).await;
+        let new = amend_dates(&root_repo, &root, Some(&pin), d, d)
+            .await
+            .unwrap();
+        let parents = git(&root_repo, &["rev-list", "--parents", "-1", &new]).await;
+        assert_eq!(parents.split_whitespace().count(), 1, "still parentless");
+    }
+
+    /// Dates-only amends skip the commit hooks; a replay reword with dates
+    /// still runs them.
+    #[tokio::test]
+    async fn date_steps_follow_the_hook_rule() {
+        let (dir, repo) = setup_repo("dates-hooks").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        write_hook(&repo, "pre-commit", "echo pre-commit-refused >&2; exit 1");
+        write_hook(&repo, "commit-msg", "exit 1");
+        let d = Some(date(1767949200, 0));
+        let state = AppState::default();
+
+        let reword = RewriteStep {
+            message: Some("reworded".into()),
+            ..dated(&c1, d, d)
+        };
+        let msg = refusal_text(
+            rewrite_commits(&state, &repo, &base, &[reword], &[])
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(msg.lines().next(), Some(L_ROLLEDBACK), "{msg}");
+        assert!(
+            msg.contains("pre-commit-refused"),
+            "the hook's refusal: {msg}"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, c1, "branch tip unchanged");
+
+        rewrite_commits(&state, &repo, &base, &[dated(&c1, d, d)], &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1767949200 +0000|1767949200 +0000"
+        );
+
+        let tip = rev(&repo, "HEAD").await;
+        let e = Some(date(1767949300, 0));
+        rebase_edit(&state, repo.clone(), base, vec![dated(&tip, e, e)], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1767949300 +0000|1767949300 +0000"
+        );
+
+        let tip = rev(&repo, "HEAD").await;
+        let pin = head_branch(&repo).await;
+        amend_dates(&repo, &tip, Some(&pin), d, None).await.unwrap();
+    }
+
+    /// An out-of-range step date refuses before the scratch dir is written.
+    #[tokio::test]
+    async fn out_of_range_step_dates_refuse_before_any_git_call() {
+        let (dir, repo) = setup_repo("dates-range").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let scratch = git_dir_of(&repo).await.join("gd-rebase-edit");
+        let bad = dated(&c1, Some(date(-1, 0)), None);
+        let expected = "commit date is out of range (1970-01-01 to 2099-12-31)";
+        let e = rewrite_commits(
+            &AppState::default(),
+            &repo,
+            &base,
+            std::slice::from_ref(&bad),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refusal_text(e), expected);
+        assert!(!scratch.exists());
+        let e = rebase_edit(&AppState::default(), repo.clone(), base, vec![bad], None)
+            .await
+            .unwrap_err();
+        assert_eq!(refusal_text(e), expected);
+        assert!(!scratch.exists());
+    }
+
+    /// Both raw dates per commit, offsets with odd minutes signed as a whole,
+    /// intact bodies (one starting with a date-shaped line) and an empty message.
+    #[tokio::test]
+    async fn unpushed_messages_carry_both_raw_dates() {
+        let (_dir, repo) = setup_repo("unpushed-dates").await;
+        let base = rev(&repo, "HEAD").await;
+        let a = commit_at(
+            &repo,
+            Some("a"),
+            "a",
+            "@1700000000 +0545",
+            "@1700000100 -0800",
+        )
+        .await;
+        let b = commit_at(
+            &repo,
+            Some("b"),
+            "b\n\n1700000000 +0000\nmore",
+            "@1700000200 -0330",
+            "@1700000300 -0930",
+        )
+        .await;
+        let out = run_git_raw_env(
+            Some(&repo),
+            &[
+                "commit",
+                "--allow-empty",
+                "--allow-empty-message",
+                "-m",
+                "",
+                "--date=@1700000400 -0030",
+            ],
+            &[("GIT_COMMITTER_DATE", "@1700000500 +0000")],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 0, "{}", out.full_failure_text());
+        let c = rev(&repo, "HEAD").await;
+        let rows = git_unpushed_messages(repo.clone(), base).await.unwrap();
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.hash.clone(),
+                    r.message.clone(),
+                    r.author_date,
+                    r.committer_date,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    c,
+                    String::new(),
+                    Some(date(1700000400, -30)),
+                    Some(date(1700000500, 0))
+                ),
+                (
+                    b,
+                    "b\n\n1700000000 +0000\nmore".into(),
+                    Some(date(1700000200, -210)),
+                    Some(date(1700000300, -570))
+                ),
+                (
+                    a,
+                    "a".into(),
+                    Some(date(1700000000, 345)),
+                    Some(date(1700000100, -480))
+                ),
+            ]
+        );
+    }
+
+    /// A commit whose ident carries no date reads as `None` for
+    /// that row only.
+    #[tokio::test]
+    async fn an_unreadable_date_is_null_for_its_row_only() {
+        let (dir, repo) = setup_repo("unpushed-nodate").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let one = rev(&repo, "HEAD").await;
+        let tree = rev(&repo, "HEAD^{tree}").await;
+        let object =
+            format!("tree {tree}\nparent {one}\nauthor A <a@a>\ncommitter C <c@c>\n\nno date\n");
+        let odd = run_git_raw_input(
+            Some(&repo),
+            &[
+                "hash-object",
+                "-t",
+                "commit",
+                "-w",
+                "--literally",
+                "--stdin",
+            ],
+            Some(&object),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(odd.code, 0, "{}", odd.full_failure_text());
+        let odd = odd.stdout_lossy().trim().to_string();
+        git(&repo, &["update-ref", "HEAD", &odd]).await;
+        git(&repo, &["reset", "--hard"]).await;
+        commit_file(&repo, dir.path(), "3.txt", "3\n", "three").await;
+        let rows = git_unpushed_messages(repo.clone(), base).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].hash, odd);
+        assert_eq!(rows[1].message, "no date");
+        assert_eq!(
+            (rows[1].author_date, rows[1].committer_date),
+            (None, None),
+            "{:?}",
+            git(
+                &repo,
+                &["log", "-1", "--date=raw", "--format=%ad|%cd", &odd]
+            )
+            .await
+        );
+        for row in [&rows[0], &rows[2]] {
+            assert!(row.author_date.is_some() && row.committer_date.is_some());
+        }
     }
 
     #[tokio::test]
@@ -13153,6 +14636,7 @@ mod tests {
             hashes: vec![c1],
             message: None,
             edit: true,
+            ..Default::default()
         };
         let result = rebase_edit(&AppState::default(), repo.clone(), base, vec![step], None).await;
         assert!(
@@ -13310,6 +14794,46 @@ mod tests {
         std::fs::remove_dir_all(&seq).unwrap();
         let state = op_state(&repo).await.unwrap();
         assert!(!state.cherry_picking && !state.reverting);
+    }
+
+    /// The strict read errs where `op_state` answers "nothing in flight": on a folder
+    /// that is no repository, and under the probe fault on a healthy one.
+    #[tokio::test]
+    async fn op_state_strict_errs_when_the_git_dir_probe_fails() {
+        let plain = tempfile::tempdir().unwrap();
+        let plain = plain.path().to_string_lossy().into_owned();
+        assert!(!op_state(&plain).await.unwrap().mid_op());
+        let want = "couldn't resolve the git dir";
+        let unresolved = |e: &AppError| matches!(e, AppError::InvalidArgument(m) if m == want);
+        let e = op_state_strict(&plain).await.unwrap_err();
+        assert!(unresolved(&e), "{e:?}");
+
+        let (_dir, repo) = setup_repo("strict-git-dir-probe").await;
+        assert!(!op_state_strict(&repo).await.unwrap().mid_op());
+        let e = with_git_dir_probe_fault(op_state_strict(&repo))
+            .await
+            .unwrap_err();
+        assert!(unresolved(&e), "{e:?}");
+    }
+
+    /// The date change fails closed on the same fault the undo refuses on, before any
+    /// write: HEAD stays where it was.
+    #[tokio::test]
+    async fn amend_commit_dates_refuses_when_the_git_dir_probe_fails() {
+        let (_dir, repo) = setup_repo("dates-git-dir-probe").await;
+        let head = rev(&repo, "HEAD").await;
+        let d = Some(date(1_000_000_000, 60));
+        let e = with_git_dir_probe_fault(amend_dates(&repo, &head, None, d, None))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&e, AppError::InvalidArgument(m) if m == "couldn't resolve the git dir"),
+            "{e:?}"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, head);
+        // Unscoped, the same call runs: the fault alone made it refuse.
+        amend_dates(&repo, &head, None, d, None).await.unwrap();
+        assert_ne!(rev(&repo, "HEAD").await, head);
     }
 
     /// A linked worktree keeps its op markers under

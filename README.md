@@ -282,7 +282,10 @@ terminal or a CI log finds its commit even when it isn't loaded. Per-file
 history and line blame are reachable from any file list (History, pull
 requests, Compare) or the command palette, pinned at that commit or branch
 where it applies; each blame line's commit gets a hover-card preview and a
-click to jump to it in History.
+click to jump to it in History. Commits are dated by when they were written
+(the author date), so a range you rebase or reword keeps its dates, and the
+commit detail names the committed date too when the two are a minute or more
+apart.
 
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine
@@ -291,6 +294,15 @@ click to jump to it in History.
   stops at squashing and reordering, plus amending only the latest commit).
   The list reads newest or oldest first, and remembers which.
   Cherry-pick onto the current or another branch, too.
+- **Edit commit dates**: change a commit's author and committer dates from
+  History. *Edit dates…* on the latest commit opens a small dialog that
+  changes only its dates, with a force-push warning when that commit is
+  already on the branch's upstream. For older unpushed commits, each row in
+  *Edit history* shows its date and edits it in place, alongside reword,
+  squash and reorder, and selecting several rows sets one date on all of
+  them. Dates are typed (one pasted from `git log` works) or picked, keep
+  the commit's own UTC offset unless you type another, and a commit that
+  would end up dated before its parent is flagged and confirmed first.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
@@ -1164,7 +1176,8 @@ agents read this repo through GitDesktop.
   `~/.local/bin` symlink on macOS/Linux; reversible, no admin).
 - **An escalating write ladder**: each tier is a separate flag, off by
   default, so read-only stays the default (and agent-session branches are
-  refused by the branch-mutating tools):
+  refused by the branch-mutating tools, by push and force-push, and as a
+  pull request's head):
   - **`--allow-write`**: this repo's local PRs and issues (GitDesktop's own
     app-data artifacts; nothing is pushed)
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`

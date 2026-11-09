@@ -112,6 +112,173 @@ pub(crate) async fn read_unless_unborn(
         .map(Some)
 }
 
+/// Loose entries (files and directories) the refs stamp lists before it gives up.
+const REFS_STAMP_LOOSE_CAP: usize = 2_000;
+
+/// An opaque stamp that changes whenever a ref under refs/heads or refs/remotes of the
+/// COMMON git dir changes, loose or packed, so every worktree of a repo shares it. The
+/// caller compares it only with its own previous reading and never parses it: `f1:` +
+/// 16 hex from the filesystem walk, `g1:` + 16 hex from the git fallback.
+///
+/// Built from stat data only: each loose ref's relative path, size and mtime, and
+/// packed-refs's size and mtime. No ref file is opened and no git process is spawned
+/// on the files backend. git writes a ref through a lockfile rename, so a real write
+/// is a new file with a new mtime: it sees every create, delete and rewrite of a loose
+/// ref (sibling worktrees, outside fetches and pushes, `branch -f`, the default
+/// branch's tip) and every packed-refs rewrite that changes its size or mtime.
+/// May fire with no ref value moved: pack-refs / gc, a `refs/remotes/*/HEAD` rewrite,
+/// a same-value `update-ref`, and every in-app commit or branch move.
+///
+/// Cost per call: one `read_dir` per directory under the two roots, one stat per loose
+/// ref and one for packed-refs; bounded at [`REFS_STAMP_LOOSE_CAP`] entries (about
+/// 35-50 ms there, an estimate extrapolated from a 5002-ref measurement). Over the cap
+/// it lists at most cap + 1 entries and errs, every call.
+///
+/// Cannot see:
+/// 1. refs outside the two namespaces (tags, the stash, notes, per-worktree refs,
+///    HEAD itself: a commit on a detached HEAD moves no watched ref);
+/// 2. a rewrite keeping a file's size AND mtime value, i.e. a second same-size write
+///    inside one filesystem timestamp tick (FAT/exFAT 2 s, HFS+ 1 s; on NTFS
+///    back-to-back in-process rewrites repeated an mtime 1321 times in 2000, spawned
+///    `git update-ref` rewrites never did). Ref values are same-size, so this is the
+///    one real hole;
+/// 3. a move undone inside one poll that also restores size and mtime;
+/// 4. changes that move no ref (`branch --set-upstream-to`, FETCH_HEAD, config);
+/// 5. a symlinked ref file (skipped) and anything under a symlinked or junction
+///    directory below the roots (never followed);
+/// 6. anything while over the cap (it errs until the refs are packed);
+/// 7. a loose ref or directory whose name isn't valid Unicode: `to_string_lossy`
+///    folds it to a spelling no file has, so it counts toward the cap but its stat
+///    and its listing both miss, and nothing under such a directory is listed;
+/// 8. a change to a symlinked packed-refs file's target alone: the link is stat-ed.
+///
+/// A symlinked `refs`, `refs/heads` or `refs/remotes` root is followed like a
+/// directory. The stamp is a refresh hint: a miss leaves ref-derived reads stale until
+/// the next stamp move or refresh, never a wrong write.
+///
+/// A reftable repo, or any layout the walk can't resolve and verify (the common dir
+/// must be a directory holding `HEAD`), costs one `git for-each-ref` instead; a failed
+/// run is an Err, never a defaulted stamp.
+#[tauri::command]
+pub async fn git_refs_stamp(repo_path: String) -> AppResult<String> {
+    let root = std::path::PathBuf::from(&repo_path);
+    // The resolver's reads ride the same blocking task as the walk.
+    let walked = tauri::async_runtime::spawn_blocking(move || {
+        refs_stamp_common_dir(&root).map(|common| files_refs_stamp(&common, REFS_STAMP_LOOSE_CAP))
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Io(std::io::Error::other(e.to_string())))?;
+    if let Some(stamp) = walked {
+        return stamp;
+    }
+    let out = run_git(
+        Some(&repo_path),
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname) %(symref)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hasher::write(&mut hasher, &out.stdout);
+    Ok(format!("g1:{:016x}", std::hash::Hasher::finish(&hasher)))
+}
+
+/// The common git dir behind a checkout, read off the filesystem as git does (the
+/// `.git` dir, or a gitfile's admin dir plus its `commondir` hop). `None` when it
+/// can't be read, isn't a directory holding `HEAD` (a pruned worktree's stale gitfile
+/// must not read as "no refs"), or is a reftable repo: the caller then asks git.
+fn refs_stamp_common_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let admin = crate::git::ops::resolve_git_admin_dir(root)?;
+    let common = match std::fs::read_to_string(admin.join("commondir")) {
+        Ok(rel) => admin.join(rel.trim_end_matches(['\r', '\n'])),
+        // No `commondir`: this admin dir is the common dir.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => admin,
+        Err(_) => return None,
+    };
+    let usable =
+        common.is_dir() && common.join("HEAD").exists() && !common.join("reftable").exists();
+    usable.then_some(common)
+}
+
+/// The files-backend stamp: stat data of the loose refs under refs/heads and
+/// refs/remotes plus packed-refs. Not async, so it can't spawn git. Lists at most
+/// `cap + 1` entries (files and directories; skipped names don't count) before it
+/// errs. A root or subdirectory that is absent or vanished mid-walk, or a file gone
+/// since its listing, is skipped; every other I/O error is an Err, never a partial
+/// stamp.
+fn files_refs_stamp(common: &std::path::Path, cap: usize) -> AppResult<String> {
+    use std::hash::{Hash, Hasher};
+    use std::io::ErrorKind::NotFound;
+    let over_cap = || {
+        crate::error::AppError::Command(format!(
+            "more than {cap} loose refs; the refs stamp stops there."
+        ))
+    };
+    let mut listed = 0usize;
+    let mut files: Vec<String> = Vec::new();
+    let mut dirs = vec!["refs/heads".to_string(), "refs/remotes".to_string()];
+    while let Some(rel) = dirs.pop() {
+        let entries = match std::fs::read_dir(common.join(&rel)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // No ref can be named `*.lock`: these are git's in-flight writes.
+            if name.ends_with(".lock") {
+                continue;
+            }
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(e) if e.kind() == NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            // `file_type` doesn't follow links: a symlinked or junction directory
+            // reads as neither, and is never walked into.
+            let path = format!("{rel}/{name}");
+            if kind.is_dir() {
+                dirs.push(path);
+            } else if kind.is_file() {
+                files.push(path);
+            } else {
+                continue;
+            }
+            listed += 1;
+            if listed > cap {
+                return Err(over_cap());
+            }
+        }
+    }
+    files.sort_unstable();
+    let stamp = |path: &std::path::Path| -> std::io::Result<Option<(u64, u128)>> {
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        // A pre-epoch mtime is a value like any other, not an error.
+        let nanos = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        Ok(Some((meta.len(), nanos)))
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for rel in &files {
+        if let Some(stat) = stamp(&common.join(rel))? {
+            (rel, stat).hash(&mut hasher);
+        }
+    }
+    stamp(&common.join("packed-refs"))?.hash(&mut hasher);
+    Ok(format!("f1:{:016x}", hasher.finish()))
+}
+
 /// Paged commit history. When `search` is set, searches the whole history by
 /// commit message (literal, case-insensitive) instead of paging recent commits.
 #[tauri::command]
@@ -161,13 +328,13 @@ pub struct CommitPrefixMatch {
 
 /// Every commit whose id starts with `prefix` (4..=64 hex, any case), on-branch
 /// matches first and newest first within each group. At most 20, the newest by
-/// committer date, and nothing on the wire says the list was cut; the cap applies
-/// before the on-branch ordering, so past it an older on-branch match can drop
-/// while newer off-branch ones stay. Any 21 commits sharing a prefix reach it; for
-/// random ids that is likely only with a 4-hex prefix in a repo of roughly half a
-/// million local commits or more (unreachable ones count too); a 4-hex prefix
-/// averages 20 commits at about 1.3 million. On an unborn HEAD (an orphan branch
-/// included) every match reads off-branch, an answer only the backend gives
+/// committer date (rows carry the author date), and nothing on the wire says the
+/// list was cut; the cap applies before the on-branch ordering, so past it an older
+/// on-branch match can drop while newer off-branch ones stay. Any 21 commits sharing
+/// a prefix reach it; for random ids that is likely only with a 4-hex prefix in a repo
+/// of roughly half a million local commits or more (unreachable ones count too); a
+/// 4-hex prefix averages 20 commits at about 1.3 million. On an unborn HEAD (an orphan
+/// branch included) every match reads off-branch, an answer only the backend gives
 /// today: the History panel offers no search on an unborn HEAD.
 #[tauri::command]
 pub async fn git_find_commits_by_prefix(
@@ -237,8 +404,9 @@ async fn commits_by_prefix(
     if commits.is_empty() {
         return Ok(Vec::new());
     }
-    // Sorted no-walk prints newest-first by committer date. The cap is taken here:
-    // `-n` turns `--no-walk` back into a full walk (measured, git 2.51.1).
+    // Sorted no-walk prints newest-first by committer date (rows carry the author
+    // date). The cap is taken here: `-n` turns `--no-walk` back into a full walk
+    // (measured, git 2.51.1).
     let log = run_git_input(
         Some(repo),
         &["log", "--no-walk", "--stdin", LOG_FORMAT],
@@ -365,10 +533,11 @@ fn is_full_hex_id(id: &str) -> bool {
     matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The `%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P` log format, one commit per line.
-/// Paired with `parse_commit_log` — the history and compare listings share both,
-/// so those paths can't drift into reporting empty tags or merge flags.
-pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P";
+/// The `%H%x00%s%x00%an%x00%ae%x00%aI%x00%D%x00%P` log format, one commit per line;
+/// field 5 is the AUTHOR date, so a rewritten range keeps the dates it was written
+/// with. Paired with `parse_commit_log` — the history and compare listings share
+/// both, so those paths can't drift into reporting empty tags or merge flags.
+pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%D%x00%P";
 
 pub(crate) fn parse_commit_log(text: &str) -> Vec<CommitSummary> {
     text.lines()
@@ -657,14 +826,15 @@ pub async fn git_blame(
 #[tauri::command]
 pub async fn git_commit_details(repo_path: String, hash: String) -> AppResult<CommitDetails> {
     validate_hash(&hash)?;
-    // -z terminates the record so the multi-line body (%b) parses unambiguously
+    // -z terminates the record so the multi-line body (%b) parses unambiguously.
+    // Both dates come from the one read so the pair always describes one commit.
     let out = run_git(
         Some(&repo_path),
         &[
             "log",
             "-1",
             "-z",
-            "--format=%H%x00%s%x00%an%x00%ae%x00%cI%x00%b",
+            "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%cI%x00%b",
             &hash,
         ],
         DEFAULT_TIMEOUT,
@@ -672,14 +842,23 @@ pub async fn git_commit_details(repo_path: String, hash: String) -> AppResult<Co
     .await?;
     let text = out.stdout_lossy();
     let record = text.trim_end_matches('\0');
-    let mut parts = record.splitn(6, '\0');
-    let (Some(hash), Some(subject), Some(author), Some(author_email), Some(date)) = (
+    let mut parts = record.splitn(7, '\0');
+    let (
+        Some(hash),
+        Some(subject),
+        Some(author),
+        Some(author_email),
+        Some(date),
+        Some(committer_date),
+    ) = (
         parts.next(),
         parts.next(),
         parts.next(),
         parts.next(),
         parts.next(),
-    ) else {
+        parts.next(),
+    )
+    else {
         return Err(crate::error::AppError::Git {
             code: 0,
             stderr: "unexpected git log output".into(),
@@ -694,6 +873,7 @@ pub async fn git_commit_details(repo_path: String, hash: String) -> AppResult<Co
         author: author.to_string(),
         author_email: author_email.to_string(),
         date: date.to_string(),
+        committer_date: committer_date.to_string(),
     })
 }
 
@@ -963,6 +1143,409 @@ mod tests {
 
     async fn git(repo: &str, args: &[&str]) {
         run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+    }
+
+    async fn git_out(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string()
+    }
+
+    /// A files-backend repo with one commit, pinned against the global config that
+    /// could change its layout (a reftable default, auto-gc packing refs, signing).
+    async fn stamp_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let (dir, repo) = temp_repo(tag);
+        git(&repo, &["-c", "init.defaultRefFormat=files", "init", "-q"]).await;
+        for (key, value) in [
+            ("user.email", "t@t"),
+            ("user.name", "T"),
+            ("commit.gpgsign", "false"),
+            ("gc.auto", "0"),
+        ] {
+            git(&repo, &["config", key, value]).await;
+        }
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]).await;
+        (dir, repo)
+    }
+
+    /// The stamp from the files backend: every caller asserts the walk answered, so a
+    /// layout the resolver misses can't pass through the spawning fallback.
+    async fn files_stamp(repo: &str) -> String {
+        let stamp = git_refs_stamp(repo.to_string()).await.unwrap();
+        assert!(stamp.starts_with("f1:"), "{stamp}");
+        assert_eq!(stamp.len(), 19, "{stamp}");
+        stamp
+    }
+
+    /// A second commit object, not on any ref, for value-only ref moves.
+    async fn spare_commit(repo: &str) -> String {
+        git_out(
+            repo,
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "spare"],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn refs_stamp_follows_loose_ref_writes() {
+        let (_dir, repo) = stamp_repo("refs-stamp-loose").await;
+        let head = git_out(&repo, &["rev-parse", "HEAD"]).await;
+        let spare = spare_commit(&repo).await;
+        let mut last = files_stamp(&repo).await;
+        assert_eq!(files_stamp(&repo).await, last, "no ref changed");
+
+        for args in [
+            vec!["update-ref", "refs/heads/side", head.as_str()],
+            vec!["update-ref", "refs/heads/side", spare.as_str()],
+            vec!["update-ref", "-d", "refs/heads/side"],
+            vec!["update-ref", "refs/remotes/origin/main", head.as_str()],
+            vec!["update-ref", "refs/remotes/origin/main", spare.as_str()],
+            vec!["update-ref", "-d", "refs/remotes/origin/main"],
+        ] {
+            git(&repo, &args).await;
+            let next = files_stamp(&repo).await;
+            assert_ne!(next, last, "{args:?}");
+            assert_eq!(files_stamp(&repo).await, next, "stable after {args:?}");
+            last = next;
+        }
+    }
+
+    #[tokio::test]
+    async fn refs_stamp_follows_packed_ref_moves() {
+        let (_dir, repo) = stamp_repo("refs-stamp-packed").await;
+        let spare = spare_commit(&repo).await;
+        git(&repo, &["branch", "p1"]).await;
+        git(&repo, &["branch", "p2"]).await;
+        git(&repo, &["update-ref", "refs/remotes/origin/r1", "HEAD"]).await;
+        git(&repo, &["pack-refs", "--all"]).await;
+        let packed = files_stamp(&repo).await;
+
+        // Updating a packed ref writes a loose file over it.
+        git(&repo, &["update-ref", "refs/heads/p1", &spare]).await;
+        let updated = files_stamp(&repo).await;
+        assert_ne!(updated, packed);
+
+        git(&repo, &["pack-refs", "--all"]).await;
+        let repacked = files_stamp(&repo).await;
+        git(&repo, &["update-ref", "-d", "refs/heads/p2"]).await;
+        let deleted = files_stamp(&repo).await;
+        assert_ne!(
+            deleted, repacked,
+            "a packed-only delete rewrites packed-refs"
+        );
+        git(&repo, &["update-ref", "-d", "refs/remotes/origin/r1"]).await;
+        let remote_deleted = files_stamp(&repo).await;
+        assert_ne!(remote_deleted, deleted);
+
+        git(&repo, &["branch", "-m", "p1", "p3"]).await;
+        assert_ne!(files_stamp(&repo).await, remote_deleted, "a rename");
+    }
+
+    #[tokio::test]
+    async fn refs_stamp_ignores_tags_detached_commits_and_lock_files() {
+        let (dir, repo) = stamp_repo("refs-stamp-unwatched").await;
+        let before = files_stamp(&repo).await;
+        git(&repo, &["tag", "v1"]).await;
+        git(&repo, &["checkout", "-q", "--detach"]).await;
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "detached"]).await;
+        std::fs::write(dir.path().join(".git/refs/heads/stray.lock"), "x\n").unwrap();
+        assert_eq!(files_stamp(&repo).await, before);
+    }
+
+    #[tokio::test]
+    async fn refs_stamp_is_shared_by_linked_worktrees() {
+        let (_dir, repo) = stamp_repo("refs-stamp-main").await;
+        let (_wt_dir, wt_parent) = temp_repo("refs-stamp-wt");
+        let wt = Path::new(&wt_parent)
+            .join("wt")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "-q", "-b", "wtb", &wt]).await;
+        let shared = files_stamp(&repo).await;
+        assert_eq!(files_stamp(&wt).await, shared);
+
+        git(&wt, &["commit", "-q", "--allow-empty", "-m", "sibling"]).await;
+        let after_wt = files_stamp(&repo).await;
+        assert_ne!(after_wt, shared, "a sibling's commit moves this stamp");
+        assert_eq!(files_stamp(&wt).await, after_wt);
+
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "in main"]).await;
+        let after_main = files_stamp(&wt).await;
+        assert_ne!(after_main, after_wt);
+        assert_eq!(files_stamp(&repo).await, after_main);
+    }
+
+    /// The filesystem resolver agrees with git's own common dir (the oracle state.rs's
+    /// twin resolver is pinned to), in the main checkout and a linked worktree.
+    #[tokio::test]
+    async fn refs_stamp_common_dir_agrees_with_git() {
+        let (_dir, repo) = stamp_repo("refs-stamp-common").await;
+        let (_wt_dir, wt_parent) = temp_repo("refs-stamp-common-wt");
+        let wt = Path::new(&wt_parent)
+            .join("wt")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "-q", "-b", "wtb", &wt]).await;
+        for tree in [&repo, &wt] {
+            let ours = refs_stamp_common_dir(Path::new(tree)).expect("resolves");
+            let git_says = git_out(
+                tree,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )
+            .await;
+            assert_eq!(
+                std::fs::canonicalize(&ours).unwrap(),
+                std::fs::canonicalize(&git_says).unwrap(),
+                "{tree}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refs_stamp_errs_over_the_cap_and_falls_back_on_unverified_layouts() {
+        let (dir, repo) = stamp_repo("refs-stamp-cap").await;
+        for name in ["a", "b", "c"] {
+            git(&repo, &["branch", name]).await;
+        }
+        git(&repo, &["update-ref", "refs/remotes/origin/x", "HEAD"]).await;
+        std::fs::write(dir.path().join(".git/refs/heads/z.lock"), "x\n").unwrap();
+        let common = refs_stamp_common_dir(Path::new(&repo)).unwrap();
+        // The current branch, a, b, c, then `origin/` and `origin/x`: six entries; the
+        // lock file doesn't count.
+        let at_cap = files_refs_stamp(&common, 6).unwrap();
+        assert!(
+            at_cap.len() == 19
+                && at_cap.starts_with("f1:")
+                && at_cap[3..].bytes().all(|b| b.is_ascii_hexdigit()),
+            "{at_cap}"
+        );
+        for cap in [5, 2] {
+            let e = files_refs_stamp(&common, cap).unwrap_err();
+            let want = format!("more than {cap} loose refs; the refs stamp stops there.");
+            assert!(
+                matches!(&e, crate::error::AppError::Command(m) if *m == want),
+                "{e:?}"
+            );
+        }
+
+        let plain = tempfile::tempdir().unwrap();
+        let plain = plain.path().to_string_lossy().into_owned();
+        assert!(git_refs_stamp(plain).await.is_err(), "not a repository");
+
+        let not_f1 = |r: &AppResult<String>| !matches!(r, Ok(s) if s.starts_with("f1:"));
+        let stale = tempfile::tempdir().unwrap();
+        std::fs::write(stale.path().join(".git"), "gitdir: missing-admin\n").unwrap();
+        assert!(refs_stamp_common_dir(stale.path()).is_none());
+        let r = git_refs_stamp(stale.path().to_string_lossy().into_owned()).await;
+        assert!(not_f1(&r), "stale gitfile: {r:?}");
+
+        let headless = tempfile::tempdir().unwrap();
+        let heads = headless.path().join(".git/refs/heads");
+        std::fs::create_dir_all(&heads).unwrap();
+        std::fs::write(heads.join("main"), format!("{}\n", "a".repeat(40))).unwrap();
+        assert!(refs_stamp_common_dir(headless.path()).is_none());
+        let r = git_refs_stamp(headless.path().to_string_lossy().into_owned()).await;
+        assert!(not_f1(&r), "no HEAD: {r:?}");
+    }
+
+    #[tokio::test]
+    async fn refs_stamp_falls_back_to_git_on_reftable() {
+        let (_dir, repo) = temp_repo("refs-stamp-reftable");
+        let init = run_git_raw(
+            Some(&repo),
+            &["init", "-q", "--ref-format=reftable"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        if init.code != 0 {
+            eprintln!("note: this git can't create a reftable repo; skipping");
+            return;
+        }
+        for (key, value) in [("user.email", "t@t"), ("user.name", "T")] {
+            git(&repo, &["config", key, value]).await;
+        }
+        git(&repo, &["config", "commit.gpgsign", "false"]).await;
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]).await;
+        let first = git_refs_stamp(repo.clone()).await.unwrap();
+        assert!(first.starts_with("g1:"), "{first}");
+        assert_eq!(git_refs_stamp(repo.clone()).await.unwrap(), first);
+        git(&repo, &["branch", "new"]).await;
+        let after = git_refs_stamp(repo).await.unwrap();
+        assert!(after.starts_with("g1:"), "{after}");
+        assert_ne!(after, first);
+    }
+
+    /// A symlinked directory under refs/heads is never walked into and a symlinked
+    /// ref file is skipped, so writes behind either move nothing.
+    #[tokio::test]
+    async fn refs_stamp_skips_symlinked_refs() {
+        let (dir, repo) = stamp_repo("refs-stamp-links").await;
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("target"), "x\n").unwrap();
+        let heads = dir.path().join(".git/refs/heads");
+        #[cfg(unix)]
+        let linked =
+            std::os::unix::fs::symlink(&outside, heads.join("linked-dir")).and_then(|()| {
+                std::os::unix::fs::symlink(outside.join("target"), heads.join("linked-file"))
+            });
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&outside, heads.join("linked-dir"))
+            .and_then(|()| {
+                std::os::windows::fs::symlink_file(
+                    outside.join("target"),
+                    heads.join("linked-file"),
+                )
+            });
+        if let Err(e) = linked {
+            eprintln!("note: this platform can't create the links ({e}); skipping");
+            return;
+        }
+        let before = files_stamp(&repo).await;
+        std::fs::write(outside.join("target"), "a longer value\n").unwrap();
+        std::fs::write(outside.join("added"), "y\n").unwrap();
+        assert_eq!(files_stamp(&repo).await, before);
+        // The links themselves are skipped, not merely unfollowed.
+        std::fs::remove_file(heads.join("linked-file")).unwrap();
+        assert_eq!(files_stamp(&repo).await, before);
+    }
+
+    #[test]
+    fn log_format_field_order() {
+        assert_eq!(
+            LOG_FORMAT,
+            "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%D%x00%P"
+        );
+        let text =
+            "abc\0subject\0Ann\0a@x\x002020-01-02T03:04:05+02:00\0HEAD -> main, tag: v1\0p1 p2\n";
+        let rows = parse_commit_log(text);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, "2020-01-02T03:04:05+02:00");
+        assert_eq!(rows[0].tags, vec!["v1".to_string()]);
+        assert!(rows[0].is_merge);
+    }
+
+    #[test]
+    fn commit_details_wire_keys() {
+        let details = CommitDetails {
+            hash: "h".into(),
+            subject: "s".into(),
+            body: "b".into(),
+            author: "a".into(),
+            author_email: "e".into(),
+            date: "d".into(),
+            committer_date: "c".into(),
+        };
+        let value = serde_json::to_value(details).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "author",
+                "authorEmail",
+                "body",
+                "committerDate",
+                "date",
+                "hash",
+                "subject"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn listed_dates_are_author_dates_after_a_rewrite() {
+        use crate::git::runner::run_git_raw_env;
+        const AUTHORED: &str = "2020-01-02T03:04:05+02:00";
+        const REWRITTEN: &str = "2021-05-06T07:08:09-05:00";
+        let (dir, repo) = temp_repo("author-dates");
+        git(&repo, &["init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        git(&repo, &["config", "commit.gpgsign", "false"]).await;
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "root"]).await;
+        git(&repo, &["branch", "fixture-base"]).await;
+        std::fs::write(dir.path().join("f.txt"), "f\n").unwrap();
+        git(&repo, &["add", "f.txt"]).await;
+        run_git_raw_env(
+            Some(&repo),
+            &["commit", "-q", "-m", "dated"],
+            &[
+                ("GIT_AUTHOR_DATE", AUTHORED),
+                ("GIT_COMMITTER_DATE", AUTHORED),
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .exit_verdict()
+        .unwrap();
+        // A reword stamps a new committer date and keeps the author date.
+        run_git_raw_env(
+            Some(&repo),
+            &["commit", "-q", "--amend", "--no-edit"],
+            &[("GIT_COMMITTER_DATE", REWRITTEN)],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .exit_verdict()
+        .unwrap();
+        let sha = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string();
+
+        let log = git_log(repo.clone(), 10, 0, None).await.unwrap();
+        assert_eq!(log[0].hash, sha);
+        assert_eq!(log[0].date, AUTHORED, "git_log");
+
+        let file_log = git_file_log(repo.clone(), "f.txt".into(), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(file_log[0].commit.hash, sha);
+        assert_eq!(file_log[0].commit.date, AUTHORED, "git_file_log");
+
+        let found = commits_by_prefix(&repo, &sha[..8], PREFIX_MATCH_CAP)
+            .await
+            .unwrap();
+        let hit = found.iter().find(|m| m.commit.hash == sha).unwrap();
+        assert_eq!(hit.commit.date, AUTHORED, "commits_by_prefix");
+
+        let recent = crate::git::commit::git_recent_commits(repo.clone(), 5)
+            .await
+            .unwrap();
+        assert_eq!(recent[0].hash, sha);
+        assert_eq!(recent[0].date, AUTHORED, "git_recent_commits");
+
+        let topic = crate::git::branches::current_branch_name(&repo)
+            .await
+            .unwrap()
+            .unwrap();
+        let ahead =
+            crate::git::compare::git_branch_ahead(repo.clone(), "fixture-base".into(), topic)
+                .await
+                .unwrap();
+        assert_eq!(ahead.len(), 1);
+        assert_eq!(ahead[0].hash, sha);
+        assert_eq!(ahead[0].date, AUTHORED, "git_branch_ahead");
+
+        let details = git_commit_details(repo.clone(), sha.clone()).await.unwrap();
+        assert_eq!(details.date, AUTHORED);
+        assert_eq!(details.committer_date, REWRITTEN);
+        assert_eq!(details.subject, "dated");
+        assert_eq!(details.body, "");
     }
 
     /// Builds a repo where `file.txt` gets two commits: line one is written in the

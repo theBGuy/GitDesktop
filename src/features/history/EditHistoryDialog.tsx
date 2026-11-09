@@ -2,15 +2,20 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CaretDownIcon,
+  CheckIcon,
+  ClockIcon,
   SparkleIcon,
+  WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   type FocusEvent,
   type KeyboardEvent,
+  type MouseEvent,
   useEffect,
   useEffectEvent,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -19,6 +24,7 @@ import {
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
+import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -34,21 +40,24 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import {
+  useCommitDetails,
   useRebaseEdit,
   useRewriteCommits,
   useUnpushedMessages,
 } from "@/lib/git/queries";
-import type { CommitSummary } from "@/lib/git/types";
+import type { CommitDate, CommitSummary } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
   eventToBinding,
   formatBinding,
+  hasChordModifier,
 } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import {
@@ -62,6 +71,7 @@ import {
   useSaveSettingsPatch,
   useSettings,
 } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
@@ -71,7 +81,26 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
+import { CommitDateField, SameAsAuthorCheckbox } from "./CommitDateField";
+import { datesBeforeParentConfirm } from "./commit-confirms";
 import {
+  commitDateFromIso,
+  DATE_FORMAT_HINT,
+  type DateDraft,
+  dateWarnings,
+  FIX_DATE_FIRST,
+  formatCommitDate,
+  inEditableRange,
+  OUT_OF_RANGE_NOTE,
+  readableCommitDate,
+  readCommitDate,
+  resolveDates,
+  rowDateLabel,
+  sameUnreachableNote,
+  UNREADABLE_DATE_TEXT,
+} from "./commit-date";
+import {
+  beforeParentSteps,
   type ChronoEnd,
   type CompiledPlan,
   compilePlan,
@@ -126,6 +155,89 @@ const END_REASON: Record<ChronoEnd, string> = {
   newest: AT_NEWEST,
   oldest: AT_OLDEST,
 };
+
+/** Why a row's date button is held. `busy` keeps an open editor rendered and
+ *  inert; every other hold renders no editor (a draft survives and returns). */
+type DateHold =
+  | "busy"
+  | "loading"
+  | "failed"
+  | "unreadable"
+  | "fold"
+  | "dropped";
+const DATE_HOLD_REASON: Record<DateHold, string> = {
+  busy: BUSY_REASON,
+  loading: "Loading dates…",
+  failed: "Couldn't load commit dates",
+  unreadable: "This commit's dates can't be read",
+  fold: "A squashed or fixed-up commit takes its dates from the commit it combines into.",
+  dropped: "A removed commit has no dates to change.",
+};
+const EDIT_PAUSE_DATES_NOTE =
+  "This commit pauses for amending. These dates are applied when you continue and replace any set during the pause. If you split the commit there, they land on the last new commit.";
+
+type ResolvedDates = ReturnType<typeof resolveDates>;
+/** A row's dates, decided from that row's own entry in the read, never from the
+ *  read's status alone: a row that has its entry keeps it through a later
+ *  failed refetch. */
+type RowDates =
+  | { kind: "none"; hold: "loading" | "failed" }
+  | { kind: "unreadable"; author: CommitDate | null }
+  | {
+      kind: "ok";
+      original: { author: CommitDate; committer: CommitDate };
+      resolved: ResolvedDates;
+    };
+
+function rowDatesOf(
+  entry:
+    | { authorDate: CommitDate | null; committerDate: CommitDate | null }
+    | undefined,
+  readFailed: boolean,
+  draft: DateDraft | undefined,
+): RowDates {
+  if (entry === undefined) {
+    return { kind: "none", hold: readFailed ? "failed" : "loading" };
+  }
+  const author = readableCommitDate(entry.authorDate);
+  const committer = readableCommitDate(entry.committerDate);
+  if (author === null || committer === null) {
+    return { kind: "unreadable", author };
+  }
+  const original = { author, committer };
+  return { kind: "ok", original, resolved: resolveDates(original, draft) };
+}
+
+/** Why a row can't take dates of its own, busy aside; null = it can. */
+function structuralHold(
+  action: RowAction,
+  info: RowDates | undefined,
+): Exclude<DateHold, "busy"> | null {
+  if (action === "drop") return "dropped";
+  if (isFold(action)) return "fold";
+  if (info === undefined) return "loading";
+  if (info.kind === "none") return info.hold;
+  if (info.kind === "unreadable") return "unreadable";
+  return null;
+}
+
+/** A row's draft with nothing typed yet: its current dates, and "Same as
+ *  author date" ticked iff they match. */
+function draftOf(
+  info: Extract<RowDates, { kind: "ok" }>,
+  draft: DateDraft | undefined,
+): DateDraft {
+  return (
+    draft ?? {
+      author: formatCommitDate(info.original.author),
+      same: info.resolved.same,
+      committer: formatCommitDate(info.original.committer),
+    }
+  );
+}
+
+const commitsWord = (n: number) => (n === 1 ? "commit" : "commits");
+const skippedTail = (k: number) => (k > 0 ? `, ${k} skipped` : "");
 
 type ListOrder = AppSettings["editHistoryOrder"];
 /** Direction-dependent copy. Folds still name their target and "older"; the
@@ -209,9 +321,13 @@ const MOVE_CHORDS: Partial<Record<string, "up" | "down" | "top" | "bottom">> = {
   "alt+home": "top",
   "alt+end": "bottom",
 };
-const MOVE_KEYSHORTCUTS = Object.keys(MOVE_CHORDS)
+/** The row's date keys: D opens its editor, Shift+arrows extend a selection. */
+const DATE_KEYS = ["d", "shift+up", "shift+down"];
+const ROW_KEYSHORTCUTS = [...Object.keys(MOVE_CHORDS), ...DATE_KEYS]
   .map(bindingToAriaKeyshortcuts)
   .join(" ");
+/** Plain navigation keys, which clear a selection before they move. */
+const NAV_KEYS: ReadonlySet<string> = new Set(["up", "down", "home", "end"]);
 /** Every key a row answers with Alt held. The chords above match first; any
  *  other Alt press on these (Alt+←, Alt+Shift+Home) is swallowed, so Alt never
  *  degrades to plain navigation or reaches the webview's own accelerators. */
@@ -275,12 +391,275 @@ function ActionHint({
   );
 }
 
+/** One warning line: icon + text in the warning token. */
+function DateWarning({ children }: { children: string }) {
+  return (
+    <p className="flex items-start gap-1 pl-30 text-[11px] text-warning">
+      <WarningIcon aria-hidden className="mt-px size-3 shrink-0" />
+      {children}
+    </p>
+  );
+}
+
+/** A row's inline date editor. Escape is matched on this container, so it
+ *  closes the editor and never reaches the dialog's own dismiss. */
+function RowDatesEditor({
+  id,
+  subject,
+  info,
+  draft,
+  isEdit,
+  changed,
+  parent,
+  nowMs,
+  heldReason,
+  onDraft,
+  onReset,
+  onEscape,
+}: {
+  id: string;
+  subject: string;
+  info: Extract<RowDates, { kind: "ok" }>;
+  draft: DateDraft;
+  isEdit: boolean;
+  changed: boolean;
+  parent: { parentHash: string; parentDate: CommitDate } | undefined;
+  nowMs: number;
+  heldReason: string | null;
+  onDraft: (next: DateDraft) => void;
+  onReset: () => void;
+  /** `repeat` is the key's auto-repeat flag. */
+  onEscape: (repeat: boolean) => void;
+}) {
+  const { resolved, original } = info;
+  const { author, committer } = resolved.planned;
+  const warnings = dateWarnings(resolved.planned, nowMs);
+  const sameNote = sameUnreachableNote(original, resolved);
+  if (parent !== undefined) {
+    warnings.push(
+      `Earlier than its parent ${parent.parentHash.slice(0, 7)} (${rowDateLabel(parent.parentDate, nowMs)}). Git allows this; views sorted by date will list the two out of order.`,
+    );
+  }
+  const hasError =
+    resolved.authorError !== null || resolved.committerError !== null;
+  // A changed commit sends the committer date it shows; one outside the
+  // editable range can't be sent, so git stamps it.
+  const committerNote =
+    resolved.changed &&
+    !hasError &&
+    committer !== null &&
+    !inEditableRange(committer)
+      ? OUT_OF_RANGE_NOTE
+      : null;
+
+  return (
+    <div
+      id={id}
+      role="group"
+      aria-label={`Dates for ${subject}`}
+      data-row-dates=""
+      className="space-y-1.5 px-2 pb-2 pl-29"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.stopPropagation();
+        e.preventDefault();
+        onEscape(e.repeat);
+      }}
+    >
+      <CommitDateField
+        label="Author date"
+        value={draft.author}
+        onChange={(text) => onDraft({ ...draft, author: text })}
+        original={original.author}
+        date={author}
+        error={resolved.authorError}
+        nowMs={nowMs}
+        heldReason={heldReason}
+        onReset={onReset}
+      />
+      <SameAsAuthorCheckbox
+        checked={resolved.same}
+        heldReason={heldReason}
+        // Unticking seeds the committer field with the commit's current one.
+        onChange={(same) =>
+          onDraft({
+            ...draft,
+            same,
+            committer: same
+              ? draft.committer
+              : formatCommitDate(original.committer),
+          })
+        }
+      />
+      {sameNote !== null && (
+        <p className="pl-30 text-[11px] text-muted-foreground">{sameNote}</p>
+      )}
+      {!resolved.same && (
+        <CommitDateField
+          label="Committer date"
+          value={draft.committer}
+          onChange={(text) => onDraft({ ...draft, committer: text })}
+          original={original.committer}
+          date={committer}
+          error={resolved.committerError}
+          nowMs={nowMs}
+          note={committerNote}
+          heldReason={heldReason}
+        />
+      )}
+      {warnings.map((w) => (
+        <DateWarning key={w}>{w}</DateWarning>
+      ))}
+      {isEdit && changed && (
+        <p className="pl-30 text-[11px] text-muted-foreground">
+          {EDIT_PAUSE_DATES_NOTE}
+        </p>
+      )}
+      {!hasError && warnings.length === 0 && (
+        <p className="pl-30 text-[11px] text-muted-foreground">
+          {DATE_FORMAT_HINT}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The shared editor for a multi-selection's dates, seeded once when it
+ *  appears. Its draft holds texts and the offsets an omitted one falls back to. */
+interface StripDraft {
+  author: string;
+  same: boolean;
+  committer: string;
+  fallback: CommitDate;
+  fallbackCommitter: CommitDate;
+}
+
+function SelectionStrip({
+  count,
+  skipped,
+  draft,
+  nowMs,
+  heldReason,
+  onDraft,
+  onApply,
+  onClear,
+  onEscape,
+}: {
+  count: number;
+  skipped: number;
+  draft: StripDraft;
+  nowMs: number;
+  heldReason: string | null;
+  onDraft: (next: StripDraft) => void;
+  onApply: () => void;
+  onClear: () => void;
+  /** `repeat` is the key's auto-repeat flag. */
+  onEscape: (repeat: boolean) => void;
+}) {
+  const author = readCommitDate(draft.author, draft.fallback.offsetMinutes);
+  const committer = draft.same
+    ? author
+    : readCommitDate(draft.committer, draft.fallbackCommitter.offsetMinutes);
+  const applyReason = (() => {
+    switch (true) {
+      case heldReason !== null:
+        return heldReason;
+      case !author.ok || !committer.ok:
+        return FIX_DATE_FIRST;
+      default:
+        return null;
+    }
+  })();
+  return (
+    <div
+      role="group"
+      aria-label="Dates for the selected commits"
+      data-dates-strip=""
+      className="shrink-0 space-y-1.5 border bg-muted/40 px-2 py-2"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return;
+        e.stopPropagation();
+        e.preventDefault();
+        onEscape(e.repeat);
+      }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs">
+          <span className="tabular-nums">{count}</span> commits selected
+        </span>
+        <DisabledReasonButton
+          type="button"
+          variant="ghost"
+          size="xs"
+          disabled={heldReason !== null}
+          reason={heldReason}
+          onClick={onClear}
+        >
+          Clear selection
+        </DisabledReasonButton>
+      </div>
+      <CommitDateField
+        label={`Date for all ${count}`}
+        value={draft.author}
+        onChange={(text) => onDraft({ ...draft, author: text })}
+        original={draft.fallback}
+        date={author.ok ? author.date : null}
+        error={author.ok ? null : author.error}
+        nowMs={nowMs}
+        offsetNote="the current offset"
+        heldReason={heldReason}
+        trailing={
+          <DisabledReasonButton
+            type="button"
+            variant="outline"
+            size="xs"
+            disabled={applyReason !== null}
+            reason={applyReason}
+            onClick={onApply}
+          >
+            Apply to {count}
+          </DisabledReasonButton>
+        }
+      />
+      <SameAsAuthorCheckbox
+        checked={draft.same}
+        heldReason={heldReason}
+        onChange={(same) => onDraft({ ...draft, same })}
+      />
+      {!draft.same && (
+        <CommitDateField
+          label="Committer date"
+          value={draft.committer}
+          onChange={(text) => onDraft({ ...draft, committer: text })}
+          original={draft.fallbackCommitter}
+          date={committer.ok ? committer.date : null}
+          error={committer.ok ? null : committer.error}
+          nowMs={nowMs}
+          offsetNote="the current offset"
+          heldReason={heldReason}
+        />
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        Each selected commit gets exactly this date. They keep their order: Git
+        orders equal dates by ancestry.
+      </p>
+      {skipped > 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          {skipped} in the selection can't take dates and{" "}
+          {skipped === 1 ? "is" : "are"} skipped.
+        </p>
+      )}
+    </div>
+  );
+}
+
 /**
  * The unified interactive-rebase editor over the unpushed tip (`base..HEAD`).
  * Each row picks an action (pick / reword / squash / fixup / edit / drop),
- * reorders with its ↑/↓ buttons, Alt+↑/↓ or Alt+Home/End, and edits its
- * message inline when the action bakes one (reword, squash, and a pick or edit
- * a squash folds into).
+ * reorders with its ↑/↓ buttons, Alt+↑/↓ or Alt+Home/End, edits its message
+ * inline when the action bakes one (reword, squash, and a pick or edit a
+ * squash folds into), and edits its dates inline (one row, or a selection
+ * through the strip above the list).
  * The plan compiles to the replay engine, which applies it all at once (a
  * conflict rolls it back), or to a resumable rebase when a row is set to edit.
  */
@@ -292,6 +671,7 @@ export function EditHistoryDialog({
   open,
   onOpenChange,
   onDone,
+  initialDatesFor,
 }: {
   repoPath: string;
   base: string;
@@ -303,18 +683,40 @@ export function EditHistoryDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDone: () => void;
+  /** A commit whose Dates editor starts open; the dialog's initial focus is
+   *  that row, and nothing moves focus later when its dates arrive. */
+  initialDatesFor?: string;
 }) {
   const rewrite = useRewriteCommits(repoPath);
   const rebaseEdit = useRebaseEdit(repoPath);
   const busy = rewrite.isPending || rebaseEdit.isPending;
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const messages = useUnpushedMessages(repoPath, base, open);
+  // The base's author date judges the oldest planned commit; until it reads
+  // (or when it fails) that one pair is simply not judged.
+  const baseDetails = useCommitDetails(
+    repoPath,
+    commits.length > 0 && base !== "" ? base : null,
+  );
+  const nowMs = useRelativeNow();
+  const idBase = useId();
 
   const [order, setOrder] = useState<string[]>(() =>
     commits.map((c) => c.hash),
   );
   const [actions, setActions] = useState<Record<string, RowAction>>({});
   const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [dateDrafts, setDateDrafts] = useState<Record<string, DateDraft>>({});
+  const [openDates, setOpenDates] = useState<ReadonlySet<string>>(
+    () => new Set(initialDatesFor === undefined ? [] : [initialDatesFor]),
+  );
+  // Selection is explicit and a set of hashes: rows that can't take dates are
+  // filtered out at read time, so an eligibility change never needs a clear.
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set());
+  const [anchor, setAnchor] = useState<string | null>(null);
+  // The focused row at the latest selecting gesture: the strip seeds from it.
+  const [gestureFocus, setGestureFocus] = useState<string | null>(null);
+  const [strip, setStrip] = useState<StripDraft | null>(null);
   // Bumps on every reseed, so focus the reorder dropped can be put back.
   const [reseedNonce, setReseedNonce] = useState(0);
   const [menuHash, setMenuHash] = useState<string | null>(null);
@@ -388,6 +790,12 @@ export function EditHistoryDialog({
     setOrder(commits.map((c) => c.hash));
     setActions({});
     setOverrides({});
+    setDateDrafts({});
+    setOpenDates(new Set());
+    setPicked(new Set());
+    setAnchor(null);
+    setGestureFocus(null);
+    setStrip(null);
     setReseedNonce((n) => n + 1);
     // The footer's note is spoken whenever it changes under an open dialog:
     // when the rows vanish (here) or when an empty set's reason moves on (below),
@@ -407,6 +815,10 @@ export function EditHistoryDialog({
 
   const subjectOf = useMemo(
     () => new Map(commits.map((c) => [c.hash, c.subject])),
+    [commits],
+  );
+  const listedDateOf = useMemo(
+    () => new Map(commits.map((c) => [c.hash, c.date])),
     [commits],
   );
   const fullMessages = messages.data ?? {};
@@ -442,6 +854,17 @@ export function EditHistoryDialog({
     stopGeneration();
   }, [reseedNonce]);
 
+  const dateInfo = useMemo(() => {
+    const out = new Map<string, RowDates>();
+    for (const hash of order) {
+      out.set(
+        hash,
+        rowDatesOf(messages.data?.[hash], messages.isError, dateDrafts[hash]),
+      );
+    }
+    return out;
+  }, [order, messages.data, messages.isError, dateDrafts]);
+
   const rows: EditRow[] = useMemo(
     () =>
       order.map((hash) => {
@@ -449,10 +872,28 @@ export function EditHistoryDialog({
         const subject = subjectOf.get(hash) ?? hash.slice(0, 7);
         // The full original message (or subject until it loads); compilePlan
         // uses it only for reword/squash leaders and squash contributions.
-        const message = overrides[hash] ?? fullMessages[hash] ?? subject;
-        return { hash, subject, action, message };
+        const message =
+          overrides[hash] ?? fullMessages[hash]?.message ?? subject;
+        const row: EditRow = { hash, subject, action, message };
+        // Only a row that can take dates, with a change and no error, carries
+        // them; a held row's draft waits for the row to come back.
+        const info = dateInfo.get(hash);
+        if (structuralHold(action, info) === null && info?.kind === "ok") {
+          const { changed, authorError, committerError } = info.resolved;
+          if (changed && authorError === null && committerError === null) {
+            row.dates = {
+              ...(info.resolved.authorDate && {
+                authorDate: info.resolved.authorDate,
+              }),
+              ...(info.resolved.committerDate && {
+                committerDate: info.resolved.committerDate,
+              }),
+            };
+          }
+        }
+        return row;
       }),
-    [order, actions, overrides, subjectOf, fullMessages],
+    [order, actions, overrides, subjectOf, fullMessages, dateInfo],
   );
 
   const originalHashes = useMemo(() => commits.map((c) => c.hash), [commits]);
@@ -460,12 +901,13 @@ export function EditHistoryDialog({
     () => compilePlan(rows, originalHashes),
     [rows, originalHashes],
   );
-  // reword/squash bake the message into the rewrite, so they can't be applied
-  // until the full bodies have loaded — otherwise a multi-line body would be
-  // silently truncated to its subject.
-  const needsMessages = rows.some(
-    (r) => r.action === "reword" || r.action === "squash",
-  );
+  // reword/squash bake the message into the rewrite, and a dated step its
+  // dates, so neither can be applied until the plan's own rows have loaded:
+  // otherwise a multi-line body would be silently truncated to its subject.
+  const needsRead =
+    plan.datedCount > 0 ||
+    rows.some((r) => r.action === "reword" || r.action === "squash");
+  const rowsRead = rows.every((r) => messages.data?.[r.hash] !== undefined);
   // A held fold's error says where the missing older commit would sit in the
   // displayed list; every other plan error reads verbatim. Shared by the footer
   // and the move announcement, so both say the same thing.
@@ -479,19 +921,104 @@ export function EditHistoryDialog({
   }
   const heldFoldError = heldFoldErrorOf(plan, rows);
 
+  // Before-parent: judged on the compiled plan, from the rows' original
+  // author dates and the base's (placeholder-guarded: the details read keeps
+  // the previous commit's answer while the next loads).
+  const originalAuthor: Record<string, CommitDate> = {};
+  for (const [hash, info] of dateInfo) {
+    if (info.kind === "ok") originalAuthor[hash] = info.original.author;
+  }
+  const baseAuthor =
+    !baseDetails.isPlaceholderData && baseDetails.data?.hash === base
+      ? commitDateFromIso(baseDetails.data.date)
+      : null;
+  const beforeParent = beforeParentSteps({
+    steps: plan.steps,
+    originalAuthor,
+    base: baseAuthor === null ? null : { hash: base, author: baseAuthor },
+  });
+  const beforeParentOf = new Map(beforeParent.map((b) => [b.hash, b]));
+
   // Display order; each displayed row maps back to its data index through
   // `displayIndex`, which `plan.views` and the moves index by.
   const shownRows = reversed ? [...rows].reverse() : rows;
 
-  // The rows are one Tab stop (message fields and Generate keep their own); the
-  // trigger and arrow buttons are tabIndex -1, as Enter or Space opens the menu
-  // from the row.
+  const canTakeDates = (row: EditRow) =>
+    structuralHold(row.action, dateInfo.get(row.hash)) === null;
+  const selectedOf = (set: ReadonlySet<string>) =>
+    shownRows.filter((r) => set.has(r.hash) && canTakeDates(r));
+  const selected = selectedOf(picked);
+  const skipped = picked.size - selected.length;
+  const stripShown = selected.length >= 2;
+  // Seeded once, when the strip first shows: from the focused row when it can
+  // take dates, else the first selected row; later selection changes keep it.
+  if (stripShown && strip === null) {
+    const seedRow =
+      selected.find((r) => r.hash === gestureFocus) ?? selected[0];
+    const info = dateInfo.get(seedRow.hash);
+    if (info?.kind === "ok") {
+      const { planned } = info.resolved;
+      setStrip({
+        author: formatCommitDate(planned.author ?? info.original.author),
+        same: info.resolved.same,
+        committer: formatCommitDate(
+          planned.committer ?? info.original.committer,
+        ),
+        fallback: info.original.author,
+        fallbackCommitter: info.original.committer,
+      });
+    }
+  }
+  if (!stripShown && strip !== null) setStrip(null);
+
+  // The first row, in display order, whose date can't be read as typed.
+  const invalidDateRow = shownRows.find((r) => {
+    const info = dateInfo.get(r.hash);
+    return (
+      canTakeDates(r) &&
+      info?.kind === "ok" &&
+      (info.resolved.authorError !== null ||
+        info.resolved.committerError !== null)
+    );
+  });
+  const primaryLabel = plan.hasEdit ? "Start rebase" : "Rewrite history";
+  const primaryReason = (() => {
+    switch (true) {
+      case busy:
+        return BUSY_REASON;
+      case plan.error !== null:
+        return heldFoldError ?? plan.error;
+      case invalidDateRow !== undefined:
+        return `Fix the date on ${invalidDateRow.hash.slice(0, 7)} first.`;
+      case !plan.changed:
+        return "Nothing to rewrite yet.";
+      case needsRead && !rowsRead && messages.isError:
+        return "Couldn't load commit messages and dates.";
+      case needsRead && !rowsRead:
+        return "Loading commit messages and dates…";
+      default:
+        return null;
+    }
+  })();
+
+  // The rows are one Tab stop (message and date fields and Generate keep their
+  // own); the trigger and arrow buttons are tabIndex -1, as Enter or Space
+  // opens the menu from the row.
   const nav = useRovingRows({ items: shownRows, rowKey: (r) => r.hash });
   const listRef = useRef<HTMLDivElement>(null);
   const lastFocusedRow = useRef<string | null>(null);
   // The row whose menu `onOpenChange(true)` opened during a key-driven click.
   const keyOpenedRow = useRef<string | null>(null);
-  const [moveFocus, setMoveFocus] = useState<{
+  // A row to land focus on after the commit that moved or unmounted what held
+  // it: a move, or an editor or the strip closing under focus.
+  const [rowFocus, setRowFocus] = useState<{
+    hash: string;
+    nonce: number;
+  } | null>(null);
+  const focusRow = (hash: string) =>
+    setRowFocus((prev) => ({ hash, nonce: (prev?.nonce ?? 0) + 1 }));
+  // A row whose just-opened editor takes focus in its author field.
+  const [datesFocus, setDatesFocus] = useState<{
     hash: string;
     nonce: number;
   } | null>(null);
@@ -499,14 +1026,22 @@ export function EditHistoryDialog({
   // A move re-orders keyed nodes, which can drop focus off the moved row (and a
   // button click parks it on a button), so every move lands focus back on it.
   useLayoutEffect(() => {
-    if (moveFocus === null) return;
-    const el = findRow(listRef.current, moveFocus.hash);
+    if (rowFocus === null) return;
+    const el = findRow(listRef.current, rowFocus.hash);
     el?.focus();
     el?.scrollIntoView({ block: "nearest" });
-  }, [moveFocus]);
+  }, [rowFocus]);
+
+  useLayoutEffect(() => {
+    if (datesFocus === null) return;
+    findRow(listRef.current, datesFocus.hash)
+      ?.querySelector<HTMLElement>("[data-row-dates] input")
+      ?.focus();
+  }, [datesFocus]);
 
   // A reseed re-orders and can drop rows too. Focus returns only when it was on
-  // a row or fell to the body; a message field, Generate or the footer keep it.
+  // a row or fell to the body; a field that survived, Generate or the footer
+  // keep it.
   useLayoutEffect(() => {
     if (reseedNonce === 0) return;
     const list = listRef.current;
@@ -515,7 +1050,9 @@ export function EditHistoryDialog({
     const onRow =
       active instanceof HTMLElement &&
       list.contains(active) &&
-      active.closest("[data-row-message]") === null;
+      active.closest(
+        "[data-row-message], [data-row-dates], [data-dates-strip]",
+      ) === null;
     if (!onRow && active !== null && active !== document.body) return;
     const remembered = lastFocusedRow.current;
     const el =
@@ -527,6 +1064,101 @@ export function EditHistoryDialog({
 
   function setAction(hash: string, action: RowAction) {
     setActions((a) => ({ ...a, [hash]: action }));
+  }
+
+  function setDraft(hash: string, draft: DateDraft) {
+    setDateDrafts((d) => ({ ...d, [hash]: draft }));
+  }
+
+  function resetDraft(hash: string) {
+    setDateDrafts((d) => {
+      const { [hash]: _gone, ...rest } = d;
+      return rest;
+    });
+  }
+
+  function toggleDates(hash: string) {
+    setOpenDates((s) => {
+      const next = new Set(s);
+      if (!next.delete(hash)) next.add(hash);
+      return next;
+    });
+  }
+
+  function closeDates(hash: string) {
+    setOpenDates((s) => {
+      const next = new Set(s);
+      next.delete(hash);
+      return next;
+    });
+    focusRow(hash);
+  }
+
+  /** Display-order hashes from `from` to `to`, both included. */
+  function rangeOf(from: string, to: string): Set<string> {
+    const a = shownRows.findIndex((r) => r.hash === from);
+    const b = shownRows.findIndex((r) => r.hash === to);
+    if (a === -1 || b === -1) return new Set([to]);
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    return new Set(shownRows.slice(lo, hi + 1).map((r) => r.hash));
+  }
+
+  function select(
+    next: ReadonlySet<string>,
+    nextAnchor: string | null,
+    focused: string | null,
+  ) {
+    const same =
+      next.size === picked.size && [...next].every((h) => picked.has(h));
+    setPicked(next);
+    setAnchor(nextAnchor);
+    setGestureFocus(focused);
+    if (same) return;
+    const n = selectedOf(next).length;
+    const k = next.size - n;
+    if (n === 0 && k === 0) {
+      announce("Selection cleared");
+      return;
+    }
+    announce(`${n} ${commitsWord(n)} selected${skippedTail(k)}`);
+  }
+
+  // Escape in an editor or the strip refuses while busy: nothing unmounts for
+  // the length of a rewrite.
+  function escapeUnlessBusy(repeat: boolean, close: () => void) {
+    if (!busy) close();
+    else if (!repeat) announce(BUSY_REASON);
+  }
+
+  // Clearing from the strip lands on the anchor row, else the last focused
+  // row, else the first: the strip unmounts under focus.
+  function clearSelection() {
+    const target =
+      anchor ?? lastFocusedRow.current ?? shownRows[0]?.hash ?? null;
+    select(new Set(), null, null);
+    if (target !== null) focusRow(target);
+  }
+
+  function applyStrip() {
+    if (strip === null || busy) return;
+    const a = readCommitDate(strip.author, strip.fallback.offsetMinutes);
+    const c = strip.same
+      ? a
+      : readCommitDate(strip.committer, strip.fallbackCommitter.offsetMinutes);
+    if (!a.ok || !c.ok) return;
+    const draft: DateDraft = {
+      author: formatCommitDate(a.date),
+      same: strip.same,
+      committer: formatCommitDate(c.date),
+    };
+    setDateDrafts((d) => {
+      const next = { ...d };
+      for (const r of selected) next[r.hash] = draft;
+      return next;
+    });
+    announce(
+      `Dates applied to ${selected.length} ${commitsWord(selected.length)}${skippedTail(skipped)}`,
+    );
   }
 
   // Moves the row at `index` to `to` and announces it (`moveAnnouncement` says
@@ -542,7 +1174,7 @@ export function EditHistoryDialog({
     nextRows.splice(to, 0, moved);
     const nextPlan = compilePlan(nextRows, originalHashes);
     setOrder(nextOrder);
-    setMoveFocus((prev) => ({ hash, nonce: (prev?.nonce ?? 0) + 1 }));
+    focusRow(hash);
 
     announce(
       moveAnnouncement({
@@ -561,8 +1193,8 @@ export function EditHistoryDialog({
   }
 
   function onListKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    // Rows only: caret keys in a message field, and keys on a button or in a
-    // menu, keep their own behavior.
+    // Rows only: caret keys in a message or date field, and keys on a button
+    // or in a menu, keep their own behavior.
     const row = e.target;
     if (!(row instanceof HTMLElement)) return;
     const hash = row.getAttribute("data-row");
@@ -576,6 +1208,43 @@ export function EditHistoryDialog({
     // modified Enter or Space keeps its native behavior (Shift+Space scrolls,
     // Alt+Space is the system menu).
     const menuKey = chord === "enter" || chord === "space";
+    const extend = chord === "shift+up" || chord === "shift+down";
+
+    // Every consumed press is default-prevented, so a user binding of the same
+    // key can't also fire behind the dialog.
+    if (chord === "d") {
+      e.preventDefault();
+      if (e.repeat) return;
+      if (busy) {
+        announce(BUSY_REASON);
+        return;
+      }
+      const hold = structuralHold(actions[hash] ?? "pick", dateInfo.get(hash));
+      if (hold !== null) {
+        announce(DATE_HOLD_REASON[hold]);
+        return;
+      }
+      setOpenDates((s) => (s.has(hash) ? s : new Set(s).add(hash)));
+      setDatesFocus((prev) => ({ hash, nonce: (prev?.nonce ?? 0) + 1 }));
+      return;
+    }
+    if (extend) {
+      e.preventDefault();
+      if (busy) {
+        if (!e.repeat) announce(BUSY_REASON);
+        return;
+      }
+      const at = shownRows.findIndex((r) => r.hash === hash);
+      const landing = shownRows[at + (chord === "shift+up" ? -1 : 1)];
+      // At the edge nothing moves; the key is still consumed.
+      if (landing === undefined) return;
+      const from = anchor ?? hash;
+      const el = findRow(listRef.current, landing.hash);
+      el?.focus();
+      el?.scrollIntoView({ block: "nearest" });
+      select(rangeOf(from, landing.hash), from, landing.hash);
+      return;
+    }
 
     // While busy, walking the rows stays live (it changes nothing); moves, the
     // Alt swallow and the menu open refuse with the reason.
@@ -597,6 +1266,16 @@ export function EditHistoryDialog({
     if (swallowed) {
       e.preventDefault();
       return;
+    }
+    // Plain navigation clears a selection, as History and Changes do; a busy
+    // rewrite keeps it (nothing can act on it then).
+    if (
+      chord !== null &&
+      NAV_KEYS.has(chord) &&
+      !busy &&
+      (picked.size > 0 || anchor !== null)
+    ) {
+      select(new Set(), null, null);
     }
     if (jump) {
       const all = e.currentTarget.querySelectorAll<HTMLElement>("[data-row]");
@@ -633,6 +1312,53 @@ export function EditHistoryDialog({
     nav.onRowKeyDown(e);
   }
 
+  /** The row a pointer event hit on its body: never a control, a field or a
+   *  menu (a portaled menu bubbles through React, so containment is checked). */
+  function rowBodyOf(e: MouseEvent<HTMLDivElement>): HTMLElement | null {
+    const t = e.target;
+    if (!(t instanceof Element) || !e.currentTarget.contains(t)) return null;
+    if (
+      t.closest("[data-row-control], [data-row-dates], [data-row-message]") !==
+      null
+    ) {
+      return null;
+    }
+    return t.closest<HTMLElement>("[data-row]");
+  }
+
+  // Shift+click would otherwise start a native text-range selection; its
+  // click handler focuses the row itself.
+  function onListMouseDown(e: MouseEvent<HTMLDivElement>) {
+    if (e.shiftKey && rowBodyOf(e) !== null) e.preventDefault();
+  }
+
+  function onListClick(e: MouseEvent<HTMLDivElement>) {
+    const row = rowBodyOf(e);
+    const hash = row?.getAttribute("data-row");
+    if (row == null || hash == null) return;
+    // Ctrl/Cmd through the hotkeys helper; Alt with it is no toggle gesture.
+    const toggle = hasChordModifier(e) && !e.altKey;
+    const modified = e.shiftKey || toggle;
+    if (busy) {
+      if (modified) announce(BUSY_REASON);
+      return;
+    }
+    if (e.shiftKey) {
+      const from = anchor ?? lastFocusedRow.current ?? hash;
+      row.focus();
+      select(rangeOf(from, hash), from, hash);
+      return;
+    }
+    if (toggle) {
+      const next = new Set(picked);
+      if (!next.delete(hash)) next.add(hash);
+      row.focus();
+      select(next, hash, hash);
+      return;
+    }
+    if (picked.size > 0 || anchor !== null) select(new Set(), null, null);
+  }
+
   function onListFocusCapture(e: FocusEvent<HTMLDivElement>) {
     if (e.target instanceof HTMLElement && e.target.hasAttribute("data-row")) {
       lastFocusedRow.current = e.target.getAttribute("data-row");
@@ -654,10 +1380,23 @@ export function EditHistoryDialog({
   // conditionally, so closing it mid-rewrite would drop the outcome — including
   // the hand-off to the Changes tab that the paused rebase depends on.
   async function apply() {
-    if (plan.error || !plan.changed) return;
+    if (primaryReason !== null) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
+    }
+    if (beforeParent.length > 0) {
+      // One confirm for the whole plan. A commit set that changed under
+      // the prompt drops the run, and a promote that started under it refuses.
+      const asked = reseedNonce;
+      const ok = await useConfirm
+        .getState()
+        .ask(datesBeforeParentConfirm(beforeParent.length, primaryLabel));
+      if (!ok || liveKeyRef.current !== asked) return;
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
     }
     if (plan.hasEdit) {
       // Resumable path: starts a real rebase that pauses at the first Edit —
@@ -719,7 +1458,11 @@ export function EditHistoryDialog({
         className="flex max-h-[85vh] flex-col sm:max-w-2xl"
         showCloseButton={!busy}
         initialFocus={() =>
-          listRef.current?.querySelector<HTMLElement>("[data-row]") ?? true
+          (initialDatesFor === undefined
+            ? null
+            : findRow(listRef.current, initialDatesFor)) ??
+          listRef.current?.querySelector<HTMLElement>("[data-row]") ??
+          true
         }
       >
         <DialogHeader>
@@ -772,19 +1515,41 @@ export function EditHistoryDialog({
             </span>
           </div>
           <DialogDescription>
-            Reshape your unpushed commits — reword, squash, fixup, drop, or
-            reorder. {ORDER_COPY[listOrder].onTop} {formatBinding("alt+up")} and{" "}
-            {formatBinding("alt+down")} move the focused commit. This rewrites
-            local history; a conflict rolls it back.
+            Reshape your unpushed commits: reword, squash, fixup, drop, reorder,
+            or change dates. {ORDER_COPY[listOrder].onTop}{" "}
+            {formatBinding("alt+up")} and {formatBinding("alt+down")} move the
+            focused commit; {formatBinding("shift+up")} or{" "}
+            {formatBinding("shift+down")}, or {formatBinding("mod+click")},
+            select several to date together. This rewrites local history; a
+            conflict rolls it back.
           </DialogDescription>
         </DialogHeader>
 
+        {stripShown && strip !== null && (
+          <SelectionStrip
+            count={selected.length}
+            skipped={skipped}
+            draft={strip}
+            nowMs={nowMs}
+            heldReason={busy ? BUSY_REASON : null}
+            onDraft={setStrip}
+            onApply={applyStrip}
+            onClear={clearSelection}
+            onEscape={(repeat) => escapeUnlessBusy(repeat, clearSelection)}
+          />
+        )}
+
+        {/* data-multiselect: Ctrl/Cmd+scroll over a list that takes Ctrl+click
+            scrolls it instead of zooming the app (src/lib/zoom/zoom.ts). */}
         <div
           ref={listRef}
           role="list"
           aria-label={ORDER_COPY[listOrder].listLabel}
+          data-multiselect=""
           className="min-h-0 flex-1 space-y-px overflow-y-auto border"
           onKeyDown={onListKeyDown}
+          onMouseDown={onListMouseDown}
+          onClick={onListClick}
           onFocusCapture={onListFocusCapture}
         >
           {shownRows.map((row, shown) => {
@@ -795,6 +1560,10 @@ export function EditHistoryDialog({
             const folds = isFold(row.action);
             const folding = folds && target !== null;
             const held = folds && target === null;
+            const info = dateInfo.get(row.hash);
+            const structural = structuralHold(row.action, info);
+            const ok = info?.kind === "ok" ? info : null;
+            const isSelected = picked.has(row.hash) && structural === null;
             const foldState = (() => {
               switch (true) {
                 case folding:
@@ -803,6 +1572,16 @@ export function EditHistoryDialog({
                   return `, ${ORDER_COPY[listOrder].heldLabel}`;
                 default:
                   return "";
+              }
+            })();
+            const glyph = (() => {
+              switch (true) {
+                case folding:
+                  return "↳";
+                case isSelected:
+                  return <CheckIcon className="inline size-3" />;
+                default:
+                  return null;
               }
             })();
             const up = visualMoveTarget(index, rows.length, "up", reversed);
@@ -827,108 +1606,141 @@ export function EditHistoryDialog({
                   return null;
               }
             })();
+            const dateHold: DateHold | null = busy ? "busy" : structural;
+            // A busy editor stays rendered and inert; any other hold drops it.
+            const editorShown =
+              ok !== null && structural === null && openDates.has(row.hash);
+            const editorId = `${idBase}-dates-${row.hash}`;
+            const changed = row.dates !== undefined;
+            const flagged = beforeParentOf.get(row.hash);
+            // The label falls back to the listed date while the read has none
+            // for this row: display only, never a value to send.
+            const shownDate = (() => {
+              if (ok !== null) {
+                return ok.resolved.planned.author ?? ok.original.author;
+              }
+              if (info?.kind === "unreadable" && info.author !== null) {
+                return info.author;
+              }
+              return commitDateFromIso(listedDateOf.get(row.hash) ?? "");
+            })();
+            const dateName = (() => {
+              if (shownDate === null) return `Dates for ${row.subject}`;
+              const full = formatCommitDate(shownDate);
+              if (changed && ok !== null) {
+                return `Dates for ${row.subject}: ${full}, was ${formatCommitDate(ok.original.author)}`;
+              }
+              return `Dates for ${row.subject}: ${full}`;
+            })();
             return (
               <div
                 key={row.hash}
                 role="listitem"
                 {...nav.rowProps(row)}
-                aria-label={`${ACTION_LABEL.get(row.action)} ${row.hash.slice(0, 7)} ${row.subject}${foldState}`}
-                aria-keyshortcuts={MOVE_KEYSHORTCUTS}
-                className="border-b outline-none last:border-b-0 focus-visible:bg-muted/40 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset data-[dropped=true]:bg-muted/30"
+                aria-label={`${ACTION_LABEL.get(row.action)} ${row.hash.slice(0, 7)} ${row.subject}${foldState}${flagged !== undefined ? ", dated before its parent" : ""}${changed ? ", dates changed" : ""}${isSelected ? ", selected" : ""}`}
+                aria-keyshortcuts={ROW_KEYSHORTCUTS}
+                className={cn(
+                  "border-b outline-none last:border-b-0 focus-visible:bg-muted/40 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset data-[dropped=true]:bg-muted/30",
+                  isSelected && "bg-accent focus-visible:bg-accent",
+                )}
                 data-dropped={dropped}
               >
                 <div className="flex items-center gap-2 px-2 py-1.5">
-                  <DropdownMenu
-                    open={menuHash === row.hash}
-                    onOpenChange={(o) => {
-                      if (o) keyOpenedRow.current = row.hash;
-                      // Clears only its own row, so a close racing another
-                      // row's open can't wipe that open.
-                      setMenuHash((cur) => {
-                        if (o) return row.hash;
-                        return cur === row.hash ? null : cur;
-                      });
-                    }}
-                  >
-                    <DropdownMenuTrigger
-                      render={
-                        <DisabledReasonButton
-                          variant="outline"
-                          size="xs"
-                          tabIndex={-1}
-                          disabled={busy}
-                          reason={BUSY_REASON}
-                          data-action-trigger=""
-                          className="w-20 justify-between"
-                          aria-label={`Action for ${row.subject}`}
-                        >
-                          {ACTION_LABEL.get(row.action)}
-                          <CaretDownIcon />
-                        </DisabledReasonButton>
-                      }
-                    />
-                    <DropdownMenuContent
-                      align="start"
-                      className="w-64"
-                      // Back to the row, so the next arrow walks the list
-                      // instead of reopening the menu from its trigger.
-                      finalFocus={() =>
-                        findRow(listRef.current, row.hash) ?? true
-                      }
+                  <span data-row-control="" className="contents">
+                    <DropdownMenu
+                      open={menuHash === row.hash}
+                      onOpenChange={(o) => {
+                        if (o) keyOpenedRow.current = row.hash;
+                        // Clears only its own row, so a close racing another
+                        // row's open can't wipe that open.
+                        setMenuHash((cur) => {
+                          if (o) return row.hash;
+                          return cur === row.hash ? null : cur;
+                        });
+                      }}
                     >
-                      {ACTIONS.map((a) => {
-                        const heldItem = isFold(a.value) && target === null;
-                        return (
-                          <DropdownMenuItem
-                            key={a.value}
-                            disabled={heldItem}
-                            // Named outright: the hint's first line is three
-                            // flex items, which a name from content joins with
-                            // spaces inside the quotes.
-                            aria-label={
-                              isFold(a.value) && target !== null
-                                ? `${a.label} Combine into "${target}" ${ORDER_COPY[listOrder].foldPosition}, ${FOLD_HINT_TAIL[a.value]}`
-                                : undefined
-                            }
-                            onClick={() => setAction(row.hash, a.value)}
-                            // Base UI activates a menu item on keydown with no
-                            // repeat check, so a key still held from opening
-                            // the menu would pick the highlighted item.
-                            onKeyDown={(e) => {
-                              if (
-                                e.repeat &&
-                                (e.key === "Enter" || e.key === " ")
-                              ) {
-                                e.preventDefault();
-                                e.preventBaseUIHandler();
-                              }
-                            }}
-                            className={cn(
-                              "flex-col items-start gap-0.5",
-                              heldItem && MENU_HELD_ROW_CLASS,
-                            )}
+                      <DropdownMenuTrigger
+                        render={
+                          <DisabledReasonButton
+                            variant="outline"
+                            size="xs"
+                            tabIndex={-1}
+                            disabled={busy}
+                            reason={BUSY_REASON}
+                            data-action-trigger=""
+                            className="w-20 justify-between"
+                            aria-label={`Action for ${row.subject}`}
                           >
-                            <span className="text-xs font-medium">
-                              {a.label}
-                            </span>
-                            <ActionHint
-                              action={a.value}
-                              hint={a.hint}
-                              target={target}
-                              listOrder={listOrder}
-                            />
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                            {ACTION_LABEL.get(row.action)}
+                            <CaretDownIcon />
+                          </DisabledReasonButton>
+                        }
+                      />
+                      <DropdownMenuContent
+                        align="start"
+                        className="w-64"
+                        // Back to the row, so the next arrow walks the list
+                        // instead of reopening the menu from its trigger.
+                        finalFocus={() =>
+                          findRow(listRef.current, row.hash) ?? true
+                        }
+                      >
+                        {ACTIONS.map((a) => {
+                          const heldItem = isFold(a.value) && target === null;
+                          return (
+                            <DropdownMenuItem
+                              key={a.value}
+                              disabled={heldItem}
+                              // Named outright: the hint's first line is three
+                              // flex items, which a name from content joins
+                              // with spaces inside the quotes.
+                              aria-label={
+                                isFold(a.value) && target !== null
+                                  ? `${a.label} Combine into "${target}" ${ORDER_COPY[listOrder].foldPosition}, ${FOLD_HINT_TAIL[a.value]}`
+                                  : undefined
+                              }
+                              onClick={() => setAction(row.hash, a.value)}
+                              // Base UI activates a menu item on keydown with
+                              // no repeat check, so a key still held from
+                              // opening the menu would pick the highlighted
+                              // item.
+                              onKeyDown={(e) => {
+                                if (
+                                  e.repeat &&
+                                  (e.key === "Enter" || e.key === " ")
+                                ) {
+                                  e.preventDefault();
+                                  e.preventBaseUIHandler();
+                                }
+                              }}
+                              className={cn(
+                                "flex-col items-start gap-0.5",
+                                heldItem && MENU_HELD_ROW_CLASS,
+                              )}
+                            >
+                              <span className="text-xs font-medium">
+                                {a.label}
+                              </span>
+                              <ActionHint
+                                action={a.value}
+                                hint={a.hint}
+                                target={target}
+                                listOrder={listOrder}
+                              />
+                            </DropdownMenuItem>
+                          );
+                        })}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </span>
 
-                  {/* Reserved on every row, so the fold glyph shifts nothing. */}
+                  {/* Reserved on every row, so the fold glyph or the selection
+                      check shifts nothing. A fold member is never selected. */}
                   <span
                     aria-hidden
                     className="w-3 shrink-0 text-center text-[11px] text-muted-foreground"
                   >
-                    {folding ? "↳" : null}
+                    {glyph}
                   </span>
                   <span className="font-mono text-[11px] text-muted-foreground">
                     {row.hash.slice(0, 7)}
@@ -968,34 +1780,76 @@ export function EditHistoryDialog({
                       removed
                     </span>
                   )}
-                  <DisabledReasonButton
-                    variant="ghost"
-                    size="icon-xs"
-                    tabIndex={-1}
-                    aria-label={`Move ${row.subject} up`}
-                    title={`Move up (${formatBinding("alt+up")})`}
-                    disabled={upReason !== null}
-                    reason={upReason}
-                    onClick={() => {
-                      if ("to" in up) moveTo(index, up.to);
-                    }}
-                  >
-                    <ArrowUpIcon />
-                  </DisabledReasonButton>
-                  <DisabledReasonButton
-                    variant="ghost"
-                    size="icon-xs"
-                    tabIndex={-1}
-                    aria-label={`Move ${row.subject} down`}
-                    title={`Move down (${formatBinding("alt+down")})`}
-                    disabled={downReason !== null}
-                    reason={downReason}
-                    onClick={() => {
-                      if ("to" in down) moveTo(index, down.to);
-                    }}
-                  >
-                    <ArrowDownIcon />
-                  </DisabledReasonButton>
+                  {flagged !== undefined && (
+                    <span className="flex shrink-0 items-center gap-1 text-[11px] text-warning">
+                      <WarningIcon aria-hidden className="size-3" />
+                      before parent
+                    </span>
+                  )}
+                  <span data-row-control="" className="contents">
+                    <DisabledReasonButton
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      tabIndex={-1}
+                      aria-label={dateName}
+                      title={
+                        shownDate === null
+                          ? undefined
+                          : formatCommitDate(shownDate)
+                      }
+                      aria-expanded={editorShown}
+                      aria-controls={editorShown ? editorId : undefined}
+                      disabled={dateHold !== null}
+                      reason={
+                        dateHold === null ? null : DATE_HOLD_REASON[dateHold]
+                      }
+                      className={cn(
+                        "text-[11px] tabular-nums",
+                        changed
+                          ? "font-medium text-foreground"
+                          : "font-normal text-muted-foreground",
+                      )}
+                      onClick={() => toggleDates(row.hash)}
+                    >
+                      {changed && <ClockIcon data-icon="inline-start" />}
+                      {(() => {
+                        if (shownDate !== null)
+                          return rowDateLabel(shownDate, nowMs);
+                        if (info?.kind === "unreadable")
+                          return UNREADABLE_DATE_TEXT;
+                        return <Skeleton className="h-3 w-16" />;
+                      })()}
+                    </DisabledReasonButton>
+                    <DisabledReasonButton
+                      variant="ghost"
+                      size="icon-xs"
+                      tabIndex={-1}
+                      aria-label={`Move ${row.subject} up`}
+                      title={`Move up (${formatBinding("alt+up")})`}
+                      disabled={upReason !== null}
+                      reason={upReason}
+                      onClick={() => {
+                        if ("to" in up) moveTo(index, up.to);
+                      }}
+                    >
+                      <ArrowUpIcon />
+                    </DisabledReasonButton>
+                    <DisabledReasonButton
+                      variant="ghost"
+                      size="icon-xs"
+                      tabIndex={-1}
+                      aria-label={`Move ${row.subject} down`}
+                      title={`Move down (${formatBinding("alt+down")})`}
+                      disabled={downReason !== null}
+                      reason={downReason}
+                      onClick={() => {
+                        if ("to" in down) moveTo(index, down.to);
+                      }}
+                    >
+                      <ArrowDownIcon />
+                    </DisabledReasonButton>
+                  </span>
                 </div>
 
                 {view.showMessage && (
@@ -1056,6 +1910,25 @@ export function EditHistoryDialog({
                       ))}
                   </div>
                 )}
+
+                {editorShown && (
+                  <RowDatesEditor
+                    id={editorId}
+                    subject={row.subject}
+                    info={ok}
+                    draft={draftOf(ok, dateDrafts[row.hash])}
+                    isEdit={row.action === "edit"}
+                    changed={changed}
+                    parent={flagged}
+                    nowMs={nowMs}
+                    heldReason={busy ? BUSY_REASON : null}
+                    onDraft={(d) => setDraft(row.hash, d)}
+                    onReset={() => resetDraft(row.hash)}
+                    onEscape={(repeat) =>
+                      escapeUnlessBusy(repeat, () => closeDates(row.hash))
+                    }
+                  />
+                )}
               </div>
             );
           })}
@@ -1079,7 +1952,7 @@ export function EditHistoryDialog({
                 case messages.isError:
                   return (
                     <span className="text-warning">
-                      Couldn't load commit messages.{" "}
+                      Couldn't load commit messages and dates.{" "}
                       <button
                         type="button"
                         className="cursor-pointer underline underline-offset-2"
@@ -1102,7 +1975,20 @@ export function EditHistoryDialog({
                       <span className="tabular-nums text-foreground">
                         {plan.resultCount}
                       </span>{" "}
-                      {plan.resultCount === 1 ? "commit" : "commits"}
+                      {commitsWord(plan.resultCount)}
+                      {plan.datedCount > 0 && (
+                        <>
+                          {" · dates change on "}
+                          <span className="tabular-nums text-foreground">
+                            {plan.datedCount}
+                          </span>
+                        </>
+                      )}
+                      {beforeParent.length > 0 && (
+                        <span className="text-warning">
+                          {` · ${beforeParent.length} dated before ${beforeParent.length === 1 ? "its parent" : "their parents"}`}
+                        </span>
+                      )}
                       {plan.hasEdit && (
                         <span className="block text-[11px]">
                           Pauses at each Edit so you can amend it, then Continue
@@ -1122,18 +2008,14 @@ export function EditHistoryDialog({
           >
             Cancel
           </DisabledReasonButton>
-          <Button
-            disabled={
-              busy ||
-              !plan.changed ||
-              plan.error !== null ||
-              (needsMessages && !messages.isSuccess)
-            }
+          <DisabledReasonButton
+            disabled={primaryReason !== null}
+            reason={primaryReason}
             onClick={apply}
           >
             {busy && <Spinner data-icon="inline-start" />}
-            {plan.hasEdit ? "Start rebase" : "Rewrite history"}
-          </Button>
+            {primaryLabel}
+          </DisabledReasonButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>

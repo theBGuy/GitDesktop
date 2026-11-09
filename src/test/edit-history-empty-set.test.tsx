@@ -63,7 +63,12 @@ const rewriteButton = () =>
 beforeEach(() => {
   vi.mocked(gitUnpushedMessages).mockReset();
   vi.mocked(gitUnpushedMessages).mockResolvedValue([
-    { hash: HASH_A, message: "Add the parser" },
+    {
+      hash: HASH_A,
+      message: "Add the parser",
+      authorDate: { epochSeconds: 1_762_000_000, offsetMinutes: 60 },
+      committerDate: { epochSeconds: 1_762_000_000, offsetMinutes: 60 },
+    },
   ]);
 });
 
@@ -73,7 +78,7 @@ describe("Edit history over an empty commit set", () => {
     const note = screen.getByText(CATCHING_UP);
     expect(note.closest(".text-warning")).toBeNull();
     expect(screen.queryByText(new RegExp(DROP_ALL))).toBeNull();
-    expect(rewriteButton()).toBeDisabled();
+    expect(rewriteButton()).toHaveAttribute("aria-disabled", "true");
   });
 
   it("announces the note when the set empties under the open dialog", async () => {
@@ -110,9 +115,11 @@ describe("Edit history over an empty commit set", () => {
       screen.getByRole("button", { name: `Action for ${commitA.subject}` }),
     );
     await user.click(await screen.findByRole("menuitem", { name: /^Drop/ }));
-    const error = await screen.findByText(new RegExp(DROP_ALL));
+    const error = await screen.findByText(new RegExp(DROP_ALL), {
+      ignore: "script, style, .sr-only",
+    });
     expect(error.closest(".text-warning")).not.toBeNull();
     expect(screen.queryByText(CATCHING_UP)).toBeNull();
-    expect(rewriteButton()).toBeDisabled();
+    expect(rewriteButton()).toHaveAttribute("aria-disabled", "true");
   });
 });

@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  beforeParentSteps,
   compilePlan,
   moveAnnouncement,
 } from "../src/features/history/edit-history-plan.ts";
@@ -340,5 +341,154 @@ test("every row dropped is held with the drop-all sentence", () => {
   assert.equal(
     plan.error,
     "Keep at least one commit — you can't drop them all.",
+  );
+});
+
+const at = (epochSeconds, offsetMinutes = 0) => ({
+  epochSeconds,
+  offsetMinutes,
+});
+/** A row carrying new dates. */
+const dated = (hash, action, dates) => ({ ...row(hash, action), dates });
+
+test("a dates-only row changes the plan and rides its own step", () => {
+  const plan = compile([
+    row("b", "pick"),
+    dated("a", "pick", { authorDate: at(5), committerDate: at(6, 60) }),
+  ]);
+  assert.equal(plan.error, null);
+  assert.equal(plan.changed, true);
+  assert.equal(plan.datedCount, 1);
+  // Rows without a change carry neither key.
+  assert.deepEqual(plan.steps, [
+    { hashes: ["a"], authorDate: at(5), committerDate: at(6, 60) },
+    { hashes: ["b"] },
+  ]);
+
+  const committerOnly = compile([dated("a", "pick", { committerDate: at(7) })]);
+  assert.deepEqual(committerOnly.steps, [
+    { hashes: ["a"], committerDate: at(7) },
+  ]);
+  assert.equal(committerOnly.datedCount, 1);
+
+  const none = compile([row("a", "pick"), row("b", "pick")]);
+  assert.equal(none.changed, false);
+  assert.equal(none.datedCount, 0);
+});
+
+test("fold-member and dropped-row dates are ignored; a leader's ride its step", () => {
+  const plan = compile([
+    dated("s", "fixup", { authorDate: at(1) }),
+    dated("p", "pick", { authorDate: at(2) }),
+    dated("d", "drop", { authorDate: at(3) }),
+    row("q", "pick"),
+  ]);
+  assert.equal(plan.error, null);
+  assert.deepEqual(plan.steps, [
+    { hashes: ["q"] },
+    { hashes: ["p", "s"], authorDate: at(2) },
+  ]);
+  assert.equal(plan.datedCount, 1);
+
+  // Only a member or a dropped row is dated: no step carries a date.
+  const ignored = compile([
+    dated("s", "squash", { authorDate: at(1) }),
+    row("p", "pick", "p"),
+    dated("d", "drop", { authorDate: at(3) }),
+  ]);
+  assert.equal(ignored.datedCount, 0);
+  assert.equal(
+    ignored.steps.some((s) => "authorDate" in s || "committerDate" in s),
+    false,
+  );
+});
+
+// Original author dates: a oldest, then b, then c.
+const ORIGINAL = { a: at(100), b: at(200), c: at(300) };
+const BASE = { hash: "base", author: at(50) };
+const flagged = (steps, base = BASE) =>
+  beforeParentSteps({ steps, originalAuthor: ORIGINAL, base });
+
+test("a child dated before its planned parent is flagged", () => {
+  assert.deepEqual(
+    flagged([{ hashes: ["a"] }, { hashes: ["b"] }, { hashes: ["c"], authorDate: at(150) }]),
+    [{ hash: "c", parentHash: "b", parentDate: at(200) }],
+  );
+});
+
+test("equal dates are in order", () => {
+  assert.deepEqual(
+    flagged([{ hashes: ["a"] }, { hashes: ["b"] }, { hashes: ["c"], authorDate: at(200) }]),
+    [],
+  );
+});
+
+test("the parent comes from the plan, not the original order", () => {
+  // b moved below a: c's planned parent is a (250), not b.
+  assert.deepEqual(
+    flagged([
+      { hashes: ["b"] },
+      { hashes: ["a"], authorDate: at(250) },
+      { hashes: ["c"], authorDate: at(150) },
+    ]),
+    [{ hash: "c", parentHash: "a", parentDate: at(250) }],
+  );
+});
+
+test("a drop takes its commit out of the parent chain", () => {
+  assert.deepEqual(
+    flagged([{ hashes: ["a"] }, { hashes: ["c"], authorDate: at(150) }]),
+    [],
+  );
+  assert.deepEqual(
+    flagged([{ hashes: ["a"] }, { hashes: ["c"], authorDate: at(50) }]),
+    [{ hash: "c", parentHash: "a", parentDate: at(100) }],
+  );
+});
+
+test("a fold group is judged by its leader's date", () => {
+  assert.deepEqual(
+    flagged([{ hashes: ["a", "b"] }, { hashes: ["c"], authorDate: at(150) }]),
+    [],
+  );
+  assert.deepEqual(
+    flagged([{ hashes: ["a", "b"] }, { hashes: ["c"], authorDate: at(50) }]),
+    [{ hash: "c", parentHash: "a", parentDate: at(100) }],
+  );
+});
+
+test("the oldest step is judged against the base, or not at all without one", () => {
+  const steps = [{ hashes: ["a"], authorDate: at(40) }, { hashes: ["b"] }];
+  assert.deepEqual(flagged(steps), [
+    { hash: "a", parentHash: "base", parentDate: at(50) },
+  ]);
+  assert.deepEqual(flagged(steps, null), []);
+});
+
+test("an inversion no date edit takes part in is not flagged", () => {
+  // Reorder only: a (100) now sits above b (200).
+  assert.deepEqual(flagged([{ hashes: ["b"] }, { hashes: ["a"] }, { hashes: ["c"] }]), []);
+  // An untouched oldest row older than a newer base.
+  assert.deepEqual(
+    flagged([{ hashes: ["a"] }], { hash: "base", author: at(500) }),
+    [],
+  );
+});
+
+test("a parent's edit flags its untouched child", () => {
+  assert.deepEqual(
+    flagged([{ hashes: ["a"] }, { hashes: ["b"], authorDate: at(350) }, { hashes: ["c"] }]),
+    [{ hash: "c", parentHash: "b", parentDate: at(350) }],
+  );
+});
+
+test("a step with no original author date is not judged", () => {
+  assert.deepEqual(
+    beforeParentSteps({
+      steps: [{ hashes: ["a"] }, { hashes: ["x"], authorDate: at(10) }],
+      originalAuthor: ORIGINAL,
+      base: BASE,
+    }),
+    [],
   );
 });
