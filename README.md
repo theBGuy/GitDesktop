@@ -316,10 +316,10 @@ apart.
   operation), and restores any of them non-destructively to the working
   tree.
 - **Operation journal** ⭐: records the risky compound operations GitDesktop
-  runs (local PR merges and branch updates, cherry-picks, history edits,
-  rebases). If one is interrupted by a crash or restart, a calm recovery
-  notice names what was interrupted and the exact branch + commit it
-  started from, browsable any time via the *Operation history* command.
+  runs (local PR merges and local PR branch updates, cherry-picks, history
+  edits, rebases). If one is interrupted by a crash or restart, a calm
+  recovery notice names what was interrupted and the exact branch + commit
+  it started from, browsable any time via the *Operation history* command.
 
 Plus tag management and releases: publish, edit, and delete them with asset
 uploads. When a **GitHub** release carries a `latest.json` updater manifest,

@@ -1099,10 +1099,10 @@ saying it couldn't refresh and a **Retry**. One that fails to load says why and 
 **Retry**.
 
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
-journal of the *risky* operations GitDesktop runs: local PR merges and branch updates,
-cherry-picks, history edits, interactive rebases, and a rebase pull that drops commits.
-Each is recorded with the exact branch and commit it started from, and whether it
-finished, failed, is paused on conflicts, is still pending, or **ended outside the app**
+journal of the *risky* operations GitDesktop runs: local PR merges and local PR branch
+updates, cherry-picks, history edits, interactive rebases, and a rebase pull that drops
+commits. Each is recorded with the exact branch and commit it started from, and whether
+it finished, failed, is paused on conflicts, is still pending, or **ended outside the app**
 (a cherry-pick or rebase pull you continued or aborted in a terminal, which the journal
 only knows is over). If one of these operations is interrupted (a crash or a restart
 mid-op), a calm recovery line appears above the **Changes** list naming what was
@@ -2049,7 +2049,9 @@ it adds you as a reviewer if needed, posts your drafted comment alongside, and c
 you approve), **react** with emoji on the description and comments,
 edit its **labels**, **assignees**, and **reviewers** (request a review from a project
 member; on GitLab's free tier only one reviewer sticks, and the app tells you if others
-were dropped), track **time** on it (a clock summary in the
+were dropped; both pickers filter as you type and list the people already selected
+first, and a list that stops at its first 1,000 people says so), track **time** on it
+(a clock summary in the
 header opens a popover to set an estimate and log spent time), and **merge**
 it — merge or squash, optionally deleting
 the source branch, guarded so it never merges a head you didn't see (GitLab applies the project's
@@ -3343,7 +3345,8 @@ Once connected:
   delete-source-branch), **edit** the title/description (and **retarget** the destination
   branch), **approve/unapprove**, **request changes** (a true toggle — click again to
   revoke; approving also clears it), pick **reviewers** from your workspace members (the
-  PR author can't review their own PR, so they never appear), and flip **draft ↔ ready**
+  PR author can't review their own PR, so they never appear; the picker filters as you
+  type, and a list that stops at its first 500 people says so), and flip **draft ↔ ready**
   in either direction. Its
   **line-anchored review comments** render too — grouped by file in the conversation
   column and anchored in the Files diff (see *Review comments* under *Pull requests*) —

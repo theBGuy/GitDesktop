@@ -6686,8 +6686,48 @@ fn parse_member_page(stdout: &str) -> AppResult<Vec<GlabMember>> {
 /// paths). A miss is a picker-vs-submit race or a member past the walk's
 /// `USER_LIST_CEILING`, which the error then names.
 async fn resolve_assignee_ids(repo_path: &str, assignees: &[String]) -> AppResult<Vec<u64>> {
-    let (members, truncated) = project_members(repo_path).await?;
+    let enc = encode_project(&project_path(repo_path).await?);
+    let (members, truncated) = walk_members_until_matched(assignees, |page| {
+        let endpoint = member_page_endpoint(&enc, page);
+        async move {
+            let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+            Ok(out.stdout_lossy())
+        }
+    })
+    .await?;
     assignee_ids_from(&members, truncated, assignees)
+}
+
+/// [`walk_members`] for a write: the same pages, bound and budget, but it stops at the
+/// first page after which every name in `wanted` has been read, so a write pays only
+/// for the pages its names need. The bool is "stopped at the page bound with a name
+/// still unmatched", the one case where the list may hold that name further on.
+async fn walk_members_until_matched<F, Fut>(
+    wanted: &[String],
+    mut fetch_stdout: F,
+) -> AppResult<(Vec<GlabMember>, bool)>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let mut missing: std::collections::HashSet<&str> = wanted.iter().map(String::as_str).collect();
+    let start = Instant::now();
+    let mut rows = Vec::new();
+    for page in 1..=crate::forge::USER_LIST_MAX_PAGES {
+        if page > 1 && start.elapsed() >= GLAB_NETWORK_TIMEOUT {
+            return Err(AppError::Timeout(GLAB_NETWORK_TIMEOUT.as_secs()));
+        }
+        let batch = parse_member_page(&fetch_stdout(page).await?)?;
+        let full = batch.len() >= crate::forge::USER_LIST_PAGE_SIZE;
+        for member in &batch {
+            missing.remove(member.username.as_str());
+        }
+        rows.extend(batch);
+        if missing.is_empty() || !full {
+            return Ok((rows, false));
+        }
+    }
+    Ok((rows, true))
 }
 
 fn assignee_ids_from(
@@ -11182,17 +11222,87 @@ mod tests {
         assert!(parse_member_page("not json").is_err());
     }
 
+    /// Canned member page `page` (1-based) of `sizes[page - 1]` rows, named `u<page>-<i>`.
+    fn canned_member_page(sizes: &[usize], page: usize) -> String {
+        let rows = sizes.get(page - 1).copied().unwrap_or(0);
+        let body: Vec<String> = (0..rows)
+            .map(|i| format!(r#"{{"id":{i},"username":"u{page}-{i}"}}"#))
+            .collect();
+        format!("[{}]", body.join(","))
+    }
+
     /// Walks canned member pages of `sizes[n]` rows each.
     async fn walk_canned_members(sizes: &[usize]) -> (Vec<GlabMember>, bool) {
         walk_members(|page| {
-            let rows = sizes.get(page - 1).copied().unwrap_or(0);
-            let body: Vec<String> = (0..rows)
-                .map(|i| format!(r#"{{"id":{i},"username":"u{page}-{i}"}}"#))
-                .collect();
-            async move { Ok(format!("[{}]", body.join(","))) }
+            let body = canned_member_page(sizes, page);
+            async move { Ok(body) }
         })
         .await
         .expect("walks")
+    }
+
+    /// The resolver's walk over canned pages, with the number of pages it requested.
+    async fn resolve_walk_canned(sizes: &[usize], wanted: &[&str]) -> (Vec<u64>, bool, usize) {
+        let wanted: Vec<String> = wanted.iter().map(|w| w.to_string()).collect();
+        let requests = std::cell::Cell::new(0);
+        let (members, truncated) = walk_members_until_matched(&wanted, |page| {
+            requests.set(requests.get() + 1);
+            let body = canned_member_page(sizes, page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks");
+        let ids = members.iter().map(|m| m.id).collect();
+        (ids, truncated, requests.get())
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_resolver_walk_stops_at_the_last_requested_name() {
+        let full = [100; 12];
+        // Control: the picker's full walk over the same pages requests every page.
+        let requests = std::cell::Cell::new(0);
+        walk_members(|page| {
+            requests.set(requests.get() + 1);
+            let body = canned_member_page(&full, page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks");
+        assert_eq!(requests.get(), crate::forge::USER_LIST_MAX_PAGES);
+
+        let (ids, truncated, requests) = resolve_walk_canned(&full, &["u3-40", "u1-2"]).await;
+        assert_eq!((ids.len(), truncated, requests), (300, false, 3));
+
+        // A short page ends the list, matched or not.
+        let (_, truncated, requests) = resolve_walk_canned(&[100, 7, 100], &["ghost"]).await;
+        assert_eq!((truncated, requests), (false, 2));
+    }
+
+    /// A name past the cap still reaches the resolver as a miss on a cut list.
+    #[tokio::test]
+    async fn forge_user_list_resolver_walk_reports_a_miss_past_the_cap() {
+        let (_, truncated, requests) = resolve_walk_canned(&[100; 12], &["u1-0", "u11-0"]).await;
+        assert_eq!(
+            (truncated, requests),
+            (true, crate::forge::USER_LIST_MAX_PAGES)
+        );
+
+        let wanted: Vec<String> = vec!["u1-0".into(), "u11-0".into()];
+        let (members, truncated) = walk_members_until_matched(&wanted, |page| {
+            let body = canned_member_page(&[100; 12], page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks");
+        let err = assignee_ids_from(&members, truncated, &wanted).expect_err("the miss fails");
+        assert_eq!(
+            err.to_string(),
+            AppError::Glab(
+                "could not match u11-0 to GitLab project members; the member list stops at the first 1000"
+                    .into()
+            )
+            .to_string()
+        );
     }
 
     #[tokio::test]

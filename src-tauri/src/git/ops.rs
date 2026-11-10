@@ -4653,18 +4653,21 @@ async fn merge_worktree_roots(
     ])
 }
 
-/// [`check_update_worktree`] over every root in `roots`: the merge mints the same
-/// `gd-resolve-<id>` leaf the update does. Registered under any root wins, then
-/// Unregistered; Foreign only when no root claims the path.
+/// [`check_resolve_worktree`] over every root in `roots`: the merge mints the same
+/// `gd-resolve-<id>` leaf the update does, but also accepts the full lower-case uuid
+/// older builds minted, since a merge paused under one of those still has to finish or
+/// abort. Registered under any root wins, then Unregistered; Foreign only when no root
+/// claims the path.
 async fn check_merge_worktree(
     repo_path: &str,
     roots: &[std::path::PathBuf],
     worktree_path: &str,
     worktree_id: &str,
 ) -> AppResult<UpdateWorktree> {
+    let id_ok: fn(&str) -> bool = |id| is_resolve_leaf_id(id) || is_legacy_resolve_id(id);
     let mut place = UpdateWorktree::Foreign;
     for root in roots {
-        match check_update_worktree(repo_path, root, worktree_path, worktree_id).await? {
+        match check_resolve_worktree(repo_path, root, worktree_path, worktree_id, id_ok).await? {
             UpdateWorktree::Registered => return Ok(UpdateWorktree::Registered),
             UpdateWorktree::Unregistered => place = UpdateWorktree::Unregistered,
             UpdateWorktree::Foreign => {}
@@ -5169,17 +5172,36 @@ enum UpdateWorktree {
     Foreign,
 }
 
-/// Classifies `worktree_path`: `Foreign` unless `worktree_id` is 12 lower-case hex and
-/// the path is `<root>/gd-resolve-<id>`. ONE spelling must give both the shape and the
-/// registry membership. A leaf that exists must RESOLVE to the minted name under the
-/// resolved root (aliases of the root pass), since a link at a registered path would
-/// lend its registration to whatever checkout it points at; the spelled-path fallback
-/// is only for a leaf that no longer exists. Err only when the registry read fails.
+/// [`check_resolve_worktree`] for an update's leaf, whose id is always 12 lower-case hex
+/// (updates never minted the older uuid form the merge still accepts).
 async fn check_update_worktree(
     repo_path: &str,
     root: &Path,
     worktree_path: &str,
     worktree_id: &str,
+) -> AppResult<UpdateWorktree> {
+    check_resolve_worktree(
+        repo_path,
+        root,
+        worktree_path,
+        worktree_id,
+        is_resolve_leaf_id,
+    )
+    .await
+}
+
+/// Classifies `worktree_path`: `Foreign` unless `id_ok` accepts `worktree_id` and the
+/// path is `<root>/gd-resolve-<id>`. ONE spelling must give both the shape and the
+/// registry membership. A leaf that exists must RESOLVE to the minted name under the
+/// resolved root (aliases of the root pass), since a link at a registered path would
+/// lend its registration to whatever checkout it points at; the spelled-path fallback
+/// is only for a leaf that no longer exists. Err only when the registry read fails.
+async fn check_resolve_worktree(
+    repo_path: &str,
+    root: &Path,
+    worktree_path: &str,
+    worktree_id: &str,
+    id_ok: fn(&str) -> bool,
 ) -> AppResult<UpdateWorktree> {
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     let root = root.to_string_lossy();
@@ -5193,9 +5215,10 @@ async fn check_update_worktree(
         spell(worktree_path) == format!("{}/gd-resolve-{worktree_id}", spell(&root))
     };
     let leaf = if exists {
-        is_existing_resolve_leaf(&root, worktree_path, worktree_id)
+        id_ok(worktree_id)
+            && resolves_to_leaf(&root, worktree_path, &format!("gd-resolve-{worktree_id}"))
     } else {
-        is_resolve_leaf_id(worktree_id) && spellings.iter().any(|&s| shaped(s))
+        id_ok(worktree_id) && spellings.iter().any(|&s| shaped(s))
     };
     if !leaf {
         return Ok(UpdateWorktree::Foreign);
@@ -5225,9 +5248,10 @@ fn is_resolve_leaf_id(id: &str) -> bool {
     id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The existing-leaf rule for a minted id: [`resolves_to_leaf`] at `<root>/gd-resolve-<id>`.
-fn is_existing_resolve_leaf(root: &str, path: &str, id: &str) -> bool {
-    is_resolve_leaf_id(id) && resolves_to_leaf(root, path, &format!("gd-resolve-{id}"))
+/// Whether `id` is the full lower-case hyphenated uuid older builds minted merge leaves
+/// with; only the merge's finish and abort still meet one.
+fn is_legacy_resolve_id(id: &str) -> bool {
+    id.len() == 36 && id == id.to_lowercase() && uuid::Uuid::parse_str(id).is_ok()
 }
 
 /// Whether `path` exists and RESOLVES to `<root>/<name>` under the resolved root. A link
@@ -22131,6 +22155,78 @@ detached
         assert_eq!(journal_entry(&repo, &op).await.status, "failed");
     }
 
+    /// Moves a paused merge's leaf to the full-uuid name older builds minted.
+    async fn legacy_merge_leaf(repo: &str, root: &Path, wt: &str) -> (String, String) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let legacy = root
+            .join(format!("gd-resolve-{id}"))
+            .to_string_lossy()
+            .into_owned();
+        git(repo, &["worktree", "move", wt, &legacy]).await;
+        (legacy, id)
+    }
+
+    /// A merge paused in a full-uuid leaf still finishes; the update path, which never
+    /// minted that form, refuses the same leaf.
+    #[tokio::test]
+    async fn local_pr_merge_finish_accepts_a_legacy_uuid_leaf() {
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-legacy-fin").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let (legacy, id) = legacy_merge_leaf(&repo, &root, &wt).await;
+        // Control: the update's own rule classifies the registered leaf as Foreign.
+        let place = check_update_worktree(&repo, &root, &legacy, &id)
+            .await
+            .unwrap();
+        assert_eq!(place, UpdateWorktree::Foreign);
+        std::fs::write(Path::new(&legacy).join("a.txt"), "resolved\n").unwrap();
+        git(&legacy, &["add", "a.txt"]).await;
+        let tip = rev(&repo, &base).await;
+
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "m",
+            &legacy,
+            &id,
+            roots,
+            Some(op.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.status, "merged");
+        assert_ne!(done.base_tip, tip);
+        assert_eq!(rev(&repo, &base).await, done.base_tip, "base advanced");
+        assert!(!Path::new(&legacy).exists(), "the leaf is removed");
+        assert_eq!(journal_entry(&repo, &op).await.status, "done");
+    }
+
+    /// Aborting a merge paused in a full-uuid leaf removes that leaf and closes the entry.
+    #[tokio::test]
+    async fn local_pr_merge_abort_removes_a_legacy_uuid_leaf() {
+        let (_dir, repo, _holder, root, _base, wt, op) = paused_local_merge("lpr-legacy-abt").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let (legacy, id) = legacy_merge_leaf(&repo, &root, &wt).await;
+        // Control: under the update's rule the leaf is Foreign, which removes nothing.
+        let place = check_update_worktree(&repo, &root, &legacy, &id)
+            .await
+            .unwrap();
+        assert_eq!(place, UpdateWorktree::Foreign);
+
+        let outcome = abort_local_pr_merge(&state, &repo, &legacy, roots, Some(&op)).await;
+        assert_eq!((outcome.removed, outcome.closed), (true, true));
+        assert!(!Path::new(&legacy).exists(), "the leaf is removed");
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        let name = format!("gd-resolve-{id}");
+        assert!(!lists_leaf(&listed, &root, &name), "{listed:?}");
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error.as_deref(), Some("aborted by user"));
+    }
+
     /// The registered leaf replaced by a link to a user's checkout keeps its registry
     /// entry, but resolves elsewhere: the finish refuses, and the abort removes nothing
     /// but still clears the record.
@@ -22614,11 +22710,10 @@ detached
         assert!(is_listed_worktree(&picked, &legacy), "{picked:?}");
         // Control: the minted-id rule `check_update_worktree` applies rejects it, so only
         // the sweep's own predicate can pick it.
-        assert!(!is_existing_resolve_leaf(
-            &root.to_string_lossy(),
-            &legacy,
-            id
-        ));
+        let place = check_update_worktree(&repo, &root, &legacy, id)
+            .await
+            .unwrap();
+        assert_eq!(place, UpdateWorktree::Foreign);
         let (targets, left) = sweep_resolve_leaves(&wt_base, &listed, &[]);
         assert!(
             is_listed_worktree(&targets, &legacy) && !left,

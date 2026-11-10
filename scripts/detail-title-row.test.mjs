@@ -188,8 +188,15 @@ test("a skeleton-holding title row never renders an empty heading", () => {
   // The PR and issue loading frames; zero sites would make the pin vacuous.
   assert.equal(sites.length, 2, sites.join(", "));
   const PR = "src/features/pulls/RemotePrView.tsx";
+  const ISSUE = "src/features/issues/RemoteIssueViewParts.tsx";
   const anchor = 'headingAs={title === undefined ? "div" : "h2"}';
   assert.equal(CORPUS.get(PR).split(anchor).length, 2, "the PR frame's arm");
+  // A cached title is a heading: the frame switches to h2 the moment it has one.
+  assert.equal(
+    CORPUS.get(ISSUE).split(anchor).length,
+    2,
+    "the issue frame's arm",
+  );
   const dropped = new Map([
     ...CORPUS,
     [PR, CORPUS.get(PR).replace(anchor, "")],

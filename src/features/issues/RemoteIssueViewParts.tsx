@@ -1144,7 +1144,7 @@ export function IssueLoadingFrame({
           around the same actions, and the meta row is its avatar's 24px. */}
       <header className="space-y-2 border-b px-4 py-3">
         <DetailTitleRow
-          headingAs="div"
+          headingAs={title === undefined ? "div" : "h2"}
           heading={
             title === undefined ? (
               <Skeleton

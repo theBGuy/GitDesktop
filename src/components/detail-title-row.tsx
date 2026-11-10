@@ -12,7 +12,8 @@ export function DetailTitleRow({
 }: {
   /** The heading's content: text plus the #number or key span. */
   heading: ReactNode;
-  /** "h2" on loaded headers (default); the issue loading shell keeps its "div". */
+  /** `div` while a loading frame's heading holds only its skeleton (the PR and issue
+   *  loading frames); `h2` otherwise (default). */
   headingAs?: "h2" | "div";
   /** View-owned classes merged after the layout classes (Jira's fade). */
   headingClassName?: string;
