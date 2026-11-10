@@ -151,12 +151,13 @@ and updating it afterward takes a force push. And if someone force-pushed
 the branch you're pulling, [a rebasing pull can drop a commit you'd
 already pushed there](/blog/pull-rebase-deleted-your-commit/).
 
-Rebasing does have one cost for work that never left your clone: it flattens
-merge commits, such as the ones an earlier `git pull` made, and replays
-only ordinary commits. A merge's conflict resolutions usually come back
-as conflicts to redo. They don't when the server already has your commits
-through someone else's merge: that merge's resolution silently replaces
-yours. Anything else you added to a merge commit disappears without warning.
+Rebasing does have one cost for work that never left your clone: it
+flattens merge commits, such as the ones an earlier `git pull` made,
+and replays only ordinary commits. A merge's conflict resolutions can
+come back as conflicts to redo. They can also vanish without a conflict
+when the server already has your change, either through someone else's
+merge or as the same edit; the upstream version then replaces yours.
+Anything else you added to a merge commit disappears without warning.
 `git log --oneline --merges origin/main..`, with your own upstream in place
 of `origin/main`, lists any such merges before you start rebasing your
 pulls. If one carries changes of its own, merge this time instead; even
