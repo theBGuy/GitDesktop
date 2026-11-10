@@ -266,6 +266,7 @@ const binaryMarker = scanner("binary-marker-single-source");
 const nullFallback = scanner("null-suspense-fallback");
 const preparingSlotHide = scanner("preparing-slot-hide");
 const bareGroupLabel = scanner("bare-group-label");
+const unnamedRadioGroup = scanner("unnamed-radio-group");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
 const titledBadge = scanner("titled-badge");
@@ -2678,6 +2679,39 @@ test("bare-group-label allowlists whole files, and exempts vendored ui", () => {
   assert.deepEqual(violations, [
     "src/features/repo-settings/PagesSection.tsx:1",
   ]);
+});
+
+test("unnamed-radio-group flags a RadioGroup with neither aria name", () => {
+  for (const source of [
+    "<RadioGroup value={v} onValueChange={setV}>",
+    '<RadioGroup className="flex gap-2">',
+    // A split open tag, and a handler's arrow ahead of where a name would be.
+    "<RadioGroup\n  value={v}\n  onValueChange={(next) => setV(next)}\n>",
+    // A title or a visible caption beside it names nothing.
+    '<RadioGroup title="Merge method" value={v}>',
+    "<RadioGroup />",
+  ])
+    assert.deepEqual(unnamedRadioGroup(source), [1], `should flag ${source}`);
+});
+
+test("unnamed-radio-group leaves named groups and other tags alone", () => {
+  for (const source of [
+    "<RadioGroup aria-labelledby={displayId} value={v}>",
+    '<RadioGroup aria-label="Merge method">',
+    // A name after a handler's arrow still counts.
+    "<RadioGroup\n  onValueChange={(next) => setV(next)}\n  aria-labelledby={id}\n>",
+    // Items and other components sharing the prefix are not the group.
+    '<RadioGroupItem value="a" />',
+    "<RadioGroupPrimitive.Root />",
+  ])
+    assert.deepEqual(unnamedRadioGroup(source), [], `should ignore ${source}`);
+  assert.deepEqual(
+    unnamedRadioGroup("// a bare `<RadioGroup>` announces no name"),
+    [],
+  );
+  const check = CHECKS.find((c) => c.name === "unnamed-radio-group");
+  assert.equal(check.appliesTo("src/components/ui/radio-group.tsx"), false);
+  assert.equal(check.appliesTo("src/features/diff/DiffSurface.tsx"), true);
 });
 
 test("unguarded-binding-dispatcher flags a swallowing dispatch with no guard", () => {

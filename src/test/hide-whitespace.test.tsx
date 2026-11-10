@@ -28,12 +28,14 @@ import { DiffViewer } from "@/features/diff/DiffViewer";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { StagingSide } from "@/features/diff/undecodable-note";
 import {
+  LAYOUT_COMPOSER_HELD,
   WHITESPACE_ANNOUNCEMENT,
   WHITESPACE_COMPOSER_HELD,
   WHITESPACE_ONLY_MESSAGE,
   WHITESPACE_SHEET_STAGING_NOTE,
   WHITESPACE_STRIP_COPY,
 } from "@/features/diff/whitespace-mode";
+import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import { toDraft } from "@/features/settings/settings-form";
 import {
   gitBlobSizes,
@@ -496,7 +498,7 @@ describe("the Diff options sheet", () => {
     const gear = await gearNamed("Diff options");
     const scroller = container.querySelector(".overflow-auto");
     const composer = document.createElement("div");
-    composer.setAttribute("data-diff-line-widget", "");
+    composer.setAttribute("data-diff-line-widget", "whitespace");
     scroller?.append(composer);
     await user.click(gear);
     const held = await screen.findByRole("checkbox");
@@ -527,6 +529,219 @@ describe("the Diff options sheet", () => {
     await waitFor(() =>
       expect(flips()).toEqual([{ diffHideWhitespace: true }]),
     );
+  });
+
+  /** A stand-in line composer in the pane's scroller, as the widget renders
+   *  on a host with a whitespace mode. */
+  const openComposer = (container: HTMLElement) => {
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", "whitespace");
+    container.querySelector(".overflow-auto")?.append(composer);
+    return composer;
+  };
+
+  it("holds the layout radios and the palette flip while a line composer is open", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const { container } = render(<SurfaceHarness />, {
+      wrapper: wrap(newClient(false)),
+    });
+    const gear = await gearNamed("Diff options");
+    const composer = openComposer(container);
+    // The palette route probes at fire time.
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+    expect(modeWrites()).toEqual([]);
+    await user.click(gear);
+    const group = await screen.findByRole("radiogroup", {
+      name: "Diff display",
+    });
+    expect(group.getAttribute("aria-readonly")).toBe("true");
+    for (const name of ["Unified", "Split"] as const) {
+      const held = radio(name);
+      expect(held.getAttribute("data-readonly")).not.toBeNull();
+      expect(description(held)).toBe(LAYOUT_COMPOSER_HELD);
+      const label = screen.getByText(name);
+      expect(label.closest("[title]")?.getAttribute("title")).toBe(
+        LAYOUT_COMPOSER_HELD,
+      );
+      expect(label.classList.contains("opacity-50")).toBe(true);
+    }
+    await user.click(radio("Split"));
+    act(() => radio("Unified").focus());
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard(" ");
+    expect(radio("Unified").getAttribute("aria-checked")).toBe("true");
+    expect(modeWrites()).toEqual([]);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("radiogroup")).toBeNull());
+    composer.remove();
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+    await user.click(gear);
+    const freed = await screen.findByRole("radiogroup");
+    expect(freed.getAttribute("aria-readonly")).toBeNull();
+    expect(radio("Unified").getAttribute("data-readonly")).toBeNull();
+    expect(description(radio("Unified"))).toBe("");
+    await user.click(radio("Unified"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split", "unified"]));
+  });
+
+  it("a narrow pane's reason wins on Split while a composer holds the radios", async () => {
+    const user = userEvent.setup();
+    pane.width = SPLIT_MIN_CONTAINER_PX - 1;
+    const { container } = render(<SurfaceHarness />, {
+      wrapper: wrap(newClient(false)),
+    });
+    const gear = await gearNamed("Diff options");
+    openComposer(container);
+    await user.click(gear);
+    const group = await screen.findByRole("radiogroup");
+    expect(group.getAttribute("aria-readonly")).toBe("true");
+    expect(description(radio("Split"))).toBe("Pane too narrow for split view");
+    expect(description(radio("Unified"))).toBe(LAYOUT_COMPOSER_HELD);
+  });
+
+  /** A stand-in line composer outside this host, as a hidden tab's stays
+   *  mounted under <Activity>: "whitespace" on a host with a whitespace mode
+   *  (a commit), "layout" on a forge PR's fixed patch. */
+  const openComposerElsewhere = (
+    kind: "whitespace" | "layout" = "whitespace",
+  ) => {
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", kind);
+    document.body.append(composer);
+    return composer;
+  };
+
+  /** Both palette flips refuse with their toasts, and the open sheet holds
+   *  every control, the radiogroup read-only as a whole. */
+  async function expectComposerHold(
+    user: ReturnType<typeof userEvent.setup>,
+    gear: HTMLElement,
+  ) {
+    const info = vi.spyOn(toast, "info");
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    act(() => void dispatchAction("toggle-hide-whitespace"));
+    expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+    expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    await user.click(gear);
+    const group = await screen.findByRole("radiogroup", {
+      name: "Diff display",
+    });
+    expect(group.getAttribute("aria-readonly")).toBe("true");
+    expect(sheetBox().getAttribute("aria-disabled")).toBe("true");
+    expect(description(sheetBox())).toContain(WHITESPACE_COMPOSER_HELD);
+    for (const name of ["Unified", "Split"] as const)
+      expect(description(radio(name))).toBe(LAYOUT_COMPOSER_HELD);
+    await user.click(radio("Split"));
+    await user.click(sheetBox());
+    expect(modeWrites()).toEqual([]);
+    expect(flips()).toEqual([]);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("radiogroup")).toBeNull());
+  }
+
+  it("a composer open in another view holds a DiffSurface host's flips", async () => {
+    const user = userEvent.setup();
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    const gear = await gearNamed("Diff options");
+    const composer = openComposerElsewhere();
+    try {
+      await expectComposerHold(user, gear);
+    } finally {
+      composer.remove();
+    }
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+  });
+
+  it("a composer open in another view holds the staging host's flips", async () => {
+    const user = userEvent.setup();
+    changes(false, () => diffOf(TEXT));
+    await screen.findByText(/Drag across the line numbers to/);
+    const gear = await gearNamed("Diff options");
+    const composer = openComposerElsewhere();
+    try {
+      await expectComposerHold(user, gear);
+    } finally {
+      composer.remove();
+    }
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+  });
+
+  it("a PR composer elsewhere holds only the layout flips of a DiffSurface host", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    const gear = await gearNamed("Diff options");
+    const composer = openComposerElsewhere("layout");
+    try {
+      act(() => void dispatchAction("toggle-diff-view-mode"));
+      expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+      expect(modeWrites()).toEqual([]);
+      await user.click(gear);
+      const group = await screen.findByRole("radiogroup", {
+        name: "Diff display",
+      });
+      expect(group.getAttribute("aria-readonly")).toBe("true");
+      for (const name of ["Unified", "Split"] as const)
+        expect(description(radio(name))).toBe(LAYOUT_COMPOSER_HELD);
+      await user.click(radio("Split"));
+      expect(modeWrites()).toEqual([]);
+      const box = sheetBox();
+      expect(box.getAttribute("aria-disabled")).toBeNull();
+      expect(description(box)).not.toContain(WHITESPACE_COMPOSER_HELD);
+      await user.click(box);
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: true }]),
+      );
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("radiogroup")).toBeNull());
+      act(() => void dispatchAction("toggle-hide-whitespace"));
+      await waitFor(() =>
+        expect(flips()).toEqual([
+          { diffHideWhitespace: true },
+          { diffHideWhitespace: false },
+        ]),
+      );
+      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("a PR composer elsewhere never holds the staging strip's Show whitespace", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    changes(true, () => diffOf(TEXT));
+    await screen.findByText(WHITESPACE_STRIP_COPY.unstaged);
+    const composer = openComposerElsewhere("layout");
+    try {
+      await user.click(screen.getByRole("button", { name: "Show whitespace" }));
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+      );
+      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("the staging strip's Show whitespace refuses while a composer is open elsewhere", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    changes(true, () => diffOf(TEXT));
+    await screen.findByText(WHITESPACE_STRIP_COPY.unstaged);
+    const composer = openComposerElsewhere();
+    try {
+      await user.click(screen.getByRole("button", { name: "Show whitespace" }));
+      expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+      expect(flips()).toEqual([]);
+    } finally {
+      composer.remove();
+    }
   });
 
   it("the layout radios follow the preference and write the pick", async () => {
@@ -563,7 +778,9 @@ describe("the Diff options sheet", () => {
     client.setQueryData(settingsKeys.settings, stored);
     const { unmount } = render(<SurfaceHarness />, { wrapper: wrap(client) });
     await user.click(await gearNamed("Diff options"));
-    await screen.findByRole("radiogroup");
+    const group = await screen.findByRole("radiogroup");
+    // Unified stays a pick, so the group as a whole isn't read-only.
+    expect(group.getAttribute("aria-readonly")).toBeNull();
     const split = radio("Split");
     expect(radio("Unified").getAttribute("aria-checked")).toBe("true");
     expect(split.getAttribute("aria-checked")).toBe("false");
@@ -1551,5 +1768,58 @@ describe("the layout action off a laid-out diff", () => {
     await waitFor(() => expect(modeWrites()).toEqual(["split"]));
     await waitFor(() => expect(stored.diffViewMode).toBe("split"));
     expect(modeWrites()).toEqual(["split"]);
+  });
+});
+
+describe("an agent transcript's inline diff", () => {
+  /** A whitespace-only edit step, opened, with the mode on. */
+  async function openStep(user: ReturnType<typeof userEvent.setup>) {
+    vi.mocked(gitSessionFileDiff).mockImplementation(
+      async (...args: unknown[]) => diffOf(args.at(-1) === true ? "" : TEXT),
+    );
+    render(
+      <AgentTranscript
+        segments={[{ type: "tool", tool: "edit", target: "/repo/x" }]}
+        baseDir="/repo"
+        editDiffBase="b"
+      />,
+      { wrapper: wrap(newClient(true)) },
+    );
+    await user.click(screen.getByRole("button", { expanded: false }));
+    return screen.findByRole("button", { name: "Show whitespace" });
+  }
+
+  it("Show whitespace refuses while a composer on a whitespace diff is open", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const show = await openStep(user);
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", "whitespace");
+    document.body.append(composer);
+    try {
+      await user.click(show);
+      expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+      expect(flips()).toEqual([]);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("Show whitespace flips past a composer on a PR's fixed patch", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const show = await openStep(user);
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", "layout");
+    document.body.append(composer);
+    try {
+      await user.click(show);
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+      );
+      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    } finally {
+      composer.remove();
+    }
   });
 });

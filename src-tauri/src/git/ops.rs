@@ -918,16 +918,25 @@ pub async fn git_discard_untracked_lines(
     state: State<'_, AppState>,
     repo_path: String,
     path: String,
-    lines: Vec<u32>,
+    lines: Vec<DiscardLine>,
 ) -> AppResult<()> {
     git_discard_untracked_lines_core(&state, repo_path, path, lines).await
+}
+
+/// One line an untracked-file discard removes: its 1-based number and the text
+/// the diff showed there, without the line terminator.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardLine {
+    pub line: u32,
+    pub text: String,
 }
 
 pub(crate) async fn git_discard_untracked_lines_core(
     state: &AppState,
     repo_path: String,
     path: String,
-    lines: Vec<u32>,
+    lines: Vec<DiscardLine>,
 ) -> AppResult<()> {
     if lines.is_empty() {
         return Err(AppError::InvalidArgument("no lines selected".into()));
@@ -951,13 +960,50 @@ pub(crate) async fn git_discard_untracked_lines_core(
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "no verbatim form")
         })?;
         let content = std::fs::read_to_string(&full)?;
-        let drop: std::collections::HashSet<u32> = lines.into_iter().collect();
+        // Numbers alone would delete whatever moved onto them since the diff was
+        // read, from a file git can't restore: every target must still hold its
+        // text, or nothing is written.
+        if !lines_still_match(&content, &lines) {
+            return Err(line_discard_refusal(&path, DISCARD_STALE));
+        }
+        let drop: std::collections::HashSet<u32> = lines.iter().map(|l| l.line).collect();
         std::fs::write(&full, remove_lines(&content, &drop))?;
         Ok(())
     })
     .await
     .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
     Ok(())
+}
+
+/// Whether each target line exists and holds its expected text. The disk line's
+/// body is compared exactly; the expected text may carry one extra trailing CR
+/// only where that CR is the line's own CRLF terminator, as the diff shows it.
+/// A leading BOM on line 1 is ignored on both sides, since the diff's decoding
+/// may drop it.
+fn lines_still_match(content: &str, lines: &[DiscardLine]) -> bool {
+    let existing: Vec<&str> = content.split_inclusive('\n').collect();
+    let unbom = |text: &str, first: bool| -> String {
+        if first {
+            text.strip_prefix('\u{feff}').unwrap_or(text).to_string()
+        } else {
+            text.to_string()
+        }
+    };
+    lines.iter().all(|want| {
+        let Some(index) = (want.line as usize).checked_sub(1) else {
+            return false;
+        };
+        let Some(have) = existing.get(index) else {
+            return false;
+        };
+        let (have_body, have_eol) = split_line_ending(have);
+        let have_body = unbom(have_body, index == 0);
+        let want_body = unbom(
+            want.text.strip_suffix('\n').unwrap_or(&want.text),
+            index == 0,
+        );
+        want_body == have_body || (have_eol == "\r\n" && want_body == have_body + "\r")
+    })
 }
 
 /// Removes the given 1-based line numbers from `content`, keeping every other
@@ -2085,6 +2131,8 @@ const DISCARD_GIT_DIR: &str = "it's inside the repository's .git folder";
 pub(crate) const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
 const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and try again";
 const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try again";
+const DISCARD_STALE: &str =
+    "it changed since the diff was shown, so review the refreshed diff and try again";
 const DISCARD_WIN_TRAILING: &str =
     "Windows reads a name ending in a dot or space as a different path";
 const DISCARD_WIN_SHELL_FOLDER: &str = "Windows treats a name ending in .{GUID} as a shell link";
@@ -20369,7 +20417,7 @@ detached
         let discard = {
             let state = state.clone();
             tokio::spawn(async move {
-                git_discard_untracked_lines_core(&state, repo, "untracked.txt".into(), vec![2])
+                git_discard_untracked_lines_core(&state, repo, "untracked.txt".into(), dl(2, "2"))
                     .await
             })
         };
@@ -20701,7 +20749,7 @@ detached
         let full = crate::fsops::verbatim_path(&dir.path().join("nul.txt")).unwrap();
         std::fs::write(&full, b"1\r\n2\r\n3").unwrap();
         assert!(untracked_paths(&repo).await.unwrap().contains("nul.txt"));
-        git_discard_untracked_lines_core(&AppState::default(), repo, "nul.txt".into(), vec![2])
+        git_discard_untracked_lines_core(&AppState::default(), repo, "nul.txt".into(), dl(2, "2"))
             .await
             .unwrap();
         assert_eq!(std::fs::read(&full).unwrap(), b"1\r\n3");
@@ -20862,7 +20910,7 @@ detached
                 &AppState::default(),
                 repo.clone(),
                 path.into(),
-                vec![1],
+                dl(1, "precious"),
             )
             .await
             .unwrap_err();
@@ -20887,10 +20935,99 @@ detached
         let (dir, repo) = setup_repo("discard-lines-content").await;
         discard_pin_excludes(&repo, dir.path()).await;
         std::fs::write(dir.path().join("n.txt"), "1\r\n2\r\n3").unwrap();
-        git_discard_untracked_lines_core(&AppState::default(), repo, "n.txt".into(), vec![2])
+        git_discard_untracked_lines_core(&AppState::default(), repo, "n.txt".into(), dl(2, "2"))
             .await
             .unwrap();
         assert_eq!(std::fs::read(dir.path().join("n.txt")).unwrap(), b"1\r\n3");
+    }
+
+    fn dl(line: u32, text: &str) -> Vec<DiscardLine> {
+        vec![DiscardLine {
+            line,
+            text: text.into(),
+        }]
+    }
+
+    #[test]
+    fn discard_line_reads_the_camel_case_wire_shape() {
+        let lines: Vec<DiscardLine> = serde_json::from_str(r#"[{"line":2,"text":"b"}]"#).unwrap();
+        assert_eq!((lines[0].line, lines[0].text.as_str()), (2, "b"));
+    }
+
+    /// Each stale shape refuses the whole discard and leaves the file's bytes as
+    /// they were; the matching shapes remove exactly their lines.
+    #[tokio::test]
+    async fn discard_untracked_lines_checks_each_line_still_holds_its_text() {
+        let (dir, repo) = setup_repo("discard-lines-verify").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let file = dir.path().join("v.txt");
+        let stale =
+            format!("Can't discard lines from v.txt — {DISCARD_STALE}. Nothing was changed.");
+        let two = |a: (u32, &str), b: (u32, &str)| {
+            vec![
+                DiscardLine {
+                    line: a.0,
+                    text: a.1.into(),
+                },
+                DiscardLine {
+                    line: b.0,
+                    text: b.1.into(),
+                },
+            ]
+        };
+        let refused: [(&[u8], Vec<DiscardLine>); 8] = [
+            // A line inserted above the target moved "b" off line 2.
+            (b"x\na\nb\nc\n", dl(2, "b")),
+            // Past the end of the file.
+            (b"a\nb\nc\n", dl(4, "c")),
+            (b"a\nb\nc", dl(0, "a")),
+            // One of two targets went stale: nothing is removed.
+            (b"a\nb\nc\n", two((1, "a"), (3, "C"))),
+            // A whitespace-only edit is still an edit.
+            (b"a\nb \nc\n", dl(2, "b")),
+            (b"a\n\tb\nc\n", dl(2, "b")),
+            // A CR in the content is never read as the terminator's.
+            (b"a\nb\r\r\n", dl(2, "b")),
+            // A CR that isn't this line's CRLF terminator.
+            (b"a\nb\n", dl(2, "b\r")),
+        ];
+        for (before, lines) in refused {
+            std::fs::write(&file, before).unwrap();
+            let error = git_discard_untracked_lines_core(
+                &AppState::default(),
+                repo.clone(),
+                "v.txt".into(),
+                lines,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(discard_message(error), stale);
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+        }
+        let removed: [(&[u8], Vec<DiscardLine>, &[u8]); 8] = [
+            (b"a\nb\nc\n", dl(2, "b"), b"a\nc\n"),
+            // CRLF on disk against the diff's terminator-free text, either way.
+            (b"a\r\nb\r\nc", dl(2, "b"), b"a\r\nc"),
+            (b"a\r\nb\r\nc", dl(2, "b\r"), b"a\r\nc"),
+            (b"a\nb\nc", dl(3, "c"), b"a\nb\n"),
+            (b"\xef\xbb\xbfa\nb\n", dl(1, "a"), b"b\n"),
+            (b"a\nb\nc\n", two((1, "a"), (3, "c")), b"b\n"),
+            // The diff's payload for a content CR before a CRLF terminator.
+            (b"a\nb\r\r\n", dl(2, "b\r\r"), b"a\n"),
+            (b"a\nb\r\n", dl(2, "b\r"), b"a\n"),
+        ];
+        for (before, lines, after) in removed {
+            std::fs::write(&file, before).unwrap();
+            git_discard_untracked_lines_core(
+                &AppState::default(),
+                repo.clone(),
+                "v.txt".into(),
+                lines,
+            )
+            .await
+            .unwrap();
+            assert_eq!(std::fs::read(&file).unwrap(), after);
+        }
     }
 
     #[cfg(unix)]
@@ -20902,10 +21039,14 @@ detached
         let victim = outside.path().join("victim.txt");
         std::fs::write(&victim, "precious\n").unwrap();
         std::os::unix::fs::symlink(&victim, dir.path().join("link")).unwrap();
-        let error =
-            git_discard_untracked_lines_core(&AppState::default(), repo, "link".into(), vec![1])
-                .await
-                .unwrap_err();
+        let error = git_discard_untracked_lines_core(
+            &AppState::default(),
+            repo,
+            "link".into(),
+            dl(1, "precious"),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(discard_message(error), "Can't discard lines from link — it's reached through a symbolic link or junction. Nothing was changed.");
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
     }
@@ -20924,7 +21065,7 @@ detached
             &AppState::default(),
             repo,
             "link/victim.txt".into(),
-            vec![1],
+            dl(1, "precious"),
         )
         .await
         .unwrap_err();

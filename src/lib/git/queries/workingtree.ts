@@ -475,7 +475,7 @@ export function useApplyPartial(repo: string) {
 export function useDiscardUntrackedLines(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { path: string; lines: number[] }) =>
+    (args: { path: string; lines: api.DiscardLine[] }) =>
       api.gitDiscardUntrackedLines(repo, args.path, args.lines),
     {
       invalidate: workingTreeKeys(repo),

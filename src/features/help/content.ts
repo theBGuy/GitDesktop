@@ -663,7 +663,9 @@ the last list up, with a line above it saying it couldn't refresh.
   view; {{key:escape}} or a click outside closes it. *Use unified or split diff* in the command
   palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
   the layout too while a diff is on screen and wide enough for split, though not
-  during a line selection, a discard confirmation or Markdown preview.
+  during a line selection, a discard confirmation or Markdown preview. While you're
+  writing a line comment, Unified and Split stay locked until you finish or close
+  it, so the draft isn't lost.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hovering the sheet's **Split** option shows why, and screen readers read the reason
   with it. Your preference is kept either way, so widening the pane brings the split
@@ -679,7 +681,9 @@ the last list up, with a line above it saying it couldn't refresh.
   only changes are whitespace says so. The line counts in file lists keep counting
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
-  flips it too. Diffs of pull requests on a forge always show whitespace.
+  flips it too. While you're writing a line comment on one of these diffs, it stays
+  locked until you finish or close the comment, so the draft isn't lost. Diffs of pull
+  requests on a forge always show whitespace.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both

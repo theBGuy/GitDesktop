@@ -154,10 +154,13 @@ import {
 } from "./use-hidden-trigger-focus";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
 import {
+  LAYOUT_COMPOSER_HELD,
+  lineComposerOpen,
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_COMPOSER_HELD,
   WHITESPACE_ONLY_MESSAGE,
   WHITESPACE_SHEET_STAGING_NOTE,
+  whitespaceComposerOpen,
 } from "./whitespace-mode";
 
 /**
@@ -337,6 +340,7 @@ export function GitDiffView({
   forceUnified,
   revealLanding,
   scrollerRef,
+  rebuildsOnWhitespace,
 }: {
   filePath: string;
   /** The path the old side's whole-file read uses (a rename's source).
@@ -360,6 +364,10 @@ export function GitDiffView({
   /** The host's scroller, whose top visible line a split/unified switch or a
    *  Show full diff expand keeps. Omitted = no restore. */
   scrollerRef?: { readonly current: HTMLElement | null };
+  /** The host re-reads this diff on a whitespace flip (DiffContent's
+   *  `whitespaceControl`), so an open composer holds that flip as well as a
+   *  layout one. Omitted = a fixed patch only a layout flip rebuilds. */
+  rebuildsOnWhitespace?: boolean;
 }) {
   const sinkRef = useRef<HTMLSpanElement>(null);
   return (
@@ -380,6 +388,7 @@ export function GitDiffView({
           forceUnified={forceUnified}
           revealLanding={revealLanding ?? sinkRef}
           scrollerRef={scrollerRef}
+          rebuildsOnWhitespace={rebuildsOnWhitespace}
         />
       </DiffErrorBoundary>
     </>
@@ -1125,6 +1134,7 @@ function RenderedDiff({
   forceUnified,
   revealLanding,
   scrollerRef,
+  rebuildsOnWhitespace = false,
 }: {
   filePath: string;
   oldPath?: string;
@@ -1136,6 +1146,7 @@ function RenderedDiff({
   forceUnified?: boolean;
   revealLanding?: { readonly current: HTMLElement | null };
   scrollerRef?: { readonly current: HTMLElement | null };
+  rebuildsOnWhitespace?: boolean;
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
@@ -1522,8 +1533,12 @@ function RenderedDiff({
         // The slot renders under the CLICKED line, not the range's end line — a
         // base-library limitation; the composer's "Lines X–Y" label carries the
         // true anchor.
+        //
+        // The attribute's value tells the two composer probes apart
+        // (whitespace-mode.ts): every composer holds a layout flip, only a
+        // "whitespace" one a whitespace flip.
         <div
-          data-diff-line-widget
+          data-diff-line-widget={rebuildsOnWhitespace ? "whitespace" : "layout"}
           className="m-2 rounded-none border bg-popover p-3 font-sans text-xs text-popover-foreground shadow-md"
         >
           {lineWidget.render({
@@ -1544,7 +1559,7 @@ function RenderedDiff({
         </div>
       );
     },
-    [lineWidget, resolveWidgetRange, syncPreselect],
+    [lineWidget, resolveWidgetRange, syncPreselect, rebuildsOnWhitespace],
   );
 
   // Inside a diff-pane slot, settle waits for THIS diffFile's first row: the
@@ -1820,9 +1835,6 @@ export function DiffOptionsSheet({
    *  and the hidden-state name are all absent too. */
   whitespace?: {
     onToggle: (next: boolean) => void;
-    /** Read once per open: true holds the checkbox with
-     *  WHITESPACE_COMPOSER_HELD as its reason. Omitted, never held. */
-    composerOpen?: () => boolean;
     /** Runs on each open, before any flip: a host whose flip would swap its
      *  arm while the other mode loads warms that read here. */
     onOpen?: () => void;
@@ -1832,22 +1844,30 @@ export function DiffOptionsSheet({
 }) {
   const hidden = useHideWhitespace();
   const mode = useDiffViewMode(splitDisabled);
-  // A composer can't open or close while focus is in the sheet, so the open
-  // transition's read holds for the whole open.
-  const [composerHeld, setComposerHeld] = useState(false);
+  // An open line composer holds the radios wherever it is (`lineComposerOpen`)
+  // and the checkbox only on a diff a whitespace flip re-reads
+  // (`whitespaceComposerOpen`). One can't open or close while focus is in the
+  // sheet, so the read on open holds.
+  const [held, setHeld] = useState({ whitespace: false, layout: false });
   const noteId = useId();
   const stagingNote =
     stagingSide === undefined
       ? undefined
       : WHITESPACE_SHEET_STAGING_NOTE[stagingSide];
   const wsHold = useDisabledReason({
-    disabled: composerHeld,
+    disabled: held.whitespace,
     reason: WHITESPACE_COMPOSER_HELD,
     describedBy: stagingNote === undefined ? undefined : noteId,
   });
+  const unifiedHold = useDisabledReason({
+    disabled: held.layout,
+    reason: LAYOUT_COMPOSER_HELD,
+  });
+  // The narrow pane's reason wins on Split: closing the composer still
+  // wouldn't offer it.
   const splitHold = useDisabledReason({
-    disabled: splitDisabled,
-    reason: SPLIT_NARROW_REASON,
+    disabled: splitDisabled || held.layout,
+    reason: splitDisabled ? SPLIT_NARROW_REASON : LAYOUT_COMPOSER_HELD,
   });
   const checkboxId = useId();
   const unifiedId = useId();
@@ -1861,7 +1881,10 @@ export function DiffOptionsSheet({
     <Popover
       onOpenChange={(open) => {
         if (!open) return;
-        setComposerHeld(whitespace?.composerOpen?.() ?? false);
+        setHeld({
+          whitespace: whitespaceComposerOpen(),
+          layout: lineComposerOpen(),
+        });
         whitespace?.onOpen?.();
       }}
     >
@@ -1912,18 +1935,18 @@ export function DiffOptionsSheet({
                   <Checkbox
                     id={checkboxId}
                     checked={hidden}
-                    readOnly={composerHeld}
-                    aria-disabled={composerHeld || undefined}
+                    readOnly={held.whitespace}
+                    aria-disabled={held.whitespace || undefined}
                     aria-describedby={wsHold.describedBy}
                     className={ARIA_DISABLED_CLASS}
                     onCheckedChange={(next) => {
-                      if (!composerHeld) whitespace.onToggle(next);
+                      if (!held.whitespace) whitespace.onToggle(next);
                     }}
                   />
                 </span>
                 <Label
                   htmlFor={checkboxId}
-                  className={cn(composerHeld && "opacity-50")}
+                  className={cn(held.whitespace && "opacity-50")}
                 >
                   Hide whitespace changes
                 </Label>
@@ -1946,8 +1969,11 @@ export function DiffOptionsSheet({
             a group named the same would announce it twice. */}
         <div className="space-y-2">
           <Label id={displayId}>Diff display</Label>
+          {/* readOnly on the group as well while a composer holds both radios:
+              it is what states the hold (aria-readonly) to assistive tech. */}
           <RadioGroup
             aria-labelledby={displayId}
+            readOnly={held.layout}
             value={mode.effective}
             onValueChange={(value) => {
               // Base UI types the group's value as `any`; the writer refuses
@@ -1955,9 +1981,30 @@ export function DiffOptionsSheet({
               if (value === "unified" || value === "split") mode.write(value);
             }}
           >
-            <div className="flex items-center gap-2">
-              <Radio id={unifiedId} value="unified" />
-              <Label htmlFor={unifiedId}>Unified</Label>
+            <div
+              className="flex items-center gap-2"
+              title={unifiedHold.wrapperTitle}
+            >
+              <span
+                className={cn(
+                  "inline-flex shrink-0",
+                  unifiedHold.blockedReason !== null && "cursor-not-allowed",
+                )}
+              >
+                <Radio
+                  id={unifiedId}
+                  value="unified"
+                  readOnly={held.layout}
+                  aria-describedby={unifiedHold.describedBy}
+                  className="data-readonly:opacity-50 data-readonly:focus-visible:opacity-100"
+                />
+              </span>
+              <Label
+                htmlFor={unifiedId}
+                className={cn(held.layout && "opacity-50")}
+              >
+                Unified
+              </Label>
             </div>
             <div
               className="flex items-center gap-2"
@@ -1975,19 +2022,24 @@ export function DiffOptionsSheet({
                 <Radio
                   id={splitId}
                   value="split"
-                  readOnly={splitDisabled}
+                  readOnly={splitDisabled || held.layout}
                   aria-describedby={splitHold.describedBy}
                   className="data-readonly:opacity-50 data-readonly:focus-visible:opacity-100"
                 />
               </span>
               <Label
                 htmlFor={splitId}
-                className={cn(splitDisabled && "opacity-50")}
+                className={cn((splitDisabled || held.layout) && "opacity-50")}
               >
                 Split
               </Label>
             </div>
           </RadioGroup>
+          {unifiedHold.blockedReason !== null && (
+            <span id={unifiedHold.reasonId} className="sr-only">
+              {unifiedHold.blockedReason}
+            </span>
+          )}
           {splitHold.blockedReason !== null && (
             <span id={splitHold.reasonId} className="sr-only">
               {splitHold.blockedReason}
@@ -2287,17 +2339,16 @@ export function DiffContent({
     interactive && canPreview,
   );
   // Every whitespace flip this pane owns goes through here: an open line
-  // composer would unmount with the rebuilt view and lose its text.
+  // composer on a diff the flip re-reads, in this pane or any other, would
+  // unmount with its rebuilt view and lose its text.
   const setHideWhitespaceRaw = useSetHideWhitespace();
   function flipWhitespace(next: boolean) {
-    if (scrollerRef.current?.querySelector("[data-diff-line-widget]")) {
+    if (whitespaceComposerOpen()) {
       toast.info(WHITESPACE_COMPOSER_HELD);
       return;
     }
     setHideWhitespaceRaw(next);
   }
-  const composerOpen = () =>
-    scrollerRef.current?.querySelector("[data-diff-line-widget]") != null;
   // Not gated on the toolbar: the whitespace-only, binary and empty arms
   // answer it too.
   useHotkeyAction(
@@ -2306,13 +2357,21 @@ export function DiffContent({
     interactive && whitespaceControl,
   );
   const viewMode = useDiffViewMode(narrowPane);
+  // The layout flip rebuilds the view too, so an open composer refuses it the
+  // same way, probed at fire time (opening one re-renders nothing here).
+  function flipMode() {
+    if (lineComposerOpen()) {
+      toast.info(LAYOUT_COMPOSER_HELD);
+      return;
+    }
+    viewMode.write(viewMode.effective === "unified" ? "split" : "unified");
+  }
   // Offered only while a diff is laid out (the toolbar arm, outside Preview),
   // so the flip shows where it is asked; the sheet also takes a pick on the
   // whitespace-only and stale arms. Never under the narrow pane's override.
   useHotkeyAction(
     "toggle-diff-view-mode",
-    () =>
-      viewMode.write(viewMode.effective === "unified" ? "split" : "unified"),
+    flipMode,
     interactive && showsToolbar && !previewOn && !narrowPane,
   );
   // The two arms below with a blank body: a pending read (a parked one says so
@@ -2395,9 +2454,7 @@ export function DiffContent({
               // file keeps the note though its flip lands on a text fallback.
               stagingSide={whitespaceOnly ? stagingSide : undefined}
               whitespace={
-                whitespaceControl
-                  ? { onToggle: flipWhitespace, composerOpen }
-                  : undefined
+                whitespaceControl ? { onToggle: flipWhitespace } : undefined
               }
             />
           </span>
@@ -2680,6 +2737,7 @@ export function DiffContent({
               forceUnified={narrowPane}
               revealLanding={controlsRef}
               scrollerRef={scrollerRef}
+              rebuildsOnWhitespace={whitespaceControl}
             />
           </>
         )}

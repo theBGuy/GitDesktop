@@ -40,7 +40,33 @@ export const WHITESPACE_ANNOUNCEMENT: { hidden: string; shown: string } = {
 };
 
 export const WHITESPACE_COMPOSER_HELD =
-  "Finish or close the comment you're writing, then change the whitespace view.";
+  "Finish or close the line comment you're writing (here or in another tab), then change the whitespace view.";
+
+/** The layout twin: switching Unified/Split rebuilds the view, and an open line
+ *  composer would lose its text with it. */
+export const LAYOUT_COMPOSER_HELD =
+  "Finish or close the line comment you're writing (here or in another tab), then change the diff display.";
+
+// Both diff settings are app-wide and hidden tabs keep their DOM under
+// `<Activity>`, so a flip from any pane rebuilds a hidden tab's composer too.
+// Every writer of either setting checks its probe first
+// (scripts/hide-whitespace.test.mjs pins the roster).
+
+/** The layout probe: a line comment composer is open on any diff, since
+ *  Unified/Split rebuilds every one. */
+export function lineComposerOpen(): boolean {
+  return document.querySelector("[data-diff-line-widget]") !== null;
+}
+
+/** The whitespace probe: a composer is open on a diff a whitespace flip
+ *  re-reads. Its wrapper's `data-diff-line-widget` is "whitespace" exactly on
+ *  a host with a whitespace mode (DiffContent's `whitespaceControl`); a forge
+ *  patch ("layout") never changes with the setting. */
+export function whitespaceComposerOpen(): boolean {
+  return (
+    document.querySelector('[data-diff-line-widget="whitespace"]') !== null
+  );
+}
 
 /** The Diff options sheet's helper line, on the working-tree staging hosts
  *  only (the read-only hosts have no staging for it to turn off), per side as

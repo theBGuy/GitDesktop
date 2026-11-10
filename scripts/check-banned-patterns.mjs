@@ -3412,6 +3412,12 @@ const preparingSlotHide = ({ source }, file) => {
 const UNASSOCIATED_LABEL_RE =
   /<Label(?![^>]*\b(?:htmlFor|id)\s*=)(?:\s[^>]*)?\/?>/g;
 
+// A `<RadioGroup>` open tag with neither aria-label nor aria-labelledby. An
+// arrow's `=>` inside an attribute is read through, so a name after a handler
+// still counts; any other `>` ends the tag early and fails closed.
+const UNNAMED_RADIO_GROUP_RE =
+  /<RadioGroup\b(?!(?:=>|[^>])*\baria-(?:label|labelledby)\s*=)(?:\s(?:=>|[^>])*)?\/?>/g;
+
 // A key-dispatch path that compares a live event against a user binding and
 // swallows the key, in a file missing any predicate of the canonical clause.
 // ALL THREE are required because each covers a different escape: the two target
@@ -5699,6 +5705,14 @@ export const CHECKS = [
     ],
     message:
       'a `<Label>` with no htmlFor and no id names nothing for assistive tech, however it is styled — whatever sits under it reads as anonymous; caption a GROUP with LabeledGroup (src/components/form/labeled-group.tsx), which pairs the label\'s id with role="group" + aria-labelledby, or point a single-control label at its control with htmlFor; a label that WRAPS its control is associated at runtime and a genuinely decorative one names nothing on purpose — either needs an allowlist entry with rationale',
+  },
+  {
+    name: "unnamed-radio-group",
+    appliesTo: notVendoredUi,
+    scan: perFile(UNNAMED_RADIO_GROUP_RE),
+    allowlist: [],
+    message:
+      "a `<RadioGroup>` with no aria-label and no aria-labelledby is an anonymous group: a screen reader announces its radios with nothing saying what they choose; point aria-labelledby at its visible caption (a `<Label id>`), or give it an aria-label when there is none",
   },
   {
     name: "unguarded-binding-dispatcher",

@@ -909,6 +909,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   stamps `whitespaceHidden` / `whitespaceOnly` on the result. Gates and arms
   read those marks, never the setting alone, and no patch is applied from a
   `whitespaceHidden` diff. `scripts/hide-whitespace.test.mjs` is the ratchet.
+  Both settings are app-wide and a flip rebuilds a hidden tab's open line
+  composer, so any writer of `diffHideWhitespace` or `diffViewMode` checks the
+  shared probe first (`whitespaceComposerOpen` / `lineComposerOpen`,
+  `src/features/diff/whitespace-mode.ts`); that test's writer roster fails a
+  new unguarded writer.
 - **Queries package boundary** — import the git query layer through the
   `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
   inside the package may import it but never re-export it, since `export *`
