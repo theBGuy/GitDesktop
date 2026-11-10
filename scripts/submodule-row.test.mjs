@@ -30,9 +30,11 @@ const {
   SUBMODULE_NOTHING_TO_STAGE,
   discardReach,
   noneStageableCopy,
+  isSubmoduleSide,
   rememberSubmoduleVerdicts,
   sameRepoRoot,
   stageBlocks,
+  stagedSideIsFile,
   submoduleDiscardBlocked,
   submoduleStageBlocked,
   submoduleVerdict,
@@ -232,6 +234,81 @@ test("the row's words and blocks over every measured token", () => {
   );
 });
 
+/** A record whose worktree is a gitlink (or not), with the given sides. */
+const gitlinkRow = (token, kinds, worktreeIsGitlink = true) => {
+  const entry = sub(token, kinds);
+  return { ...entry, submodule: { ...entry.submodule, worktreeIsGitlink } };
+};
+
+// [shape, entry, stagedSideIsFile]
+const STAGED_SIDE = [
+  ["MT SC..", replacedOverEdit(true), true],
+  [
+    "AT SC..",
+    gitlinkRow("SC..", { staged: "added", unstaged: "typechange" }),
+    true,
+  ],
+  [
+    "DT (defensive: git never emits it — a staged deletion has no index entry)",
+    gitlinkRow("S...", { staged: "deleted", unstaged: "typechange" }),
+    true,
+  ],
+  [
+    "TM S.M.",
+    gitlinkRow("S.M.", { staged: "typechange", unstaged: "modified" }),
+    false,
+  ],
+  ["T.", gitlinkRow("S...", { staged: "typechange" }), false],
+  // HEAD gitlink, index file, worktree repository (git 2.51.1 prints
+  // `1 TT SC.. 160000 100644 160000`): the staged diff still has its gitlink
+  // side.
+  [
+    "TT SC..",
+    gitlinkRow("SC..", { staged: "typechange", unstaged: "typechange" }),
+    false,
+  ],
+  [".T SC..", gitlinkRow("SC..", { unstaged: "typechange" }), false],
+  [
+    "MM S.M.",
+    gitlinkRow("S.M.", { staged: "modified", unstaged: "modified" }),
+    false,
+  ],
+  ["MT SC.. file over a pointer", replacedOverEdit(false), false],
+];
+
+/** The STAGED_SIDE rows `predicate` gets wrong, by shape. */
+const stagedSideMisses = (predicate) =>
+  STAGED_SIDE.filter(([, entry, want]) => predicate(entry) !== want).map(
+    ([shape]) => shape,
+  );
+
+test("stagedSideIsFile: the S token marks the record, not a side", () => {
+  assert.deepEqual(stagedSideMisses(stagedSideIsFile), []);
+  for (const [shape, entry, fileSide] of STAGED_SIDE) {
+    assert.equal(isSubmoduleSide(entry, true), !fileSide, `${shape}: staged`);
+    assert.equal(isSubmoduleSide(entry, false), true, `${shape}: unstaged`);
+  }
+  assert.equal(isSubmoduleSide(file("a.ts"), true), false);
+  assert.equal(isSubmoduleSide(file("a.ts"), false), false);
+});
+
+test("negative control: dropping any stagedSideIsFile conjunct fails its rows", () => {
+  const conjuncts = [
+    (e) => e.submodule?.worktreeIsGitlink === true,
+    (e) => e.unstaged === "typechange",
+    (e) => e.staged !== null,
+    (e) => e.staged !== "typechange",
+  ];
+  const without = (i) => (e) => conjuncts.every((c, j) => j === i || c(e));
+  assert.deepEqual(stagedSideMisses(without(-1)), []);
+  assert.deepEqual(stagedSideMisses(without(0)), [
+    "MT SC.. file over a pointer",
+  ]);
+  assert.deepEqual(stagedSideMisses(without(1)), ["MM S.M."]);
+  assert.deepEqual(stagedSideMisses(without(2)), [".T SC.."]);
+  assert.deepEqual(stagedSideMisses(without(3)), ["TT SC.."]);
+});
+
 test("noneStageableCopy and stageBlocks name each cause", () => {
   const reserved = {
     reason:
@@ -387,6 +464,28 @@ test("the verdict memory keeps the live selection's verdict once its record leav
   assert.equal(submoduleVerdict(m2, R, file("vendor/sub")), false);
 });
 
+test("the verdict is per side: MT SC..'s staged row is a file, its unstaged row a submodule", () => {
+  const S = "/repo:true:vendor/sub";
+  const U = "/repo:false:vendor/sub";
+  const record = replacedOverEdit(true);
+  assert.equal(submoduleVerdict(new Map(), S, record, true), false);
+  assert.equal(submoduleVerdict(new Map(), U, record, false), true);
+  const m = rememberSubmoduleVerdicts(new Map(), [
+    { key: S, record, staged: true },
+    { key: U, record, staged: false },
+  ]);
+  assert.deepEqual(
+    [...m],
+    [
+      [S, false],
+      [U, true],
+    ],
+  );
+  // Once the record leaves, each side keeps its own verdict.
+  assert.equal(submoduleVerdict(m, S, undefined, true), false);
+  assert.equal(submoduleVerdict(m, U, undefined, false), true);
+});
+
 // --- wiring pins ------------------------------------------------------------
 
 const read = (rel) =>
@@ -520,6 +619,17 @@ function viewerProblems(viewer) {
     problems.push("the live selection isn't remembered");
   if (!/\brecordOf\(file\)/.test(args))
     problems.push("the deferred file isn't remembered");
+  // Each side decides on its own: the selection's side rides along.
+  if (!/\bstaged: selectedFile\.staged\b/.test(args))
+    problems.push("the live selection's side isn't remembered");
+  if (!/\bstaged: file\.staged\b/.test(args))
+    problems.push("the deferred file's side isn't remembered");
+  if (
+    !/\bsubmoduleVerdict\(\s*remembered,\s*keyOf\(repoPath, file\),\s*recordOf\(file\),\s*file\.staged,?\s*\)/.test(
+      v,
+    )
+  )
+    problems.push("the verdict isn't asked for the deferred file's side");
   return problems;
 }
 
@@ -605,25 +715,27 @@ test("negative controls: each wiring pin goes red", () => {
     wiringProblems(PANEL, `${MENU}\n// Stage files (Windows-reserved names)\n`),
     [],
   );
-  // Dropping the live selection from the memory must go red.
-  assert.notDeepEqual(
-    viewerProblems(
-      mutate(
-        VIEWER,
-        "      ? [{ key: keyOf(repoPath, selectedFile), record: recordOf(selectedFile) }]\n",
-        "      ? []\n",
-      ),
-    ),
-    [],
-  );
-  assert.notDeepEqual(
-    viewerProblems(
-      mutate(
-        VIEWER,
-        "    ...(file ? [{ key: keyOf(repoPath, file), record: recordOf(file) }] : []),\n",
-        "",
-      ),
-    ),
-    [],
-  );
+  // Dropping either selection from the memory, or either side, must go red.
+  const viewerMutants = [
+    [
+      "    ...(selectedFile\n      ? [\n          {\n            key: keyOf(repoPath, selectedFile),\n            record: recordOf(selectedFile),\n            staged: selectedFile.staged,\n          },\n        ]\n      : []),\n",
+      "",
+    ],
+    [
+      "    ...(file\n      ? [\n          {\n            key: keyOf(repoPath, file),\n            record: recordOf(file),\n            staged: file.staged,\n          },\n        ]\n      : []),\n",
+      "",
+    ],
+    ["staged: selectedFile.staged,", "staged: false,"],
+    ["            staged: file.staged,", "            staged: false,"],
+    [
+      "      recordOf(file),\n      file.staged,\n",
+      "      recordOf(file),\n      false,\n",
+    ],
+  ];
+  for (const [from, to] of viewerMutants)
+    assert.notDeepEqual(
+      viewerProblems(mutate(VIEWER, from, to)),
+      [],
+      `viewer mutant survived: ${to}`,
+    );
 });

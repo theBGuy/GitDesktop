@@ -705,6 +705,47 @@ describe("DiffViewer dispatch (criterion 10)", () => {
     expect(gitSubmoduleChanges).not.toHaveBeenCalled();
   });
 
+  // A repository replaced the file over a staged edit: the index holds a plain
+  // file, so only the worktree side is a submodule.
+  const REPLACED_OVER_EDIT: FileEntry = {
+    path: PATH,
+    staged: "modified",
+    unstaged: "typechange",
+    submodule: {
+      commitChanged: true,
+      trackedModified: false,
+      untracked: false,
+      worktreeIsGitlink: true,
+    },
+  };
+
+  it("MT SC..: the staged row reads its text diff", async () => {
+    renderViewer([REPLACED_OVER_EDIT], PATH, true);
+    await waitFor(() =>
+      expect(gitDiffFile).toHaveBeenCalledWith(
+        "/repo",
+        PATH,
+        true,
+        false,
+        false,
+      ),
+    );
+    expect(gitSubmoduleChanges).not.toHaveBeenCalled();
+  });
+
+  it("MT SC..: the unstaged row mounts the pane", async () => {
+    renderViewer([REPLACED_OVER_EDIT], PATH, false);
+    await waitFor(() =>
+      expect(gitSubmoduleChanges).toHaveBeenCalledWith(
+        "/repo",
+        PATH,
+        false,
+        undefined,
+      ),
+    );
+    expect(gitDiffFile).not.toHaveBeenCalled();
+  });
+
   it("a row that leaves status keeps the pane", async () => {
     const c = renderViewer([SUBMODULE_ROW], PATH);
     expect(await screen.findByText("Untracked files inside")).toBeTruthy();

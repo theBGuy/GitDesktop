@@ -10,21 +10,34 @@ import type { FileEntry } from "../../lib/git/types";
 export const SUBMODULE_NOTHING_TO_STAGE =
   "Nothing to stage: commit inside the submodule first";
 
+/** Whether a submodule record's STAGED side is a plain index file: a nested
+ *  repository replaced the file in the worktree over a staged edit (`MT SC..`)
+ *  or a staged add (`AT SC..`); a staged deletion has no index entry, so git
+ *  lists the repository as `? d/` with no token (measured). The `S` token marks
+ *  the record, not a side; a staged typechange (`T.`, `TM`) is a gitlink. */
+export function stagedSideIsFile(entry: FileEntry): boolean {
+  return (
+    entry.submodule?.worktreeIsGitlink === true &&
+    entry.unstaged === "typechange" &&
+    entry.staged !== null &&
+    entry.staged !== "typechange"
+  );
+}
+
+/** Whether the row on `staged`'s side is a submodule (a gitlink there). */
+export function isSubmoduleSide(entry: FileEntry, staged: boolean): boolean {
+  return entry.submodule !== undefined && !(staged && stagedSideIsFile(entry));
+}
+
 /** The row's "what changed", where line counts sit on other rows. The status
  *  token carries no direction, so a moved pointer is "commit changed"; only the
- *  pane names the direction. A repository that replaced a file over a staged
- *  edit (`MT SC..`) keeps a plain FILE in the index, so its staged row says
- *  what a file row's words say: nothing. */
+ *  pane names the direction. A staged side that is a plain file
+ *  (`stagedSideIsFile`) says what a file row's words say: nothing. */
 export function submoduleWords(entry: FileEntry, staged: boolean): string {
   const sub = entry.submodule;
   if (sub === undefined) return "";
   if ((staged ? entry.staged : entry.unstaged) !== "modified") return "";
-  if (
-    staged &&
-    sub.worktreeIsGitlink === true &&
-    entry.unstaged === "typechange"
-  )
-    return "";
+  if (staged && stagedSideIsFile(entry)) return "";
   if (staged) return "commit changed";
   const words: string[] = [];
   if (sub.commitChanged) words.push("commit changed");
@@ -166,18 +179,22 @@ export function sameRepoRoot(a: string, b: string, windows: boolean): boolean {
 /** Verdicts by `${repo}:${staged}:${path}`. */
 export type SubmoduleVerdicts = ReadonlyMap<string, boolean>;
 
-/** For each seen key: its record's verdict when the record exists, else the
- *  value `prev` held. Keys not in `seen` are dropped. Returns `prev` itself
- *  when nothing changed. */
+/** For each seen key: its record's verdict on the key's side when the record
+ *  exists, else the value `prev` held. Keys not in `seen` are dropped. Returns
+ *  `prev` itself when nothing changed. */
 export function rememberSubmoduleVerdicts(
   prev: SubmoduleVerdicts,
-  seen: readonly { key: string; record: FileEntry | undefined }[],
+  seen: readonly {
+    key: string;
+    record: FileEntry | undefined;
+    staged: boolean;
+  }[],
 ): SubmoduleVerdicts {
   const next = new Map<string, boolean>();
-  for (const { key, record } of seen) {
+  for (const { key, record, staged } of seen) {
     if (next.has(key)) continue;
     const verdict =
-      record !== undefined ? record.submodule !== undefined : prev.get(key);
+      record !== undefined ? isSubmoduleSide(record, staged) : prev.get(key);
     if (verdict !== undefined) next.set(key, verdict);
   }
   if (
@@ -188,12 +205,14 @@ export function rememberSubmoduleVerdicts(
   return next;
 }
 
-/** The record's verdict when it exists, else the remembered one, else false. */
+/** The record's verdict on `staged`'s side when it exists, else the remembered
+ *  one, else false. */
 export function submoduleVerdict(
   memory: SubmoduleVerdicts,
   key: string,
   record: FileEntry | undefined,
+  staged: boolean,
 ): boolean {
-  if (record !== undefined) return record.submodule !== undefined;
+  if (record !== undefined) return isSubmoduleSide(record, staged);
   return memory.get(key) ?? false;
 }

@@ -13,6 +13,7 @@ import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { pathBasename } from "@/lib/path-tree";
 import { cn } from "@/lib/utils";
 import {
+  isSubmoduleSide,
   SUBMODULE_NOTHING_TO_STAGE,
   submoduleStageBlocked,
   submoduleWords,
@@ -99,7 +100,7 @@ export const FileRow = memo(function FileRow({
   let stageReason: string | null = null;
   if (reservedName !== null) stageReason = reservedStageReason(reservedName);
   else if (submoduleBlocked) stageReason = SUBMODULE_NOTHING_TO_STAGE;
-  const isSubmodule = entry.submodule !== undefined;
+  const isSubmodule = isSubmoduleSide(entry, staged);
   const words = submoduleWords(entry, staged);
   // The name cell. A rename is two paths and an arrow, and tree mode shows
   // basenames (the folder row above carries the directory): the wrapper's title

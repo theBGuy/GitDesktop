@@ -116,6 +116,28 @@ describe("a submodule row in Changes", () => {
     expect(row).not.toHaveTextContent("untracked files");
   });
 
+  it("6: a repository over a staged file edit (MT SC..) tags only its unstaged row", () => {
+    const entry: FileEntry = {
+      path: "vendor/sub",
+      staged: "modified",
+      unstaged: "typechange",
+      submodule: token("SC.."),
+    };
+    // The index holds a plain file: an ordinary row with its line counts.
+    const { row } = renderRow({ entry, staged: true });
+    expect(row).not.toHaveTextContent("Submodule");
+    expect(row).not.toHaveAttribute("aria-label");
+    expect(row).toHaveTextContent("+3");
+    cleanup();
+    const { row: unstaged } = renderRow({
+      entry,
+      kind: "typechange",
+      staged: false,
+    });
+    expect(unstaged).toHaveTextContent("Submodule");
+    expect(unstaged).toHaveAccessibleName("Type changed vendor/sub, Submodule");
+  });
+
   it("6: kinds other than modified carry the tag and no words", () => {
     for (const [entry, kind] of [
       [

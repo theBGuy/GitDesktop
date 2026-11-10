@@ -216,14 +216,33 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   const [verdicts, setVerdicts] = useState<SubmoduleVerdicts>(() => new Map());
   const remembered = rememberSubmoduleVerdicts(verdicts, [
     ...(selectedFile
-      ? [{ key: keyOf(repoPath, selectedFile), record: recordOf(selectedFile) }]
+      ? [
+          {
+            key: keyOf(repoPath, selectedFile),
+            record: recordOf(selectedFile),
+            staged: selectedFile.staged,
+          },
+        ]
       : []),
-    ...(file ? [{ key: keyOf(repoPath, file), record: recordOf(file) }] : []),
+    ...(file
+      ? [
+          {
+            key: keyOf(repoPath, file),
+            record: recordOf(file),
+            staged: file.staged,
+          },
+        ]
+      : []),
   ]);
   if (remembered !== verdicts) setVerdicts(remembered);
   const submodule =
     file !== null &&
-    submoduleVerdict(remembered, keyOf(repoPath, file), recordOf(file));
+    submoduleVerdict(
+      remembered,
+      keyOf(repoPath, file),
+      recordOf(file),
+      file.staged,
+    );
   const target = paneTarget(repoPath, file, isConflicted, submodule);
 
   // The last settled view stays painted while a newly selected file prepares

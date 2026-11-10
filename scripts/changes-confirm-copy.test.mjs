@@ -8,11 +8,14 @@
 // one-target folder Discard takes the single-file wording; the reserved-name
 // notes come after "This cannot be undone."; the whole-tree Discard and Stash
 // sweep the repo's entries, not their scope, for reserved names; and the Stash
-// count and note ride the any-component rule the backend's stash excludes on.
-// The whole-tree bodies end with a submodule note, after any reserved-name
-// note, while the repo holds a submodule whose staged or unstaged kind is
-// `modified` (the states both commands leave in place); a files scope never
-// takes it.
+// count and note ride the any-component rule the backend's stash excludes on;
+// the Stash count also leaves out the submodules and embedded repositories a
+// stash can't take.
+// After any reserved-name note, the whole-tree bodies add a submodule note
+// while the repo holds a submodule whose staged or unstaged kind is `modified`
+// (the states both commands leave in place), then a replaced-file warning while
+// a nested repository replaced a tracked file; the note yields to the warning
+// on such a row. A files scope takes neither.
 //
 // It also pins the copy's single source: no other src file spells either
 // whole-tree body lead, and BranchSwitcher's whole-tree dialogs and

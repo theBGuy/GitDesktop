@@ -183,8 +183,8 @@ function leftAloneOf(scope: ChangeActionScope): string {
 }
 
 /** The Discard confirm's title and body. `repoEntries` is the whole tree, which
- *  the "all" arm's reserved-name sweep reads: it discards everything, not just
- *  what's on screen. */
+ *  the "all" arm's reserved-name sweep, submodule note and replaced-file warning
+ *  read: it discards everything, not just what's on screen. */
 export function discardConfirmCopy(
   scope: ChangeActionScope,
   repoEntries: readonly FileEntry[],
@@ -235,7 +235,8 @@ export function discardConfirmCopy(
 }
 
 /** The Stash confirm's title and body. `repoEntries` is the whole tree, which
- *  the "all" arm's reserved-name sweep reads, as `discardConfirmCopy` does. */
+ *  the "all" arm's reserved-name sweep, submodule note and replaced-file warning
+ *  read, as `discardConfirmCopy`'s do. */
 export function stashConfirmCopy(
   scope: ChangeActionScope,
   repoEntries: readonly FileEntry[],
