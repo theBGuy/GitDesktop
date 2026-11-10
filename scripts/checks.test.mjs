@@ -2690,6 +2690,25 @@ test("unnamed-radio-group flags a RadioGroup with neither aria name", () => {
     // A title or a visible caption beside it names nothing.
     '<RadioGroup title="Merge method" value={v}>',
     "<RadioGroup />",
+    // A longer attribute ending in the name is not the name.
+    '<RadioGroup data-aria-label="Merge method">',
+    // Blank names name nothing.
+    '<RadioGroup aria-label="">',
+    "<RadioGroup aria-label={undefined}>",
+    "<RadioGroup aria-labelledby={null}>",
+    '<RadioGroup aria-label={""}>',
+    "<RadioGroup aria-label={``}>",
+    // The last spelling of a repeated attribute wins.
+    '<RadioGroup aria-label="Merge method" aria-label="">',
+    // A spread may carry a blank name over one spelled before it.
+    '<RadioGroup aria-label="Merge method" {...groupProps}>',
+    "<RadioGroup {...groupProps}>",
+    // A value the walk can't finish reading fails closed.
+    '<RadioGroup aria-label="Merge method>',
+    // A renamed import or a member tag hides the group from the tag scan.
+    'import { Radio, RadioGroup as ChoiceGroup } from "@/components/ui/radio-group";',
+    'export { RadioGroup as ChoiceGroup } from "@/components/ui/radio-group";',
+    '<UI.RadioGroup aria-label="Merge method">',
   ])
     assert.deepEqual(unnamedRadioGroup(source), [1], `should flag ${source}`);
 });
@@ -2700,6 +2719,15 @@ test("unnamed-radio-group leaves named groups and other tags alone", () => {
     '<RadioGroup aria-label="Merge method">',
     // A name after a handler's arrow still counts.
     "<RadioGroup\n  onValueChange={(next) => setV(next)}\n  aria-labelledby={id}\n>",
+    // A `>` inside a value is read through.
+    '<RadioGroup onValueChange={(v) => v > 1 && set(v)} aria-label="X">',
+    "<RadioGroup aria-label={`${n} > 0`}>",
+    '<RadioGroup aria-label={open ? "Open" : "Closed"}>',
+    // A name after a spread overrides whatever the spread carries.
+    '<RadioGroup {...groupProps} aria-label="Merge method">',
+    // A JSX comment inside the tag strips to an empty pair.
+    "<RadioGroup {/* named below */} aria-label={ariaLabel}>",
+    'import { Radio, RadioGroup } from "@/components/ui/radio-group";',
     // Items and other components sharing the prefix are not the group.
     '<RadioGroupItem value="a" />',
     "<RadioGroupPrimitive.Root />",

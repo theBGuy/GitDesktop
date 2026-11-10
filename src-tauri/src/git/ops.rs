@@ -20980,6 +20980,7 @@ detached
             (b"x\na\nb\nc\n", dl(2, "b")),
             // Past the end of the file.
             (b"a\nb\nc\n", dl(4, "c")),
+            // Line 0 doesn't exist.
             (b"a\nb\nc", dl(0, "a")),
             // One of two targets went stale: nothing is removed.
             (b"a\nb\nc\n", two((1, "a"), (3, "C"))),

@@ -327,12 +327,13 @@ export function whitespaceFlipHeld(
   );
 }
 
+/** Why the staging writes are held: a refresh under way, or one that failed. */
+export type HeldDiffCause = "updating" | "refresh-failed";
+
 /** Why the staging writes are held. A flip's hold outlives a failed refetch
  *  (fail closed), so once the read has answered since the flip with nothing
  *  new, nothing else holding and no fetch in flight, it says the refresh failed
  *  rather than that one is under way. */
-export type HeldDiffCause = "updating" | "refresh-failed";
-
 export function heldDiffCause(o: {
   flipHeld: boolean;
   answeredSinceFlip: boolean;

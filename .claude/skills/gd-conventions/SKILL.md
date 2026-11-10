@@ -407,7 +407,9 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   on an id'd caption (a `<Label id>`, or an existing caption element) instead
   of a LabeledGroup wrapper, whose group would repeat the name
   (BoardBulkFieldsDialog's mode picker, ProjectLifecycleDialogs' Layout,
-  RepositoryMenu's fork intent, the Diff options sheet's Diff display).
+  RepositoryMenu's fork intent, the Diff options sheet's Diff display); a group
+  with no visible caption takes `aria-label` instead. The `unnamed-radio-group`
+  guard in `pnpm run checks` fails on a `RadioGroup` carrying neither.
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech. The

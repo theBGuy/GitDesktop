@@ -3412,11 +3412,104 @@ const preparingSlotHide = ({ source }, file) => {
 const UNASSOCIATED_LABEL_RE =
   /<Label(?![^>]*\b(?:htmlFor|id)\s*=)(?:\s[^>]*)?\/?>/g;
 
-// A `<RadioGroup>` open tag with neither aria-label nor aria-labelledby. An
-// arrow's `=>` inside an attribute is read through, so a name after a handler
-// still counts; any other `>` ends the tag early and fails closed.
-const UNNAMED_RADIO_GROUP_RE =
-  /<RadioGroup\b(?!(?:=>|[^>])*\baria-(?:label|labelledby)\s*=)(?:\s(?:=>|[^>])*)?\/?>/g;
+// A `<RadioGroup>` that names nothing, or a spelling that hides the group from
+// the scan. The open tag's attributes are walked one by one over the joined
+// view, so a `>` inside a braced or quoted value is read through and
+// `data-aria-label` is its own attribute. A name counts only as a top-level
+// `aria-label` / `aria-labelledby` whose value isn't blank: a non-empty string,
+// or an expression other than `undefined`, `null` or an empty literal. A
+// spread may override any name spelled before it, so only a name after the last
+// spread counts. Fails CLOSED on a value or token the walk can't read, on an
+// import that renames the group (`RadioGroup as X`), and on a member tag
+// (`<UI.RadioGroup>`). Out of reach: an alias made outside an import
+// (`const G = RadioGroup`), and an expression that is blank only at runtime.
+const RADIO_GROUP_TAG_RE = /<RadioGroup\b/g;
+const RADIO_GROUP_RENAMED_RE =
+  /\b(?:import|export)\s+(?:type\s+)?\{[^}]*\bRadioGroup\s+as\s/g;
+const RADIO_GROUP_MEMBER_TAG_RE = /<[\w$.]+\.RadioGroup\b/g;
+const RADIO_GROUP_NAME_ATTRS = new Set(["aria-label", "aria-labelledby"]);
+
+/** End index (exclusive) of the JSX attribute value starting at `i`, or -1
+ *  when it can't be read: a quoted string, or a brace-balanced expression
+ *  whose own string and template literals are skipped. */
+function jsxValueEnd(text, i) {
+  const open = text[i];
+  if (open === '"' || open === "'") {
+    const close = text.indexOf(open, i + 1);
+    return close < 0 ? -1 : close + 1;
+  }
+  if (open !== "{") return -1;
+  let depth = 0;
+  for (let j = i; j < text.length; j++) {
+    const c = text[j];
+    if (c === '"' || c === "'" || c === "`") {
+      for (j++; j < text.length && text[j] !== c; j++)
+        if (text[j] === "\\") j++;
+      if (j >= text.length) return -1;
+    } else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return j + 1;
+  }
+  return -1;
+}
+
+/** A name value that names nothing: a blank string, or an expression that is
+ *  empty, `undefined`, `null` or a blank string literal. */
+function blankJsxName(value) {
+  const inner = value.startsWith("{") ? value.slice(1, -1).trim() : value;
+  if (inner === "" || inner === "undefined" || inner === "null") return true;
+  return /^(["'`])\s*\1$/.test(inner);
+}
+
+/** Whether the `<RadioGroup` open tag whose attributes start at `i` carries a
+ *  readable, non-blank name. As in JSX, a later attribute or spread overrides an
+ *  earlier one; anything the walk can't read answers false. */
+function radioGroupTagNamed(text, i) {
+  const names = new Map();
+  for (;;) {
+    while (/\s/.test(text[i] ?? "")) i++;
+    if (i >= text.length) return false;
+    if (text[i] === ">" || text.startsWith("/>", i))
+      return [...names.values()].some(Boolean);
+    // An empty pair is a JSX comment stripComments blanked; a spread may
+    // carry blank names, so it voids every name before it.
+    if (text[i] === "{") {
+      const end = jsxValueEnd(text, i);
+      const inner = end < 0 ? null : text.slice(i + 1, end - 1).trim();
+      if (inner === null || (inner !== "" && !inner.startsWith("...")))
+        return false;
+      if (inner !== "") names.clear();
+      i = end;
+      continue;
+    }
+    const attr = /^[A-Za-z_$][\w$:.-]*/.exec(text.slice(i))?.[0];
+    if (!attr) return false;
+    i += attr.length;
+    while (/\s/.test(text[i] ?? "")) i++;
+    if (text[i] !== "=") {
+      if (RADIO_GROUP_NAME_ATTRS.has(attr)) names.set(attr, false);
+      continue;
+    }
+    i++;
+    while (/\s/.test(text[i] ?? "")) i++;
+    const end = jsxValueEnd(text, i);
+    if (end < 0) return false;
+    if (RADIO_GROUP_NAME_ATTRS.has(attr))
+      names.set(attr, !blankJsxName(text.slice(i, end)));
+    i = end;
+  }
+}
+
+/** Scanner: unnamed `<RadioGroup>` tags, plus renamed imports and member tags
+ *  of the group, each on the line it starts. */
+const unnamedRadioGroups = ({ text, starts }) => {
+  const hits = new Set();
+  for (const m of text.matchAll(RADIO_GROUP_TAG_RE))
+    if (!radioGroupTagNamed(text, m.index + m[0].length))
+      hits.add(lineAt(starts, m.index));
+  for (const re of [RADIO_GROUP_RENAMED_RE, RADIO_GROUP_MEMBER_TAG_RE])
+    for (const m of text.matchAll(re)) hits.add(lineAt(starts, m.index));
+  return [...hits].sort((a, b) => a - b);
+};
 
 // A key-dispatch path that compares a live event against a user binding and
 // swallows the key, in a file missing any predicate of the canonical clause.
@@ -5709,10 +5802,10 @@ export const CHECKS = [
   {
     name: "unnamed-radio-group",
     appliesTo: notVendoredUi,
-    scan: perFile(UNNAMED_RADIO_GROUP_RE),
+    scan: unnamedRadioGroups,
     allowlist: [],
     message:
-      "a `<RadioGroup>` with no aria-label and no aria-labelledby is an anonymous group: a screen reader announces its radios with nothing saying what they choose; point aria-labelledby at its visible caption (a `<Label id>`), or give it an aria-label when there is none",
+      "a `<RadioGroup>` with no aria-label and no aria-labelledby is an anonymous group: a screen reader announces its radios with nothing saying what they choose; point aria-labelledby at its visible caption (a `<Label id>`), or give it a non-blank aria-label when there is none; a spread can't show the scan a name, so spell the name on the tag; import RadioGroup unaliased and render it as `<RadioGroup>`, the one spelling this check reads",
   },
   {
     name: "unguarded-binding-dispatcher",
