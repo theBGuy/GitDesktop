@@ -12,7 +12,14 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DetailTitleRow } from "@/components/detail-title-row";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -58,17 +65,26 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
-import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
+  gitBranchDiff,
+  type LocalPrMergeAbortOutcome,
+  type MergeStrategy,
+} from "@/lib/git/api";
+import {
+  AUTOSTASH_WRITES_FAMILY,
   conflictPreviewKey,
   forgeFeatureReady,
   LOCAL_PR_WRITES_KEY,
   type LocalPrUpdateDiscardVars,
   type LocalPrUpdateFinishVars,
   type LocalPrUpdateStartVars,
+  MERGE_UPDATE_ABORT_FAILED_NOTE,
+  MERGE_UPDATE_UNFINISHED_MESSAGE,
+  type MergeRefusal,
   pendingWriteMatching,
   pendingWriteOfKind,
   repoKeys,
+  useAbortLocalPrMerge,
   useBranchDiffFiles,
   useCompareBranches,
   useConflictPreview,
@@ -85,7 +101,7 @@ import {
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
-import { openPendingUpdate } from "@/lib/pulls/local";
+import { type LocalPr, openPendingUpdate } from "@/lib/pulls/local";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import {
   LOCAL_PR_RECORD_WRITES_FAMILY,
@@ -99,7 +115,7 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
@@ -160,8 +176,9 @@ const SECTION_LABEL: Record<
   review: () => "Review",
 };
 
-/** Merge's reasons, spelled once: the button's tooltip and the footer's visible
- *  line read the same string. */
+/** Merge's reasons, spelled once. Both are the button's tooltip reason; only
+ *  MERGE_DIRTY_TREE also renders as the footer's visible line, so the two read the
+ *  same string. */
 const MERGE_NEEDS_APPROVAL = "Approve the PR before merging";
 const MERGE_DIRTY_TREE =
   "Commit or stash your changes before merging into the current branch";
@@ -173,6 +190,38 @@ const RESOLVE_DIRTY_HEAD =
 const UPDATE_PREPARING_REASON = "Preparing to resolve conflicts…";
 const UPDATE_UNFINISHED_REASON =
   "Finish or discard the unfinished conflict resolution first";
+
+/** Each refusal's toast once the newcomer's worktree is discarded, and its note when
+ *  that discard fails or leaves the worktree. */
+const MERGE_REFUSED: Record<
+  MergeRefusal,
+  { message: string; abortFailed: string }
+> = {
+  "not-open": {
+    message:
+      "This pull request is no longer open, so the paused merge was discarded.",
+    abortFailed:
+      "This pull request is no longer open, and the paused merge couldn't be discarded, so it is still there.",
+  },
+  merging: {
+    message:
+      "This pull request already has a paused merge, so the new one was discarded.",
+    abortFailed:
+      "This pull request already has a paused merge, and the new one couldn't be discarded, so it is still there.",
+  },
+  updating: {
+    message: MERGE_UPDATE_UNFINISHED_MESSAGE,
+    abortFailed: MERGE_UPDATE_ABORT_FAILED_NOTE,
+  },
+};
+
+/** A record write that changes the approval: `approved` (the value it sets) is what
+ *  the Merge and Approve hold reads back from the mutation cache. */
+type ApprovalWriteVars = {
+  id: string;
+  mutate: (pr: LocalPr) => LocalPr;
+  approved: boolean;
+};
 
 /** The one approval toggle, rendered in the composer and the footer so the two
  *  mounts cannot drift. */
@@ -210,7 +259,10 @@ export function LocalPrView({
   const prs = useLocalPrs(repoPath);
   const pr = prs.data?.find((p) => p.id === id);
   const update = useUpdateLocalPr(repoPath);
-  const merge = useMergeLocalPr(repoPath);
+  // The list key the merge and the update writes re-read before they settle.
+  const recordKey = localPrKey(repoPath);
+  const merge = useMergeLocalPr(repoPath, recordKey);
+  const abortMerge = useAbortLocalPrMerge(repoPath);
   const updateBranchFrom = useUpdateBranchFrom(repoPath);
   // Read from the mutation cache, not the hooks' observers: this view unmounts on a
   // local -> remote -> local hop, and a remount's fresh observers never saw the write.
@@ -224,6 +276,11 @@ export function LocalPrView({
     repoPath,
   );
   const recovery = useStashReapplyRecovery(repoPath);
+  // The recovery's compound, read from the cache for the same remount reason.
+  const autostashWrites = usePendingRepoWrites(
+    AUTOSTASH_WRITES_FAMILY,
+    repoPath,
+  );
   const status = useRepoStatus(repoPath);
   const selectedPr = useUiStore((s) => s.selectedPr);
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
@@ -326,6 +383,17 @@ export function LocalPrView({
   const [updateSettlingFor, setUpdateSettlingFor] = useState<{
     repo: string;
     id: string;
+  } | null>(null);
+  // The same hold when Update branch's dirty-tree refusal went to the stash-and-reapply
+  // recovery: from the moment its compound runs (`ran`, seen through `recovery.pending`,
+  // since the recovery runs it unawaited) until the strip's reads answer after it. A
+  // prompt dismissed without running leaves it inert.
+  const [recoveringFor, setRecoveringFor] = useState<{
+    repo: string;
+    id: string;
+    base: string;
+    head: string;
+    ran: boolean;
   } | null>(null);
   // The same hold after a conflict resolution moved the head (a clean start, a
   // finish, a discard that had landed): set as the write answers, cleared once the
@@ -433,7 +501,6 @@ export function LocalPrView({
 
   // A conflict-resolving update (base merged INTO head). Its writes are read from the
   // cache by PR id: this view outlives a PR switch.
-  const recordKey = localPrKey(repoPath);
   const startUpdate = useStartLocalPrUpdate(repoPath, recordKey);
   const discardUpdate = useDiscardLocalPrUpdate(repoPath, recordKey);
   const gitWrites = usePendingRepoWrites(LOCAL_PR_WRITES_KEY[0], repoPath);
@@ -524,12 +591,42 @@ export function LocalPrView({
   // update-from, and the branch switcher runs the same write.
   const thisUpdateSettling =
     updateSettlingFor?.repo === repoPath && updateSettlingFor.id === pr?.id;
+  if (recoveringFor !== null && !recoveringFor.ran && recovery.pending)
+    setRecoveringFor({ ...recoveringFor, ran: true });
+  const recoverySettling =
+    recoveringFor?.repo === repoPath &&
+    recoveringFor.id === pr?.id &&
+    (recoveringFor.ran || recovery.pending);
+  // A remounted view's slot and observer start empty, so the compound itself is
+  // also matched in the cache: it merges this base into the checked-out head.
+  const recoveryCompoundRunning =
+    pr !== undefined &&
+    headIsCurrent &&
+    pendingWriteMatching(
+      autostashWrites,
+      "merge",
+      (ref: unknown) => ref === pr.base,
+    ) !== undefined;
+  const recoveryRead =
+    recoveringFor?.ran && !recovery.pending ? recoveringFor : null;
+  const settleRecovery = useEffectEvent(
+    (target: NonNullable<typeof recoveringFor>) => {
+      void refetchStripReads(target).finally(() =>
+        setRecoveringFor((cur) => (cur === target ? null : cur)),
+      );
+    },
+  );
+  useEffect(() => {
+    if (recoveryRead) settleRecovery(recoveryRead);
+  }, [recoveryRead]);
   // A finish moves this head too, and its reads settle after the record clears.
   const resolveSettling =
     resolveSettlingFor?.repo === repoPath && resolveSettlingFor.id === pr?.id;
   const thisUpdateRunning =
     pr !== undefined &&
     (thisUpdateSettling ||
+      recoverySettling ||
+      recoveryCompoundRunning ||
       resolveSettling ||
       finishingUpdate ||
       localWrites.some(
@@ -697,7 +794,16 @@ export function LocalPrView({
     slot?.repo === repoPath && slot.id === pr.id;
   const statusHeld = updateHold !== undefined || ownsSlot(statusSavingFor);
   const reviewPosting = updateHold !== undefined || ownsSlot(postingReviewFor);
-  const approveHeld = ownsSlot(approveSavingFor);
+  // The click slot covers the instant before the cache notice; the cache read keeps the
+  // hold across a remount (this view unmounts on a local -> remote -> local hop).
+  const approveHeld =
+    ownsSlot(approveSavingFor) ||
+    pendingWriteMatching(
+      storeWrites,
+      "update",
+      (v: ApprovalWriteVars) =>
+        v.id === pr.id && typeof v.approved === "boolean",
+    ) !== undefined;
 
   const ahead = comparison.data?.ahead ?? [];
 
@@ -744,11 +850,14 @@ export function LocalPrView({
     const next = !pr.approved;
     const mine = { repo: repoPath, id: pr.id };
     setApproveSavingFor(mine);
+    // `approved` names the write as an approval change for the hold's cache read.
+    const vars: ApprovalWriteVars = {
+      id: pr.id,
+      mutate: (cur) => ({ ...cur, approved: next }),
+      approved: next,
+    };
     try {
-      await update.mutateAsync({
-        id: pr.id,
-        mutate: (cur) => ({ ...cur, approved: next }),
-      });
+      await update.mutateAsync(vars);
     } catch (e) {
       toastError(e);
     } finally {
@@ -817,9 +926,8 @@ export function LocalPrView({
 
   // Awaited, not per-call callbacks: this view's effects tear down when the
   // selection or the repo tab changes, and react-query drops per-call callbacks
-  // once the observer has no listeners. Here that would lose the record write —
-  // a landed merge still reading open, or a paused one with no `pendingMerge`
-  // to reach its resolver by.
+  // once the observer has no listeners. Here that would lose a landed merge's
+  // record write (it would still read open) or a refused merge's discard.
   async function doMerge(strategy: MergeStrategy) {
     // Any local merge in flight refuses another: they share the refs it advances.
     if (!pr || runningMerge || preparing || activeUpdate) return;
@@ -830,6 +938,7 @@ export function LocalPrView({
     const message = pr.body.trim() ? `${pr.title}\n\n${pr.body}` : pr.title;
     try {
       const outcome = await merge.mutateAsync({
+        id: pr.id,
         base: pr.base,
         head: pr.head,
         message,
@@ -852,32 +961,30 @@ export function LocalPrView({
         return;
       }
       // Conflicts: the merge is paused in an isolated worktree (the user's
-      // branch and working tree are untouched). Record it on the PR so this
-      // view swaps to the in-place ResolveConflictsView, where the conflict
-      // editor is pointed at that worktree — awaited because a lost write
-      // strands that worktree with nothing left pointing at it.
-      if (!outcome.worktreePath || !outcome.worktreeId) {
+      // branch and working tree are untouched), and the mutation recorded it on
+      // the PR, so this view swaps to the in-place ResolveConflictsView. A record
+      // that closed, gained another window's paused merge, or gained an update
+      // meanwhile was kept as it is, and only this merge's worktree is discarded:
+      // the resolutions exclude each other.
+      if (outcome.refused !== null) {
+        const copy = MERGE_REFUSED[outcome.refused];
+        let aborted: LocalPrMergeAbortOutcome;
+        try {
+          aborted = await abortMerge.mutateAsync({
+            worktreePath: outcome.worktreePath,
+            opId: outcome.opId,
+          });
+        } catch (e) {
+          toastErrorWithNote(e, copy.abortFailed);
+          return;
+        }
+        // The just-minted worktree is registered, so a removal always closes its
+        // entry: only whether the worktree went decides the words.
         toastError(
-          new Error("Merge paused on conflicts but returned no worktree"),
+          new Error(aborted.removed ? copy.message : copy.abortFailed),
         );
         return;
       }
-      await update.mutateAsync({
-        id: pr.id,
-        mutate: (cur) => ({
-          ...cur,
-          pendingMerge: {
-            base: pr.base,
-            head: pr.head,
-            strategy: strategy as "merge" | "squash" | "rebase",
-            message,
-            worktreePath: outcome.worktreePath as string,
-            worktreeId: outcome.worktreeId as string,
-            opId: outcome.opId,
-            startedAt: new Date().toISOString(),
-          },
-        }),
-      });
       toast.warning("Merge has conflicts — resolve them to finish");
     } catch (e) {
       toastError(e);
@@ -914,6 +1021,7 @@ export function LocalPrView({
           run: { op: "merge", ref: pr.base },
         })
       ) {
+        setRecoveringFor({ ...moved, id: mine.id, ran: false });
         return;
       }
       toastError(e);
@@ -1146,24 +1254,26 @@ export function LocalPrView({
   // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
   // must not override "Merging…" with a remedy that doesn't apply.
   // A resolve preparing or unfinished outranks approval: approving wouldn't unblock it.
+  // A merge in flight outranks approval too, which can't stop it. An approval change
+  // still saving outranks the stored record's verdict on it.
   const mergeReason = (() => {
     switch (true) {
       case preparing:
         return UPDATE_PREPARING_REASON;
       case activeUpdate !== undefined:
         return UPDATE_UNFINISHED_REASON;
-      case !canMerge:
-        return MERGE_NEEDS_APPROVAL;
       case runningMerge?.head === pr.head && runningMerge.base === pr.base:
         return "Merging…";
       case runningMerge?.head != null && runningMerge.base != null:
         return `Merging ${runningMerge.head} into ${runningMerge.base}…`;
       case runningMerge !== undefined:
         return "Merging…";
-      case dirtyBlocks:
-        return MERGE_DIRTY_TREE;
       case approveHeld:
         return "Saving…";
+      case !canMerge:
+        return MERGE_NEEDS_APPROVAL;
+      case dirtyBlocks:
+        return MERGE_DIRTY_TREE;
       default:
         return `Merge ${pr.head} into ${pr.base}`;
     }

@@ -68,7 +68,8 @@ pub struct OpLogEntry {
     /// `"pending"` | `"done"` | `"failed"` | `"dismissed"` | `"paused"` | `"concluded"`.
     /// `"paused"` = handed to the user mid-op (a stopped cherry-pick or the rebase
     /// of a decided pull drop, both [`PAUSABLE_OPS`], or a local PR's branch update
-    /// stopped on conflicts in its resolve worktree), so it is neither in-flight
+    /// or into-base merge (`update_local_pr_head`, `merge_local_pr`) stopped on
+    /// conflicts in its resolve worktree), so it is neither in-flight
     /// nor finished until they continue or abort it; `"concluded"` = that op ended
     /// outside the app, so the journal knows only that it is over (see
     /// [`conclude_stale_pauses`]).
@@ -663,6 +664,60 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
     if let Err(e) = result {
         eprintln!("gitdesktop: opslog finish failed (op unaffected): {e}");
     }
+}
+
+/// [`finish`] for an entry that may have ended meanwhile: closes `id` only while it is
+/// still `"pending"` or `"paused"`, so a finish that landed first keeps its outcome.
+/// True only when the close was written; a failed write is logged and reads false.
+pub(crate) async fn finish_if_unfinished(repo: &str, id: &str, error: Option<String>) -> bool {
+    let (repo, id, now) = (repo.to_string(), id.to_string(), now_iso());
+    let result = crate::store_lock::locked_store_task(move || {
+        close_unfinished_entry(&repo, &id, error, now)
+    })
+    .await;
+    result.unwrap_or_else(|e| {
+        eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
+        false
+    })
+}
+
+/// The status check AND the write under ONE acquisition of both locks: checked and
+/// written separately, a finish landing in between would be overwritten.
+fn close_unfinished_entry(
+    repo: &str,
+    id: &str,
+    error: Option<String>,
+    now: String,
+) -> AppResult<bool> {
+    let path = store_path(repo)?;
+    let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _store_lock = crate::store_lock::lock_store(&path);
+    let mut store = read_store(&path)?;
+    let Some(key) = existing_key(&store, repo) else {
+        return Ok(false);
+    };
+    let Some(obj) = store
+        .get_mut(&key)
+        .and_then(Value::as_array_mut)
+        .and_then(|list| {
+            list.iter_mut()
+                .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+        })
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(false);
+    };
+    let status = obj.get("status").and_then(Value::as_str);
+    if !matches!(status, Some("pending" | "paused")) {
+        return Ok(false);
+    }
+    let status = if error.is_some() { "failed" } else { "done" };
+    obj.insert("status".to_string(), Value::String(status.to_string()));
+    obj.insert("finishedAt".to_string(), Value::String(now));
+    let error = error.map_or(Value::Null, Value::String);
+    obj.insert("error".to_string(), error);
+    write_store(&path, &store)?;
+    Ok(true)
 }
 
 /// Best-effort: if `id` is `Some`, flip that entry to `"paused"` — the op did not
@@ -1655,6 +1710,42 @@ mod tests {
             returned.is_empty(),
             "an unborn HEAD reads as unknown: {returned:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn finish_if_unfinished_closes_only_an_unfinished_entry() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-oplog-close-unfinished-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        let at = "2026-01-01T00:00:00.000Z";
+        seed_entries(
+            &repo,
+            vec![
+                pick_record("done-one", at, "done"),
+                pick_record("paused-one", at, "paused"),
+                pick_record("pending-one", at, "pending"),
+                pick_record("control", at, "done"),
+            ],
+        );
+        let abandoned = || Some("abandoned".to_string());
+
+        assert!(!finish_if_unfinished(&repo, "done-one", abandoned()).await);
+        let done = stored_entry(&repo, "done-one");
+        assert_eq!(done["status"], "done");
+        assert_eq!(done["error"], Value::Null);
+        assert!(finish_if_unfinished(&repo, "paused-one", abandoned()).await);
+        let paused = stored_entry(&repo, "paused-one");
+        assert_eq!(paused["status"], "failed");
+        assert_eq!(paused["error"], "abandoned");
+        assert!(paused["finishedAt"].is_string());
+        assert!(finish_if_unfinished(&repo, "pending-one", None).await);
+        assert_eq!(stored_entry(&repo, "pending-one")["status"], "done");
+        assert!(!finish_if_unfinished(&repo, "missing", abandoned()).await);
+        // Control: the unconditional finish overwrites a done entry.
+        finish(&repo, &Some("control".to_string()), abandoned()).await;
+        assert_eq!(stored_entry(&repo, "control")["status"], "failed");
     }
 
     /// A pick concluded OUTSIDE the app leaves its record `"paused"` — nothing in-app

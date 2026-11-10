@@ -12,9 +12,14 @@ import {
   it,
   vi,
 } from "vitest";
-import { ResolveConflictsView } from "@/features/pulls/ResolveConflictsView";
+import {
+  MERGE_ABORT_KEPT,
+  MERGE_ENTRY_ALREADY_CLOSED,
+  ResolveConflictsView,
+} from "@/features/pulls/ResolveConflictsView";
 import {
   getSecret,
+  gitAbortLocalPrMerge,
   gitDiscardLocalPrUpdate,
   gitFinishLocalPrMerge,
   gitFinishLocalPrUpdate,
@@ -53,6 +58,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitFinishLocalPrUpdate: vi.fn(),
   gitDiscardLocalPrUpdate: vi.fn(),
   gitFinishLocalPrMerge: vi.fn(),
+  gitAbortLocalPrMerge: vi.fn(),
 }));
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
@@ -163,7 +169,7 @@ afterEach(() => {
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
 describe("ResolveConflictsView, update mode", () => {
-  it("E1: the header names the merge into head, wraps, and offers Back to PR", async () => {
+  it("the header names the merge into head, wraps, and offers Back to PR", async () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
     renderEditor({ onBack });
@@ -181,7 +187,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(updateLocalPr).not.toHaveBeenCalled();
   });
 
-  it("E1: the header and done line name the record's head after a rename", async () => {
+  it("the header and done line name the record's head after a rename", async () => {
     // A branch rename rewrites the record's head, never its update field.
     renderEditor({ pr: makePr({ head: "feat-renamed" }) });
     const sentence = await screen.findByText(/^Merging/);
@@ -200,7 +206,7 @@ describe("ResolveConflictsView, update mode", () => {
     );
   });
 
-  it("E1: the header's buttons wrap inside their group, right-aligned", async () => {
+  it("the header's buttons wrap inside their group, right-aligned", async () => {
     renderEditor({ onBack: vi.fn() });
     await screen.findByText(/^Merging/);
     const group = screen.getByRole("button", { name: "Back to PR" })
@@ -215,13 +221,13 @@ describe("ResolveConflictsView, update mode", () => {
     );
   });
 
-  it("E1: no Back to PR without onBack", async () => {
+  it("no Back to PR without onBack", async () => {
     renderEditor();
     await screen.findByText(/^Merging/);
     expect(screen.queryByRole("button", { name: "Back to PR" })).toBeNull();
   });
 
-  it("E1: a conflict left holds Finish; none shows the done line", async () => {
+  it("a conflict left holds Finish; none shows the done line", async () => {
     vi.mocked(gitStatus).mockResolvedValue(status(["src/a.ts"]));
     const view = renderEditor();
     await screen.findByRole("option", { name: "a.ts" });
@@ -254,7 +260,7 @@ describe("ResolveConflictsView, update mode", () => {
     );
   });
 
-  it("E1: finishHeldReason holds Finish while Discard stays enabled", async () => {
+  it("finishHeldReason holds Finish while Discard stays enabled", async () => {
     renderEditor({
       finishHeldReason:
         "Commit or stash your changes to update the current branch",
@@ -270,7 +276,7 @@ describe("ResolveConflictsView, update mode", () => {
     );
   });
 
-  it("AM12: Finish holds while the worktree's status read has not answered", async () => {
+  it("Finish holds while the worktree's status read has not answered", async () => {
     vi.mocked(gitStatus).mockReturnValue(new Promise(() => undefined));
     renderEditor();
     await screen.findByText(/^Merging/);
@@ -281,7 +287,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(screen.queryByText(UNREADABLE)).toBeNull();
   });
 
-  it("E2: Finish sends the record's update and toasts the finish", async () => {
+  it("Finish sends the record's update and toasts the finish", async () => {
     const user = userEvent.setup();
     const onHeadMoved = vi.fn();
     vi.mocked(gitFinishLocalPrUpdate).mockResolvedValue({
@@ -319,7 +325,7 @@ describe("ResolveConflictsView, update mode", () => {
     );
   });
 
-  it("AM14: Finish sends the base the start merged, not the PR's live base", async () => {
+  it("Finish sends the base the start merged, not the PR's live base", async () => {
     const user = userEvent.setup();
     vi.mocked(gitFinishLocalPrUpdate).mockReturnValue(
       new Promise(() => undefined),
@@ -338,7 +344,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(vi.mocked(gitFinishLocalPrUpdate).mock.calls[0][1]).toBe("release");
   });
 
-  it("E2: an approved finish names the approval; a switched-away one names the repo", async () => {
+  it("an approved finish names the approval; a switched-away one names the repo", async () => {
     const user = userEvent.setup();
     const answer =
       deferred<Awaited<ReturnType<typeof gitFinishLocalPrUpdate>>>();
@@ -378,7 +384,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(written[0].approved).toBe(false);
   });
 
-  it("E2: a refused finish toasts the error and keeps the editor", async () => {
+  it("a refused finish toasts the error and keeps the editor", async () => {
     const user = userEvent.setup();
     const err = new Error("Resolve every conflict first");
     vi.mocked(gitFinishLocalPrUpdate).mockRejectedValue(err);
@@ -393,7 +399,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(screen.getByText(/^Merging/)).toBeInTheDocument();
   });
 
-  it("E3: Discard confirms with the update's copy; Cancel runs nothing", async () => {
+  it("Discard confirms with the update's copy; Cancel runs nothing", async () => {
     const user = userEvent.setup();
     const ask = vi.fn(async () => false);
     useConfirm.setState({ ask });
@@ -412,7 +418,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(updateLocalPr).not.toHaveBeenCalled();
   });
 
-  it("E3: a confirmed Discard discards and says so", async () => {
+  it("a confirmed Discard discards and says so", async () => {
     const user = userEvent.setup();
     useConfirm.setState({ ask: vi.fn(async () => true) });
     vi.mocked(gitDiscardLocalPrUpdate).mockResolvedValue({
@@ -434,7 +440,7 @@ describe("ResolveConflictsView, update mode", () => {
     );
   });
 
-  it("E3: a discard that finds the update landed toasts the finish", async () => {
+  it("a discard that finds the update landed toasts the finish", async () => {
     const user = userEvent.setup();
     useConfirm.setState({ ask: vi.fn(async () => true) });
     vi.mocked(gitDiscardLocalPrUpdate).mockResolvedValue({ status: "updated" });
@@ -454,7 +460,7 @@ describe("ResolveConflictsView, update mode", () => {
     expect(toast.success).not.toHaveBeenCalledWith("Update discarded");
   });
 
-  it("E6: an unreadable worktree says so in both slots and holds only Finish", async () => {
+  it("an unreadable worktree says so in both slots and holds only Finish", async () => {
     vi.mocked(gitStatus).mockRejectedValue(new Error("no such directory"));
     renderEditor({ onBack: vi.fn() });
     await waitFor(() =>
@@ -485,7 +491,7 @@ describe("ResolveConflictsView, merge mode (parity)", () => {
     startedAt: "2026-01-01T00:00:00Z",
   };
 
-  it("E4: the into-base flow keeps its copy and commands", async () => {
+  it("the into-base flow keeps its copy and commands", async () => {
     const user = userEvent.setup();
     const ask = vi.fn(async () => false);
     useConfirm.setState({ ask });
@@ -516,7 +522,7 @@ describe("ResolveConflictsView, merge mode (parity)", () => {
     expect(finishButton()).toHaveAccessibleName("Finish merge");
   });
 
-  it("E4: a record carrying an update too still names the merge's branches", async () => {
+  it("a record carrying an update too still names the merge's branches", async () => {
     renderEditor({
       mode: "merge",
       pr: makePr({
@@ -528,7 +534,73 @@ describe("ResolveConflictsView, merge mode (parity)", () => {
     expect(sentence).toHaveTextContent("Resolving conflicts · feat → main");
   });
 
-  it("E4: an errored status read shows no unreadable line in merge mode", async () => {
+  /** Confirms Abort on a paused merge whose abort command answers with `aborted`,
+   *  over a fresh record that differs from the shown one by `fresh`. */
+  async function abortMerge(
+    aborted: { removed: boolean; closed: boolean },
+    fresh: Partial<LocalPr> = {},
+  ) {
+    const user = userEvent.setup();
+    useConfirm.setState({ ask: vi.fn(async () => true) });
+    vi.mocked(gitAbortLocalPrMerge).mockResolvedValue(aborted);
+    vi.mocked(updateLocalPr).mockImplementation(async (_repo, _id, mutate) => {
+      const next = mutate(
+        makePr({ pendingUpdate: undefined, pendingMerge: MERGE, ...fresh }),
+      );
+      written.push(next);
+      return next;
+    });
+    renderEditor({
+      mode: "merge",
+      pr: makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+    });
+    await screen.findByText(/^Resolving conflicts/);
+    await user.click(screen.getByRole("button", { name: "Abort" }));
+    await waitFor(() => expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1));
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+  }
+
+  it("an abort that removed the worktree and closed the merge says it was discarded", async () => {
+    await abortMerge({ removed: true, closed: true });
+    expect(toast.success).toHaveBeenCalledWith("Merge discarded");
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toBeUndefined();
+    expect(written[0].status).toBe("open");
+  });
+
+  it("an abort that left the worktree keeps the record and says it is still there", async () => {
+    await abortMerge({ removed: false, closed: false });
+    expect(toastError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: MERGE_ABORT_KEPT }),
+    );
+    expect(toast.success).not.toHaveBeenCalledWith("Merge discarded");
+    expect(updateLocalPr).not.toHaveBeenCalled();
+  });
+
+  it("an abort whose entry was already closed clears the merge and claims no finish", async () => {
+    await abortMerge({ removed: true, closed: false });
+    expect(toast.success).toHaveBeenCalledWith("Merge discarded", {
+      description: MERGE_ENTRY_ALREADY_CLOSED,
+    });
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toBeUndefined();
+    expect(written[0].status).toBe("open");
+    expect(written[0].mergedAt).toBeUndefined();
+  });
+
+  it("an abort whose entry was already closed keeps a merged status another window wrote", async () => {
+    const mergedAt = "2026-01-02T00:00:00Z";
+    await abortMerge(
+      { removed: true, closed: false },
+      { status: "merged", mergedAt },
+    );
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toBeUndefined();
+    expect(written[0].status).toBe("merged");
+    expect(written[0].mergedAt).toBe(mergedAt);
+  });
+
+  it("an errored status read shows no unreadable line in merge mode", async () => {
     vi.mocked(gitStatus).mockRejectedValue(new Error("gone"));
     renderEditor({
       mode: "merge",

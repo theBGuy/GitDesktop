@@ -5,16 +5,18 @@ import {
   gitCloseAbandonedLocalPrUpdates,
 } from "@/lib/git/api";
 import {
-  LOCAL_PR_UPDATE_START_KEY,
   type LocalPrUpdateDiscardVars,
   oplogCheckOptions,
-  useAnyLocalPrUpdateStarting,
+  RESOLVE_WORKTREE_START_KEYS,
+  resolveSweeps,
+  useAnyResolveWorktreeStarting,
   useDiscardLocalPrUpdate,
 } from "@/lib/git/queries";
 import {
   type LocalPr,
   openPendingUpdate,
   type PendingUpdate,
+  reloadLocalPrs,
   updateLocalPr,
 } from "@/lib/pulls/local";
 import { localPrKey, useLocalPrs } from "@/lib/pulls/queries";
@@ -43,7 +45,8 @@ const discardOf = (
  * compare the next list against:
  * - a PR that is no longer open but still carries the field: a well-formed field is
  *   discarded under its record id and the record's own head (a branch rename rewrites
- *   that, never the field); one too malformed to name a worktree is listed in
+ *   an OPEN record's head, never the field, and leaves closed records as they are);
+ *   one too malformed to name a worktree is listed in
  *   `clears`, to be dropped from the record with nothing to remove;
  * - an open update in `seen` whose PR is gone from this list (deleted): discarded with
  *   a null id and the head it was stored with, since no record is left.
@@ -82,24 +85,31 @@ export function staleUpdateDiscards(
   return { discards, clears, seen: { repo: repoPath, updates } };
 }
 
+/** False when `current` turned false before an IPC: a start began, or the repository
+ *  switched, after `prs` was read, so the keep-lists are stale and the rest of the
+ *  pass is left undone. */
 async function sweepResolveWorktrees(
   queryClient: QueryClient,
   repoPath: string,
   prs: LocalPr[],
-) {
+  current: () => boolean,
+): Promise<boolean> {
   const keep: string[] = [];
   const keepOpIds: string[] = [];
   for (const pr of prs) {
     if (pr.pendingMerge?.worktreePath) keep.push(pr.pendingMerge.worktreePath);
+    if (pr.pendingMerge?.opId) keepOpIds.push(pr.pendingMerge.opId);
     const update = openPendingUpdate(pr);
     if (update) {
       keep.push(update.worktreePath);
       keepOpIds.push(update.opId);
     }
   }
+  if (!current()) return false;
   await gitCleanupOrphanedResolveWorktrees(repoPath, keep).catch(
     () => undefined,
   );
+  if (!current()) return false;
   const closed = await gitCloseAbandonedLocalPrUpdates(
     repoPath,
     keepOpIds,
@@ -112,6 +122,7 @@ async function sweepResolveWorktrees(
       queryKey: ["repo", repoPath, "oplog"],
     });
   }
+  return true;
 }
 
 /**
@@ -122,14 +133,16 @@ async function sweepResolveWorktrees(
  *   `gd-resolve-*` worktree outside the keep-list (each paused merge's worktree plus
  *   each open PR's unfinished update worktree) and, keep-list free, every remote
  *   `gd-pr-resolve-*` worktree holding nothing; then the journal closer ends this
- *   checkout's unfinished update entries whose op id no open record keeps. The
- *   keep-list comes ONLY from a list read this hook requested after the repo opened
- *   and after the last moment a local-PR update start was in flight in this window,
- *   under any checkout key: a cached list, or one read before a start wrote its
- *   record, would sweep that start's new worktree. A failed read skips the sweep for
- *   this open (an empty keep-list would remove live worktrees). Residuals: a second
- *   window's in-flight start is invisible here, and so is an in-flight into-base
- *   merge start.
+ *   checkout's unfinished update entries whose op id no open record keeps, and its
+ *   paused merge entries whose op id no record keeps. The keep-list comes ONLY from a
+ *   list read this hook requested, after a store reload, once the repo opened and
+ *   after the last moment a local-PR update or into-base merge start was in flight
+ *   in this window, under any checkout key: a cached list, one read before a start
+ *   wrote its record, or the store's in-memory copy would sweep a live worktree.
+ *   A start in this window waits out a pass in flight, and a pass that sees a start
+ *   begin abandons before its next IPC and asks again. A failed reload or read skips
+ *   the sweep for this open (an empty keep-list would remove live worktrees).
+ *   Residual: a second window's in-flight start is invisible here.
  * - On EVERY loaded list, a PR that stopped being open with its update still on
  *   record (closed or merged by a route outside the view) has that update discarded,
  *   and an open update whose PR left the list (deleted) is discarded with no record
@@ -142,7 +155,7 @@ async function sweepResolveWorktrees(
 export function useCleanupResolveWorktrees(repoPath: string) {
   const queryClient = useQueryClient();
   const prs = useLocalPrs(repoPath);
-  const starting = useAnyLocalPrUpdateStarting();
+  const starting = useAnyResolveWorktreeStarting();
   const { mutateAsync: discardUpdate } = useDiscardLocalPrUpdate(
     repoPath,
     localPrKey(repoPath),
@@ -166,10 +179,13 @@ export function useCleanupResolveWorktrees(repoPath: string) {
     // before one does, so the cache itself is read, not only `starting`.
     const startsInFlight = () =>
       starting ||
-      queryClient.getMutationCache().findAll({
-        mutationKey: LOCAL_PR_UPDATE_START_KEY,
-        status: "pending",
-      }).length > 0;
+      RESOLVE_WORKTREE_START_KEYS.some(
+        (mutationKey) =>
+          queryClient.getMutationCache().findAll({
+            mutationKey,
+            status: "pending",
+          }).length > 0,
+      );
     const sweepWhenFresh = () => {
       if (!repoPath) return;
       if (fresh.current?.repo !== repoPath)
@@ -183,13 +199,20 @@ export function useCleanupResolveWorktrees(repoPath: string) {
         return;
       const token = fresh.current;
       token.requested = true;
-      void refetch().then((result) => {
-        if (
-          fresh.current !== token ||
-          startsInFlight() ||
-          sweptRepo.current === repoPath
-        )
+      const current = () => fresh.current === token && !startsInFlight();
+      const sweep = async () => {
+        // The store serves its in-memory copy, so another instance's records reach
+        // the read only through a reload; a failed one skips this open's sweep.
+        try {
+          await reloadLocalPrs();
+        } catch {
+          if (current()) sweptRepo.current = repoPath;
           return;
+        }
+        if (!current() || sweptRepo.current === repoPath) return;
+        // Cancels a read in flight from before the reload.
+        const result = await refetch();
+        if (!current() || sweptRepo.current === repoPath) return;
         // A read cancelled back to its earlier answer resolves with data from before
         // `since`, which this window never requested: ask again.
         if (result.isSuccess && result.dataUpdatedAt <= token.since) {
@@ -200,8 +223,20 @@ export function useCleanupResolveWorktrees(repoPath: string) {
         sweptRepo.current = repoPath;
         // A failed list read skips this open's sweep rather than guess a keep-list.
         if (!result.isSuccess) return;
-        void sweepResolveWorktrees(queryClient, repoPath, result.data);
-      });
+        const done = await sweepResolveWorktrees(
+          queryClient,
+          repoPath,
+          result.data,
+          current,
+        ).catch(() => true);
+        if (done) return;
+        // A start began or the repository switched mid-pass: this open is still
+        // unswept, so ask again (the request waits until no start is in flight).
+        if (sweptRepo.current === repoPath) sweptRepo.current = null;
+        request.current?.();
+      };
+      // Starts wait this out before their command runs (`resolveSweeps`).
+      resolveSweeps.track(repoPath, sweep());
     };
     request.current = sweepWhenFresh;
     sweepWhenFresh();
@@ -215,12 +250,10 @@ export function useCleanupResolveWorktrees(repoPath: string) {
       queryClient.getMutationCache().subscribe((event) => {
         if (event.type !== "added" && event.type !== "updated") return;
         const key = event.mutation?.options.mutationKey;
-        if (
-          key?.[0] !== LOCAL_PR_UPDATE_START_KEY[0] ||
-          key[1] !== LOCAL_PR_UPDATE_START_KEY[1] ||
-          !fresh.current
-        )
-          return;
+        const isStart = RESOLVE_WORKTREE_START_KEYS.some(
+          (start) => key?.[0] === start[0] && key[1] === start[1],
+        );
+        if (!isStart || !fresh.current) return;
         fresh.current = {
           repo: fresh.current.repo,
           since: Date.now(),

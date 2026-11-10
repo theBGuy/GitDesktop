@@ -18,16 +18,25 @@ import {
 } from "@/lib/branch-rules/store";
 import { EMPTY_BRANCH_RULES } from "@/lib/branch-rules/types";
 import {
+  gitAbortLocalPrMerge,
   gitCompareBranches,
   gitConflictPreview,
   gitDefaultBranch,
   gitDiscardLocalPrUpdate,
+  gitMergeAutostash,
   gitMergeLocalPr,
   gitStatus,
+  gitUpdateBranchFrom,
   gitUpdateLocalPrHead,
+  type LocalPrMergeAbortOutcome,
+  type LocalPrMergeOutcome,
   type LocalPrUpdateOutcome,
 } from "@/lib/git/api";
-import { conflictPreviewKey } from "@/lib/git/queries";
+import {
+  conflictPreviewKey,
+  MERGE_UPDATE_ABORT_FAILED_NOTE,
+  MERGE_UPDATE_UNFINISHED_MESSAGE,
+} from "@/lib/git/queries";
 import type {
   BranchComparison,
   CommitSummary,
@@ -46,7 +55,7 @@ import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { unmockedCommands } from "./setup";
 
 vi.mock("sonner", () => ({
@@ -61,6 +70,7 @@ vi.mock("sonner", () => ({
 vi.mock("@/lib/toast", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/toast")>()),
   toastError: vi.fn(),
+  toastErrorWithNote: vi.fn(),
 }));
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
@@ -75,6 +85,9 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitUpdateLocalPrHead: vi.fn(),
   gitDiscardLocalPrUpdate: vi.fn(),
   gitMergeLocalPr: vi.fn(),
+  gitAbortLocalPrMerge: vi.fn(),
+  gitUpdateBranchFrom: vi.fn(),
+  gitMergeAutostash: vi.fn(),
   gitBranchDiffFiles: vi.fn(async () => []),
   // The Files tab's fork-point read and the Review tab's key read.
   gitMergeBase: vi.fn(() => new Promise(() => undefined)),
@@ -112,6 +125,7 @@ vi.mock("@/features/repository/ConflictResolveView", () => ({
 }));
 
 const REPO = "C:/repo";
+const DISCARDED: LocalPrMergeAbortOutcome = { removed: true, closed: true };
 const OTHER_REPO = "C:/other";
 const WT = "C:/data/gd-resolve-0123456789ab";
 const HEADER = "Merging main into feat. Finishing updates feat.";
@@ -234,6 +248,12 @@ function renderView(id = "a") {
       result.rerender(ui(pid, REPO));
     },
     showRepo: (repo: string) => result.rerender(ui(id, repo)),
+    /** Unmounts the view and mounts it again over the same cache, as a local ->
+     *  remote -> local hop does. */
+    remount: () => {
+      result.rerender(<QueryClientProvider client={client} />);
+      result.rerender(ui(id, REPO));
+    },
     /** The list re-read a second window or a refocus would bring. */
     arrive: async (next: LocalPr[]) => {
       records = next;
@@ -296,6 +316,8 @@ beforeEach(() => {
     path === WT ? worktreeStatus : repoStatus,
   );
   vi.mocked(gitUpdateLocalPrHead).mockReturnValue(new Promise(() => undefined));
+  vi.mocked(gitUpdateBranchFrom).mockReturnValue(new Promise(() => undefined));
+  vi.mocked(gitMergeAutostash).mockReturnValue(new Promise(() => undefined));
 });
 
 afterEach(() => {
@@ -305,7 +327,7 @@ afterEach(() => {
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
 describe("LocalPrView: resolving conflicts before approval", () => {
-  it("V1: Resolve conflicts starts once and holds the PR's other actions while preparing", async () => {
+  it("Resolve conflicts starts once and holds the PR's other actions while preparing", async () => {
     const user = userEvent.setup();
     renderView();
     await findStrip(/will conflict/);
@@ -328,7 +350,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(gitUpdateLocalPrHead).toHaveBeenCalledTimes(1);
   });
 
-  it("V2: a conflicted start opens the editor once the list shows it, focus on the sink", async () => {
+  it("a conflicted start opens the editor once the list shows it, focus on the sink", async () => {
     const user = userEvent.setup();
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
@@ -358,7 +380,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(document.activeElement).toHaveAccessibleName("Conflict editor");
   });
 
-  it("AM6: a record that lands while the start is pending holds Discard and Continue", async () => {
+  it("a record that lands while the start is pending holds Discard and Continue", async () => {
     const user = userEvent.setup();
     const view = renderView();
     await findStrip(/will conflict/);
@@ -372,7 +394,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     }
   });
 
-  it("V3: a clean start updates in place and holds the strip until its reads answer", async () => {
+  it("a clean start updates in place and holds the strip until its reads answer", async () => {
     const user = userEvent.setup();
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
@@ -416,7 +438,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(screen.queryByText(/Finishing updates/)).toBeNull();
   });
 
-  it("V3: an unapproved clean start says nothing of approval", async () => {
+  it("an unapproved clean start says nothing of approval", async () => {
     const user = userEvent.setup();
     vi.mocked(gitUpdateLocalPrHead).mockResolvedValue(updatedOutcome);
     renderView();
@@ -431,7 +453,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     await findStrip("No conflicts with main.");
   });
 
-  it("V4: a failed start toasts and leaves the strip offering Resolve again", async () => {
+  it("a failed start toasts and leaves the strip offering Resolve again", async () => {
     const user = userEvent.setup();
     const err = new Error("Updating feat from main failed; feat is unchanged.");
     vi.mocked(gitUpdateLocalPrHead).mockRejectedValue(err);
@@ -448,7 +470,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(updateLocalPr).not.toHaveBeenCalled();
   });
 
-  it("V5: a dirty checked-out head holds the start, but not Discard or Continue", async () => {
+  it("a dirty checked-out head holds the start, but not Discard or Continue", async () => {
     repoStatus = statusOn("feat", true);
     const view = renderView();
     await findStrip(/will conflict/);
@@ -467,7 +489,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
       expect(stripButton(name)).not.toHaveAttribute("aria-disabled");
   });
 
-  it("V6: a promotion PR offers no start, yet an existing update stays dismissable", async () => {
+  it("a promotion PR offers no start, yet an existing update stays dismissable", async () => {
     records = [makePr({ base: "release", head: "main" })];
     const view = renderView();
     await findStrip(/Approve, then Merge to resolve the conflicts/);
@@ -492,7 +514,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(stripButton("Continue resolving")).toBeInTheDocument();
   });
 
-  it("V7 / AM1: entering a PR with an unfinished update opens the editor", async () => {
+  it("entering a PR with an unfinished update opens the editor", async () => {
     records = [makePr({ pendingUpdate: { ...UPDATE } })];
     renderView();
     const sentence = await screen.findByText(/Finishing updates/);
@@ -503,7 +525,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(strip()).toBeNull();
   });
 
-  it("V7: a record that arrives on screen shows the resume arm; Continue opens the editor", async () => {
+  it("a record that arrives on screen shows the resume arm; Continue opens the editor", async () => {
     const user = userEvent.setup();
     const view = renderView();
     await findStrip(/will conflict/);
@@ -519,7 +541,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("V8: a start that settles after a PR switch writes its own PR and opens nothing", async () => {
+  it("a start that settles after a PR switch writes its own PR and opens nothing", async () => {
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
     records = [makePr(), makePr({ id: "b", title: "PR B", head: "other" })];
@@ -548,7 +570,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("V8: a start that settles after a repository switch names that repository", async () => {
+  it("a start that settles after a repository switch names that repository", async () => {
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
     const user = userEvent.setup();
@@ -571,7 +593,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(screen.queryByText(/Finishing updates/)).toBeNull();
   });
 
-  it("V9: a paused merge and an update exclude each other", async () => {
+  it("a paused merge and an update exclude each other", async () => {
     records = [
       makePr({
         approved: true,
@@ -613,7 +635,207 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(gitMergeLocalPr).not.toHaveBeenCalled();
   });
 
-  it("V10: the palette and the keyboard start it only for the selected PR", async () => {
+  it("a merge that pauses after an update was recorded discards its own worktree", async () => {
+    const user = userEvent.setup();
+    const mergeWt = "C:/data/gd-resolve-fedcba987654";
+    const paused: LocalPrMergeOutcome = {
+      status: "conflicts",
+      conflicts: ["src/a.ts"],
+      baseTip: "abc1234",
+      worktreePath: mergeWt,
+      worktreeId: "fedcba987654",
+      opId: "op-m",
+    };
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    vi.mocked(gitAbortLocalPrMerge).mockResolvedValue(DISCARDED);
+    records = [makePr({ approved: true })];
+    renderView();
+    await findStrip(/will conflict/);
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Create a merge commit" }),
+    );
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    // Another window records an update while the merge command runs.
+    records = [makePr({ approved: true, pendingUpdate: { ...UPDATE } })];
+    const recorded = records[0];
+    await act(async () => run.resolve(paused));
+    // Either ending toasts once: the refusal, or the paused merge's warning.
+    await waitFor(() =>
+      expect(
+        vi.mocked(toastError).mock.calls.length +
+          vi.mocked(toast.warning).mock.calls.length,
+      ).toBe(1),
+    );
+    expect(records[0]).toEqual(recorded);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, mergeWt, "op-m");
+    expect(toastError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: MERGE_UPDATE_UNFINISHED_MESSAGE }),
+    );
+    expect(toastErrorWithNote).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("a refused paused merge whose abort fails says it is still there", async () => {
+    const user = userEvent.setup();
+    const mergeWt = "C:/data/gd-resolve-fedcba987654";
+    const paused: LocalPrMergeOutcome = {
+      status: "conflicts",
+      conflicts: ["src/a.ts"],
+      baseTip: "abc1234",
+      worktreePath: mergeWt,
+      worktreeId: "fedcba987654",
+      opId: "op-m",
+    };
+    const run = deferred<LocalPrMergeOutcome>();
+    const abortErr = new Error("abort failed");
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    vi.mocked(gitAbortLocalPrMerge).mockRejectedValue(abortErr);
+    records = [makePr({ approved: true })];
+    renderView();
+    await findStrip(/will conflict/);
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Create a merge commit" }),
+    );
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    records = [makePr({ approved: true, pendingUpdate: { ...UPDATE } })];
+    const recorded = records[0];
+    await act(async () => run.resolve(paused));
+    await waitFor(() =>
+      expect(toastErrorWithNote).toHaveBeenCalledWith(
+        abortErr,
+        MERGE_UPDATE_ABORT_FAILED_NOTE,
+      ),
+    );
+    await settle();
+    expect(records[0]).toEqual(recorded);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
+    expect(toastError).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("a merge that pauses after another window paused its own merge discards its worktree", async () => {
+    await refusedMergeKeepsTheRecord(
+      (pr) => ({
+        ...pr,
+        pendingMerge: {
+          base: "main",
+          head: "feat",
+          strategy: "merge",
+          message: "m",
+          worktreePath: WT,
+          worktreeId: "0123456789ab",
+          opId: "op-other",
+          startedAt: "2026-01-01T00:00:00Z",
+        },
+      }),
+      "This pull request already has a paused merge, so the new one was discarded.",
+    );
+  });
+
+  it("a merge that pauses after the PR was closed discards its worktree", async () => {
+    await refusedMergeKeepsTheRecord(
+      (pr) => ({ ...pr, status: "closed" }),
+      "This pull request is no longer open, so the paused merge was discarded.",
+    );
+  });
+
+  /** A merge that pauses after `change` landed on the record in another window:
+   *  the record is kept, only the newcomer's worktree is aborted. */
+  async function refusedMergeKeepsTheRecord(
+    change: (pr: LocalPr) => LocalPr,
+    message: string,
+    aborted: LocalPrMergeAbortOutcome = DISCARDED,
+  ) {
+    const user = userEvent.setup();
+    const mergeWt = "C:/data/gd-resolve-fedcba987654";
+    const paused: LocalPrMergeOutcome = {
+      status: "conflicts",
+      conflicts: ["src/a.ts"],
+      baseTip: "abc1234",
+      worktreePath: mergeWt,
+      worktreeId: "fedcba987654",
+      opId: "op-m",
+    };
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    vi.mocked(gitAbortLocalPrMerge).mockResolvedValue(aborted);
+    records = [makePr({ approved: true })];
+    renderView();
+    await findStrip(/will conflict/);
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Create a merge commit" }),
+    );
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    // The record changes in another window while the merge command runs.
+    records = [change(makePr({ approved: true }))];
+    const recorded = records[0];
+    await act(async () => run.resolve(paused));
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        expect.objectContaining({ message }),
+      ),
+    );
+    await settle();
+    expect(records[0]).toEqual(recorded);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, mergeWt, "op-m");
+    expect(toast.warning).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledTimes(1);
+  }
+
+  const CLOSED_DISCARDED =
+    "This pull request is no longer open, so the paused merge was discarded.";
+
+  it("a refused merge whose abort left the worktree says it is still there", async () => {
+    await refusedMergeKeepsTheRecord(
+      (pr) => ({ ...pr, status: "closed" }),
+      "This pull request is no longer open, and the paused merge couldn't be discarded, so it is still there.",
+      { removed: false, closed: false },
+    );
+    expect(toastError).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: CLOSED_DISCARDED }),
+    );
+  });
+
+  it("a remount while Update branch's stash-and-reapply runs keeps Update branch held", async () => {
+    repoStatus = statusOn("feat", false);
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    vi.mocked(gitUpdateBranchFrom).mockRejectedValue(
+      new Error(
+        "error: Your local changes to the following files would be overwritten by merge: a.txt",
+      ),
+    );
+    const compound = deferred<{ kind: "reapplied" }>();
+    vi.mocked(gitMergeAutostash).mockReturnValue(compound.promise);
+    const user = userEvent.setup();
+    const view = renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Update branch" }));
+    await user.click(
+      await screen.findByRole("button", { name: /Stash and reapply/ }),
+    );
+    await waitFor(() =>
+      expect(gitMergeAutostash).toHaveBeenCalledWith(REPO, "main"),
+    );
+    // The remounted view's slot and recovery observer start empty.
+    view.remount();
+    await findStrip("Updating feat from main…");
+    await settle();
+    expect(strip()).not.toHaveTextContent("behind");
+    const held = screen.getByRole("button", { name: "Update branch" });
+    expect(held).toHaveAttribute("aria-disabled", "true");
+    expect(held).toHaveAccessibleDescription("Updating this branch…");
+    await act(async () => compound.resolve({ kind: "reapplied" }));
+  });
+
+  it("the palette and the keyboard start it only for the selected PR", async () => {
     const user = userEvent.setup();
     const view = renderView();
     await findStrip(/will conflict/);
@@ -639,7 +861,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(gitUpdateLocalPrHead).toHaveBeenCalledTimes(1);
   });
 
-  it("V11: a closed PR still carrying an update shows the closed view", async () => {
+  it("a closed PR still carrying an update shows the closed view", async () => {
     records = [makePr({ status: "closed", pendingUpdate: { ...UPDATE } })];
     renderView();
     await screen.findByRole("button", { name: "Reopen" });
@@ -648,7 +870,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(strip()).toBeNull();
   });
 
-  it("V12: the strip's Discard confirms, discards, and offers Resolve again", async () => {
+  it("the strip's Discard confirms, discards, and offers Resolve again", async () => {
     const user = userEvent.setup();
     const ask = vi.fn(async () => true);
     useConfirm.setState({ ask });
@@ -678,7 +900,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(stripButton("Resolve conflicts")).toBeInTheDocument();
   });
 
-  it("V13: Back to PR returns to the PR, keeps the update, and re-entry reopens it", async () => {
+  it("Back to PR returns to the PR, keeps the update, and re-entry reopens it", async () => {
     const user = userEvent.setup();
     records = [
       makePr({ pendingUpdate: { ...UPDATE } }),
@@ -701,7 +923,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("V14: a tab pick during the start leaves the editor closed", async () => {
+  it("a tab pick during the start leaves the editor closed", async () => {
     const user = userEvent.setup();
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
@@ -718,7 +940,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(screen.queryByText(/Finishing updates/)).toBeNull();
   });
 
-  it("V14: the composer's draft survives the editor and Back to PR", async () => {
+  it("the composer's draft survives the editor and Back to PR", async () => {
     const user = userEvent.setup();
     vi.mocked(gitUpdateLocalPrHead).mockResolvedValue(conflictsOutcome);
     renderView();
@@ -737,7 +959,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("V15: an approved PR's Resolve carries the approval notice; the resume arm never does", async () => {
+  it("an approved PR's Resolve carries the approval notice; the resume arm never does", async () => {
     const note = "Merges main into feat. Finishing clears the approval.";
     records = [makePr({ approved: true })];
     const view = renderView();
@@ -768,7 +990,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("V15: an approved PR whose start is held shows its reason, never the notice", async () => {
+  it("an approved PR whose start is held shows its reason, never the notice", async () => {
     records = [makePr({ approved: true })];
     repoStatus = statusOn("feat", true);
     renderView();
@@ -785,7 +1007,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(stripButton("Resolve conflicts")).not.toHaveAttribute("title");
   });
 
-  it("V1: two activations before the start's cache notice lands start once", async () => {
+  it("two activations before the start's cache notice lands start once", async () => {
     renderView();
     await findStrip(/will conflict/);
     await settle();
@@ -795,7 +1017,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(gitUpdateLocalPrHead).toHaveBeenCalledTimes(1);
   });
 
-  it("D20: a head that turns dirty while preparing keeps the start's own reason", async () => {
+  it("a head that turns dirty while preparing keeps the start's own reason", async () => {
     const user = userEvent.setup();
     repoStatus = statusOn("feat", false);
     const view = renderView();
@@ -819,7 +1041,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(stripButton("Preparing…")).toHaveAccessibleDescription("Preparing…");
   });
 
-  it("B1: another PR's start holds this PR's Resolve with its reason", async () => {
+  it("another PR's start holds this PR's Resolve with its reason", async () => {
     const user = userEvent.setup();
     records = [makePr(), makePr({ id: "b", title: "PR B", head: "other" })];
     const view = renderView("b");
@@ -840,7 +1062,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("B1: a discard in flight holds Continue resolving with its reason", async () => {
+  it("a discard in flight holds Continue resolving with its reason", async () => {
     const user = userEvent.setup();
     useConfirm.setState({ ask: vi.fn(async () => true) });
     vi.mocked(gitDiscardLocalPrUpdate).mockReturnValue(
@@ -862,7 +1084,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("C2: Update branch, offered over a failed prediction, holds while preparing", async () => {
+  it("Update branch, offered over a failed prediction, holds while preparing", async () => {
     const user = userEvent.setup();
     const view = renderView();
     await findStrip(/will conflict/);
@@ -883,7 +1105,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
   });
 
-  it("V8: a start that settles while another PR's editor is open leaves it open", async () => {
+  it("a start that settles while another PR's editor is open leaves it open", async () => {
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
     const otherUpdate: PendingUpdate = {
@@ -919,7 +1141,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     expect(screen.getByText(/Finishing updates/).textContent).toBe(header);
   });
 
-  it("CS1: a clean start whose PR was left before its reads answered holds on return", async () => {
+  it("a clean start whose PR was left before its reads answered holds on return", async () => {
     const user = userEvent.setup();
     const command = deferred<LocalPrUpdateOutcome>();
     vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);

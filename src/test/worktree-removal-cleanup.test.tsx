@@ -121,6 +121,7 @@ const stageUpdate = (repo: string, branch: string) =>
 
 const stageMerge = (repo: string, base: string, head: string) =>
   stageWrite(useMergeLocalPr, repo, {
+    id: "pr-1",
     base,
     head,
     message: "Merge",

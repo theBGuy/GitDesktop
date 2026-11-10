@@ -15,7 +15,7 @@ import { relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { maskNonCode, sourceFiles } from "./lib/ts-mask.mjs";
+import { maskNonCode, ScanError, sourceFiles } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const COMPONENT = "src/components/detail-title-row.tsx";
@@ -45,13 +45,31 @@ const IMPURE = [
   ["a key attribute", /\bkey\s*=/],
 ];
 
-/** Every .ts/.tsx under src/, keyed by repo-relative forward-slash path. */
-function loadCorpus() {
-  const files = new Map();
+const NUL = String.fromCharCode(0);
+const REPLACEMENT = String.fromCharCode(0xfffd);
+
+/** A file's text with CRLF folded, or a ScanError when it holds a NUL or a
+ *  decoding replacement character: the scan can't read it, so it fails closed. */
+function readable(rel, text) {
+  if (text.includes(NUL) || text.includes(REPLACEMENT)) {
+    throw new ScanError(`${rel}: unreadable bytes`);
+  }
+  return text.replace(/\r\n/g, "\n");
+}
+
+/** Every .ts/.tsx under src/ as `[path, text]`, the path repo-relative with
+ *  forward slashes. */
+function* srcFiles() {
   for (const full of sourceFiles(`${ROOT}src`)) {
     const rel = relative(ROOT, full).split("\\").join("/");
-    files.set(rel, readFileSync(full, "utf8").replace(/\r\n/g, "\n"));
+    yield [rel, readFileSync(full, "utf8")];
   }
+}
+
+/** The scanned corpus; `entries` replaces the src/ walk for the controls. */
+function loadCorpus(entries = srcFiles()) {
+  const files = new Map();
+  for (const [rel, text] of entries) files.set(rel, readable(rel, text));
   return files;
 }
 
@@ -262,4 +280,32 @@ test("mutation controls go red", () => {
 
   assert.notDeepEqual(rowBanProblems(new Map()), [], "empty walk");
   assert.notDeepEqual(titleBanProblems(new Map()), [], "empty walk");
+
+  const FAKE = "src/features/fake/Bytes.tsx";
+  assert.equal(readable(FAKE, "a\r\nb"), "a\nb", "a readable file passes");
+  for (const [label, bad] of [
+    ["NUL", NUL],
+    ["U+FFFD", REPLACEMENT],
+  ]) {
+    assert.throws(
+      () => readable(FAKE, `export const x = "a${bad}b";\n`),
+      ScanError,
+      `${label} in a scanned file`,
+    );
+  }
+  // The corpus load itself refuses an unreadable file, not just `readable`.
+  assert.throws(
+    () =>
+      loadCorpus([
+        ["src/features/fake/Clean.tsx", "export const c = 1;\n"],
+        [FAKE, `export const x = "a${NUL}b";\n`],
+      ]),
+    ScanError,
+    "a NUL file in the loaded corpus",
+  );
+  assert.equal(
+    loadCorpus([[FAKE, "a\r\nb"]]).get(FAKE),
+    "a\nb",
+    "a readable corpus loads",
+  );
 });

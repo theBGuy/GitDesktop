@@ -3975,16 +3975,44 @@ fn new_resolve_worktree_id() -> String {
 }
 
 /// Pure decision for [`git_cleanup_orphaned_resolve_worktrees`]: from all
-/// worktree paths, pick the resolve worktrees (basename `gd-resolve-*`) that are NOT
-/// among `keep`, compared under both spellings ([`is_listed_worktree`]): git prints
-/// the resolved path, which a kept path the frontend stored need not match textually.
-fn orphaned_resolve_worktrees(all_paths: &[String], keep: &[String]) -> Vec<String> {
+/// worktree paths, pick the resolve worktrees (basename `gd-resolve-*`, directly under
+/// a root of `base`) that are NOT among `keep`, compared under both spellings
+/// ([`is_listed_worktree`]): git prints the resolved path, which a kept path the
+/// frontend stored need not match textually. The root shape is what keeps a user's
+/// own worktree that happens to carry the prefix out of the sweep.
+fn orphaned_resolve_worktrees(base: &Path, all_paths: &[String], keep: &[String]) -> Vec<String> {
     all_paths
         .iter()
-        .filter(|p| is_resolve_worktree_path(p))
+        .filter(|p| is_resolve_worktree_path(p) && is_in_a_worktree_root(base, p))
         .filter(|p| !is_listed_worktree(keep, p))
         .cloned()
         .collect()
+}
+
+/// The sweep's removal targets: [`orphaned_resolve_worktrees`] narrowed to paths that
+/// pass [`is_own_resolve_leaf`], plus whether any other orphan was left. A removal
+/// aimed at a link could take the checkout it points at, so a link (or a leaf deleted
+/// outside the app) is left to `worktree prune`.
+fn sweep_resolve_leaves(base: &Path, all: &[String], keep: &[String]) -> (Vec<String>, bool) {
+    let (leaves, rest): (Vec<_>, Vec<_>) = orphaned_resolve_worktrees(base, all, keep)
+        .into_iter()
+        .partition(|p| is_own_resolve_leaf(p));
+    (leaves, !rest.is_empty())
+}
+
+/// [`resolves_to_leaf`] under `path`'s own parent, for any `gd-resolve-` name rather
+/// than only a minted id: a leaf named with a full uuid (the older id form) shares the
+/// root, and the sweep still owes it removal.
+fn is_own_resolve_leaf(path: &str) -> bool {
+    let p = Path::new(path);
+    let name = p
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|name| name.starts_with("gd-resolve-"));
+    match (p.parent(), name) {
+        (Some(root), Some(name)) => resolves_to_leaf(&root.to_string_lossy(), path, name),
+        _ => false,
+    }
 }
 
 /// A branch's tip, read through its fully-qualified ref. Never a bare name:
@@ -4355,7 +4383,7 @@ pub(crate) async fn merge_local_pr(
     let label = format!("{verb} {head} → {base}");
     let op_id = crate::oplog::begin(
         repo_path,
-        "merge_local_pr",
+        MERGE_LOCAL_PR_OP,
         &label,
         Some(base.to_string()),
         &base_tip,
@@ -4465,8 +4493,10 @@ pub(crate) async fn merge_local_pr(
             // never writes MERGE_HEAD, so this is more reliable than op markers).
             let conflicts = unmerged_paths(&worktree_path).await;
             if !conflicts.is_empty() {
-                // Keep the worktree + leave the oplog pending; the frontend drives
-                // resolution there, then finish/abort close it.
+                // Keep the worktree and pause the entry; the frontend drives resolution
+                // there, then finish/abort close it. A pending entry would be reconciled
+                // to "done" by any oplog check that finds the user on a clean base.
+                crate::oplog::pause(repo_path, &op_id).await;
                 Ok(LocalPrMergeOutcome {
                     status: "conflicts".to_string(),
                     conflicts,
@@ -4512,6 +4542,7 @@ pub async fn git_finish_local_pr_merge(
     worktree_id: String,
     op_id: Option<String>,
 ) -> AppResult<LocalPrMergeOutcome> {
+    let roots = merge_worktree_roots(&state, &repo_path).await?;
     finish_local_pr_merge(
         &state,
         &repo_path,
@@ -4520,9 +4551,44 @@ pub async fn git_finish_local_pr_merge(
         &message,
         &worktree_path,
         &worktree_id,
+        &roots,
         op_id,
     )
     .await
+}
+
+/// Where a local-PR merge's resolve worktree may sit: the identity root merges mint
+/// in, then the checkout-keyed root earlier builds minted in (a merge paused under
+/// one of those still has to finish or abort).
+async fn merge_worktree_roots(
+    state: &AppState,
+    repo_path: &str,
+) -> AppResult<Vec<std::path::PathBuf>> {
+    let identity = state.repo_identity_cached(repo_path).await?;
+    Ok(vec![
+        identity_worktree_root_dir(&identity)?,
+        worktree_root_dir(repo_path)?,
+    ])
+}
+
+/// [`check_update_worktree`] over every root in `roots`: the merge mints the same
+/// `gd-resolve-<id>` leaf the update does. Registered under any root wins, then
+/// Unregistered; Foreign only when no root claims the path.
+async fn check_merge_worktree(
+    repo_path: &str,
+    roots: &[std::path::PathBuf],
+    worktree_path: &str,
+    worktree_id: &str,
+) -> AppResult<UpdateWorktree> {
+    let mut place = UpdateWorktree::Foreign;
+    for root in roots {
+        match check_update_worktree(repo_path, root, worktree_path, worktree_id).await? {
+            UpdateWorktree::Registered => return Ok(UpdateWorktree::Registered),
+            UpdateWorktree::Unregistered => place = UpdateWorktree::Unregistered,
+            UpdateWorktree::Foreign => {}
+        }
+    }
+    Ok(place)
 }
 
 /// Testable core of [`git_finish_local_pr_merge`] — takes a plain `&AppState` so
@@ -4536,11 +4602,30 @@ pub(crate) async fn finish_local_pr_merge(
     message: &str,
     worktree_path: &str,
     worktree_id: &str,
+    roots: &[std::path::PathBuf],
     op_id: Option<String>,
 ) -> AppResult<LocalPrMergeOutcome> {
     // Same gate as `merge_local_pr` — this path reaches the identical
     // `finalize_base` update-ref refspec.
     crate::git::branches::validate_branch_name(base)?;
+    // The record names the worktree, so the commit and the force-removal below act
+    // only on one this repository's merges minted and git still lists: an unlisted
+    // leftover directory would take the commit into whatever repository encloses it.
+    let place = check_merge_worktree(repo_path, roots, worktree_path, worktree_id).await?;
+    match place {
+        UpdateWorktree::Registered => {}
+        UpdateWorktree::Unregistered => {
+            return Err(AppError::Command(
+                "This merge's worktree no longer exists. Abort the merge and start it again."
+                    .to_string(),
+            ))
+        }
+        UpdateWorktree::Foreign => {
+            return Err(AppError::InvalidArgument(format!(
+                "not a conflict-resolution worktree of this repository: {worktree_path}"
+            )))
+        }
+    }
 
     // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
     // into the main tree — re-guard clean HERE, since the user may have dirtied it
@@ -4633,20 +4718,97 @@ pub(crate) async fn finish_local_pr_merge(
     })
 }
 
-/// Abandons a local-PR merge that `git_merge_local_pr` left conflicted: removes
-/// the resolve worktree (`--force`) and prunes. The user's main tree and branch
-/// were never touched, so there is nothing else to roll back. Best-effort, then
-/// closes the oplog entry as failed ("aborted by user").
+/// What an abort did. `removed`: nothing this repository can remove backs the record
+/// any more (a path that is not one of its minted leaves, even one git still lists, is
+/// not its to remove); false on a failed registry read or when a leaf of ours survived
+/// the removal. `closed`: the abort ended the merge; false when the entry was already
+/// closed as done while no registered worktree of ours backed it, and whenever
+/// `removed` is false (the entry is then left open).
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPrMergeAbortOutcome {
+    pub removed: bool,
+    pub closed: bool,
+}
+
+/// Abandons a local-PR merge that `git_merge_local_pr` left conflicted. The user's
+/// main tree and branch were never touched, so there is nothing else to roll back. A
+/// record is always clearable: the worktree is removed only when it is this
+/// repository's own `<root>/gd-resolve-<id>` (a relocated repository's stored path no
+/// longer is), and the oplog entry is then closed as failed ("aborted by user") unless
+/// it already ended, so an abort racing another window's finish keeps that outcome.
+/// A failed registry read or a leaf of ours it could not remove leaves the entry open.
 #[tauri::command]
 pub async fn git_abort_local_pr_merge(
     state: State<'_, AppState>,
     repo_path: String,
     worktree_path: String,
     op_id: Option<String>,
-) -> AppResult<()> {
-    remove_resolve_worktree(&state, &repo_path, &worktree_path).await;
-    crate::oplog::finish(&repo_path, &op_id, Some("aborted by user".to_string())).await;
-    Ok(())
+) -> AppResult<LocalPrMergeAbortOutcome> {
+    let roots = merge_worktree_roots(&state, &repo_path).await?;
+    Ok(abort_local_pr_merge(&state, &repo_path, &worktree_path, &roots, op_id.as_deref()).await)
+}
+
+async fn abort_local_pr_merge(
+    state: &AppState,
+    repo_path: &str,
+    worktree_path: &str,
+    roots: &[std::path::PathBuf],
+    op_id: Option<&str>,
+) -> LocalPrMergeAbortOutcome {
+    let kept = LocalPrMergeAbortOutcome {
+        removed: false,
+        closed: false,
+    };
+    // The id is the minted leaf's own suffix; the shape check still rejects any other.
+    let id = Path::new(worktree_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|name| name.strip_prefix("gd-resolve-"))
+        .unwrap_or_default();
+    let Ok(place) = check_merge_worktree(repo_path, roots, worktree_path, id).await else {
+        return kept;
+    };
+    match place {
+        UpdateWorktree::Registered => {
+            remove_resolve_worktree(state, repo_path, worktree_path).await;
+            if std::fs::symlink_metadata(worktree_path).is_ok() {
+                return kept;
+            }
+        }
+        // A minted leaf under this repository's root that no registry lists is ours to
+        // delete, and `worktree remove` refuses a path it does not list. One that survives
+        // the delete keeps its record, since nothing else would ever remove it.
+        UpdateWorktree::Unregistered => match std::fs::remove_dir_all(worktree_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return kept,
+            _ => {}
+        },
+        UpdateWorktree::Foreign => {}
+    }
+    let Some(op_id) = op_id else {
+        return LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: true,
+        };
+    };
+    let aborted = Some("aborted by user".to_string());
+    // The finish removes its worktree before journaling done, so a done entry beside a
+    // leaf that was still registered was never written by a finish.
+    let closed = crate::oplog::finish_if_unfinished(repo_path, op_id, aborted).await
+        || place == UpdateWorktree::Registered
+        || !merge_entry_is_done(repo_path, op_id).await;
+    LocalPrMergeAbortOutcome {
+        removed: true,
+        closed,
+    }
+}
+
+/// Whether the journal holds `op_id` closed as done. A missing entry or an unreadable
+/// journal is no evidence of a finish, so it reads false.
+async fn merge_entry_is_done(repo_path: &str, op_id: &str) -> bool {
+    crate::oplog::git_oplog_list(repo_path.to_string())
+        .await
+        .is_ok_and(|entries| entries.iter().any(|e| e.id == op_id && e.status == "done"))
 }
 
 /// Concludes a resolved merge (or squash) in a resolve worktree with a commit of the
@@ -4697,6 +4859,8 @@ async fn commit_resolved_merge(worktree_path: &str, message: &str) -> AppResult<
 
 /// The journal op kind of a local PR's conflict-resolving branch update.
 pub(crate) const UPDATE_LOCAL_PR_HEAD_OP: &str = "update_local_pr_head";
+/// The journal op kind of a local PR's merge into its base.
+const MERGE_LOCAL_PR_OP: &str = "merge_local_pr";
 
 /// Outcome of starting or finishing a local PR's branch update (base merged INTO head).
 /// The frontend consumes this verbatim: the camelCase shape is a frozen contract.
@@ -4717,8 +4881,9 @@ pub struct LocalPrUpdateOutcome {
     pub journal_repo: String,
 }
 
-/// Outcome of discarding an update: "discarded", or "updated" when the journal shows it
-/// had already landed (the frontend then clears the approval as a finish would).
+/// Outcome of discarding an update: "discarded", or "updated" when the journal or the
+/// worktree's own commit shows the update already landed (the frontend then clears the
+/// approval as a finish would).
 #[derive(serde::Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalPrDiscardOutcome {
@@ -4733,6 +4898,7 @@ const UNJOURNALED_UPDATE: &str =
 /// The remedy of every finish refusal that a retry cannot clear.
 const UPDATE_RESTART: &str = "Discard this update, then choose Resolve conflicts to start again.";
 const ABANDONED_UPDATE: &str = "this update was left unfinished and its worktree was cleaned up";
+const ABANDONED_MERGE: &str = "this merge was left unfinished and its worktree was cleaned up";
 
 fn update_moved_at_start(head: &str) -> String {
     format!(
@@ -4758,8 +4924,9 @@ fn update_merge_subject(base: &str, head: &str) -> String {
     format!("Merge branch '{base}' into {head}")
 }
 
-/// The clean-tree gate for an update of the checked-out head, in R32's words. Only the
-/// gate's own refusal is reworded: a failed git run passes through unchanged.
+/// The clean-tree gate for an update of the checked-out head, refusing with the sentence
+/// the frontend holds Resolve conflicts with. Only the gate's own refusal is reworded: a
+/// failed git run passes through unchanged.
 async fn ensure_clean_head_checkout(repo_path: &str) -> AppResult<()> {
     ensure_clean_tree(repo_path).await.map_err(|e| match e {
         AppError::InvalidArgument(_) => AppError::Command(DIRTY_HEAD_UPDATE.to_string()),
@@ -4867,20 +5034,17 @@ async fn entry_status(key: &str, op_id: &str) -> Option<String> {
         .map(|e| e.status)
 }
 
-/// Closes the entry only while it is still pending or paused, read again right before
-/// the write, so a finish that landed meanwhile keeps its `done`. True when it closed.
+/// Closes the entry only while it is still pending or paused, checked in the same locked
+/// write, so a finish that landed meanwhile keeps its `done`. True when it closed.
 async fn close_if_unfinished(key: &str, op_id: &str, error: Option<String>) -> bool {
-    let status = entry_status(key, op_id).await;
-    if !matches!(status.as_deref(), Some("pending" | "paused")) {
-        return false;
-    }
-    crate::oplog::finish(key, &Some(op_id.to_string()), error).await;
-    true
+    crate::oplog::finish_if_unfinished(key, op_id, error).await
 }
 
-/// Refuses an update of a head that an agent session's checkout holds, on the three
-/// tests Update branch applies and in its words. A `gd-update-*` holder under the base
-/// is left to the finalize step, whose update-marker refusals answer for it.
+/// Refuses an update of a head that an agent session's checkout holds: a session-named
+/// head (matched case-insensitively), a holder at a registered session path, or a holder
+/// under the managed base. The refusal sentence matches Update branch's. A `gd-update-*`
+/// holder under the base is left to the finalize step, whose update-marker refusals
+/// answer for it.
 async fn refuse_session_holder(
     repo_path: &str,
     head: &str,
@@ -4924,20 +5088,34 @@ enum UpdateWorktree {
 }
 
 /// Classifies `worktree_path`: `Foreign` unless `worktree_id` is 12 lower-case hex and
-/// the path is `<root>/gd-resolve-<id>` under either spelling. Err only when the
-/// registry read fails.
+/// the path is `<root>/gd-resolve-<id>`. ONE spelling must give both the shape and the
+/// registry membership. A leaf that exists must RESOLVE to the minted name under the
+/// resolved root (aliases of the root pass), since a link at a registered path would
+/// lend its registration to whatever checkout it points at; the spelled-path fallback
+/// is only for a leaf that no longer exists. Err only when the registry read fails.
 async fn check_update_worktree(
     repo_path: &str,
     root: &Path,
     worktree_path: &str,
     worktree_id: &str,
 ) -> AppResult<UpdateWorktree> {
-    let id_shaped = worktree_id.len() == 12
-        && worktree_id
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    let minted = root.join(format!("gd-resolve-{worktree_id}"));
-    if !id_shaped || !same_wt_path(&minted.to_string_lossy(), worktree_path) {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    let root = root.to_string_lossy();
+    let exists = std::fs::symlink_metadata(worktree_path).is_ok();
+    let spellings: &[fn(&str) -> String] = if exists {
+        &[canonical_wt_path]
+    } else {
+        &[canonical_wt_path, normalize_wt_path]
+    };
+    let shaped = |spell: fn(&str) -> String| {
+        spell(worktree_path) == format!("{}/gd-resolve-{worktree_id}", spell(&root))
+    };
+    let leaf = if exists {
+        is_existing_resolve_leaf(&root, worktree_path, worktree_id)
+    } else {
+        is_resolve_leaf_id(worktree_id) && spellings.iter().any(|&s| shaped(s))
+    };
+    if !leaf {
         return Ok(UpdateWorktree::Foreign);
     }
     let listed = run_git(
@@ -4947,11 +5125,38 @@ async fn check_update_worktree(
     )
     .await?;
     let paths = parse_worktree_paths(&listed.stdout_lossy());
-    Ok(if is_listed_worktree(&paths, worktree_path) {
+    let member = |spell: fn(&str) -> String| {
+        let p = spell(worktree_path);
+        paths.iter().any(|l| spell(l) == p)
+    };
+    Ok(if spellings.iter().any(|&s| shaped(s) && member(s)) {
         UpdateWorktree::Registered
+    } else if is_listed_worktree(&paths, worktree_path) {
+        UpdateWorktree::Foreign
     } else {
         UpdateWorktree::Unregistered
     })
+}
+
+/// Whether `id` is a minted resolve-worktree id: 12 lower-case hex.
+fn is_resolve_leaf_id(id: &str) -> bool {
+    id.len() == 12 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The existing-leaf rule for a minted id: [`resolves_to_leaf`] at `<root>/gd-resolve-<id>`.
+fn is_existing_resolve_leaf(root: &str, path: &str, id: &str) -> bool {
+    is_resolve_leaf_id(id) && resolves_to_leaf(root, path, &format!("gd-resolve-{id}"))
+}
+
+/// Whether `path` exists and RESOLVES to `<root>/<name>` under the resolved root. A link
+/// at a registered leaf resolves to its target, and git's registry lookup can match that
+/// target's own entry, so a link never qualifies; a dangling one resolves nowhere and
+/// cannot prove its target either.
+fn resolves_to_leaf(root: &str, path: &str, name: &str) -> bool {
+    use crate::git::worktree::canonical_wt_path;
+    std::fs::symlink_metadata(path).is_ok()
+        && dunce::canonicalize(path).is_ok()
+        && canonical_wt_path(path) == format!("{}/{name}", canonical_wt_path(root))
 }
 
 /// An update's journal entry. `key` is the checkout path it is filed under, which
@@ -5221,8 +5426,10 @@ pub(crate) async fn update_local_pr_head(
 /// Completes an update [`git_update_local_pr_head`] paused on conflicts, once they are
 /// resolved and STAGED in its worktree: commits the index there and moves `head` to the
 /// result through the finalize step, anchored on the tip the journal recorded at the
-/// start. Every refusal keeps the worktree and the unfinished entry, so a retry is
-/// always possible; a finish found to have landed already reports `updated`.
+/// start. No refusal removes the worktree or closes the entry, so the update stays
+/// retryable or discardable; a refusal a retry cannot clear about the update itself (its
+/// worktree gone, its entry closed, a resolution off the start tip, nothing merged) names
+/// `UPDATE_RESTART`'s remedy. A finish found to have landed already reports `updated`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
 pub async fn git_finish_local_pr_update(
@@ -5369,12 +5576,14 @@ pub(crate) async fn finish_local_pr_update(
     Ok(update_landed(new_sha, op_id, &journal.key))
 }
 
-/// Discards an unfinished update. Always succeeds once the journal is read, so a record
-/// is always clearable: the worktree is removed only when it is this repository's own
-/// `<root>/gd-resolve-<id>` (a relocated repository's stored path no longer is) and
-/// builds on the entry's start tip, and the entry is closed only while unfinished. An
-/// update that landed, by the journal or by the worktree's own commit, reports
-/// `updated`, so the caller clears the approval as a finish would.
+/// Discards an unfinished update. Always succeeds once the repository's identity
+/// resolves, so a record is always clearable: the worktree is removed only when it
+/// is this repository's own `<root>/gd-resolve-<id>` (a relocated repository's
+/// stored path no longer is) and builds on the entry's start tip, and the entry is
+/// closed only while unfinished. Removal is best-effort: a directory that survives it
+/// is reported nowhere. An update that landed, by the journal or by the
+/// worktree's own commit, reports `updated`, so the caller clears the approval as
+/// a finish would.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
 pub async fn git_discard_local_pr_update(
@@ -5413,13 +5622,40 @@ pub(crate) async fn discard_local_pr_update(
     journal_repo: &str,
     root: &Path,
 ) -> AppResult<LocalPrDiscardOutcome> {
+    let at = UpdateHandles {
+        repo_path,
+        head,
+        worktree_path,
+        worktree_id,
+        op_id,
+        journal_repo,
+        root,
+    };
     let journal = update_journal(repo_path, journal_repo, op_id).await;
-    let by_journal = match journal.as_ref() {
+    let assessed = assess_discard(&at, journal.as_ref()).await;
+    Ok(settle_discard(state, &at, journal, assessed).await)
+}
+
+/// One update's handles, as the discard receives them.
+struct UpdateHandles<'a> {
+    repo_path: &'a str,
+    head: &'a str,
+    worktree_path: &'a str,
+    worktree_id: &'a str,
+    op_id: &'a str,
+    journal_repo: &'a str,
+    root: &'a Path,
+}
+
+/// What a discard does against `journal`: (remove the worktree, the update landed).
+async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>) -> (bool, bool) {
+    let (repo_path, head, worktree_path) = (at.repo_path, at.head, at.worktree_path);
+    let by_journal = match journal {
         Some(j) => update_already_landed(repo_path, head, j).await.is_some(),
         None => false,
     };
-    let place = check_update_worktree(repo_path, root, worktree_path, worktree_id).await;
-    let (remove, landed) = match (place, journal.as_ref()) {
+    let place = check_update_worktree(repo_path, at.root, worktree_path, at.worktree_id).await;
+    match (place, journal) {
         // A registered worktree is removed only once bound to the entry, and proves (or
         // disproves) a landing itself: an unfinished entry's update may have landed before
         // a crash, and a closed one's worktree may still hold an uncommitted resolution.
@@ -5440,26 +5676,48 @@ pub(crate) async fn discard_local_pr_update(
         // Best-effort, so a worktree deleted outside the app still discards.
         (Ok(UpdateWorktree::Unregistered), _) => (true, by_journal),
         (Ok(UpdateWorktree::Foreign) | Err(_), _) => (false, by_journal),
-    };
-    // The journal first, as the finish does; closed only while still unfinished.
-    let error = (!landed).then(|| "aborted by user".to_string());
-    if let Some(j) = journal.as_ref().filter(|j| is_unfinished(j)) {
-        close_if_unfinished(&j.key, op_id, error).await;
     }
-    if remove {
-        remove_resolve_worktree(state, repo_path, worktree_path).await;
-    }
-    let status = if landed { "updated" } else { "discarded" };
-    Ok(LocalPrDiscardOutcome {
-        status: status.to_string(),
-    })
 }
 
-/// Closes this checkout's unfinished update entries whose op id is not in
-/// `keep_op_ids` (every open local PR's unfinished update), returning how many it
-/// closed. The frontend calls it after the resolve-worktree sweep removed those
-/// updates' worktrees. Reads only `repo_path`'s own journal: an entry another checkout
-/// filed is closed when that checkout is opened.
+/// Closes the entry and removes the worktree per `assessed`, made against `journal`. A
+/// close that loses to a concurrent finish re-reads the journal and assesses again, so
+/// an update that landed meanwhile reports `updated` rather than the stale verdict.
+async fn settle_discard(
+    state: &AppState,
+    at: &UpdateHandles<'_>,
+    journal: Option<UpdateJournal>,
+    assessed: (bool, bool),
+) -> LocalPrDiscardOutcome {
+    let (mut remove, mut landed) = assessed;
+    // The journal first, as the finish does; closed only while still unfinished.
+    if let Some(j) = journal.as_ref().filter(|j| is_unfinished(j)) {
+        let error = (!landed).then(|| "aborted by user".to_string());
+        if !close_if_unfinished(&j.key, at.op_id, error).await {
+            let fresh = update_journal(at.repo_path, at.journal_repo, at.op_id).await;
+            (remove, landed) = assess_discard(at, fresh.as_ref()).await;
+        }
+    }
+    if remove {
+        remove_resolve_worktree(state, at.repo_path, at.worktree_path).await;
+        // `worktree remove` refuses a path no registry lists, so a leftover leaf of this
+        // repository's that is unregistered (or became so) is deleted directly.
+        let (repo_path, root) = (at.repo_path, at.root);
+        let place = check_update_worktree(repo_path, root, at.worktree_path, at.worktree_id);
+        if let Ok(UpdateWorktree::Unregistered) = place.await {
+            let _ = std::fs::remove_dir_all(at.worktree_path);
+        }
+    }
+    let status = if landed { "updated" } else { "discarded" };
+    LocalPrDiscardOutcome {
+        status: status.to_string(),
+    }
+}
+
+/// Closes this checkout's unfinished update entries and paused merge entries whose op
+/// id is not in `keep_op_ids` (every open local PR's unfinished update and every
+/// record's paused merge), returning how many it closed. The frontend calls it after
+/// the resolve-worktree sweep removed those worktrees. Reads only `repo_path`'s own
+/// journal: an entry another checkout filed is closed when that checkout is opened.
 #[tauri::command]
 pub async fn git_close_abandoned_local_pr_updates(
     repo_path: String,
@@ -5474,11 +5732,17 @@ pub(crate) async fn close_abandoned_local_pr_updates(
 ) -> AppResult<u32> {
     let mut closed = 0;
     for entry in crate::oplog::git_oplog_list(repo_path.to_string()).await? {
-        let unfinished = matches!(entry.status.as_str(), "pending" | "paused");
-        if entry.op != UPDATE_LOCAL_PR_HEAD_OP || !unfinished || keep_op_ids.contains(&entry.id) {
+        // A pending merge may be another window's merge still in flight, so only a
+        // paused one (its record written, or never to be) is abandoned when unkept.
+        let abandoned = match (entry.op.as_str(), entry.status.as_str()) {
+            (UPDATE_LOCAL_PR_HEAD_OP, "pending" | "paused") => ABANDONED_UPDATE,
+            (MERGE_LOCAL_PR_OP, "paused") => ABANDONED_MERGE,
+            _ => continue,
+        };
+        if keep_op_ids.contains(&entry.id) {
             continue;
         }
-        let error = Some(ABANDONED_UPDATE.to_string());
+        let error = Some(abandoned.to_string());
         if close_if_unfinished(repo_path, &entry.id, error).await {
             closed += 1;
         }
@@ -5492,8 +5756,9 @@ pub(crate) async fn close_abandoned_local_pr_updates(
 /// path to remove it — being detached, the user-facing worktree manager excludes it.
 /// The frontend calls this on repo open with every paused merge's worktree and every
 /// OPEN local PR's unfinished update worktree as `keep_paths`; every other
-/// `gd-resolve-*` worktree is torn down. Best-effort per worktree; always returns
-/// `Ok(())`.
+/// `gd-resolve-*` worktree is torn down. Best-effort per worktree: once the worktrees
+/// base resolves and the worktree list is read, one worktree's failure never fails the
+/// sweep.
 #[tauri::command]
 pub async fn git_cleanup_orphaned_resolve_worktrees(
     state: State<'_, AppState>,
@@ -5552,10 +5817,15 @@ pub(crate) async fn cleanup_orphaned_resolve_worktrees(
     )
     .await?;
     let all = parse_worktree_paths(&listed.stdout_lossy());
-    for path in orphaned_resolve_worktrees(&all, keep_paths) {
+    let (leaves, left) = sweep_resolve_leaves(base, &all, keep_paths);
+    for path in leaves {
         // remove_resolve_worktree is itself best-effort (both git calls swallow
         // errors), so one stuck worktree can't stop the rest.
         remove_resolve_worktree(state, repo_path, &path).await;
+    }
+    if left {
+        let prune = ["worktree", "prune"];
+        let _ = run_git_worktree_admin(state, repo_path, &prune, DEFAULT_TIMEOUT).await;
     }
 
     // Remote-PR resolves take no keep-set: WORTHLESSNESS is the protection, and it
@@ -16097,22 +16367,28 @@ detached
             // A user worktree that merely contains "gd-resolve-" mid-path but whose
             // BASENAME doesn't start with it — must NOT be swept.
             "C:/repos/gd-resolve-ish/feature".to_string(),
+            // A user worktree whose basename carries the prefix, outside every root.
+            "C:/repos/gd-resolve-mine".to_string(),
             // The kept (active) resolve worktree — frontend passed it in keep_paths,
             // but with back-slashes and different case (as the store holds it).
-            "C:/data/worktrees/h/gd-resolve-keep".to_string(),
+            "C:/data/worktrees/0123456789abcdef/gd-resolve-keep".to_string(),
             // An orphaned resolve worktree — swept.
-            "C:/data/worktrees/h/gd-resolve-orphan".to_string(),
+            "C:/data/worktrees/0123456789abcdef/gd-resolve-orphan".to_string(),
         ];
-        let keep = vec!["c:\\data\\worktrees\\h\\gd-resolve-keep".to_string()];
+        let keep = vec!["c:\\data\\worktrees\\0123456789abcdef\\gd-resolve-keep".to_string()];
+        let base = Path::new("C:/data/worktrees");
 
-        let got = orphaned_resolve_worktrees(&all, &keep);
-        assert_eq!(got, vec!["C:/data/worktrees/h/gd-resolve-orphan".to_string()]);
+        let got = orphaned_resolve_worktrees(base, &all, &keep);
+        assert_eq!(
+            got,
+            vec!["C:/data/worktrees/0123456789abcdef/gd-resolve-orphan".to_string()]
+        );
 
         // The basename test is the gate: a mid-path "gd-resolve-" is not a match.
         assert!(!is_resolve_worktree_path("C:/repos/gd-resolve-ish/feature"));
-        assert!(is_resolve_worktree_path("C:/data/worktrees/h/gd-resolve-orphan"));
-        // Empty keep list → every resolve worktree is orphaned.
-        let all_orphans = orphaned_resolve_worktrees(&all, &[]);
+        assert!(is_resolve_worktree_path("C:/repos/gd-resolve-mine"));
+        // Empty keep list → every resolve worktree under a root is orphaned.
+        let all_orphans = orphaned_resolve_worktrees(base, &all, &[]);
         assert_eq!(all_orphans.len(), 2);
     }
 
@@ -16750,7 +17026,7 @@ detached
         let all = parse_worktree_paths(&porcelain);
         assert!(all.iter().any(|p| p.contains("gd-pr-resolve-")), "{porcelain}");
         assert!(
-            orphaned_resolve_worktrees(&all, &[]).is_empty(),
+            orphaned_resolve_worktrees(&wt_base, &all, &[]).is_empty(),
             "the local-PR sweep must not touch a remote-PR resolve: {all:?}"
         );
 
@@ -17031,6 +17307,7 @@ detached
             "merge it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             None,
         )
         .await
@@ -17158,6 +17435,7 @@ detached
             "merge it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             outcome.op_id.clone(),
         )
         .await
@@ -17514,6 +17792,7 @@ detached
             "merge it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             outcome.op_id.clone(),
         )
         .await
@@ -17584,6 +17863,7 @@ detached
             "merge it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             outcome.op_id.clone(),
         )
         .await;
@@ -17659,6 +17939,7 @@ detached
             "merge it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             None,
         )
         .await;
@@ -17729,6 +18010,7 @@ detached
             "squash it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             None,
         )
         .await
@@ -17847,6 +18129,7 @@ detached
             "merge it",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             None,
         )
         .await
@@ -17900,6 +18183,7 @@ detached
             "",
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
+            std::slice::from_ref(&root),
             None,
         )
         .await;
@@ -18715,6 +18999,34 @@ detached
     }
 
     #[tokio::test]
+    async fn local_pr_merge_close_abandoned_closes_only_an_unkept_paused_merge() {
+        let f = UpdateFixture::new("lpm-closer", true).await;
+        let begin = || {
+            let (repo, fork) = (f.repo.clone(), f.fork.clone());
+            async move {
+                crate::oplog::begin(&repo, MERGE_LOCAL_PR_OP, "label", None, &fork, Some(&fork))
+                    .await
+                    .expect("journaled")
+            }
+        };
+        let pending = begin().await;
+        let kept = begin().await;
+        crate::oplog::pause(&f.repo, &Some(kept.clone())).await;
+        let unkept = begin().await;
+        crate::oplog::pause(&f.repo, &Some(unkept.clone())).await;
+
+        let closed = close_abandoned_local_pr_updates(&f.repo, std::slice::from_ref(&kept))
+            .await
+            .unwrap();
+        assert_eq!(closed, 1);
+        let abandoned = journal_entry(&f.repo, &unkept).await;
+        assert_eq!(abandoned.status, "failed");
+        assert_eq!(abandoned.error.as_deref(), Some(ABANDONED_MERGE));
+        assert_eq!(journal_entry(&f.repo, &kept).await.status, "paused");
+        assert_eq!(journal_entry(&f.repo, &pending).await.status, "pending");
+    }
+
+    #[tokio::test]
     async fn local_pr_update_finish_refuses_unresolved_conflicts() {
         let f = UpdateFixture::new("lpu-unresolved", true).await;
         let state = AppState::default();
@@ -19130,22 +19442,19 @@ detached
     #[test]
     fn local_pr_update_sweep_keeps_a_worktree_kept_under_another_spelling() {
         let dir = tempfile::tempdir().expect("create temp dir");
-        let wt = dir.path().join("gd-resolve-0123456789ab");
+        let root = dir.path().join("0123456789abcdef");
+        let wt = root.join("gd-resolve-0123456789ab");
         std::fs::create_dir_all(&wt).unwrap();
-        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
         // The same directory through a detour: equal only once resolved.
-        let detour = dir
-            .path()
-            .join("sub")
-            .join("..")
-            .join("gd-resolve-0123456789ab");
+        let detour = root.join("sub").join("..").join("gd-resolve-0123456789ab");
         let listed = vec![wt.to_string_lossy().into_owned()];
         let kept = [detour.to_string_lossy().into_owned()];
         assert!(
-            orphaned_resolve_worktrees(&listed, &kept).is_empty(),
+            orphaned_resolve_worktrees(dir.path(), &listed, &kept).is_empty(),
             "{kept:?}"
         );
-        assert_eq!(orphaned_resolve_worktrees(&listed, &[]), listed);
+        assert_eq!(orphaned_resolve_worktrees(dir.path(), &listed, &[]), listed);
     }
 
     #[tokio::test]
@@ -19168,6 +19477,607 @@ detached
         let done = f.finish(&state, &out).await.unwrap();
         assert_eq!(done.status, "updated");
         assert_eq!(journal_entry(&link, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_refuses_a_link_at_the_minted_path_to_an_ordinary_checkout() {
+        let f = UpdateFixture::new("lpu-planted", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        // A user's checkout at the start tip, where a holder of head sits before a finish.
+        let victim = f.outside("victim");
+        git(
+            &f.repo,
+            &["worktree", "add", "--detach", &victim, &start_tip],
+        )
+        .await;
+        let wip = Path::new(&victim).join("wip.txt");
+        std::fs::write(&wip, "uncommitted\n").unwrap();
+        let id = "abcdefabcdef";
+        let planted = f.root().join(format!("gd-resolve-{id}"));
+        let planted = planted.to_string_lossy().into_owned();
+        update_directory_link(&planted, &victim);
+        let paths = [victim.clone(), planted];
+
+        for path in &paths {
+            let err = f
+                .finish_raw(&state, &f.repo, "feature", path, id, &out.op_id, &f.repo)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("invalid argument: not a conflict-resolution worktree of this repository: {path}")
+            );
+        }
+        for path in &paths {
+            assert_eq!(f.discard_raw(&state, path, id, &out).await, "discarded");
+        }
+        assert!(wip.exists(), "the checkout's files are untouched");
+        assert_eq!(rev(&victim, "HEAD").await, start_tip);
+        let listed = git(&f.repo, &["worktree", "list", "--porcelain"]).await;
+        let listed = parse_worktree_paths(&listed);
+        assert!(is_listed_worktree(&listed, &victim), "{listed:?}");
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_refuses_a_registered_worktree_replaced_by_a_link() {
+        use crate::git::worktree::normalize_wt_path;
+        let f = UpdateFixture::new("lpu-relinked", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let (wt, id) = handles(&out);
+        // An alias of the root still classifies the real worktree, under either spelling.
+        let alias = f.outside("root-alias");
+        update_directory_link(&alias, &f.root().to_string_lossy());
+        let alias_root = Path::new(&alias);
+        let via_alias = alias_root.join(format!("gd-resolve-{id}"));
+        for path in [wt, &*via_alias.to_string_lossy()] {
+            let place = check_update_worktree(&f.repo, alias_root, path, id).await;
+            assert_eq!(place.unwrap(), UpdateWorktree::Registered, "{path}");
+        }
+
+        // A user's checkout at the start tip, holding a staged change.
+        let victim = f.outside("victim");
+        git(
+            &f.repo,
+            &["worktree", "add", "--detach", &victim, &start_tip],
+        )
+        .await;
+        std::fs::write(Path::new(&victim).join("staged.txt"), "staged\n").unwrap();
+        git(&victim, &["add", "staged.txt"]).await;
+        // The registered directory becomes a link to it, and its registry entry stays.
+        std::fs::remove_dir_all(wt).unwrap();
+        update_directory_link(wt, &victim);
+        // Control: the spelled form still gives both the shape and the membership, which
+        // classified this path Registered before an existing leaf had to resolve to it.
+        let listed = git(&f.repo, &["worktree", "list", "--porcelain"]).await;
+        let spelled = normalize_wt_path(&format!("{}/gd-resolve-{id}", f.root().display()));
+        assert_eq!(normalize_wt_path(wt), spelled);
+        assert!(
+            parse_worktree_paths(&listed)
+                .iter()
+                .any(|l| normalize_wt_path(l) == spelled),
+            "{listed}"
+        );
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid argument: not a conflict-resolution worktree of this repository: {wt}"
+            )
+        );
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        assert_eq!(
+            rev(&victim, "HEAD").await,
+            start_tip,
+            "nothing was committed"
+        );
+        let staged = git(&victim, &["diff", "--cached", "--name-only"]).await;
+        assert_eq!(staged.trim(), "staged.txt", "the staged change stands");
+        assert!(
+            std::fs::symlink_metadata(wt).is_ok(),
+            "the link is not removed"
+        );
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    /// `worktree remove` refuses a path no registry lists, so the discard deletes an
+    /// unregistered leftover leaf itself; its outcome is the same either way.
+    #[tokio::test]
+    async fn local_pr_update_discard_deletes_an_unregistered_leftover_leaf() {
+        let f = UpdateFixture::new("lpu-unlisted-leaf", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let (wt, id) = handles(&out);
+        git(&f.repo, &["worktree", "remove", "--force", wt]).await;
+        std::fs::create_dir_all(wt).unwrap();
+        std::fs::write(Path::new(wt).join("a.txt"), "left over\n").unwrap();
+        let place = check_update_worktree(&f.repo, &f.root(), wt, id).await;
+        assert_eq!(place.unwrap(), UpdateWorktree::Unregistered);
+        // Control: the git removal alone leaves it in place.
+        remove_resolve_worktree(&state, &f.repo, wt).await;
+        assert!(Path::new(wt).join("a.txt").exists());
+
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        assert!(!Path::new(wt).exists(), "the leftover leaf is deleted");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "failed");
+    }
+
+    /// The discard's own read and assessment, then a finish, then the discard's close:
+    /// the close loses, and the settle re-reads rather than trusting its stale verdict.
+    #[tokio::test]
+    async fn local_pr_update_discard_whose_close_loses_to_a_finish_reports_updated() {
+        let f = UpdateFixture::new("lpu-discard-lost-close", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, id) = handles(&out);
+        let root = f.root();
+        let at = UpdateHandles {
+            repo_path: &f.repo,
+            head: "feature",
+            worktree_path: wt,
+            worktree_id: id,
+            op_id: &out.op_id,
+            journal_repo: &out.journal_repo,
+            root: &root,
+        };
+        let journal = update_journal(&f.repo, &out.journal_repo, &out.op_id).await;
+        let assessed = assess_discard(&at, journal.as_ref()).await;
+        // Control: settled on this stale verdict alone, the discard would say "discarded".
+        assert_eq!(assessed, (true, false));
+
+        assert_eq!(f.finish(&state, &out).await.unwrap().status, "updated");
+        let landed = rev(&f.repo, "feature").await;
+        let outcome = settle_discard(&state, &at, journal, assessed).await;
+        assert_eq!(outcome.status, "updated");
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+        assert_eq!(rev(&f.repo, "feature").await, landed);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_closer_never_closes_a_done_entry() {
+        let f = UpdateFixture::new("lpu-close-done", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        assert_eq!(f.finish(&state, &out).await.unwrap().status, "updated");
+
+        let abandoned = || Some(ABANDONED_UPDATE.to_string());
+        assert!(!close_if_unfinished(&f.repo, &out.op_id, abandoned()).await);
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+        let closed = close_abandoned_local_pr_updates(&f.repo, &[]).await;
+        assert_eq!(closed.unwrap(), 0);
+        // Control: an unconditional write overwrites a done entry.
+        crate::oplog::finish(&f.repo, &Some(out.op_id.clone()), abandoned()).await;
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_abort_never_overwrites_a_done_entry() {
+        let (dir, repo) = setup_repo("lpr-abort-done").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let state = AppState::default();
+        let merge = || merge_local_pr(&state, &repo, &base, "feature", "m", "merge", &root);
+
+        // An unfinished merge's entry is closed as aborted.
+        let roots = std::slice::from_ref(&root);
+        let paused = merge().await.unwrap();
+        assert_eq!(paused.status, "conflicts");
+        let (wt, op) = (paused.worktree_path.unwrap(), paused.op_id.unwrap());
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let both = LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: true,
+        };
+        assert_eq!(outcome, both);
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error.as_deref(), Some("aborted by user"));
+
+        // One another window finished first (worktree removed, then journaled done)
+        // stays done, and the abort says so.
+        let finished = merge().await.unwrap();
+        let (wt, op) = (finished.worktree_path.unwrap(), finished.op_id.unwrap());
+        remove_resolve_worktree(&state, &repo, &wt).await;
+        crate::oplog::finish(&repo, &Some(op.clone()), None).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let lost = LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: false,
+        };
+        assert_eq!(outcome, lost);
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+        // Control: an unconditional write overwrites a done entry.
+        let aborted = Some("aborted by user".to_string());
+        crate::oplog::finish(&repo, &Some(op.clone()), aborted).await;
+        assert_eq!(journal_entry(&repo, &op).await.status, "failed");
+
+        // A done entry beside a still-registered leaf was never a finish (a reconciled
+        // entry): the abort ended the merge, and the entry is left as it reads.
+        let reconciled = merge().await.unwrap();
+        let (wt, op) = (reconciled.worktree_path.unwrap(), reconciled.op_id.unwrap());
+        crate::oplog::finish(&repo, &Some(op.clone()), None).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        assert_eq!(outcome, both);
+        assert!(!Path::new(&wt).exists(), "the worktree is removed");
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+    }
+
+    /// A conflicted merge's entry is paused, so an oplog check that finds the user on a
+    /// clean base (the repo-open warm-up runs one) cannot reconcile it to done.
+    #[tokio::test]
+    async fn merge_local_pr_conflict_pauses_its_entry_through_an_oplog_check() {
+        let (dir, repo) = setup_repo("lpr-conflict-paused").await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let out = merge_local_pr(&state, &repo, &base, "feature", "m", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(out.status, "conflicts");
+        let (wt, op) = (out.worktree_path.unwrap(), out.op_id.unwrap());
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+
+        // Control: a pending entry of the same shape is reconciled to done by the check.
+        let tip = rev(&repo, &base).await;
+        let pending = crate::oplog::begin(&repo, "merge_local_pr", "m", Some(base), &tip, None)
+            .await
+            .expect("journal entry");
+        let check = crate::oplog::git_oplog_check(repo.clone()).await.unwrap();
+        assert!(check.is_empty(), "{check:?}");
+        assert_eq!(journal_entry(&repo, &pending).await.status, "done");
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+
+        let roots = std::slice::from_ref(&root);
+        abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error.as_deref(), Some("aborted by user"));
+    }
+
+    /// A merge `a.txt` conflicts on, paused in its resolve worktree under `root`.
+    async fn paused_local_merge(
+        marker: &str,
+    ) -> (
+        tempfile::TempDir,
+        String,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        String,
+        String,
+        String,
+    ) {
+        let (dir, repo) = setup_repo(marker).await;
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let out = merge_local_pr(&state, &repo, &base, "feature", "m", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(out.status, "conflicts");
+        let (wt, op) = (out.worktree_path.unwrap(), out.op_id.unwrap());
+        (dir, repo, root_holder, root, base, wt, op)
+    }
+
+    #[test]
+    fn local_pr_merge_abort_outcome_wire_keys() {
+        let wire = serde_json::to_value(LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: false,
+        })
+        .unwrap();
+        assert_eq!(wire, serde_json::json!({ "removed": true, "closed": false }));
+    }
+
+    /// A worktree the abort could not remove stays, and so does its paused entry.
+    #[tokio::test]
+    async fn local_pr_merge_abort_keeps_a_worktree_it_could_not_remove() {
+        let (_dir, repo, _holder, root, _base, wt, op) = paused_local_merge("lpr-abort-locked").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        // A single --force does not remove a locked worktree.
+        git(&repo, &["worktree", "lock", &wt]).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let kept = LocalPrMergeAbortOutcome {
+            removed: false,
+            closed: false,
+        };
+        assert_eq!(outcome, kept);
+        assert!(Path::new(&wt).exists());
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+
+        // Control: once removable, the same abort removes and closes.
+        git(&repo, &["worktree", "unlock", &wt]).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        assert_eq!((outcome.removed, outcome.closed), (true, true));
+        assert_eq!(journal_entry(&repo, &op).await.status, "failed");
+    }
+
+    /// A record naming a checkout outside the resolve roots: the finish neither commits
+    /// nor removes there, and the abort removes nothing but still clears the record.
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_and_abort_clears_without_removing_outside_the_root() {
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-foreign").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let id = Path::new(&wt).file_name().unwrap().to_string_lossy()["gd-resolve-".len()..]
+            .to_string();
+        let victim_holder = tempfile::tempdir().expect("create temp dir");
+        let victim = victim_holder
+            .path()
+            .join(format!("gd-resolve-{id}"))
+            .to_string_lossy()
+            .into_owned();
+        let tip = rev(&repo, &base).await;
+        git(&repo, &["worktree", "add", "--detach", &victim, &tip]).await;
+        std::fs::write(Path::new(&victim).join("staged.txt"), "staged\n").unwrap();
+        git(&victim, &["add", "staged.txt"]).await;
+
+        let Err(err) = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "m",
+            &victim,
+            &id,
+            roots,
+            Some(op.clone()),
+        )
+        .await
+        else {
+            panic!("the finish must refuse");
+        };
+        assert_eq!(
+            err.to_string(),
+            format!("invalid argument: not a conflict-resolution worktree of this repository: {victim}")
+        );
+        assert_eq!(rev(&victim, "HEAD").await, tip, "nothing was committed");
+        // Control: the real worktree under the root is still accepted.
+        let place = check_merge_worktree(&repo, roots, &wt, &id).await.unwrap();
+        assert_eq!(place, UpdateWorktree::Registered);
+        let outcome = abort_local_pr_merge(&state, &repo, &victim, roots, Some(&op)).await;
+        assert_eq!((outcome.removed, outcome.closed), (true, true));
+        assert!(
+            Path::new(&victim).join("staged.txt").exists(),
+            "nothing was removed"
+        );
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        assert!(
+            is_listed_worktree(&listed, &victim),
+            "and it is still registered"
+        );
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error.as_deref(), Some("aborted by user"));
+    }
+
+    /// A relocated repository's roots re-hash, so a paused merge's stored leaf sits under
+    /// neither: the finish refuses it, and the abort removes nothing there but clears the
+    /// record and closes the entry.
+    #[tokio::test]
+    async fn local_pr_merge_abort_clears_a_record_under_a_relocated_root() {
+        let (_dir, repo, holder, root, base, wt, op) = paused_local_merge("lpr-relocated").await;
+        let state = AppState::default();
+        let id = Path::new(&wt).file_name().unwrap().to_string_lossy()["gd-resolve-".len()..]
+            .to_string();
+        let moved = vec![holder.path().join("rehashed")];
+        let tip = rev(&repo, &base).await;
+        let Err(err) = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "m",
+            &wt,
+            &id,
+            &moved,
+            Some(op.clone()),
+        )
+        .await
+        else {
+            panic!("the finish must refuse");
+        };
+        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert_eq!(rev(&repo, &base).await, tip, "base did not move");
+
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, &moved, Some(&op)).await;
+        let both = LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: true,
+        };
+        assert_eq!(outcome, both);
+        assert!(
+            Path::new(&wt).exists(),
+            "a leaf outside the roots is never removed"
+        );
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!(entry.status, "failed");
+        assert_eq!(entry.error.as_deref(), Some("aborted by user"));
+        // Control: under its own root the same leaf classifies as this repository's.
+        let place = check_merge_worktree(&repo, std::slice::from_ref(&root), &wt, &id).await;
+        assert_eq!(place.unwrap(), UpdateWorktree::Registered);
+    }
+
+    /// A pruned leftover leaf (no registry entry, no `.git`) is never finished into, since
+    /// the commit would land in whatever repository encloses it; the abort deletes it.
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_an_unregistered_leaf() {
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-unlisted").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let id = Path::new(&wt).file_name().unwrap().to_string_lossy()["gd-resolve-".len()..]
+            .to_string();
+        git(&repo, &["worktree", "remove", "--force", &wt]).await;
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(Path::new(&wt).join("a.txt"), "left over\n").unwrap();
+        let place = check_merge_worktree(&repo, roots, &wt, &id).await.unwrap();
+        assert_eq!(place, UpdateWorktree::Unregistered);
+        let tip = rev(&repo, &base).await;
+        let Err(err) = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "m",
+            &wt,
+            &id,
+            roots,
+            Some(op.clone()),
+        )
+        .await
+        else {
+            panic!("the finish must refuse");
+        };
+        assert_eq!(
+            err.to_string(),
+            "This merge's worktree no longer exists. Abort the merge and start it again."
+        );
+        assert_eq!(rev(&repo, &base).await, tip, "nothing was committed");
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        assert_eq!((outcome.removed, outcome.closed), (true, true));
+        assert!(!Path::new(&wt).exists(), "the leftover leaf is deleted");
+        assert_eq!(journal_entry(&repo, &op).await.status, "failed");
+    }
+
+    /// An unregistered leaf the abort could not delete keeps its record and its entry,
+    /// since nothing else would ever remove that directory.
+    #[tokio::test]
+    async fn local_pr_merge_abort_keeps_an_unregistered_leaf_it_could_not_delete() {
+        let (_dir, repo, _holder, root, _base, wt, op) = paused_local_merge("lpr-held-leaf").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        git(&repo, &["worktree", "remove", "--force", &wt]).await;
+        std::fs::create_dir_all(&wt).unwrap();
+        let held = Path::new(&wt).join("held.txt");
+        std::fs::write(&held, "held\n").unwrap();
+        // Windows: a handle that shares no access; elsewhere: a leaf whose entries can't go.
+        #[cfg(windows)]
+        let hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut open = std::fs::OpenOptions::new();
+            open.read(true).share_mode(0).open(&held).unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        // Control: the delete the abort makes fails here, which the abort must not ignore.
+        assert!(std::fs::remove_dir_all(&wt).is_err());
+
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let kept = LocalPrMergeAbortOutcome {
+            removed: false,
+            closed: false,
+        };
+        assert_eq!(outcome, kept);
+        assert!(held.exists(), "the leaf survives");
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+
+        // Control: once deletable, the same abort deletes the leaf and closes the entry.
+        #[cfg(windows)]
+        drop(hold);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        assert_eq!((outcome.removed, outcome.closed), (true, true));
+        assert!(!Path::new(&wt).exists(), "the leaf is deleted");
+        assert_eq!(journal_entry(&repo, &op).await.status, "failed");
+    }
+
+    /// The registered leaf replaced by a link to a user's checkout keeps its registry
+    /// entry, but resolves elsewhere: the finish refuses, and the abort removes nothing
+    /// but still clears the record.
+    #[tokio::test]
+    async fn local_pr_merge_refuses_a_registered_worktree_replaced_by_a_link() {
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-relinked").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let id = Path::new(&wt).file_name().unwrap().to_string_lossy()["gd-resolve-".len()..]
+            .to_string();
+        let victim_holder = tempfile::tempdir().expect("create temp dir");
+        let victim = victim_holder
+            .path()
+            .join("victim")
+            .to_string_lossy()
+            .into_owned();
+        let tip = rev(&repo, &base).await;
+        git(&repo, &["worktree", "add", "--detach", &victim, &tip]).await;
+        std::fs::write(Path::new(&victim).join("staged.txt"), "staged\n").unwrap();
+        git(&victim, &["add", "staged.txt"]).await;
+        std::fs::remove_dir_all(&wt).unwrap();
+        update_directory_link(&wt, &victim);
+        // Control: the link path is still in the registry under its spelled form.
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        assert!(is_listed_worktree(&listed, &wt), "{listed:?}");
+
+        let Err(err) = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "merge",
+            "m",
+            &wt,
+            &id,
+            roots,
+            Some(op.clone()),
+        )
+        .await
+        else {
+            panic!("the finish must refuse");
+        };
+        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+        assert_eq!(rev(&victim, "HEAD").await, tip, "nothing was committed");
+        let staged = git(&victim, &["diff", "--cached", "--name-only"]).await;
+        assert_eq!(staged.trim(), "staged.txt", "the staged change stands");
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        assert_eq!((outcome.removed, outcome.closed), (true, true));
+        assert!(
+            Path::new(&victim).join("staged.txt").exists(),
+            "the checkout stays"
+        );
+        assert_eq!(journal_entry(&repo, &op).await.status, "failed");
     }
 
     #[tokio::test]
@@ -19480,6 +20390,140 @@ detached
         );
         assert!(Path::new(&dirty).exists(), "an in-progress one is kept");
         assert_eq!(pr_resolves_listed(&repo).await.len(), 1);
+    }
+
+    /// The local-PR sweep removes only a `gd-resolve-*` worktree that sits directly
+    /// under a resolve root: the user's own worktree of that name elsewhere survives.
+    #[tokio::test]
+    async fn orphan_sweep_keeps_a_user_worktree_named_like_a_resolve_outside_the_root() {
+        let (_dir, repo) = setup_repo("lpr-orphan-user-named").await;
+        let user_holder = tempfile::tempdir().expect("create temp dir");
+        let mine = user_holder
+            .path()
+            .join("gd-resolve-mine")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "--detach", &mine, "HEAD"]).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let orphan = root
+            .join("gd-resolve-0123456789ab")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "--detach", &orphan, "HEAD"]).await;
+        // Control: the user's worktree passes the basename test alone.
+        assert!(is_resolve_worktree_path(&mine));
+
+        let state = AppState::default();
+        cleanup_orphaned_resolve_worktrees(&state, &repo, &[], &wt_base)
+            .await
+            .unwrap();
+
+        assert!(Path::new(&mine).exists(), "the user's worktree survives");
+        assert!(!Path::new(&orphan).exists(), "the orphan under the root is removed");
+        let listed = git(&repo, &["worktree", "list", "--porcelain"]).await;
+        assert!(listed.contains("gd-resolve-mine"), "{listed}");
+    }
+
+    /// A registered leaf replaced by a link to a user's own checkout is still listed
+    /// under its spelled path, but the sweep never aims a removal at it.
+    #[tokio::test]
+    async fn orphan_sweep_leaves_a_registered_leaf_replaced_by_a_link() {
+        let (_dir, repo) = setup_repo("lpr-orphan-relinked").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let leaf = |id: &str| {
+            root.join(format!("gd-resolve-{id}"))
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (relinked, plain) = (leaf("0123456789ab"), leaf("ba9876543210"));
+        git(&repo, &["worktree", "add", "--detach", &relinked, "HEAD"]).await;
+        git(&repo, &["worktree", "add", "--detach", &plain, "HEAD"]).await;
+        let victim_holder = tempfile::tempdir().expect("create temp dir");
+        let victim = victim_holder
+            .path()
+            .join("checkout")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "--detach", &victim, "HEAD"]).await;
+        std::fs::write(Path::new(&victim).join("staged.txt"), "staged\n").unwrap();
+        git(&victim, &["add", "staged.txt"]).await;
+        std::fs::remove_dir_all(&relinked).unwrap();
+        update_directory_link(&relinked, &victim);
+        // Control: the link is still listed and passes the sweep's shape and keep filters.
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        assert!(is_listed_worktree(&listed, &relinked), "{listed:?}");
+        let picked = orphaned_resolve_worktrees(&wt_base, &listed, &[]);
+        assert!(is_listed_worktree(&picked, &relinked), "{picked:?}");
+        // git 2.51.1 refuses a removal spelled as the link's absolute path (a relative
+        // spelling took the checkout, measured), so the checkout surviving cannot by
+        // itself show that no removal was aimed at the link. This assertion is the pin,
+        // and a sweep that stopped calling `sweep_resolve_leaves` is caught only by
+        // clippy's dead-code lint under -D warnings, since nothing else calls it.
+        let (targets, left) = sweep_resolve_leaves(&wt_base, &listed, &[]);
+        assert!(!is_listed_worktree(&targets, &relinked), "{targets:?}");
+        assert!(is_listed_worktree(&targets, &plain) && left, "{targets:?}");
+
+        let state = AppState::default();
+        cleanup_orphaned_resolve_worktrees(&state, &repo, &[], &wt_base)
+            .await
+            .unwrap();
+
+        let staged = git(&victim, &["diff", "--cached", "--name-only"]).await;
+        assert_eq!(
+            staged.trim(),
+            "staged.txt",
+            "the checkout and its staged file stand"
+        );
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        assert!(is_listed_worktree(&listed, &victim), "{listed:?}");
+        // No removal was aimed at the link: it and its registry entry stay as they were.
+        assert!(
+            std::fs::symlink_metadata(&relinked).is_ok(),
+            "the link stays"
+        );
+        assert!(is_listed_worktree(&listed, &relinked), "{listed:?}");
+        assert!(!Path::new(&plain).exists(), "an ordinary orphan is removed");
+        assert!(!is_listed_worktree(&listed, &plain), "{listed:?}");
+    }
+
+    /// A leaf named with a full uuid under the same root is swept like a minted one.
+    #[tokio::test]
+    async fn orphan_sweep_removes_a_full_uuid_leaf() {
+        let (_dir, repo) = setup_repo("lpr-orphan-uuid-leaf").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let id = "0f8e6a2c-3b1d-4e5f-9a7b-1c2d3e4f5a6b";
+        let legacy = root
+            .join(format!("gd-resolve-{id}"))
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "--detach", &legacy, "HEAD"]).await;
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        let picked = orphaned_resolve_worktrees(&wt_base, &listed, &[]);
+        assert!(is_listed_worktree(&picked, &legacy), "{picked:?}");
+        // Control: the minted-id rule `check_update_worktree` applies rejects it, so only
+        // the sweep's own predicate can pick it.
+        assert!(!is_existing_resolve_leaf(
+            &root.to_string_lossy(),
+            &legacy,
+            id
+        ));
+        let (targets, left) = sweep_resolve_leaves(&wt_base, &listed, &[]);
+        assert!(
+            is_listed_worktree(&targets, &legacy) && !left,
+            "{targets:?}"
+        );
+
+        let state = AppState::default();
+        cleanup_orphaned_resolve_worktrees(&state, &repo, &[], &wt_base)
+            .await
+            .unwrap();
+
+        assert!(!Path::new(&legacy).exists(), "the uuid leaf is removed");
+        let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        assert!(!is_listed_worktree(&listed, &legacy), "{listed:?}");
     }
 
     /// An in-progress resolve in a legacy checkout-keyed root is adopted as-is: a

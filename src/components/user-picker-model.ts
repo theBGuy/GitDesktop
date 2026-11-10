@@ -24,8 +24,9 @@ export const PICKER_ROW_HEIGHT = 36;
 /** The rail's `py-2`: the rows' spacer sits this far below the scroll origin. */
 export const PICKER_RAIL_PAD = 8;
 
-/** Lowercased label, then id, compared by code unit: the same rule as the
- *  backend's `ForgeUserList::build` sort, so never `localeCompare`. */
+/** The backend's `ForgeUserList::build` rule (lowercased label, then id), so never
+ *  `localeCompare`. JS compares UTF-16 code units and Rust UTF-8 bytes; the two
+ *  orders differ only on astral characters. */
 export function compareUsers(a: PickerUser, b: PickerUser): number {
   const la = a.label.toLowerCase();
   const lb = b.label.toLowerCase();

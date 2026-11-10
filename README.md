@@ -407,7 +407,7 @@ in one click.
   chips (Jira tickets aren't closed from PR text). Editing a PR peels any
   trailing `Closes #N` / `Relates to #N` lines back into chips, so the chips
   stay the single editor for the ref block.
-- **Conflicts with the base**: every open PR keeps a one-line strip under its
+- **Conflicts with the base**: every open PR keeps a strip under its
   header, so you always know whether it merges into its base. It reads
   **Checking for conflicts…** while the answers load, and **No conflicts with
   `main`** once the forge or the local prediction finds none. When neither can
@@ -435,8 +435,8 @@ in one click.
   its detailed merge statuses. **Merge** stays available (whoever holds bypass
   permission can merge anyway), and a refused merge repeats the same line
   beside the forge's own message.
-- **Local PR merges**: an open local PR keeps the same one-line merge strip as
-  hosted PRs: whether merging will **conflict** (with the files that clash),
+- **Local PR merges**: an open local PR keeps a merge strip like hosted
+  PRs: whether merging will **conflict** (with the files that clash),
   how far the branch is **behind its base** (with **Update branch** beside it
   unless a conflict is predicted), or that there are no conflicts. **Approve**
   sits beside **Merge** on every tab. A merge that does conflict is resolved
@@ -444,7 +444,9 @@ in one click.
   working tree, then **Finish** or **Abort**. A predicted conflict can be
   resolved before the PR is approved: **Resolve conflicts** merges the base
   into the PR's branch in an isolated worktree, and **Finish update** moves
-  the branch while the PR stays open.
+  the branch while the PR stays open. Unlike the hosted strip, this one
+  keeps a failed or unavailable check, a conflict it can't resolve here, and
+  a promotion gap on more than one line instead of cutting them short.
 - **Activity feed**: a PR's Conversation is a **date-sorted timeline** of
   reviews, comments, grouped **pushed commits** (each SHA clickable), and
   events, every entry carrying a relative **timestamp** (hover for the exact

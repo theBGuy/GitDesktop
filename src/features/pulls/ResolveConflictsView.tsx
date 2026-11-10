@@ -94,6 +94,14 @@ export const discardSettledToast = (
     ? updatedToast(head, base, result.approvalCleared, away)
     : `Update discarded${away}`;
 
+/** A merge abort that could not remove the worktree: nothing was discarded. */
+export const MERGE_ABORT_KEPT =
+  "The paused merge couldn't be discarded, so it is still there.";
+/** The note on a merge abort whose journal entry was already closed as done: by a
+ *  finish elsewhere, or by a reconcile no finish backs, so it never claims a merge. */
+export const MERGE_ENTRY_ALREADY_CLOSED =
+  "Its journal entry had already been closed.";
+
 type ResolveMode = "merge" | "update";
 
 /** Each mode's words and the write kinds its busy state reads. The merge column is
@@ -433,17 +441,29 @@ export function ResolveConflictsView({
         return;
       }
       if (!merge) return;
-      await abort.mutateAsync({
+      const aborted = await abort.mutateAsync({
         worktreePath: merge.worktreePath,
         opId: merge.opId,
       });
-      // Same ordering as Finish: the worktree is already gone, so a record
-      // still naming it must surface as an error rather than a success toast.
+      // A worktree the abort left in place still backs the record, so it stays.
+      if (!aborted.removed) {
+        toastError(new Error(MERGE_ABORT_KEPT));
+        return;
+      }
+      // Same ordering as Finish: nothing of this repository's backs the record
+      // now, so a record still naming the worktree must surface as an error
+      // rather than a success toast.
+      // Status stays as the fresh record has it: a finish elsewhere wrote merged
+      // itself, and a closed entry alone is no proof one ran.
       await updateRecord.mutateAsync({
         id: pr.id,
         mutate: (cur) => ({ ...cur, pendingMerge: undefined }),
       });
-      toast.success("Merge discarded");
+      if (aborted.closed) toast.success("Merge discarded");
+      else
+        toast.success("Merge discarded", {
+          description: MERGE_ENTRY_ALREADY_CLOSED,
+        });
     } catch (e) {
       toastError(e);
     }

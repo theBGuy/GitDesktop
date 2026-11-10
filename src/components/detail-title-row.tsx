@@ -2,7 +2,8 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 /** A PR or issue detail header's title row: the title, then every header action
- *  and state badge in one group pinned to the right of the title's first line. */
+ *  and state badge in one group beside the title's first line, right-aligned, that
+ *  wraps below it as one unit when the row is too narrow. */
 export function DetailTitleRow({
   heading,
   headingAs: Heading = "h2",

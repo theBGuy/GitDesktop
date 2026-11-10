@@ -59,6 +59,11 @@ export function usePullAutostash(repo: string) {
   );
 }
 
+/** Filter family of the stash → merge → reapply compound's mutation key
+ *  (`[family, "merge", repo]`, the merged-in branch riding the variables), so a
+ *  remounted view can hold on a compound its own observer never saw. */
+export const AUTOSTASH_WRITES_FAMILY = "git-autostash";
+
 export function useMergeAutostash(repo: string) {
   return useRepoMutation(
     repo,
@@ -66,6 +71,7 @@ export function useMergeAutostash(repo: string) {
     {
       // Local git write — never park it offline.
       networkMode: "always",
+      identity: [AUTOSTASH_WRITES_FAMILY, "merge", repo],
     },
   );
 }

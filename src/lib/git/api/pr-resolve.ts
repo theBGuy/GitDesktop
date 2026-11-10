@@ -56,6 +56,17 @@ export const gitFinishLocalPrMerge = (
     opId,
   });
 
+/** What an abort did: `removed` = nothing this repository can remove backs the
+ *  record any more (a path that is not one of its minted leaves is not its to
+ *  remove, even one git still lists), false on a failed registry read or when a
+ *  leaf of ours survived the removal; `closed` = the abort ended the merge, false
+ *  when the entry was already closed as done while no registered worktree of ours
+ *  backed it, and whenever `removed` is false (the entry is then left open). */
+export interface LocalPrMergeAbortOutcome {
+  removed: boolean;
+  closed: boolean;
+}
+
 /** Rolls a paused local-PR merge back by deleting the merge worktree — the user's
  *  branch and working tree were never touched, so nothing else to undo. */
 export const gitAbortLocalPrMerge = (
@@ -63,7 +74,7 @@ export const gitAbortLocalPrMerge = (
   worktreePath: string,
   opId: string | null,
 ) =>
-  invoke<void>("git_abort_local_pr_merge", {
+  invoke<LocalPrMergeAbortOutcome>("git_abort_local_pr_merge", {
     repoPath,
     worktreePath,
     opId,
@@ -106,8 +117,10 @@ export const gitUpdateLocalPrHead = (
     head,
   });
 
-/** Commits a paused update's staged resolution and moves the head to it. Refusals keep
- *  the worktree and the unfinished entry, so Finish can be retried. */
+/** Commits a paused update's staged resolution and moves the head to it. No refusal
+ *  removes the worktree or closes the entry, so the update stays retryable or
+ *  discardable; one about the update itself that a retry cannot clear says to
+ *  discard it and start again. */
 export const gitFinishLocalPrUpdate = (
   repoPath: string,
   base: string,
@@ -146,8 +159,8 @@ export const gitDiscardLocalPrUpdate = (
     journalRepo,
   });
 
-/** Closes this checkout's unfinished update journal entries whose id is not kept;
- *  resolves to how many it closed. */
+/** Closes this checkout's unfinished update and paused merge journal entries whose
+ *  id is not kept; resolves to how many it closed. */
 export const gitCloseAbandonedLocalPrUpdates = (
   repoPath: string,
   keepOpIds: string[],

@@ -18,12 +18,15 @@ import {
   gitCleanupOrphanedResolveWorktrees,
   gitCloseAbandonedLocalPrUpdates,
   gitDiscardLocalPrUpdate,
+  gitMergeLocalPr,
   gitUpdateLocalPrHead,
+  type LocalPrMergeOutcome,
   type LocalPrUpdateOutcome,
 } from "@/lib/git/api";
 import {
   type LocalPrUpdateDiscardVars,
   oplogCheckOptions,
+  useMergeLocalPr,
   useStartLocalPrUpdate,
 } from "@/lib/git/queries";
 import {
@@ -31,6 +34,7 @@ import {
   listLocalPrs,
   openPendingUpdate,
   type PendingUpdate,
+  reloadLocalPrs,
   updateLocalPr,
 } from "@/lib/pulls/local";
 import { localPrKey } from "@/lib/pulls/queries";
@@ -41,11 +45,13 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitCleanupOrphanedResolveWorktrees: vi.fn(),
   gitCloseAbandonedLocalPrUpdates: vi.fn(),
   gitDiscardLocalPrUpdate: vi.fn(),
+  gitMergeLocalPr: vi.fn(),
   gitUpdateLocalPrHead: vi.fn(),
 }));
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
   listLocalPrs: vi.fn(),
+  reloadLocalPrs: vi.fn(),
   updateLocalPr: vi.fn(),
 }));
 
@@ -90,7 +96,7 @@ const pr = (id: string, over: Partial<LocalPr> = {}): LocalPr => ({
 });
 
 const MERGE_PATH = "C:/data/wt/gd-resolve-aaaaaaaaaaaa";
-const merging = (id: string) =>
+const merging = (id: string, opId: string | null = null) =>
   pr(id, {
     pendingMerge: {
       base: "main",
@@ -99,7 +105,7 @@ const merging = (id: string) =>
       message: "m",
       worktreePath: MERGE_PATH,
       worktreeId: "aaaaaaaaaaaa",
-      opId: null,
+      opId,
       startedAt: "x",
     },
   });
@@ -109,6 +115,9 @@ let qc: QueryClient;
 let stores: Map<string, Map<string, LocalPr>>;
 /** When set, a list read of REPO waits on it after taking its snapshot. */
 let listGate: Promise<void> | null;
+/** The store's in-memory copy where it differs from disk (`stores`): list reads
+ *  serve it until a reload drops it. */
+let memory: Map<string, LocalPr[]>;
 
 const storeOf = (repo: string) => {
   let store = stores.get(repo);
@@ -145,11 +154,16 @@ beforeEach(() => {
   unmockedCommands.length = 0;
   stores = new Map();
   listGate = null;
+  memory = new Map();
   vi.mocked(listLocalPrs).mockReset();
   vi.mocked(listLocalPrs).mockImplementation(async (repo) => {
-    const snapshot = [...storeOf(repo).values()];
+    const snapshot = memory.get(repo) ?? [...storeOf(repo).values()];
     if (listGate && repo === REPO) await listGate;
     return snapshot;
+  });
+  vi.mocked(reloadLocalPrs).mockReset();
+  vi.mocked(reloadLocalPrs).mockImplementation(async () => {
+    memory.clear();
   });
   vi.mocked(updateLocalPr).mockReset();
   vi.mocked(updateLocalPr).mockImplementation(async (repo, id, mutate) => {
@@ -168,6 +182,7 @@ beforeEach(() => {
   vi.mocked(gitDiscardLocalPrUpdate).mockReset();
   vi.mocked(gitDiscardLocalPrUpdate).mockResolvedValue({ status: "discarded" });
   vi.mocked(gitUpdateLocalPrHead).mockReset();
+  vi.mocked(gitMergeLocalPr).mockReset();
 });
 
 afterEach(() => {
@@ -209,6 +224,23 @@ describe("the worktree sweep", () => {
     // Once per repo open: a later list read sweeps nothing more.
     await relist();
     expect(gitCleanupOrphanedResolveWorktrees).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps every record's paused merge op id from the journal closer", async () => {
+    setList(REPO, [
+      merging("merge", "op-merge-open"),
+      pr("open", { pendingUpdate: update(1) }),
+      { ...merging("merged-away", "op-merge-closed"), status: "closed" },
+    ]);
+    mount(REPO);
+    await waitFor(() =>
+      expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledTimes(1),
+    );
+    expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledWith(REPO, [
+      "op-merge-open",
+      "op-1",
+      "op-merge-closed",
+    ]);
   });
 
   it("sweeps only from a read it requested, never a list cached before it mounted", async () => {
@@ -302,20 +334,21 @@ describe("the worktree sweep", () => {
       });
     });
     const created = update(6, { journalRepo: SIBLING_CHECKOUT });
+    start.resolve({
+      status: "conflicts",
+      conflicts: ["a.txt"],
+      headTip: "c".repeat(40),
+      worktreePath: created.worktreePath,
+      worktreeId: created.worktreeId,
+      opId: created.opId,
+      journalRepo: SIBLING_CHECKOUT,
+    });
+    // The start waits out the sweep whose read is in flight.
+    listGate = null;
     await act(async () => {
-      start.resolve({
-        status: "conflicts",
-        conflicts: ["a.txt"],
-        headTip: "c".repeat(40),
-        worktreePath: created.worktreePath,
-        worktreeId: created.worktreeId,
-        opId: created.opId,
-        journalRepo: SIBLING_CHECKOUT,
-      });
+      gate.resolve();
       await started;
     });
-    listGate = null;
-    gate.resolve();
     await waitFor(() =>
       expect(gitCleanupOrphanedResolveWorktrees).toHaveBeenCalled(),
     );
@@ -410,6 +443,197 @@ describe("the worktree sweep", () => {
     expect(listLocalPrs).toHaveBeenCalledTimes(2);
     expect(gitCleanupOrphanedResolveWorktrees).not.toHaveBeenCalled();
     expect(gitCloseAbandonedLocalPrUpdates).not.toHaveBeenCalled();
+  });
+
+  it("reads the keep-list from disk, not the store's in-memory copy", async () => {
+    // Another instance recorded the update; this one's store still holds the older copy.
+    setList(REPO, [pr("open", { pendingUpdate: update(1) })]);
+    memory.set(REPO, [pr("open")]);
+    mount(REPO);
+    await waitFor(() =>
+      expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledTimes(1),
+    );
+    expect(reloadLocalPrs).toHaveBeenCalled();
+    expect(keepLists()).toEqual([[update(1).worktreePath]]);
+    expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledWith(REPO, [
+      "op-1",
+    ]);
+  });
+
+  it("skips the sweep for this open when the store reload fails", async () => {
+    setList(REPO, [pr("open", { pendingUpdate: update(1) })]);
+    vi.mocked(reloadLocalPrs).mockRejectedValueOnce(
+      new Error("store unreadable"),
+    );
+    mount(REPO);
+    await waitFor(() => expect(reloadLocalPrs).toHaveBeenCalledTimes(1));
+    await relist();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(reloadLocalPrs).toHaveBeenCalledTimes(1);
+    expect(gitCleanupOrphanedResolveWorktrees).not.toHaveBeenCalled();
+    expect(gitCloseAbandonedLocalPrUpdates).not.toHaveBeenCalled();
+  });
+
+  /** Mounts a start of PR "open" in REPO; `answer` settles its command. */
+  function startOpen() {
+    const command = deferred<LocalPrUpdateOutcome>();
+    vi.mocked(gitUpdateLocalPrHead).mockReturnValue(command.promise);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+    const starter = renderHook(
+      () => useStartLocalPrUpdate(REPO, localPrKey(REPO)),
+      { wrapper },
+    );
+    let started!: Promise<unknown>;
+    act(() => {
+      started = starter.result.current.mutateAsync({
+        id: "open",
+        base: "main",
+        head: "head-open",
+      });
+    });
+    const created = update(7);
+    const answer = () =>
+      act(async () => {
+        command.resolve({
+          status: "conflicts",
+          conflicts: ["a.txt"],
+          headTip: "c".repeat(40),
+          worktreePath: created.worktreePath,
+          worktreeId: created.worktreeId,
+          opId: created.opId,
+          journalRepo: REPO,
+        });
+        await started;
+      });
+    return { created, answer };
+  }
+
+  it("runs a start dispatched mid-sweep after the pass, which never closes with the old keep-list", async () => {
+    setList(REPO, [pr("open")]);
+    const cleanup = deferred<void>();
+    vi.mocked(gitCleanupOrphanedResolveWorktrees).mockReturnValueOnce(
+      cleanup.promise,
+    );
+    mount(REPO);
+    await waitFor(() =>
+      expect(gitCleanupOrphanedResolveWorktrees).toHaveBeenCalledTimes(1),
+    );
+    const { created, answer } = startOpen();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitUpdateLocalPrHead).not.toHaveBeenCalled();
+    await act(async () => cleanup.resolve());
+    await waitFor(() => expect(gitUpdateLocalPrHead).toHaveBeenCalledTimes(1));
+    // The pass abandoned before its closer: its keep-list predates the start.
+    expect(gitCloseAbandonedLocalPrUpdates).not.toHaveBeenCalled();
+    await answer();
+    await waitFor(() =>
+      expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledTimes(1),
+    );
+    expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledWith(REPO, [
+      created.opId,
+    ]);
+    expect(keepLists().at(-1)).toEqual([created.worktreePath]);
+  });
+
+  it("runs an into-base merge dispatched mid-sweep after the pass, and sweeps again only once it settles", async () => {
+    setList(REPO, [pr("open")]);
+    const cleanup = deferred<void>();
+    vi.mocked(gitCleanupOrphanedResolveWorktrees).mockReturnValueOnce(
+      cleanup.promise,
+    );
+    mount(REPO);
+    await waitFor(() =>
+      expect(gitCleanupOrphanedResolveWorktrees).toHaveBeenCalledTimes(1),
+    );
+    const command = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(command.promise);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+    const merger = renderHook(() => useMergeLocalPr(REPO, localPrKey(REPO)), {
+      wrapper,
+    });
+    let started!: Promise<unknown>;
+    /** The record as the mutation settles, before any later write could land. */
+    let recordAtSettle: LocalPr | undefined;
+    act(() => {
+      started = merger.result.current
+        .mutateAsync({
+          id: "open",
+          base: "main",
+          head: "head-open",
+          message: "m",
+          strategy: "merge",
+        })
+        .then((result) => {
+          recordAtSettle = storeOf(REPO).get("open");
+          return result;
+        });
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitMergeLocalPr).not.toHaveBeenCalled();
+    await act(async () => cleanup.resolve());
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    // The pass abandoned before its closer: its keep-list predates the merge.
+    expect(gitCloseAbandonedLocalPrUpdates).not.toHaveBeenCalled();
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+    expect(gitCleanupOrphanedResolveWorktrees).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      command.resolve({
+        status: "conflicts",
+        conflicts: ["a.txt"],
+        baseTip: "b".repeat(40),
+        worktreePath: MERGE_PATH,
+        worktreeId: "aaaaaaaaaaaa",
+        opId: "op-m",
+      });
+      await started;
+    });
+    await waitFor(() =>
+      expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledTimes(1),
+    );
+    expect(gitCleanupOrphanedResolveWorktrees).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(gitCleanupOrphanedResolveWorktrees).mock.invocationCallOrder[1],
+    ).toBeGreaterThan(vi.mocked(gitMergeLocalPr).mock.invocationCallOrder[0]);
+    // The merge recorded its worktree before it settled, so the pass that ran
+    // once it settled keeps it.
+    expect(recordAtSettle?.pendingMerge?.worktreePath).toBe(MERGE_PATH);
+    expect(keepLists().at(-1)).toContain(MERGE_PATH);
+  });
+
+  it("never cleans up with a keep-list read before a start that began during the read", async () => {
+    qc.setQueryData(localPrKey(REPO), [pr("open")]);
+    setList(REPO, [pr("open")]);
+    const gate = deferred<void>();
+    listGate = gate.promise;
+    mount(REPO);
+    await waitFor(() => expect(listLocalPrs).toHaveBeenCalledTimes(1));
+    const { created, answer } = startOpen();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(gitUpdateLocalPrHead).not.toHaveBeenCalled();
+    listGate = null;
+    await act(async () => gate.resolve());
+    await waitFor(() => expect(gitUpdateLocalPrHead).toHaveBeenCalledTimes(1));
+    await answer();
+    await waitFor(() =>
+      expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledTimes(1),
+    );
+    for (const keep of keepLists())
+      expect(keep).toContain(created.worktreePath);
+    expect(gitCloseAbandonedLocalPrUpdates).toHaveBeenCalledWith(REPO, [
+      created.opId,
+    ]);
   });
 
   it("does nothing while no repository is open", async () => {

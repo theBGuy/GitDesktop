@@ -15,8 +15,10 @@ import {
   vi,
 } from "vitest";
 import {
+  gitAbortLocalPrMerge,
   gitDiscardLocalPrUpdate,
   gitFinishLocalPrUpdate,
+  gitMergeLocalPr,
   gitOpState,
   gitUpdateLocalPrHead,
   type LocalPrUpdateOutcome,
@@ -26,8 +28,10 @@ import {
   LOCAL_PR_WRITES_KEY,
   type LocalPrUpdateDiscardVars,
   type LocalPrUpdateFinishVars,
+  UPDATE_MERGE_PAUSED_MESSAGE,
   useDiscardLocalPrUpdate,
   useFinishLocalPrUpdate,
+  useMergeLocalPr,
   useStartLocalPrUpdate,
 } from "@/lib/git/queries";
 import type { RepoOpState } from "@/lib/git/types";
@@ -48,8 +52,10 @@ import { unmockedCommands } from "./setup";
 // The api modules are the seam; everything else in them stays real.
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
+  gitAbortLocalPrMerge: vi.fn(),
   gitDiscardLocalPrUpdate: vi.fn(),
   gitFinishLocalPrUpdate: vi.fn(),
+  gitMergeLocalPr: vi.fn(),
   gitOpState: vi.fn(),
   gitUpdateLocalPrHead: vi.fn(),
 }));
@@ -207,6 +213,8 @@ beforeEach(() => {
   vi.mocked(gitFinishLocalPrUpdate).mockReset();
   vi.mocked(gitDiscardLocalPrUpdate).mockReset();
   vi.mocked(gitDiscardLocalPrUpdate).mockResolvedValue({ status: "discarded" });
+  vi.mocked(gitMergeLocalPr).mockReset();
+  vi.mocked(gitAbortLocalPrMerge).mockReset();
 });
 
 afterEach(() => {
@@ -247,17 +255,7 @@ describe("openPendingUpdate", () => {
 
 describe("useStartLocalPrUpdate", () => {
   it("records a conflicted start with the outcome's ids and nothing else", async () => {
-    const merge = {
-      base: "main",
-      head: "feat",
-      strategy: "merge" as const,
-      message: "m",
-      worktreePath: "C:/wt/merge",
-      worktreeId: "merge",
-      opId: null,
-      startedAt: "x",
-    };
-    records.set("pr-1", pr({ approved: true, pendingMerge: merge }));
+    records.set("pr-1", pr({ approved: true, labels: ["keep"] }));
     vi.mocked(gitUpdateLocalPrHead).mockResolvedValue(conflicts());
     const view = await mount(useStartLocalPrUpdate);
     let result: unknown;
@@ -280,7 +278,7 @@ describe("useStartLocalPrUpdate", () => {
       journalRepo: "C:/repos/demo-checkout",
       startedAt: expect.any(String),
     });
-    expect(written?.pendingMerge).toEqual(merge);
+    expect(written?.labels).toEqual(["keep"]);
     expect(written?.status).toBe("open");
     expect(written?.approved).toBe(true);
     expect(gitDiscardLocalPrUpdate).not.toHaveBeenCalled();
@@ -326,6 +324,46 @@ describe("useStartLocalPrUpdate", () => {
     },
   );
 
+  it("discards its own worktree when a paused merge is recorded while the command runs", async () => {
+    records.set("pr-1", pr());
+    let answer!: (o: Awaited<ReturnType<typeof gitUpdateLocalPrHead>>) => void;
+    vi.mocked(gitUpdateLocalPrHead).mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const view = await mount(useStartLocalPrUpdate);
+    let started!: Promise<unknown>;
+    act(() => {
+      started = view.result.current.hook.mutateAsync({
+        id: "pr-1",
+        base: "main",
+        head: "feat",
+      });
+    });
+    await waitFor(() => expect(gitUpdateLocalPrHead).toHaveBeenCalled());
+    // Another window pauses an into-base merge before the start writes its record.
+    const merging = pr({
+      pendingMerge: {
+        base: "main",
+        head: "feat",
+        strategy: "merge",
+        message: "m",
+        worktreePath: "C:/wt/merge",
+        worktreeId: "merge",
+        opId: null,
+        startedAt: "x",
+      },
+    });
+    records.set("pr-1", merging);
+    await act(async () => {
+      answer(conflicts());
+      await expect(started).rejects.toThrow(UPDATE_MERGE_PAUSED_MESSAGE);
+    });
+    expect(records.get("pr-1")).toBe(merging);
+    expect(gitDiscardLocalPrUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it("overwrites a malformed stored field, which is inert", async () => {
     const malformed = { ...update(), opId: "" };
     records.set("pr-1", pr({ pendingUpdate: malformed }));
@@ -358,6 +396,91 @@ describe("useStartLocalPrUpdate", () => {
     });
     expect(gitDiscardLocalPrUpdate).toHaveBeenCalledTimes(1);
   });
+
+  const pausedMerge = () =>
+    pr({
+      pendingMerge: {
+        base: "main",
+        head: "feat",
+        strategy: "merge",
+        message: "m",
+        worktreePath: "C:/wt/merge",
+        worktreeId: "merge",
+        opId: null,
+        startedAt: "x",
+      },
+    });
+  /** Each refusal's fresh record, its sentence once the discard removed the new
+   *  worktree, and its sentences when the discard failed or found it landed. */
+  const REFUSALS = [
+    {
+      name: "is no longer open",
+      fresh: () => pr({ status: "closed" }),
+      discarded:
+        "This pull request is no longer open, so the update was discarded.",
+      kept: "This pull request is no longer open, and the update couldn't be discarded, so it is still there.",
+      updated:
+        "This pull request is no longer open, and the update had already landed.",
+    },
+    {
+      name: "already has an unfinished update",
+      fresh: () =>
+        pr({ pendingUpdate: update({ worktreeId: "fedcba987654" }) }),
+      discarded:
+        "This pull request already has an unfinished conflict resolution, so the new one was discarded.",
+      kept: "This pull request already has an unfinished conflict resolution, and the new one couldn't be discarded, so it is still there.",
+      updated:
+        "This pull request already has an unfinished conflict resolution, and the new one had already landed.",
+    },
+    {
+      name: "has a paused merge",
+      fresh: pausedMerge,
+      discarded:
+        "This pull request has a paused merge to finish or abort first, so the new conflict resolution was discarded.",
+      kept: "This pull request has a paused merge to finish or abort first, and the new conflict resolution couldn't be discarded, so it is still there.",
+      updated:
+        "This pull request has a paused merge to finish or abort first, and the new conflict resolution had already landed.",
+    },
+  ];
+
+  it.each(
+    REFUSALS.flatMap((r) =>
+      (["kept", "updated"] as const).map((outcome) => ({ ...r, outcome })),
+    ),
+  )(
+    "says the refused update was $outcome, not discarded, when the fresh record $name",
+    async ({ fresh, discarded, outcome, ...said }) => {
+      const record = fresh();
+      records.set("pr-1", record);
+      vi.mocked(gitUpdateLocalPrHead).mockResolvedValue(conflicts());
+      if (outcome === "kept")
+        vi.mocked(gitDiscardLocalPrUpdate).mockRejectedValue(
+          new Error("worktree busy"),
+        );
+      else
+        vi.mocked(gitDiscardLocalPrUpdate).mockResolvedValue({
+          status: "updated",
+        });
+      const view = await mount(useStartLocalPrUpdate);
+      let thrown: unknown;
+      await act(async () => {
+        thrown = await view.result.current.hook
+          .mutateAsync({ id: "pr-1", base: "main", head: "feat" })
+          .then(
+            () => undefined,
+            (e: unknown) => e,
+          );
+      });
+      expect(thrown).toBeInstanceOf(Error);
+      const message = (thrown as Error).message;
+      expect(message).toBe(said[outcome]);
+      // Negative control: the removal's sentence is not what a failed or landed
+      // discard says.
+      expect(message).not.toBe(discarded);
+      expect(records.get("pr-1")).toBe(record);
+      expect(gitDiscardLocalPrUpdate).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("clears the approval of an approved record on a clean start", async () => {
     records.set("pr-1", pr({ approved: true }));
@@ -437,6 +560,78 @@ describe("useStartLocalPrUpdate", () => {
     expect(result).toMatchObject({
       recordError: "store locked by another window",
     });
+  });
+});
+
+describe("useMergeLocalPr", () => {
+  it("aborts its new worktree, then rethrows, when the record write rejects", async () => {
+    const failure = new Error("no local PR with id pr-1");
+    vi.mocked(updateLocalPr).mockRejectedValue(failure);
+    const mergeWt = "C:/data/worktrees/id/gd-resolve-fedcba987654";
+    vi.mocked(gitMergeLocalPr).mockResolvedValue({
+      status: "conflicts",
+      conflicts: ["a.txt"],
+      baseTip: "c".repeat(40),
+      worktreePath: mergeWt,
+      worktreeId: "fedcba987654",
+      opId: "op-m",
+    });
+    vi.mocked(gitAbortLocalPrMerge).mockResolvedValue({
+      removed: true,
+      closed: true,
+    });
+    const view = await mount(useMergeLocalPr);
+    let thrown: unknown;
+    await act(async () => {
+      thrown = await view.result.current.hook
+        .mutateAsync({
+          id: "pr-1",
+          base: "main",
+          head: "feat",
+          message: "m",
+          strategy: "merge",
+        })
+        .then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+    });
+    expect(updateLocalPr).toHaveBeenCalledTimes(1);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, mergeWt, "op-m");
+    expect(thrown).toBe(failure);
+  });
+
+  it("still rethrows the write's rejection when that abort fails too", async () => {
+    const failure = new Error("store unwritable");
+    vi.mocked(updateLocalPr).mockRejectedValue(failure);
+    vi.mocked(gitMergeLocalPr).mockResolvedValue({
+      status: "conflicts",
+      conflicts: ["a.txt"],
+      baseTip: "c".repeat(40),
+      worktreePath: WT_PATH,
+      worktreeId: WT_ID,
+      opId: null,
+    });
+    vi.mocked(gitAbortLocalPrMerge).mockRejectedValue(new Error("busy"));
+    const view = await mount(useMergeLocalPr);
+    let thrown: unknown;
+    await act(async () => {
+      thrown = await view.result.current.hook
+        .mutateAsync({
+          id: "pr-1",
+          base: "main",
+          head: "feat",
+          message: "m",
+          strategy: "merge",
+        })
+        .then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+    });
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, WT_PATH, null);
+    expect(thrown).toBe(failure);
   });
 });
 

@@ -149,16 +149,17 @@ export interface LocalMergeStripInputs {
   promotionSettling: boolean;
   /** An update-from write naming THIS head and base is running. */
   updating: boolean;
-  /** Package 2's resolve slot; null when nothing offers a resolve. */
+  /** The resolve slot; null when nothing offers a resolve. */
   resolve: { unfinished: boolean } | null;
 }
 
 /**
  * A running update outranks all (every input reads the head it moves); an unfinished resolve
  * needs no read and its conflict stays predicted; an errored preview is `failed` over any
- * retained answer. `unknown` (git older than 2.38, a base or head that no longer resolves
- * such as a deleted branch, an empty merge-tree answer on exit 1), a disabled preview or an
- * unrecognised status is `unchecked`, never behind. Conflict outranks behind; a pending read
+ * retained answer. `unknown` (a base or head that no longer resolves such as a deleted
+ * branch, an empty merge-tree answer on exit 1, or any other merge-tree exit, git older
+ * than 2.38 among them), a disabled preview or an unrecognised status is `unchecked`,
+ * never behind. Conflict outranks behind; a pending read
  * holds `checking`; `clean` claims only the prediction: a FAILED comparison never says behind.
  */
 export function localMergeStripArm(input: LocalMergeStripInputs): {

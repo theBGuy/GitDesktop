@@ -12,10 +12,11 @@ import {
   gitCompareBranches,
   gitConflictPreview,
   gitDefaultBranch,
+  gitMergeAutostash,
   gitStatus,
   gitUpdateBranchFrom,
 } from "@/lib/git/api";
-import { useUpdateBranchFrom } from "@/lib/git/queries";
+import { useMergeLocalPr, useUpdateBranchFrom } from "@/lib/git/queries";
 import type {
   BranchComparison,
   CommitSummary,
@@ -24,6 +25,7 @@ import type {
 } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { type LocalPr, listLocalPrs, updateLocalPr } from "@/lib/pulls/local";
+import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
@@ -53,6 +55,9 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitDefaultBranch: vi.fn(),
   gitStatus: vi.fn(),
   gitUpdateBranchFrom: vi.fn(),
+  gitMergeAutostash: vi.fn(),
+  // A merge staged from outside the view stays in flight.
+  gitMergeLocalPr: vi.fn(() => new Promise(() => undefined)),
   gitBranchDiffFiles: vi.fn(async () => []),
   // The Files tab's fork-point read and the Review tab's key read.
   gitMergeBase: vi.fn(() => new Promise(() => undefined)),
@@ -142,6 +147,32 @@ function UpdateProbe() {
   return null;
 }
 
+/** Starts PR "a"'s record and merge writes from outside the view, as another
+ *  surface or a remounted view's earlier press would: no click slot is set. */
+let stageRecordWrite!: (vars: {
+  mutate: (pr: LocalPr) => LocalPr;
+  approved?: boolean;
+}) => void;
+let stageMerge!: () => void;
+function WriteProbe() {
+  const record = useUpdateLocalPr(REPO);
+  const merge = useMergeLocalPr(REPO);
+  stageRecordWrite = (vars) => {
+    void record.mutateAsync({ id: "a", ...vars }).catch(() => undefined);
+  };
+  stageMerge = () => {
+    const vars = {
+      id: "a",
+      base: "main",
+      head: "feature",
+      message: "m",
+      strategy: "merge" as const,
+    };
+    void merge.mutateAsync(vars).catch(() => undefined);
+  };
+  return null;
+}
+
 /** A selection change re-renders a mounted view, so it lands inside act. */
 function select(id: string) {
   act(() => useUiStore.setState({ selectedPr: { kind: "local", id } }));
@@ -155,6 +186,7 @@ function renderView(id = "a") {
     <QueryClientProvider client={client}>
       <LocalPrView repoPath={REPO} id={pid} />
       <UpdateProbe />
+      <WriteProbe />
     </QueryClientProvider>
   );
   select(id);
@@ -164,6 +196,17 @@ function renderView(id = "a") {
     showPr: (pid: string) => {
       select(pid);
       result.rerender(ui(pid));
+    },
+    /** Unmounts the view and mounts it again over the same cache, as a local ->
+     *  remote -> local hop does. */
+    remount: () => {
+      result.rerender(
+        <QueryClientProvider client={client}>
+          <UpdateProbe />
+          <WriteProbe />
+        </QueryClientProvider>,
+      );
+      result.rerender(ui(id));
     },
   };
 }
@@ -221,7 +264,7 @@ beforeEach(() => {
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
 describe("LocalPrView merge strip", () => {
-  it("V1: an open PR shows the strip under the header on every tab", async () => {
+  it("an open PR shows the strip under the header on every tab", async () => {
     const user = userEvent.setup();
     renderView();
     const s = await findStrip("No conflicts with main.");
@@ -241,7 +284,7 @@ describe("LocalPrView merge strip", () => {
   it.each([
     ["closed", { status: "closed" as const }],
     ["merged", { status: "merged" as const }],
-  ])("V1: a %s PR shows no strip", async (_label, over) => {
+  ])("a %s PR shows no strip", async (_label, over) => {
     records = [makePr(over)];
     renderView();
     await screen.findByRole("heading", { name: /PR A/ });
@@ -250,7 +293,7 @@ describe("LocalPrView merge strip", () => {
     expect(screen.queryByText(/No conflicts with/)).toBeNull();
   });
 
-  it("V2: the old status block's lines render in no state", async () => {
+  it("the old status block's lines render in no state", async () => {
     const old =
       /Merges cleanly|This merge will conflict in|Approve this PR to merge/;
     renderView();
@@ -265,7 +308,7 @@ describe("LocalPrView merge strip", () => {
     expect(screen.queryByText(old)).toBeNull();
   });
 
-  it("V3: Approve sits in the footer on every tab and holds while it saves", async () => {
+  it("Approve sits in the footer on every tab and holds while it saves", async () => {
     const user = userEvent.setup();
     const write = deferred<LocalPr>();
     vi.mocked(updateLocalPr).mockImplementationOnce(
@@ -306,14 +349,14 @@ describe("LocalPrView merge strip", () => {
     }
   });
 
-  it("V3: a closed PR has no Approve", async () => {
+  it("a closed PR has no Approve", async () => {
     records = [makePr({ status: "closed" })];
     renderView();
     await screen.findByRole("button", { name: "Reopen" });
     expect(screen.queryByRole("button", { name: /^Approve/ })).toBeNull();
   });
 
-  it("V4: the approval hold stays with its PR across a switch", async () => {
+  it("the approval hold stays with its PR across a switch", async () => {
     const user = userEvent.setup();
     records = [makePr(), makePr({ id: "b", title: "PR B", head: "other" })];
     vi.mocked(updateLocalPr).mockReturnValueOnce(new Promise(() => undefined));
@@ -331,7 +374,7 @@ describe("LocalPrView merge strip", () => {
     expect(approve).not.toHaveAttribute("aria-disabled");
   });
 
-  it("V5: Merge holds while an approval change saves", async () => {
+  it("Merge holds while an approval change saves", async () => {
     const user = userEvent.setup();
     records = [makePr({ approved: true })];
     vi.mocked(updateLocalPr).mockReturnValueOnce(new Promise(() => undefined));
@@ -349,7 +392,66 @@ describe("LocalPrView merge strip", () => {
     expect(merge()).toHaveAccessibleDescription("Saving…");
   });
 
-  it("V5: Merge names its reason, and the dirty tree's shows as text", async () => {
+  it("an approval being granted holds Merge as saving, not as unapproved", async () => {
+    const user = userEvent.setup();
+    vi.mocked(updateLocalPr).mockReturnValueOnce(new Promise(() => undefined));
+    renderView();
+    await findStrip("No conflicts with main.");
+    await settle();
+    const merge = () => screen.getByRole("button", { name: "Merge" });
+    // Control: the stored record alone reads as unapproved.
+    expect(merge()).toHaveAccessibleDescription(
+      "Approve the PR before merging",
+    );
+    await user.click(within(footer()).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(merge()).toHaveAccessibleDescription("Saving…"));
+    expect(merge()).toHaveAttribute("aria-disabled", "true");
+    expect(records[0].approved).toBe(false);
+  });
+
+  it("an approval write pending in the cache holds Merge as saving with no click", async () => {
+    vi.mocked(updateLocalPr).mockReturnValue(new Promise(() => undefined));
+    renderView();
+    await findStrip("No conflicts with main.");
+    await settle();
+    const merge = () => screen.getByRole("button", { name: "Merge" });
+    const unapproved = "Approve the PR before merging";
+    // Control: a pending record write that sets no approval holds nothing.
+    act(() => stageRecordWrite({ mutate: (cur) => ({ ...cur, title: "x" }) }));
+    await settle();
+    expect(merge()).toHaveAccessibleDescription(unapproved);
+    act(() =>
+      stageRecordWrite({
+        mutate: (cur) => ({ ...cur, approved: true }),
+        approved: true,
+      }),
+    );
+    await waitFor(() => expect(merge()).toHaveAccessibleDescription("Saving…"));
+    expect(merge()).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("a merge in flight outranks an approval write in flight", async () => {
+    records = [makePr({ approved: true })];
+    vi.mocked(updateLocalPr).mockReturnValue(new Promise(() => undefined));
+    renderView();
+    await findStrip("No conflicts with main.");
+    await settle();
+    const merge = () => screen.getByRole("button", { name: "Merge" });
+    act(() =>
+      stageRecordWrite({
+        mutate: (cur) => ({ ...cur, approved: false }),
+        approved: false,
+      }),
+    );
+    // Control: the approval write alone reads as saving.
+    await waitFor(() => expect(merge()).toHaveAccessibleDescription("Saving…"));
+    act(() => stageMerge());
+    await waitFor(() =>
+      expect(merge()).toHaveAccessibleDescription("Merging…"),
+    );
+  });
+
+  it("Merge names its reason, and the dirty tree's shows as text", async () => {
     // Unapproved over a dirty current base: the approval reason outranks the tree's.
     vi.mocked(gitStatus).mockResolvedValue(statusOn("main", true));
     const view = renderView();
@@ -392,7 +494,7 @@ describe("LocalPrView merge strip", () => {
     expect(screen.queryByText(DIRTY)).toBeNull();
   });
 
-  it("V6: Update branch lives in the strip, behind and conflict-free only", async () => {
+  it("Update branch lives in the strip, behind and conflict-free only", async () => {
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
     const view = renderView();
     const s = await findStrip("This branch is 3 commits behind main.");
@@ -423,7 +525,7 @@ describe("LocalPrView merge strip", () => {
     expect(screen.queryByRole("button", { name: "Update branch" })).toBeNull();
   });
 
-  it("V7: a running update on this branch holds the button and shows in the strip", async () => {
+  it("a running update on this branch holds the button and shows in the strip", async () => {
     const user = userEvent.setup();
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
     renderView();
@@ -458,7 +560,7 @@ describe("LocalPrView merge strip", () => {
     return { previewRead, compareRead };
   }
 
-  it("D1: a finished update holds the strip until its reads answer", async () => {
+  it("a finished update holds the strip until its reads answer", async () => {
     const user = userEvent.setup();
     let button!: HTMLElement;
     await updateWithReadsInFlight(async () => {
@@ -473,7 +575,7 @@ describe("LocalPrView merge strip", () => {
     expect(document.activeElement).toBe(button);
   });
 
-  it("D1: the strip turns clean once the reads land, focus on its root", async () => {
+  it("the strip turns clean once the reads land, focus on its root", async () => {
     const user = userEvent.setup();
     const { previewRead, compareRead } = await updateWithReadsInFlight(
       async () => {
@@ -489,7 +591,7 @@ describe("LocalPrView merge strip", () => {
     expect(document.activeElement).toBe(s);
   });
 
-  it("D1 control: without the press's hold the window offers the update again", async () => {
+  it("an update started outside the strip leaves the window open, offering the update again", async () => {
     // The same write started outside the strip carries no hold, so this is the
     // window a press showed before: the retained behind answer, enabled.
     await updateWithReadsInFlight(async () => {
@@ -501,7 +603,70 @@ describe("LocalPrView merge strip", () => {
     ).not.toHaveAttribute("aria-disabled");
   });
 
-  it("V7: an update of other branches holds with their names", async () => {
+  it("keeps the strip held while a dirty-tree update's stash-and-reapply runs, until its reads answer", async () => {
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    vi.mocked(gitUpdateBranchFrom).mockRejectedValue(
+      new Error(
+        "error: Your local changes to the following files would be overwritten by merge: a.txt",
+      ),
+    );
+    const compound = deferred<{ kind: "reapplied" }>();
+    vi.mocked(gitMergeAutostash).mockReturnValue(compound.promise);
+    const user = userEvent.setup();
+    renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Update branch" }));
+    await user.click(
+      await screen.findByRole("button", { name: /Stash and reapply/ }),
+    );
+    await waitFor(() =>
+      expect(gitMergeAutostash).toHaveBeenCalledWith(REPO, "main"),
+    );
+    await findStrip("Updating feature from main…");
+    const previewRead = deferred<MergePreview>();
+    const compareRead = deferred<BranchComparison>();
+    vi.mocked(gitConflictPreview).mockReturnValue(previewRead.promise);
+    vi.mocked(gitCompareBranches).mockReturnValue(compareRead.promise);
+    await act(async () => compound.resolve({ kind: "reapplied" }));
+    await settle();
+    // The compound settled; the strip's reads were re-asked and have not answered.
+    expect(strip()).toHaveTextContent("Updating feature from main…");
+    expect(strip()).not.toHaveTextContent("behind");
+    const held = screen.getByRole("button", { name: "Update branch" });
+    expect(held).toHaveAttribute("aria-disabled", "true");
+    expect(held).toHaveAccessibleDescription("Updating this branch…");
+    await act(async () => {
+      previewRead.resolve(preview("clean"));
+      compareRead.resolve(behindBy(0));
+    });
+    await findStrip("No conflicts with main.");
+    expect(screen.queryByRole("button", { name: "Update branch" })).toBeNull();
+  });
+
+  it("keeps Merge held across a remount while an approval withdrawal saves", async () => {
+    const user = userEvent.setup();
+    records = [makePr({ approved: true })];
+    vi.mocked(updateLocalPr).mockReturnValueOnce(new Promise(() => undefined));
+    const view = renderView();
+    await findStrip("No conflicts with main.");
+    await settle();
+    const merge = () => screen.getByRole("button", { name: "Merge" });
+    expect(merge()).not.toHaveAttribute("aria-disabled");
+    await user.click(
+      within(footer()).getByRole("button", { name: "Approved" }),
+    );
+    await waitFor(() =>
+      expect(merge()).toHaveAttribute("aria-disabled", "true"),
+    );
+    view.remount();
+    await findStrip("No conflicts with main.");
+    await settle();
+    expect(merge()).toHaveAttribute("aria-disabled", "true");
+    expect(merge()).toHaveAccessibleDescription("Saving…");
+  });
+
+  it("an update of other branches holds with their names", async () => {
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
     renderView();
     await findStrip("This branch is 3 commits behind main.");
@@ -531,20 +696,17 @@ describe("LocalPrView merge strip", () => {
           .mockReturnValue(new Promise(() => undefined)),
       "Checking this repository's promotion branches…",
     ],
-  ])(
-    "V7: %s still loading holds Update branch",
-    async (_l, arrange, reason) => {
-      vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
-      arrange();
-      renderView();
-      await findStrip("This branch is 3 commits behind main.");
-      const button = screen.getByRole("button", { name: "Update branch" });
-      expect(button).toHaveAttribute("aria-disabled", "true");
-      expect(button).toHaveAccessibleDescription(reason);
-    },
-  );
+  ])("%s still loading holds Update branch", async (_l, arrange, reason) => {
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    arrange();
+    renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    const button = screen.getByRole("button", { name: "Update branch" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAccessibleDescription(reason);
+  });
 
-  it("V8: a failed check offers Retry, which re-reads the failed reads", async () => {
+  it("a failed check offers Retry, which re-reads the failed reads", async () => {
     const user = userEvent.setup();
     vi.mocked(gitConflictPreview).mockRejectedValue(new Error("boom"));
     vi.mocked(gitCompareBranches).mockRejectedValue(new Error("boom"));
@@ -557,7 +719,7 @@ describe("LocalPrView merge strip", () => {
     expect(gitCompareBranches).toHaveBeenCalledTimes(2);
   });
 
-  it("V8: Retry leaves an answered comparison alone, and behind shows the update", async () => {
+  it("Retry leaves an answered comparison alone, and behind shows the update", async () => {
     const user = userEvent.setup();
     vi.mocked(gitConflictPreview).mockRejectedValue(new Error("boom"));
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(2));
@@ -574,7 +736,7 @@ describe("LocalPrView merge strip", () => {
     expect(gitCompareBranches).toHaveBeenCalledTimes(1);
   });
 
-  it("V8: a check that can't be made offers no Retry", async () => {
+  it("a check that can't be made offers no Retry", async () => {
     vi.mocked(gitConflictPreview).mockResolvedValue(preview("unknown"));
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(2));
     renderView();
@@ -588,7 +750,7 @@ describe("LocalPrView merge strip", () => {
     ).toBeInTheDocument();
   });
 
-  it("V9: the palette's Update pull request branch runs only where the button would", async () => {
+  it("the palette's Update pull request branch runs only where the button would", async () => {
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
     const view = renderView();
     await findStrip("This branch is 3 commits behind main.");
@@ -627,7 +789,7 @@ describe("LocalPrView merge strip", () => {
     expect(gitUpdateBranchFrom).not.toHaveBeenCalled();
   });
 
-  it("V10: a paused merge's takeover shows no strip", async () => {
+  it("a paused merge's takeover shows no strip", async () => {
     records = [
       makePr({
         pendingMerge: {
@@ -649,7 +811,7 @@ describe("LocalPrView merge strip", () => {
     ).toBeNull();
   });
 
-  it("V11: a switched PR never shows the previous PR's conflict", async () => {
+  it("a switched PR never shows the previous PR's conflict", async () => {
     records = [makePr(), makePr({ id: "b", title: "PR B", head: "other" })];
     vi.mocked(gitConflictPreview).mockImplementation(async (_r, _b, head) =>
       head === "feature"

@@ -6,6 +6,7 @@ import {
 import {
   type LocalPr,
   openPendingUpdate,
+  type PendingMerge,
   type PendingUpdate,
   updateLocalPr,
 } from "@/lib/pulls/local";
@@ -18,24 +19,120 @@ import { LOCAL_PR_WRITES_KEY, localPrWriteKey, prWriteKey } from "./pr-writes";
 import { recheckRunsAfterPush } from "./push-writes";
 import { oplogCheckOptions } from "./stashes";
 
+/** Why the fresh record refuses a paused merge, in the order it is checked. */
+export type MergeRefusal = "not-open" | "merging" | "updating";
+
+/** The refusal of the paused merge whose worktree is `worktreeId`, or null when the
+ *  fresh record takes it: an open PR with no other paused merge and no unfinished
+ *  update. Its own merge recorded already (a retried write) is no collision. */
+function mergeRefusal(cur: LocalPr, worktreeId: string): MergeRefusal | null {
+  switch (true) {
+    case cur.status !== "open":
+      return "not-open";
+    case !!cur.pendingMerge?.worktreePath &&
+      cur.pendingMerge.worktreeId !== worktreeId:
+      return "merging";
+    case openPendingUpdate(cur) !== undefined:
+      return "updating";
+    default:
+      return null;
+  }
+}
+
+/** `cur` carrying `merge`, or `cur` itself when {@link mergeRefusal} refuses it.
+ *  Named in the networkMode guard's local `set` family, so the merge's mutationFn
+ *  may call it bare. */
+function setPendingMerge(cur: LocalPr, merge: PendingMerge): LocalPr {
+  return mergeRefusal(cur, merge.worktreeId) === null
+    ? { ...cur, pendingMerge: merge }
+    : cur;
+}
+
+export type LocalPrMergeVars = {
+  id: string;
+  base: string;
+  head: string;
+  message: string;
+  strategy: api.MergeStrategy;
+};
+/** A merge's outcome; `refused` names why the fresh record kept a conflicted
+ *  merge out, leaving its worktree for the caller to discard. */
+export type LocalPrMergeResult =
+  | (api.LocalPrMergeOutcome & { refused: null })
+  | (api.LocalPrMergeOutcome & { refused: MergeRefusal; worktreePath: string });
+
 /** Merge a local PR in an isolated worktree. Keyed so the view's hold reads the
- *  cache, which outlives the view's own mount. */
-export function useMergeLocalPr(repo: string) {
+ *  cache, which outlives the view's own mount. The command waits out any
+ *  resolve-worktree sweep in flight ({@link resolveSweeps}): a conflicted merge
+ *  mints a worktree a pass's older keep-list would remove. A conflicted merge is
+ *  recorded as the PR's `pendingMerge` before the mutation settles, so the sweep's
+ *  next keep-list (read once no start is pending) already names its worktree.
+ *  With `recordKey` (the list a caller shows), the mutation then awaits its
+ *  re-read, like the update start; without one there is no list to wait for. */
+export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: {
-      base: string;
-      head: string;
-      message: string;
-      strategy: api.MergeStrategy;
-    }) =>
-      api.gitMergeLocalPr(
+    async (args: LocalPrMergeVars): Promise<LocalPrMergeResult> => {
+      await resolveSweeps.settled();
+      const outcome = await api.gitMergeLocalPr(
         repo,
         args.base,
         args.head,
         args.message,
         args.strategy,
-      ),
+      );
+      if (outcome.status === "merged") return { ...outcome, refused: null };
+      const { worktreePath, worktreeId, opId } = outcome;
+      if (!worktreePath || !worktreeId)
+        throw new Error("Merge paused on conflicts but returned no worktree");
+      const merge: PendingMerge = {
+        base: args.base,
+        head: args.head,
+        strategy: args.strategy as PendingMerge["strategy"],
+        message: args.message,
+        worktreePath,
+        worktreeId,
+        opId,
+        startedAt: new Date().toISOString(),
+      };
+      const reread = async () => {
+        if (recordKey)
+          await queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined);
+      };
+      let written: LocalPr;
+      try {
+        written = await updateLocalPr(repo, args.id, (cur) =>
+          setPendingMerge(cur, merge),
+        );
+      } catch (e) {
+        // No record names the new worktree, so nothing else would ever remove it.
+        await api
+          .gitAbortLocalPrMerge(repo, worktreePath, opId)
+          .catch(() => undefined);
+        await reread();
+        throw e;
+      }
+      await reread();
+      // `mergeRefusal`'s order over the record the write left, spelled inline
+      // because the networkMode guard classifies no other bare callee here.
+      const refused = ((): MergeRefusal | null => {
+        switch (true) {
+          case written.pendingMerge?.worktreeId === worktreeId:
+            return null;
+          case written.status !== "open":
+            return "not-open";
+          case !!written.pendingMerge?.worktreePath &&
+            written.pendingMerge.worktreeId !== worktreeId:
+            return "merging";
+          default:
+            return "updating";
+        }
+      })();
+      return { ...outcome, worktreePath, refused };
+    },
     {
       // Local merge write — never park it offline.
       networkMode: "always",
@@ -202,8 +299,8 @@ export const conflictPreviewKey = (repo: string) =>
   ["repo", repo, "conflict-preview"] as const;
 
 /** Pre-merge conflict prediction for a local PR's `base`/`head`, keyed under the
- *  repo so merge mutations invalidate it. Gate with `enabled` (skip while the tree
- *  has tracked changes or the PR can't merge). */
+ *  repo so merge mutations invalidate it. Gate with `enabled`: its caller runs it
+ *  for every open PR. */
 export function useConflictPreview(
   repo: string,
   base: string,
@@ -255,16 +352,83 @@ export const UPDATE_NOT_OPEN_MESSAGE =
   "This pull request is no longer open, so the update was discarded.";
 export const UPDATE_ALREADY_UNFINISHED_MESSAGE =
   "This pull request already has an unfinished conflict resolution, so the new one was discarded.";
+export const UPDATE_MERGE_PAUSED_MESSAGE =
+  "This pull request has a paused merge to finish or abort first, so the new conflict resolution was discarded.";
 
-/** `cur` carrying `update`, or `cur` itself when the fresh record is no longer open
- *  or already has an unfinished update. A malformed stored field is inert, so a real
- *  start overwrites it. Named in the networkMode guard's local `set` family, so the
- *  start's mutationFn may call it bare. */
+/** Why a start's fresh record refused its new update. */
+type UpdateRefusal = "not-open" | "merge-paused" | "already-unfinished";
+/** What the refused update's discard answered; `kept` = it rejected. */
+type RefusedDiscard = api.LocalPrDiscardOutcome["status"] | "kept";
+
+/** Each refusal's words, by what the discard of the refused worktree did. */
+export const UPDATE_REFUSED: Record<
+  UpdateRefusal,
+  Record<RefusedDiscard, string>
+> = {
+  "not-open": {
+    discarded: UPDATE_NOT_OPEN_MESSAGE,
+    updated:
+      "This pull request is no longer open, and the update had already landed.",
+    kept: "This pull request is no longer open, and the update couldn't be discarded, so it is still there.",
+  },
+  "merge-paused": {
+    discarded: UPDATE_MERGE_PAUSED_MESSAGE,
+    updated:
+      "This pull request has a paused merge to finish or abort first, and the new conflict resolution had already landed.",
+    kept: "This pull request has a paused merge to finish or abort first, and the new conflict resolution couldn't be discarded, so it is still there.",
+  },
+  "already-unfinished": {
+    discarded: UPDATE_ALREADY_UNFINISHED_MESSAGE,
+    updated:
+      "This pull request already has an unfinished conflict resolution, and the new one had already landed.",
+    kept: "This pull request already has an unfinished conflict resolution, and the new one couldn't be discarded, so it is still there.",
+  },
+};
+
+export const MERGE_UPDATE_UNFINISHED_MESSAGE =
+  "This pull request has an unfinished conflict resolution, so the paused merge was discarded.";
+export const MERGE_UPDATE_ABORT_FAILED_NOTE =
+  "This pull request has an unfinished conflict resolution, and the paused merge couldn't be discarded, so it is still there.";
+
+/** `cur` carrying `update`, or `cur` itself when the fresh record is no longer open,
+ *  already has an unfinished update, or has a paused merge (the two resolutions
+ *  exclude each other). A malformed stored field is inert, so a real start overwrites
+ *  it. Named in the networkMode guard's local `set` family, so the start's mutationFn
+ *  may call it bare. */
 function setPendingUpdate(cur: LocalPr, update: PendingUpdate): LocalPr {
-  return cur.status === "open" && openPendingUpdate(cur) === undefined
+  return cur.status === "open" &&
+    openPendingUpdate(cur) === undefined &&
+    !cur.pendingMerge?.worktreePath
     ? { ...cur, pendingUpdate: update }
     : cur;
 }
+
+/** The resolve-worktree sweeps in flight in this window, by checkout: each tracked
+ *  pass covers its fresh list read, the worktree cleanup IPC and the journal-closer
+ *  IPC. The stale-update discards run in a separate effect and are not tracked. An
+ *  update start waits out every pass in this window, whatever checkout key it ran
+ *  under, since every checkout of a repository shares those worktrees and records. */
+const sweepsInFlight = new Map<string, Set<Promise<void>>>();
+
+export const resolveSweeps = {
+  /** Records `sweep` for `repo` until it settles. It must never reject. A newer pass
+   *  never hides an older one still running. */
+  track(repo: string, sweep: Promise<void>) {
+    const running = sweepsInFlight.get(repo) ?? new Set<Promise<void>>();
+    running.add(sweep);
+    sweepsInFlight.set(repo, running);
+    void sweep.then(() => {
+      running.delete(sweep);
+      if (running.size === 0 && sweepsInFlight.get(repo) === running)
+        sweepsInFlight.delete(repo);
+    });
+  },
+  /** Resolves once every sweep in flight now has settled. */
+  settled: () =>
+    Promise.all(
+      [...sweepsInFlight.values()].flatMap((running) => [...running]),
+    ).then(() => undefined),
+};
 
 /** Clears the approval on the fresh record after a clean update moved `head`. The
  *  branch already moved, so a failed write is reported by its message beside it,
@@ -290,14 +454,17 @@ async function setApprovalClearedAfterUpdate(
 // `recordKey` (the caller's `localPrKey(repo)`) before it returns or rethrows: the
 // mutation stays pending, and every hold that reads it stays up, until the list on
 // screen shows the write. Callers add no invalidation of their own. Inside a
-// mutationFn only `api.` callees and `updateLocalPr` are called bare, the names the
-// networkMode guard classifies.
+// mutationFn the only bare callees are `api.*`, `updateLocalPr`, this module's `set*`
+// helpers (`setPendingUpdate`, `setApprovalClearedAfterUpdate`) and the start's local
+// closures (`rejournal`, `reread`): the networkMode guard classifies the first three
+// and passes closures a mutationFn declares.
 
 /** Starts resolving a local PR's predicted conflicts: merges `base` INTO `head` in an
  *  isolated worktree. A clean merge moves `head` at once and clears the approval; a
  *  conflicted one is recorded as the PR's `pendingUpdate`, unless the fresh record is
- *  no longer open or already has one, in which case the new worktree is discarded and
- *  the start rejects. */
+ *  no longer open, already has one or has a paused merge, in which case the new
+ *  worktree is discarded and the start rejects. The command waits out any
+ *  resolve-worktree sweep in flight ({@link resolveSweeps}). */
 export function useStartLocalPrUpdate(
   repo: string,
   recordKey: readonly unknown[],
@@ -319,6 +486,9 @@ export function useStartLocalPrUpdate(
         queryClient
           .invalidateQueries({ queryKey: journalKey })
           .catch(() => undefined);
+      // A sweep mid-run holds a keep-list read before this start: it would remove
+      // the new worktree or close its entry.
+      await resolveSweeps.settled();
       const outcome = await api
         .gitUpdateLocalPrHead(repo, base, head)
         .catch(async (e: unknown) => {
@@ -356,22 +526,28 @@ export function useStartLocalPrUpdate(
         journalRepo,
         startedAt: new Date().toISOString(),
       };
-      let refusal = null as unknown;
+      let refused = null as UpdateRefusal | null;
+      let failure = null as unknown;
       try {
         const written = await updateLocalPr(repo, id, (cur) =>
           setPendingUpdate(cur, update),
         );
         if (written.pendingUpdate !== update)
-          refusal = new Error(
-            written.status === "open"
-              ? UPDATE_ALREADY_UNFINISHED_MESSAGE
-              : UPDATE_NOT_OPEN_MESSAGE,
-          );
+          refused = (() => {
+            switch (true) {
+              case written.status !== "open":
+                return "not-open";
+              case !!written.pendingMerge?.worktreePath:
+                return "merge-paused";
+              default:
+                return "already-unfinished";
+            }
+          })();
       } catch (e) {
-        refusal = e;
+        failure = e;
       }
-      if (refusal !== null) {
-        await api
+      if (refused !== null || failure !== null) {
+        const discard: RefusedDiscard = await api
           .gitDiscardLocalPrUpdate(
             repo,
             head,
@@ -380,9 +556,14 @@ export function useStartLocalPrUpdate(
             opId,
             journalRepo,
           )
-          .catch(() => undefined);
+          .then(
+            (o) => o.status,
+            () => "kept" as const,
+          );
         await reread(false);
-        throw refusal;
+        throw refused !== null
+          ? new Error(UPDATE_REFUSED[refused][discard])
+          : failure;
       }
       await reread(false);
       return { status: "conflicts", worktreeId };
@@ -523,14 +704,40 @@ export const LOCAL_PR_UPDATE_START_KEY = [
   "update-resolve",
 ] as const;
 
+/** Filter prefix for every into-base local-PR merge start, under any checkout key. */
+export const LOCAL_PR_MERGE_START_KEY = [
+  ...LOCAL_PR_WRITES_KEY,
+  "merge",
+] as const;
+
+/** The starts that mint a `gd-resolve-*` worktree, which the sweep's keep-list must
+ *  postdate. */
+export const RESOLVE_WORKTREE_START_KEYS = [
+  LOCAL_PR_UPDATE_START_KEY,
+  LOCAL_PR_MERGE_START_KEY,
+] as const;
+
 const anyUpdateStarting = (cache: MutationCache) =>
   cache.findAll({
     mutationKey: LOCAL_PR_UPDATE_START_KEY,
     status: "pending",
   }).length > 0;
 
+/** Whether any start in {@link RESOLVE_WORKTREE_START_KEYS} is pending in `cache`. */
+export const anyResolveWorktreeStarting = (cache: MutationCache) =>
+  RESOLVE_WORKTREE_START_KEYS.some(
+    (mutationKey) =>
+      cache.findAll({ mutationKey, status: "pending" }).length > 0,
+  );
+
 /** Whether ANY local-PR update start is in flight in this window, under any checkout
- *  key: the sweep's freshness gate and the recovery banner read it. */
+ *  key: the recovery banner reads it. */
 export function useAnyLocalPrUpdateStarting(): boolean {
   return useMutationCacheSnapshot(anyUpdateStarting, false);
+}
+
+/** Whether any update or merge start is in flight in this window, under any checkout
+ *  key: the sweep's freshness gate reads it. */
+export function useAnyResolveWorktreeStarting(): boolean {
+  return useMutationCacheSnapshot(anyResolveWorktreeStarting, false);
 }

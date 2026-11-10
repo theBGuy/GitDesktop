@@ -1,11 +1,12 @@
 // Every Base UI `ComboboxItem` row in src/ whose text truncates shows the full
 // text on hover through `clipTitle` / `clipTitleFromText`
-// (src/lib/clip-title.ts), the only-when-clipped tooltip, on the same element
-// that carries `truncate`. Blocks and tags are located on masked source
-// (comments, strings and JSX text blanked) and the `truncate` class token is
-// read from the raw text of each tag's string literals, since masking blanks
-// attribute strings. Files with a known clipped row and no handler sit in
-// ALLOWLIST with a count; a count that drifts either way fails.
+// (src/lib/clip-title.ts), the only-when-clipped tooltip, bound as
+// `onMouseEnter` on the same element that carries `truncate`. Blocks and tags
+// are located on masked source (comments, strings and JSX text blanked) and
+// the `truncate` class token is read from the raw text of each tag's string
+// literals, since masking blanks attribute strings. Files with a known clipped
+// row and no handler sit in ALLOWLIST with a count; a count that drifts either
+// way fails.
 // Not covered: a truncating child component rendered inside the item, a row
 // built outside the `<ComboboxItem>` literal (a helper returning the row's
 // children), text clipped by a class other than `truncate` (`line-clamp-*`,
@@ -30,6 +31,10 @@ import {
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const VENDORED = "src/components/ui/";
 const TAG = "ComboboxItem";
+// The two bindings the real sites use; any other attribute naming the helper
+// (another event, a data prop) installs no hover tooltip.
+const HOVER_BINDING =
+  /(?:^|\s)onMouseEnter=\{\s*(?:clipTitleFromText\s*\}|clipTitle\s*\()/;
 
 const ALLOWLIST = {
   "src/features/sessions/AgentPickers.tsx": {
@@ -187,7 +192,7 @@ function scan(files) {
       const bare = openingTags(rel, text, masked, from, to).some(
         ([s, e]) =>
           /(?:^|\s)truncate(?:\s|$)/.test(literalText(text, masked, s, e)) &&
-          !/\bclipTitle/.test(masked.slice(s, e)),
+          !HOVER_BINDING.test(masked.slice(s, e)),
       );
       if (bare) {
         const lines = flagged.get(rel) ?? [];
@@ -281,6 +286,26 @@ test("mutation: a handler named only in a comment or string does not count", () 
     '{/* clipTitleFromText */}<span className="truncate" title="clipTitle">{x}</span>',
   );
   assert.equal(problems(new Map([...CORPUS, [rel, commented]])).length, 1);
+});
+
+test("mutation: the helper bound to another event or prop does not count", () => {
+  const rel = "src/features/zz/Synthetic.tsx";
+  const leave = block(
+    '<span className="truncate" onMouseLeave={clipTitleFromText}>{x}</span>',
+  );
+  const unused = block(
+    '<span className="truncate" data-unused={clipTitleFromText}>{x}</span>',
+  );
+  const leaveCall = block(
+    '<span className="truncate" onMouseLeave={clipTitle(x)}>{x}</span>',
+  );
+  for (const src of [leave, unused, leaveCall]) {
+    assert.equal(problems(new Map([...CORPUS, [rel, src]])).length, 1, src);
+  }
+  const enter = block(
+    '<span className="truncate" onMouseEnter={clipTitleFromText}>{x}</span>',
+  );
+  assert.deepEqual(problems(new Map([...CORPUS, [rel, enter]])), []);
 });
 
 test("mutation: a handler on a sibling or on the item box does not count", () => {

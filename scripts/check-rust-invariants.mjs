@@ -173,13 +173,13 @@ const REFSPEC_ALLOWLIST = [
     file: "git/ops.rs",
     fn: "branch_tip",
     rationale:
-      "private helper reading a branch tip (never a refspec); its validating callers (merge_local_pr, finish_local_pr_merge, update_local_pr_head, finish_local_pr_update) gate every branch it reads with validate_branch_name",
+      "private helper reading a branch tip (never a refspec); every branch it reads is gated with validate_branch_name by its callers' entry points (merge_local_pr, finish_local_pr_merge, update_local_pr_head, finish_local_pr_update) or, for discard_local_pr_update, by update_already_landed and worktree_standing, which validate head themselves",
   },
   {
     file: "git/ops.rs",
     fn: "finalize_branch",
     rationale:
-      "private helper; its four callers (merge_local_pr, finish_local_pr_merge, update_local_pr_head, finish_local_pr_update) validate the target branch with validate_branch_name",
+      "private helper; update_local_pr_head and finish_local_pr_update validate the target branch with validate_branch_name before calling it, and finalize_base forwards a target its own callers (merge_local_pr, finish_local_pr_merge) validated the same way",
   },
   {
     file: "git/ops.rs",

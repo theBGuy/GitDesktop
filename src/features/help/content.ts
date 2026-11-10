@@ -1016,13 +1016,14 @@ journal of the *risky* operations GitDesktop runs: local PR merges and branch up
 cherry-picks, history edits, interactive rebases, and a rebase pull that drops commits.
 Each is recorded with the exact branch and commit it started from, and whether it
 finished, failed, is paused on conflicts, is still pending, or **ended outside the app**
-(a cherry-pick or rebase pull you continued or aborted in a terminal, which the journal only knows is over). If one of
-these operations is interrupted (a crash or a restart mid-op), a calm recovery line
-appears above the **Changes** list naming what was interrupted and the state it started
-from. That notice only informs — it never resets or continues anything on its own (the
-git-native **Continue**/**Abort** for an in-progress merge, rebase, cherry-pick, or revert
-live in the conflict bar right above it); from it you can open this history, jump to
-**Recover lost work** to rescue any orphaned changes, or dismiss the notice.
+(a cherry-pick or rebase pull you continued or aborted in a terminal, which the journal
+only knows is over). If one of these operations is interrupted (a crash or a restart
+mid-op), a calm recovery line appears above the **Changes** list naming what was
+interrupted and the state it started from. That notice only informs — it never resets or
+continues anything on its own (the git-native **Continue**/**Abort** for an in-progress
+merge, rebase, cherry-pick, or revert live in the conflict bar right above it); from it
+you can open this history, jump to **Recover lost work** to rescue any
+orphaned changes, or dismiss the notice.
 
 ## Compare
 
@@ -1442,8 +1443,8 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 **draft** and **ready for review** in either direction (a footer **Ready for review** /
 **Convert to draft** pair, also reachable from the command palette),
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
-The **Assignees** and **Reviewers** pickers filter as you type and list the people already selected
-first; a list that stops at its first 1,000 people says so.
+The **Assignees** and **Reviewers** pickers filter as you type and list the people
+already selected first; a list that stops at its first 1,000 people says so.
 Closing asks first: everyone watching is notified, and reopening puts the pull request
 back but can't unsend that. The command palette's **Focus the comment box** jumps
 straight to the composer here too.
@@ -1656,12 +1657,13 @@ follows its link, and badges and icons stay put.
 
 ## Conflicts with the base branch
 
-Every open pull request keeps a one-line strip under its header about merging into its
-base. It reads **Checking for conflicts…** while the answers load, then **No conflicts
+Every open pull request keeps a strip under its header about merging into its base.
+It reads **Checking for conflicts…** while the answers load, then **No conflicts
 with \`main\`** when the forge (or the local prediction below) finds none; where neither
 can answer, it says the conflicts can't be checked. When a pull request no longer merges
-cleanly into its base, the strip says so, naming the base branch. A line too long for
-the panel is cut short; hover it to read the rest. Whenever GitDesktop can work out
+cleanly into its base, the strip says so, naming the base branch. On a hosted pull
+request that status stays on one line: a line too long for the panel is cut short; hover
+it to read the rest. Whenever GitDesktop can work out
 **which files clash**, it lists them right under that sentence — up to five paths, then
 *and N more* (hover it for the rest). **GitHub** and **GitLab** answer that question
 themselves; while a forge is still working it out the strip keeps reading **Checking for
@@ -1675,8 +1677,9 @@ empty checks list there means *never ran*, not *passed*. In the list, **GitHub**
 so you can spot a conflicting one without opening it.
 
 On a hosted pull request, **Resolve conflicts** settles it right here. GitDesktop
-merges the base branch into the pull request's **head** branch in an **isolated worktree** — your own branch and working
-tree are untouched, the same way a local PR's merge works (see *Local PRs* below) — and
+merges the base branch into the pull request's **head** branch in an
+**isolated worktree** (your own branch and working tree are untouched, the same way a
+local PR's merge works; see *Local PRs* below) and
 takes the view over with the conflicted files and the in-app conflict editor (see
 *Syncing & conflicts*).{{ai}} **Resolve with AI** is offered on the strip itself — it
 opens the resolution and starts walking the conflicts with AI straight away — and again
@@ -2076,10 +2079,12 @@ a **created** marker, interleaves the branch's **pushed commits** (grouped, each
 clickable to that commit's detail) with your **comments**, and ends with a **merged** or
 **closed** marker once the PR reaches that state.
 
-An open local PR keeps the same one-line strip under its header as a hosted one (see
+An open local PR keeps a strip under its header like a hosted one's (see
 *Conflicts with the base branch*). It reads **Checking for conflicts…**, then **No
 conflicts with \`main\`**, or warns that merging will conflict, lists the files that
-clash, and offers **Resolve conflicts**. When the branch has fallen behind its base the
+clash, and offers **Resolve conflicts**. Unlike the hosted strip, a failed or unavailable
+check, a conflict it can't resolve here, and a promotion gap wrap onto more lines instead
+of being cut short. When the branch has fallen behind its base the
 strip says by how many commits and, unless a conflict is predicted, offers **Update
 branch** to merge the base in; **Update pull request branch** in the command palette
 ({{kbd:command-palette}}) does the same. A promotion PR shows the expected gap and leaves
@@ -2110,11 +2115,12 @@ conflicts*); once every conflict is resolved, **Finish merge** commits and marks
 merged, or **Abort** throws the merge away.
 
 **Managing the record** lives on the PR's list row, not the footer (which approves,
-merges, closes or publishes the PR): **{{Secondaryclick}}** a local PR to **Archive / Unarchive** it (archiving
-hides it and deselects the detail view) or **Delete** it — Delete confirms first and
-tells you how many comments go with it; the branches themselves are never touched. Both
-are also in the command palette ({{kbd:command-palette}}) as **Archive pull request** and
-**Delete pull request**, acting on the selected local PR.
+merges, closes or publishes the PR): **{{Secondaryclick}}** a local PR to
+**Archive / Unarchive** it (archiving hides it and deselects the detail view) or
+**Delete** it — Delete confirms first and tells you how many comments go with it; the
+branches themselves are never touched. Both are also in the command palette
+({{kbd:command-palette}}) as **Archive pull request** and **Delete pull request**,
+acting on the selected local PR.
 {{ai}}
 ## AI review
 

@@ -882,9 +882,9 @@ const LOCAL_ARM_MESSAGE: Record<
       {trailingBehind(ctx)}
     </>
   ),
-  // "unknown" has three producers, so no Retry: git older than 2.38 (no
-  // `merge-tree --write-tree`), a base or head that no longer resolves, and an
-  // empty merge-tree answer; a record naming no base or head never runs a check.
+  // Fed by "unknown", hence no Retry: a base or head that no longer resolves, an
+  // empty merge-tree answer on exit 1, or any other merge-tree exit (git older than
+  // 2.38 among them); a record naming no base or head never runs a check.
   unchecked: (ctx) => (
     <>
       {conflictsWith(ctx.base)}
