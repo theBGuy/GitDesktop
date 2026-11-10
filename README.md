@@ -59,9 +59,10 @@ instead, see [Development](#development).
   pull requests, merge requests, review requests, and issues from
   GitHub, GitLab, and Bitbucket, with Enter opening each right where
   the work lives.
-- **A [GitHub Actions cockpit](#github-actions)**: runs, jobs, steps,
-  re-run / cancel / dispatch (from the run or a right-click on its row),
-  failed-step logs, and AI debugging.
+- **A [GitHub Actions cockpit](#github-actions)**: runs you can filter by
+  workflow, event, status, branch, or actor; their jobs and steps; re-run /
+  cancel / dispatch (from the run or a right-click on its row); failed-step
+  logs; and AI debugging.
 - **[Coding agents](#coding-agent-sessions) with guardrails**: hand tasks to
   Claude Code, Codex, Copilot, or opencode in isolated worktrees or
   containers, watch every edit, and keep the result as a branch or local PR.
@@ -798,7 +799,17 @@ list to re-run or cancel it, run its workflow again with the picker
 already on that workflow, open it on the forge, or copy its link; those
 actions are in the command palette too. The Run workflow picker marks
 the workflows that can't be started by hand on the chosen ref, so a
-dispatch that would be rejected is visible before you run it.
+dispatch that would be rejected is visible before you run it. Filter the
+run list by workflow (a Workflows section lists each workflow with its
+latest status), event, status, branch, or actor, as removable chips;
+GitLab and Bitbucket pipelines take the same event, status, branch, and
+actor filters. An Open on GitHub menu beside Refresh links to the
+repository's Actions caches, deployments, attestations, runners, and
+usage and performance metrics. The Run workflow dialog shows the
+workflow's inputs as typed fields (a picker for a choice, a checkbox for
+a boolean, a text field for the rest) with their defaults filled in and
+required ones marked, and takes anything else by name under Additional
+inputs.
 
 - **Debug failed CI with AI**: turn a failed job's logs into a streamed
   root-cause + fix, ending with a ready-to-paste prompt for a coding agent.

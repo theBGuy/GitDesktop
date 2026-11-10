@@ -484,6 +484,11 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
+      "Actions run filters & typed inputs — filter runs by workflow, event, status, branch and actor; typed Run-workflow inputs; a Workflows section and forge link-outs (GitLab & Bitbucket take the pipeline filters)",
+  },
+  {
+    group: "CI, tags & releases",
+    label:
       "Tags, releases & cross-platform assets — edit notes (GitHub & GitLab), sync the updater manifest (GitHub)",
   },
   {

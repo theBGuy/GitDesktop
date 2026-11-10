@@ -16,6 +16,7 @@ use crate::github::runner::{
     gh_auth_epoch, gh_host_for_repo, gh_output_ok, run_gh, run_gh_cached_get,
     run_gh_cached_get_raw_on_host, run_gh_on_host, run_gh_raw, GH_NETWORK_TIMEOUT,
 };
+use crate::github::workflow_inputs::{parse_workflow_dispatch_inputs, WorkflowInput};
 
 // Job ids can exceed JS's safe integer range, so the frontend handles them as
 // strings — serialize the u64 as a string here.
@@ -57,6 +58,31 @@ where
 fn validate_ref(name: &str) -> AppResult<()> {
     if name.is_empty() || name.starts_with('-') {
         return Err(AppError::InvalidArgument(format!("invalid ref: {name}")));
+    }
+    Ok(())
+}
+
+/// Longest event, status or actor value accepted; real ones are far shorter.
+const MAX_RUN_FACET_BYTES: usize = 200;
+
+/// The provider-neutral check on the event, status and actor facets: a control char (an
+/// argv hazard) or whitespace (never valid there) is refused. The branch is left to each
+/// arm's own check, so any branch name git allows still filters.
+pub(crate) fn validate_run_filters(f: &RunFilters) -> AppResult<()> {
+    for (facet, value) in [
+        ("event", &f.event),
+        ("status", &f.status),
+        ("actor", &f.actor),
+    ] {
+        let Some(v) = value else { continue };
+        if v.trim().is_empty()
+            || v.len() > MAX_RUN_FACET_BYTES
+            || v.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid {facet} filter: {v:?}"
+            )));
+        }
     }
     Ok(())
 }
@@ -110,6 +136,34 @@ pub struct WorkflowRun {
     pub url: String,
     #[serde(default)]
     pub head_sha: String,
+    /// Who started the run, where the provider's list payload says: GitHub's
+    /// `actor.login`, Bitbucket's pipeline `creator`; always `None` on GitLab.
+    #[serde(default)]
+    pub actor: Option<RunActor>,
+}
+
+/// A run's starter. `id` is what the provider's actor facet filters on (the GitHub
+/// login, the braced Bitbucket uuid), `name` what a row shows.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunActor {
+    pub name: String,
+    pub id: String,
+}
+
+/// Server-side facets for one page of runs. Every field is optional and a default
+/// value reproduces the unfiltered read; a provider that can't honour a facet refuses
+/// the request rather than returning an unfiltered page.
+#[derive(Deserialize, Default, Clone, Debug)]
+// An unknown key (a drifted `workflow_id`) must fail the call, not read as no facet.
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct RunFilters {
+    pub branch: Option<String>,
+    /// GitHub only: picks the `workflows/{id}/runs` endpoint.
+    pub workflow_id: Option<u64>,
+    pub event: Option<String>,
+    pub status: Option<String>,
+    pub actor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +323,14 @@ struct RestRun {
     html_url: String,
     #[serde(default, deserialize_with = "de_null_string")]
     head_sha: String,
+    #[serde(default)]
+    actor: Option<RestActor>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RestActor {
+    #[serde(default, deserialize_with = "de_null_string")]
+    login: String,
 }
 
 /// Map one REST run onto the neutral row. `workflow_names` is the `workflow_id` →
@@ -295,6 +357,14 @@ fn from_rest_run(r: RestRun, workflow_names: &HashMap<u64, String>) -> WorkflowR
         updated_at: r.updated_at,
         url: r.html_url,
         head_sha: r.head_sha,
+        actor: r
+            .actor
+            .map(|a| a.login)
+            .filter(|login| !login.is_empty())
+            .map(|login| RunActor {
+                name: login.clone(),
+                id: login,
+            }),
     }
 }
 
@@ -303,13 +373,16 @@ fn from_rest_run(r: RestRun, workflow_names: &HashMap<u64, String>) -> WorkflowR
 /// defaults to POST, and only under GET do they become query params), every field rides
 /// `-f` and never `-F` (`-F`'s leading-`@` magic reads host files), and
 /// `exclude_pull_requests=true` — what `gh run list` itself sends — suppresses a per-run
-/// array nothing here consumes. `branch` must already be validated.
+/// array nothing here consumes. `branch` and `facets` must already be validated;
+/// `facets.branch` and `facets.workflow_id` are ignored here (the caller passes the
+/// branch and picks the endpoint).
 fn run_page_args(
     endpoint: &str,
     limit: u32,
     page: u32,
     branch: Option<&str>,
     head_sha: Option<&str>,
+    facets: &RunFilters,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "api".into(),
@@ -327,6 +400,16 @@ fn run_page_args(
         args.push("-f".into());
         args.push(format!("branch={b}"));
     }
+    for (key, value) in [
+        ("event", &facets.event),
+        ("status", &facets.status),
+        ("actor", &facets.actor),
+    ] {
+        if let Some(v) = value.as_deref().filter(|s| !s.is_empty()) {
+            args.push("-f".into());
+            args.push(format!("{key}={v}"));
+        }
+    }
     if let Some(sha) = head_sha {
         args.push("-f".into());
         args.push(format!("head_sha={sha}"));
@@ -334,11 +417,42 @@ fn run_page_args(
     args
 }
 
+/// `forge_ci_run_page`'s two branch inputs folded into one set of facets: a non-empty
+/// `filters.branch` wins, else the plain `branch` param applies, and an empty branch
+/// from either means none.
+pub(crate) fn merge_branch(branch: Option<String>, filters: Option<RunFilters>) -> RunFilters {
+    let mut merged = filters.unwrap_or_default();
+    if merged.branch.as_deref().is_none_or(str::is_empty) {
+        merged.branch = branch.filter(|b| !b.is_empty());
+    }
+    merged
+}
+
+/// A workflow facet reads that workflow's own run list; the id is a number, so the
+/// endpoint never carries a string the client chose.
+fn run_page_endpoint(slug: &str, workflow_id: Option<u64>) -> String {
+    match workflow_id {
+        Some(id) => format!("repos/{slug}/actions/workflows/{id}/runs"),
+        None => format!("repos/{slug}/actions/runs"),
+    }
+}
+
+/// Filtered run searches return at most 1,000 results.
+const GH_FILTERED_RUN_WINDOW: u64 = 1_000;
+
 /// Whether a page follows the 1-based `page` just fetched. BOTH conditions must
 /// hold: the count math alone could promise pages past a provider-side window, and a
-/// short page ends paging whatever the count says.
-fn gh_has_more(fetched: usize, limit: u32, page: u32, total_count: u64) -> bool {
-    fetched == limit as usize && u64::from(page) * u64::from(limit) < total_count
+/// short page ends paging whatever the count says. `capped` is set when the request
+/// carried a branch, event, status or actor field: GitHub serves those reads from a
+/// 1,000-run window while still reporting the full match count (a status read reported
+/// 2,500 and returned nothing on page 26). A workflow-only read is exact.
+fn gh_has_more(fetched: usize, limit: u32, page: u32, total_count: u64, capped: bool) -> bool {
+    let reachable = if capped {
+        total_count.min(GH_FILTERED_RUN_WINDOW)
+    } else {
+        total_count
+    };
+    fetched == limit as usize && u64::from(page) * u64::from(limit) < reachable
 }
 
 /// How long a repo's workflow-name index stays trusted, per direction. Bounds the
@@ -453,11 +567,11 @@ async fn workflow_name_index(repo_path: &str, slug: &str) -> HashMap<u64, String
     }
 }
 
-/// One page of workflow runs, newest first; optionally scoped to one branch. `page`
+/// One page of workflow runs, newest first; optionally narrowed by `filters`. `page`
 /// is 1-based.
 ///
 /// REST rather than `gh run list`, which has no page flag; [`run_page_args`] holds the
-/// argv and the constraints that shape it.
+/// argv and the constraints that shape it, and [`run_page_endpoint`] the endpoint.
 ///
 /// The workflow-name index resolves alongside, concurrently, because a run's REST
 /// `name` is the RUN's name — `gh run list` resolves `workflowName` through the same
@@ -468,17 +582,21 @@ pub async fn gh_run_page(
     repo_path: String,
     limit: u32,
     page: u32,
-    branch: Option<String>,
+    filters: RunFilters,
 ) -> AppResult<CiRunPage> {
     let limit = limit.clamp(1, 100);
     let page = page.max(1);
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let endpoint = format!("repos/{slug}/actions/runs");
-    let branch = branch.as_deref().filter(|s| !s.is_empty());
+    let endpoint = run_page_endpoint(&slug, filters.workflow_id);
+    let branch = filters.branch.as_deref().filter(|s| !s.is_empty());
     if let Some(b) = branch {
         validate_ref(b)?;
     }
-    let args = run_page_args(&endpoint, limit, page, branch, None);
+    let capped = branch.is_some()
+        || [&filters.event, &filters.status, &filters.actor]
+            .iter()
+            .any(|v| v.as_deref().is_some_and(|s| !s.is_empty()));
+    let args = run_page_args(&endpoint, limit, page, branch, None, &filters);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (out, workflow_names) = tokio::join!(
         run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
@@ -497,7 +615,7 @@ pub async fn gh_run_page(
         .map(|r| from_rest_run(r, &workflow_names))
         .collect();
     Ok(CiRunPage {
-        has_more: gh_has_more(runs.len(), limit, page, total_count),
+        has_more: gh_has_more(runs.len(), limit, page, total_count, capped),
         runs,
         total_count: Some(total_count),
     })
@@ -509,7 +627,14 @@ pub async fn gh_runs_for_head(repo_path: String, head_sha: String) -> AppResult<
     let head_sha = validate_head_sha(&head_sha)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let endpoint = format!("repos/{slug}/actions/runs");
-    let args = run_page_args(&endpoint, 100, 1, None, Some(&head_sha));
+    let args = run_page_args(
+        &endpoint,
+        100,
+        1,
+        None,
+        Some(&head_sha),
+        &RunFilters::default(),
+    );
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (out, workflow_names) = tokio::join!(
         run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
@@ -536,7 +661,11 @@ pub async fn gh_run_list(
     limit: u32,
     branch: Option<String>,
 ) -> AppResult<Vec<WorkflowRun>> {
-    Ok(gh_run_page(repo_path, limit, 1, branch).await?.runs)
+    let filters = RunFilters {
+        branch,
+        ..Default::default()
+    };
+    Ok(gh_run_page(repo_path, limit, 1, filters).await?.runs)
 }
 
 const COMPLETED_RUN_CACHE_MAX_AGE: Duration = Duration::from_secs(3600);
@@ -1156,94 +1285,141 @@ const DISPATCH_PROBE_CONCURRENCY: usize = 4;
 static DISPATCH_PROBE_GATE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(DISPATCH_PROBE_CONCURRENCY);
 
-/// How long a probe verdict stays trusted, per direction — the two stale directions
-/// cost differently, so they get different windows.
+/// One workflow's probe answer at a ref: whether its file declares the trigger, and
+/// the inputs the trigger declares. `inputs` is `None` when the file wasn't parsed or
+/// didn't parse, which the dialog reads as "unknown" and answers with free-form rows.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DispatchProbe {
+    pub declared: bool,
+    pub inputs: Option<Vec<WorkflowInput>>,
+}
+
+/// How long a probe answer stays trusted, per kind — the stale directions cost
+/// differently, so they get different windows.
 #[derive(Debug, Clone, Copy)]
 struct ProbeTtl {
-    /// Window for a `true` verdict (the file declares the trigger).
+    /// Window for a declared entry whose inputs weren't parsed.
     declared: Duration,
-    /// Window for a `false` verdict.
+    /// Window for a declared entry carrying parsed inputs: a stale schema renders the
+    /// wrong form, and inputs change more often than the trigger itself.
+    inputs: Duration,
+    /// Window for an entry that doesn't declare the trigger.
     absent: Duration,
 }
 
-/// A workflow file's trigger block at a given ref changes on the order of releases, not
-/// keystrokes, so a generous window is what keeps a repo's whole picker off the network
-/// for a working session. The directions are asymmetric: a stale `true` merely re-offers
-/// a workflow whose dispatch then refuses with the humanized 422, while a stale `false`
-/// HIDES an action the user may have just enabled (`RunWorkflowDialog` refuses only on an
-/// explicit `false`). This window bounds the staleness a frontend refetch can RE-ADOPT:
-/// the two caches compose, since a refetch landing just inside it re-serves that verdict
-/// for another frontend staleTime. Worst-case hide is therefore `absent` + one staleTime
-/// (~600s), half of the ~900s a symmetric long window would give.
+/// A stale `true` only re-offers a workflow the 422 then refuses, a stale `false` hides a
+/// runnable one (`absent` is one frontend staleTime, so a refetch caps the hide at ~600 s),
+/// and a stale schema renders the wrong form, so `inputs` is the shortest window.
 const DISPATCH_PROBE_TTL: ProbeTtl = ProbeTtl {
     declared: Duration::from_secs(600),
+    inputs: Duration::from_secs(120),
     absent: Duration::from_secs(300),
 };
 
 /// Cache map keyed by `(repo_path, slug, workflow_path, git_ref)`; value is
-/// `(probe time, declares workflow_dispatch)`.
-type DispatchProbeCache = Mutex<HashMap<(String, String, String, String), (Instant, bool)>>;
+/// `(probe time, probe answer)`.
+type DispatchProbeCache =
+    Mutex<HashMap<(String, String, String, String), (Instant, DispatchProbe)>>;
 
-/// Per-`(repo, slug, workflow file, ref)` cache of the last probe verdict and when it was
-/// taken. `repo_path` is in the key because the slug alone is NOT host-qualified —
-/// `gh_origin_slug` resolves through `forge::remote_path`, which strips the authority, so
-/// an Enterprise remote and a github.com remote sharing an `owner/repo` path would
-/// otherwise collide and one repo's `false` could hide the other's workflow. Re-probing
-/// the same key overwrites in place, but `git_ref` is a user-typed axis, so distinct refs
-/// mint entries that live for the process lifetime — slow unbounded growth, unlike the
-/// closed (repo, remote) key space of `REMOTE_URL_CACHE` this mirrors. An entry is a few
-/// short strings and a bool, so no eviction machinery is warranted at this size. Only
-/// PARSED verdicts are stored: an erred fetch leaves the key absent so it re-probes and
-/// keeps failing open.
+/// Probe answers from successful fetches; `repo_path` is keyed because the slug drops the
+/// host. Entries for user-typed refs live until a 422 evicts them or the process exits,
+/// each bounded by the parser's clamps and its 1 MiB scalar budget.
 static DISPATCH_PROBE_CACHE: OnceLock<DispatchProbeCache> = OnceLock::new();
 
 fn dispatch_probe_cache() -> &'static DispatchProbeCache {
     DISPATCH_PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Return the cached verdict for `(repo_path, slug, path, git_ref)` only if an entry
-/// exists AND it was probed less than its direction's window ago — the stored verdict
-/// picks the window, so one cache serves both. The lock is held only long enough to
-/// read the value.
+/// When each `(repo_path, slug, git_ref)` was last evicted. Taken after the cache lock,
+/// never alone, so an eviction and a store can't interleave.
+type ProbeEvictions = Mutex<HashMap<(String, String, String), Instant>>;
+
+/// A fetch that started before its ref's eviction may have read the refused schema, so
+/// its answer is dropped instead of re-filling the cache. One stamp per evicted ref.
+static DISPATCH_PROBE_EVICTIONS: OnceLock<ProbeEvictions> = OnceLock::new();
+
+fn probe_evictions() -> &'static ProbeEvictions {
+    DISPATCH_PROBE_EVICTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Return the cached answer for `(repo_path, slug, path, git_ref)` only if an entry
+/// exists AND it was probed less than its kind's window ago — the stored answer picks
+/// the window, so one cache serves every kind. The lock is held only long enough to
+/// clone the value.
 fn probe_cache_get(
     repo_path: &str,
     slug: &str,
     path: &str,
     git_ref: &str,
     ttl: ProbeTtl,
-) -> Option<bool> {
+) -> Option<DispatchProbe> {
     let guard = dispatch_probe_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    let (probed_at, verdict) = guard.get(&(
+    let (probed_at, probe) = guard.get(&(
         repo_path.to_string(),
         slug.to_string(),
         path.to_string(),
         git_ref.to_string(),
     ))?;
-    let window = if *verdict { ttl.declared } else { ttl.absent };
-    if probed_at.elapsed() < window {
-        Some(*verdict)
+    let window = if !probe.declared {
+        ttl.absent
+    } else if probe.inputs.is_some() {
+        ttl.inputs
     } else {
-        None
-    }
+        ttl.declared
+    };
+    (probed_at.elapsed() < window).then(|| probe.clone())
 }
 
-/// Record `verdict` as the current answer for `(repo_path, slug, path, git_ref)`,
-/// stamped now.
-fn probe_cache_put(repo_path: &str, slug: &str, path: &str, git_ref: &str, verdict: bool) {
-    dispatch_probe_cache()
+/// Record `probe` as the answer for `(repo_path, slug, path, git_ref)`, stamped when its
+/// fetch STARTED, unless that ref was evicted after the fetch began.
+fn probe_cache_put(
+    repo_path: &str,
+    slug: &str,
+    path: &str,
+    git_ref: &str,
+    probed_at: Instant,
+    probe: DispatchProbe,
+) {
+    let mut cache = dispatch_probe_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let evicted_at = probe_evictions()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .insert(
-            (
-                repo_path.to_string(),
-                slug.to_string(),
-                path.to_string(),
-                git_ref.to_string(),
-            ),
-            (Instant::now(), verdict),
-        );
+        .get(&(repo_path.to_string(), slug.to_string(), git_ref.to_string()))
+        .copied();
+    if evicted_at.is_some_and(|at| probed_at < at) {
+        return;
+    }
+    cache.insert(
+        (
+            repo_path.to_string(),
+            slug.to_string(),
+            path.to_string(),
+            git_ref.to_string(),
+        ),
+        (probed_at, probe),
+    );
+}
+
+/// Drop every cached answer for `git_ref` in `(repo_path, slug)`: GitHub just refused
+/// a dispatch's inputs there, so the cached schema is stale.
+pub(crate) fn evict_probe_entries(repo_path: &str, slug: &str, git_ref: &str) {
+    let mut cache = dispatch_probe_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut evictions = probe_evictions().lock().unwrap_or_else(|p| p.into_inner());
+    // A stamp older than the longest window can veto nothing (a read that old is already
+    // expired), so pruning here keeps the map bounded by recently evicted refs.
+    evictions.retain(|_, at| at.elapsed() < DISPATCH_PROBE_TTL.declared);
+    evictions.insert(
+        (repo_path.to_string(), slug.to_string(), git_ref.to_string()),
+        Instant::now(),
+    );
+    cache.retain(|(repo, s, _, r), _| !(repo == repo_path && s == slug && r == git_ref));
 }
 
 /// Split the active workflows into verdicts already decided and the files that still
@@ -1255,18 +1431,24 @@ fn plan_probes<'a>(
     slug: &str,
     git_ref: &str,
     ttl: ProbeTtl,
-) -> (HashMap<String, bool>, Vec<&'a Workflow>) {
+) -> (HashMap<String, DispatchProbe>, Vec<&'a Workflow>) {
     let mut map = HashMap::new();
     let mut probes: Vec<&Workflow> = Vec::new();
     for w in workflows.iter().filter(|w| w.state == "active") {
         match classify_workflow_path(&w.path) {
             PathVerdict::NotDispatchable => {
-                map.insert(w.id.to_string(), false);
+                map.insert(
+                    w.id.to_string(),
+                    DispatchProbe {
+                        declared: false,
+                        inputs: None,
+                    },
+                );
             }
             PathVerdict::Unknown => {}
             PathVerdict::Fetch => match probe_cache_get(repo_path, slug, &w.path, git_ref, ttl) {
-                Some(verdict) => {
-                    map.insert(w.id.to_string(), verdict);
+                Some(probe) => {
+                    map.insert(w.id.to_string(), probe);
                 }
                 None => probes.push(w),
             },
@@ -1275,17 +1457,17 @@ fn plan_probes<'a>(
     (map, probes)
 }
 
-/// Which active workflows declare a `workflow_dispatch` trigger at `git_ref`.
-/// Keyed by stringified workflow id. A workflow ABSENT from the map is unknown
-/// (probe failed) — callers fail open and keep it offered. Per-file verdicts are
-/// served from [`DISPATCH_PROBE_CACHE`] within [`DISPATCH_PROBE_TTL`]'s per-direction
-/// window; the workflow LIST is always re-read, so a newly added workflow shows up
-/// immediately.
+/// Which active workflows declare a `workflow_dispatch` trigger at `git_ref`, and the
+/// inputs each declares. Keyed by stringified workflow id. A workflow ABSENT from the
+/// map is unknown (probe failed) — callers fail open and keep it offered. Per-file
+/// answers are served from [`DISPATCH_PROBE_CACHE`] within their kind's
+/// [`DISPATCH_PROBE_TTL`] window; the workflow LIST is always re-read, so a newly added
+/// workflow shows up immediately.
 #[tauri::command]
 pub async fn gh_workflow_dispatchable(
     repo_path: String,
     git_ref: String,
-) -> AppResult<HashMap<String, bool>> {
+) -> AppResult<HashMap<String, DispatchProbe>> {
     validate_ref(&git_ref)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     // Listed server-side: a frontend-supplied path would aim the contents fetch
@@ -1302,6 +1484,9 @@ pub async fn gh_workflow_dispatchable(
         let path = w.path.as_str();
         async move {
             let _permit = DISPATCH_PROBE_GATE.acquire().await.ok();
+            // Stamped before the read, after the queue: the stamp is what lets a 422
+            // eviction landing mid-read drop this answer.
+            let probed_at = Instant::now();
             // `--method GET` is mandatory: `gh api` with `-f` fields present
             // defaults to POST, and only under GET do they become query
             // params. `-f` never `-F` — `-F`'s leading-`@` magic reads host files.
@@ -1320,26 +1505,40 @@ pub async fn gh_workflow_dispatchable(
                 GH_NETWORK_TIMEOUT,
             )
             .await;
-            (w.id, path, res)
+            (w.id, path, probed_at, res)
         }
     }))
     .await;
-    for (id, path, res) in results {
+    for (id, path, probed_at, res) in results {
         // A failed fetch leaves the key ABSENT — "unknown" must not read as
         // "not dispatchable", which would hide a runnable workflow — and stays out
         // of the cache, so the next call re-probes instead of pinning the failure.
         if let Ok(out) = res {
-            let verdict = yaml_declares_workflow_dispatch(&out.stdout_lossy());
-            probe_cache_put(&repo_path, &slug, path, &git_ref, verdict);
-            map.insert(id.to_string(), verdict);
+            let text = out.stdout_lossy();
+            let declared = yaml_declares_workflow_dispatch(&text);
+            // The substring alone decides `declared`; a failed parse costs only the
+            // inputs. A non-declaring file is never parsed.
+            let inputs = if declared {
+                parse_workflow_dispatch_inputs(&text)
+            } else {
+                None
+            };
+            let probe = DispatchProbe { declared, inputs };
+            probe_cache_put(&repo_path, &slug, path, &git_ref, probed_at, probe.clone());
+            map.insert(id.to_string(), probe);
         }
     }
     Ok(map)
 }
 
-/// GitHub's 422 for a workflow without the trigger reaches the user as gh's raw
-/// HTTP line, API URL included. Lead with a plain sentence — the toast shows only
-/// the first line — and keep the raw text below it for the details view.
+/// The lead both input-422 arms of [`humanize_dispatch_error`] write. The frontend's
+/// `isDispatchInputsError` matches this exact text, so the two must stay identical.
+pub(crate) const DISPATCH_INPUTS_REJECTED_LEAD: &str = "Workflow inputs rejected: ";
+
+/// GitHub's 422s for a dispatch reach the user as gh's raw HTTP line, API URL
+/// included. Lead with a plain sentence — the toast shows only the first line — and
+/// keep the raw text below it for the details view. GitHub doesn't document its input
+/// 422 wording, so those arms match a substring and name inputs best-effort.
 fn humanize_dispatch_error(raw: &str, git_ref: &str) -> String {
     let lower = raw.to_lowercase();
     if lower.contains("workflow does not have") && lower.contains("workflow_dispatch") {
@@ -1347,7 +1546,44 @@ fn humanize_dispatch_error(raw: &str, git_ref: &str) -> String {
             "This workflow can't be run manually: it has no workflow_dispatch trigger on \"{git_ref}\".\n\n{raw}"
         );
     }
-    raw.to_string()
+    let names = quoted_tokens(raw);
+    let was = if names.len() > 1 { "weren't" } else { "wasn't" };
+    let names = (!names.is_empty()).then(|| names.join(", "));
+    let clause = if lower.contains("unexpected inputs provided") {
+        names.map_or_else(
+            || "got an input it doesn't declare".to_string(),
+            |n| format!("doesn't declare {n}"),
+        )
+    } else if lower.contains("required input") && lower.contains("not provided") {
+        names.map_or_else(
+            || "requires an input that wasn't sent".to_string(),
+            |n| format!("requires {n}, which {was} sent"),
+        )
+    } else {
+        return raw.to_string();
+    };
+    // Surface-neutral: the Run workflow dialog and the MCP dispatch tool both show it,
+    // and the caller evicts this ref's cached input schema before returning it.
+    format!(
+        "{DISPATCH_INPUTS_REJECTED_LEAD}this workflow on \"{git_ref}\" {clause}. Its declared inputs are re-read, so the next attempt uses the current ones.\n\n{raw}"
+    )
+}
+
+/// Every non-empty single- or double-quoted token in `raw`, in order and deduplicated.
+fn quoted_tokens(raw: &str) -> Vec<&str> {
+    let mut tokens: Vec<&str> = Vec::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find(['\'', '"']) {
+        let quote = rest.as_bytes()[start] as char;
+        let after = &rest[start + 1..];
+        let Some(end) = after.find(quote) else { break };
+        let token = &after[..end];
+        if !token.is_empty() && !tokens.contains(&token) {
+            tokens.push(token);
+        }
+        rest = &after[end + 1..];
+    }
+    tokens
 }
 
 /// Manually dispatches a workflow (`workflow_dispatch`) on a ref, with inputs.
@@ -1369,7 +1605,7 @@ pub async fn gh_workflow_run(
         "workflow".into(),
         "run".into(),
         "-R".into(),
-        slug,
+        slug.clone(),
         workflow,
         "--ref".into(),
         git_ref.clone(),
@@ -1385,7 +1621,14 @@ pub async fn gh_workflow_run(
     run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)
         .await
         .map_err(|e| match e {
-            AppError::Gh(msg) => AppError::Gh(humanize_dispatch_error(&msg, &git_ref)),
+            AppError::Gh(msg) => {
+                let message = humanize_dispatch_error(&msg, &git_ref);
+                // GitHub refused the inputs, so the cached schema for this ref is stale.
+                if message.starts_with(DISPATCH_INPUTS_REJECTED_LEAD) {
+                    evict_probe_entries(&repo_path, &slug, &git_ref);
+                }
+                AppError::Gh(message)
+            }
             other => other,
         })?;
     Ok(())
@@ -1850,6 +2093,10 @@ mod tests {
             updated_at: "2026-08-13T09:04:10Z".to_string(),
             url: "https://github.com/o/r/actions/runs/17234567890".to_string(),
             head_sha: "c5779b7".to_string(),
+            actor: Some(RunActor {
+                name: "octocat".to_string(),
+                id: "octocat".to_string(),
+            }),
         };
         assert_eq!(
             serde_json::to_value(&run).unwrap(),
@@ -1867,7 +2114,8 @@ mod tests {
                 "startedAt": "2026-08-13T09:00:30Z",
                 "updatedAt": "2026-08-13T09:04:10Z",
                 "url": "https://github.com/o/r/actions/runs/17234567890",
-                "headSha": "c5779b7"
+                "headSha": "c5779b7",
+                "actor": { "name": "octocat", "id": "octocat" }
             })
         );
 
@@ -1986,6 +2234,13 @@ mod tests {
                 );
             }
         }
+
+        // A provider with no actor (GitLab, or a run whose actor is unknown) sends an
+        // explicit null, never an omitted key.
+        let anonymous = WorkflowRun { actor: None, ..run };
+        let value = serde_json::to_value(&anonymous).unwrap();
+        assert_eq!(value["actor"], serde_json::Value::Null);
+        assert!(value.as_object().unwrap().contains_key("actor"));
     }
 
     /// The page envelope crosses the same hand-maintained TS boundary as
@@ -2126,6 +2381,30 @@ mod tests {
         assert_eq!(third.started_at, "");
         assert_eq!(third.head_branch, "");
         assert_eq!(third.status, "queued");
+    }
+
+    #[test]
+    fn a_rest_actor_login_becomes_the_run_actor() {
+        let actor_of = |body: &str| {
+            let run: RestRun = serde_json::from_str(body).unwrap();
+            from_rest_run(run, &HashMap::new()).actor
+        };
+        assert_eq!(
+            actor_of(r#"{"actor": {"login": "octocat", "id": 583231}}"#),
+            Some(RunActor {
+                name: "octocat".into(),
+                id: "octocat".into(),
+            })
+        );
+        for absent in [
+            r#"{}"#,
+            r#"{"actor": null}"#,
+            r#"{"actor": {}}"#,
+            r#"{"actor": {"login": null}}"#,
+            r#"{"actor": {"login": ""}}"#,
+        ] {
+            assert_eq!(actor_of(absent), None, "{absent}");
+        }
     }
 
     /// REST's per-run `name` is the RUN's name, so a dynamic or `run-name:` workflow
@@ -2346,16 +2625,29 @@ mod tests {
     #[test]
     fn a_short_page_or_an_exhausted_count_ends_paging() {
         // Full page with more behind it.
-        assert!(gh_has_more(40, 40, 1, 4085));
+        assert!(gh_has_more(40, 40, 1, 4085, false));
         // Full page that exactly consumes the total.
-        assert!(!gh_has_more(40, 40, 2, 80));
+        assert!(!gh_has_more(40, 40, 2, 80, false));
         // Short page — no next page however large the total claims to be.
-        assert!(!gh_has_more(17, 40, 1, 4085));
+        assert!(!gh_has_more(17, 40, 1, 4085, false));
         // Full page past the total (a provider-side window; count math alone would
         // keep promising pages).
-        assert!(!gh_has_more(40, 40, 3, 100));
+        assert!(!gh_has_more(40, 40, 3, 100, false));
         // Empty page.
-        assert!(!gh_has_more(0, 40, 5, 4085));
+        assert!(!gh_has_more(0, 40, 5, 4085, false));
+    }
+
+    #[test]
+    fn a_filtered_read_stops_at_the_thousand_run_window() {
+        // Page 25 of 40 reaches run 1,000: the filtered window's end.
+        assert!(!gh_has_more(40, 40, 25, 2500, true));
+        assert!(gh_has_more(40, 40, 24, 2500, true));
+        // Unfiltered (or workflow-only) reads page the real total.
+        assert!(gh_has_more(40, 40, 25, 2500, false));
+        // A total under the window is honoured as is.
+        assert!(!gh_has_more(40, 40, 2, 80, true));
+        // A short page still ends paging.
+        assert!(!gh_has_more(12, 40, 3, 2500, true));
     }
 
     /// A body missing the envelope entirely (an error object, a shape change) parses to
@@ -2367,7 +2659,7 @@ mod tests {
         let parsed: RestRunPage = serde_json::from_str(r#"{"message":"Not Found"}"#).unwrap();
         assert_eq!(parsed.total_count, 0);
         assert!(parsed.workflow_runs.is_empty());
-        assert!(!gh_has_more(0, 40, 1, 0));
+        assert!(!gh_has_more(0, 40, 1, 0, false));
 
         for body in [
             r#"{"total_count":null,"workflow_runs":null}"#,
@@ -2395,11 +2687,25 @@ mod tests {
             "exclude_pull_requests=true",
         ];
         assert_eq!(
-            run_page_args("repos/o/r/actions/runs", 40, 1, None, None),
+            run_page_args(
+                "repos/o/r/actions/runs",
+                40,
+                1,
+                None,
+                None,
+                &RunFilters::default()
+            ),
             base
         );
         let sha = "a".repeat(40);
-        let scoped = run_page_args("repos/o/r/actions/runs", 40, 1, Some("branch"), Some(&sha));
+        let scoped = run_page_args(
+            "repos/o/r/actions/runs",
+            40,
+            1,
+            Some("branch"),
+            Some(&sha),
+            &RunFilters::default(),
+        );
         assert_eq!(scoped[..base.len()], base);
         assert_eq!(
             scoped[base.len()..],
@@ -2574,7 +2880,14 @@ mod tests {
     /// The argv invariants `gh_run_page`'s correctness rests on, pinned without a spawn.
     #[test]
     fn run_page_argv_keeps_its_invariants() {
-        let args = run_page_args("repos/o/r/actions/runs", 40, 2, None, None);
+        let args = run_page_args(
+            "repos/o/r/actions/runs",
+            40,
+            2,
+            None,
+            None,
+            &RunFilters::default(),
+        );
 
         // `gh api` with `-f` fields present defaults to POST; only under GET do they
         // become query params.
@@ -2605,18 +2918,227 @@ mod tests {
         // The branch field appears only when a branch is given, and only as a `-f`.
         assert!(!args.iter().any(|a| a.starts_with("branch=")), "{args:?}");
         for absent in [None, Some("")] {
-            let args = run_page_args("repos/o/r/actions/runs", 40, 1, absent, None);
+            let args = run_page_args(
+                "repos/o/r/actions/runs",
+                40,
+                1,
+                absent,
+                None,
+                &RunFilters::default(),
+            );
             assert!(
                 !args.iter().any(|a| a.starts_with("branch=")),
                 "{absent:?} must add no branch field: {args:?}"
             );
         }
-        let scoped = run_page_args("repos/o/r/actions/runs", 40, 1, Some("feat/x"), None);
+        let scoped = run_page_args(
+            "repos/o/r/actions/runs",
+            40,
+            1,
+            Some("feat/x"),
+            None,
+            &RunFilters::default(),
+        );
         let at = scoped
             .iter()
             .position(|a| a == "branch=feat/x")
             .unwrap_or_else(|| panic!("{scoped:?}"));
         assert_eq!(scoped[at - 1], "-f", "{scoped:?}");
+    }
+
+    #[test]
+    fn run_page_args_adds_facets_as_fields_only() {
+        let sha = "b".repeat(40);
+        let facets = RunFilters {
+            // Ignored here: the caller passes the branch and picks the endpoint.
+            branch: Some("ignored".into()),
+            workflow_id: Some(307_406_754),
+            event: Some("push".into()),
+            status: Some("success".into()),
+            actor: Some("octocat".into()),
+        };
+        let args = run_page_args(
+            "repos/o/r/actions/runs",
+            40,
+            1,
+            Some("main"),
+            Some(&sha),
+            &facets,
+        );
+        let at = |field: &str| {
+            args.iter()
+                .position(|a| a == field)
+                .unwrap_or_else(|| panic!("{field} missing: {args:?}"))
+        };
+        let order = [
+            at("branch=main"),
+            at("event=push"),
+            at("status=success"),
+            at("actor=octocat"),
+            at(&format!("head_sha={sha}")),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{args:?}");
+        for i in order {
+            assert_eq!(args[i - 1], "-f", "{args:?}");
+        }
+        assert!(!args.iter().any(|a| a == "-F"), "{args:?}");
+        assert!(!args
+            .iter()
+            .any(|a| a.contains("ignored") || a.contains("307406754")));
+        assert_eq!(
+            args[3], "repos/o/r/actions/runs",
+            "facets never touch the endpoint"
+        );
+
+        // An empty facet adds no field.
+        let empty = RunFilters {
+            event: Some(String::new()),
+            ..Default::default()
+        };
+        let args = run_page_args("repos/o/r/actions/runs", 40, 1, None, None, &empty);
+        assert!(!args.iter().any(|a| a.starts_with("event=")), "{args:?}");
+    }
+
+    #[test]
+    fn workflow_facet_picks_the_per_workflow_endpoint() {
+        assert_eq!(run_page_endpoint("o/r", None), "repos/o/r/actions/runs");
+        assert_eq!(
+            run_page_endpoint("o/r", Some(307_406_754)),
+            "repos/o/r/actions/workflows/307406754/runs"
+        );
+    }
+
+    #[test]
+    fn run_filters_read_the_camel_case_wire_and_default_every_field() {
+        let f: RunFilters = serde_json::from_value(json!({
+            "branch": "main",
+            "workflowId": 307_406_754u64,
+            "event": "push",
+            "status": "success",
+            "actor": "octocat"
+        }))
+        .unwrap();
+        assert_eq!(f.workflow_id, Some(307_406_754));
+        assert_eq!(f.branch.as_deref(), Some("main"));
+        assert_eq!(f.actor.as_deref(), Some("octocat"));
+        let empty: RunFilters = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.branch.is_none() && empty.workflow_id.is_none());
+
+        // A drifted key must fail the call, never read as an unfiltered page.
+        assert!(serde_json::from_value::<RunFilters>(json!({ "workflow_id": 5 })).is_err());
+        assert!(serde_json::from_value::<RunFilters>(json!({ "branchName": "main" })).is_err());
+        let workflow: RunFilters = serde_json::from_value(json!({ "workflowId": 5 })).unwrap();
+        assert_eq!(workflow.workflow_id, Some(5));
+    }
+
+    #[test]
+    fn validate_run_filters_refuses_unsendable_values() {
+        assert!(validate_run_filters(&RunFilters::default()).is_ok());
+        let ok = RunFilters {
+            branch: Some("feat/x".into()),
+            workflow_id: Some(1),
+            event: Some("workflow_dispatch".into()),
+            status: Some("in_progress".into()),
+            actor: Some("{0e1f-uuid}".into()),
+        };
+        assert!(validate_run_filters(&ok).is_ok());
+        for bad in [
+            RunFilters {
+                status: Some("in progress".into()),
+                ..Default::default()
+            },
+            RunFilters {
+                actor: Some("a\nb".into()),
+                ..Default::default()
+            },
+            RunFilters {
+                event: Some("   ".into()),
+                ..Default::default()
+            },
+            RunFilters {
+                event: Some(String::new()),
+                ..Default::default()
+            },
+            RunFilters {
+                actor: Some("x".repeat(MAX_RUN_FACET_BYTES + 1)),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                matches!(
+                    validate_run_filters(&bad),
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "{bad:?}"
+            );
+        }
+        let at_limit = RunFilters {
+            actor: Some("x".repeat(MAX_RUN_FACET_BYTES)),
+            ..Default::default()
+        };
+        assert!(validate_run_filters(&at_limit).is_ok());
+    }
+
+    /// A branch is checked only as the arm always checked it, so a long name or one
+    /// with a no-break space (both legal git refs) still filters; as an actor the same
+    /// text is refused.
+    #[test]
+    fn the_branch_facet_keeps_the_ref_validation_it_always_had() {
+        let nbsp = char::from(0xA0_u8);
+        for name in ["x".repeat(MAX_RUN_FACET_BYTES + 1), format!("feat{nbsp}x")] {
+            let as_branch = RunFilters {
+                branch: Some(name.clone()),
+                ..Default::default()
+            };
+            assert!(validate_run_filters(&as_branch).is_ok(), "{name:?}");
+            assert!(validate_ref(&name).is_ok(), "{name:?}");
+            let merged = merge_branch(Some(name.clone()), None);
+            assert!(validate_run_filters(&merged).is_ok(), "{name:?}");
+
+            let as_actor = RunFilters {
+                actor: Some(name.clone()),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    validate_run_filters(&as_actor),
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_branch_prefers_the_filters_branch_and_falls_back_to_the_param() {
+        let with = |branch: &str| RunFilters {
+            branch: Some(branch.into()),
+            status: Some("success".into()),
+            ..Default::default()
+        };
+        let merged = merge_branch(Some("legacy".into()), Some(with("chosen")));
+        assert_eq!(merged.branch.as_deref(), Some("chosen"));
+        assert_eq!(merged.status.as_deref(), Some("success"));
+
+        assert_eq!(
+            merge_branch(Some("legacy".into()), None).branch.as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(
+            merge_branch(Some("legacy".into()), Some(with("")))
+                .branch
+                .as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(
+            merge_branch(Some("legacy".into()), Some(RunFilters::default()))
+                .branch
+                .as_deref(),
+            Some("legacy")
+        );
+        assert_eq!(merge_branch(Some(String::new()), None).branch, None);
+        assert_eq!(merge_branch(None, Some(with(""))).branch, None);
+        assert_eq!(merge_branch(None, None).branch, None);
     }
 
     /// `--failed` appends only when asked; the plain rerun must stay byte-identical
@@ -2704,8 +3226,28 @@ mod tests {
     /// how these tests stand in for elapsed-past-TTL without sleeping.
     const EXPIRED: ProbeTtl = ProbeTtl {
         declared: Duration::ZERO,
+        inputs: Duration::ZERO,
         absent: Duration::ZERO,
     };
+
+    fn declared() -> DispatchProbe {
+        DispatchProbe {
+            declared: true,
+            inputs: None,
+        }
+    }
+
+    fn absent() -> DispatchProbe {
+        DispatchProbe {
+            declared: false,
+            inputs: None,
+        }
+    }
+
+    /// Stores `probe` as a fetch that started just now would.
+    fn put(repo: &str, slug: &str, path: &str, git_ref: &str, probe: DispatchProbe) {
+        probe_cache_put(repo, slug, path, git_ref, Instant::now(), probe);
+    }
 
     /// The cache is process-wide and shared by every test in this binary, so each test
     /// keys its entries under its own repo path and slug.
@@ -2723,13 +3265,19 @@ mod tests {
         // parsed verdict is ever stored — reads as absent, i.e. unknown.
         assert_eq!(probe_cache_get(repo, slug, path, git_ref, ttl), None);
 
-        probe_cache_put(repo, slug, path, git_ref, true);
-        assert_eq!(probe_cache_get(repo, slug, path, git_ref, ttl), Some(true));
+        put(repo, slug, path, git_ref, declared());
+        assert_eq!(
+            probe_cache_get(repo, slug, path, git_ref, ttl),
+            Some(declared())
+        );
         assert_eq!(probe_cache_get(repo, slug, path, git_ref, EXPIRED), None);
 
         // `false` round-trips as a hit, not as an absence.
-        probe_cache_put(repo, slug, path, git_ref, false);
-        assert_eq!(probe_cache_get(repo, slug, path, git_ref, ttl), Some(false));
+        put(repo, slug, path, git_ref, absent());
+        assert_eq!(
+            probe_cache_get(repo, slug, path, git_ref, ttl),
+            Some(absent())
+        );
         assert_eq!(probe_cache_get(repo, slug, path, git_ref, EXPIRED), None);
     }
 
@@ -2740,18 +3288,19 @@ mod tests {
             ".github/workflows/enabled.yml",
             ".github/workflows/disabled.yml",
         );
-        probe_cache_put(repo, slug, yes, "master", true);
-        probe_cache_put(repo, slug, no, "master", false);
+        put(repo, slug, yes, "master", declared());
+        put(repo, slug, no, "master", absent());
 
         // Both entries are the same age; only the verdict decides which window applies.
         // This window is past the `false` one and still inside the `true` one.
         let past_the_short_window = ProbeTtl {
             declared: Duration::from_secs(600),
+            inputs: Duration::from_secs(600),
             absent: Duration::ZERO,
         };
         assert_eq!(
             probe_cache_get(repo, slug, yes, "master", past_the_short_window),
-            Some(true),
+            Some(declared()),
             "a true verdict still holds inside the long window"
         );
         assert_eq!(
@@ -2764,21 +3313,58 @@ mod tests {
         // Inside both windows nothing has expired yet.
         assert_eq!(
             probe_cache_get(repo, slug, no, "master", DISPATCH_PROBE_TTL),
-            Some(false)
+            Some(absent())
         );
 
         // The shipped windows really are asymmetric, and `absent` is pinned to one
         // frontend staleTime (`5 * 60_000` in `useWorkflowDispatchable`) — the composed
         // worst-case hide is that window plus one more staleTime.
+        assert!(DISPATCH_PROBE_TTL.inputs < DISPATCH_PROBE_TTL.absent);
         assert!(DISPATCH_PROBE_TTL.absent < DISPATCH_PROBE_TTL.declared);
         assert_eq!(DISPATCH_PROBE_TTL.absent, Duration::from_secs(300));
+        assert_eq!(DISPATCH_PROBE_TTL.inputs, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn a_declared_entry_with_inputs_expires_on_the_short_window() {
+        let (repo, slug) = ("C:/repos/inputs-ttl", "o/inputs-ttl");
+        let (parsed, unparsed) = (
+            ".github/workflows/typed.yml",
+            ".github/workflows/unparsed.yml",
+        );
+        let typed = DispatchProbe {
+            declared: true,
+            inputs: Some(Vec::new()),
+        };
+        put(repo, slug, parsed, "master", typed.clone());
+        put(repo, slug, unparsed, "master", declared());
+
+        let past_the_inputs_window = ProbeTtl {
+            declared: Duration::from_secs(600),
+            inputs: Duration::ZERO,
+            absent: Duration::from_secs(600),
+        };
+        assert_eq!(
+            probe_cache_get(repo, slug, parsed, "master", past_the_inputs_window),
+            None,
+            "an entry carrying inputs (even none) re-probes on the inputs window"
+        );
+        assert_eq!(
+            probe_cache_get(repo, slug, unparsed, "master", past_the_inputs_window),
+            Some(declared()),
+            "a declared entry whose parse failed keeps the long window"
+        );
+        assert_eq!(
+            probe_cache_get(repo, slug, parsed, "master", DISPATCH_PROBE_TTL),
+            Some(typed)
+        );
     }
 
     #[test]
     fn every_key_axis_misses_independently() {
         let ttl = DISPATCH_PROBE_TTL;
         let (repo, slug, ci) = ("C:/repos/keys", "o/keys", ".github/workflows/ci.yml");
-        probe_cache_put(repo, slug, ci, "master", true);
+        put(repo, slug, ci, "master", declared());
 
         assert_eq!(
             probe_cache_get(repo, slug, ci, "dev", ttl),
@@ -2822,10 +3408,10 @@ mod tests {
             vec![1, 2],
             "cold: both real files fetch"
         );
-        assert_eq!(map.get("3"), Some(&false));
+        assert_eq!(map.get("3"), Some(&absent()));
         assert_eq!(map.len(), 1, "only the path-decided workflow is in the map");
 
-        probe_cache_put(repo, slug, ".github/workflows/ci.yml", "master", true);
+        put(repo, slug, ".github/workflows/ci.yml", "master", declared());
         let (map, probes) = plan_probes(&workflows, repo, slug, "master", ttl);
         assert_eq!(
             probes.iter().map(|w| w.id).collect::<Vec<_>>(),
@@ -2834,7 +3420,7 @@ mod tests {
         );
         assert_eq!(
             map.get("1"),
-            Some(&true),
+            Some(&declared()),
             "its verdict comes from the cache"
         );
 
@@ -2880,6 +3466,148 @@ mod tests {
 
         let unrelated = "HTTP 404: Not Found (https://api.github.com/repos/o/r/actions/workflows/1/dispatches)";
         assert_eq!(humanize_dispatch_error(unrelated, "master"), unrelated);
+        assert!(!out.starts_with(DISPATCH_INPUTS_REJECTED_LEAD));
+    }
+
+    #[test]
+    fn humanizes_both_input_rejections_under_one_lead() {
+        let unexpected = "could not create workflow dispatch event: HTTP 422: Unexpected inputs provided: [\"debug\", \"extra\"] (https://api.github.com/repos/o/r/actions/workflows/1/dispatches)";
+        let out = humanize_dispatch_error(unexpected, "main");
+        assert!(out.starts_with(DISPATCH_INPUTS_REJECTED_LEAD), "{out}");
+        assert_eq!(
+            out.lines().next().unwrap(),
+            "Workflow inputs rejected: this workflow on \"main\" doesn't declare debug, extra. Its declared inputs are re-read, so the next attempt uses the current ones."
+        );
+        assert!(
+            out.ends_with(unexpected),
+            "raw text must survive verbatim: {out}"
+        );
+
+        let required = "HTTP 422: Required input 'version' not provided (https://api.github.com/repos/o/r/actions/workflows/1/dispatches)";
+        let out = humanize_dispatch_error(required, "dev");
+        assert_eq!(
+            out.lines().next().unwrap(),
+            "Workflow inputs rejected: this workflow on \"dev\" requires version, which wasn't sent. Its declared inputs are re-read, so the next attempt uses the current ones."
+        );
+        let out = humanize_dispatch_error("HTTP 422: Required inputs 'a', 'b' not provided", "dev");
+        assert!(
+            out.starts_with(
+                "Workflow inputs rejected: this workflow on \"dev\" requires a, b, which weren't sent."
+            ),
+            "{out}"
+        );
+        // The same line reaches the MCP tool, where no dialog exists to point at.
+        assert!(!out.contains("Run workflow"), "{out}");
+
+        // No quoted names: the clause still reads as a sentence.
+        let out = humanize_dispatch_error("HTTP 422: unexpected inputs provided", "main");
+        assert!(out.starts_with(
+            "Workflow inputs rejected: this workflow on \"main\" got an input it doesn't declare."
+        ));
+        let out = humanize_dispatch_error("HTTP 422: REQUIRED INPUT NOT PROVIDED", "main");
+        assert!(out.starts_with(
+            "Workflow inputs rejected: this workflow on \"main\" requires an input that wasn't sent."
+        ));
+
+        // The lead the frontend's `isDispatchInputsError` matches, byte for byte.
+        assert_eq!(DISPATCH_INPUTS_REJECTED_LEAD, "Workflow inputs rejected: ");
+    }
+
+    #[test]
+    fn input_422_evicts_the_probe_entries_for_the_ref() {
+        let (repo, slug, ci) = ("C:/repos/evict", "o/evict", ".github/workflows/ci.yml");
+        let release = ".github/workflows/release.yml";
+        put(repo, slug, ci, "master", declared());
+        put(repo, slug, release, "master", declared());
+        put(repo, slug, ci, "dev", declared());
+        put("C:/repos/evict-other", slug, ci, "master", declared());
+        // A fetch for this ref that started before the 422 is still in flight (backdated
+        // so a coarse clock can't stamp it equal to the eviction).
+        let in_flight = Instant::now()
+            .checked_sub(Duration::from_millis(5))
+            .expect("the clock is past 5 ms");
+
+        evict_probe_entries(repo, slug, "master");
+        probe_cache_put(repo, slug, ci, "master", in_flight, declared());
+
+        let ttl = DISPATCH_PROBE_TTL;
+        assert_eq!(
+            probe_cache_get(repo, slug, ci, "master", ttl),
+            None,
+            "an answer read before the eviction must not refill it"
+        );
+        assert_eq!(probe_cache_get(repo, slug, release, "master", ttl), None);
+        assert_eq!(
+            probe_cache_get(repo, slug, ci, "dev", ttl),
+            Some(declared()),
+            "another ref keeps its entry"
+        );
+        assert_eq!(
+            probe_cache_get("C:/repos/evict-other", slug, ci, "master", ttl),
+            Some(declared()),
+            "another checkout keeps its entry"
+        );
+
+        // A fetch that starts after the eviction reads the new file, so it is stored.
+        put(repo, slug, ci, "master", absent());
+        assert_eq!(
+            probe_cache_get(repo, slug, ci, "master", ttl),
+            Some(absent())
+        );
+    }
+
+    #[test]
+    fn quoted_tokens_reads_both_quote_styles_in_order() {
+        assert_eq!(
+            quoted_tokens(r#"a 'one' b "two" c 'one' "" 'unclosed"#),
+            ["one", "two"]
+        );
+        assert!(quoted_tokens("no quotes here").is_empty());
+    }
+
+    /// The probe answer crosses the hand-maintained TS mirror in `actions.ts`; a
+    /// casing drift would reach the dialog as `undefined`.
+    #[test]
+    fn dispatch_probe_wire_shape_is_pinned() {
+        use crate::github::workflow_inputs::WorkflowInputKind;
+        let probe = DispatchProbe {
+            declared: true,
+            inputs: Some(vec![WorkflowInput {
+                name: "level".into(),
+                kind: WorkflowInputKind::Choice,
+                description: None,
+                default: Some("info".into()),
+                required: false,
+                options: vec!["info".into(), "debug".into()],
+            }]),
+        };
+        let text = serde_json::to_string(&probe).unwrap();
+        assert_eq!(
+            text,
+            r#"{"declared":true,"inputs":[{"name":"level","type":"choice","description":null,"default":"info","required":false,"options":["info","debug"]}]}"#
+        );
+        assert!(!text.contains("\"kind\""), "{text}");
+
+        let unknown = serde_json::to_string(&absent()).unwrap();
+        assert_eq!(unknown, r#"{"declared":false,"inputs":null}"#);
+        assert!(
+            !unknown.contains("[]"),
+            "None must not serialize as an empty list"
+        );
+
+        for kind in [
+            WorkflowInputKind::String,
+            WorkflowInputKind::Boolean,
+            WorkflowInputKind::Number,
+            WorkflowInputKind::Environment,
+        ] {
+            let v = serde_json::to_value(&kind).unwrap();
+            let s = v.as_str().unwrap();
+            assert!(
+                s.chars().all(|c| c.is_ascii_lowercase()),
+                "{s} must be one lowercase word"
+            );
+        }
     }
 
     /// A failed log read must be an error, or it overwrites a cached log with

@@ -11576,7 +11576,7 @@ test("focusable-held-button-render is clean on the real tree, red without one si
   // NEGATIVE CONTROL: one site's render removed in memory turns the tree red.
   const site = "src/features/actions/ActionsPanel.tsx";
   const source = readFileSync(join(root, site), "utf8");
-  const line = "render={heldButtonRender(runs.isFetchingNextPage)}";
+  const line = "render={heldButtonRender(moreHeld)}";
   assert.ok(source.includes(line));
   const mutated = new Map(views).set(
     site,
