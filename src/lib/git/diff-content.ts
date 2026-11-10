@@ -9,6 +9,8 @@ const FIELDS = {
   text: true,
   undecodable: true,
   oldPath: true,
+  whitespaceHidden: true,
+  whitespaceOnly: true,
 } satisfies Record<keyof FileDiff, true>;
 
 export const FILE_DIFF_FIELDS = Object.keys(FIELDS) as (keyof FileDiff)[];

@@ -25,5 +25,12 @@ export function createOpenClaims(getEpoch: () => number) {
       const epoch = getEpoch();
       return () => latest === seen && getEpoch() === epoch;
     },
+    /** Claims an open at its REQUEST, ignoring the epoch: the check fails only
+     *  once a newer open is claimed, for a caller whose wait a re-selection of
+     *  its own row must not retire. */
+    claimOrder: (): (() => boolean) => {
+      const request = ++latest;
+      return () => request === latest;
+    },
   };
 }

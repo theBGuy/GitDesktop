@@ -1055,6 +1055,7 @@ pub async fn git_commit_file_diff(
     repo_path: String,
     hash: String,
     file_path: String,
+    ignore_whitespace: Option<bool>,
 ) -> AppResult<FileDiff> {
     validate_hash(&hash)?;
     // The helper passes literal pathspecs: a raw `[slug]`-style path splices a
@@ -1062,15 +1063,18 @@ pub async fn git_commit_file_diff(
     let out = super::diff::diff_with_rename_pairing(
         &repo_path,
         &file_path,
-        &[
-            "show",
-            "--no-show-signature",
-            "-m",
-            "--first-parent",
-            "--no-color",
-            "--format=",
-            &hash,
-        ],
+        &super::diff::with_ignore_whitespace(
+            &[
+                "show",
+                "--no-show-signature",
+                "-m",
+                "--first-parent",
+                "--no-color",
+                "--format=",
+                &hash,
+            ],
+            ignore_whitespace,
+        ),
         &[
             "show",
             "--no-show-signature",
@@ -1812,7 +1816,7 @@ mod tests {
             .to_string();
 
         for path in ["plain.txt", "[slug]/a.txt"] {
-            let diff = git_commit_file_diff(repo.clone(), hash.clone(), path.to_string())
+            let diff = git_commit_file_diff(repo.clone(), hash.clone(), path.to_string(), None)
                 .await
                 .unwrap();
             assert_eq!(diff.file_path, path);

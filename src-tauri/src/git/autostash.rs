@@ -2597,13 +2597,14 @@ mod tests {
                 repo.clone(),
                 sha.clone(),
                 path.into(),
+                None,
             )
             .await
             .unwrap();
             assert!(!diff.text.trim().is_empty(), "{path}: empty diff");
         }
         let untracked_diff =
-            crate::git::ops::git_orphaned_stash_file_diff(repo.clone(), sha, "new.txt".into())
+            crate::git::ops::git_orphaned_stash_file_diff(repo.clone(), sha, "new.txt".into(), None)
                 .await
                 .unwrap();
         assert!(untracked_diff.text.contains("untracked body"));

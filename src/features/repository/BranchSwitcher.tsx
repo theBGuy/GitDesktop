@@ -229,6 +229,11 @@ import {
 } from "./CleanupBranchesDialog";
 import { CreateBranchDialog } from "./CreateBranchDialog";
 import {
+  confirmEntries,
+  discardConfirmCopy,
+  stashConfirmCopy,
+} from "./changes-confirm-copy";
+import {
   baseName,
   PROMOTION_BLOCKS_CHECKOUT,
   rowCheckoutCopy,
@@ -715,6 +720,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const shownRemoteDeleteTarget = useRetained(remoteDeleteTarget);
   const [discardAllIn, setDiscardAllIn] = useState<string | null>(null);
   const [stashAllIn, setStashAllIn] = useState<string | null>(null);
+  const entriesFor = (repo: string) =>
+    confirmEntries(repo, repoPath, status.data?.entries ?? []);
+  const discardAllCopy = discardConfirmCopy(
+    { kind: "all", repo: discardAllIn ?? repoPath },
+    entriesFor(discardAllIn ?? repoPath),
+  );
+  const stashAllCopy = stashConfirmCopy(
+    { kind: "all", repo: stashAllIn ?? repoPath },
+    entriesFor(stashAllIn ?? repoPath),
+  );
   const [stashPopIn, setStashPopIn] = useState<string | null>(null);
   const [stashesOpen, setStashesOpen] = useState(false);
   // Which view the Stashes dialog opens to — "recoverable" for "Recover lost
@@ -5001,8 +5016,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       <ConfirmDialog
         open={discardAllIn !== null}
         onCancel={() => setDiscardAllIn(null)}
-        title="Discard all changes?"
-        body="All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin."
+        title={discardAllCopy.title}
+        body={discardAllCopy.body}
         confirmLabel="Discard all"
         confirmVariant="destructive"
         pending={discardAll.isPending}
@@ -5012,10 +5027,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       <ConfirmDialog
         open={stashAllIn !== null}
         onCancel={() => setStashAllIn(null)}
-        title="Stash all changes?"
-        body={
-          'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.'
-        }
+        title={stashAllCopy.title}
+        body={stashAllCopy.body}
         confirmLabel="Stash changes"
         pending={stashAll.isPending}
         onConfirm={doStashAll}

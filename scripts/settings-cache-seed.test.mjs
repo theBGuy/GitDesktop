@@ -2,9 +2,10 @@
 // react-query cache: after a settings write succeeds the cache holds that write's
 // committed snapshot even when the follow-up re-read fails, unless a newer
 // settings write started after it, whose optimistic patch or own seed wins; the
-// invalidate always runs, cancels an older in-flight read, and `mutateAsync`
-// resolves only once its refetch settled. Also pins that every settings mutation
-// hook in queries.ts spreads the factory.
+// superseded write then skips its invalidate too, and the newer write's settle
+// (a failure included) reconciles. The latest write's invalidate cancels an older
+// in-flight read, and `mutateAsync` resolves only once its refetch settled. Also
+// pins that every settings mutation hook in queries.ts spreads the factory.
 //
 // The cache only refetches ACTIVE queries, so every re-read case subscribes a
 // QueryObserver; without one the rejecting read never runs and the seed case
@@ -157,29 +158,60 @@ async function mutantSeed(replacements) {
 }
 
 const SEED_LINES =
-  "      if (committed && ctx?.seq === started)\n        client.setQueryData(key, committed);\n";
+  "      if (committed) client.setQueryData(key, committed);\n";
+const SUPERSEDED_BRANCH =
+  "        reconcileOwed = true;\n        payOwedUnlessNewer(newer);\n";
+const SUPERSEDED_ARM = `      if (ctx?.seq !== started) {\n        owedGen++;\n${SUPERSEDED_BRANCH}        return;\n      }\n`;
 const NO_SEED = [[SEED_LINES, ""]];
-const NO_GUARD = [["if (committed && ctx?.seq === started)", "if (committed)"]];
+const NO_GUARD = [[SUPERSEDED_ARM, ""]];
 const NO_NULL_ARM = [
-  ["if (committed && ctx?.seq === started)", "if (ctx?.seq === started)"],
+  [SEED_LINES, "      client.setQueryData(key, committed);\n"],
+];
+// The superseded arm skips its seed but still invalidates, as the factory once did.
+const UNCONDITIONAL_INVALIDATE = [
+  [
+    SUPERSEDED_BRANCH,
+    "        reconcileOwed = newer;\n        return client.invalidateQueries({ queryKey: key });\n",
+  ],
+];
+// A superseded success always defers, even with no newer write left to pay.
+const NO_LAST_BRANCH = [[SUPERSEDED_BRANCH, "        reconcileOwed = true;\n"]];
+// A paid reconcile retires its debt at the invalidate, before the read lands.
+const PAY_BODY_START =
+  "    const cache = client.getQueryCache();\n    const query = cache.find({ queryKey: key, exact: true });\n";
+const CLEAR_BEFORE_REFETCH = [
+  [PAY_BODY_START, `    reconcileOwed = false;\n${PAY_BODY_START}`],
+];
+// A failure never pays the reconcile a superseded success owed.
+const ERROR_SETTLE = "      payOwedUnlessNewer(settleAndCheckNewer(ctx));\n";
+const NO_ERROR_RECONCILE = [
+  [ERROR_SETTLE, "      settleAndCheckNewer(ctx);\n"],
+];
+// Only the LATEST write's failure pays, the rule the A/B/C ordering breaks.
+const ERROR_LATEST_ONLY = [
+  [
+    ERROR_SETTLE,
+    "      const newer = settleAndCheckNewer(ctx);\n      if (ctx?.seq !== started) return;\n      payOwedUnlessNewer(newer);\n",
+  ],
 ];
 // A cache-identity guard, the alternative the start sequence is pinned against:
 // seed only while the cache still holds the object it held when the write
 // started.
 const CACHE_IDENTITY_GUARD = [
   [
-    "onMutate: (): SettingsSeedContext => ({ seq: ++started }),",
-    "onMutate: () => ({ seq: ++started, seen: client.getQueryData(key) }),",
+    "      return { seq };",
+    "      return { seq, seen: client.getQueryData(key) };",
   ],
+  [SUPERSEDED_ARM, ""],
   [
-    "if (committed && ctx?.seq === started)",
-    "if (committed && client.getQueryData(key) === ctx?.seen)",
+    SEED_LINES,
+    "      if (committed && client.getQueryData(key) === ctx?.seen)\n        client.setQueryData(key, committed);\n",
   ],
 ];
 const NO_CANCEL = [
   [
-    "return client.invalidateQueries({ queryKey: key });",
-    "return client.invalidateQueries({ queryKey: key }, { cancelRefetch: false });",
+    `${SEED_LINES}      return client.invalidateQueries({ queryKey: key });`,
+    `${SEED_LINES}      return client.invalidateQueries({ queryKey: key }, { cancelRefetch: false });`,
   ],
 ];
 
@@ -291,12 +323,17 @@ async function supersedeCase(t, factory, [field, value]) {
 
   const olderCommitted = settings({ ...PRE, hideAi: true });
   await olderHook.onSuccess(olderCommitted, olderCommitted, older);
-  assertRefetchRejected(h);
+  await sleep(5);
+  assert.equal(
+    h.counts.rejected,
+    0,
+    `${field}: the older success re-read nothing`,
+  );
   assert.deepEqual(h.data(), patched, `${field}: the newer patch survives`);
 
   const newerCommitted = settings({ ...patched, hideAi: true });
   await newerHook.onSuccess(newerCommitted, patched, newer);
-  assertRefetchRejected(h, 2);
+  assertRefetchRejected(h);
   assert.deepEqual(h.data(), newerCommitted, `${field}: the newer write seeds`);
 }
 
@@ -332,14 +369,52 @@ async function overlappingSaves(t, factory, olderSettlesLast) {
   if (olderSettlesLast) {
     await b.onSuccess(committedB, committedB, ctxB);
     await a.onSuccess(committedA, committedA, ctxA);
+    await sleep(5);
   } else {
     await a.onSuccess(committedA, committedA, ctxA);
     assert.deepEqual(h.data(), PRE, "the older success skipped its seed");
     await b.onSuccess(committedB, committedB, ctxB);
   }
-  assertRefetchRejected(h, 2);
+  // Settling first, the older success defers to the newer write; settling
+  // last, with nothing newer left, it re-reads once itself.
+  assertRefetchRejected(h, olderSettlesLast ? 2 : 1);
   assert.deepEqual(h.data(), committedB);
 }
+
+/** The older write commits after the newer one settled and re-read: nothing
+ *  newer is left to reconcile for it, so its own success re-reads once. */
+async function olderSettlesLastCase(t, factory) {
+  const diskB = settings({ theme: "slate" });
+  const diskBoth = settings({ theme: "slate", hideAi: true });
+  const h = harness(t, [PRE, diskB, diskBoth]);
+  await h.subscribe();
+  const a = factory(h.qc, KEY);
+  const b = factory(h.qc, KEY);
+  const ctxA = a.onMutate();
+  const ctxB = b.onMutate();
+  await b.onSuccess(diskB, diskB, ctxB);
+  assert.equal(h.counts.reads, 2, "the newer write re-read");
+  await a.onSuccess(diskBoth, diskBoth, ctxA);
+  await sleep(5);
+  assert.equal(h.counts.reads, 3, "the older success re-read exactly once");
+  assert.deepEqual(h.data(), diskBoth);
+}
+
+test("an older write settling last with nothing newer pending re-reads once", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  await olderSettlesLastCase(t, settingsSeedCallbacks);
+});
+
+test("the settles-last case fails when a superseded success always defers", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // NEGATIVE CONTROL: the debt is owed to no pending write, so the older
+  // commit never reaches the cache.
+  const deferring = await mutantSeed(NO_LAST_BRANCH);
+  await assert.rejects(
+    olderSettlesLastCase(t, deferring),
+    assert.AssertionError,
+  );
+});
 
 test("overlapping saves: the newest-started seed wins in either settle order", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
@@ -360,6 +435,212 @@ test("the overlapping-saves case fails against a factory without the start guard
     overlappingSaves(t, unguarded, false),
     assert.AssertionError,
   );
+});
+
+/** The older write's re-read would ANSWER here (disk holds its commit), so an
+ *  invalidate from its success would land that answer over the newer patch. */
+async function supersededRereadCase(t, factory) {
+  const olderDisk = settings({ ...PRE, hideAi: true });
+  const h = harness(t, [PRE, olderDisk]);
+  await h.subscribe();
+  const olderHook = factory(h.qc, KEY);
+  const newerHook = factory(h.qc, KEY);
+  const older = olderHook.onMutate();
+  const patched = { ...h.data(), theme: "slate" };
+  h.qc.setQueryData(KEY, patched);
+  newerHook.onMutate();
+  await olderHook.onSuccess(olderDisk, olderDisk, older);
+  await sleep(5);
+  assert.equal(h.counts.reads, 1, "the older success re-read nothing");
+  assert.deepEqual(h.data(), patched);
+}
+
+test("an older write's success neither seeds nor invalidates while a newer one is in flight", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  await supersededRereadCase(t, settingsSeedCallbacks);
+});
+
+test("the superseded-reread case fails when the superseded arm still invalidates", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // NEGATIVE CONTROL: the older write's refetch lands its disk over the patch.
+  const invalidating = await mutantSeed(UNCONDITIONAL_INVALIDATE);
+  await assert.rejects(
+    supersededRereadCase(t, invalidating),
+    assert.AssertionError,
+  );
+});
+
+/** The newer write fails after the older one's skipped success: its error
+ *  reconciles the cache with disk. A failure with nothing owed re-reads nothing. */
+async function owedReconcileCase(t, factory) {
+  const olderDisk = settings({ ...PRE, hideAi: true });
+  const h = harness(t, [PRE, olderDisk]);
+  await h.subscribe();
+  const olderHook = factory(h.qc, KEY);
+  const newerHook = factory(h.qc, KEY);
+  const older = olderHook.onMutate();
+  h.qc.setQueryData(KEY, { ...h.data(), theme: "slate" });
+  const newer = newerHook.onMutate();
+  await olderHook.onSuccess(olderDisk, olderDisk, older);
+  await newerHook.onError(new Error("disk full"), {}, newer);
+  await sleep(5);
+  assert.equal(h.counts.reads, 2, "the newer failure re-read once");
+  assert.deepEqual(h.data(), olderDisk);
+
+  const lone = factory(h.qc, KEY);
+  await lone.onError(new Error("disk full"), {}, lone.onMutate());
+  await sleep(5);
+  assert.equal(
+    h.counts.reads,
+    2,
+    "a failure with nothing owed re-reads nothing",
+  );
+}
+
+test("the newest write's failure pays a superseded success's reconcile", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  await owedReconcileCase(t, settingsSeedCallbacks);
+});
+
+test("the owed-reconcile case fails without the error arm's invalidate", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // NEGATIVE CONTROL: the cache keeps the failed write's state, missing the
+  // older write that landed on disk.
+  const silent = await mutantSeed(NO_ERROR_RECONCILE);
+  await assert.rejects(owedReconcileCase(t, silent), assert.AssertionError);
+});
+
+/** The newer write's failure pays the owed re-read, but a whitespace flip cancels
+ *  that read and patches before it lands, then fails: its settle pays again, so
+ *  disk's value replaces the flip's rollback. */
+async function cancelledPayCase(t, factory) {
+  const olderDisk = settings({ ...PRE, hideAi: true });
+  const gate = deferred();
+  const h = harness(t, [PRE, () => gate.promise, olderDisk]);
+  await h.subscribe();
+  const [older, newer, flip] = [0, 1, 2].map(() => factory(h.qc, KEY));
+  const ctxOlder = older.onMutate();
+  h.qc.setQueryData(KEY, { ...h.data(), theme: "slate" });
+  const ctxNewer = newer.onMutate();
+  await older.onSuccess(olderDisk, olderDisk, ctxOlder);
+  await newer.onError(new Error("disk full"), {}, ctxNewer);
+  await sleep(1);
+  assert.equal(h.counts.reads, 2, "the newer failure paid a re-read");
+  // useSetHideWhitespace: cancel, patch, then the write starts.
+  void h.qc.cancelQueries({ queryKey: KEY, exact: true });
+  const stale = h.data();
+  h.qc.setQueryData(KEY, { ...stale, diffHideWhitespace: true });
+  const ctxFlip = flip.onMutate();
+  gate.resolve(settings({ theme: "cancelled" }));
+  await sleep(5);
+  await flip.onError(new Error("disk full"), {}, ctxFlip);
+  h.qc.setQueryData(KEY, { ...h.data(), diffHideWhitespace: false });
+  await sleep(5);
+  assert.equal(h.counts.reads, 3, "the flip's failure paid the re-read again");
+  assert.deepEqual(h.data(), olderDisk);
+}
+
+test("a paid re-read a flip cancels stays owed, and the next settle pays it", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  await cancelledPayCase(t, settingsSeedCallbacks);
+});
+
+test("the cancelled-pay case fails when a pay retires its debt before the read lands", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // NEGATIVE CONTROL: the cancelled read retired the debt, so the flip's failure
+  // re-reads nothing and the stale snapshot stays.
+  const early = await mutantSeed(CLEAR_BEFORE_REFETCH);
+  await assert.rejects(cancelledPayCase(t, early), assert.AssertionError);
+});
+
+// A paid re-read retires the debt on any fetched success, generation unchecked.
+const RETIRE_ON_ANY_SUCCESS = [
+  [
+    "        if (owedGen === paying) reconcileOwed = false;\n",
+    "        reconcileOwed = false;\n",
+  ],
+];
+
+/** B's failure pays A's debt with a read still in flight when C's superseded
+ *  success owes a newer one; that read's success predates C's commit, so the
+ *  debt stands and D's failure pays it again. */
+async function midPayDebtCase(t, factory) {
+  const diskA = settings({ ...PRE, hideAi: true });
+  const diskAC = settings({ theme: "slate", hideAi: true });
+  const gate = deferred();
+  const h = harness(t, [PRE, () => gate.promise, diskAC]);
+  await h.subscribe();
+  const [a, b, c, d] = [0, 1, 2, 3].map(() => factory(h.qc, KEY));
+  const ctxA = a.onMutate();
+  const ctxB = b.onMutate();
+  await a.onSuccess(diskA, diskA, ctxA);
+  await b.onError(new Error("disk full"), {}, ctxB);
+  await sleep(1);
+  assert.equal(h.counts.reads, 2, "B's failure paid A's re-read");
+  const ctxC = c.onMutate();
+  const ctxD = d.onMutate();
+  await c.onSuccess(diskAC, diskAC, ctxC);
+  await sleep(1);
+  assert.equal(h.counts.reads, 2, "C defers while D is unsettled");
+  gate.resolve(diskA);
+  await sleep(5);
+  assert.equal(h.status(), "success", "the paid read landed");
+  assert.deepEqual(h.data(), diskA);
+  await d.onError(new Error("disk full"), {}, ctxD);
+  await sleep(5);
+  assert.equal(h.counts.reads, 3, "D's failure paid C's debt");
+  assert.deepEqual(h.data(), diskAC);
+}
+
+test("a debt owed while a paid re-read is in flight survives that read's success", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  await midPayDebtCase(t, settingsSeedCallbacks);
+});
+
+test("the mid-pay debt case fails when any fetched success retires the debt", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // NEGATIVE CONTROL: the older read retires C's debt, so D's failure re-reads
+  // nothing and C's commit never reaches the cache.
+  const ungenerational = await mutantSeed(RETIRE_ON_ANY_SUCCESS);
+  await assert.rejects(
+    midPayDebtCase(t, ungenerational),
+    assert.AssertionError,
+  );
+});
+
+/** Queue order differs from start order: C (newest) lands first, A succeeds
+ *  while B is still unsettled, then B fails. B is not the latest write, yet with
+ *  nothing newer than it unsettled its failure pays A's owed re-read. */
+async function queueOrderCase(t, factory) {
+  const diskC = settings({ theme: "slate" });
+  const diskAC = settings({ theme: "slate", hideAi: true });
+  const h = harness(t, [PRE, diskC, diskAC]);
+  await h.subscribe();
+  const [a, b, c] = [0, 1, 2].map(() => factory(h.qc, KEY));
+  const ctxA = a.onMutate();
+  const ctxB = b.onMutate();
+  const ctxC = c.onMutate();
+  await c.onSuccess(diskC, diskC, ctxC);
+  assert.equal(h.counts.reads, 2, "the newest write re-read");
+  await a.onSuccess(diskAC, diskAC, ctxA);
+  await sleep(5);
+  assert.equal(h.counts.reads, 2, "A defers while B is unsettled");
+  await b.onError(new Error("disk full"), {}, ctxB);
+  await sleep(5);
+  assert.equal(h.counts.reads, 3, "B's failure paid A's re-read once");
+  assert.deepEqual(h.data(), diskAC);
+}
+
+test("a non-latest failure pays an owed re-read once nothing newer is unsettled", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  await queueOrderCase(t, settingsSeedCallbacks);
+});
+
+test("the queue-order case fails when only the latest write's failure pays", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  // NEGATIVE CONTROL: B is not the latest write, so A's commit never lands.
+  const latestOnly = await mutantSeed(ERROR_LATEST_ONLY);
+  await assert.rejects(queueOrderCase(t, latestOnly), assert.AssertionError);
 });
 
 const MID = settings({ theme: "light", hideAi: false, lastSeenVersion: "1" });

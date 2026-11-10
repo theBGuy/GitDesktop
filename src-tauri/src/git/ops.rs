@@ -1980,7 +1980,14 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
     .code
         == 0;
     if head_exists {
-        run_git(Some(&top), &["reset", "--hard", "HEAD"], DEFAULT_TIMEOUT).await?;
+        // The confirm promises registered submodules keep their inner files; `submodule.recurse`
+        // would make the reset wipe them.
+        run_git(
+            Some(&top),
+            &["reset", "--hard", "--no-recurse-submodules", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -3198,40 +3205,65 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
 /// against its base (`^1`); untracked files live in the stash's third parent
 /// (`^3`, created by `--include-untracked`), so an empty tracked diff falls
 /// back to that. `spec` is `stash@{N}`, or any stash commit's sha, live or
-/// dangling.
-async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResult<FileDiff> {
+/// dangling. With whitespace hidden, a tracked change `-w` empties keeps its
+/// empty text rather than falling back.
+async fn stash_file_diff_at(
+    repo: &str,
+    spec: &str,
+    file_path: &str,
+    ignore_whitespace: Option<bool>,
+) -> AppResult<FileDiff> {
     let base = format!("{spec}^1");
     let out = crate::git::diff::diff_with_rename_pairing(
         repo,
         file_path,
-        &["diff", "--no-ext-diff", "--no-color", &base, spec],
+        &crate::git::diff::with_ignore_whitespace(
+            &["diff", "--no-ext-diff", "--no-color", &base, spec],
+            ignore_whitespace,
+        ),
         &["diff", "--no-ext-diff", "--name-status", "-z", &base, spec],
     )
     .await?;
     let old_path = out.old_path;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     if text.trim().is_empty() {
-        // Not a tracked change — try the untracked-files parent if present.
+        // Empty: no tracked change, or one `-w` emptied. Only the former falls
+        // back to the untracked-files parent (when the stash has one).
         let untracked = format!("{spec}^3");
         // Literal pathspec: a `[slug]`-style path would splice a glob-sibling's
         // untracked file from the stash's untracked parent into this diff.
         let path_spec = crate::git::pathspec::literal(file_path);
-        if let Ok(o) = run_git(
-            Some(repo),
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-color",
-                &base,
-                &untracked,
-                "--",
-                &path_spec,
-            ],
-            DEFAULT_TIMEOUT,
-        )
-        .await
-        {
-            text = o.stdout_lossy();
+        // `-w` empties a whitespace-only tracked change, and the `^3` read would
+        // show that path as a whole-file deletion; a plain probe tells them apart.
+        let tracked_change = if ignore_whitespace == Some(true) {
+            let names = run_git(
+                Some(repo),
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--name-only",
+                    "-z",
+                    &base,
+                    spec,
+                    "--",
+                    &path_spec,
+                ],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            !names.stdout.is_empty()
+        } else {
+            false
+        };
+        if !tracked_change {
+            let mut args = crate::git::diff::with_ignore_whitespace(
+                &["diff", "--no-ext-diff", "--no-color", &base, &untracked],
+                ignore_whitespace,
+            );
+            args.extend(["--", path_spec.as_str()]);
+            if let Ok(o) = run_git(Some(repo), &args, DEFAULT_TIMEOUT).await {
+                text = o.stdout_lossy();
+            }
         }
     }
     let is_binary = text
@@ -3263,8 +3295,10 @@ pub async fn git_stash_file_diff(
     repo_path: String,
     index: u32,
     file_path: String,
+    ignore_whitespace: Option<bool>,
 ) -> AppResult<FileDiff> {
-    stash_file_diff_at(&repo_path, &format!("stash@{{{index}}}"), &file_path).await
+    let spec = format!("stash@{{{index}}}");
+    stash_file_diff_at(&repo_path, &spec, &file_path, ignore_whitespace).await
 }
 
 /// Find dangling stash commits — work a `git stash` created that has since
@@ -3369,9 +3403,10 @@ pub async fn git_orphaned_stash_file_diff(
     repo_path: String,
     sha: String,
     file_path: String,
+    ignore_whitespace: Option<bool>,
 ) -> AppResult<FileDiff> {
     validate_hash(&sha)?;
-    stash_file_diff_at(&repo_path, &sha, &file_path).await
+    stash_file_diff_at(&repo_path, &sha, &file_path, ignore_whitespace).await
 }
 
 /// Restore a dangling (orphaned) stash into the working tree. Applies (never
@@ -17220,7 +17255,7 @@ mod tests {
         git(&repo, &["stash", "push", "-m", "echo test"]).await;
 
         for path in ["plain.txt", "[slug]/a.txt"] {
-            let diff = git_stash_file_diff(repo.clone(), 0, path.to_string())
+            let diff = git_stash_file_diff(repo.clone(), 0, path.to_string(), None)
                 .await
                 .unwrap();
             assert_eq!(diff.file_path, path);
@@ -20988,6 +21023,43 @@ detached
             );
             assert!(!listed.contains(&name.to_string()), "{name} is not listed");
         }
+    }
+
+    /// Under `submodule.recurse=true` a plain `reset --hard` also resets every
+    /// submodule's working tree; discard-all must leave a submodule's inner edits alone.
+    #[tokio::test]
+    async fn discard_all_keeps_submodule_inner_edits_under_submodule_recurse() {
+        let (_inner_dir, inner) = setup_repo("discard-all-sub-inner").await;
+        let (dir, repo) = setup_repo("discard-all-sub-parent").await;
+        let url = inner.replace('\\', "/");
+        git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &url,
+                "sub",
+            ],
+        )
+        .await;
+        git(&repo, &["commit", "-m", "add sub"]).await;
+        git(&repo, &["config", "submodule.recurse", "true"]).await;
+        std::fs::write(dir.path().join("a.txt"), b"dirty\n").unwrap();
+        std::fs::write(dir.path().join("sub/a.txt"), b"inner edit\n").unwrap();
+
+        git_discard_all_core(&AppState::default(), repo)
+            .await
+            .expect("discard-all runs");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("sub/a.txt")).unwrap(),
+            b"inner edit\n"
+        );
+        let parent_file = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+        assert_eq!(parent_file.trim_end(), "v0");
     }
 
     /// Discard-all is one compound: the untracked sweep must run INSIDE the hold,

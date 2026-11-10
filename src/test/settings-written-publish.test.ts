@@ -78,3 +78,17 @@ describe("subscribeSettingsWritten", () => {
     expect(heard).toEqual([]);
   });
 });
+
+describe("saveSettingsMerged", () => {
+  it("keeps the stored diffHideWhitespace over a snapshot's copy", async () => {
+    const committed = await saveSettingsMerged({
+      ...base(),
+      diffHideWhitespace: true,
+      editHistoryOrder: "oldest-first",
+    });
+    const stored = disk.settings as AppSettings;
+    expect(stored.diffHideWhitespace).toBe(false);
+    expect(stored.editHistoryOrder).toBe("oldest-first");
+    expect(committed.diffHideWhitespace).toBe(false);
+  });
+});

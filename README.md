@@ -135,8 +135,11 @@ context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
 GitHub and Bitbucket pull requests included. A non-image binary file with
 unstaged changes (in your working copy or an agent session's) opens in its
-default program, or shows in Explorer, right from its diff; for a deleted
-file, Explorer opens the nearest folder that still exists.
+default program (a file your system would run instead is refused), or shows
+in Explorer, right from its diff; for a deleted file, Explorer opens the
+nearest folder that still exists.
+Hide whitespace changes in any local diff to read a re-indented file by the
+lines whose content changed.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.
@@ -154,9 +157,12 @@ only part of a brand-new (untracked) file. Partial staging is for UTF-8 text,
 where a long diff opens with up to 1,000 lines and Show full diff loads the
 rest; other encodings stage and discard as a whole file. Stage or unstage a
 drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`, without reaching for the
-button. Press `Space` on a focused file to stage or unstage it. Once the file
-you're viewing has nothing left to stage, whole or line by line, the next
-file in the list opens (the one above it, at the end of a section), and
+button. Press `Space` on a focused file to stage or unstage it.
+Double-click a file to open it in your external editor, or in its default
+program when none is set. A submodule opens as its own repository instead, and an
+untracked folder shows in your file manager.
+Once the file you're viewing has nothing left to stage, whole or line by line,
+the next file in the list opens (the one above it, at the end of a section), and
 unstaging works the same way in Staged. Stage, unstage, discard, stash,
 ignore, or untrack single files or a multi-selection from the context menu,
 each item counting the selected files it applies to (staging and unstaging a
@@ -325,7 +331,10 @@ commit your repo records or to the tip of the branch each one tracks
 (recursing into nested submodules either way), edit a submodule's URL or
 tracked branch, and open one as its own repository. Adding, removing, and
 editing stage the change for you to commit, and the clone dialog can bring
-every submodule down with the repo.
+every submodule down with the repo. A changed submodule is tagged in Changes
+with what changed; selecting it lists the commits the submodule moved across,
+its unstaged row lists the uncommitted files inside, and **Open submodule** is
+one click away.
 
 ### Syncing and conflicts
 

@@ -25,7 +25,9 @@ import {
 import { STATUS_READ_FAILED_REASON } from "@/features/repository/sync-controls-state";
 import { gitDiffFile, gitStatus } from "@/lib/git/api";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
+import { readViewDiff } from "@/lib/git/whitespace-diff";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import { cn } from "@/lib/utils";
 
 /** The working-tree change a session turn is mid-way through making. */
@@ -248,9 +250,19 @@ function WorktreeFileDiffSlot({
   // polling query (not the shared `useFileDiff`) so the diff keeps refreshing as the
   // agent re-edits the SAME file — the shared key has no content hash, so it would
   // otherwise serve a stale cached diff for the whole turn.
+  const hide = useHideWhitespace();
   const diff = useQuery({
-    queryKey: ["session-worktree-diff", repoPath, path, untracked] as const,
-    queryFn: () => gitDiffFile(repoPath, path, false, untracked),
+    queryKey: [
+      "session-worktree-diff",
+      repoPath,
+      path,
+      untracked,
+      hide,
+    ] as const,
+    queryFn: () =>
+      readViewDiff(hide, (iw) =>
+        gitDiffFile(repoPath, path, false, untracked, iw),
+      ),
     refetchInterval: 1500,
     networkMode: "always",
   });

@@ -68,6 +68,10 @@ export const claimRepoOpen = openClaims.claim;
  *  open or any navigation arrives. */
 export const repoOpenWatermark = openClaims.watermark;
 
+/** Claims an open at its REQUEST; the check fails only once a newer open is
+ *  claimed, whatever navigation happens meanwhile. */
+export const claimRepoOpenOrder = openClaims.claimOrder;
+
 // The store's cross-repo landings hold on this (src/lib can't import it). Below
 // `openClaims`, which it closes over; the module-level client is the app's.
 registerRepoShellWarmup((root) => {
@@ -149,11 +153,12 @@ export function useOpenRecordedRepo() {
  * worktree no longer checks out; every miss opens main silently. A recents
  * click retired by a newer open or a navigation before it starts opening
  * resolves false without recording its row, which would otherwise jump to the
- * top of recents after the user moved on; a superseded picker, submodule or
- * relocate open still records its repo.
+ * top of recents after the user moved on; a superseded picker or relocate open
+ * still records its repo, and so does a submodule open once it reaches this
+ * hook (useOpenSubmoduleAsRepo drops one retired during its own probe).
  * Callers: the shared recents list, macOS File → Open Recent, the folder
  * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
- * repository from the Submodules dialog.
+ * repository through useOpenSubmoduleAsRepo.
  */
 export function useOpenRepoByPath() {
   const openRecorded = useOpenRecordedRepo();

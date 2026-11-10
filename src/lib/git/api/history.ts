@@ -71,7 +71,14 @@ export const gitCommitFileDiff = (
   repoPath: string,
   hash: string,
   filePath: string,
-) => invoke<FileDiff>("git_commit_file_diff", { repoPath, hash, filePath });
+  ignoreWhitespace = false,
+) =>
+  invoke<FileDiff>("git_commit_file_diff", {
+    repoPath,
+    hash,
+    filePath,
+    ignoreWhitespace,
+  });
 
 /** Scans the working tree for TODO/FIXME/HACK/… code comments (case-sensitive
  *  fixed-string `git grep`), grouped by path in output order. `maxHits` caps the

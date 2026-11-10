@@ -1,5 +1,9 @@
 import { invoke } from "@/lib/tauri/invoke";
-import type { Submodule, SubmoduleRemoveOutcome } from "../types";
+import type {
+  Submodule,
+  SubmoduleChanges,
+  SubmoduleRemoveOutcome,
+} from "../types";
 
 export const gitSubmodules = (repoPath: string) =>
   invoke<Submodule[]>("git_submodules", { repoPath });
@@ -54,3 +58,19 @@ export const gitSubmoduleSetBranch = (
   path: string,
   branch: string | null,
 ) => invoke<void>("git_submodule_set_branch", { repoPath, path, branch });
+
+/** One side of a submodule row: the commits between its two gitlinks and, on the
+ *  unstaged side, the files changed inside. Read-only. `origPath` is a staged
+ *  rename's old path, where HEAD still records the gitlink. */
+export const gitSubmoduleChanges = (
+  repoPath: string,
+  path: string,
+  staged: boolean,
+  origPath?: string,
+) =>
+  invoke<SubmoduleChanges>("git_submodule_changes", {
+    repoPath,
+    path,
+    staged,
+    origPath: origPath ?? null,
+  });

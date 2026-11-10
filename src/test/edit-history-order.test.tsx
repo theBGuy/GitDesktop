@@ -460,8 +460,12 @@ describe("Edit history order toggle", () => {
         screen.getByRole("button", { name: "Newest first" }),
       ).toHaveAttribute("aria-pressed", "true");
     };
-    // The first write's re-read answers the order it landed.
+    // The first write lands; a settings re-read then answers the order it
+    // landed (its own success skips one while the second write is pending).
     await act(async () => writes[0].resolve());
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: settingsKeys.settings });
+    });
     await waitFor(() => expect(cachedOrder(client)).toBe("oldest-first"));
     newestShown();
     await act(async () => writes[1].resolve());
@@ -480,7 +484,8 @@ describe("Edit history order toggle", () => {
     await press("Oldest first");
     await press("Newest first");
     await waitFor(() => expect(writes.length).toBe(2));
-    // The first write lands on disk; the settings re-read after it hangs.
+    // The first write lands on disk; the re-read the second write's failure
+    // owes it hangs.
     let failRead: ((e: Error) => void) | undefined;
     vi.mocked(loadSettings).mockReturnValueOnce(
       new Promise((_, rej) => {
@@ -488,8 +493,8 @@ describe("Edit history order toggle", () => {
       }),
     );
     await act(async () => writes[0].resolve());
-    await waitFor(() => expect(loadSettings).toHaveBeenCalled());
     await act(async () => writes[1].reject(new Error("disk full")));
+    await waitFor(() => expect(loadSettings).toHaveBeenCalled());
     expect(cachedOrder(client)).toBe("oldest-first");
     await waitFor(() =>
       expect(shownSubjects()).toEqual(["First", "Second", "Third"]),

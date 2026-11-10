@@ -3,7 +3,9 @@ import {
   REPO_SHELL_GC_TIME,
   REPO_SHELL_WARM_STALE_MS,
 } from "@/lib/query-cache-times";
+import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import * as api from "../api";
+import { readViewDiff } from "../whitespace-diff";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
 
 export function useCompareBranches(
@@ -84,15 +86,16 @@ export function useBranchFileDiff(
   file: string | null,
   enabled = true,
 ) {
+  const hide = useHideWhitespace();
   return useQuery({
-    queryKey: repoKeys.branchFileDiff(
-      repo,
-      base ?? "",
-      compare ?? "",
-      file ?? "",
-    ),
+    queryKey: [
+      ...repoKeys.branchFileDiff(repo, base ?? "", compare ?? "", file ?? ""),
+      hide,
+    ] as const,
     queryFn: () =>
-      api.gitBranchFileDiff(repo, base ?? "", compare ?? "", file ?? ""),
+      readViewDiff(hide, (iw) =>
+        api.gitBranchFileDiff(repo, base ?? "", compare ?? "", file ?? "", iw),
+      ),
     enabled:
       enabled &&
       base !== null &&

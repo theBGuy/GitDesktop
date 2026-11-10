@@ -381,6 +381,10 @@ export interface AppSettings {
    *  like theme; the window may apply a lower level when the monitor cannot fit it. */
   zoom: number;
   diffViewMode: (typeof DIFF_VIEW_MODES)[number];
+  /** Hide whitespace-only changes in every local diff view (`git diff -w`).
+   *  Applied outside the bulk settings form (apply-on-change), like
+   *  diffViewMode. */
+  diffHideWhitespace: boolean;
   /** Changes panel layout: flat list or compacted directory tree. Applied outside
    *  the bulk settings form (apply-on-change), like diffViewMode. */
   changesViewMode: (typeof CHANGES_VIEW_MODES)[number];
@@ -856,6 +860,8 @@ export function setBitbucketTokenExpiresAt(
  * of them is stale by definition, every other field is the user's intent. `mcpServers`,
  * which `relocateRecentRepo` also rewrites, stays the caller's: the user edits it here, and
  * an open form re-homes its draft copy via {@link subscribeMcpRehome}.
+ * `diffHideWhitespace` is re-pinned too: only its field-only patch writer owns it, so a
+ * snapshot's optimistic copy must never persist past that patch's own failure.
  */
 export function saveSettingsMerged(
   settings: AppSettings,
@@ -866,6 +872,7 @@ export function saveSettingsMerged(
       ...settings,
       recentRepos: fresh.recentRepos,
       bitbucketTokenExpiresAt: fresh.bitbucketTokenExpiresAt,
+      diffHideWhitespace: fresh.diffHideWhitespace,
     };
     await saveSettings(committed);
     return healLoadedSettings(committed);
