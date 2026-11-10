@@ -507,6 +507,45 @@ describe("RunWorkflowDialog input arms", () => {
     expect(field("version")).toHaveValue("2.0");
   });
 
+  const CROSS_REF_INPUTS = [
+    input("target", "string", { default: "staging" }),
+    input("note", "string"),
+  ];
+
+  it.each([
+    ["pending", "pending" as const, "Checking inputs on release/1.0…"],
+    [
+      "failed",
+      new Error("gh failed"),
+      "Couldn't read inputs on release/1.0; showing the inputs read on main",
+    ],
+  ])(
+    "fields held from another ref send only edits while the check is %s",
+    async (_arm, answer, line) => {
+      probes.main = { "1": declared(CROSS_REF_INPUTS) };
+      probes["release/1.0"] = answer;
+      const user = renderDialog();
+      await waitFor(() => expect(field("target")).toHaveValue("staging"));
+      await user.type(field("note"), "hi");
+      await typeRef(user, "release/1.0");
+      await statusIs(line);
+      expect(field("target")).toHaveValue("staging");
+      await user.click(runButton());
+      await waitFor(() => expect(sent()).toEqual([{ note: "hi" }]));
+    },
+  );
+
+  it("fields read on the dispatched ref still send their untouched defaults", async () => {
+    probes.main = { "1": declared(CROSS_REF_INPUTS) };
+    const user = renderDialog();
+    await waitFor(() => expect(field("target")).toHaveValue("staging"));
+    await user.type(field("note"), "hi");
+    await user.click(runButton());
+    await waitFor(() =>
+      expect(sent()).toEqual([{ target: "staging", note: "hi" }]),
+    );
+  });
+
   it("an empty landing that drops the focused field keeps the update note", async () => {
     probes.main = { "1": declared([input("version", "string")]) };
     probes.dev = { "1": declared([]) };

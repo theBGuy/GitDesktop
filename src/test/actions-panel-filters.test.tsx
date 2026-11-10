@@ -283,18 +283,53 @@ describe("facets reach the run read", () => {
     await waitFor(() => expect(lastFilters()).toEqual({ status: "failure" }));
   });
 
-  it("picking the same Status row again is a no-op", async () => {
+  it("pressing a checked Status row clears its facet and keeps the popover open", async () => {
     const user = userEvent.setup();
     renderPanel();
     await waitFor(() =>
       expect(funnel()).not.toHaveAttribute("aria-disabled", "true"),
     );
-    await pickOption(user, "Failed");
-    await pickOption(user, "Failed");
-    expect(lastFilters()).toEqual({ status: "failure" });
+    await openFilters(user);
+    await user.click(await screen.findByRole("option", { name: "Failed" }));
+    await waitFor(() => expect(lastFilters()).toEqual({ status: "failure" }));
+    const row = screen.getByRole("option", { name: "Failed" });
+    expect(row).toHaveAttribute("aria-selected", "true");
+    await user.click(row);
+    await waitFor(() => expect(lastFilters()).toEqual({}));
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Failed" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(filterInput()).toHaveFocus();
     expect(
-      screen.getByRole("button", { name: "Remove filter Status: Failed" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Remove filter Status: Failed" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Enter on a checked row toggles its facet off, the row keeping the highlight", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() =>
+      expect(funnel()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await openFilters(user);
+    const failed = () => screen.getByRole("option", { name: "Failed" });
+    await screen.findByRole("option", { name: "Failed" });
+    // The Event group comes first; step down to the Status row.
+    for (let i = 0; i < 100 && !failed().hasAttribute("data-highlighted"); i++)
+      await user.keyboard("{ArrowDown}");
+    const row = failed();
+    expect(row).toHaveAttribute("data-highlighted");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(lastFilters()).toEqual({ status: "failure" }));
+    await waitFor(() => expect(row).toHaveAttribute("aria-selected", "true"));
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(lastFilters()).toEqual({}));
+    expect(row).toHaveAttribute("aria-selected", "false");
+    expect(row).toHaveAttribute("data-highlighted");
+    expect(filterInput()).toHaveFocus();
+    expect(filterInput()).toHaveAttribute("aria-activedescendant", row.id);
   });
 
   it("This branch on main sends { branch: 'main' } and renders no chip", async () => {

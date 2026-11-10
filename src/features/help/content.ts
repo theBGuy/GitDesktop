@@ -3062,9 +3062,10 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   by text. Filtering by branch, event, status, or actor caps what GitHub pages at 1,000
   runs, so the count reads 1,000+ once there are more; a workflow filter alone shows
   the full count. A **Workflows** section at the top of the list shows each workflow
-  with its latest run's status (pick one to see only its runs), and the **Open on
-  GitHub** button beside Refresh opens the repository's Actions caches, deployments,
-  attestations, runners, and usage and performance metrics on GitHub.
+  with its latest run's status when that run is among the most recent (pick one to
+  see only its runs), and the **Open on GitHub** button beside Refresh opens the
+  repository's Actions caches, deployments, attestations, runners, and usage and
+  performance metrics on GitHub.
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run; a

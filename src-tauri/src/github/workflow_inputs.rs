@@ -11,10 +11,14 @@ use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy};
 /// Larger files are refused before the parser sees them; real workflow files are KBs.
 const MAX_YML_BYTES: usize = 1_048_576;
 const MAX_INPUTS: usize = 25;
-/// The clamps that bound a cached probe entry: descriptions, defaults and each option
-/// are cut to this many chars, and a choice keeps its first `MAX_OPTIONS` options.
+/// Descriptions are display-only, so they are cut to this many chars; a choice keeps
+/// its first `MAX_OPTIONS` options.
 const MAX_TEXT_CHARS: usize = 512;
 const MAX_OPTIONS: usize = 200;
+/// GitHub caps a dispatch's inputs payload at 65,535 chars (workflow_dispatch docs),
+/// so a longer default or option could never be sent. Values are never cut: a cut
+/// one would be dispatched as if the file had declared it.
+const MAX_VALUE_CHARS: usize = 65_535;
 const DISPATCH: &str = "workflow_dispatch";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -123,7 +127,8 @@ fn dispatch_inputs(doc: &Node) -> Option<Vec<WorkflowInput>> {
 fn input(name: &str, body: &Node) -> WorkflowInput {
     let fields = entries(body).unwrap_or_default();
     let field = |key: &str| lookup(fields, |k| k == key);
-    let mut default = field("default").and_then(scalar_text).map(clamp_text);
+    let default_text = field("default").and_then(scalar_text);
+    let mut default = default_text.filter(|d| sendable(d)).map(str::to_string);
     // An unquoted `True`/`FALSE` is the YAML boolean GitHub reads; only YAML 1.2
     // spellings count, so `yes`, `on` and any quoted text stay text.
     let default_boolean = match field("default") {
@@ -137,17 +142,18 @@ fn input(name: &str, body: &Node) -> WorkflowInput {
             .iter()
             .filter_map(scalar_text)
             .take(MAX_OPTIONS)
-            .map(clamp_text)
+            .map(str::to_string)
             .collect(),
         _ => Vec::new(),
     };
+    // A choice with an option it could never send degrades like one with none.
     let kind = match field("type").and_then(scalar_text) {
-        Some("choice") if !options.is_empty() => WorkflowInputKind::Choice,
+        Some("choice") if !options.is_empty() && options.iter().all(|o| sendable(o)) => {
+            WorkflowInputKind::Choice
+        }
         Some("boolean")
             if default_boolean.is_some()
-                || default
-                    .as_deref()
-                    .is_none_or(|d| d == "true" || d == "false") =>
+                || default_text.is_none_or(|d| d == "true" || d == "false") =>
         {
             WorkflowInputKind::Boolean
         }
@@ -184,6 +190,10 @@ fn input(name: &str, body: &Node) -> WorkflowInput {
 
 fn clamp_text(text: &str) -> String {
     text.chars().take(MAX_TEXT_CHARS).collect()
+}
+
+fn sendable(value: &str) -> bool {
+    value.chars().count() <= MAX_VALUE_CHARS
 }
 
 fn entries(node: &Node) -> Option<&[(Node, Node)]> {
@@ -658,17 +668,28 @@ mod tests {
     }
 
     #[test]
-    fn defaults_clamp_to_512_chars() {
+    fn defaults_are_kept_whole() {
         let long = "é".repeat(600);
         let yml =
             format!("on:\n  workflow_dispatch:\n    inputs:\n      x:\n        default: {long}\n");
-        let default = only(&yml).default.unwrap();
-        assert_eq!(default.chars().count(), 512);
-        assert!(long.starts_with(&default));
+        assert_eq!(only(&yml).default, Some(long));
     }
 
     #[test]
-    fn options_keep_the_first_200_each_clamped_to_512_chars() {
+    fn a_default_over_the_dispatch_cap_reads_as_absent() {
+        for (len, kept) in [(MAX_VALUE_CHARS, true), (MAX_VALUE_CHARS + 1, false)] {
+            let long = "a".repeat(len);
+            let yml = format!(
+                "on:\n  workflow_dispatch:\n    inputs:\n      x:\n        default: {long}\n"
+            );
+            let got = only(&yml);
+            assert_eq!(got.default.is_some(), kept, "len {len}");
+            assert_eq!(got.kind, WorkflowInputKind::String);
+        }
+    }
+
+    #[test]
+    fn options_keep_the_first_200_each_whole() {
         let long = "é".repeat(600);
         let items: Vec<String> = (0..201).map(|i| format!("o{i}")).collect();
         let yml = format!(
@@ -677,10 +698,20 @@ mod tests {
         );
         let options = only(&yml).options;
         assert_eq!(options.len(), 200);
-        assert_eq!(options[0].chars().count(), 512);
-        assert!(long.starts_with(&options[0]));
+        assert_eq!(options[0], long);
         assert_eq!(options[1], "o0");
         assert_eq!(options[199], "o198");
+    }
+
+    #[test]
+    fn a_choice_with_an_option_over_the_dispatch_cap_degrades_to_string() {
+        let long = "a".repeat(MAX_VALUE_CHARS + 1);
+        let yml = format!(
+            "on:\n  workflow_dispatch:\n    inputs:\n      x:\n        type: choice\n        options: [info, {long}]\n"
+        );
+        let got = only(&yml);
+        assert_eq!(got.kind, WorkflowInputKind::String);
+        assert!(got.options.is_empty());
     }
 
     #[test]

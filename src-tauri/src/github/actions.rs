@@ -1324,7 +1324,7 @@ type DispatchProbeCache =
 
 /// Probe answers from successful fetches; `repo_path` is keyed because the slug drops the
 /// host. Entries for user-typed refs live until a 422 evicts them or the process exits,
-/// each bounded by the parser's clamps and its 1 MiB scalar budget.
+/// each bounded by the parser's 1 MiB file cap and 65,535 chars per kept value.
 static DISPATCH_PROBE_CACHE: OnceLock<DispatchProbeCache> = OnceLock::new();
 
 fn dispatch_probe_cache() -> &'static DispatchProbeCache {

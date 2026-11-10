@@ -169,10 +169,13 @@ export function numberWarning(value: string): string | null {
 /** The inputs a dispatch sends, or the first reason it can't go yet, ranked:
  *  a required text field left blank, a required choice unpicked, a free row
  *  repeating a declared name, two free rows sharing a name, then GitHub's caps
- *  over the record that would be sent. */
+ *  over the record that would be sent. `editedOnly` (fields read on another ref
+ *  than the dispatch's) sends only edited fields, so that ref's own declared
+ *  defaults apply to the rest instead of the held ref's. */
 export function buildDispatch(
   fields: DispatchField[],
   rows: DispatchRow[],
+  editedOnly = false,
 ): { record: Record<string, string>; hold: string | undefined } {
   const held = (hold: string) => ({ record: {}, hold });
   const blank = fields.find(
@@ -207,6 +210,7 @@ export function buildDispatch(
   // __proto__ through the prototype setter and drop it.
   const entries: [string, string][] = [];
   for (const f of fields) {
+    if (editedOnly && !f.dirty) continue;
     const sent = sentValue(f);
     if (sent !== null) entries.push([f.input.name, sent]);
   }

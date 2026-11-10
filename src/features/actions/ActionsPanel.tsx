@@ -877,6 +877,7 @@ export function ActionsPanel({
               clearRescue.hostRef(node);
             }}
             onPick={(items) => setFacets(items.reduce(withPicked, facets))}
+            onUnpick={(kinds) => setFacets(kinds.reduce(withoutFacet, facets))}
           />
         </div>
       </div>

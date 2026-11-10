@@ -143,6 +143,7 @@ export function RunFilterPopover({
   paletteEnabled,
   triggerRef,
   onPick,
+  onUnpick,
 }: {
   provider: ForgeProvider | null | undefined;
   facets: Facets;
@@ -155,14 +156,16 @@ export function RunFilterPopover({
   paletteEnabled: boolean;
   triggerRef: Ref<HTMLButtonElement>;
   onPick: (items: FacetItem[]) => void;
+  /** A checked row pressed again: clears its facet, leaving focus in the popup. */
+  onUnpick: (kinds: FacetKind[]) => void;
 }) {
   const [open, setOpen] = useState(false);
   const openRef = useRef(false);
   const ownTrigger = useRef<HTMLButtonElement | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [seen, setSeen] = useState<Seen>(NO_SEEN);
-  const kind: ForgeProvider = provider ?? "github";
-  const support = FACET_SUPPORT[kind];
+  const forge: ForgeProvider = provider ?? "github";
+  const support = FACET_SUPPORT[forge];
   const pipelines = isPipelineProvider(provider);
   const query = inputValue.trim();
   const count = activeFacetCount(facets);
@@ -177,13 +180,13 @@ export function RunFilterPopover({
           disabled: isDisabledWorkflow(w.state),
         }));
       case "event":
-        return eventOptions(kind, seen.events).map((e) => ({
+        return eventOptions(forge, seen.events).map((e) => ({
           kind: k,
           value: e,
           label: e,
         }));
       case "status":
-        return STATUS_FACETS[kind].map((s) => ({
+        return STATUS_FACETS[forge].map((s) => ({
           kind: k,
           value: s,
           label: statusFacetLabel(provider, s),
@@ -275,14 +278,16 @@ export function RunFilterPopover({
       itemToStringLabel={(item) => item.label}
       isItemEqualToValue={(a, b) => a.kind === b.kind && a.value === b.value}
       onValueChange={(next) => {
-        // Only additions act: each sets its facet, replacing that facet's
-        // value. A removal is a re-pick of the current value, a no-op; a
-        // facet's clear control is its chip.
-        const added = next.filter(
-          (item) =>
-            !value.some((v) => v.kind === item.kind && v.value === item.value),
+        // An addition sets its facet, replacing that facet's value. Base UI
+        // drops a pressed checked row from `next`, which clears its facet.
+        const same = (a: FacetItem) => (b: FacetItem) =>
+          a.kind === b.kind && a.value === b.value;
+        const added = next.filter((item) => !value.some(same(item)));
+        const removed = value.filter(
+          (v) => !next.some(same(v)) && !added.some((a) => a.kind === v.kind),
         );
         if (added.length > 0) onPick(added);
+        if (removed.length > 0) onUnpick(removed.map((v) => v.kind));
         const q = inputValue;
         queueMicrotask(() => setInputValue(q));
       }}

@@ -444,8 +444,16 @@ export function RunWorkflowDialog({
       ? held
       : null;
   const shownFields = heldHere?.fields ?? [];
-  // A typed-fields dispatch: the record it sends, or why it can't go yet.
-  const typedDispatch = isPipelines ? null : buildDispatch(shownFields, rows);
+  const refTrim = gitRef.trim();
+  // A typed-fields dispatch: the record it sends, or why it can't go yet. Fields
+  // read on another ref (debounce, check pending or failed) send only edits.
+  const typedDispatch = isPipelines
+    ? null
+    : buildDispatch(
+        shownFields,
+        rows,
+        heldHere !== null && heldHere.ref !== refTrim,
+      );
 
   const setFieldValue = (name: string, value: string) =>
     setHeld((h) =>
@@ -549,7 +557,6 @@ export function RunWorkflowDialog({
   // outlives it and takes the focus.
   const inputsRescue = useRetryFocusRescue(!selectedNoTrigger);
 
-  const refTrim = gitRef.trim();
   // A verdict for the current ref that carries no schema for this workflow.
   const probeUnread =
     probeCurrent &&
