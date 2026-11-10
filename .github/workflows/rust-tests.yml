@@ -301,6 +301,7 @@ jobs:
       matrix:
         platform:
           - windows-2025
+          - ubuntu-24.04
           - ubuntu-26.04
           - macos-26
     runs-on: ${{ matrix.platform }}
@@ -316,12 +317,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-          # rust-cache keys on the OS family, not the image: without this a
-          # 24.04-built cache serves the 26.04 leg unchanged.
+          # rust-cache keys on the OS family, not the runner image: without the
+          # image in the key, Linux legs share one cache and an image bump
+          # restores the previous image's build.
           key: ${{ matrix.platform }}
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-26.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \

@@ -55,9 +55,9 @@ jobs:
         include:
           - platform: windows-2025
             args: ""
-          # Pinned to 24.04 on purpose: the shipped Linux bundles (AppImage, .deb, .rpm)
-          # inherit the build image's glibc floor, so this leg moves only on a support
-          # decision (appimage-check.yml mirrors it).
+          # Pinned to 24.04 on purpose: the shipped Linux bundles (AppImage, .deb,
+          # .rpm) inherit the build image's glibc floor, so this leg moves only on a
+          # support decision (appimage-check.yml mirrors it).
           - platform: ubuntu-24.04
             args: ""
           # macOS: a universal binary (Intel + Apple Silicon), signed with a
@@ -93,7 +93,7 @@ jobs:
           workspaces: "./src-tauri -> target"
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-24.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
