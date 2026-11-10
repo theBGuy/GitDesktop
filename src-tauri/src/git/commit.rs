@@ -954,7 +954,14 @@ const UNDO_MID_MERGE: &str =
 /// The refusal for an undo over unmerged entries with no merge stopped (a conflicted
 /// squash, stash pop or rebase), the other half of `reset --soft`'s refusal. KEEP IN STEP
 /// with the family above.
+// KEEP IN STEP: HistoryPanel.tsx's `UNDO_UNRESOLVED` toasts this exact sentence on the
+// hotkey and palette routes, and its menu row shows a short form.
 const UNDO_UNRESOLVED: &str = "Resolve the conflicts first; nothing was undone.";
+
+/// The refusal for an undo whose operation-state read could not resolve the git dir:
+/// without it a stopped merge or pick is invisible, and the undo would move the branch
+/// under it. KEEP IN STEP with the family above.
+const UNDO_STATE_UNREAD: &str = "Couldn't read the repository's state; nothing was undone.";
 
 /// The refusal for an undo while a cherry-pick or revert is stopped: `reset --soft` would
 /// cancel it, clearing its sequencer only on the last pick. KEEP IN STEP with the family above.
@@ -1061,7 +1068,9 @@ pub(crate) async fn git_undo_commit_core(
             code: 1,
             stderr: copy.to_string(),
         };
-        let ops = crate::git::ops::op_state(&repo_path).await?;
+        let ops = crate::git::ops::op_state_strict(&repo_path)
+            .await
+            .map_err(|_| refuse(UNDO_STATE_UNREAD))?;
         if ops.cherry_picking || ops.reverting {
             return Err(refuse(UNDO_MID_PICK));
         }
@@ -2968,6 +2977,58 @@ mod tests {
             .expect("a resolved squash leaves nothing to refuse");
         assert_eq!(head(&repo).await, a);
         assert!(branch_state_present(&repo).await.is_empty());
+    }
+
+    /// A git-dir probe that fails can't tell a stopped merge from none, so the undo
+    /// refuses instead of moving the branch under the merge. The fault is scoped to the
+    /// undo alone: the fail-open `op_state` stays "nothing in flight" under it, and the
+    /// same undo outside it refuses on the merge itself.
+    #[tokio::test]
+    async fn undo_refuses_when_the_git_dir_probe_fails() {
+        assert_eq!(
+            UNDO_STATE_UNREAD,
+            "Couldn't read the repository's state; nothing was undone."
+        );
+        let (dir, repo) = amend_fixture("gd-undo-git-dir-probe-", &[]).await;
+        let (_, b) = diverged(&dir, &repo).await;
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "fixture: the merge stops on its conflict");
+        resolve_ours(&repo).await;
+        assert!(crate::git::ops::op_state(&repo).await.unwrap().merging);
+        let merge_head = ref_oid(&repo, "MERGE_HEAD").await.unwrap();
+        assert!(merge_head.is_some(), "fixture: MERGE_HEAD is written");
+
+        let on = branch_here(&repo).await;
+        let result =
+            crate::git::ops::with_git_dir_probe_fault(undo_on(&repo, Some(b.clone()), on)).await;
+        assert_undo_refused(result, UNDO_STATE_UNREAD);
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(ref_oid(&repo, "MERGE_HEAD").await.unwrap(), merge_head);
+
+        // The fail-open contract holds under the same fault.
+        let open = crate::git::ops::with_git_dir_probe_fault(async {
+            (
+                crate::git::ops::op_state(&repo).await.unwrap(),
+                crate::git::ops::op_in_progress(&repo).await,
+            )
+        })
+        .await;
+        assert!(!open.0.merging && !open.0.rebasing && !open.0.cherry_picking);
+        assert!(!open.0.reverting && !open.0.edit_paused && open.0.rebase_stop.is_none());
+        assert!(!open.1, "op_in_progress stays fail-open");
+
+        // Unscoped, the seam is inert: the merge's own refusal wins.
+        assert_undo_refused(
+            undo_on(&repo, Some(b.clone()), branch_here(&repo).await).await,
+            UNDO_MID_MERGE,
+        );
+        assert_eq!(head(&repo).await, b);
     }
 
     /// Parity with git's own `reset --soft HEAD~1`, measured on twin repos (git 2.51.1):

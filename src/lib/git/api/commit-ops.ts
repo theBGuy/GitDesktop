@@ -1,5 +1,5 @@
 import { invoke } from "@/lib/tauri/invoke";
-import type { BranchHead, RewriteStep } from "../types";
+import type { BranchHead, CommitDate, RewriteStep } from "../types";
 
 /** The `expectedBranch` IPC form of the HEAD a surface displayed: its branch name, or
  *  `HEAD` when detached (git refuses a branch named `HEAD`, so the two never
@@ -120,12 +120,40 @@ export const gitRebaseEdit = (
     dropped: dropped ?? null,
   });
 
-/** Full messages (subject + body) for the unpushed commits `base..HEAD`, to
- *  pre-fill the Edit-history editor without truncating multi-line bodies. */
+/** Full messages (subject + body) and both dates for the unpushed commits
+ *  `base..HEAD`, to pre-fill the Edit-history editor without truncating
+ *  multi-line bodies. A date git printed in a shape the backend can't read is
+ *  `null` for that row only. */
 export const gitUnpushedMessages = (repoPath: string, base: string) =>
-  invoke<{ hash: string; message: string }[]>("git_unpushed_messages", {
+  invoke<
+    {
+      hash: string;
+      message: string;
+      authorDate: CommitDate | null;
+      committerDate: CommitDate | null;
+    }[]
+  >("git_unpushed_messages", {
     repoPath,
     base,
+  });
+
+/** Changes only HEAD's dates (message, tree and index untouched) and resolves
+ *  the new HEAD oid. A `null` date keeps git's own behaviour: the author date
+ *  stays, the committer date becomes now. The backend refuses unless HEAD is
+ *  still `expectedHead` on `expectedBranch` ({@link headBranchPin}). */
+export const gitAmendCommitDates = (
+  repoPath: string,
+  expectedHead: string,
+  expectedBranch: string,
+  authorDate: CommitDate | null,
+  committerDate: CommitDate | null,
+) =>
+  invoke<string>("git_amend_commit_dates", {
+    repoPath,
+    expectedHead,
+    expectedBranch,
+    authorDate,
+    committerDate,
   });
 
 /** The backend refuses when the latest commit is no longer `expectedHead`, or HEAD no

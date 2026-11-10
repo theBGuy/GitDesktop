@@ -27,10 +27,13 @@ import {
   isNoUpstream,
   NO_UPSTREAM_COUNT_RECHECK_MS,
   observeHeadOid,
+  observeSeeded,
   preMoveStale,
   resolveUnpushedView,
   squashGate,
+  statusContentSignature,
   statusLogAction,
+  undoPushedHold,
   viewAgrees,
 } from "../src/features/history/editable-set.ts";
 
@@ -84,36 +87,36 @@ test("headAgrees: only a present log head equal to a present oid", () => {
   assert.equal(headAgrees(undefined, "abc"), false, "empty log");
 });
 
-test("viewAgrees: heads, then the no-upstream count's freshness", () => {
+test("viewAgrees: heads, then the no-upstream count's HEAD", () => {
   const base = {
     logHead: "U2",
     statusOid: "U2",
     noUpstream: false,
     countIsError: false,
-    countAt: 0,
-    logAt: 100,
+    countHead: undefined,
   };
   assert.equal(viewAgrees(base), true, "upstream mode ignores the count read");
   assert.equal(viewAgrees({ ...base, statusOid: "N" }), false, "head mismatch");
   assert.equal(
-    viewAgrees({ ...base, noUpstream: true, countAt: 100 }),
+    viewAgrees({ ...base, noUpstream: true, countHead: "U2" }),
     true,
-    "no-upstream count as fresh as the log",
+    "a count taken on the same HEAD agrees, whatever its read order",
   );
+  for (const [countHead, label] of [
+    ["U1", "a count taken on another head"],
+    [null, "an unborn-HEAD count"],
+    [undefined, "no count read"],
+  ]) {
+    assert.equal(
+      viewAgrees({ ...base, noUpstream: true, countHead }),
+      false,
+      label,
+    );
+  }
   assert.equal(
-    viewAgrees({ ...base, noUpstream: true, countAt: 150 }),
-    true,
-    "no-upstream count fresher than the log",
-  );
-  assert.equal(
-    viewAgrees({ ...base, noUpstream: true, countAt: 50 }),
+    viewAgrees({ ...base, noUpstream: true, countHead: "U2", countIsError: true }),
     false,
-    "no-upstream count older than the log",
-  );
-  assert.equal(
-    viewAgrees({ ...base, noUpstream: true, countAt: 150, countIsError: true }),
-    false,
-    "no-upstream count errored but timestamp-fresh",
+    "an errored count whose retained data names the same head",
   );
 });
 
@@ -335,6 +338,11 @@ const SYNC_BASE = {
   countIsError: false,
   countIsFetching: false,
   countAt: 0,
+  countErrorAt: 0,
+  countHead: "N",
+  logErrorAt: 0,
+  refsChanged: false,
+  contentChanged: false,
 };
 const sync = (over) => {
   const actions = statusLogAction({ ...SYNC_BASE, ...over });
@@ -406,28 +414,43 @@ test("statusLogAction: the HEAD-move set fires exactly on an oid change", () => 
 test("statusLogAction: the no-upstream count retries once heads agree", () => {
   const agreeing = { logHead: "N", noUpstream: true, logAt: 100 };
   assert.deepEqual(
-    sync({ ...agreeing, countAt: 50 }),
+    sync({ ...agreeing, countHead: "U2", countAt: 50 }),
     ["refresh-count"],
-    "older",
+    "taken on another head and older than the status reading",
+  );
+  assert.equal(
+    sync({ ...agreeing, countHead: "U2", countAt: 250 }),
+    null,
+    "taken on a head NEWER than a lagging status: no loop",
   );
   assert.deepEqual(
-    sync({ ...agreeing, countAt: 150, countIsError: true }),
+    sync({ ...agreeing, countAt: 150, countIsError: true, countErrorAt: 150 }),
     ["refresh-count"],
-    "errored but timestamp-fresh",
+    "errored, its failure older than the status reading",
   );
-  assert.equal(sync({ ...agreeing, countAt: 150 }), null, "fresh count");
   assert.equal(
-    sync({ ...agreeing, countAt: 100 }),
+    sync({ ...agreeing, countAt: 150, countIsError: true, countErrorAt: 200 }),
     null,
-    "as fresh as the log",
+    "errored at the status reading: retried once per status reading",
   );
   assert.equal(
-    sync({ ...agreeing, countAt: 50, countIsFetching: true }),
+    sync({ ...agreeing, countAt: 150, countIsError: true, countErrorAt: 250 }),
+    null,
+    "errored after the status reading",
+  );
+  assert.equal(sync({ ...agreeing, countAt: 150 }), null, "same head");
+  assert.equal(
+    sync({ ...agreeing, countAt: 50 }),
+    null,
+    "same head, older than the log: identity, not read order",
+  );
+  assert.equal(
+    sync({ ...agreeing, countHead: "U2", countAt: 50, countIsFetching: true }),
     null,
     "a count read in flight must land",
   );
   assert.deepEqual(
-    sync({ ...agreeing, countAt: 50, oidChanged: true }),
+    sync({ ...agreeing, countHead: "U2", countAt: 50, oidChanged: true }),
     ["refresh-head-set", "refresh-side-keys"],
     "the side keys already cover the count",
   );
@@ -437,7 +460,7 @@ test("statusLogAction: the no-upstream count retries once heads agree", () => {
     "heads differ",
   );
   assert.equal(
-    sync({ ...agreeing, noUpstream: false, countAt: 50 }),
+    sync({ ...agreeing, noUpstream: false, countHead: "U2", countAt: 50 }),
     null,
     "upstream mode",
   );
@@ -483,7 +506,7 @@ test("statusLogAction: a no-upstream count past the recheck age re-reads", () =>
     "an oid change refreshes the count through the side keys instead",
   );
   assert.deepEqual(
-    aged(1, { countIsError: true }),
+    aged(1, { countIsError: true, countErrorAt: countAt }),
     ["refresh-count"],
     "an errored count re-reads under the threshold too",
   );
@@ -539,8 +562,7 @@ function step(state, input) {
     statusOid: input.oid,
     noUpstream: input.noUpstream,
     countIsError: false,
-    countAt: input.countAt ?? 0,
-    logAt: input.logAt ?? 0,
+    countHead: input.countHead,
   });
   const live = {
     repo: REPO,
@@ -623,7 +645,7 @@ test("an outside commit changes the editable set exactly once (upstream)", () =>
   );
 });
 
-test("no upstream: a count older than the moved log never pairs with it", () => {
+test("no upstream: a count taken on the old head never pairs with the moved log", () => {
   const state = { snapshot: null };
   const input = { noUpstream: true };
   const steps = [
@@ -632,35 +654,31 @@ test("no upstream: a count older than the moved log never pairs with it", () => 
       commits: OLD_LOG,
       oid: "U2",
       count: 2,
-      logAt: 100,
-      countAt: 100,
+      countHead: "U2",
     }),
     step(state, {
       ...input,
       commits: OLD_LOG,
       oid: "N",
       count: 2,
-      logAt: 100,
-      countAt: 100,
+      countHead: "U2",
     }),
-    // The log lands, but the count read is still older than it: the log has
+    // The log lands, but the count read still names the old head: the log has
     // moved past the snapshot head, so nothing is editable until the count
-    // catches up.
+    // re-reads on the new one.
     step(state, {
       ...input,
       commits: NEW_LOG,
       oid: "N",
       count: 2,
-      logAt: 200,
-      countAt: 100,
+      countHead: "U2",
     }),
     step(state, {
       ...input,
       commits: NEW_LOG,
       oid: "N",
       count: 3,
-      logAt: 200,
-      countAt: 250,
+      countHead: "N",
     }),
   ];
   assert.deepEqual(
@@ -671,7 +689,7 @@ test("no upstream: a count older than the moved log never pairs with it", () => 
   assert.notEqual(
     steps[2].key,
     steps[2].ungated,
-    "ungated paired the new log with a count older than it",
+    "ungated paired the new log with a count taken on the old head",
   );
 });
 
@@ -927,4 +945,221 @@ test("editHistoryHold: available exactly where the old gate was", () => {
       }
     }
   }
+});
+
+test("statusLogAction: a count read at or after the status reading never re-reads itself", () => {
+  const OID = "N";
+  const BASES = [
+    "remotes",
+    "default-branch",
+    "on-default-branch",
+    "unresolved",
+    undefined,
+  ];
+  let rows = 0;
+  const check = (args) => {
+    rows++;
+    const actions = statusLogAction(args);
+    assert.ok(
+      !(actions?.has("refresh-count") ?? false),
+      `refresh-count fired for ${JSON.stringify(args)}`,
+    );
+  };
+  for (const heads of [true, false])
+    for (const [logHasData, logIsFetching] of [
+      [true, false],
+      [true, true],
+    ])
+      for (const logAt of [100, 200, 300])
+        for (const statusAt of [150, 200, 250])
+          for (const countBasis of BASES)
+            for (const statusBranch of ["main", "feature", null])
+              for (const countHead of [OID, "OTHER", undefined]) {
+                const base = {
+                  oid: OID,
+                  oidChanged: false,
+                  refsChanged: false,
+                  contentChanged: false,
+                  logHead: heads ? OID : "OLD",
+                  logHasData,
+                  logIsFetching,
+                  logAt,
+                  logErrorAt: 0,
+                  statusAt,
+                  noUpstream: true,
+                  countIsFetching: false,
+                  countBasis,
+                  countDefault: "main",
+                  countHead,
+                  statusBranch,
+                };
+                for (const countAt of [statusAt, statusAt + 50]) {
+                  check({ ...base, countIsError: false, countAt, countErrorAt: 0 });
+                }
+                // A count that rejects: react-query keeps dataUpdatedAt at the
+                // last success (0 when there never was one).
+                for (const countAt of [0, statusAt - 40_000, statusAt, statusAt + 50])
+                  for (const countErrorAt of [statusAt, statusAt + 50]) {
+                    check({ ...base, countIsError: true, countAt, countErrorAt });
+                  }
+              }
+  assert.ok(rows > 5000, `table too small: ${rows}`);
+});
+
+test("undoPushedHold: every arm in its order", () => {
+  const STATES = [
+    { countLoaded: true, countFailed: false },
+    { countLoaded: false, countFailed: false },
+    { countLoaded: false, countFailed: true },
+    { countLoaded: true, countFailed: true },
+  ];
+  const oracle = (a) => {
+    if (a.countFailed) return "unpushed-unchecked";
+    if (!a.countLoaded) return "refreshing";
+    if (a.basis !== "remotes") return null;
+    if (!a.agreed) return "refreshing";
+    if (a.count > 0) return null;
+    return "already-pushed";
+  };
+  for (const basis of [
+    "remotes",
+    "default-branch",
+    "on-default-branch",
+    "unresolved",
+  ])
+    for (const state of STATES)
+      for (const agreed of [true, false])
+        for (const count of [0, 1]) {
+          const args = { noUpstream: true, ahead: 0, basis, agreed, count, ...state };
+          assert.equal(undoPushedHold(args), oracle(args), JSON.stringify(args));
+        }
+  const upstream = {
+    noUpstream: false,
+    countLoaded: false,
+    countFailed: true,
+    basis: null,
+    count: 0,
+    agreed: false,
+  };
+  assert.equal(undoPushedHold({ ...upstream, ahead: 1 }), null, "ahead");
+  assert.equal(
+    undoPushedHold({ ...upstream, ahead: 0 }),
+    "already-pushed",
+    "nothing ahead of the upstream",
+  );
+  assert.equal(
+    undoPushedHold({
+      noUpstream: true,
+      ahead: 0,
+      countLoaded: true,
+      countFailed: false,
+      basis: "remotes",
+      count: 0,
+      agreed: true,
+    }),
+    "already-pushed",
+    "a remote branch has HEAD's commit",
+  );
+});
+
+test("statusContentSignature: entries only, order-free, short", () => {
+  const a = { path: "a.txt", staged: "modified", unstaged: null };
+  const b = { path: "b.txt", staged: null, unstaged: "added" };
+  assert.equal(statusContentSignature(undefined), null);
+  assert.equal(typeof statusContentSignature([]), "string");
+  assert.equal(
+    statusContentSignature([a, b]),
+    statusContentSignature([b, a]),
+    "order-independent",
+  );
+  assert.notEqual(
+    statusContentSignature([a]),
+    statusContentSignature([{ ...a, staged: null, unstaged: "modified" }]),
+    "a staged/unstaged flip",
+  );
+  assert.notEqual(
+    statusContentSignature([a]),
+    statusContentSignature([a, b]),
+    "an added path",
+  );
+  assert.notEqual(
+    statusContentSignature([{ ...a, staged: "conflicted" }]),
+    statusContentSignature([a]),
+    "a kind change",
+  );
+  const many = Array.from({ length: 5_000 }, (_, i) => ({
+    path: `dir/file-${i}.ts`,
+    staged: null,
+    unstaged: "modified",
+  }));
+  const sig = statusContentSignature(many);
+  assert.ok(sig.length < 64, `signature length ${sig.length}`);
+  assert.match(sig, /^5000:[0-9a-f]{16}$/);
+});
+
+test("observeSeeded: seeds once, keeps through a missing value", () => {
+  assert.deepEqual(observeSeeded(null, "a"), { next: "a", changed: false });
+  assert.deepEqual(observeSeeded("a", "a"), { next: "a", changed: false });
+  assert.deepEqual(observeSeeded("a", "b"), { next: "b", changed: true });
+  assert.deepEqual(observeSeeded("a", null), { next: "a", changed: false });
+  assert.deepEqual(observeSeeded("a", undefined), {
+    next: "a",
+    changed: false,
+  });
+  assert.deepEqual(observeSeeded(null, ""), { next: "", changed: false });
+  assert.deepEqual(observeSeeded("", "x"), { next: "x", changed: true });
+  assert.deepEqual(observeSeeded("x", ""), { next: "", changed: true });
+});
+
+test("statusLogAction: the ref set, op state and the log's failure gate", () => {
+  const settled = { logHead: "N" };
+  assert.deepEqual(
+    sync({ ...settled, refsChanged: true }),
+    ["refresh-op-state", "refresh-ref-set"],
+    "the stamp covers the operation sentinels",
+  );
+  assert.deepEqual(sync({ ...settled, contentChanged: true }), [
+    "refresh-op-state",
+  ]);
+  assert.deepEqual(
+    sync({ ...settled, refsChanged: true, contentChanged: true }),
+    ["refresh-op-state", "refresh-ref-set"],
+  );
+  assert.deepEqual(
+    sync({ ...settled, refsChanged: true, oidChanged: true }),
+    ["refresh-head-set", "refresh-ref-set", "refresh-side-keys"],
+    "an oid change already re-reads op state on a stamp move too",
+  );
+  assert.deepEqual(
+    sync({ ...settled, contentChanged: true, oidChanged: true }),
+    ["refresh-head-set", "refresh-side-keys"],
+    "an oid change already re-reads op state",
+  );
+  assert.deepEqual(
+    sync({
+      ...settled,
+      noUpstream: true,
+      countAt: 0,
+      statusAt: 50_000,
+      refsChanged: true,
+    }),
+    ["refresh-op-state", "refresh-ref-set"],
+    "the ref set re-reads the count itself",
+  );
+  assert.deepEqual(
+    sync({ ...settled, noUpstream: true, countAt: 0, statusAt: 50_000 }),
+    ["refresh-count"],
+    "the same count without a stamp move",
+  );
+  assert.equal(
+    sync({ logErrorAt: 250 }),
+    null,
+    "a log refetch that failed after the status reading waits for the next",
+  );
+  assert.equal(sync({ logErrorAt: 200 }), null, "failed at the reading");
+  assert.deepEqual(
+    sync({ logErrorAt: 150 }),
+    ["refetch-log"],
+    "a failure older than the status reading retries",
+  );
 });

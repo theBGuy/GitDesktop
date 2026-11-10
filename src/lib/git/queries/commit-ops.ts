@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import * as api from "../api";
-import type { RewriteStep } from "../types";
+import type { CommitDate, RewriteStep } from "../types";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 
@@ -184,9 +184,43 @@ export function useRebaseEdit(repo: string) {
   );
 }
 
-/** Full messages for the unpushed commits `base..HEAD`, as a hash→message map,
- *  for the Edit-history editor's reword/squash defaults. Enabled only when the
- *  dialog is open with a base. */
+/** Rewrites HEAD's dates only, pinned to the HEAD and branch the dialog opened
+ *  on. Unpinned on purpose: its one host, the Edit dates dialog, is keyed per
+ *  repo, so no observer outlives a switch; callers consume `mutateAsync`. */
+export function useAmendCommitDates(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: {
+      expectedHead: string;
+      expectedBranch: string;
+      authorDate: CommitDate | null;
+      committerDate: CommitDate | null;
+    }) =>
+      api.gitAmendCommitDates(
+        repo,
+        args.expectedHead,
+        args.expectedBranch,
+        args.authorDate,
+        args.committerDate,
+      ),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
+  );
+}
+
+/** One unpushed commit's full message and dates; a date is `null` when the
+ *  backend couldn't read it for that row. */
+export interface UnpushedCommitData {
+  message: string;
+  authorDate: CommitDate | null;
+  committerDate: CommitDate | null;
+}
+
+/** Full messages and dates for the unpushed commits `base..HEAD`, keyed by
+ *  hash, for the Edit-history editor's reword/squash defaults and date fields.
+ *  Enabled only when the dialog is open with a base. */
 export function useUnpushedMessages(
   repo: string,
   base: string,
@@ -194,9 +228,18 @@ export function useUnpushedMessages(
 ) {
   return useQuery({
     queryKey: [...repoKeys.unpushedMessages(repo), base] as const,
-    queryFn: async () => {
+    queryFn: async (): Promise<Record<string, UnpushedCommitData>> => {
       const list = await api.gitUnpushedMessages(repo, base);
-      return Object.fromEntries(list.map((c) => [c.hash, c.message]));
+      return Object.fromEntries(
+        list.map((c) => [
+          c.hash,
+          {
+            message: c.message,
+            authorDate: c.authorDate,
+            committerDate: c.committerDate,
+          },
+        ]),
+      );
     },
     enabled: enabled && base !== "",
     staleTime: 0,

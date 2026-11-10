@@ -1376,6 +1376,12 @@ export const ACTIONS = [
     category: "Actions",
     defaultBinding: null,
   },
+  {
+    id: "edit-commit-dates",
+    label: "Edit dates…",
+    category: "Repository",
+    defaultBinding: null,
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];

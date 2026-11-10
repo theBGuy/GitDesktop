@@ -25,6 +25,8 @@ export interface UnpushedCount {
   count: number;
   basis: UnpushedBasis;
   defaultBranch: string | null;
+  /** The HEAD oid the count was taken from; null only on an unborn HEAD. */
+  headOid: string | null;
 }
 
 /** The "unpublished" count for a branch with no upstream (where

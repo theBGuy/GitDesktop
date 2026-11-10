@@ -180,6 +180,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Rewrite & recovery",
+    label:
+      "Edit a commit's author and committer dates — one commit or several, typed or picked",
+  },
+  {
+    group: "Rewrite & recovery",
     label: "Change base — replay only a branch's own commits onto a new base",
   },
   {

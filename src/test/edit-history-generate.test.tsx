@@ -128,7 +128,12 @@ beforeEach(() => {
   signals = [];
   feeds = [];
   vi.mocked(gitUnpushedMessages).mockResolvedValue(
-    [FOURTH, ...COMMITS].map((c) => ({ hash: c.hash, message: c.subject })),
+    [FOURTH, ...COMMITS].map((c) => ({
+      hash: c.hash,
+      message: c.subject,
+      authorDate: { epochSeconds: 1_762_000_000, offsetMinutes: 60 },
+      committerDate: { epochSeconds: 1_762_000_000, offsetMinutes: 60 },
+    })),
   );
   vi.mocked(gitBranchDiff).mockResolvedValue({
     text: "diff --git a/x b/x\n",

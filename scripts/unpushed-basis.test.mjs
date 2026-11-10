@@ -227,8 +227,7 @@ const agreeing = (over = {}) => ({
   statusOid: "c2",
   noUpstream: true,
   countIsError: false,
-  countAt: 1000,
-  logAt: 900,
+  countHead: "c2",
   countBasis: "on-default-branch",
   countDefault: "master",
   statusBranch: "master",
@@ -282,11 +281,16 @@ const syncing = (over = {}) => ({
   logHasData: true,
   logIsFetching: false,
   logAt: 900,
+  logErrorAt: 0,
+  refsChanged: false,
+  contentChanged: false,
   statusAt: 1500,
   noUpstream: true,
   countIsError: false,
   countIsFetching: false,
   countAt: 1000,
+  countErrorAt: 0,
+  countHead: "c2",
   countBasis: "on-default-branch",
   countDefault: "master",
   statusBranch: "master",
@@ -482,6 +486,7 @@ const BASIS_ARGS = [
   "countBasis:unpushedVsRemotes.data?.basis",
   "countDefault:unpushedVsRemotes.data?.defaultBranch",
   "statusBranch:head?.name",
+  "countHead:unpushedVsRemotes.data?.headOid",
 ];
 
 /** Problems with the call sites' basis args; empty = pinned. Each call's
@@ -538,5 +543,23 @@ test("HistoryPanel passes the count's basis and status's branch to both agreemen
     ),
     "basis-args",
     "a commented-out default",
+  );
+  assertFailsOn(
+    checkBasisArgs(
+      mutate(src, "\n    countHead: unpushedVsRemotes.data?.headOid,\n", "\n"),
+    ),
+    "basis-args",
+    "the gate drops the count's head",
+  );
+  assertFailsOn(
+    checkBasisArgs(
+      mutate(
+        src,
+        "\n        countHead: unpushedVsRemotes.data?.headOid,\n",
+        "\n        countHead: head?.oid,\n",
+      ),
+    ),
+    "basis-args",
+    "the sync reads status's oid as the count's head",
   );
 });

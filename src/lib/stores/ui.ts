@@ -637,6 +637,10 @@ interface UiState {
    *  undo removed it), not because the user chose to. A prune, so it never bumps
    *  {@link UiState.interactionEpoch}: a pending amend landing must not strand. */
   clearSelectedCommit: () => void;
+  /** Move the History selection onto a rewrite's new commit after its await lands (the
+   *  edit-dates continuation). A landing, not a user action, so it never bumps
+   *  {@link UiState.interactionEpoch}: a late bump would retire a newer action's continuation. */
+  landSelectedCommit: (hash: string) => void;
   selectCompareCommit: (hash: string | null) => void;
   setCommitDraft: (title: string, body: string) => void;
   setCommitTitle: (title: string) => void;
@@ -1184,6 +1188,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         interactionEpoch: s.interactionEpoch + 1,
       })),
     clearSelectedCommit: () => set({ selectedCommitHash: null }),
+    landSelectedCommit: (hash) => set({ selectedCommitHash: hash }),
     selectCompareCommit: (hash) =>
       set((s) => ({
         compareCommitHash: hash,
