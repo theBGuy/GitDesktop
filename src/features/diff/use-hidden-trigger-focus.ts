@@ -29,7 +29,7 @@ export function useHiddenTriggerFocus(): {
 
 /**
  * Focus rescue for a mode swap that unmounts the control holding focus (a
- * palette-driven flip — the picker and mode toggle leave the cluster),
+ * palette-driven flip — the picker and options gear leave the cluster),
  * dropping focus to `<body>`; land it on `controlsRef`'s silent landing spot
  * instead. Change-only (prev-ref guard), so a mount can never steal focus
  * from elsewhere.

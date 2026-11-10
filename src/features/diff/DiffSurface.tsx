@@ -22,6 +22,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -29,23 +30,27 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { LabeledGroup } from "@/components/form/labeled-group";
 import { InfoNote } from "@/components/info-note";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
-import { ButtonGroup } from "@/components/ui/button-group";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Radio, RadioGroup } from "@/components/ui/radio-group";
+import { Separator } from "@/components/ui/separator";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import {
   detailNoticeMessage,
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
-import { useCloseSettled } from "@/features/repository/publish-confirm";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import {
   classifyHeaderOnlyDiff,
@@ -58,7 +63,7 @@ import {
 import { useFileAtRev } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import type { CustomLanguage } from "@/lib/settings/api";
+import type { AppSettings, CustomLanguage } from "@/lib/settings/api";
 import {
   useHideWhitespace,
   useSetHideWhitespace,
@@ -68,6 +73,10 @@ import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
 import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -148,6 +157,7 @@ import {
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_COMPOSER_HELD,
   WHITESPACE_ONLY_MESSAGE,
+  WHITESPACE_SHEET_STAGING_NOTE,
 } from "./whitespace-mode";
 
 /**
@@ -284,57 +294,30 @@ function pastSyntaxCap(diffText: string): boolean {
   return Math.max(max.old, max.new) >= SYNTAX_LINE_CAP;
 }
 
-/** The persisted Unified/Split preference toggle. */
-export function DiffModeToggle({
-  splitDisabled = false,
-}: {
-  /** The pane is too narrow to render split (see {@link SPLIT_MIN_CONTAINER_PX}).
-   *  The active segment follows what's ON SCREEN, so Unified reads as active
-   *  while the override holds — and because it does, its write is withheld too:
-   *  a persisted `split` must survive the narrow pane that hid it, so neither
-   *  button may touch the preference while the override stands in for it. */
-  splitDisabled?: boolean;
-}) {
+type DiffViewMode = AppSettings["diffViewMode"];
+
+/**
+ * The persisted Unified/Split preference as the pane shows it, and its writer.
+ * While `splitDisabled` (the pane is too narrow, see
+ * {@link SPLIT_MIN_CONTAINER_PX}) the pane shows unified and the writer is
+ * withheld: a persisted `split` must survive the narrow pane that hid it.
+ */
+export function useDiffViewMode(splitDisabled: boolean): {
+  effective: DiffViewMode;
+  write: (value: DiffViewMode) => void;
+} {
   const settings = useSettings();
   const saveSettings = useSaveSettings();
-  const viewMode = settings.data?.diffViewMode ?? "unified";
-  const effectiveViewMode = splitDisabled ? "unified" : viewMode;
-  return (
-    // DisabledReasonButton's wrapper span has no `data-slot`, so it opts out of
-    // ButtonGroup's border-collapse/rounding child selectors — this call site
-    // owns the seam on the Button instead (same arrangement as SyncControls).
-    <ButtonGroup aria-label="Diff view mode">
-      <Button
-        variant={effectiveViewMode === "unified" ? "secondary" : "ghost"}
-        size="xs"
-        aria-pressed={effectiveViewMode === "unified"}
-        onClick={() => {
-          if (splitDisabled || !settings.data) return;
-          void saveSettings
-            .mutateAsync({ ...settings.data, diffViewMode: "unified" })
-            .catch(toastError);
-        }}
-      >
-        Unified
-      </Button>
-      <DisabledReasonButton
-        variant={effectiveViewMode === "split" ? "secondary" : "ghost"}
-        size="xs"
-        aria-pressed={effectiveViewMode === "split"}
-        disabled={splitDisabled}
-        reason="Pane too narrow for split view"
-        className="border-l-0 focus-visible:relative focus-visible:z-10"
-        onClick={() => {
-          if (!settings.data) return;
-          void saveSettings
-            .mutateAsync({ ...settings.data, diffViewMode: "split" })
-            .catch(toastError);
-        }}
-      >
-        Split
-      </DisabledReasonButton>
-    </ButtonGroup>
-  );
+  const effective = splitDisabled
+    ? "unified"
+    : (settings.data?.diffViewMode ?? "unified");
+  const write = (value: DiffViewMode) => {
+    if (splitDisabled || !settings.data) return;
+    void saveSettings
+      .mutateAsync({ ...settings.data, diffViewMode: value })
+      .catch(toastError);
+  };
+  return { effective, write };
 }
 
 /**
@@ -1817,39 +1800,82 @@ export function DiffCapFooter({
   );
 }
 
+const SPLIT_NARROW_REASON = "Pane too narrow for split view";
+
+/** A held Enter or Space acts once: its auto-repeat is refused, both Base UI's
+ *  handler and the browser's default. */
+function refuseKeyRepeat(e: {
+  repeat: boolean;
+  key: string;
+  preventDefault: () => void;
+  preventBaseUIHandler: () => void;
+}) {
+  if (e.repeat && (e.key === "Enter" || e.key === " ")) {
+    e.preventDefault();
+    e.preventBaseUIHandler();
+  }
+}
+
 /**
- * The diff toolbar's view options: one checkbox for the app-wide whitespace
- * mode. The flip waits for the menu's close to settle: Base UI returns focus
- * to the trigger only when the popup unmounts, and a toolbar swap before that
- * would drop focus to <body> from inside the portaled popup.
+ * The diff toolbar's "Diff options" sheet: the app-wide whitespace mode (where
+ * the host has one) and the Unified/Split preference. It stays open while
+ * settings change, each written at once, so the host must keep the trigger
+ * mounted across every arm a flip passes through: an unmounted trigger takes
+ * the portaled sheet, and the focus inside it, down with it.
  */
-export function DiffViewOptionsMenu({
-  onToggle,
+export function DiffOptionsSheet({
+  splitDisabled,
+  whitespace,
+  stagingNote = false,
 }: {
-  onToggle: (next: boolean) => void;
+  /** The pane is too narrow for split (the host's `narrowPane`). */
+  splitDisabled: boolean;
+  /** Absent: the host has no whitespace mode, so its section, the gear's dot
+   *  and the hidden-state name are all absent too. */
+  whitespace?: {
+    onToggle: (next: boolean) => void;
+    /** Read once per open: true holds the checkbox with
+     *  WHITESPACE_COMPOSER_HELD as its reason. Omitted, never held. */
+    composerOpen?: () => boolean;
+    /** Runs on each open, before any flip: a host whose flip would swap its
+     *  arm while the other mode loads warms that read here. */
+    onOpen?: () => void;
+  };
+  /** Working-tree staging host: shows WHITESPACE_SHEET_STAGING_NOTE. */
+  stagingNote?: boolean;
 }) {
   const hidden = useHideWhitespace();
-  const [open, setOpen] = useState(false);
-  // The pressed value while the close settles; the menu takes no second
-  // instruction meanwhile.
-  const [pending, setPending] = useState<boolean | null>(null);
-  const { onOpenChangeComplete, waitClosed } = useCloseSettled(open);
-  const label = hidden
-    ? "View options, whitespace changes hidden"
-    : "View options";
+  const mode = useDiffViewMode(splitDisabled);
+  // A composer can't open or close while focus is in the sheet, so the open
+  // transition's read holds for the whole open.
+  const [composerHeld, setComposerHeld] = useState(false);
+  const wsHold = useDisabledReason({
+    disabled: composerHeld,
+    reason: WHITESPACE_COMPOSER_HELD,
+  });
+  const splitHold = useDisabledReason({
+    disabled: splitDisabled,
+    reason: SPLIT_NARROW_REASON,
+  });
+  const checkboxId = useId();
+  const unifiedId = useId();
+  const splitId = useId();
+  const marked = whitespace !== undefined && hidden;
+  const label = marked
+    ? "Diff options, whitespace changes hidden"
+    : "Diff options";
   return (
-    <DropdownMenu
-      open={open}
-      onOpenChange={(next) => {
-        if (next && pending !== null) return;
-        setOpen(next);
+    <Popover
+      onOpenChange={(open) => {
+        if (!open) return;
+        setComposerHeld(whitespace?.composerOpen?.() ?? false);
+        whitespace?.onOpen?.();
       }}
-      onOpenChangeComplete={onOpenChangeComplete}
     >
-      <DropdownMenuTrigger
+      <PopoverTrigger
         onKeyDown={(e) => {
-          // The item's close returns focus here while the key is still held:
-          // its auto-repeat would reopen the menu, so only a fresh press opens.
+          // Escape's close returns focus here while a key may still be held:
+          // its auto-repeat would reopen the sheet, so only a fresh press opens.
           if (e.repeat && (e.key === "Enter" || e.key === " ")) {
             e.preventDefault();
             e.preventBaseUIHandler();
@@ -1866,44 +1892,127 @@ export function DiffViewOptionsMenu({
         }
       >
         <GearSixIcon aria-hidden />
-        {hidden && (
+        {marked && (
           <span
             aria-hidden
             className="absolute top-0.5 right-0.5 size-1.5 bg-primary"
           />
         )}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuCheckboxItem
-          checked={pending ?? hidden}
-          closeOnClick
-          onKeyDown={(e) => {
-            // Items activate on keydown with no repeat check, so a held key
-            // would flip the mode twice.
-            if (e.repeat && (e.key === "Enter" || e.key === " ")) {
-              e.preventDefault();
-              e.preventBaseUIHandler();
-            }
-          }}
-          onCheckedChange={(next) => {
-            if (pending !== null) return;
-            setPending(next);
-            void waitClosed().then(() => {
-              onToggle(next);
-              setPending(null);
-            });
-          }}
-        >
-          Hide whitespace changes
-        </DropdownMenuCheckboxItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-64">
+        <PopoverHeader>
+          <PopoverTitle>Diff options</PopoverTitle>
+        </PopoverHeader>
+        {whitespace !== undefined && (
+          <>
+            <LabeledGroup label="Whitespace">
+              <div
+                className="flex items-center gap-2"
+                title={wsHold.wrapperTitle}
+              >
+                <span
+                  className={cn(
+                    "inline-flex shrink-0",
+                    wsHold.blockedReason !== null && "cursor-not-allowed",
+                  )}
+                >
+                  <Checkbox
+                    id={checkboxId}
+                    checked={hidden}
+                    readOnly={composerHeld}
+                    aria-disabled={composerHeld || undefined}
+                    aria-describedby={wsHold.describedBy}
+                    className={ARIA_DISABLED_CLASS}
+                    onKeyDown={refuseKeyRepeat}
+                    onCheckedChange={(next) => {
+                      if (!composerHeld) whitespace.onToggle(next);
+                    }}
+                  />
+                </span>
+                <Label
+                  htmlFor={checkboxId}
+                  className={cn(composerHeld && "opacity-50")}
+                >
+                  Hide whitespace changes
+                </Label>
+              </div>
+              {wsHold.blockedReason !== null && (
+                <span id={wsHold.reasonId} className="sr-only">
+                  {wsHold.blockedReason}
+                </span>
+              )}
+              {stagingNote && (
+                <p className="pl-6 text-muted-foreground">
+                  {WHITESPACE_SHEET_STAGING_NOTE}
+                </p>
+              )}
+            </LabeledGroup>
+            <Separator />
+          </>
+        )}
+        {/* The caption's group names this section once; a name on the
+            radiogroup too would be announced a second time. */}
+        <LabeledGroup label="Diff display">
+          <RadioGroup
+            value={mode.effective}
+            onValueChange={(value) => {
+              // Base UI types the group's value as `any`; the writer refuses
+              // every pick while the narrow pane overrides the preference.
+              if (value === "unified" || value === "split") mode.write(value);
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <Radio
+                id={unifiedId}
+                value="unified"
+                onKeyDown={refuseKeyRepeat}
+              />
+              <Label htmlFor={unifiedId}>Unified</Label>
+            </div>
+            <div
+              className="flex items-center gap-2"
+              title={splitHold.wrapperTitle}
+            >
+              <span
+                className={cn(
+                  "inline-flex shrink-0",
+                  splitHold.blockedReason !== null && "cursor-not-allowed",
+                )}
+              >
+                {/* Held by `readOnly` alone: Base UI's arrow-key roving skips
+                    an aria-disabled radio, which would leave its reason
+                    unreachable from the keyboard. */}
+                <Radio
+                  id={splitId}
+                  value="split"
+                  readOnly={splitDisabled}
+                  aria-describedby={splitHold.describedBy}
+                  className="data-readonly:opacity-50 data-readonly:focus-visible:opacity-100"
+                  onKeyDown={refuseKeyRepeat}
+                />
+              </span>
+              <Label
+                htmlFor={splitId}
+                className={cn(splitDisabled && "opacity-50")}
+              >
+                Split
+              </Label>
+            </div>
+          </RadioGroup>
+          {splitHold.blockedReason !== null && (
+            <span id={splitHold.reasonId} className="sr-only">
+              {splitHold.blockedReason}
+            </span>
+          )}
+        </LabeledGroup>
+      </PopoverContent>
+    </Popover>
   );
 }
 
 /**
  * Renders a single file diff (with loading/binary/empty placeholders and the
- * unified/split toggle) for any diff query — working tree or a commit.
+ * Diff options sheet) for any diff query — working tree or a commit.
  */
 export function DiffSurface({
   filePath,
@@ -2013,8 +2122,9 @@ export function DiffContent({
   /** PR surfaces only: the commit oid gating the binary-size lookups (PR head on Files,
    *  the commit on Commits). undefined = local surface. See BinaryFileSummary. */
   anchorCommit?: string | null;
-  /** Shows the view-options gear and answers the whitespace palette action.
-   *  Only {@link DiffSurface} sets it, so the remote PR hosts get neither. */
+  /** Adds the whitespace section to the Diff options sheet and answers the
+   *  whitespace palette action. Only {@link DiffSurface} sets it, so the
+   *  remote PR hosts get neither. */
   whitespaceControl?: boolean;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
@@ -2197,12 +2307,24 @@ export function DiffContent({
     }
     setHideWhitespaceRaw(next);
   }
+  const composerOpen = () =>
+    scrollerRef.current?.querySelector("[data-diff-line-widget]") != null;
   // Not gated on the toolbar: the whitespace-only, binary and empty arms
   // answer it too.
   useHotkeyAction(
     "toggle-hide-whitespace",
     () => flipWhitespace(!hideWhitespace),
     interactive && whitespaceControl,
+  );
+  const viewMode = useDiffViewMode(narrowPane);
+  // Offered only while a diff is laid out (the toolbar arm, outside Preview),
+  // so the flip shows where it is asked; the sheet also takes a pick on the
+  // whitespace-only and stale arms. Never under the narrow pane's override.
+  useHotkeyAction(
+    "toggle-diff-view-mode",
+    () =>
+      viewMode.write(viewMode.effective === "unified" ? "split" : "unified"),
+    interactive && showsToolbar && !previewOn && !narrowPane,
   );
   // The two arms below with a blank body: a pending read (a parked one says so
   // instead) and another key's retained data. Every other arm's own markup is
@@ -2244,7 +2366,7 @@ export function DiffContent({
             <MarkdownViewToggle view={mdView} onChange={setMdView} />
           </span>
         )}
-        {/* The picker and Unified/Split configure the raw diff, so they
+        {/* The picker and the options sheet configure the raw diff, so they
             leave the cluster while Preview is up (the same swap this row
             already does for the working-tree selection actions). */}
         {showsToolbar && !previewOn && (
@@ -2269,10 +2391,22 @@ export function DiffContent({
                 }}
               />
             </span>
-            {whitespaceControl && (
-              <DiffViewOptionsMenu onToggle={flipWhitespace} />
-            )}
-            <DiffModeToggle splitDisabled={narrowPane} />
+          </span>
+        )}
+        {/* Mounted through both flip directions' arms (the whitespace-only
+            arm, and the stale blank one a flip off passes through), so an open
+            sheet and the focus inside it survive the settle. */}
+        {!previewOn && (showsToolbar || whitespaceOnly || modeStale) && (
+          <span className="contents" ref={captureHeldRef}>
+            <DiffOptionsSheet
+              splitDisabled={narrowPane}
+              stagingNote={stagingSide !== undefined}
+              whitespace={
+                whitespaceControl
+                  ? { onToggle: flipWhitespace, composerOpen }
+                  : undefined
+              }
+            />
           </span>
         )}
       </DiffPathRow>

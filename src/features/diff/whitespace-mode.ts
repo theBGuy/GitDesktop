@@ -42,6 +42,11 @@ export const WHITESPACE_ANNOUNCEMENT: { hidden: string; shown: string } = {
 export const WHITESPACE_COMPOSER_HELD =
   "Finish or close the comment you're writing, then change the whitespace view.";
 
+/** The Diff options sheet's helper line, on the working-tree staging hosts
+ *  only: the read-only hosts have no staging for it to turn off. */
+export const WHITESPACE_SHEET_STAGING_NOTE =
+  "Line and hunk staging is off while whitespace is hidden.";
+
 export const WHITESPACE_ONLY_MESSAGE = "Only whitespace changed in this file";
 
 export const SHOW_WHITESPACE_LABEL = "Show whitespace";

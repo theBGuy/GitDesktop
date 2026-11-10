@@ -1,8 +1,8 @@
 // Pins the whitespace mode of the local diff views: `readViewDiff` and
 // `hasHunk` (src/lib/git/whitespace-diff.ts), the setting's heal arm, the copy
 // in src/features/diff/whitespace-mode.ts, and the wiring no jsdom test can
-// see: the fire-time belts, the palette registrations, the gear's place and
-// its write-after-close order, the per-hook placeholders, the line-selection
+// see: the fire-time belts, the palette registrations, the options sheet's
+// place in the staging toolbar, the per-hook placeholders, the line-selection
 // gates, the composer hold, the IPC key and the roster of view-diff fetches.
 // Every source pin takes text and has an in-memory mutation control; a pin that
 // cannot find its anchor fails, never skips.
@@ -294,6 +294,38 @@ function pinRegistrations(files) {
     if (!b.includes(need)) throw new Error(`WorkingTreeDiff's gate: ${need}`);
 }
 
+/** The layout action: the same two complementary registrations, each offered
+ *  only where its toolbar's sheet takes a pick (never under the narrow pane). */
+function pinModeRegistrations(files) {
+  const re = /useHotkeyAction\(\s*"toggle-diff-view-mode"/g;
+  const where = [];
+  for (const [rel, text] of files) {
+    const n = [...text.matchAll(re)].length;
+    for (let i = 0; i < n; i++) where.push(rel);
+  }
+  assert.deepEqual(where.sort(), [SURFACE, VIEWER].sort(), "registrations");
+  const a = hotkeyEnabled(files.get(SURFACE), "toggle-diff-view-mode");
+  for (const need of [
+    "interactive",
+    "showsToolbar",
+    "!previewOn",
+    "!narrowPane",
+  ])
+    if (!a.includes(need))
+      throw new Error(`DiffContent's layout gate: ${need}`);
+  const b = hotkeyEnabled(files.get(VIEWER), "toggle-diff-view-mode");
+  for (const need of [
+    "interactive",
+    "shownView !== null",
+    "selection === null",
+    "discard === null",
+    "!previewOn",
+    "!narrowPane",
+  ])
+    if (!b.includes(need))
+      throw new Error(`WorkingTreeDiff's layout gate: ${need}`);
+}
+
 function srcFiles() {
   const files = new Map();
   for (const abs of sourceFiles(SRC)) {
@@ -330,8 +362,43 @@ test("the palette action registers twice, each under its own gate", () => {
   );
 });
 
+test("the layout action registers twice, each under its own gate", () => {
+  const files = srcFiles();
+  pinModeRegistrations(files);
+  const surface = files.get(SURFACE);
+  const a = hotkeyEnabled(surface, "toggle-diff-view-mode");
+  red(
+    pinModeRegistrations,
+    new Map(files).set(
+      SURFACE,
+      surface.replace(a, () => a.replace(" && !narrowPane", "")),
+    ),
+    "!narrowPane dropped from DiffContent's layout gate",
+  );
+  const viewer = files.get(VIEWER);
+  const b = hotkeyEnabled(viewer, "toggle-diff-view-mode");
+  red(
+    pinModeRegistrations,
+    new Map(files).set(
+      VIEWER,
+      viewer.replace(b, () => b.replace("selection === null &&", "")),
+    ),
+    "selection === null dropped from WorkingTreeDiff's layout gate",
+  );
+  red(
+    pinModeRegistrations,
+    new Map(files).set(
+      "src/features/diff/Extra.tsx",
+      'useHotkeyAction("toggle-diff-view-mode", () => {}, true);',
+    ),
+    "a third registration",
+  );
+});
+
 function pinStagingGear(text) {
-  const gear = once(text, "<DiffViewOptionsMenu", "staging gear");
+  const gear = once(text, "<DiffOptionsSheet", "staging sheet");
+  if (/<DiffModeToggle\b|<DiffViewOptionsMenu\b/.test(text))
+    throw new Error("the sheet replaces the old toolbar controls");
   const ternary = once(text, "{selection ? (");
   const block = text.indexOf("{!previewOn && (", ternary);
   if (block < 0) throw new Error("no Preview block after the selection arm");
@@ -339,15 +406,17 @@ function pinStagingGear(text) {
   const end = matchBrace(masked, block + "{!previewOn && ".length);
   const wrap = text.indexOf("ref={langWrapRef}", block);
   const wrapClose = text.indexOf("</span>", wrap);
-  const toggle = text.indexOf("<DiffModeToggle", block);
-  if (!(wrap > block && wrapClose < gear && gear < toggle && toggle < end))
-    throw new Error("the gear sits between the picker wrapper and the toggle");
+  if (!(wrap > block && wrapClose < gear && gear < end))
+    throw new Error("the sheet follows the picker wrapper, inside the block");
 }
 
-test("the staging toolbar's gear sits between the picker and Unified/Split", () => {
+test("the staging toolbar's sheet follows the picker", () => {
   const text = source(VIEWER);
   pinStagingGear(text);
-  const line = "<DiffViewOptionsMenu onToggle={setHideWhitespace} />";
+  // The whole element, through its own closing line.
+  const start = once(text, "<DiffOptionsSheet");
+  const close = "\n                  />";
+  const line = text.slice(start, text.indexOf(close, start) + close.length);
   const block = "{!previewOn && (";
   const above = swap(text, line, "");
   const idx = above.indexOf(block, above.indexOf("{selection ? ("));
@@ -361,88 +430,19 @@ test("the staging toolbar's gear sits between the picker and Unified/Split", () 
     swap(text, "{selection ? (\n", `{selection ? (\n${line}\n`),
     "a second gear in the selection arm",
   );
-});
-
-function pinMenuOrder(text) {
-  const body = bodyOf(text, "export function DiffViewOptionsMenu(");
-  const toggle = once(body, "onToggle(", "onToggle call");
-  const then = once(body, "waitClosed().then(");
-  const masked = maskNonCode(body, true);
-  const thenEnd = matchBrace(masked, then + "waitClosed().then".length);
-  if (!(toggle > then && toggle < thenEnd))
-    throw new Error("onToggle must run only once the close has settled");
-  once(body, "onOpenChangeComplete={onOpenChangeComplete}");
-  once(body, "useCloseSettled(open)");
-  if (
-    !/onCheckedChange=\{\(next\) => \{\s*if \(pending !== null\) return;/.test(
-      body,
-    )
-  )
-    throw new Error("onCheckedChange must refuse while a choice is pending");
-  if (
-    !/onOpenChange=\{\(next\) => \{\s*if \(next && pending !== null\) return;/.test(
-      body,
-    )
-  )
-    throw new Error("onOpenChange must refuse to reopen while pending");
-  // The item's close hands focus back to the trigger while its key is held, so
-  // the trigger refuses a repeat (Base UI's handler and the browser's click).
-  const trigger = once(body, "<DropdownMenuTrigger");
-  const head = body.slice(trigger, body.indexOf("render={", trigger));
-  if (
-    !/onKeyDown=\{\(e\) => \{[\s\S]*?if \(e\.repeat && \(e\.key === "Enter" \|\| e\.key === " "\)\) \{\s*e\.preventDefault\(\);\s*e\.preventBaseUIHandler\(\);\s*\}\s*\}\}/.test(
-      head,
-    )
-  )
-    throw new Error("the trigger must refuse an auto-repeat Enter or Space");
-}
-
-test("the gear writes only after its menu's close settles", () => {
-  const text = source(SURFACE);
-  pinMenuOrder(text);
   red(
-    pinMenuOrder,
-    swap(
-      text,
-      "setPending(next);\n            void waitClosed().then(() => {\n              onToggle(next);",
-      "setPending(next);\n            onToggle(next);\n            void waitClosed().then(() => {",
-    ),
-    "onToggle at the press",
-  );
-  red(
-    pinMenuOrder,
-    swap(
-      text,
-      "onCheckedChange={(next) => {\n            if (pending !== null) return;\n",
-      "onCheckedChange={(next) => {\n",
-    ),
-    "no pending return",
-  );
-  red(
-    pinMenuOrder,
-    text.replace(
-      /onOpenChange=\{\(next\) => \{\s*if \(next && pending !== null\) return;\s*setOpen\(next\);\s*\}\}/,
-      () => "onOpenChange={setOpen}",
-    ),
-    "bare onOpenChange",
-  );
-  const guard =
-    '          if (e.repeat && (e.key === "Enter" || e.key === " ")) {\n            e.preventDefault();\n            e.preventBaseUIHandler();\n          }\n';
-  red(pinMenuOrder, swap(text, guard, ""), "no trigger repeat guard");
-  red(
-    pinMenuOrder,
-    swap(text, guard, guard.replace("e.repeat && ", "")),
-    "a guard that refuses every press",
-  );
-  red(
-    pinMenuOrder,
-    swap(text, guard, guard.replace("            e.preventDefault();\n", "")),
-    "a guard that leaves the browser's click",
+    pinStagingGear,
+    swap(text, line, `${line}\n<DiffModeToggle splitDisabled={narrowPane} />`),
+    "the old Unified/Split toggle back in the toolbar",
   );
 });
 
 const HOOKS = [
-  ["src/lib/git/queries/workingtree.ts", "export function useFileDiff(", false],
+  [
+    "src/lib/git/queries/workingtree.ts",
+    "export function fileDiffQueryOptions(",
+    false,
+  ],
   [
     "src/lib/git/queries/workingtree.ts",
     "export function useSessionFileDiff(",
@@ -463,6 +463,8 @@ const HOOKS = [
     "export function useOrphanedStashFileDiff(",
     true,
   ],
+  // Spreads the factory above; a placeholder could also ride its call.
+  ["src/lib/git/queries/workingtree.ts", "export function useFileDiff(", false],
 ];
 
 function pinPlaceholder(text, anchor, keeps) {
@@ -484,7 +486,16 @@ test("placeholders per hook: none for Changes, the repo's for the rest", () => {
       "    enabled: file !== null,\n",
       "    enabled: file !== null,\n    placeholderData: keepPreviousDataForRepo(repo),\n",
     ),
-    "a placeholder on useFileDiff",
+    "a placeholder on fileDiffQueryOptions",
+  );
+  red(
+    (t) => pinPlaceholder(t, HOOKS.at(-1)[1], false),
+    swap(
+      wt,
+      "useQuery(fileDiffQueryOptions(repo, file, hide));",
+      "useQuery({\n    ...fileDiffQueryOptions(repo, file, hide),\n    placeholderData: keepPreviousDataForRepo(repo),\n  });",
+    ),
+    "a placeholder on useFileDiff's spread",
   );
   const cmp = source(HOOKS[3][0]);
   const branch = bodyOf(cmp, HOOKS[3][1], false);
@@ -882,11 +893,7 @@ test("the transcript's whitespace-only arm: ahead of the empty arm, focus first"
 });
 
 function pinSubmodulePane(text) {
-  for (const name of [
-    "DiffViewOptionsMenu",
-    "useHideWhitespace",
-    "readViewDiff",
-  ])
+  for (const name of ["DiffOptionsSheet", "useHideWhitespace", "readViewDiff"])
     if (new RegExp(String.raw`\b${name}\b`).test(text))
       throw new Error(`the submodule pane must not reach ${name}`);
 }

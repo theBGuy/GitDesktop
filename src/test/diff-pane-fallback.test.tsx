@@ -69,7 +69,7 @@ describe("lazy diff wrappers' Suspense fallback", () => {
   it("GitDiffView keeps its blank fallback (its hosts draw their own headers)", () => {
     const { container } = render(<GitDiffView filePath={PATH} text="" />);
     expect(container.textContent).not.toContain("file-name.ts");
-    expect(screen.queryByRole("button", { name: "Unified" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Diff options/ })).toBeNull();
     expect(container.querySelector(".ph-no-capture")).toBeNull();
     expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
   });

@@ -53,7 +53,7 @@ export function canPreviewMarkdown(
   );
 }
 
-/** The Raw ⇄ Preview segment pair, same vocabulary as {@link DiffModeToggle}. */
+/** The Raw ⇄ Preview segment pair in the diff toolbar. */
 export function MarkdownViewToggle({
   view,
   onChange,

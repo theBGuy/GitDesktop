@@ -301,7 +301,13 @@ function SubmoduleChangesBody({
         </p>
       )}
       {stageLine !== null && (
-        <p className="text-muted-foreground">{stageLine}</p>
+        <div className="flex flex-col gap-0.5">
+          {stageLine.map((sentence) => (
+            <p key={sentence} className="text-muted-foreground">
+              {sentence}
+            </p>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -310,67 +316,79 @@ function SubmoduleChangesBody({
 const theseFiles = (d: SubmoduleChanges) =>
   d.filesTotal === 1 ? "this file" : "these files";
 
-/** The stage line: the FIRST row whose test passes; a null sentence says
- *  nothing. `differs` = both shas present and different; `origPath` is a
- *  staged rename's old path. */
+/** The stage line: the FIRST row whose test passes; a null row says nothing.
+ *  Each entry is one sentence, rendered one per line. `differs` = both shas
+ *  present and different; `origPath` is a staged rename's old path. */
 const STAGE_LINES: readonly [
   (d: SubmoduleChanges, differs: boolean) => boolean,
-  ((d: SubmoduleChanges, origPath: string | undefined) => string) | null,
+  (
+    | ((d: SubmoduleChanges, origPath: string | undefined) => readonly string[])
+    | null
+  ),
 ][] = [
   [
     (d) => d.staged && d.toSha === null,
-    () => "The next commit removes this submodule.",
+    () => ["The next commit removes this submodule."],
   ],
   [
     (d) => d.staged && d.fromSha === null,
-    (d) => `The next commit adds this submodule at ${short(d.toSha)}.`,
+    (d) => [`The next commit adds this submodule at ${short(d.toSha)}.`],
   ],
   [
     (d) => d.staged,
-    (d, origPath) =>
+    (d, origPath) => [
       origPath === undefined
         ? `The next commit records this submodule at ${short(d.toSha)}.`
         : `The next commit records this submodule at ${short(d.toSha)}, moved from ${origPath}.`,
+    ],
   ],
   [
     (d) => d.checkout === "replaced",
-    () => "Stage this row to record the file in place of the submodule.",
+    () => ["Stage this row to record the file in place of the submodule."],
   ],
   [(d) => d.checkout !== "ok", null],
   [
     (d) => d.toSha === null && d.files.length > 0,
-    (d) =>
-      `Nothing to stage here yet: no commit is checked out in this submodule. Open it to commit ${theseFiles(d)}.`,
+    (d) => [
+      "Nothing to stage here yet: no commit is checked out in this submodule.",
+      `Open it to commit ${theseFiles(d)}.`,
+    ],
   ],
   [
     (d) => d.fromSha === null && d.toSha !== null,
-    () => "Stage this row to record a submodule here in place of the file.",
+    () => ["Stage this row to record a submodule here in place of the file."],
   ],
   [
     (d) => d.fromSha !== null && d.fromSha === d.toSha && d.files.length > 0,
-    (d) =>
-      `Nothing to stage here yet: the submodule still points at the same commit. Open it to commit ${theseFiles(d)}.`,
+    (d) => [
+      "Nothing to stage here yet: the submodule still points at the same commit.",
+      `Open it to commit ${theseFiles(d)}.`,
+    ],
   ],
   [
     (d, differs) => differs && d.files.length > 0,
-    () =>
-      "Staging this row records only the commit the submodule points at. Open the submodule to stage and commit its files.",
+    () => [
+      "Staging this row records only the commit the submodule points at.",
+      "Open the submodule to stage and commit its files.",
+    ],
   ],
   [
     (d, differs) =>
       differs && d.rangeKnown && d.aheadCount > 0 && d.behindCount === 0,
-    (d) =>
+    (d) => [
       `Stage this row to move this repository's record forward to ${short(d.toSha)}.`,
+    ],
   ],
   [
     (d, differs) =>
       differs && d.rangeKnown && d.behindCount > 0 && d.aheadCount === 0,
-    (d) =>
+    (d) => [
       `Stage this row to move this repository's record back to ${short(d.toSha)}.`,
+    ],
   ],
   [
     (_d, differs) => differs,
-    (d) => `Stage this row to record ${short(d.toSha)} for this submodule.`,
+    (d) => [`Stage this row to record ${short(d.toSha)} for this submodule.`],
   ],
 ];
 

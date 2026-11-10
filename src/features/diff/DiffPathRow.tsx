@@ -38,7 +38,7 @@ export function DiffPathRow({
       {meta}
       {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so
           the row keeps one height in every arm and in the lazy fallback: an
-          extensionless file keeps only the xs (h-6) mode toggle, and the arms
+          extensionless file keeps only the size-6 options gear, and the arms
           without controls keep none. tabIndex/outline-none make it a silent
           landing spot for focus when the picker closes with its trigger
           already hidden, or when the toolbar comes back. */}

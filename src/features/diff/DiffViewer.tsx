@@ -61,6 +61,7 @@ import {
   parseHunks,
 } from "@/lib/git/hunks";
 import {
+  fileDiffQueryOptions,
   repoKeys,
   useApplyPartial,
   useApplyPatch,
@@ -106,9 +107,9 @@ import {
   createDiffFile,
   DiffCapFooter,
   type DiffContentRevs,
-  DiffModeToggle,
+  DiffOptionsSheet,
   DiffSurface,
-  DiffViewOptionsMenu,
+  useDiffViewMode,
   useFileContent,
   useModeLineAnchor,
   useShikiRouting,
@@ -1137,6 +1138,22 @@ function WorkingTreeDiff({
     () => setHideWhitespace(!hideWhitespace),
     interactive && shownView !== null && discard === null,
   );
+  // This toolbar's own registration too, offered only where its sheet's Diff
+  // display section takes a pick (never under the narrow pane's override).
+  const diffViewMode = useDiffViewMode(narrowPane);
+  useHotkeyAction(
+    "toggle-diff-view-mode",
+    () =>
+      diffViewMode.write(
+        diffViewMode.effective === "unified" ? "split" : "unified",
+      ),
+    interactive &&
+      shownView !== null &&
+      selection === null &&
+      discard === null &&
+      !previewOn &&
+      !narrowPane,
+  );
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
   // opened against (a refetch while the dialog is up), whichever arm opened it.
@@ -1367,9 +1384,9 @@ function WorkingTreeDiff({
               {canPreview && (
                 <MarkdownViewToggle view={mdView} onChange={setMdView} />
               )}
-              {/* The picker and Unified/Split configure the raw diff, so they
-                  leave the cluster while Preview is up — the same swap this
-                  row already does for the selection actions. */}
+              {/* The picker and the Diff options sheet configure the raw diff,
+                  so they leave the cluster while Preview is up — the same swap
+                  this row already does for the selection actions. */}
               {!previewOn && (
                 <>
                   {/* Same treatment as the read-only surface's toolbar: the
@@ -1393,8 +1410,25 @@ function WorkingTreeDiff({
                       }}
                     />
                   </span>
-                  <DiffViewOptionsMenu onToggle={setHideWhitespace} />
-                  <DiffModeToggle splitDisabled={narrowPane} />
+                  <DiffOptionsSheet
+                    splitDisabled={narrowPane}
+                    stagingNote
+                    whitespace={{
+                      onToggle: setHideWhitespace,
+                      // A flip whose other-mode answer is cold swaps this arm
+                      // for the fallback while it loads, closing the sheet;
+                      // warming it on open keeps the sheet up. prefetchQuery
+                      // never rejects, so a failed warm-up stays silent.
+                      onOpen: () =>
+                        void queryClient.prefetchQuery(
+                          fileDiffQueryOptions(
+                            repoPath,
+                            { ...file, untracked },
+                            !hideWhitespace,
+                          ),
+                        ),
+                    }}
+                  />
                 </>
               )}
             </>

@@ -493,7 +493,8 @@ the last list up, with a line above it saying it couldn't refresh.
 
 ## Staging
 
-- Click a file to see its diff. Toggle **unified / split** at the top of the diff.
+- Click a file to see its diff. The gear at the top of the diff switches it between
+  **Unified** and **Split** (see **Diff options** below).
 - Stage or unstage a file with the **+ / −** button on its row, or press
   {{key:space}} on the focused row; {{key:enter}} on a row opens its diff.
   In the list, {{key:tab}} stops on the file you're on, {{key:up}} and {{key:down}}
@@ -656,10 +657,16 @@ the last list up, with a line above it saying it couldn't refresh.
 - Files that look **generated or minified** (one enormous line — bundles, source maps,
   \`.tsbuildinfo\`) show a placeholder instead of freezing the view — **Show diff anyway**
   renders a safely shortened version.
+- **Diff options** — the gear in the diff toolbar opens one sheet for the diff's view
+  settings: **Hide whitespace changes** and the **Unified** or **Split** layout. Each
+  change applies at once, and the sheet stays open while the diff it sits on stays in
+  view; Escape or a click outside closes it. *Use unified or split diff* in the command
+  palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
+  the layout too.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
-  hover the **Split** button and it says so. Your preference is kept either way, so
+  the sheet's **Split** option says so. Your preference is kept either way, so
   widening the pane brings the split view back.
-- **Hide whitespace changes** — the gear in the diff toolbar hides changes that only
+- **Hide whitespace changes** — the **Diff options** sheet hides changes that only
   touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
   content changed; an added or removed blank line still shows. It applies to every
   local diff (the working tree, commit details, a file's history, branch compare,
