@@ -109,7 +109,8 @@ To undo a mistaken merge, run `git reset --keep ORIG_HEAD` right after
 the pull, before anything else. `ORIG_HEAD` records where your branch was
 before the pull, until the next stash, reset, merge, rebase or pull moves
 it. `--keep` holds on to uncommitted edits in files the merge didn't change
-(staged ones come back unstaged), and if the merge changed one of them, it
+(staged edits come back unstaged, and a staged version that differs from
+the file on disk is lost), and if the merge changed one of those files, it
 refuses without touching anything:
 
 ```sh
@@ -150,12 +151,23 @@ and updating it afterward takes a force push. And if someone force-pushed
 the branch you're pulling, [a rebasing pull can drop a commit you'd
 already pushed there](/blog/pull-rebase-deleted-your-commit/).
 
+Rebasing does have one cost for work that never left your clone: it flattens
+merge commits, such as the ones an earlier `git pull` made, and replays only
+ordinary commits. A merge's conflict resolutions come back as conflicts
+to redo, but anything else you added to a merge commit disappears without
+warning. `git log --oneline --merges origin/main..` lists any such merges
+before you start rebasing your pulls. If one carries changes of its own,
+merge this time instead; even `git pull --rebase=merges` rebuilds the merge
+commit without them.
+
 ## Fast-forward only says no
 
 The hint's third setting, `pull.ff only`, never makes a merge or a rebase
 on its own. When the branches have diverged, the pull refuses and leaves
 your branch where it was. As a default, it stops just the pulls that
-need a decision:
+need a decision. Each capture from here until the Windows one starts
+after you pushed the previous result and you and your teammate both
+committed once more:
 
 ```sh
 $ git config --global pull.ff only
@@ -213,8 +225,8 @@ and the stash stays in `git stash list` until you fix the file, run
 `git stash drop`. `rebase.autoStash true` makes stashing the default, for
 plain `git rebase` as well; Git 2.51 added `pull.autoStash` for pulls alone.
 
-Either kind of pull can also stop on a conflict, when you and your teammate
-changed the same lines:
+With that `signup.html` edit discarded, either kind of pull can also stop on
+a conflict, when you and your teammate changed the same lines:
 
 ```sh
 $ git pull --no-rebase
@@ -228,12 +240,15 @@ $ git status --short --branch
 ## main...origin/main [ahead 1, behind 1]
 ```
 
-`git merge --abort` puts the branch back as it was before the pull, and
-the fetched commits stay in `origin/main` for your next try. A rebasing
-pull stops the same way, once for each of your commits that conflicts, and
-`git rebase --abort` undoes the whole rebase however far it got. To resolve
-instead, fix the file and `git add` it, then run `git commit` for a merge or
-`git rebase --continue` for a rebase.
+From a clean working tree, `git merge --abort` puts the branch back as it
+was before the pull, and the fetched commits stay in `origin/main` for your
+next try. With uncommitted edits in play, Git's documentation warns the
+abort can't always rebuild them, so commit, stash, or pass `--autostash`
+before a pull you expect to conflict (`git merge --abort` puts an autostash
+back too). A rebasing pull stops the same way, once for each of your commits
+that conflicts, and `git rebase --abort` undoes the whole rebase however
+far it got. To resolve instead, fix the file and `git add` it, then run
+`git commit` for a merge or `git rebase --continue` for a rebase.
 
 ## Windows picked an answer at install time
 
@@ -267,17 +282,19 @@ install merges without asking, while a teammate on macOS or Linux with
 no pull setting, or you in WSL, gets the error instead. The same file
 holds the installer's `core.autocrlf` setting, the one [the line-endings
 post](/blog/every-file-shows-as-modified/) traces phantom changes to. A
-global `pull.ff only` overrides the installer's pull answer, whichever
-one it wrote, so setting that on each machine you use makes them all
-behave the same.
+global `pull.ff only` overrides the installer's pull answer, whichever one
+it wrote, so setting that on each machine you use makes them all behave
+the same, apart from any repository with its own `pull.ff`, like the
+rebase setup above.
 
 ## Picking a default
 
 If your team has a rule, such as rebasing before every push, set the value
 that matches it. Without one, `pull.ff only` is the default least likely to
 surprise you. Every pull either fast-forwards or stops, and when it stops
-you choose: `--rebase` for commits that never left your clone, `--no-rebase`
-for commits already shared under their current hashes.
+you choose: `--rebase` for commits that never left your clone, unless they
+include a merge with changes of its own, and `--no-rebase` for commits
+already shared under their current hashes.
 
 ## Or don't do any of this
 
