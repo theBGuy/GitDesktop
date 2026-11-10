@@ -247,6 +247,7 @@ export function SubmitReviewDialog({
 
         <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-w-0 space-y-3")}>
           <RadioGroup
+            aria-label="Review verdict"
             value={effectiveVerdict}
             onValueChange={(v) => setVerdict(v as ReviewVerdict)}
             className="gap-2 text-xs"

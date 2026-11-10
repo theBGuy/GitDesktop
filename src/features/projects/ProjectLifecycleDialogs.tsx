@@ -3,6 +3,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  useId,
   useState,
 } from "react";
 import { LabeledGroup } from "@/components/form/labeled-group";
@@ -16,6 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { required, useAppForm } from "@/lib/form";
@@ -363,6 +365,7 @@ export function ViewNameDialog({
   onSubmit: (name: string, layout: ProjectViewLayout) => Promise<void>;
 }) {
   const [layout, setLayout] = useState<ProjectViewLayout>("table");
+  const layoutLabelId = useId();
   const form = useAppForm({
     defaultValues: { name: "" },
     onSubmit: ({ value }) => onSubmit(value.name.trim(), layout),
@@ -419,8 +422,12 @@ export function ViewNameDialog({
             )}
           </form.AppField>
           {mode === "create" && (
-            <LabeledGroup label="Layout">
+            // The caption names the radiogroup itself: a wrapping group named
+            // the same would announce it twice.
+            <div className="space-y-2">
+              <Label id={layoutLabelId}>Layout</Label>
               <RadioGroup
+                aria-labelledby={layoutLabelId}
                 className="gap-1"
                 value={layout}
                 onValueChange={(next) => {
@@ -438,7 +445,7 @@ export function ViewNameDialog({
                   </label>
                 ))}
               </RadioGroup>
-            </LabeledGroup>
+            </div>
           )}
           <form.AppForm>
             <HeldFooter

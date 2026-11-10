@@ -402,7 +402,14 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   guard in `pnpm run checks` fails on any `<Label>` carrying neither `htmlFor`
   nor `id`. Existing idioms that already do their own aria wiring stay as they
   are: the CreatePrDialog / CreateIssueDialog field-group wrappers and
-  McpServersSection's `role="group"` scope groups.
+  McpServersSection's `role="group"` scope groups. A single control that carries
+  its own group role (a `RadioGroup`) takes its name through `aria-labelledby`
+  on an id'd caption (a `<Label id>`, or an existing caption element) instead
+  of a LabeledGroup wrapper, whose group would repeat the name
+  (BoardBulkFieldsDialog's mode picker, ProjectLifecycleDialogs' Layout,
+  RepositoryMenu's fork intent, the Diff options sheet's Diff display); a group
+  with no visible caption takes `aria-label` instead. The `unnamed-radio-group`
+  guard in `pnpm run checks` fails on a `RadioGroup` carrying neither.
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech. The
@@ -904,6 +911,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   stamps `whitespaceHidden` / `whitespaceOnly` on the result. Gates and arms
   read those marks, never the setting alone, and no patch is applied from a
   `whitespaceHidden` diff. `scripts/hide-whitespace.test.mjs` is the ratchet.
+  Both settings are app-wide and a flip rebuilds a hidden tab's open line
+  composer, so any writer of `diffHideWhitespace` or `diffViewMode` checks the
+  shared probe first (`whitespaceComposerOpen` / `lineComposerOpen`,
+  `src/features/diff/whitespace-mode.ts`); that test's writer roster fails a
+  new unguarded writer.
 - **Queries package boundary** — import the git query layer through the
   `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
   inside the package may import it but never re-export it, since `export *`

@@ -25,12 +25,17 @@ import {
 } from "vitest";
 import { DiffContent, DiffSurface } from "@/features/diff/DiffSurface";
 import { DiffViewer } from "@/features/diff/DiffViewer";
+import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
+import type { StagingSide } from "@/features/diff/undecodable-note";
 import {
+  LAYOUT_COMPOSER_HELD,
   WHITESPACE_ANNOUNCEMENT,
   WHITESPACE_COMPOSER_HELD,
   WHITESPACE_ONLY_MESSAGE,
+  WHITESPACE_SHEET_STAGING_NOTE,
   WHITESPACE_STRIP_COPY,
 } from "@/features/diff/whitespace-mode";
+import { AgentTranscript } from "@/features/sessions/AgentTranscript";
 import { toDraft } from "@/features/settings/settings-form";
 import {
   gitBlobSizes,
@@ -59,9 +64,11 @@ import {
   useSessionFileDiff,
 } from "@/lib/git/queries";
 import type { FileDiff, RepoStatus, SubmoduleChanges } from "@/lib/git/types";
+import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import {
   type AppSettings,
   loadSettings,
+  saveSettingsMerged,
   saveSettingsPatch,
 } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -96,6 +103,13 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
   saveSettingsPatch: vi.fn(),
+  saveSettingsMerged: vi.fn(),
+}));
+
+/** The width every measured pane reports; null = not yet measured. */
+const pane = vi.hoisted(() => ({ width: null as number | null }));
+vi.mock("@/lib/use-container-width", () => ({
+  useContainerWidth: () => [() => undefined, pane.width],
 }));
 
 vi.mock("@/lib/toast", async (importOriginal) => ({
@@ -177,6 +191,11 @@ beforeEach(() => {
     stored = { ...stored, ...patch };
     return stored;
   });
+  vi.mocked(saveSettingsMerged).mockImplementation(async (settings) => {
+    stored = { ...stored, ...settings };
+    return stored;
+  });
+  pane.width = null;
   vi.mocked(gitBlobSizes).mockResolvedValue({ oldSize: null, newSize: 7 });
   vi.mocked(gitStatus).mockResolvedValue({
     branch: { name: "main", detached: false, oid: null, upstream: null },
@@ -261,42 +280,101 @@ describe("Changes with whitespace hidden", () => {
   });
 });
 
-describe("the view-options gear", () => {
-  it("names its state, writes the patch once the menu closes, keeps focus", async () => {
+const otherModeKey = (hide: boolean) =>
+  [...repoKeys.diff("/repo", "x", false), false, hide] as const;
+const gearNamed = (name: string) => screen.findByRole("button", { name });
+const sheetBox = () =>
+  screen.getByRole("checkbox", { name: "Hide whitespace changes" });
+const radio = (name: "Unified" | "Split") =>
+  screen.getByRole("radio", { name });
+const modeWrites = () =>
+  vi.mocked(saveSettingsMerged).mock.calls.map(([s]) => s.diffViewMode);
+/** The text the element's aria-describedby points at. */
+const description = (el: HTMLElement) =>
+  (el.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ");
+
+describe("the Diff options sheet", () => {
+  it("writes each flip at once and stays open; Escape returns to the gear", async () => {
     const user = userEvent.setup();
-    changes(false, () => diffOf(TEXT));
-    const gear = await screen.findByRole("button", { name: "View options" });
-    const group = screen.getByRole("group", { name: "Diff view mode" });
-    expect(
-      gear.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    await user.click(gear);
-    const item = await screen.findByRole("menuitemcheckbox", {
-      name: "Hide whitespace changes",
+    // The other mode's answer cached: a cold read has no hunk view yet, so
+    // the staging arm (and its sheet) would swap out for the fallback.
+    vi.mocked(gitDiffFile).mockImplementation(async () => diffOf(TEXT));
+    const client = newClient(false);
+    client.setQueryData(otherModeKey(true), {
+      ...diffOf(TEXT),
+      whitespaceHidden: true,
     });
-    expect(item.getAttribute("aria-checked")).toBe("false");
-    await user.click(item);
+    render(<DiffViewer repoPath="/repo" />, { wrapper: wrap(client) });
+    const gear = await gearNamed("Diff options");
+    expect(screen.queryByRole("button", { name: "Unified" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Diff view mode" })).toBeNull();
+    await user.click(gear);
+    expect(
+      await screen.findByRole("dialog", { name: "Diff options" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(WHITESPACE_SHEET_STAGING_NOTE.unstaged),
+    ).toBeTruthy();
+    expect(description(sheetBox())).toBe(
+      WHITESPACE_SHEET_STAGING_NOTE.unstaged,
+    );
+    expect(screen.getByRole("group", { name: "Whitespace" })).toBeTruthy();
+    expect(
+      screen.getByRole("radiogroup", { name: "Diff display" }),
+    ).toBeTruthy();
+    expect(sheetBox().getAttribute("aria-checked")).toBe("false");
+    await user.click(sheetBox());
     await waitFor(() =>
       expect(flips()).toEqual([{ diffHideWhitespace: true }]),
     );
     await waitFor(() =>
-      expect(screen.queryByRole("menuitemcheckbox")).toBeNull(),
+      expect(sheetBox().getAttribute("aria-checked")).toBe("true"),
     );
-    expect(
-      await screen.findByRole("button", {
-        name: "View options, whitespace changes hidden",
-      }),
-    ).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+    expect(await gearNamed("Diff options, whitespace changes hidden")).toBe(
+      gear,
+    );
+    expect(gear.querySelector(".bg-primary")).not.toBeNull();
+    await user.click(sheetBox());
+    await waitFor(() =>
+      expect(flips()).toEqual([
+        { diffHideWhitespace: true },
+        { diffHideWhitespace: false },
+      ]),
+    );
+    expect(sheetBox()).toBeTruthy();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(gear));
   });
 
-  it("is on every DiffSurface host and absent from a bare DiffContent", async () => {
+  it("closes on an outside click, focus back on the gear", async () => {
+    const user = userEvent.setup();
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    const gear = await gearNamed("Diff options");
+    await user.click(gear);
+    await screen.findByRole("checkbox");
+    await user.click(document.body);
+    await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
+    expect(gear.isConnected).toBe(true);
+  });
+
+  it("is on every DiffSurface host; a bare DiffContent gets Diff display only", async () => {
+    const user = userEvent.setup();
     newClient(false);
     const client = newClient(true);
     const { unmount } = render(<SurfaceHarness />, { wrapper: wrap(client) });
-    expect(
-      await screen.findByRole("button", { name: /View options/ }),
-    ).toBeTruthy();
+    await user.click(
+      await gearNamed("Diff options, whitespace changes hidden"),
+    );
+    expect(sheetBox().getAttribute("aria-checked")).toBe("true");
+    // The staging note is the working-tree host's alone.
+    for (const note of Object.values(WHITESPACE_SHEET_STAGING_NOTE))
+      expect(screen.queryByText(note)).toBeNull();
+    expect(sheetBox().getAttribute("aria-describedby")).toBeNull();
     for (const status of screen.queryAllByRole("status"))
       expect(status.textContent).not.toContain(WHITESPACE_ANNOUNCEMENT.hidden);
     unmount();
@@ -309,63 +387,624 @@ describe("the view-options gear", () => {
       />,
       { wrapper: wrap(client) },
     );
-    expect(screen.queryByRole("button", { name: /View options/ })).toBeNull();
+    // The mode is on, yet this host shows whitespace: no dot, no claim.
+    const gear = await gearNamed("Diff options");
+    expect(gear.querySelector(".bg-primary")).toBeNull();
+    await user.click(gear);
+    expect(await screen.findByRole("radio", { name: "Unified" })).toBeTruthy();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Whitespace" })).toBeNull();
+    for (const note of Object.values(WHITESPACE_SHEET_STAGING_NOTE))
+      expect(screen.queryByText(note)).toBeNull();
   });
 
-  it("a held key never flips it; a fresh press does", async () => {
+  it("the staged side's note names unstaging, on each arm that stages", async () => {
     const user = userEvent.setup();
-    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
-    await user.click(
-      await screen.findByRole("button", { name: "View options" }),
+    vi.mocked(gitStatus).mockResolvedValue({
+      branch: { name: "main", detached: false, oid: null, upstream: null },
+      entries: [{ path: "x", staged: "modified", unstaged: null }],
+    } as unknown as RepoStatus);
+    useUiStore.setState({
+      selectedFile: { path: "x", staged: true, untracked: false },
+    });
+    vi.mocked(gitDiffFile).mockImplementation(async () => diffOf(TEXT));
+    const client = newClient(false);
+    const { unmount } = render(<DiffViewer repoPath="/repo" />, {
+      wrapper: wrap(client),
+    });
+    await screen.findByText(/Drag across the line numbers to/);
+    await user.click(await gearNamed("Diff options"));
+    expect(description(await screen.findByRole("checkbox"))).toBe(
+      WHITESPACE_SHEET_STAGING_NOTE.staged,
     );
-    const item = await screen.findByRole("menuitemcheckbox");
-    fireEvent.keyDown(item, { key: "Enter", repeat: true });
+    expect(
+      screen.queryByText(WHITESPACE_SHEET_STAGING_NOTE.unstaged),
+    ).toBeNull();
+    unmount();
+    // The fallback host's whitespace-only arm, whose flip off returns to
+    // staging, carries the note too.
+    render(<ModeHarness keep stagingSide="staged" answer={() => WS_ONLY} />, {
+      wrapper: wrap(newClient(true)),
+    });
+    await screen.findByText(WHITESPACE_ONLY_MESSAGE);
+    await user.click(
+      await gearNamed("Diff options, whitespace changes hidden"),
+    );
+    expect(description(await screen.findByRole("checkbox"))).toBe(
+      WHITESPACE_SHEET_STAGING_NOTE.staged,
+    );
+  });
+
+  it("a Changes text fallback, where staging never exists, shows no staging note", async () => {
+    const user = userEvent.setup();
+    changes(true, () => ({
+      ...stamped(diffOf(TEXT), true),
+      isTruncated: true,
+    }));
+    await user.click(
+      await gearNamed("Diff options, whitespace changes hidden"),
+    );
+    const box = await screen.findByRole("checkbox");
+    for (const note of Object.values(WHITESPACE_SHEET_STAGING_NOTE))
+      expect(screen.queryByText(note)).toBeNull();
+    expect(box.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("Space acts once, on its release, however long it is held; Enter never", async () => {
+    const user = userEvent.setup();
+    render(<SurfaceHarness keep />, { wrapper: wrap(newClient(false)) });
+    await user.click(await gearNamed("Diff options"));
+    const box = await screen.findByRole("checkbox");
+    const hold = (el: HTMLElement, key: string) => {
+      fireEvent.keyDown(el, { key });
+      for (let i = 0; i < 3; i++) fireEvent.keyDown(el, { key, repeat: true });
+    };
+    for (const el of [box, radio("Split")]) {
+      hold(el, "Enter");
+      fireEvent.keyUp(el, { key: "Enter" });
+      hold(el, " ");
+    }
     expect(flips()).toEqual([]);
-    expect(screen.getByRole("menuitemcheckbox")).toBeTruthy();
-    fireEvent.keyDown(item, { key: "Enter" });
+    expect(modeWrites()).toEqual([]);
+    fireEvent.keyUp(radio("Split"), { key: " " });
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+    fireEvent.keyUp(sheetBox(), { key: " " });
     await waitFor(() =>
       expect(flips()).toEqual([{ diffHideWhitespace: true }]),
     );
+    expect(modeWrites()).toEqual(["split"]);
   });
 
   it("L1: a held key's repeat never opens the closed gear; a fresh press does", async () => {
     const user = userEvent.setup();
     render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
-    const gear = await screen.findByRole("button", { name: "View options" });
+    const gear = await gearNamed("Diff options");
     gear.focus();
     // A cancelled keydown is what keeps the browser from activating the
-    // button, so the repeat must come back default-prevented.
-    for (const key of ["Enter", " "])
-      expect(fireEvent.keyDown(gear, { key, repeat: true }), key).toBe(false);
-    expect(screen.queryByRole("menuitemcheckbox")).toBeNull();
+    // button, so an Enter repeat must come back default-prevented.
+    expect(fireEvent.keyDown(gear, { key: "Enter", repeat: true })).toBe(false);
+    expect(screen.queryByRole("checkbox")).toBeNull();
     expect(fireEvent.keyDown(gear, { key: "Enter" })).toBe(true);
     await user.keyboard("{Enter}");
-    expect(await screen.findByRole("menuitemcheckbox")).toBeTruthy();
+    expect(await screen.findByRole("checkbox")).toBeTruthy();
   });
 
-  it("holds the flip while a line composer is open in the pane", async () => {
+  it("holds the checkbox while a line composer is open in the pane", async () => {
     const user = userEvent.setup();
     const info = vi.spyOn(toast, "info");
     const { container } = render(<SurfaceHarness />, {
       wrapper: wrap(newClient(false)),
     });
-    await screen.findByRole("button", { name: "View options" });
+    const gear = await gearNamed("Diff options");
     const scroller = container.querySelector(".overflow-auto");
     const composer = document.createElement("div");
-    composer.setAttribute("data-diff-line-widget", "");
+    composer.setAttribute("data-diff-line-widget", "whitespace");
     scroller?.append(composer);
-    await user.click(screen.getByRole("button", { name: "View options" }));
-    await user.click(await screen.findByRole("menuitemcheckbox"));
-    await waitFor(() =>
-      expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD),
-    );
+    await user.click(gear);
+    const held = await screen.findByRole("checkbox");
+    expect(held.getAttribute("aria-disabled")).toBe("true");
+    expect(held.tabIndex).toBe(0);
+    expect(description(held)).toBe(WHITESPACE_COMPOSER_HELD);
+    const heldLabel = screen.getByText("Hide whitespace changes");
+    const heldRow = heldLabel.closest("[title]");
+    expect(heldRow?.getAttribute("title")).toBe(WHITESPACE_COMPOSER_HELD);
+    expect(heldRow?.contains(held)).toBe(true);
+    expect(heldLabel.classList.contains("opacity-50")).toBe(true);
+    await user.click(held);
+    act(() => held.focus());
+    await user.keyboard(" ");
     expect(flips()).toEqual([]);
+    expect(held.getAttribute("aria-checked")).toBe("false");
+    // The palette route still refuses with the toast.
+    act(() => void dispatchAction("toggle-hide-whitespace"));
+    expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    expect(flips()).toEqual([]);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
     composer.remove();
-    await user.click(screen.getByRole("button", { name: "View options" }));
-    await user.click(await screen.findByRole("menuitemcheckbox"));
+    await user.click(gear);
+    const free = await screen.findByRole("checkbox");
+    expect(free.getAttribute("aria-disabled")).toBeNull();
+    await user.click(free);
     await waitFor(() =>
       expect(flips()).toEqual([{ diffHideWhitespace: true }]),
     );
+  });
+
+  /** A stand-in line composer in the pane's scroller, as the widget renders
+   *  on a host with a whitespace mode. */
+  const openComposer = (container: HTMLElement) => {
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", "whitespace");
+    container.querySelector(".overflow-auto")?.append(composer);
+    return composer;
+  };
+
+  it("holds the layout radios and the palette flip while a line composer is open", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const { container } = render(<SurfaceHarness />, {
+      wrapper: wrap(newClient(false)),
+    });
+    const gear = await gearNamed("Diff options");
+    const composer = openComposer(container);
+    // The palette route probes at fire time.
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+    expect(modeWrites()).toEqual([]);
+    await user.click(gear);
+    const group = await screen.findByRole("radiogroup", {
+      name: "Diff display",
+    });
+    expect(group.getAttribute("aria-readonly")).toBe("true");
+    for (const name of ["Unified", "Split"] as const) {
+      const held = radio(name);
+      expect(held.getAttribute("data-readonly")).not.toBeNull();
+      expect(description(held)).toBe(LAYOUT_COMPOSER_HELD);
+      const label = screen.getByText(name);
+      expect(label.closest("[title]")?.getAttribute("title")).toBe(
+        LAYOUT_COMPOSER_HELD,
+      );
+      expect(label.classList.contains("opacity-50")).toBe(true);
+    }
+    await user.click(radio("Split"));
+    act(() => radio("Unified").focus());
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard(" ");
+    expect(radio("Unified").getAttribute("aria-checked")).toBe("true");
+    expect(modeWrites()).toEqual([]);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("radiogroup")).toBeNull());
+    composer.remove();
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+    await user.click(gear);
+    const freed = await screen.findByRole("radiogroup");
+    expect(freed.getAttribute("aria-readonly")).toBeNull();
+    expect(radio("Unified").getAttribute("data-readonly")).toBeNull();
+    expect(description(radio("Unified"))).toBe("");
+    await user.click(radio("Unified"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split", "unified"]));
+  });
+
+  it("a narrow pane's reason wins on Split while a composer holds the radios", async () => {
+    const user = userEvent.setup();
+    pane.width = SPLIT_MIN_CONTAINER_PX - 1;
+    const { container } = render(<SurfaceHarness />, {
+      wrapper: wrap(newClient(false)),
+    });
+    const gear = await gearNamed("Diff options");
+    openComposer(container);
+    await user.click(gear);
+    const group = await screen.findByRole("radiogroup");
+    expect(group.getAttribute("aria-readonly")).toBe("true");
+    expect(description(radio("Split"))).toBe("Pane too narrow for split view");
+    expect(description(radio("Unified"))).toBe(LAYOUT_COMPOSER_HELD);
+  });
+
+  /** A stand-in line composer outside this host, as a hidden tab's stays
+   *  mounted under <Activity>: "whitespace" on a host with a whitespace mode
+   *  (a commit), "layout" on a forge PR's fixed patch. */
+  const openComposerElsewhere = (
+    kind: "whitespace" | "layout" = "whitespace",
+  ) => {
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", kind);
+    document.body.append(composer);
+    return composer;
+  };
+
+  /** Both palette flips refuse with their toasts, and the open sheet holds
+   *  every control, the radiogroup read-only as a whole. */
+  async function expectComposerHold(
+    user: ReturnType<typeof userEvent.setup>,
+    gear: HTMLElement,
+  ) {
+    const info = vi.spyOn(toast, "info");
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    act(() => void dispatchAction("toggle-hide-whitespace"));
+    expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+    expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    await user.click(gear);
+    const group = await screen.findByRole("radiogroup", {
+      name: "Diff display",
+    });
+    expect(group.getAttribute("aria-readonly")).toBe("true");
+    expect(sheetBox().getAttribute("aria-disabled")).toBe("true");
+    expect(description(sheetBox())).toContain(WHITESPACE_COMPOSER_HELD);
+    for (const name of ["Unified", "Split"] as const)
+      expect(description(radio(name))).toBe(LAYOUT_COMPOSER_HELD);
+    await user.click(radio("Split"));
+    await user.click(sheetBox());
+    expect(modeWrites()).toEqual([]);
+    expect(flips()).toEqual([]);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("radiogroup")).toBeNull());
+  }
+
+  it("a composer open in another view holds a DiffSurface host's flips", async () => {
+    const user = userEvent.setup();
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    const gear = await gearNamed("Diff options");
+    const composer = openComposerElsewhere();
+    try {
+      await expectComposerHold(user, gear);
+    } finally {
+      composer.remove();
+    }
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+  });
+
+  it("a composer open in another view holds the staging host's flips", async () => {
+    const user = userEvent.setup();
+    changes(false, () => diffOf(TEXT));
+    await screen.findByText(/Drag across the line numbers to/);
+    const gear = await gearNamed("Diff options");
+    const composer = openComposerElsewhere();
+    try {
+      await expectComposerHold(user, gear);
+    } finally {
+      composer.remove();
+    }
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+  });
+
+  it("a PR composer elsewhere holds only the layout flips of a DiffSurface host", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    const gear = await gearNamed("Diff options");
+    const composer = openComposerElsewhere("layout");
+    try {
+      act(() => void dispatchAction("toggle-diff-view-mode"));
+      expect(info).toHaveBeenCalledWith(LAYOUT_COMPOSER_HELD);
+      expect(modeWrites()).toEqual([]);
+      await user.click(gear);
+      const group = await screen.findByRole("radiogroup", {
+        name: "Diff display",
+      });
+      expect(group.getAttribute("aria-readonly")).toBe("true");
+      for (const name of ["Unified", "Split"] as const)
+        expect(description(radio(name))).toBe(LAYOUT_COMPOSER_HELD);
+      await user.click(radio("Split"));
+      expect(modeWrites()).toEqual([]);
+      const box = sheetBox();
+      expect(box.getAttribute("aria-disabled")).toBeNull();
+      expect(description(box)).not.toContain(WHITESPACE_COMPOSER_HELD);
+      await user.click(box);
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: true }]),
+      );
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("radiogroup")).toBeNull());
+      act(() => void dispatchAction("toggle-hide-whitespace"));
+      await waitFor(() =>
+        expect(flips()).toEqual([
+          { diffHideWhitespace: true },
+          { diffHideWhitespace: false },
+        ]),
+      );
+      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("a PR composer elsewhere never holds the staging strip's Show whitespace", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    changes(true, () => diffOf(TEXT));
+    await screen.findByText(WHITESPACE_STRIP_COPY.unstaged);
+    const composer = openComposerElsewhere("layout");
+    try {
+      await user.click(screen.getByRole("button", { name: "Show whitespace" }));
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+      );
+      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("the staging strip's Show whitespace refuses while a composer is open elsewhere", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    changes(true, () => diffOf(TEXT));
+    await screen.findByText(WHITESPACE_STRIP_COPY.unstaged);
+    const composer = openComposerElsewhere();
+    try {
+      await user.click(screen.getByRole("button", { name: "Show whitespace" }));
+      expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+      expect(flips()).toEqual([]);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("the layout radios follow the preference and write the pick", async () => {
+    const user = userEvent.setup();
+    render(<SurfaceHarness />, { wrapper: wrap(newClient(false)) });
+    await user.click(await gearNamed("Diff options"));
+    await screen.findByRole("radiogroup", { name: "Diff display" });
+    // The radiogroup carries the one name; no wrapping group repeats it.
+    expect(screen.queryByRole("group", { name: "Diff display" })).toBeNull();
+    expect(
+      [...document.querySelectorAll("[aria-labelledby]")].filter(
+        (el) =>
+          document.getElementById(el.getAttribute("aria-labelledby") ?? "")
+            ?.textContent === "Diff display",
+      ),
+    ).toHaveLength(1);
+    expect(radio("Unified").getAttribute("aria-checked")).toBe("true");
+    expect(radio("Split").getAttribute("aria-disabled")).toBeNull();
+    await user.click(radio("Split"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+    await waitFor(() =>
+      expect(radio("Split").getAttribute("aria-checked")).toBe("true"),
+    );
+    await user.click(radio("Unified"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split", "unified"]));
+    expect(screen.getByRole("radiogroup")).toBeTruthy();
+  });
+
+  it("a narrow pane holds Split with its reason and writes nothing", async () => {
+    const user = userEvent.setup();
+    pane.width = SPLIT_MIN_CONTAINER_PX - 1;
+    const client = newClient(false);
+    stored = { ...stored, diffViewMode: "split" };
+    client.setQueryData(settingsKeys.settings, stored);
+    const { unmount } = render(<SurfaceHarness />, { wrapper: wrap(client) });
+    await user.click(await gearNamed("Diff options"));
+    const group = await screen.findByRole("radiogroup");
+    // Unified stays a pick, so the group as a whole isn't read-only.
+    expect(group.getAttribute("aria-readonly")).toBeNull();
+    const split = radio("Split");
+    expect(radio("Unified").getAttribute("aria-checked")).toBe("true");
+    expect(split.getAttribute("aria-checked")).toBe("false");
+    expect(split.getAttribute("data-readonly")).not.toBeNull();
+    expect(description(split)).toBe("Pane too narrow for split view");
+    // The reason hovers on the whole option, and its label dims with it.
+    const splitLabel = screen.getByText("Split");
+    const splitRow = splitLabel.closest("[title]");
+    expect(splitRow?.getAttribute("title")).toBe(
+      "Pane too narrow for split view",
+    );
+    expect(splitRow?.contains(split)).toBe(true);
+    expect(splitLabel.classList.contains("opacity-50")).toBe(true);
+    act(() => radio("Unified").focus());
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(split);
+    await user.keyboard(" ");
+    await user.click(split);
+    await user.click(radio("Unified"));
+    expect(radio("Unified").getAttribute("aria-checked")).toBe("true");
+    // The palette action isn't offered while the override stands.
+    expect(dispatchAction("toggle-diff-view-mode")).toBe(false);
+    expect(modeWrites()).toEqual([]);
+    expect(stored.diffViewMode).toBe("split");
+    unmount();
+    pane.width = SPLIT_MIN_CONTAINER_PX;
+    render(<SurfaceHarness />, { wrapper: wrap(client) });
+    await user.click(await gearNamed("Diff options"));
+    await screen.findByRole("radiogroup");
+    expect(radio("Split").getAttribute("aria-checked")).toBe("true");
+    expect(radio("Split").getAttribute("data-readonly")).toBeNull();
+    expect(screen.getByText("Split").closest("[title]")).toBeNull();
+    expect(screen.getByText("Split").classList.contains("opacity-50")).toBe(
+      false,
+    );
+  });
+
+  for (const host of ["read-only", "staging"] as const)
+    it(`the palette flips the layout on the ${host} host, never while narrow`, async () => {
+      const client = newClient(false);
+      if (host === "staging") {
+        vi.mocked(gitDiffFile).mockImplementation(async () => diffOf(TEXT));
+        render(<DiffViewer repoPath="/repo" />, { wrapper: wrap(client) });
+        await screen.findByText(/Drag across the line numbers to/);
+      } else {
+        render(<SurfaceHarness />, { wrapper: wrap(client) });
+        await gearNamed("Diff options");
+      }
+      act(() => void dispatchAction("toggle-diff-view-mode"));
+      await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+      await waitFor(() =>
+        expect(
+          client.getQueryData<AppSettings>(settingsKeys.settings),
+        ).toMatchObject({ diffViewMode: "split" }),
+      );
+      act(() => void dispatchAction("toggle-diff-view-mode"));
+      await waitFor(() => expect(modeWrites()).toEqual(["split", "unified"]));
+    });
+
+  it("the staging host's narrow pane doesn't offer the palette flip", async () => {
+    pane.width = SPLIT_MIN_CONTAINER_PX - 1;
+    vi.mocked(gitDiffFile).mockImplementation(async () => diffOf(TEXT));
+    render(<DiffViewer repoPath="/repo" />, {
+      wrapper: wrap(newClient(false)),
+    });
+    await screen.findByText(/Drag across the line numbers to/);
+    expect(dispatchAction("toggle-diff-view-mode")).toBe(false);
+    expect(modeWrites()).toEqual([]);
+  });
+
+  it("the staging host withholds the layout flip in Markdown preview", async () => {
+    vi.mocked(gitStatus).mockResolvedValue({
+      branch: { name: "main", detached: false, oid: null, upstream: null },
+      entries: [{ path: "x.md", staged: null, unstaged: "modified" }],
+    } as unknown as RepoStatus);
+    useUiStore.setState({
+      selectedFile: { path: "x.md", staged: false, untracked: false },
+    });
+    vi.mocked(gitDiffFile).mockImplementation(async () => diffOf(TEXT, "x.md"));
+    render(<DiffViewer repoPath="/repo" />, {
+      wrapper: wrap(newClient(false)),
+    });
+    await gearNamed("Diff options");
+    act(() => void dispatchAction("toggle-markdown-preview"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Diff options" })).toBeNull(),
+    );
+    expect(dispatchAction("toggle-diff-view-mode")).toBe(false);
+    act(() => void dispatchAction("toggle-markdown-preview"));
+    await gearNamed("Diff options");
+    expect(modeWrites()).toEqual([]);
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+  });
+
+  it("a read-only host withholds the layout flip in Markdown preview", async () => {
+    render(
+      <DiffContent
+        filePath="x.md"
+        repoPath="/repo"
+        previewRev="HEAD"
+        data={diffOf(TEXT, "x.md")}
+        isPending={false}
+        isError={false}
+      />,
+      { wrapper: wrap(newClient(false)) },
+    );
+    await gearNamed("Diff options");
+    act(() => void dispatchAction("toggle-markdown-preview"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Diff options" })).toBeNull(),
+    );
+    expect(dispatchAction("toggle-diff-view-mode")).toBe(false);
+    act(() => void dispatchAction("toggle-markdown-preview"));
+    await gearNamed("Diff options");
+    expect(modeWrites()).toEqual([]);
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+  });
+
+  it("a flip off from the Changes fallback's whitespace-only arm lands focus on a pane sink", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    const plain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holdPlain = false;
+    vi.mocked(gitDiffFile).mockImplementation(
+      async (_repo, _path, _staged, _untracked, iw = false) => {
+        if (!iw && holdPlain) await plain;
+        return diffOf(iw ? "" : TEXT);
+      },
+    );
+    const { container } = render(<DiffViewer repoPath="/repo" />, {
+      wrapper: wrap(newClient(true)),
+    });
+    await screen.findByText(WHITESPACE_ONLY_MESSAGE);
+    await user.click(
+      await gearNamed("Diff options, whitespace changes hidden"),
+    );
+    holdPlain = true;
+    expect(description(await screen.findByRole("checkbox"))).toBe(
+      WHITESPACE_SHEET_STAGING_NOTE.unstaged,
+    );
+    await user.click(await screen.findByRole("checkbox"));
+    await waitFor(() =>
+      expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+    );
+    // The plain read is pending with no placeholder: the arm, its gear and the
+    // open sheet unmount, and only the pane's sink can take focus.
+    await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
+    await waitFor(() => {
+      const focused = document.activeElement;
+      expect(focused).not.toBe(document.body);
+      expect(focused?.getAttribute("tabindex")).toBe("-1");
+      expect(container.contains(focused)).toBe(true);
+    });
+    release();
+    await screen.findByText(/Drag across the line numbers to/);
+  });
+
+  it("a flip onto the staging fallback closes the sheet and keeps focus off <body>", async () => {
+    const user = userEvent.setup();
+    changes(false, (iw) => diffOf(iw ? "" : TEXT));
+    await screen.findByText(/Drag across the line numbers to/);
+    await user.click(await gearNamed("Diff options"));
+    await user.click(await screen.findByRole("checkbox"));
+    expect(await screen.findByText(WHITESPACE_ONLY_MESSAGE)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
+    expect(
+      await gearNamed("Diff options, whitespace changes hidden"),
+    ).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
+  });
+
+  it("opening it on the staging host warms the other mode, so a flip keeps it open", async () => {
+    const user = userEvent.setup();
+    const { client } = changes(false, () => diffOf(TEXT));
+    await screen.findByText(/Drag across the line numbers to/);
+    const gear = await gearNamed("Diff options");
+    expect(client.getQueryState(otherModeKey(true))).toBeUndefined();
+    await user.click(gear);
+    await screen.findByRole("dialog", { name: "Diff options" });
+    await waitFor(() =>
+      expect(client.getQueryState(otherModeKey(true))?.status).toBe("success"),
+    );
+    await user.click(sheetBox());
+    await screen.findByText(WHITESPACE_STRIP_COPY.unstaged);
+    expect(sheetBox().getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("dialog", { name: "Diff options" })).toBeTruthy();
+    expect(await gearNamed("Diff options, whitespace changes hidden")).toBe(
+      gear,
+    );
+    expect(document.activeElement).toBe(sheetBox());
+  });
+
+  it("a flip before the warm-up lands closes the sheet onto a pane sink", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(gitDiffFile).mockImplementation(
+      async (_repo, _path, _staged, _untracked, iw = false) => {
+        if (iw) await held;
+        return diffOf(TEXT);
+      },
+    );
+    const { container } = render(<DiffViewer repoPath="/repo" />, {
+      wrapper: wrap(newClient(false)),
+    });
+    await screen.findByText(/Drag across the line numbers to/);
+    await user.click(await gearNamed("Diff options"));
+    await user.click(await screen.findByRole("checkbox"));
+    await waitFor(() => expect(screen.queryByRole("checkbox")).toBeNull());
+    // A pane sink takes focus, never <body>.
+    await waitFor(() => {
+      const focused = document.activeElement;
+      expect(focused).not.toBe(document.body);
+      expect(focused?.getAttribute("tabindex")).toBe("-1");
+      expect(container.contains(focused)).toBe(true);
+    });
+    release();
+    await screen.findByText(WHITESPACE_STRIP_COPY.unstaged);
   });
 });
 
@@ -766,9 +1405,7 @@ describe("the setting", () => {
   });
 });
 
-const viewOptions = () => screen.getByRole("button", { name: /View options/ });
-const otherModeKey = (hide: boolean) =>
-  [...repoKeys.diff("/repo", "x", false), false, hide] as const;
+const viewOptions = () => screen.getByRole("button", { name: /Diff options/ });
 
 describe("a flip served from the cache (Changes)", () => {
   const sink = (container: HTMLElement) =>
@@ -826,9 +1463,11 @@ const WS_ONLY: FileDiff = {
 function ModeHarness({
   keep,
   answer,
+  stagingSide,
 }: {
   keep: boolean;
-  answer: (hide: boolean) => FileDiff;
+  answer: (hide: boolean) => FileDiff | Promise<FileDiff>;
+  stagingSide?: StagingSide;
 }) {
   const hide = useHideWhitespace();
   const diff = useQuery({
@@ -836,17 +1475,17 @@ function ModeHarness({
     queryFn: async () => answer(hide),
     placeholderData: keep ? (prev) => prev : undefined,
   });
-  return <DiffSurface filePath="x" diff={diff} />;
+  return <DiffSurface filePath="x" diff={diff} stagingSide={stagingSide} />;
 }
 
 async function flipFromGear(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "View options" }));
-  await user.click(await screen.findByRole("menuitemcheckbox"));
+  await user.click(await screen.findByRole("button", { name: "Diff options" }));
+  await user.click(await screen.findByRole("checkbox"));
 }
 
-describe("flipping on from the gear of a read-only host", () => {
+describe("flipping from the sheet of a read-only host", () => {
   for (const seeded of [false, true])
-    it(`into a whitespace-only file lands on its arm (${seeded ? "pre-seeded" : "cold"})`, async () => {
+    it(`on into a whitespace-only file keeps the sheet open on its arm (${seeded ? "pre-seeded" : "cold"})`, async () => {
       const user = userEvent.setup();
       const client = newClient(false);
       if (seeded) client.setQueryData(["mode-surface", true], WS_ONLY);
@@ -857,20 +1496,67 @@ describe("flipping on from the gear of a read-only host", () => {
         />,
         { wrapper: wrap(client) },
       );
+      const gear = await screen.findByRole("button", { name: "Diff options" });
       await flipFromGear(user);
-      const message = await screen.findByText(WHITESPACE_ONLY_MESSAGE);
-      expect(screen.queryByRole("button", { name: /View options/ })).toBeNull();
-      await waitFor(() =>
-        expect(document.activeElement).not.toBe(document.body),
-      );
-      const active = document.activeElement as HTMLElement;
-      expect(active.getAttribute("tabindex")).toBe("-1");
-      expect(active.contains(message)).toBe(true);
+      expect(await screen.findByText(WHITESPACE_ONLY_MESSAGE)).toBeTruthy();
+      expect(
+        screen.getByRole("button", {
+          name: "Diff options, whitespace changes hidden",
+        }),
+      ).toBe(gear);
+      const box = sheetBox();
+      expect(box.getAttribute("aria-checked")).toBe("true");
+      expect(document.activeElement).toBe(box);
     });
 
-  it("without a placeholder, the toolbar's round trip keeps focus in the pane", async () => {
+  it("off from the whitespace-only arm keeps the sheet through the blank arm", async () => {
     const user = userEvent.setup();
-    const { container } = render(
+    let release: () => void = () => undefined;
+    const plain = new Promise<void>((r) => {
+      release = r;
+    });
+    const client = newClient(true);
+    render(
+      <ModeHarness
+        keep
+        answer={(hide) =>
+          hide ? WS_ONLY : plain.then(() => stamped(diffOf(TEXT), false))
+        }
+      />,
+      { wrapper: wrap(client) },
+    );
+    await screen.findByText(WHITESPACE_ONLY_MESSAGE);
+    const gear = screen.getByRole("button", {
+      name: "Diff options, whitespace changes hidden",
+    });
+    await user.click(gear);
+    const box = await screen.findByRole("checkbox");
+    await user.click(box);
+    await waitFor(() =>
+      expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(WHITESPACE_ONLY_MESSAGE)).toBeNull(),
+    );
+    expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Diff options" })).toBe(gear);
+    expect(sheetBox()).toBe(box);
+    expect(document.activeElement).toBe(box);
+    // The stale answer blanks the body until the plain one lands.
+    act(() => release());
+    await waitFor(() =>
+      expect(document.querySelector(".overflow-auto")).not.toBeNull(),
+    );
+    expect(screen.getByRole("button", { name: "Diff options" })).toBe(gear);
+    expect(document.activeElement).toBe(box);
+  });
+
+  // A host whose read has no placeholder (the Changes fallback is one) shows
+  // the limit of the mount continuity: a pending read takes the toolbar, and
+  // the sheet with it, so the flip still lands but the sheet has closed.
+  it("without a placeholder, the cold read closes the sheet and the flip lands", async () => {
+    const user = userEvent.setup();
+    render(
       <ModeHarness
         keep={false}
         answer={(hide) => stamped(diffOf(TEXT), hide)}
@@ -879,10 +1565,10 @@ describe("flipping on from the gear of a read-only host", () => {
     );
     await flipFromGear(user);
     await screen.findByRole("button", {
-      name: "View options, whitespace changes hidden",
+      name: "Diff options, whitespace changes hidden",
     });
-    await waitFor(() => expect(document.activeElement).not.toBe(document.body));
-    expect(container.contains(document.activeElement)).toBe(true);
+    expect(flips()).toEqual([{ diffHideWhitespace: true }]);
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });
 
@@ -932,7 +1618,7 @@ describe("a submodule row with the mode on", () => {
     });
     render(<DiffViewer repoPath="/repo" />, { wrapper: wrap(client) });
     expect(await screen.findByText("Untracked files inside")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /View options/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Diff options/ })).toBeNull();
     for (const copy of Object.values(WHITESPACE_STRIP_COPY))
       expect(screen.queryByText(copy)).toBeNull();
     expect(
@@ -1053,4 +1739,87 @@ describe("a mode change and the commit prefetch under the mode", () => {
           .some((q) => q.queryKey.includes("h") && q.queryKey.at(-1) === hide),
       ).toBe(true);
     });
+});
+
+describe("the layout action off a laid-out diff", () => {
+  it("is withheld on a read-only host's whitespace-only arm", async () => {
+    render(<ModeHarness keep answer={() => WS_ONLY} />, {
+      wrapper: wrap(newClient(true)),
+    });
+    await screen.findByText(WHITESPACE_ONLY_MESSAGE);
+    expect(dispatchAction("toggle-diff-view-mode")).toBe(false);
+    expect(modeWrites()).toEqual([]);
+  });
+
+  it("is withheld on the Changes fallback's whitespace-only arm", async () => {
+    changes(true, (iw) => diffOf(iw ? "" : TEXT));
+    await screen.findByText(WHITESPACE_ONLY_MESSAGE);
+    expect(dispatchAction("toggle-diff-view-mode")).toBe(false);
+    expect(modeWrites()).toEqual([]);
+  });
+
+  it("the Changes text fallback's DiffContent registration answers the palette", async () => {
+    changes(false, () => ({
+      ...stamped(diffOf(TEXT), false),
+      isTruncated: true,
+    }));
+    await gearNamed("Diff options");
+    act(() => void dispatchAction("toggle-diff-view-mode"));
+    await waitFor(() => expect(modeWrites()).toEqual(["split"]));
+    await waitFor(() => expect(stored.diffViewMode).toBe("split"));
+    expect(modeWrites()).toEqual(["split"]);
+  });
+});
+
+describe("an agent transcript's inline diff", () => {
+  /** A whitespace-only edit step, opened, with the mode on. */
+  async function openStep(user: ReturnType<typeof userEvent.setup>) {
+    vi.mocked(gitSessionFileDiff).mockImplementation(
+      async (...args: unknown[]) => diffOf(args.at(-1) === true ? "" : TEXT),
+    );
+    render(
+      <AgentTranscript
+        segments={[{ type: "tool", tool: "edit", target: "/repo/x" }]}
+        baseDir="/repo"
+        editDiffBase="b"
+      />,
+      { wrapper: wrap(newClient(true)) },
+    );
+    await user.click(screen.getByRole("button", { expanded: false }));
+    return screen.findByRole("button", { name: "Show whitespace" });
+  }
+
+  it("Show whitespace refuses while a composer on a whitespace diff is open", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const show = await openStep(user);
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", "whitespace");
+    document.body.append(composer);
+    try {
+      await user.click(show);
+      expect(info).toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+      expect(flips()).toEqual([]);
+    } finally {
+      composer.remove();
+    }
+  });
+
+  it("Show whitespace flips past a composer on a PR's fixed patch", async () => {
+    const user = userEvent.setup();
+    const info = vi.spyOn(toast, "info");
+    const show = await openStep(user);
+    const composer = document.createElement("div");
+    composer.setAttribute("data-diff-line-widget", "layout");
+    document.body.append(composer);
+    try {
+      await user.click(show);
+      await waitFor(() =>
+        expect(flips()).toEqual([{ diffHideWhitespace: false }]),
+      );
+      expect(info).not.toHaveBeenCalledWith(WHITESPACE_COMPOSER_HELD);
+    } finally {
+      composer.remove();
+    }
+  });
 });

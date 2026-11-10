@@ -12,6 +12,7 @@ import {
 } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { type ComponentType, type ReactNode, useState } from "react";
+import { toast } from "sonner";
 import { Markdown } from "@/components/markdown/markdown";
 import { PathText } from "@/components/path-text";
 import {
@@ -28,7 +29,9 @@ import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import {
   SHOW_WHITESPACE_LABEL,
+  WHITESPACE_COMPOSER_HELD,
   WHITESPACE_ONLY_MESSAGE,
+  whitespaceComposerOpen,
 } from "@/features/diff/whitespace-mode";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
 import { presentError } from "@/lib/error-summary";
@@ -287,6 +290,10 @@ function InlineDiff({
         <button
           type="button"
           onClick={(e) => {
+            if (whitespaceComposerOpen()) {
+              toast.info(WHITESPACE_COMPOSER_HELD);
+              return;
+            }
             // It unmounts with the reload, so the host every arm keeps takes
             // focus first.
             const host =

@@ -53,7 +53,7 @@ import {
 import { useWalkSelfHeal } from "@/features/repository/use-walk-self-heal";
 import { useOpenSubmoduleAsRepo } from "@/features/repository/useOpenSubmoduleAsRepo";
 import { clipTitleFromText } from "@/lib/clip-title";
-import type { SelectedLine } from "@/lib/git/api";
+import type { DiscardLine, SelectedLine } from "@/lib/git/api";
 import {
   buildHunkPatch,
   type DiffHunk,
@@ -61,6 +61,7 @@ import {
   parseHunks,
 } from "@/lib/git/hunks";
 import {
+  fileDiffQueryOptions,
   repoKeys,
   useApplyPartial,
   useApplyPatch,
@@ -106,9 +107,9 @@ import {
   createDiffFile,
   DiffCapFooter,
   type DiffContentRevs,
-  DiffModeToggle,
+  DiffOptionsSheet,
   DiffSurface,
-  DiffViewOptionsMenu,
+  useDiffViewMode,
   useFileContent,
   useModeLineAnchor,
   useShikiRouting,
@@ -118,13 +119,18 @@ import { useDiffPaneHold, useReportPaneSettled } from "./diff-pane-hold";
 import {
   answeredSince,
   answerMark,
+  discardConfirmStale,
   filePaneView,
+  type HeldDiffCause,
   HOLD_BOUND_MS,
+  heldDiffCause,
   type PaneView,
   type StatusWait,
   stagingKeep,
   statusBehind,
   statusWaitFor,
+  type WhitespaceFlip,
+  whitespaceFlipHeld,
 } from "./diff-pane-slots";
 import { restingDiffMessage } from "./diff-resting-message";
 import {
@@ -162,11 +168,15 @@ import {
   useHiddenTriggerFocus,
 } from "./use-hidden-trigger-focus";
 import {
+  LAYOUT_COMPOSER_HELD,
+  lineComposerOpen,
   SHOW_WHITESPACE_LABEL,
   WHITESPACE_ANNOUNCEMENT,
+  WHITESPACE_COMPOSER_HELD,
   WHITESPACE_HUNK_REASON,
   WHITESPACE_REFUSAL,
   WHITESPACE_STRIP_COPY,
+  whitespaceComposerOpen,
   whitespaceWritesOff,
 } from "./whitespace-mode";
 
@@ -376,6 +386,14 @@ const STALE_HUNK_ACTION: Record<HunkActionKind, string> = {
  *  displayed diff still trails the text it was given. */
 const UPDATING_DIFF_REASON = "Updating the diff…";
 
+/** The held controls' reason per `heldDiffCause`. Reselecting the file or
+ *  refocusing the window re-reads an errored diff. */
+const HELD_DIFF_REASON: Record<HeldDiffCause, string> = {
+  updating: UPDATING_DIFF_REASON,
+  "refresh-failed":
+    "Couldn't refresh the diff. Reselect the file or refocus the window to retry.",
+};
+
 /** What an unstaged-side Discard puts back, read from live status when its
  *  confirm opens: the worktree reverts to the index copy, which is the staged
  *  version once anything is staged and the last commit otherwise. */
@@ -558,7 +576,17 @@ function WorkingTreeDiff({
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const hideWhitespace = useHideWhitespace();
-  const setHideWhitespace = useSetHideWhitespace();
+  const setHideWhitespaceRaw = useSetHideWhitespace();
+  // Every whitespace flip this pane owns goes through here: an open line
+  // composer on a diff the flip re-reads, a hidden tab's included, would lose
+  // its text.
+  function flipWhitespace(next: boolean) {
+    if (whitespaceComposerOpen()) {
+      toast.info(WHITESPACE_COMPOSER_HELD);
+      return;
+    }
+    setHideWhitespaceRaw(next);
+  }
   const isDark = useIsDark();
   // Split needs a legible column count per side; under it this pane renders
   // unified without ever writing the preference back (`null` = not yet
@@ -712,6 +740,29 @@ function WorkingTreeDiff({
     );
   const refreshing =
     write !== null && (settled === null || diffBehind || statusWaiting);
+  // An effective whitespace flip can land the read on an answer cached before
+  // it, so writes hold until the diff has new data (`whitespaceFlipHeld`).
+  // Captured before paint, so the flip's first frame never shows them live.
+  const [wsFlip, setWsFlip] = useState<WhitespaceFlip | null>(null);
+  const flipSeenRef = useRef(hideWhitespace);
+  useLayoutEffect(() => {
+    if (flipSeenRef.current === hideWhitespace) return;
+    flipSeenRef.current = hideWhitespace;
+    const entries = queryClient.getQueryCache().findAll({
+      queryKey: repoKeys.diff(repoPath, file.path, file.staged),
+      exact: false,
+    });
+    setWsFlip({
+      stamps: new Set(entries.map((q) => q.state.dataUpdatedAt)),
+      marks: new Set(entries.map((q) => answerMark(q.state))),
+    });
+  }, [hideWhitespace, queryClient, repoPath, file.path, file.staged]);
+  const flipHeld = whitespaceFlipHeld(wsFlip, diff);
+  if (wsFlip !== null && !flipHeld) setWsFlip(null);
+  // Fetched once more below while nothing has answered since the flip; an
+  // error answer ends the retry but not the hold.
+  const flipUnanswered =
+    flipHeld && wsFlip !== null && !answeredSince(diff, wsFlip.marks);
   const onSide = file.staged
     ? liveEntry?.staged != null
     : liveEntry?.unstaged != null;
@@ -730,11 +781,13 @@ function WorkingTreeDiff({
   const refetchDiff = diff.refetch;
   const refetchStatus = status.refetch;
   useEffect(() => {
-    if (diffBehind && diffIdle) void refetchDiff({ cancelRefetch: false });
+    if ((diffBehind || flipUnanswered) && diffIdle)
+      void refetchDiff({ cancelRefetch: false });
     if (statusWaiting && statusIdle)
       void refetchStatus({ cancelRefetch: false });
   }, [
     diffBehind,
+    flipUnanswered,
     diffIdle,
     statusWaiting,
     statusIdle,
@@ -830,12 +883,22 @@ function WorkingTreeDiff({
   }, [leftSide, emptied]);
   // `busy` is computed above the early return because the hotkey
   // registrations below run unconditionally and read it.
-  const busy =
+  const writeHeld =
     applyPatch.isPending ||
     applyPartial.isPending ||
     discardUntracked.isPending ||
     refreshing ||
     kept;
+  const busy = writeHeld || flipHeld;
+  const busyReason =
+    HELD_DIFF_REASON[
+      heldDiffCause({
+        flipHeld,
+        answeredSinceFlip: flipHeld && !flipUnanswered,
+        fetching: !diffIdle,
+        otherHold: writeHeld,
+      })
+    ];
   // A selection is valid only against the diff text it was dragged against —
   // stale by text means every consumer sees no selection at the same instant.
   const selection =
@@ -964,11 +1027,16 @@ function WorkingTreeDiff({
   // Discard lines from an untracked (new) file: remove just those new-side line
   // numbers from the file. A new file is all additions, so there's nothing to
   // reverse-apply (reverse-applying its patch would delete the whole file).
+  // Each line carries the text it showed, which the backend checks first.
   function discardLines(
-    lines: number[],
+    lines: DiscardLine[] | null,
     focus: HunkFocus | null,
     rescue: SelectionPress | null = null,
   ) {
+    if (lines === null) {
+      toast.info(STALE_HUNK_ACTION.discard);
+      return;
+    }
     if (lines.length === 0) return;
     const path = file.path;
     void runWrite(
@@ -1050,7 +1118,7 @@ function WorkingTreeDiff({
         restores: discardRestores,
         forText,
         run: untracked
-          ? () => discardLines(hunkAddedNewLines(hunk), focus)
+          ? () => discardLines(hunkAddedLines(hunk), focus)
           : () => applyHunk(hunk, { cached: false, reverse: true }, focus),
       });
     } else {
@@ -1134,8 +1202,30 @@ function WorkingTreeDiff({
   // shown, the fallback DiffSurface answers for itself.
   useHotkeyAction(
     "toggle-hide-whitespace",
-    () => setHideWhitespace(!hideWhitespace),
+    () => flipWhitespace(!hideWhitespace),
     interactive && shownView !== null && discard === null,
+  );
+  // This toolbar's own registration too, offered only where its sheet's Diff
+  // display section takes a pick (never under the narrow pane's override).
+  // The layout is app-wide as well, so an open composer refuses it the same way.
+  const diffViewMode = useDiffViewMode(narrowPane);
+  useHotkeyAction(
+    "toggle-diff-view-mode",
+    () => {
+      if (lineComposerOpen()) {
+        toast.info(LAYOUT_COMPOSER_HELD);
+        return;
+      }
+      diffViewMode.write(
+        diffViewMode.effective === "unified" ? "split" : "unified",
+      );
+    },
+    interactive &&
+      shownView !== null &&
+      selection === null &&
+      discard === null &&
+      !previewOn &&
+      !narrowPane,
   );
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
@@ -1282,7 +1372,7 @@ function WorkingTreeDiff({
                   variant="secondary"
                   size="xs"
                   disabled={busy}
-                  reason={UPDATING_DIFF_REASON}
+                  reason={busyReason}
                   title={selectionTitle}
                   aria-keyshortcuts={selectionKeyshortcuts}
                   onClick={(e) =>
@@ -1300,7 +1390,7 @@ function WorkingTreeDiff({
                     variant="secondary"
                     size="xs"
                     disabled={busy}
-                    reason={UPDATING_DIFF_REASON}
+                    reason={busyReason}
                     title={selectionTitle}
                     aria-keyshortcuts={selectionKeyshortcuts}
                     onClick={(e) =>
@@ -1317,23 +1407,26 @@ function WorkingTreeDiff({
                     size="xs"
                     className="text-destructive"
                     disabled={busy}
-                    reason={UPDATING_DIFF_REASON}
+                    reason={busyReason}
                     onClick={(e) => {
                       // Armed only when the confirm runs, so Cancel arms none.
                       const press = selectionPress(e.currentTarget, true);
+                      // Texts from the parse the selection was made over, read
+                      // at the press like its numbers.
+                      const lines = untracked
+                        ? untrackedDiscardLines(
+                            parsed?.hunks ?? [],
+                            selection
+                              .filter((s) => s.side === "new")
+                              .map((s) => s.line),
+                          )
+                        : null;
                       setDiscard({
                         label: `${selection.length} selected ${selection.length === 1 ? "line" : "lines"}`,
                         restores: discardRestores,
                         forText: diff.data?.text ?? "",
                         run: untracked
-                          ? () =>
-                              discardLines(
-                                selection
-                                  .filter((s) => s.side === "new")
-                                  .map((s) => s.line),
-                                null,
-                                press,
-                              )
+                          ? () => discardLines(lines, null, press)
                           : () =>
                               applySelection(
                                 { cached: false, reverse: true },
@@ -1350,7 +1443,7 @@ function WorkingTreeDiff({
                 variant="ghost"
                 size="xs"
                 disabled={busy}
-                reason={UPDATING_DIFF_REASON}
+                reason={busyReason}
                 onClick={(e) => {
                   selectionFocusRef.current = {
                     ...selectionPress(e.currentTarget, false),
@@ -1367,9 +1460,9 @@ function WorkingTreeDiff({
               {canPreview && (
                 <MarkdownViewToggle view={mdView} onChange={setMdView} />
               )}
-              {/* The picker and Unified/Split configure the raw diff, so they
-                  leave the cluster while Preview is up — the same swap this
-                  row already does for the selection actions. */}
+              {/* The picker and the Diff options sheet configure the raw diff,
+                  so they leave the cluster while Preview is up — the same swap
+                  this row already does for the selection actions. */}
               {!previewOn && (
                 <>
                   {/* Same treatment as the read-only surface's toolbar: the
@@ -1393,8 +1486,25 @@ function WorkingTreeDiff({
                       }}
                     />
                   </span>
-                  <DiffViewOptionsMenu onToggle={setHideWhitespace} />
-                  <DiffModeToggle splitDisabled={narrowPane} />
+                  <DiffOptionsSheet
+                    splitDisabled={narrowPane}
+                    stagingSide={stagingSide}
+                    whitespace={{
+                      onToggle: flipWhitespace,
+                      // A flip whose other-mode answer is cold swaps this arm
+                      // for the fallback while it loads, closing the sheet;
+                      // warming it on open keeps the sheet up. prefetchQuery
+                      // never rejects, so a failed warm-up stays silent.
+                      onOpen: () =>
+                        void queryClient.prefetchQuery(
+                          fileDiffQueryOptions(
+                            repoPath,
+                            { ...file, untracked },
+                            !hideWhitespace,
+                          ),
+                        ),
+                    }}
+                  />
                 </>
               )}
             </>
@@ -1413,7 +1523,7 @@ function WorkingTreeDiff({
           action={
             <button
               type="button"
-              onClick={() => setHideWhitespace(false)}
+              onClick={() => flipWhitespace(false)}
               className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
             >
               {SHOW_WHITESPACE_LABEL}
@@ -1498,6 +1608,7 @@ function WorkingTreeDiff({
               hunks={shownView.hunks}
               staged={file.staged}
               busy={busy}
+              busyReason={busyReason}
               frozen={kept}
               whitespaceOff={whitespaceOff}
               selection={selection}
@@ -1549,11 +1660,18 @@ function WorkingTreeDiff({
             <DisabledReasonButton
               variant="destructive"
               disabled={busy}
-              reason={UPDATING_DIFF_REASON}
+              reason={busyReason}
               onKeyDown={swallowRepeatedActivation}
               onClick={() => {
                 setConfirmClosing(true);
-                discard?.run();
+                // The close effect drops the confirm only once the new text
+                // has committed; a press before then is refused here.
+                if (
+                  discard !== null &&
+                  discardConfirmStale(discard.forText, liveDiffRef.current)
+                )
+                  toast.info(STALE_HUNK_ACTION.discard);
+                else discard?.run();
                 setDiscard(null);
               }}
             >
@@ -1820,11 +1938,38 @@ function hunkChangedLines(hunk: DiffHunk): {
   return { added, deleted };
 }
 
-/** The new-side line numbers of a hunk's added (`+`) lines. Used to discard a
- *  new file's lines by number; for an all-additions (untracked) hunk this is
- *  every body line. */
-function hunkAddedNewLines(hunk: DiffHunk): number[] {
-  return hunkChangedLines(hunk).added;
+/** A hunk's added (`+`) lines, each with its new-side number and text. A new
+ *  file's line discard sends both, so the backend can refuse a file whose
+ *  lines moved since this diff was read; for an untracked hunk this is every
+ *  body line. */
+function hunkAddedLines(hunk: DiffHunk): DiscardLine[] {
+  let newNum = hunkStart(hunk, "new");
+  const added: DiscardLine[] = [];
+  for (const line of hunk.text.split("\n").slice(1)) {
+    if (line === "" || line.startsWith("\\")) continue; // split artifact / "\ No newline"
+    if (line.startsWith("+"))
+      added.push({ line: newNum++, text: line.slice(1) });
+    else if (!line.startsWith("-")) newNum++;
+  }
+  return added;
+}
+
+/** The given new-side line numbers with their texts from `hunks`, or null when
+ *  one isn't an added line there (its text is unknown, so it can't be checked). */
+function untrackedDiscardLines(
+  hunks: readonly DiffHunk[],
+  numbers: readonly number[],
+): DiscardLine[] | null {
+  const texts = new Map(
+    hunks.flatMap(hunkAddedLines).map((l) => [l.line, l.text] as const),
+  );
+  const lines: DiscardLine[] = [];
+  for (const line of numbers) {
+    const text = texts.get(line);
+    if (text === undefined) return null;
+    lines.push({ line, text });
+  }
+  return lines;
 }
 
 /** The selectable line numbers of a whole diff, by side — the `-` lines' old
@@ -1852,6 +1997,8 @@ interface HunkActionProps {
   staged: boolean;
   /** A press's own hold: a write from this pane in flight or refreshing. */
   busy: boolean;
+  /** Why `busy` holds (HELD_DIFF_REASON). */
+  busyReason: string;
   /** The displayed diff trails the text the pane was given. */
   trailing: boolean;
   /** Whitespace is hidden: every write is off, with its own reason. */
@@ -1873,14 +2020,16 @@ function HunkActionButtons({
   index,
   staged,
   busy,
+  busyReason,
   trailing,
   whitespaceOff,
   onHunkAction,
 }: HunkActionProps) {
   const rangeId = useId();
   const held = busy || trailing || whitespaceOff;
+  const heldReason = busy ? busyReason : UPDATING_DIFF_REASON;
   const reasonFor = (kind: HunkActionKind) =>
-    whitespaceOff ? WHITESPACE_HUNK_REASON[kind] : UPDATING_DIFF_REASON;
+    whitespaceOff ? WHITESPACE_HUNK_REASON[kind] : heldReason;
   // A refresh's trail delays the held look, so a fast one never blinks it; the
   // vendored Button transitions everything with no reduced-motion arm, hence
   // the explicit duration. Accepted: ARIA_DISABLED_CLASS drops pointer events
@@ -1996,6 +2145,7 @@ function StagingDiffView({
   hunks,
   staged,
   busy,
+  busyReason,
   frozen,
   whitespaceOff,
   selection,
@@ -2019,6 +2169,8 @@ function StagingDiffView({
   hunks: DiffHunk[];
   staged: boolean;
   busy: boolean;
+  /** Why `busy` holds (HELD_DIFF_REASON). */
+  busyReason: string;
   /** The parent is keeping this view up past its data: never rebuild it. */
   frozen: boolean;
   /** Whitespace is hidden: no hunk or line write and no line selection. */
@@ -2384,6 +2536,7 @@ function StagingDiffView({
               index={data.hunk}
               staged={staged}
               busy={busy}
+              busyReason={busyReason}
               trailing={trailing}
               whitespaceOff={whitespaceOff}
               onHunkAction={onDisplayedHunkAction}
@@ -2398,6 +2551,7 @@ function StagingDiffView({
       split,
       staged,
       busy,
+      busyReason,
       trailing,
       whitespaceOff,
       onDisplayedHunkAction,
@@ -2948,6 +3102,7 @@ function StagingDiffView({
               index={0}
               staged={staged}
               busy={busy}
+              busyReason={busyReason}
               trailing={trailing}
               whitespaceOff={whitespaceOff}
               onHunkAction={onDisplayedHunkAction}
@@ -2986,6 +3141,7 @@ function StagingDiffView({
               index={i}
               staged={staged}
               busy={busy}
+              busyReason={busyReason}
               trailing={trailing}
               whitespaceOff={whitespaceOff}
               onHunkAction={onDisplayedHunkAction}
@@ -3003,7 +3159,7 @@ function StagingDiffView({
         onShowFull={onShowFullClick}
         onButtonKeyDown={swallowRepeatedActivation}
         held={held || contentPending}
-        heldReason={UPDATING_DIFF_REASON}
+        heldReason={busy ? busyReason : UPDATING_DIFF_REASON}
         buttonRef={showFullRef}
       />
     </div>

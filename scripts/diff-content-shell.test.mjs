@@ -502,16 +502,16 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     "the held record has exactly two writes: the cleanup's true and the gate's reset",
   );
 
-  // The six nodes that can hold focus and leave on a watched flip: the text
-  // and typechange scrollers, the Preview body, both toolbar clusters, and the
-  // notice. Each scroller's capture rides the merged ref, shared with the line
-  // anchor.
+  // The seven nodes that can hold focus and leave on a watched flip: the text
+  // and typechange scrollers, the Preview body, both toolbar clusters, the
+  // options sheet's gear, and the notice. Each scroller's capture rides the
+  // merged ref, shared with the line anchor.
   need(
     codeOccurrences(surfaceRaw, masked, "ref={captureHeldRef}", body).length ===
-      4 &&
+      5 &&
       codeOccurrences(surfaceRaw, masked, "ref={scrollerCaptureRef}", body)
         .length === 2,
-    "six capture nodes carry captureHeldRef, the scrollers through their merged ref",
+    "seven capture nodes carry captureHeldRef, the scrollers through their merged ref",
   );
   // Identity-stable, so a re-render never runs the capture's cleanup; its own
   // cleanup runs the capture's before the scroller stops being readable.
@@ -576,13 +576,21 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     ],
     [
       // The lazy run stops at the picker wrapper's own close, so the capture
-      // span wraps the picker, the view-options gear and Unified/Split, in
-      // that order (the gear must be inside it for the whitespace-only rescue).
+      // span wraps the picker alone.
       captureAt(
-        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*\{whitespaceControl\s*&&\s*\(?\s*<DiffViewOptionsMenu\b[^>]*\/>\s*\)?\s*\}\s*<DiffModeToggle\b[^>]*\/>\s*<\/span>`,
+        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*<\/span>`,
         "<span",
       ),
-      "the language picker, the view-options gear and the mode toggle render inside a capture node, in that order",
+      "the language picker renders inside a capture node",
+    ],
+    [
+      // Its own node, mounted through every arm a whitespace flip passes
+      // through, so an open sheet survives the flip's settle.
+      captureAt(
+        String.raw`\{!previewOn\s*&&\s*\(showsToolbar\s*\|\|\s*whitespaceOnly\s*\|\|\s*modeStale\)\s*&&\s*\(\s*${CONTENTS}(?<child><DiffOptionsSheet\b)`,
+        "<DiffOptionsSheet",
+      ),
+      "the options sheet renders inside its own capture node, mounted across the whitespace arms",
     ],
     [
       captureAt(
@@ -951,7 +959,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<div className="min-h-0 flex-1 overflow-auto">',
     ),
     image,
-    "six capture nodes carry captureHeldRef",
+    "seven capture nodes carry captureHeldRef",
   );
   // The merged ref dropping the capture's cleanup, or its stable identity.
   caught(
@@ -997,7 +1005,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<span className="contents" ref={captureHeldRef}>\n            <MarkdownDocPreview',
     ),
     image,
-    "six capture nodes carry captureHeldRef",
+    "seven capture nodes carry captureHeldRef",
   );
   caught(
     swap(
@@ -1046,7 +1054,28 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<span aria-hidden ref={captureHeldRef} className="hidden shrink-0 @2xl/diff-pane:inline">',
     ),
     image,
-    "the language picker, the view-options gear and the mode toggle render inside a capture node, in that order",
+    "the language picker renders inside a capture node",
+  );
+  caught(
+    swap(
+      unref(
+        surface,
+        '<span className="contents" ref={captureHeldRef}>\n            <DiffOptionsSheet',
+      ),
+      '<span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">',
+      '<span aria-hidden ref={captureHeldRef} className="hidden shrink-0 @2xl/diff-pane:inline">',
+    ),
+    image,
+    "the options sheet renders inside its own capture node, mounted across the whitespace arms",
+  );
+  caught(
+    swap(
+      surface,
+      "{!previewOn && (showsToolbar || whitespaceOnly || modeStale) && (",
+      "{!previewOn && (showsToolbar || whitespaceOnly) && (",
+    ),
+    image,
+    "the options sheet renders inside its own capture node, mounted across the whitespace arms",
   );
   // The record written from outside its two writers, by any right-hand side.
   caught(
@@ -1176,7 +1205,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<InfoNote ref={scrollerCaptureRef} className="shrink-0">',
     ),
     image,
-    "six capture nodes carry captureHeldRef",
+    "seven capture nodes carry captureHeldRef",
   );
   caught(
     swap(

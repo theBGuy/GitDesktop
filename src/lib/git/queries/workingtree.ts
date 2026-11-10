@@ -1,4 +1,8 @@
-import { type QueryClient, useQuery } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  queryOptions,
+  useQuery,
+} from "@tanstack/react-query";
 import { usePanelActive } from "@/components/panel-portal";
 import { ignoreLines } from "@/lib/ai/ignore";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
@@ -70,12 +74,17 @@ const commitAftermathKeys = (repo: string) =>
     ...headMoveAftermathKeys(repo),
   ] as const;
 
-export function useFileDiff(
+type WorkingFile = { path: string; staged: boolean; untracked: boolean };
+
+/** The working-tree file diff read in one whitespace mode: shared by
+ *  {@link useFileDiff} and imperative prefetches, which inherit nothing from
+ *  the hook (a prefetch without `networkMode` would park offline). */
+export function fileDiffQueryOptions(
   repo: string,
-  file: { path: string; staged: boolean; untracked: boolean } | null,
+  file: WorkingFile | null,
+  hide: boolean,
 ) {
-  const hide = useHideWhitespace();
-  return useQuery({
+  return queryOptions({
     // `untracked` is in the key so the untracked→tracked flip (after staging part
     // of a new file) subscribes to a fresh query — the `--no-index` "all new"
     // diff and the normal remainder diff must not share a cache entry, or an
@@ -101,6 +110,11 @@ export function useFileDiff(
     // the same holds for every `networkMode` in this file.
     networkMode: "always",
   });
+}
+
+export function useFileDiff(repo: string, file: WorkingFile | null) {
+  const hide = useHideWhitespace();
+  return useQuery(fileDiffQueryOptions(repo, file, hide));
 }
 
 /**
@@ -461,7 +475,7 @@ export function useApplyPartial(repo: string) {
 export function useDiscardUntrackedLines(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { path: string; lines: number[] }) =>
+    (args: { path: string; lines: api.DiscardLine[] }) =>
       api.gitDiscardUntrackedLines(repo, args.path, args.lines),
     {
       invalidate: workingTreeKeys(repo),

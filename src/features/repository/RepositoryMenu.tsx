@@ -26,7 +26,14 @@ import {
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { lazy, Suspense, useEffect, useEffectEvent, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useEffectEvent,
+  useId,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
@@ -165,6 +172,7 @@ const STAR_FAILED_ITEM_REASON = "couldn't check";
 
 export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
+  const forkIntentLabelId = useId();
   const settings = useSettings();
   // Automations are paused while AI features are hidden, so every way into the
   // per-repo grid goes with them — an editable rule that can't run misleads.
@@ -994,8 +1002,11 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <p className="text-xs font-medium">I'll be using this fork…</p>
+            <p id={forkIntentLabelId} className="text-xs font-medium">
+              I'll be using this fork…
+            </p>
             <RadioGroup
+              aria-labelledby={forkIntentLabelId}
               value={forkIntent}
               onValueChange={(v) => setForkIntent(v as "contribute" | "own")}
             >

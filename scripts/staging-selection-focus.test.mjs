@@ -199,19 +199,29 @@ export function selectionFocusViolations(raw) {
     "the stage hotkey, Unstage, Stage and tracked Discard each arm",
   );
   const barDiscards = calls(src, "discardLines", pane.start, pane.end).filter(
-    (c) => c.text.startsWith("discardLines(selection"),
+    (c) => c.text.startsWith("discardLines(lines"),
   );
   need(
     barDiscards.length === 1 && barDiscards[0].text.endsWith(",null,press)"),
     "the untracked Discard arms",
   );
   const confirm = calls(src, "setDiscard", pane.start, pane.end).find((c) =>
-    c.text.includes("discardLines(selection"),
+    c.text.includes("discardLines(lines"),
   );
+  // The press is recorded first; only the lines read at the same press (with
+  // their comment) may sit between it and the confirm.
+  const pressAt =
+    confirm === undefined
+      ? -1
+      : raw.lastIndexOf(
+          "const press = selectionPress(e.currentTarget, true);",
+          confirm.start,
+        );
   need(
     confirm !== undefined &&
-      flat(raw.slice(confirm.start - 120, confirm.start)).endsWith(
-        "constpress=selectionPress(e.currentTarget,true);",
+      pressAt > confirm.start - 600 &&
+      /^constpress=selectionPress\(e\.currentTarget,true\);(?:\/\/.*?)?constlines=untracked\?untrackedDiscardLines\([^;]*\):null;$/.test(
+        flat(raw.slice(pressAt, confirm.start)),
       ),
     "the bar's Discard records its press, through the confirm, at open",
   );
@@ -418,8 +428,8 @@ test("selection focus: the bar's routes rescue focus to the pane sink", () => {
       CONFIRM,
     ],
     [
-      "                                null,\n                                press,",
-      "                                null,",
+      "discardLines(lines, null, press)",
+      "discardLines(lines, null)",
       UNTRACKED,
     ],
     ["settled: boolean };", "settled: boolean; tookOver: boolean };", NO_LATCH],

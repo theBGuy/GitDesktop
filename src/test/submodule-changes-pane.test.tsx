@@ -131,8 +131,14 @@ const NO_CHECKOUT_SENTENCE =
   "This submodule has no checkout on disk. Initialize it from Submodules in the repository menu.";
 const STAGE_LINE =
   /^(The next commit|Stage this row|Staging this row|Nothing to stage)/;
+/** Every line of the stage note: its first sentence matches STAGE_LINE and
+ *  the rest render as sibling `<p>`s in the same group, one per sentence. */
 const stageLines = () =>
-  screen.queryAllByText(STAGE_LINE).map((el) => el.textContent ?? "");
+  screen
+    .queryAllByText(STAGE_LINE)
+    .flatMap((el) =>
+      Array.from(el.parentElement?.children ?? [], (p) => p.textContent ?? ""),
+    );
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -380,7 +386,8 @@ describe("SubmoduleChangesPane sections and stage lines", () => {
     expect(await screen.findByText("Untracked files inside")).toBeTruthy();
     expect(screen.getByText("and 140 more")).toBeTruthy();
     expect(stageLines()).toEqual([
-      "Nothing to stage here yet: the submodule still points at the same commit. Open it to commit these files.",
+      "Nothing to stage here yet: the submodule still points at the same commit.",
+      "Open it to commit these files.",
     ]);
   });
 
@@ -448,7 +455,8 @@ describe("SubmoduleChangesPane sections and stage lines", () => {
     expect(await screen.findByText("Untracked files inside")).toBeTruthy();
     expect(screen.getByText("New commits · aaaaaaa → bbbbbbb")).toBeTruthy();
     expect(stageLines()).toEqual([
-      "Staging this row records only the commit the submodule points at. Open the submodule to stage and commit its files.",
+      "Staging this row records only the commit the submodule points at.",
+      "Open the submodule to stage and commit its files.",
     ]);
   });
 
@@ -463,7 +471,8 @@ describe("SubmoduleChangesPane sections and stage lines", () => {
     );
     expect(await screen.findByText("No commits yet")).toBeTruthy();
     expect(stageLines()).toEqual([
-      "Nothing to stage here yet: no commit is checked out in this submodule. Open it to commit this file.",
+      "Nothing to stage here yet: no commit is checked out in this submodule.",
+      "Open it to commit this file.",
     ]);
   });
 

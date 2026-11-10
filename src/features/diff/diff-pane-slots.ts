@@ -306,6 +306,55 @@ export const answeredSince = (
   before: ReadonlySet<string>,
 ) => q.isFetched && !before.has(answerMark(q));
 
+/** What every cache entry under the staging diff's prefix held at an effective
+ *  whitespace-mode flip: their data stamps, and their answer marks for the
+ *  refetch that keeps the hold from stranding. */
+export interface WhitespaceFlip {
+  stamps: ReadonlySet<number>;
+  marks: ReadonlySet<string>;
+}
+
+/** Whether the staging view's writes still hold after a whitespace flip: the
+ *  flip can land the read on an answer cached before it, so writes wait for
+ *  new DATA. An error answer keeps the hold (fail closed), unlike
+ *  `answeredSince`, so a failed refresh never re-enables writes over old text. */
+export function whitespaceFlipHeld(
+  flip: { stamps: ReadonlySet<number> } | null,
+  q: { dataUpdatedAt: number },
+): boolean {
+  return (
+    flip !== null && (q.dataUpdatedAt === 0 || flip.stamps.has(q.dataUpdatedAt))
+  );
+}
+
+/** Why the staging writes are held: a refresh under way, or one that failed. */
+export type HeldDiffCause = "updating" | "refresh-failed";
+
+/** Why the staging writes are held. A flip's hold outlives a failed refetch
+ *  (fail closed), so once the read has answered since the flip with nothing
+ *  new, nothing else holding and no fetch in flight, it says the refresh failed
+ *  rather than that one is under way. */
+export function heldDiffCause(o: {
+  flipHeld: boolean;
+  answeredSinceFlip: boolean;
+  fetching: boolean;
+  otherHold: boolean;
+}): HeldDiffCause {
+  return o.flipHeld && o.answeredSinceFlip && !o.fetching && !o.otherHold
+    ? "refresh-failed"
+    : "updating";
+}
+
+/** A Discard confirm's run is refused when the diff on hand no longer is the
+ *  text the confirm was raised against (or is gone): its lines or hunk were
+ *  taken from that text. */
+export function discardConfirmStale(
+  forText: string,
+  live: { text: string } | undefined,
+): boolean {
+  return live?.text !== forText;
+}
+
 /** Which status answer the post-write hold waits on. Every write to an
  *  untracked file waits (status re-keys its diff once part of it is staged).
  *  A tracked stage or unstage waits only once its fresh diff answers empty:

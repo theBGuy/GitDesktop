@@ -995,6 +995,14 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "toggle-diff-view-mode",
+    label: "Use unified or split diff",
+    category: "Changes",
+    // Palette-only: live only while a text diff's toolbar is on screen and the
+    // pane is wide enough for split.
+    defaultBinding: null,
+  },
+  {
     id: "open-changed-file",
     label: "Open changed file",
     category: "Changes",

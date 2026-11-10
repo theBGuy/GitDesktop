@@ -1,8 +1,8 @@
 // Pins the whitespace mode of the local diff views: `readViewDiff` and
 // `hasHunk` (src/lib/git/whitespace-diff.ts), the setting's heal arm, the copy
 // in src/features/diff/whitespace-mode.ts, and the wiring no jsdom test can
-// see: the fire-time belts, the palette registrations, the gear's place and
-// its write-after-close order, the per-hook placeholders, the line-selection
+// see: the fire-time belts, the palette registrations, the options sheet's
+// place in the staging toolbar, the per-hook placeholders, the line-selection
 // gates, the composer hold, the IPC key and the roster of view-diff fetches.
 // Every source pin takes text and has an in-memory mutation control; a pin that
 // cannot find its anchor fails, never skips.
@@ -187,6 +187,7 @@ test("every whitespace copy table is total and non-empty", () => {
   assert.match(mode.WHITESPACE_STRIP_COPY.staged, /can't be unstaged/);
   assert.match(mode.WHITESPACE_STRIP_COPY.unstaged, /staged or discarded/);
   assert.ok(mode.WHITESPACE_COMPOSER_HELD.length > 0);
+  assert.match(mode.LAYOUT_COMPOSER_HELD, /diff display/);
   assert.equal(
     mode.WHITESPACE_ONLY_MESSAGE,
     "Only whitespace changed in this file",
@@ -276,6 +277,91 @@ test("the fire-time belts refuse before any write", () => {
   );
 });
 
+// jsdom never lays out the staging view's rows, so neither the hunk buttons the
+// flip hold disables nor the Discard confirm they raise can be pressed there;
+// the predicates are tested in scripts/diff-pane-hold.test.mjs, the wiring here.
+const FLIP_HELD = "const flipHeld = whitespaceFlipHeld(wsFlip, diff);";
+const STALE_RUN = "discardConfirmStale(discard.forText, liveDiffRef.current)";
+
+function pinFlipHold(text) {
+  const held = once(text, FLIP_HELD, "flip hold");
+  const arm = once(text, "flipSeenRef.current = hideWhitespace;", "flip arm");
+  const capture = text.indexOf("setWsFlip({", arm);
+  if (capture < 0 || capture > held)
+    throw new Error("the flip is captured in the effect keyed on the setting");
+  // The capture effect's own deps: without the setting it never re-runs on a flip.
+  const depsAt = text.indexOf("}, [", capture);
+  const deps = text.slice(depsAt, text.indexOf("]);", depsAt));
+  if (depsAt < 0 || depsAt > held || !/[[,\s]hideWhitespace[,\s\]]/.test(deps))
+    throw new Error("the flip capture effect must key on hideWhitespace");
+  const busyAt = once(text, "  const busy = writeHeld || flipHeld;", "busy");
+  if (busyAt < held) throw new Error("busy must fold in the flip hold");
+  // Every control `busy` holds reads the cause-aware reason.
+  if (/disabled=\{busy\}\s*reason=\{UPDATING_DIFF_REASON\}/.test(text))
+    throw new Error("a busy hold names a fixed reason");
+  once(text, "HELD_DIFF_REASON[\n      heldDiffCause({", "the held reason");
+  once(text, "if ((diffBehind || flipUnanswered) && diffIdle)", "flip refetch");
+}
+
+function pinStaleDiscardRun(text) {
+  const check = once(text, STALE_RUN, "stale discard check");
+  const toast = text.indexOf("toast.info(STALE_HUNK_ACTION.discard);", check);
+  const run = once(text, "else discard?.run();", "the guarded run");
+  if (toast < 0 || toast > run || check > run)
+    throw new Error("the confirm checks its text before it runs");
+  if (text.split(".run()").length - 1 !== 1)
+    throw new Error("a Discard confirm runs only through the guarded call");
+}
+
+test("a whitespace flip holds the staging writes until new diff data", () => {
+  const text = source(VIEWER);
+  pinFlipHold(text);
+  red(
+    pinFlipHold,
+    swap(
+      text,
+      "const busy = writeHeld || flipHeld;",
+      "const busy = writeHeld;",
+    ),
+    "busy drops the hold",
+  );
+  red(
+    pinFlipHold,
+    text.replace("reason={busyReason}", () => "reason={UPDATING_DIFF_REASON}"),
+    "a held control's reason fixed",
+  );
+  red(
+    pinFlipHold,
+    swap(text, FLIP_HELD, "const flipHeld = false;"),
+    "the predicate unplugged",
+  );
+  red(
+    pinFlipHold,
+    swap(text, "(diffBehind || flipUnanswered) && diffIdle", "diffBehind"),
+    "the flip's refetch dropped",
+  );
+  red(
+    pinFlipHold,
+    swap(
+      text,
+      "}, [hideWhitespace, queryClient, repoPath, file.path, file.staged]);",
+      "}, [queryClient, repoPath, file.path, file.staged]);",
+    ),
+    "the capture effect no longer keys on the setting",
+  );
+});
+
+test("a Discard confirm refuses once the diff moved past its text", () => {
+  const text = source(VIEWER);
+  pinStaleDiscardRun(text);
+  red(pinStaleDiscardRun, swap(text, STALE_RUN, "false"), "check removed");
+  red(
+    pinStaleDiscardRun,
+    swap(text, "else discard?.run();", "discard?.run();"),
+    "the run escapes the check",
+  );
+});
+
 function pinRegistrations(files) {
   const re = /useHotkeyAction\(\s*"toggle-hide-whitespace"/g;
   const where = [];
@@ -292,6 +378,31 @@ function pinRegistrations(files) {
   const b = hotkeyEnabled(files.get(VIEWER), "toggle-hide-whitespace");
   for (const need of ["interactive", "shownView !== null", "discard === null"])
     if (!b.includes(need)) throw new Error(`WorkingTreeDiff's gate: ${need}`);
+}
+
+/** The layout action: exactly the two complementary registrations, plus the
+ *  gate arms no jsdom test reaches: both `interactive` arms (a held pane), and
+ *  the staging gate's selection and discard arms (jsdom never builds the
+ *  staging view's rows). */
+function pinModeRegistrations(files) {
+  const re = /useHotkeyAction\(\s*"toggle-diff-view-mode"/g;
+  const where = [];
+  for (const [rel, text] of files) {
+    const n = [...text.matchAll(re)].length;
+    for (let i = 0; i < n; i++) where.push(rel);
+  }
+  assert.deepEqual(where.sort(), [SURFACE, VIEWER].sort(), "registrations");
+  const a = hotkeyEnabled(files.get(SURFACE), "toggle-diff-view-mode");
+  if (!a.trimStart().startsWith("interactive &&"))
+    throw new Error("DiffContent's layout gate: interactive");
+  const b = hotkeyEnabled(files.get(VIEWER), "toggle-diff-view-mode");
+  for (const need of [
+    "interactive &&",
+    "selection === null",
+    "discard === null",
+  ])
+    if (!b.includes(need))
+      throw new Error(`WorkingTreeDiff's layout gate: ${need}`);
 }
 
 function srcFiles() {
@@ -330,8 +441,50 @@ test("the palette action registers twice, each under its own gate", () => {
   );
 });
 
+// Their toolbar (showsToolbar, shownView !== null), preview and narrow-pane
+// arms are exercised in src/test/hide-whitespace.test.tsx.
+test("the layout action registers twice", () => {
+  const files = srcFiles();
+  pinModeRegistrations(files);
+  const surface = files.get(SURFACE);
+  const a = hotkeyEnabled(surface, "toggle-diff-view-mode");
+  red(
+    pinModeRegistrations,
+    new Map(files).set(
+      SURFACE,
+      surface.replace(a, () => a.replace("interactive && ", "")),
+    ),
+    "interactive dropped from DiffContent's layout gate",
+  );
+  const viewer = files.get(VIEWER);
+  const b = hotkeyEnabled(viewer, "toggle-diff-view-mode");
+  for (const arm of [
+    "interactive &&",
+    "selection === null &&",
+    "discard === null &&",
+  ])
+    red(
+      pinModeRegistrations,
+      new Map(files).set(
+        VIEWER,
+        viewer.replace(b, () => b.replace(arm, "")),
+      ),
+      `${arm} dropped from WorkingTreeDiff's layout gate`,
+    );
+  red(
+    pinModeRegistrations,
+    new Map(files).set(
+      "src/features/diff/Extra.tsx",
+      'useHotkeyAction("toggle-diff-view-mode", () => {}, true);',
+    ),
+    "a third registration",
+  );
+});
+
 function pinStagingGear(text) {
-  const gear = once(text, "<DiffViewOptionsMenu", "staging gear");
+  const gear = once(text, "<DiffOptionsSheet", "staging sheet");
+  if (/<DiffModeToggle\b|<DiffViewOptionsMenu\b/.test(text))
+    throw new Error("the sheet replaces the old toolbar controls");
   const ternary = once(text, "{selection ? (");
   const block = text.indexOf("{!previewOn && (", ternary);
   if (block < 0) throw new Error("no Preview block after the selection arm");
@@ -339,15 +492,17 @@ function pinStagingGear(text) {
   const end = matchBrace(masked, block + "{!previewOn && ".length);
   const wrap = text.indexOf("ref={langWrapRef}", block);
   const wrapClose = text.indexOf("</span>", wrap);
-  const toggle = text.indexOf("<DiffModeToggle", block);
-  if (!(wrap > block && wrapClose < gear && gear < toggle && toggle < end))
-    throw new Error("the gear sits between the picker wrapper and the toggle");
+  if (!(wrap > block && wrapClose < gear && gear < end))
+    throw new Error("the sheet follows the picker wrapper, inside the block");
 }
 
-test("the staging toolbar's gear sits between the picker and Unified/Split", () => {
+test("the staging toolbar's sheet follows the picker", () => {
   const text = source(VIEWER);
   pinStagingGear(text);
-  const line = "<DiffViewOptionsMenu onToggle={setHideWhitespace} />";
+  // The whole element, through its own closing line.
+  const start = once(text, "<DiffOptionsSheet");
+  const close = "\n                  />";
+  const line = text.slice(start, text.indexOf(close, start) + close.length);
   const block = "{!previewOn && (";
   const above = swap(text, line, "");
   const idx = above.indexOf(block, above.indexOf("{selection ? ("));
@@ -361,88 +516,19 @@ test("the staging toolbar's gear sits between the picker and Unified/Split", () 
     swap(text, "{selection ? (\n", `{selection ? (\n${line}\n`),
     "a second gear in the selection arm",
   );
-});
-
-function pinMenuOrder(text) {
-  const body = bodyOf(text, "export function DiffViewOptionsMenu(");
-  const toggle = once(body, "onToggle(", "onToggle call");
-  const then = once(body, "waitClosed().then(");
-  const masked = maskNonCode(body, true);
-  const thenEnd = matchBrace(masked, then + "waitClosed().then".length);
-  if (!(toggle > then && toggle < thenEnd))
-    throw new Error("onToggle must run only once the close has settled");
-  once(body, "onOpenChangeComplete={onOpenChangeComplete}");
-  once(body, "useCloseSettled(open)");
-  if (
-    !/onCheckedChange=\{\(next\) => \{\s*if \(pending !== null\) return;/.test(
-      body,
-    )
-  )
-    throw new Error("onCheckedChange must refuse while a choice is pending");
-  if (
-    !/onOpenChange=\{\(next\) => \{\s*if \(next && pending !== null\) return;/.test(
-      body,
-    )
-  )
-    throw new Error("onOpenChange must refuse to reopen while pending");
-  // The item's close hands focus back to the trigger while its key is held, so
-  // the trigger refuses a repeat (Base UI's handler and the browser's click).
-  const trigger = once(body, "<DropdownMenuTrigger");
-  const head = body.slice(trigger, body.indexOf("render={", trigger));
-  if (
-    !/onKeyDown=\{\(e\) => \{[\s\S]*?if \(e\.repeat && \(e\.key === "Enter" \|\| e\.key === " "\)\) \{\s*e\.preventDefault\(\);\s*e\.preventBaseUIHandler\(\);\s*\}\s*\}\}/.test(
-      head,
-    )
-  )
-    throw new Error("the trigger must refuse an auto-repeat Enter or Space");
-}
-
-test("the gear writes only after its menu's close settles", () => {
-  const text = source(SURFACE);
-  pinMenuOrder(text);
   red(
-    pinMenuOrder,
-    swap(
-      text,
-      "setPending(next);\n            void waitClosed().then(() => {\n              onToggle(next);",
-      "setPending(next);\n            onToggle(next);\n            void waitClosed().then(() => {",
-    ),
-    "onToggle at the press",
-  );
-  red(
-    pinMenuOrder,
-    swap(
-      text,
-      "onCheckedChange={(next) => {\n            if (pending !== null) return;\n",
-      "onCheckedChange={(next) => {\n",
-    ),
-    "no pending return",
-  );
-  red(
-    pinMenuOrder,
-    text.replace(
-      /onOpenChange=\{\(next\) => \{\s*if \(next && pending !== null\) return;\s*setOpen\(next\);\s*\}\}/,
-      () => "onOpenChange={setOpen}",
-    ),
-    "bare onOpenChange",
-  );
-  const guard =
-    '          if (e.repeat && (e.key === "Enter" || e.key === " ")) {\n            e.preventDefault();\n            e.preventBaseUIHandler();\n          }\n';
-  red(pinMenuOrder, swap(text, guard, ""), "no trigger repeat guard");
-  red(
-    pinMenuOrder,
-    swap(text, guard, guard.replace("e.repeat && ", "")),
-    "a guard that refuses every press",
-  );
-  red(
-    pinMenuOrder,
-    swap(text, guard, guard.replace("            e.preventDefault();\n", "")),
-    "a guard that leaves the browser's click",
+    pinStagingGear,
+    swap(text, line, `${line}\n<DiffModeToggle splitDisabled={narrowPane} />`),
+    "the old Unified/Split toggle back in the toolbar",
   );
 });
 
 const HOOKS = [
-  ["src/lib/git/queries/workingtree.ts", "export function useFileDiff(", false],
+  [
+    "src/lib/git/queries/workingtree.ts",
+    "export function fileDiffQueryOptions(",
+    false,
+  ],
   [
     "src/lib/git/queries/workingtree.ts",
     "export function useSessionFileDiff(",
@@ -463,6 +549,8 @@ const HOOKS = [
     "export function useOrphanedStashFileDiff(",
     true,
   ],
+  // Spreads the factory above; a placeholder could also ride its call.
+  ["src/lib/git/queries/workingtree.ts", "export function useFileDiff(", false],
 ];
 
 function pinPlaceholder(text, anchor, keeps) {
@@ -484,7 +572,16 @@ test("placeholders per hook: none for Changes, the repo's for the rest", () => {
       "    enabled: file !== null,\n",
       "    enabled: file !== null,\n    placeholderData: keepPreviousDataForRepo(repo),\n",
     ),
-    "a placeholder on useFileDiff",
+    "a placeholder on fileDiffQueryOptions",
+  );
+  red(
+    (t) => pinPlaceholder(t, HOOKS.at(-1)[1], false),
+    swap(
+      wt,
+      "useQuery(fileDiffQueryOptions(repo, file, hide));",
+      "useQuery({\n    ...fileDiffQueryOptions(repo, file, hide),\n    placeholderData: keepPreviousDataForRepo(repo),\n  });",
+    ),
+    "a placeholder on useFileDiff's spread",
   );
   const cmp = source(HOOKS[3][0]);
   const branch = bodyOf(cmp, HOOKS[3][1], false);
@@ -614,17 +711,23 @@ function pinComposerHold(text) {
     once(text, "const renderWidgetLine = useCallback("),
   );
   if (
-    !/<div\b(?=[^>]*\bdata-diff-line-widget\b)[^>]*className="m-2 rounded-none border bg-popover/.test(
+    !/<div\s+data-diff-line-widget=\{rebuildsOnWhitespace \? "whitespace" : "layout"\}\s+className="m-2 rounded-none border bg-popover/.test(
       widget,
     )
   )
-    throw new Error("the composer wrapper must carry data-diff-line-widget");
+    throw new Error(
+      "the composer wrapper must tag itself whitespace or layout by its host",
+    );
   const body = bodyOf(text, "export function DiffContent(");
+  const hosted = body.slice(once(body, "lineWidget={lineWidget}"));
+  const tag = hosted.indexOf("rebuildsOnWhitespace={whitespaceControl}");
+  if (tag < 0 || tag > hosted.indexOf("/>"))
+    throw new Error("DiffContent's composer host must pass whitespaceControl");
   if (body.split("setHideWhitespaceRaw").length - 1 !== 2)
     throw new Error("setHideWhitespaceRaw: a declaration and one guarded call");
   once(body, "const setHideWhitespaceRaw = useSetHideWhitespace();");
   const flip = bodyOf(body, "function flipWhitespace(");
-  const check = flip.indexOf('querySelector("[data-diff-line-widget]")');
+  const check = flip.indexOf("if (whitespaceComposerOpen()) {");
   const call = flip.indexOf("setHideWhitespaceRaw(next)");
   if (check < 0 || call < 0 || check > call)
     throw new Error("flipWhitespace checks for an open composer first");
@@ -635,8 +738,17 @@ test("an open line composer holds every flip DiffContent owns", () => {
   pinComposerHold(text);
   red(
     pinComposerHold,
-    swap(text, "          data-diff-line-widget\n", ""),
-    "attribute removed",
+    swap(
+      text,
+      'data-diff-line-widget={rebuildsOnWhitespace ? "whitespace" : "layout"}',
+      "data-diff-line-widget",
+    ),
+    "attribute without its value",
+  );
+  red(
+    pinComposerHold,
+    swap(text, "              rebuildsOnWhitespace={whitespaceControl}\n", ""),
+    "the composer host drops the flag",
   );
   red(
     pinComposerHold,
@@ -649,11 +761,206 @@ test("an open line composer holds every flip DiffContent owns", () => {
   );
   red(
     pinComposerHold,
-    text.replace(
-      /if \(scrollerRef\.current\?\.querySelector\("\[data-diff-line-widget\]"\)\) \{[\s\S]*?return;\s*\}/,
-      () => "",
+    swap(
+      text,
+      "    if (whitespaceComposerOpen()) {\n      toast.info(WHITESPACE_COMPOSER_HELD);\n      return;\n    }\n    setHideWhitespaceRaw(next);",
+      "    setHideWhitespaceRaw(next);",
     ),
     "the composer check removed",
+  );
+});
+
+// TRIPWIRE: every writer of the two app-wide diff settings checks its composer
+// probe in the block that writes, since a flip rebuilds a hidden tab's open
+// composer too. A new writer file fails until it is guarded and listed here.
+const WRITER_HOOKS = {
+  useSetHideWhitespace: { probe: "whitespaceComposerOpen", call: "" },
+  useDiffViewMode: { probe: "lineComposerOpen", call: ".write" },
+};
+const TRANSCRIPT_FILE = "src/features/sessions/AgentTranscript.tsx";
+const WRITER_ROSTER = {
+  [SURFACE]: { useSetHideWhitespace: 1, useDiffViewMode: 2 },
+  [VIEWER]: { useSetHideWhitespace: 1, useDiffViewMode: 1 },
+  [TRANSCRIPT_FILE]: { useSetHideWhitespace: 1 },
+};
+/** Writes held instead by a `readOnly` the probe sets when the sheet opens:
+ *  [file, the write's trimmed line, the source lines the hold rides]. */
+const HELD_BY_READONLY = [
+  [
+    SURFACE,
+    'if (value === "unified" || value === "split") mode.write(value);',
+    [
+      "          layout: lineComposerOpen(),\n",
+      "            readOnly={held.layout}\n            value={mode.effective}\n",
+    ],
+  ],
+];
+/** Where each hook is defined, so its own declaration isn't read as a use. */
+const HOOK_DEFINITIONS = {
+  useSetHideWhitespace: "src/lib/settings/hide-whitespace.ts",
+  useDiffViewMode: SURFACE,
+};
+
+/** The open brace of the innermost block enclosing `at` in masked text. */
+function innermostBlock(masked, at) {
+  const stack = [];
+  for (let i = 0; i < at; i++) {
+    if (masked[i] === "{") stack.push(i);
+    else if (masked[i] === "}") stack.pop();
+  }
+  if (stack.length === 0) throw new Error("no enclosing block");
+  return stack[stack.length - 1];
+}
+
+/** Each use of a writer hook in `rel`, its binding name and declaration index;
+ *  an import or the hook's own definition is not a use. */
+function writerBindings(rel, text, masked, hook) {
+  const out = [];
+  for (const m of masked.matchAll(new RegExp(`\\b${hook}\\b`, "g"))) {
+    const at = m.index;
+    const before = masked.slice(0, at);
+    if (/import\s*(type\s*)?\{[^}]*$/.test(before)) continue;
+    if (rel === HOOK_DEFINITIONS[hook] && /function\s+$/.test(before)) continue;
+    const decl = /const\s+(\w+)\s*=\s*$/.exec(before.slice(-80));
+    if (decl === null || masked[at + hook.length] !== "(")
+      throw new Error(
+        `${rel}: ${hook} must be bound as \`const x = ${hook}(…)\``,
+      );
+    out.push({ name: decl[1], at });
+  }
+  return out;
+}
+
+function pinWriterGuards(files) {
+  const seen = {};
+  for (const [rel, text] of files) {
+    const masked = maskNonCode(text, rel.endsWith(".tsx"));
+    for (const [hook, { probe, call }] of Object.entries(WRITER_HOOKS)) {
+      for (const { name, at } of writerBindings(rel, text, masked, hook)) {
+        seen[rel] ??= {};
+        seen[rel][hook] = (seen[rel][hook] ?? 0) + 1;
+        const scopeEnd = matchBrace(masked, innermostBlock(masked, at));
+        const scope = masked.slice(at, scopeEnd);
+        for (const m of scope.matchAll(new RegExp(`\\b${name}\\b`, "g"))) {
+          const pos = at + m.index;
+          const after = masked.slice(pos + name.length);
+          if (call === ".write" && after.startsWith(".effective")) continue;
+          if (!after.startsWith(`${call}(`))
+            throw new Error(
+              `${rel}: ${name} is used as a value; call it where ${probe}() is checked`,
+            );
+          const line = text
+            .slice(text.lastIndexOf("\n", pos) + 1, text.indexOf("\n", pos))
+            .trim();
+          const exempt = HELD_BY_READONLY.find(
+            ([f, l]) => f === rel && l === line,
+          );
+          if (exempt !== undefined) {
+            for (const hold of exempt[2])
+              if (!text.includes(hold))
+                throw new Error(`${rel}: the held write lost ${hold.trim()}`);
+            continue;
+          }
+          const block = masked.slice(innermostBlock(masked, pos), pos);
+          if (!block.includes(`if (${probe}()) {`))
+            throw new Error(
+              `${rel}: ${name}${call}() runs without checking ${probe}() first`,
+            );
+        }
+      }
+    }
+  }
+  assert.deepEqual(seen, WRITER_ROSTER, "writers of the diff settings");
+}
+
+test("every diff-settings writer checks its composer probe first", () => {
+  const files = srcFiles();
+  pinWriterGuards(files);
+  const withFile = (rel, text) => new Map([...files, [rel, text]]);
+  const NEW = "src/features/x/NewWriter.tsx";
+  red(
+    pinWriterGuards,
+    withFile(
+      NEW,
+      "export function NewWriter() {\n  const set = useSetHideWhitespace();\n  return <button onClick={() => set(true)} />;\n}\n",
+    ),
+    "a new unguarded writer file",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      NEW,
+      "export function NewWriter() {\n  const set = useSetHideWhitespace();\n  function flip() {\n    if (whitespaceComposerOpen()) {\n      return;\n    }\n    set(true);\n  }\n  return <button onClick={flip} />;\n}\n",
+    ),
+    "a new guarded writer outside the roster",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      NEW,
+      "export function NewWriter() {\n  const mode = useDiffViewMode(false);\n  return <Sheet onPick={mode.write} />;\n}\n",
+    ),
+    "a writer passed on as a value",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      TRANSCRIPT_FILE,
+      swap(
+        files.get(TRANSCRIPT_FILE),
+        "            if (whitespaceComposerOpen()) {\n",
+        "            if (false) {\n",
+      ),
+    ),
+    "the transcript's probe removed",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      VIEWER,
+      swap(
+        files.get(VIEWER),
+        "    if (whitespaceComposerOpen()) {\n",
+        "    if (lineComposerOpen()) {\n",
+      ),
+    ),
+    "the staging flip checks the layout probe",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      VIEWER,
+      swap(
+        files.get(VIEWER),
+        "      if (lineComposerOpen()) {\n        toast.info(LAYOUT_COMPOSER_HELD);\n        return;\n      }\n",
+        "",
+      ),
+    ),
+    "the staging layout flip unguarded",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      SURFACE,
+      swap(
+        files.get(SURFACE),
+        "            readOnly={held.layout}\n            value=",
+        "            value=",
+      ),
+    ),
+    "the sheet's radiogroup no longer held",
+  );
+  red(
+    pinWriterGuards,
+    withFile(
+      SURFACE,
+      swap(
+        files.get(SURFACE),
+        "          layout: lineComposerOpen(),\n",
+        "          layout: false,\n",
+      ),
+    ),
+    "the sheet's layout hold no longer probed",
   );
 });
 
@@ -882,11 +1189,7 @@ test("the transcript's whitespace-only arm: ahead of the empty arm, focus first"
 });
 
 function pinSubmodulePane(text) {
-  for (const name of [
-    "DiffViewOptionsMenu",
-    "useHideWhitespace",
-    "readViewDiff",
-  ])
+  for (const name of ["DiffOptionsSheet", "useHideWhitespace", "readViewDiff"])
     if (new RegExp(String.raw`\b${name}\b`).test(text))
       throw new Error(`the submodule pane must not reach ${name}`);
 }

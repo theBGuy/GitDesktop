@@ -29,9 +29,11 @@ import { fileURLToPath } from "node:url";
 import {
   answeredSince,
   answerMark,
+  discardConfirmStale,
   expirePane,
   filePaneView,
   HOLD_BOUND_MS,
+  heldDiffCause,
   heldRetained,
   isHolding,
   keyedPaneView,
@@ -47,6 +49,7 @@ import {
   statusBehind,
   statusWaitFor,
   WORKING_TREE_ENTITY,
+  whitespaceFlipHeld,
 } from "../src/features/diff/diff-pane-slots.ts";
 import {
   collapseAllContext,
@@ -1800,4 +1803,144 @@ test("answeredSince: the status marks are the status entry alone", {
   client.setQueryData(status, { entries: [] }, { updatedAt: 3000 });
   client.setQueryData([...status, "line-stats"], {}, { updatedAt: 4000 });
   assert.deepEqual([...settleMarks(client, status, true)], ["3000:0"]);
+});
+
+// whitespaceFlipHeld over a flip captured the way the staging pane captures it:
+// every entry under the file's diff prefix, both whitespace modes included.
+
+/** f.txt's tracked unstaged diff key under the whitespace mode `hide`. */
+const modeKey = (hide) => [...diffKeyFor(false), hide];
+
+/** A client holding both modes' answers: the plain one cached before the -w. */
+function modesClient() {
+  const client = new rq.QueryClient();
+  client.setQueryData(modeKey(false), { text: "older" }, { updatedAt: 1000 });
+  client.setQueryData(modeKey(true), { text: "hidden" }, { updatedAt: 2000 });
+  return client;
+}
+
+/** The flip record the pane takes at an effective whitespace-mode change. */
+function captureFlip(client) {
+  const entries = client
+    .getQueryCache()
+    .findAll({ queryKey: diffPrefix, exact: false });
+  return {
+    stamps: new Set(entries.map((q) => q.state.dataUpdatedAt)),
+    marks: new Set(entries.map((q) => answerMark(q.state))),
+  };
+}
+
+test("whitespaceFlipHeld: no flip never holds", () => {
+  assert.equal(whitespaceFlipHeld(null, { dataUpdatedAt: 0 }), false);
+  assert.equal(whitespaceFlipHeld(null, { dataUpdatedAt: 1000 }), false);
+});
+
+test("whitespaceFlipHeld: a flip onto an older cached answer holds until new data", {
+  skip,
+}, async () => {
+  const client = modesClient();
+  const flip = captureFlip(client);
+  const { observer, fetches, unsubscribe } = observe(client, modeKey(false));
+  await tick();
+  const pending = observer.getCurrentResult();
+  assert.equal(pending.dataUpdatedAt, 1000, "the older answer is on screen");
+  assert.equal(whitespaceFlipHeld(flip, pending), true);
+  assert.equal(fetches.length, 1, "the stale answer refetches on mount");
+  fetches[0].resolve({ text: "fresh" });
+  await tick(5);
+  assert.equal(whitespaceFlipHeld(flip, observer.getCurrentResult()), false);
+  unsubscribe();
+});
+
+test("whitespaceFlipHeld: a failed refetch keeps the hold (fail closed)", {
+  skip,
+}, async () => {
+  const client = modesClient();
+  const flip = captureFlip(client);
+  const { observer, fetches, unsubscribe } = observe(client, modeKey(false));
+  await tick();
+  fetches[0].reject(new Error("git failed"));
+  await tick(5);
+  const after = observer.getCurrentResult();
+  assert.equal(after.errorUpdateCount, 1);
+  // The write hold's release test lets this answer through; the flip's doesn't.
+  assert.equal(answeredSince(after, flip.marks), true);
+  assert.equal(whitespaceFlipHeld(flip, after), true);
+  // That held, answered state is the one heldDiffCause names as failed.
+  assert.equal(
+    heldDiffCause({
+      flipHeld: true,
+      answeredSinceFlip: answeredSince(after, flip.marks),
+      fetching: after.fetchStatus !== "idle",
+      otherHold: false,
+    }),
+    "refresh-failed",
+  );
+  unsubscribe();
+});
+
+test("heldDiffCause: only a settled flip hold with nothing else says failed", () => {
+  const base = {
+    flipHeld: true,
+    answeredSinceFlip: true,
+    fetching: false,
+    otherHold: false,
+  };
+  assert.equal(heldDiffCause(base), "refresh-failed");
+  for (const [field, value] of [
+    ["flipHeld", false],
+    ["answeredSinceFlip", false],
+    ["fetching", true],
+    ["otherHold", true],
+  ])
+    assert.equal(
+      heldDiffCause({ ...base, [field]: value }),
+      "updating",
+      `${field}: ${value}`,
+    );
+});
+
+test("whitespaceFlipHeld: a flip onto a cold key holds while it loads", {
+  skip,
+}, async () => {
+  const client = new rq.QueryClient();
+  const flip = captureFlip(client);
+  const { observer, fetches, unsubscribe } = observe(client, modeKey(false));
+  await tick();
+  assert.equal(whitespaceFlipHeld(flip, observer.getCurrentResult()), true);
+  fetches[0].resolve({ text: "first" });
+  await tick(5);
+  assert.equal(whitespaceFlipHeld(flip, observer.getCurrentResult()), false);
+  unsubscribe();
+});
+
+test("whitespaceFlipHeld: a second flip re-arms over the answer it lands on", {
+  skip,
+}, async () => {
+  const client = modesClient();
+  const first = captureFlip(client);
+  const { observer, fetches, unsubscribe } = observe(client, modeKey(false));
+  await tick();
+  fetches[0].resolve({ text: "fresh" });
+  await tick(5);
+  assert.equal(whitespaceFlipHeld(first, observer.getCurrentResult()), false);
+  // On and back off: the answer now on screen predates the new flip.
+  const second = captureFlip(client);
+  assert.equal(whitespaceFlipHeld(second, observer.getCurrentResult()), true);
+  void observer.refetch();
+  await tick();
+  assert.equal(fetches.length, 2);
+  // A later millisecond, so the new stamp can't collide with the captured one.
+  await tick(5);
+  fetches[1].resolve({ text: "fresher" });
+  await tick(5);
+  assert.equal(whitespaceFlipHeld(second, observer.getCurrentResult()), false);
+  unsubscribe();
+});
+
+test("discardConfirmStale: only the text the confirm was raised against runs", () => {
+  assert.equal(discardConfirmStale("T1", { text: "T1" }), false);
+  assert.equal(discardConfirmStale("T1", { text: "T2" }), true);
+  assert.equal(discardConfirmStale("T1", undefined), true);
+  assert.equal(discardConfirmStale("", undefined), true);
 });

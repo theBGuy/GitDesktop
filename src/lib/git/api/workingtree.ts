@@ -197,14 +197,22 @@ export const gitReplaceFileLines = (
     stageWhenClean,
   });
 
+/** One line of an untracked file to discard: its 1-based number and the text
+ *  the diff showed there, without the line terminator. */
+export interface DiscardLine {
+  line: number;
+  text: string;
+}
+
 /** Discards selected lines from an untracked (new) file — removes just those
  *  1-based line numbers and rewrites it in place (the file stays untracked).
  *  Used for line/hunk discard of a new file, where reverse-applying a patch
- *  would delete the whole file instead. */
+ *  would delete the whole file instead. Refuses, writing nothing, when any
+ *  line no longer holds its `text`. */
 export const gitDiscardUntrackedLines = (
   repoPath: string,
   path: string,
-  lines: number[],
+  lines: DiscardLine[],
 ) => invoke<void>("git_discard_untracked_lines", { repoPath, path, lines });
 
 /** Appends ignore patterns to the repo root `.gitignore` (created if absent),

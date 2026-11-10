@@ -943,6 +943,7 @@ function CreateWorktree({
 
       <div className="space-y-3">
         <RadioGroup
+          aria-label="Branch source"
           value={source}
           onValueChange={(v) => setSource(v as "new" | "existing")}
           className="flex gap-4 text-xs"
