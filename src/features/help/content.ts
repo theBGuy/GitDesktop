@@ -662,10 +662,12 @@ the last list up, with a line above it saying it couldn't refresh.
   change applies at once, and the sheet stays open while the diff it sits on stays in
   view; Escape or a click outside closes it. *Use unified or split diff* in the command
   palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
-  the layout too.
+  the layout too while a diff is on screen and wide enough for split, though not
+  during a line selection, a discard confirmation or Markdown preview.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
-  the sheet's **Split** option says so. Your preference is kept either way, so
-  widening the pane brings the split view back.
+  hovering the sheet's **Split** option shows why, and screen readers read the reason
+  with it. Your preference is kept either way, so widening the pane brings the split
+  view back.
 - **Hide whitespace changes** — the **Diff options** sheet hides changes that only
   touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
   content changed; an added or removed blank line still shows. It applies to every

@@ -294,8 +294,10 @@ function pinRegistrations(files) {
     if (!b.includes(need)) throw new Error(`WorkingTreeDiff's gate: ${need}`);
 }
 
-/** The layout action: the same two complementary registrations, each offered
- *  only where its toolbar's sheet takes a pick (never under the narrow pane). */
+/** The layout action: exactly the two complementary registrations, plus the
+ *  gate arms no jsdom test reaches: both `interactive` arms (a held pane), and
+ *  the staging gate's selection and discard arms (jsdom never builds the
+ *  staging view's rows). */
 function pinModeRegistrations(files) {
   const re = /useHotkeyAction\(\s*"toggle-diff-view-mode"/g;
   const where = [];
@@ -305,22 +307,13 @@ function pinModeRegistrations(files) {
   }
   assert.deepEqual(where.sort(), [SURFACE, VIEWER].sort(), "registrations");
   const a = hotkeyEnabled(files.get(SURFACE), "toggle-diff-view-mode");
-  for (const need of [
-    "interactive",
-    "showsToolbar",
-    "!previewOn",
-    "!narrowPane",
-  ])
-    if (!a.includes(need))
-      throw new Error(`DiffContent's layout gate: ${need}`);
+  if (!a.trimStart().startsWith("interactive &&"))
+    throw new Error("DiffContent's layout gate: interactive");
   const b = hotkeyEnabled(files.get(VIEWER), "toggle-diff-view-mode");
   for (const need of [
-    "interactive",
-    "shownView !== null",
+    "interactive &&",
     "selection === null",
     "discard === null",
-    "!previewOn",
-    "!narrowPane",
   ])
     if (!b.includes(need))
       throw new Error(`WorkingTreeDiff's layout gate: ${need}`);
@@ -362,7 +355,9 @@ test("the palette action registers twice, each under its own gate", () => {
   );
 });
 
-test("the layout action registers twice, each under its own gate", () => {
+// Their toolbar (showsToolbar, shownView !== null), preview and narrow-pane
+// arms are exercised in src/test/hide-whitespace.test.tsx.
+test("the layout action registers twice", () => {
   const files = srcFiles();
   pinModeRegistrations(files);
   const surface = files.get(SURFACE);
@@ -371,20 +366,25 @@ test("the layout action registers twice, each under its own gate", () => {
     pinModeRegistrations,
     new Map(files).set(
       SURFACE,
-      surface.replace(a, () => a.replace(" && !narrowPane", "")),
+      surface.replace(a, () => a.replace("interactive && ", "")),
     ),
-    "!narrowPane dropped from DiffContent's layout gate",
+    "interactive dropped from DiffContent's layout gate",
   );
   const viewer = files.get(VIEWER);
   const b = hotkeyEnabled(viewer, "toggle-diff-view-mode");
-  red(
-    pinModeRegistrations,
-    new Map(files).set(
-      VIEWER,
-      viewer.replace(b, () => b.replace("selection === null &&", "")),
-    ),
-    "selection === null dropped from WorkingTreeDiff's layout gate",
-  );
+  for (const arm of [
+    "interactive &&",
+    "selection === null &&",
+    "discard === null &&",
+  ])
+    red(
+      pinModeRegistrations,
+      new Map(files).set(
+        VIEWER,
+        viewer.replace(b, () => b.replace(arm, "")),
+      ),
+      `${arm} dropped from WorkingTreeDiff's layout gate`,
+    );
   red(
     pinModeRegistrations,
     new Map(files).set(

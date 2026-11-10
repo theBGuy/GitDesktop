@@ -43,9 +43,15 @@ export const WHITESPACE_COMPOSER_HELD =
   "Finish or close the comment you're writing, then change the whitespace view.";
 
 /** The Diff options sheet's helper line, on the working-tree staging hosts
- *  only: the read-only hosts have no staging for it to turn off. */
-export const WHITESPACE_SHEET_STAGING_NOTE =
-  "Line and hunk staging is off while whitespace is hidden.";
+ *  only (the read-only hosts have no staging for it to turn off), per side as
+ *  WHITESPACE_STRIP_COPY. */
+export const WHITESPACE_SHEET_STAGING_NOTE: Record<StagingSide, string> = {
+  unstaged:
+    "Line and hunk staging and discards are off while whitespace is hidden.",
+  untracked:
+    "Line and hunk staging and discards are off while whitespace is hidden.",
+  staged: "Line and hunk unstaging is off while whitespace is hidden.",
+};
 
 export const WHITESPACE_ONLY_MESSAGE = "Only whitespace changed in this file";
 

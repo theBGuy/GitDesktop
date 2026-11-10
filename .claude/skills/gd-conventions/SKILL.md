@@ -402,7 +402,11 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   guard in `pnpm run checks` fails on any `<Label>` carrying neither `htmlFor`
   nor `id`. Existing idioms that already do their own aria wiring stay as they
   are: the CreatePrDialog / CreateIssueDialog field-group wrappers and
-  McpServersSection's `role="group"` scope groups.
+  McpServersSection's `role="group"` scope groups. A single control that carries
+  its own group role (a `RadioGroup`) takes its name through `aria-labelledby`
+  on a `<Label id>` instead of a LabeledGroup wrapper, whose group would repeat
+  the name (BoardBulkFieldsDialog's mode picker, ProjectLifecycleDialogs' Layout,
+  the Diff options sheet's Diff display).
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech. The

@@ -1802,20 +1802,6 @@ export function DiffCapFooter({
 
 const SPLIT_NARROW_REASON = "Pane too narrow for split view";
 
-/** A held Enter or Space acts once: its auto-repeat is refused, both Base UI's
- *  handler and the browser's default. */
-function refuseKeyRepeat(e: {
-  repeat: boolean;
-  key: string;
-  preventDefault: () => void;
-  preventBaseUIHandler: () => void;
-}) {
-  if (e.repeat && (e.key === "Enter" || e.key === " ")) {
-    e.preventDefault();
-    e.preventBaseUIHandler();
-  }
-}
-
 /**
  * The diff toolbar's "Diff options" sheet: the app-wide whitespace mode (where
  * the host has one) and the Unified/Split preference. It stays open while
@@ -1826,7 +1812,7 @@ function refuseKeyRepeat(e: {
 export function DiffOptionsSheet({
   splitDisabled,
   whitespace,
-  stagingNote = false,
+  stagingSide,
 }: {
   /** The pane is too narrow for split (the host's `narrowPane`). */
   splitDisabled: boolean;
@@ -1841,17 +1827,23 @@ export function DiffOptionsSheet({
      *  arm while the other mode loads warms that read here. */
     onOpen?: () => void;
   };
-  /** Working-tree staging host: shows WHITESPACE_SHEET_STAGING_NOTE. */
-  stagingNote?: boolean;
+  /** Working-tree staging host's side: shows its WHITESPACE_SHEET_STAGING_NOTE. */
+  stagingSide?: StagingSide;
 }) {
   const hidden = useHideWhitespace();
   const mode = useDiffViewMode(splitDisabled);
   // A composer can't open or close while focus is in the sheet, so the open
   // transition's read holds for the whole open.
   const [composerHeld, setComposerHeld] = useState(false);
+  const noteId = useId();
+  const stagingNote =
+    stagingSide === undefined
+      ? undefined
+      : WHITESPACE_SHEET_STAGING_NOTE[stagingSide];
   const wsHold = useDisabledReason({
     disabled: composerHeld,
     reason: WHITESPACE_COMPOSER_HELD,
+    describedBy: stagingNote === undefined ? undefined : noteId,
   });
   const splitHold = useDisabledReason({
     disabled: splitDisabled,
@@ -1860,6 +1852,7 @@ export function DiffOptionsSheet({
   const checkboxId = useId();
   const unifiedId = useId();
   const splitId = useId();
+  const displayId = useId();
   const marked = whitespace !== undefined && hidden;
   const label = marked
     ? "Diff options, whitespace changes hidden"
@@ -1874,9 +1867,9 @@ export function DiffOptionsSheet({
     >
       <PopoverTrigger
         onKeyDown={(e) => {
-          // Escape's close returns focus here while a key may still be held:
-          // its auto-repeat would reopen the sheet, so only a fresh press opens.
-          if (e.repeat && (e.key === "Enter" || e.key === " ")) {
+          // Closing the sheet returns focus here while Enter may still be held,
+          // and a native button clicks on each Enter keydown: a repeat reopens it.
+          if (e.repeat && e.key === "Enter") {
             e.preventDefault();
             e.preventBaseUIHandler();
           }
@@ -1923,7 +1916,6 @@ export function DiffOptionsSheet({
                     aria-disabled={composerHeld || undefined}
                     aria-describedby={wsHold.describedBy}
                     className={ARIA_DISABLED_CLASS}
-                    onKeyDown={refuseKeyRepeat}
                     onCheckedChange={(next) => {
                       if (!composerHeld) whitespace.onToggle(next);
                     }}
@@ -1941,19 +1933,21 @@ export function DiffOptionsSheet({
                   {wsHold.blockedReason}
                 </span>
               )}
-              {stagingNote && (
-                <p className="pl-6 text-muted-foreground">
-                  {WHITESPACE_SHEET_STAGING_NOTE}
+              {stagingNote !== undefined && (
+                <p id={noteId} className="pl-6 text-muted-foreground">
+                  {stagingNote}
                 </p>
               )}
             </LabeledGroup>
             <Separator />
           </>
         )}
-        {/* The caption's group names this section once; a name on the
-            radiogroup too would be announced a second time. */}
-        <LabeledGroup label="Diff display">
+        {/* The caption names the radiogroup itself, with no wrapping group:
+            a group named the same would announce it twice. */}
+        <div className="space-y-2">
+          <Label id={displayId}>Diff display</Label>
           <RadioGroup
+            aria-labelledby={displayId}
             value={mode.effective}
             onValueChange={(value) => {
               // Base UI types the group's value as `any`; the writer refuses
@@ -1962,11 +1956,7 @@ export function DiffOptionsSheet({
             }}
           >
             <div className="flex items-center gap-2">
-              <Radio
-                id={unifiedId}
-                value="unified"
-                onKeyDown={refuseKeyRepeat}
-              />
+              <Radio id={unifiedId} value="unified" />
               <Label htmlFor={unifiedId}>Unified</Label>
             </div>
             <div
@@ -1988,7 +1978,6 @@ export function DiffOptionsSheet({
                   readOnly={splitDisabled}
                   aria-describedby={splitHold.describedBy}
                   className="data-readonly:opacity-50 data-readonly:focus-visible:opacity-100"
-                  onKeyDown={refuseKeyRepeat}
                 />
               </span>
               <Label
@@ -2004,7 +1993,7 @@ export function DiffOptionsSheet({
               {splitHold.blockedReason}
             </span>
           )}
-        </LabeledGroup>
+        </div>
       </PopoverContent>
     </Popover>
   );
@@ -2400,7 +2389,11 @@ export function DiffContent({
           <span className="contents" ref={captureHeldRef}>
             <DiffOptionsSheet
               splitDisabled={narrowPane}
-              stagingNote={stagingSide !== undefined}
+              // The note shows on the whitespace-only arm, whose flip off
+              // returns to the staging view. Gap: readViewDiff drops the plain
+              // read's truncation and encoding, so an over-cap or undecodable
+              // file keeps the note though its flip lands on a text fallback.
+              stagingSide={whitespaceOnly ? stagingSide : undefined}
               whitespace={
                 whitespaceControl
                   ? { onToggle: flipWhitespace, composerOpen }

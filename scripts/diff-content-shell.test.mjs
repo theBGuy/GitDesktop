@@ -504,8 +504,8 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
 
   // The seven nodes that can hold focus and leave on a watched flip: the text
   // and typechange scrollers, the Preview body, both toolbar clusters, the
-  // options sheet's gear, and the notice. Each scroller's capture rides the merged ref, shared with the line
-  // anchor.
+  // options sheet's gear, and the notice. Each scroller's capture rides the
+  // merged ref, shared with the line anchor.
   need(
     codeOccurrences(surfaceRaw, masked, "ref={captureHeldRef}", body).length ===
       5 &&

@@ -1412,7 +1412,7 @@ function WorkingTreeDiff({
                   </span>
                   <DiffOptionsSheet
                     splitDisabled={narrowPane}
-                    stagingNote
+                    stagingSide={stagingSide}
                     whitespace={{
                       onToggle: setHideWhitespace,
                       // A flip whose other-mode answer is cold swaps this arm
