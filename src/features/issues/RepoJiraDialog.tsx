@@ -26,6 +26,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { forgeBbAccount } from "@/lib/git/api";
 import { jiraSetAccount, jiraSetAccountFromBitbucket } from "@/lib/jira/api";
@@ -437,7 +438,12 @@ export function RepoJiraDialog({
                       <span className="font-mono text-muted-foreground">
                         {item.key}
                       </span>
-                      <span className="truncate">{item.name}</span>
+                      <span
+                        className="truncate"
+                        onMouseEnter={clipTitleFromText}
+                      >
+                        {item.name}
+                      </span>
                     </ComboboxItem>
                   )}
                 </ComboboxList>

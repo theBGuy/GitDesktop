@@ -1,5 +1,5 @@
-// Shared TypeScript/TSX masking and source traversal for the networkmode guards.
-// Runs in CI's installless guards job, so node built-ins ONLY.
+// Shared TypeScript/TSX masking, source traversal and JSX scanning for the
+// scripts/ guards. Runs in CI's installless guards job, so node built-ins ONLY.
 // Known false ambiguities: a `<const T,>` generic arrow lexes as JSX and a
 // function-typed JSX prop's type argument is unreadable; both fail closed. In
 // .tsx a generic function type after any EXPR_OPENERS punctuator or expression
@@ -12,8 +12,8 @@
 // closed only when nothing later on the line closes it, else the code between is
 // blanked silently. A regex right after a brace-less `if (…)`/`while (…)`/
 // `for (…)` lexes as a division.
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 
 export class ScanError extends Error {}
 
@@ -347,4 +347,153 @@ export function* sourceFiles(dir) {
     if (entry.isDirectory()) yield* sourceFiles(full);
     else if (/\.tsx?$/.test(entry.name)) yield full;
   }
+}
+
+const NUL = String.fromCharCode(0);
+const REPLACEMENT = String.fromCharCode(0xfffd);
+
+/** A file's text with CRLF folded, or a ScanError when it holds a NUL or a
+ *  decoding replacement character: the scan can't read it, so it fails closed. */
+export function readable(rel, text) {
+  if (text.includes(NUL) || text.includes(REPLACEMENT)) {
+    throw new ScanError(`${rel}: unreadable bytes`);
+  }
+  return text.replace(/\r\n/g, "\n");
+}
+
+/** Every .ts/.tsx under `root`'s src/ that `keep` accepts, as `[path, text]`,
+ *  the path repo-relative with forward slashes. Only kept files are read. */
+export function* srcEntries(root, keep = () => true) {
+  for (const full of sourceFiles(join(root, "src"))) {
+    const rel = relative(root, full).split("\\").join("/");
+    if (keep(rel)) yield [rel, readFileSync(full, "utf8")];
+  }
+}
+
+/** The scanned corpus keyed by path, every text through {@link readable}, so
+ *  one unreadable file fails the whole load. */
+export function loadCorpus(entries) {
+  const files = new Map();
+  for (const [rel, text] of entries) files.set(rel, readable(rel, text));
+  return files;
+}
+
+/** The [start, end) offset range of every `<name …>…</name>` (or
+ *  self-closing `<name … />`) element in `masked`. Offsets are UTF-16 code
+ *  units, shared by the raw text the mask came from. */
+export function elementRanges(rel, text, masked, name) {
+  const tail = "(?![\\w.$-])";
+  const open = new RegExp(`<${escapeRe(name)}${tail}`, "g");
+  const either = new RegExp(`<(/?)${escapeRe(name)}${tail}`, "g");
+  const ranges = [];
+  for (const m of masked.matchAll(open)) {
+    const end = tagEnd(masked, m.index);
+    if (end < 0) {
+      throw new ScanError(
+        `${rel}:${lineOf(text, m.index)}: <${name} tag never ends`,
+      );
+    }
+    if (masked[end - 1] === "/") {
+      ranges.push([m.index, end + 1]);
+      continue;
+    }
+    let depth = 1;
+    either.lastIndex = end + 1;
+    let close = -1;
+    while (depth > 0) {
+      const n = either.exec(masked);
+      if (!n) {
+        throw new ScanError(
+          `${rel}:${lineOf(text, m.index)}: <${name} has no </${name}>`,
+        );
+      }
+      if (n[1]) {
+        depth--;
+        close = n.index;
+      } else {
+        const e = tagEnd(masked, n.index);
+        if (e < 0) {
+          throw new ScanError(
+            `${rel}:${lineOf(text, n.index)}: nested <${name} tag never ends`,
+          );
+        }
+        if (masked[e - 1] !== "/") depth++;
+      }
+    }
+    const closeEnd = masked.indexOf(">", close);
+    if (closeEnd < 0) {
+      throw new ScanError(
+        `${rel}:${lineOf(text, close)}: </${name} never ends`,
+      );
+    }
+    ranges.push([m.index, closeEnd + 1]);
+  }
+  return ranges;
+}
+
+/** The text of every string literal and template-literal text segment in
+ *  `masked`'s [from, to) range, read from the raw `text`: masking keeps quote
+ *  delimiters and blanks comments and JSX text whole, so their words never
+ *  count. A literal running past the range throws. */
+export function literalStrings(text, masked, from = 0, to = masked.length) {
+  const out = [];
+  const braces = [];
+  const template = (start) => {
+    let k = start;
+    while (
+      k < to &&
+      masked[k] !== "`" &&
+      !(masked[k] === "$" && masked[k + 1] === "{")
+    )
+      k++;
+    if (k >= to) throw new ScanError("a template literal runs past its range");
+    out.push(text.slice(start, k));
+    if (masked[k] === "`") return k + 1;
+    braces.push(0);
+    return k + 2;
+  };
+  let i = from;
+  while (i < to) {
+    const c = masked[i];
+    if (c === '"' || c === "'") {
+      const j = masked.indexOf(c, i + 1);
+      if (j < 0 || j >= to) throw new ScanError("a string runs past its range");
+      out.push(text.slice(i + 1, j));
+      i = j + 1;
+    } else if (c === "`") {
+      i = template(i + 1);
+    } else if (braces.length > 0 && c === "{") {
+      braces[braces.length - 1]++;
+      i++;
+    } else if (braces.length > 0 && c === "}") {
+      if (braces[braces.length - 1] === 0) {
+        braces.pop();
+        i = template(i + 1);
+      } else {
+        braces[braces.length - 1]--;
+        i++;
+      }
+    } else i++;
+  }
+  return out;
+}
+
+/** {@link literalStrings} over a tag's range, joined into one class-token text. */
+export const literalText = (text, masked, from, to) =>
+  literalStrings(text, masked, from, to).join(" ");
+
+/** Every JSX opening tag in masked's [from, to) range, as [start, end) with
+ *  end just past its `>`. A tag that never ends throws. */
+export function openingTags(rel, text, masked, from, to) {
+  const tags = [];
+  const re = /<[A-Za-z][\w.]*/g;
+  re.lastIndex = from;
+  for (let m = re.exec(masked); m && m.index < to; m = re.exec(masked)) {
+    const end = tagEnd(masked, m.index);
+    if (end < 0 || end >= to) {
+      throw new ScanError(`${rel}:${lineOf(text, m.index)}: tag never ends`);
+    }
+    tags.push([m.index, end + 1]);
+  }
+  return tags;
 }

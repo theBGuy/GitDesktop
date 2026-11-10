@@ -15,8 +15,9 @@ export const gitRemoveWorktree = (repoPath: string, worktreePath: string) =>
 
 /** Reclaims leaked local-PR conflict worktrees: removes every hidden `gd-resolve-*`
  *  worktree whose path is NOT in `keepPaths`. Pass every active paused merge's
- *  `pendingMerge.worktreePath` (as it came from the merge outcome) so an in-progress
- *  resolve is spared. Best-effort housekeeping, run once on repo open. */
+ *  `pendingMerge.worktreePath` (as it came from the merge outcome) AND every open local
+ *  PR's unfinished update worktree path, so an in-progress resolve is spared.
+ *  Best-effort housekeeping, run once on repo open. */
 export const gitCleanupOrphanedResolveWorktrees = (
   repoPath: string,
   keepPaths: string[],

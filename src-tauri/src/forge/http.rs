@@ -60,7 +60,7 @@ pub const KEY_USERNAME: &str = "username";
 pub const KEY_DISPLAY_NAME: &str = "display_name";
 
 /// Mirror `GLAB_NETWORK_TIMEOUT` — the ceiling for a single request.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// A tighter connect timeout so an unreachable host fails fast, not after 120s.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 

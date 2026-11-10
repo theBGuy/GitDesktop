@@ -2161,13 +2161,14 @@ pub async fn forge_pr_set_reviewers(
 /// minus the user the provider would reject. For an existing PR (`Some(number)`)
 /// that's the PR author (GitHub/Bitbucket exclude them; GitLab tolerates it); at
 /// create time (`None`, no PR yet) it's the viewer. GitHub: assignable users;
-/// GitLab: project members; Bitbucket: workspace members.
+/// GitLab: project members; Bitbucket: workspace members. Returns the walked list
+/// with its `truncated` flag and the provider's `ceiling`.
 #[tauri::command]
 pub async fn forge_pr_reviewer_candidates(
     repo_path: String,
     number: Option<u64>,
     lens: Option<String>,
-) -> AppResult<Vec<model::ForgeUserRef>> {
+) -> AppResult<model::ForgeUserList> {
     match detect_non_github(&repo_path).await {
         Some((Provider::Bitbucket, _)) => {
             bitbucket::reviewer_candidates(&repo_path, number).await
@@ -3200,14 +3201,76 @@ pub async fn forge_repo_labels(
     }
 }
 
+/// Page size and page bound of the assignable-user and reviewer-candidate walks on
+/// GitHub and GitLab. Bitbucket's walk keeps `bitbucket::BB_MAX_PAGES`.
+pub(crate) const USER_LIST_PAGE_SIZE: usize = 100;
+pub(crate) const USER_LIST_MAX_PAGES: usize = 10;
+pub(crate) const USER_LIST_CEILING: usize = USER_LIST_PAGE_SIZE * USER_LIST_MAX_PAGES;
+
+/// Walks a 1-based `page=N` list until a page comes back short or `max_pages` is spent.
+/// The bool is "stopped at the bound with the last page full": the walk cannot prove the
+/// list ended there, so it reports it cut. A failed page fails the whole walk. Pages
+/// are awaited one at a time so the command future stays small.
+///
+/// `budget` (one page's own timeout) bounds the whole walk: it is checked before each
+/// page after the first, and a spent budget fails the read as a timed-out page does.
+/// A page in flight is never cancelled, so the worst case is the budget plus one page.
+pub(crate) async fn walk_numbered_pages<T, F, Fut>(
+    page_size: usize,
+    max_pages: usize,
+    budget: std::time::Duration,
+    fetch_page: F,
+) -> AppResult<(Vec<T>, bool)>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<T>>>,
+{
+    walk_numbered_pages_clocked(
+        page_size,
+        max_pages,
+        budget,
+        std::time::Instant::now,
+        fetch_page,
+    )
+    .await
+}
+
+async fn walk_numbered_pages_clocked<T, F, Fut>(
+    page_size: usize,
+    max_pages: usize,
+    budget: std::time::Duration,
+    now: impl Fn() -> std::time::Instant,
+    mut fetch_page: F,
+) -> AppResult<(Vec<T>, bool)>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<T>>>,
+{
+    let start = now();
+    let mut rows = Vec::new();
+    for page in 1..=max_pages {
+        if page > 1 && now().duration_since(start) >= budget {
+            return Err(AppError::Timeout(budget.as_secs()));
+        }
+        let batch = fetch_page(page).await?;
+        let full = batch.len() >= page_size;
+        rows.extend(batch);
+        if !full {
+            return Ok((rows, false));
+        }
+    }
+    Ok((rows, true))
+}
+
 /// The repo's assignable users for the assignee picker, behind the abstraction.
 /// GitHub lists repo assignees (avatar login-derived); GitLab lists project members
-/// (with their avatars). Returns `ForgeUserRef`s so the picker renders avatars.
+/// (with their avatars). Returns the walked list with its `truncated` flag and the
+/// provider's `ceiling`; nobody is excluded, the viewer included.
 #[tauri::command]
 pub async fn forge_assignable_users(
     repo_path: String,
     lens: Option<String>,
-) -> AppResult<Vec<model::ForgeUserRef>> {
+) -> AppResult<model::ForgeUserList> {
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::assignable_users(&repo_path).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
@@ -4657,6 +4720,118 @@ pub(crate) async fn forge_pr_create_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the walker over canned page sizes; returns its result and the pages asked for.
+    async fn walk_canned(
+        sizes: &[usize],
+        fail_on: Option<usize>,
+        max_pages: usize,
+    ) -> (AppResult<(Vec<u32>, bool)>, Vec<usize>) {
+        let requested = std::cell::RefCell::new(Vec::new());
+        let budget = std::time::Duration::from_secs(30);
+        let out = walk_numbered_pages(100, max_pages, budget, |page| {
+            requested.borrow_mut().push(page);
+            let rows = sizes.get(page - 1).copied().unwrap_or(0);
+            async move {
+                if fail_on == Some(page) {
+                    Err(AppError::InvalidArgument(format!("page {page} failed")))
+                } else {
+                    Ok(vec![0u32; rows])
+                }
+            }
+        })
+        .await;
+        (out, requested.into_inner())
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_walk_stops_on_a_short_page() {
+        let (out, asked) = walk_canned(&[], None, 10).await;
+        assert_eq!(out.expect("ok"), (vec![], false));
+        assert_eq!(asked, [1]);
+
+        let (out, asked) = walk_canned(&[37], None, 10).await;
+        let (rows, truncated) = out.expect("ok");
+        assert_eq!((rows.len(), truncated), (37, false));
+        assert_eq!(asked, [1]);
+
+        // A full page then an empty one is a complete list of exactly one page.
+        let (out, asked) = walk_canned(&[100, 0], None, 10).await;
+        let (rows, truncated) = out.expect("ok");
+        assert_eq!((rows.len(), truncated), (100, false));
+        assert_eq!(asked, [1, 2]);
+
+        let (out, asked) = walk_canned(&[100, 100, 12], None, 10).await;
+        let (rows, truncated) = out.expect("ok");
+        assert_eq!((rows.len(), truncated), (212, false));
+        assert_eq!(asked, [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_walk_reports_truncated_at_the_page_bound() {
+        let (out, asked) = walk_canned(&[100; 12], None, 10).await;
+        let (rows, truncated) = out.expect("ok");
+        assert_eq!((rows.len(), truncated), (1000, true));
+        assert_eq!(asked.len(), 10);
+
+        // A page larger than the page size still reads full.
+        let (out, asked) = walk_canned(&[150, 150], None, 2).await;
+        let (rows, truncated) = out.expect("ok");
+        assert_eq!((rows.len(), truncated), (300, true));
+        assert_eq!(asked, [1, 2]);
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_walk_fails_whole_on_a_failed_page() {
+        let (out, asked) = walk_canned(&[100, 100, 100], Some(2), 10).await;
+        assert!(out.is_err(), "a mid-walk failure returns no partial list");
+        assert_eq!(asked, [1, 2], "page 3 is never requested");
+    }
+
+    /// Runs the walker over full pages on a fake clock that each fetch moves `step`
+    /// seconds; returns its result and the pages asked for.
+    async fn walk_on_clock(
+        step: u64,
+        budget: u64,
+        max_pages: usize,
+    ) -> (AppResult<(Vec<u32>, bool)>, Vec<usize>) {
+        let base = std::time::Instant::now();
+        let elapsed = std::cell::Cell::new(0u64);
+        let requested = std::cell::RefCell::new(Vec::new());
+        let out = walk_numbered_pages_clocked(
+            100,
+            max_pages,
+            std::time::Duration::from_secs(budget),
+            || base + std::time::Duration::from_secs(elapsed.get()),
+            |page| {
+                requested.borrow_mut().push(page);
+                elapsed.set(elapsed.get() + step);
+                async { Ok(vec![0u32; 100]) }
+            },
+        )
+        .await;
+        (out, requested.into_inner())
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_walk_fails_once_its_budget_is_spent() {
+        // Pages at 0s and 20s start inside a 30s budget; the third would start at 40s.
+        let (out, asked) = walk_on_clock(20, 30, 10).await;
+        assert!(
+            matches!(out, Err(AppError::Timeout(30))),
+            "a spent budget fails the read as a timed-out page does: {out:?}"
+        );
+        assert_eq!(asked, [1, 2], "no page starts after the budget is spent");
+
+        // The first page always runs, however long it takes, and a walk inside its
+        // budget reads to the bound.
+        let (out, asked) = walk_on_clock(45, 30, 1).await;
+        assert_eq!(out.expect("ok").0.len(), 100);
+        assert_eq!(asked, [1]);
+        let (out, asked) = walk_on_clock(1, 30, 10).await;
+        assert_eq!(out.expect("ok"), (vec![0u32; 1000], true));
+        assert_eq!(asked.len(), 10);
+    }
 
     #[test]
     fn remote_host_parses_https_and_ssh_forms() {

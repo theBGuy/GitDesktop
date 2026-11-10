@@ -150,6 +150,8 @@ export const ALLOWLIST = [
   ]),
   ...entries("src/features/pulls/LocalPrView.tsx", "LocalPrView", [
     ["defaultBranch", "useDefaultBranch", ["isPending"], QUERY],
+    ["conflictPreview", "useConflictPreview", ["isPending"], QUERY],
+    ["comparison", "useCompareBranches", ["isPending"], QUERY],
   ]),
   ...entries(
     "src/features/pulls/PromoteLocalPrDialog.tsx",

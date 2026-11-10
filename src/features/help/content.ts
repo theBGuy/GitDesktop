@@ -1099,17 +1099,18 @@ saying it couldn't refresh and a **Retry**. One that fails to load says why and 
 **Retry**.
 
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
-journal of the *risky* operations GitDesktop runs: local PR merges, cherry-picks, history
-edits, interactive rebases, and a rebase pull that drops commits. Each is recorded with the
-exact branch and commit it started from, and whether it finished, failed, is paused on
-conflicts, is still pending, or **ended outside the app** (a cherry-pick or rebase pull
-you continued or aborted in a terminal, which the journal only knows is over). If one of
-these operations is interrupted (a crash or a restart mid-op), a calm recovery line
-appears above the **Changes** list naming what was interrupted and the state it started
-from. That notice only informs — it never resets or continues anything on its own (the
-git-native **Continue**/**Abort** for an in-progress merge, rebase, cherry-pick, or revert
-live in the conflict bar right above it); from it you can open this history, jump to
-**Recover lost work** to rescue any orphaned changes, or dismiss the notice.
+journal of the *risky* operations GitDesktop runs: local PR merges and local PR branch
+updates, cherry-picks, history edits, interactive rebases, and a rebase pull that drops
+commits. Each is recorded with the exact branch and commit it started from, and whether
+it finished, failed, is paused on conflicts, is still pending, or **ended outside the app**
+(a cherry-pick or rebase pull you continued or aborted in a terminal, which the journal
+only knows is over). If one of these operations is interrupted (a crash or a restart
+mid-op), a calm recovery line appears above the **Changes** list naming what was
+interrupted and the state it started from. That notice only informs — it never resets or
+continues anything on its own (the git-native **Continue**/**Abort** for an in-progress
+merge, rebase, cherry-pick, or revert live in the conflict bar right above it); from it
+you can open this history, jump to **Recover lost work** to rescue any
+orphaned changes, or dismiss the notice.
 
 ## Compare
 
@@ -1529,6 +1530,8 @@ excludes the PR author, whom GitHub won't let you request), flip a PR between
 **draft** and **ready for review** in either direction (a footer **Ready for review** /
 **Convert to draft** pair, also reachable from the command palette),
 **merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
+The **Assignees** and **Reviewers** pickers filter as you type and list the people
+already selected first; a list that stops at its first 1,000 people says so.
 Closing asks first: everyone watching is notified, and reopening puts the pull request
 back but can't unsend that. The command palette's **Focus the comment box** jumps
 straight to the composer here too.
@@ -1741,12 +1744,13 @@ follows its link, and badges and icons stay put.
 
 ## Conflicts with the base branch
 
-Every open pull request keeps a one-line strip under its header about merging into its
-base. It reads **Checking for conflicts…** while the answers load, then **No conflicts
+Every open pull request keeps a strip under its header about merging into its base.
+It reads **Checking for conflicts…** while the answers load, then **No conflicts
 with \`main\`** when the forge (or the local prediction below) finds none; where neither
 can answer, it says the conflicts can't be checked. When a pull request no longer merges
-cleanly into its base, the strip says so, naming the base branch. A line too long for
-the panel is cut short; hover it to read the rest. Whenever GitDesktop can work out
+cleanly into its base, the strip says so, naming the base branch. On a hosted pull
+request that status stays on one line: a line too long for the panel is cut short; hover
+it to read the rest. Whenever GitDesktop can work out
 **which files clash**, it lists them right under that sentence — up to five paths, then
 *and N more* (hover it for the rest). **GitHub** and **GitLab** answer that question
 themselves; while a forge is still working it out the strip keeps reading **Checking for
@@ -1759,9 +1763,10 @@ empty checks list there means *never ran*, not *passed*. In the list, **GitHub**
 **GitLab** rows carry a **Conflicts** chip (icon plus the word) on open pull requests,
 so you can spot a conflicting one without opening it.
 
-**Resolve conflicts** settles it right here. GitDesktop merges the base branch into the
-pull request's **head** branch in an **isolated worktree** — your own branch and working
-tree are untouched, the same way a local PR's merge works (see *Local PRs* below) — and
+On a hosted pull request, **Resolve conflicts** settles it right here. GitDesktop
+merges the base branch into the pull request's **head** branch in an
+**isolated worktree** (your own branch and working tree are untouched, the same way a
+local PR's merge works; see *Local PRs* below) and
 takes the view over with the conflicted files and the in-app conflict editor (see
 *Syncing & conflicts*).{{ai}} **Resolve with AI** is offered on the strip itself — it
 opens the resolution and starts walking the conflicts with AI straight away — and again
@@ -1774,6 +1779,8 @@ request's **head branch**, so the pull request itself picks the resolution up. T
 resolution is kept rather than overwritten. **Discard** deletes the hidden worktree and
 touches nothing else. Leave a resolution unfinished and it's offered back the next time
 you open that pull request from any checkout of the repository, as **Continue resolving**.
+A local PR resolves its conflicts the same way, finishing with **Finish update** and
+pushing nothing (see *Local PRs*).
 
 This flow stops at a pull request **from a fork**: finishing a resolution means pushing
 it to a head branch in the contributor's repository, which the conflict resolver doesn't
@@ -1800,8 +1807,9 @@ beside the button offers **Update with rebase…** instead, which rewrites the p
 request branch's history and force-pushes it, so it asks you to confirm first: on a pull
 request from a fork, that branch is the contributor's. Both controls are disabled with
 the reason on hover when you don't have push access, or when a fork's author left
-GitHub's *Allow edits by maintainers* off. This reads GitHub's own comparison of the two
-branches, so it's **GitHub** only, and the line yields to anything more pressing: a
+GitHub's *Allow edits by maintainers* off. On a hosted pull request this reads GitHub's
+own comparison of the two branches, so there it's **GitHub** only (a local PR compares
+its two branches itself; see *Local PRs*), and the line yields to anything more pressing: a
 conflict, an unfinished resolution, a merge the base branch's rules are blocking, or
 a mergeability answer the app couldn't read. **Update pull request branch** is in the
 command palette ({{kbd:command-palette}}) too — no default shortcut, so give it one in
@@ -2041,7 +2049,9 @@ it adds you as a reviewer if needed, posts your drafted comment alongside, and c
 you approve), **react** with emoji on the description and comments,
 edit its **labels**, **assignees**, and **reviewers** (request a review from a project
 member; on GitLab's free tier only one reviewer sticks, and the app tells you if others
-were dropped), track **time** on it (a clock summary in the
+were dropped; both pickers filter as you type and list the people already selected
+first, and a list that stops at its first 1,000 people says so), track **time** on it
+(a clock summary in the
 header opens a popover to set an estimate and log spent time), and **merge**
 it — merge or squash, optionally deleting
 the source branch, guarded so it never merges a head you didn't see (GitLab applies the project's
@@ -2158,20 +2168,48 @@ a **created** marker, interleaves the branch's **pushed commits** (grouped, each
 clickable to that commit's detail) with your **comments**, and ends with a **merged** or
 **closed** marker once the PR reaches that state.
 
-Before you merge, the PR footer previews whether the merge will **conflict** or land
-cleanly. If a merge does hit conflicts, GitDesktop runs it in an **isolated worktree** —
+An open local PR keeps a strip under its header like a hosted one's (see
+*Conflicts with the base branch*). It reads **Checking for conflicts…**, then **No
+conflicts with \`main\`**, or warns that merging will conflict, lists the files that
+clash, and offers **Resolve conflicts**. Unlike the hosted strip, a failed or unavailable
+check, a conflict it can't resolve here, and a promotion gap wrap onto more lines instead
+of being cut short. When the branch has fallen behind its base the
+strip says by how many commits and, unless a conflict is predicted, offers **Update
+branch** to merge the base in; **Update pull request branch** in the command palette
+({{kbd:command-palette}}) does the same. A promotion PR shows the expected gap and leaves
+the button out. When the check failed the strip offers **Retry**; when it can't be made
+at all (for example on a Git too old to predict merges, or when a branch no longer
+exists) the strip says the conflicts can't be checked. **Approve** sits beside **Merge**
+at the bottom of every tab, and a held **Merge** says what it is waiting for.
+
+**Resolve conflicts** needs no approval. It merges the base into the PR's branch in an
+isolated worktree and opens the conflict editor (see *Syncing & conflicts*); **Finish
+update** moves the PR's branch to the resolved merge, and the PR stays open, ready to
+review and merge. When the merge turns out clean it finishes straight away. Finishing an
+update on an approved PR clears the approval, because the branch changed, and the button
+and the editor say so beforehand. **Back to PR** returns to the pull request without
+discarding anything, and the strip then offers **Continue resolving**; leave it
+unfinished and the PR opens in the editor again next time, also after a restart.
+**Discard** throws the resolution away and touches neither your branch nor your working
+tree. When the PR's branch is the one you have checked out, commit or stash your changes
+first. A promotion PR keeps the Approve-then-Merge route. **Resolve pull request
+conflicts** in the command palette ({{kbd:command-palette}}) does the same for the
+selected local PR.
+
+If a merge does hit conflicts, GitDesktop runs it in an **isolated worktree** —
 your branch and working tree are left untouched, so you don't need a clean tree (unless
 you're merging into the branch you're currently on). The PR view opens a **resolve
 surface** with the conflicted files and the in-app conflict editor (see *Syncing &
 conflicts*); once every conflict is resolved, **Finish merge** commits and marks the PR
 merged, or **Abort** throws the merge away.
 
-**Managing the record** lives on the PR's list row, not the merge footer (which is just
-the merge decision): **{{Secondaryclick}}** a local PR to **Archive / Unarchive** it (archiving
-hides it and deselects the detail view) or **Delete** it — Delete confirms first and
-tells you how many comments go with it; the branches themselves are never touched. Both
-are also in the command palette ({{kbd:command-palette}}) as **Archive pull request** and
-**Delete pull request**, acting on the selected local PR.
+**Managing the record** lives on the PR's list row, not the footer (which approves,
+merges, closes or publishes the PR): **{{Secondaryclick}}** a local PR to
+**Archive / Unarchive** it (archiving hides it and deselects the detail view) or
+**Delete** it — Delete confirms first and tells you how many comments go with it; the
+branches themselves are never touched. Both are also in the command palette
+({{kbd:command-palette}}) as **Archive pull request** and **Delete pull request**,
+acting on the selected local PR.
 {{ai}}
 ## AI review
 
@@ -3307,7 +3345,8 @@ Once connected:
   delete-source-branch), **edit** the title/description (and **retarget** the destination
   branch), **approve/unapprove**, **request changes** (a true toggle — click again to
   revoke; approving also clears it), pick **reviewers** from your workspace members (the
-  PR author can't review their own PR, so they never appear), and flip **draft ↔ ready**
+  PR author can't review their own PR, so they never appear; the picker filters as you
+  type, and a list that stops at its first 500 people says so), and flip **draft ↔ ready**
   in either direction. Its
   **line-anchored review comments** render too — grouped by file in the conversation
   column and anchored in the Files diff (see *Review comments* under *Pull requests*) —

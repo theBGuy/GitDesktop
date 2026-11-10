@@ -10,7 +10,7 @@
 //! there (GitHub and GitLab only).
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{
@@ -471,13 +471,17 @@ impl GitDesktopMcp {
         description = "List users assignable to issues/pull requests in the repository, from its \
                        forge (GitHub or GitLab, per its remote; Bitbucket assignees aren't \
                        supported). Use these logins with set_issue_assignees / \
-                       set_pull_request_assignees. Returns JSON."
+                       set_pull_request_assignees. Returns JSON. A list cut at the first 1000 \
+                       users says so in a second text block."
     )]
     async fn list_assignable_users(&self) -> Result<CallToolResult, McpError> {
-        let users = crate::forge::forge_assignable_users(self.repo.clone(), None)
+        let list = crate::forge::forge_assignable_users(self.repo.clone(), None)
             .await
             .map_err(app_err)?;
-        json_result(&users)
+        let blocks = assignable_users_blocks(&list)?;
+        Ok(CallToolResult::success(
+            blocks.into_iter().map(ContentBlock::text).collect(),
+        ))
     }
 
     #[tool(
@@ -638,9 +642,78 @@ fn strip_empty_comment_defaults(v: &mut serde_json::Value) {
     }
 }
 
+/// The text blocks `list_assignable_users` returns: the users as the same pretty JSON array
+/// it has always returned, then one sentence only when the walk stopped at its ceiling. Pure.
+/// No untrusted-content framing: the payload is collaborator logins, and block 0's shape is
+/// a contract.
+fn assignable_users_blocks(
+    list: &crate::forge::model::ForgeUserList,
+) -> Result<Vec<String>, McpError> {
+    let json = serde_json::to_string_pretty(&list.users)
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let mut blocks = vec![json];
+    if list.truncated {
+        blocks.push(format!(
+            "The list above stops at the first {} assignable users; the repository may have more.",
+            list.ceiling
+        ));
+    }
+    Ok(blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forge_user_list_mcp_blocks_keep_the_array_and_add_the_note_only_when_truncated() {
+        use crate::forge::model::{ForgeUserList, ForgeUserRef};
+        let user = |id: &str| ForgeUserRef {
+            id: id.into(),
+            label: id.into(),
+            avatar_url: String::new(),
+            is_bot: false,
+        };
+        let empty = ForgeUserList {
+            users: vec![],
+            truncated: false,
+            ceiling: 1000,
+        };
+        assert_eq!(assignable_users_blocks(&empty).expect("blocks"), ["[]"]);
+
+        let users = vec![user("amy"), user("bob")];
+        let whole = ForgeUserList {
+            users: users.clone(),
+            truncated: false,
+            ceiling: 1000,
+        };
+        let whole_blocks = assignable_users_blocks(&whole).expect("blocks");
+        assert_eq!(whole_blocks.len(), 1);
+        // Block 0 is byte-identical to what `json_result(&users)` produced.
+        assert_eq!(
+            whole_blocks[0],
+            serde_json::to_string_pretty(&users).expect("json")
+        );
+        let cut = ForgeUserList {
+            users,
+            truncated: true,
+            ceiling: 1000,
+        };
+        let cut_blocks = assignable_users_blocks(&cut).expect("blocks");
+        assert_eq!(cut_blocks.len(), 2);
+        assert_eq!(cut_blocks[0], whole_blocks[0]);
+        assert_eq!(
+            cut_blocks[1],
+            "The list above stops at the first 1000 assignable users; the repository may have more."
+        );
+
+        let bb = ForgeUserList {
+            users: vec![user("amy")],
+            truncated: true,
+            ceiling: 500,
+        };
+        assert!(assignable_users_blocks(&bb).expect("blocks")[1].contains("first 500 "));
+    }
 
     /// The discussion gate's host classification: github.com passes; a known GitLab
     /// or Bitbucket host is refused; an unrecognized host defaults to GitHub (the

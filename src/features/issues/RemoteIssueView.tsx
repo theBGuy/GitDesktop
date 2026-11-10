@@ -9,6 +9,7 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DetailTitleRow } from "@/components/detail-title-row";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { HeldFrame, heldParentProps } from "@/components/held-frame";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
@@ -1370,16 +1371,16 @@ export function RemoteIssueView({
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="space-y-2 border-b px-4 py-3">
-        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
-            the actions would stay put and the title collapse instead. Growing also
-            replaces the spacer that used to right-align them. */}
-        <div className="flex flex-wrap items-start gap-2">
-          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-            {issue.title}{" "}
-            <span className="font-normal text-muted-foreground">
-              #{issue.number}
-            </span>
-          </h2>
+        <DetailTitleRow
+          heading={
+            <>
+              {issue.title}{" "}
+              <span className="font-normal text-muted-foreground">
+                #{issue.number}
+              </span>
+            </>
+          }
+        >
           {/* Both seed an AI run from the rendered issue, so they hold while
               that issue isn't the one you selected. */}
           <PlanIssueButton
@@ -1572,7 +1573,7 @@ export function RemoteIssueView({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-        </div>
+        </DetailTitleRow>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant={isOpen ? "default" : "secondary"}>
             {issue.state.toLowerCase()}

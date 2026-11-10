@@ -33,7 +33,7 @@ use crate::forge::http::{
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
-    ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider,
+    ForgeTimelineEventOut, ForgeUserList, ForgeUserRef, Implemented, Provider,
 };
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
@@ -423,6 +423,11 @@ impl<T> Default for BbPage<T> {
 /// remaining next page at the cap; callers using the list-only wrapper and inline
 /// walkers may still discard that signal.
 pub(super) const BB_MAX_PAGES: usize = 5;
+
+/// `pagelen` of the workspace-members walk; with [`BB_MAX_PAGES`] it sets the ceiling
+/// the reviewer picker reports.
+const BB_MEMBER_PAGE_SIZE: usize = 100;
+const BB_MEMBER_CEILING: usize = BB_MAX_PAGES * BB_MEMBER_PAGE_SIZE;
 
 /// The next page's URL, or `None` when there is no page to follow. Three cases stop
 /// the walk: an ABSENT `next`, an EMPTY one, and one pointing anywhere but
@@ -3508,53 +3513,95 @@ struct BbPrAuthorOnly {
     author: Option<BbUser>,
 }
 
-/// Map + filter workspace members into picker candidates. Pure (testable): drops
-/// uuid-less entries and the PR author, and sorts by label (case-insensitive) so
-/// the popover list is stable across refetches.
-fn reviewer_candidates_from(members: Vec<BbUser>, author_uuid: &str) -> Vec<ForgeUserRef> {
-    let mut out: Vec<ForgeUserRef> = members
+/// Map workspace members into picker candidates through `ForgeUserList::build`, which
+/// drops uuid-less entries and the PR author and sorts by label, so the popover list
+/// is stable across refetches. Pure.
+fn reviewer_candidates_from(
+    members: Vec<BbUser>,
+    author_uuid: &str,
+    truncated: bool,
+) -> ForgeUserList {
+    let refs = members
         .into_iter()
-        .filter_map(|u| {
-            let id = u.uuid.clone().unwrap_or_default();
-            if id.is_empty() || id == author_uuid {
-                return None;
-            }
-            Some(ForgeUserRef {
-                id,
-                label: user_login(&u),
-                avatar_url: user_avatar(&u),
-                is_bot: false,
-            })
+        .map(|u| ForgeUserRef {
+            id: u.uuid.clone().unwrap_or_default(),
+            label: user_login(&u),
+            avatar_url: user_avatar(&u),
+            is_bot: false,
         })
         .collect();
-    out.sort_by_key(|a| a.label.to_lowercase());
-    out
+    ForgeUserList::build(refs, author_uuid, truncated, BB_MEMBER_CEILING)
 }
 
-/// Walk a workspace's members, following `next` up to 5 pages (500 members at
-/// `pagelen=100`) — a larger workspace truncates rather than hanging the caller,
-/// consistent with the module's bounded-pagination posture. Shared by
-/// [`reviewer_candidates`] (which then filters the PR author) and
-/// [`member_candidates`] (which keeps everyone).
-async fn workspace_members(creds: &BbCredentials, ws: &str) -> AppResult<Vec<BbUser>> {
+fn workspace_members_url(ws: &str) -> String {
     // `next` is in the `fields` selector on purpose: omit it and the server omits the
     // link, silently truncating the walk to page 1.
-    let url = format!(
-        "workspaces/{}/members?pagelen=100&fields=values.user.uuid,values.user.display_name,values.user.nickname,values.user.links.avatar.href,next",
+    format!(
+        "workspaces/{}/members?pagelen={BB_MEMBER_PAGE_SIZE}&fields=values.user.uuid,values.user.display_name,values.user.nickname,values.user.links.avatar.href,next",
         encode_query_value(ws),
-    );
-    let memberships: Vec<BbMembership> = bb_paginate(creds, url, "workspace members").await?;
-    Ok(memberships.into_iter().filter_map(|m| m.user).collect())
+    )
+}
+
+/// Walk a workspace's members, following `next` up to [`BB_MAX_PAGES`] pages of
+/// [`BB_MEMBER_PAGE_SIZE`] — a larger workspace truncates (and says so in the flag)
+/// rather than hanging the caller. Shared by [`reviewer_candidates`] (which then
+/// filters the PR author) and [`member_candidates`] (which keeps everyone).
+async fn workspace_members(creds: &BbCredentials, ws: &str) -> AppResult<(Vec<BbUser>, bool)> {
+    walk_workspace_members(
+        workspace_members_url(ws),
+        std::time::Instant::now,
+        |url| async move {
+            http::bb_get_json::<BbPage<BbMembership>>(
+                creds,
+                &url,
+                "workspace members",
+                BbOpKind::Read,
+            )
+            .await
+        },
+    )
+    .await
+}
+
+/// The members walk over `fetch_page`, with one request's timeout as the whole walk's
+/// budget. The budget is checked before each page after the first; a spent one fails
+/// the read as a timed-out request does, and a page in flight is never cancelled.
+async fn walk_workspace_members<F, Fut>(
+    first_url: String,
+    now: impl Fn() -> std::time::Instant,
+    fetch_page: F,
+) -> AppResult<(Vec<BbUser>, bool)>
+where
+    F: Fn(String) -> Fut + Copy,
+    Fut: std::future::Future<Output = AppResult<BbPage<BbMembership>>>,
+{
+    let budget = crate::forge::http::REQUEST_TIMEOUT;
+    let start = now();
+    let mut first_page = true;
+    let (memberships, truncated) = bb_walk_pages(first_url, |url| {
+        let later_page = !std::mem::replace(&mut first_page, false);
+        let spent = later_page && now().duration_since(start) >= budget;
+        async move {
+            if spent {
+                return Err(AppError::Bitbucket(format!(
+                    "Bitbucket request failed: the workspace member list took longer than {}s: {}",
+                    budget.as_secs(),
+                    http::TRANSPORT_TIMED_OUT
+                )));
+            }
+            fetch_page(url).await
+        }
+    })
+    .await?;
+    let users = memberships.into_iter().filter_map(|m| m.user).collect();
+    Ok((users, truncated))
 }
 
 /// The reviewer picker's candidate list: the repo's WORKSPACE members, minus the user
 /// the server would reject as a reviewer. For an EXISTING PR (`Some(number)`) that's
 /// the PR author; at CREATE time (`None`, no PR yet) it's the VIEWER (the create body's
 /// author, whom the server 400s "…is the author…").
-pub async fn reviewer_candidates(
-    repo_path: &str,
-    number: Option<u64>,
-) -> AppResult<Vec<ForgeUserRef>> {
+pub async fn reviewer_candidates(repo_path: &str, number: Option<u64>) -> AppResult<ForgeUserList> {
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
     let exclude_uuid = match number {
@@ -3578,8 +3625,8 @@ pub async fn reviewer_candidates(
     };
 
     let (ws, _slug) = workspace_slug(repo_path).await?;
-    let members = workspace_members(&creds, &ws).await?;
-    Ok(reviewer_candidates_from(members, &exclude_uuid))
+    let (members, truncated) = workspace_members(&creds, &ws).await?;
+    Ok(reviewer_candidates_from(members, &exclude_uuid, truncated))
 }
 
 /// A newly-created PR's identity (id + web link), for mapping onto [`PrRef`].
@@ -5185,9 +5232,10 @@ pub async fn default_reviewer_remove(repo_path: &str, uuid: &str) -> AppResult<(
 pub async fn member_candidates(repo_path: &str) -> AppResult<Vec<ForgeUserRef>> {
     let creds = http::load_credentials().await?;
     let (ws, _slug) = workspace_slug(repo_path).await?;
-    let members = workspace_members(&creds, &ws).await?;
-    // Reuse the map/sort with an empty author filter (nothing excluded).
-    Ok(reviewer_candidates_from(members, ""))
+    let (members, truncated) = workspace_members(&creds, &ws).await?;
+    // Reuse the map/sort with an empty author filter (nothing excluded). This command's
+    // wire shape is the bare array, so the walk flag and ceiling stop here.
+    Ok(reviewer_candidates_from(members, "", truncated).users)
 }
 
 // ── Branch restrictions ──────────────────────────────────────────────────────
@@ -8581,12 +8629,116 @@ definitions:
             ]"#,
         )
         .unwrap();
-        let out = reviewer_candidates_from(members, "{author}");
+        let out = reviewer_candidates_from(members, "{author}", false).users;
         // Author + uuid-less dropped; case-insensitive label sort; label falls back
         // to nickname when display_name is absent.
         let labels: Vec<&str> = out.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, vec!["amy", "bob", "Zed"]);
         assert_eq!(out[0].id, "{amy}");
+    }
+
+    #[test]
+    fn forge_user_list_workspace_members_url_carries_pagelen_and_next() {
+        let url = workspace_members_url("ws");
+        assert!(url.starts_with("workspaces/ws/members?"));
+        assert!(url.contains(&format!("pagelen={BB_MEMBER_PAGE_SIZE}&")));
+        assert!(url.contains("pagelen=100&"));
+        let fields = url.split("fields=").nth(1).expect("fields selector");
+        assert!(fields.split(',').any(|f| f == "next"), "{fields}");
+    }
+
+    #[test]
+    fn forge_user_list_bitbucket_candidates_carry_the_walk_flag_and_ceiling() {
+        let members = || -> Vec<BbUser> {
+            serde_json::from_str(r#"[{"uuid":"{amy}","display_name":"amy"}]"#).unwrap()
+        };
+        let cut = reviewer_candidates_from(members(), "", true);
+        assert!(cut.truncated);
+        assert_eq!(cut.ceiling, BB_MAX_PAGES * BB_MEMBER_PAGE_SIZE);
+        assert_eq!(cut.ceiling, 500);
+        let whole = reviewer_candidates_from(members(), "", false);
+        assert!(!whole.truncated);
+        assert_eq!(whole.ceiling, 500);
+    }
+
+    /// Walks canned member pages of `sizes[n]` users, each page but the last linking the
+    /// next, on a fake clock that each fetch moves `step` seconds. Returns the walk and
+    /// how many pages it asked for.
+    async fn walk_canned_workspace(
+        sizes: &[usize],
+        step: u64,
+    ) -> (AppResult<(Vec<BbUser>, bool)>, usize) {
+        let base = std::time::Instant::now();
+        let elapsed = std::cell::Cell::new(0u64);
+        let requested = std::cell::Cell::new(0usize);
+        let out = walk_workspace_members(
+            format!("{BB_API_BASE}m?page=1"),
+            || base + std::time::Duration::from_secs(elapsed.get()),
+            |url: String| {
+                let page: usize = url
+                    .rsplit('=')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .expect("page");
+                requested.set(requested.get() + 1);
+                elapsed.set(elapsed.get() + step);
+                let rows = sizes.get(page - 1).copied().unwrap_or(0);
+                let next =
+                    (page < sizes.len()).then(|| format!("{BB_API_BASE}m?page={}", page + 1));
+                async move {
+                    let values = (0..rows)
+                        .map(|i| BbMembership {
+                            user: serde_json::from_value(
+                                serde_json::json!({ "uuid": format!("p{page}u{i}") }),
+                            )
+                            .ok(),
+                        })
+                        .collect();
+                    Ok(BbPage {
+                        values,
+                        next,
+                        size: None,
+                    })
+                }
+            },
+        )
+        .await;
+        (out, requested.get())
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_bitbucket_walk_carries_its_flag_to_the_members() {
+        // A next link left unread at the page bound reads cut.
+        let (out, requested) = walk_canned_workspace(&[100; 6], 0).await;
+        let (users, truncated) = out.expect("walks");
+        assert_eq!(
+            (users.len(), truncated, requested),
+            (500, true, BB_MAX_PAGES)
+        );
+
+        let (out, requested) = walk_canned_workspace(&[100, 3], 0).await;
+        let (users, truncated) = out.expect("walks");
+        assert_eq!((users.len(), truncated, requested), (103, false, 2));
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_bitbucket_walk_fails_once_its_budget_is_spent() {
+        // Pages start at 0s and 70s inside the 120s budget; the third would start at 140s.
+        let (out, requested) = walk_canned_workspace(&[100; 6], 70).await;
+        let Err(error) = out else {
+            panic!("a spent budget fails the read");
+        };
+        let message = error.to_string();
+        assert!(
+            message.ends_with(crate::forge::http::TRANSPORT_TIMED_OUT),
+            "{message}"
+        );
+        assert_eq!(requested, 2, "no page starts after the budget is spent");
+
+        // The first page always runs, however long it takes.
+        let (out, requested) = walk_canned_workspace(&[3], 500).await;
+        assert_eq!(out.expect("walks").0.len(), 3);
+        assert_eq!(requested, 1);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
   ApprovalState,
-  ForgeUserRef,
+  ForgeUserList,
   GitLabMrMergeState,
   PrTask,
   RemoteLens,
@@ -95,7 +95,7 @@ export const forgePrReviewerCandidates = (
   number: number | null,
   lens: RemoteLens,
 ) =>
-  invoke<ForgeUserRef[]>("forge_pr_reviewer_candidates", {
+  invoke<ForgeUserList>("forge_pr_reviewer_candidates", {
     repoPath,
     number,
     lens,

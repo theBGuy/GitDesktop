@@ -23,7 +23,7 @@ use crate::forge::glab::{
 use crate::forge::model::{
     namespace_set, Capabilities, CompletedReviewerOut, ForgeForkActivity, ForgeForkEntry,
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
-    ForgeTimelineEventOut, ForgeUserRef, Implemented, Provider, RemoteListFilter,
+    ForgeTimelineEventOut, ForgeUserList, ForgeUserRef, Implemented, Provider, RemoteListFilter,
 };
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
@@ -6632,32 +6632,109 @@ struct GlabMember {
     avatar_url: String,
 }
 
-/// The project's members (`members/all` = direct + inherited group members).
-async fn project_members(repo_path: &str) -> AppResult<Vec<GlabMember>> {
+/// The project's members (`members/all` = direct + inherited group members), walked
+/// up to `USER_LIST_CEILING`, with the walk's "stopped at the bound" flag.
+async fn project_members(repo_path: &str) -> AppResult<(Vec<GlabMember>, bool)> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let out = run_glab(
-        Some(repo_path),
-        &["api", &format!("projects/{enc}/members/all?per_page=100")],
+    walk_members(|page| {
+        let endpoint = member_page_endpoint(&enc, page);
+        async move {
+            let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+            Ok(out.stdout_lossy())
+        }
+    })
+    .await
+}
+
+/// The members walk over `fetch_stdout` (one page's body per call), with one call's
+/// `GLAB_NETWORK_TIMEOUT` as the whole walk's budget.
+async fn walk_members<F, Fut>(mut fetch_stdout: F) -> AppResult<(Vec<GlabMember>, bool)>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    crate::forge::walk_numbered_pages(
+        crate::forge::USER_LIST_PAGE_SIZE,
+        crate::forge::USER_LIST_MAX_PAGES,
         GLAB_NETWORK_TIMEOUT,
+        |page| {
+            let stdout = fetch_stdout(page);
+            async move { parse_member_page(&stdout.await?) }
+        },
     )
-    .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "project members",
-                format!("could not parse GitLab project members: {e}"),
-            )
-        })
+    .await
+}
+
+fn member_page_endpoint(enc: &str, page: usize) -> String {
+    let per_page = crate::forge::USER_LIST_PAGE_SIZE;
+    format!("projects/{enc}/members/all?per_page={per_page}&page={page}")
+}
+
+fn parse_member_page(stdout: &str) -> AppResult<Vec<GlabMember>> {
+    serde_json::from_str(stdout).map_err(|e| {
+        gl_unreadable(
+            "project members",
+            format!("could not parse GitLab project members: {e}"),
+        )
+    })
 }
 
 /// Resolve assignee usernames to GitLab's numeric ids via the project members.
 /// Errors when the members can't be fetched (a 403/timeout must not read as "no
 /// match") or when ANY username fails to resolve (naming the misses) — an assignee
 /// write must never silently drop someone (fail safe; shared by the set + create
-/// paths). A miss is a picker-vs-submit race or a >100-member project (the members
-/// read is capped at one page).
+/// paths). A miss is a picker-vs-submit race or a member past the walk's
+/// `USER_LIST_CEILING`, which the error then names.
 async fn resolve_assignee_ids(repo_path: &str, assignees: &[String]) -> AppResult<Vec<u64>> {
-    let members = project_members(repo_path).await?;
+    let enc = encode_project(&project_path(repo_path).await?);
+    let (members, truncated) = walk_members_until_matched(assignees, |page| {
+        let endpoint = member_page_endpoint(&enc, page);
+        async move {
+            let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+            Ok(out.stdout_lossy())
+        }
+    })
+    .await?;
+    assignee_ids_from(&members, truncated, assignees)
+}
+
+/// [`walk_members`] for a write: the same pages, bound and budget, but it stops at the
+/// first page after which every name in `wanted` has been read, so a write pays only
+/// for the pages its names need. The bool is "stopped at the page bound with a name
+/// still unmatched", the one case where the list may hold that name further on.
+async fn walk_members_until_matched<F, Fut>(
+    wanted: &[String],
+    mut fetch_stdout: F,
+) -> AppResult<(Vec<GlabMember>, bool)>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let mut missing: std::collections::HashSet<&str> = wanted.iter().map(String::as_str).collect();
+    let start = Instant::now();
+    let mut rows = Vec::new();
+    for page in 1..=crate::forge::USER_LIST_MAX_PAGES {
+        if page > 1 && start.elapsed() >= GLAB_NETWORK_TIMEOUT {
+            return Err(AppError::Timeout(GLAB_NETWORK_TIMEOUT.as_secs()));
+        }
+        let batch = parse_member_page(&fetch_stdout(page).await?)?;
+        let full = batch.len() >= crate::forge::USER_LIST_PAGE_SIZE;
+        for member in &batch {
+            missing.remove(member.username.as_str());
+        }
+        rows.extend(batch);
+        if missing.is_empty() || !full {
+            return Ok((rows, false));
+        }
+    }
+    Ok((rows, true))
+}
+
+fn assignee_ids_from(
+    members: &[GlabMember],
+    truncated: bool,
+    assignees: &[String],
+) -> AppResult<Vec<u64>> {
     let by_name: HashMap<&str, u64> = members
         .iter()
         .map(|m| (m.username.as_str(), m.id))
@@ -6671,45 +6748,24 @@ async fn resolve_assignee_ids(repo_path: &str, assignees: &[String]) -> AppResul
         }
     }
     if !missing.is_empty() {
-        return Err(AppError::Glab(format!(
-            "could not match {} to GitLab project members",
-            missing.join(", ")
-        )));
+        let names = missing.join(", ");
+        return Err(AppError::Glab(if truncated {
+            format!(
+                "could not match {names} to GitLab project members; the member list stops at the first {}",
+                crate::forge::USER_LIST_CEILING
+            )
+        } else {
+            format!("could not match {names} to GitLab project members")
+        }));
     }
     Ok(ids)
 }
 
-/// The project's assignable users as `ForgeUserRef`s (with avatars), mirroring the
-/// reviewer candidates. `members/all` can list a user twice (direct + inherited), so
-/// dedupe by username.
-pub async fn assignable_users(repo_path: &str) -> AppResult<Vec<ForgeUserRef>> {
-    let mut seen = std::collections::HashSet::new();
-    Ok(project_members(repo_path)
-        .await?
+/// Excludes nobody: the viewer stays assignable, and GitLab tolerates the author as a
+/// reviewer. `members/all` can list a user twice (direct + inherited); `build` dedupes.
+fn member_list_from(members: Vec<GlabMember>, truncated: bool) -> ForgeUserList {
+    let refs = members
         .into_iter()
-        .filter(|m| seen.insert(m.username.clone()))
-        .map(|m| ForgeUserRef {
-            id: m.username.clone(),
-            label: m.username,
-            avatar_url: m.avatar_url,
-            is_bot: false,
-        })
-        .collect())
-}
-
-/// The reviewer picker's candidates for a GitLab MR: the project members, keyed by
-/// username (deduped) — the same id space the setter resolves and the MR-detail
-/// read fills. GitLab tolerates the author as a reviewer, so `number` is unused (no
-/// author exclusion, matching the assignee picker).
-pub async fn reviewer_candidates(
-    repo_path: &str,
-    _number: Option<u64>,
-) -> AppResult<Vec<ForgeUserRef>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<ForgeUserRef> = project_members(repo_path)
-        .await?
-        .into_iter()
-        .filter(|m| seen.insert(m.username.clone()))
         .map(|m| ForgeUserRef {
             id: m.username.clone(),
             label: m.username,
@@ -6717,8 +6773,25 @@ pub async fn reviewer_candidates(
             is_bot: false,
         })
         .collect();
-    out.sort_by_key(|a| a.label.to_lowercase());
-    Ok(out)
+    ForgeUserList::build(refs, "", truncated, crate::forge::USER_LIST_CEILING)
+}
+
+/// The project's assignable users (with avatars), mirroring the reviewer candidates.
+pub async fn assignable_users(repo_path: &str) -> AppResult<ForgeUserList> {
+    let (members, truncated) = project_members(repo_path).await?;
+    Ok(member_list_from(members, truncated))
+}
+
+/// The reviewer picker's candidates for a GitLab MR: the project members, keyed by
+/// username — the same id space the setter resolves and the MR-detail read fills.
+/// GitLab tolerates the author as a reviewer, so `number` is unused (no author
+/// exclusion, matching the assignee picker).
+pub async fn reviewer_candidates(
+    repo_path: &str,
+    _number: Option<u64>,
+) -> AppResult<ForgeUserList> {
+    let (members, truncated) = project_members(repo_path).await?;
+    Ok(member_list_from(members, truncated))
 }
 
 /// Replace an MR's reviewers with `desired` (usernames): resolve username→numeric
@@ -11117,6 +11190,170 @@ mod my_work_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member(id: u64, username: &str) -> GlabMember {
+        GlabMember {
+            id,
+            username: username.into(),
+            avatar_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn forge_user_list_member_endpoint_carries_page_size_and_page() {
+        let endpoint = member_page_endpoint("g%2Fp", 3);
+        assert_eq!(endpoint, "projects/g%2Fp/members/all?per_page=100&page=3");
+        assert!(endpoint.contains(&format!("per_page={}", crate::forge::USER_LIST_PAGE_SIZE)));
+    }
+
+    #[test]
+    fn forge_user_list_member_page_parses() {
+        let rows = parse_member_page(
+            r#"[{"id":7,"username":"amy","avatar_url":null},{"id":9,"username":"bob","avatar_url":"https://x/b.png"}]"#,
+        )
+        .expect("parses");
+        assert_eq!(rows.len(), 2);
+        let first = &rows[0];
+        assert_eq!(first.id, 7);
+        assert_eq!(first.username, "amy");
+        assert_eq!(first.avatar_url, "", "a null avatar reads as empty");
+        assert_eq!(rows[1].avatar_url, "https://x/b.png");
+        assert!(parse_member_page("[]").expect("parses").is_empty());
+        assert!(parse_member_page("not json").is_err());
+    }
+
+    /// Canned member page `page` (1-based) of `sizes[page - 1]` rows, named `u<page>-<i>`.
+    fn canned_member_page(sizes: &[usize], page: usize) -> String {
+        let rows = sizes.get(page - 1).copied().unwrap_or(0);
+        let body: Vec<String> = (0..rows)
+            .map(|i| format!(r#"{{"id":{i},"username":"u{page}-{i}"}}"#))
+            .collect();
+        format!("[{}]", body.join(","))
+    }
+
+    /// Walks canned member pages of `sizes[n]` rows each.
+    async fn walk_canned_members(sizes: &[usize]) -> (Vec<GlabMember>, bool) {
+        walk_members(|page| {
+            let body = canned_member_page(sizes, page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks")
+    }
+
+    /// The resolver's walk over canned pages, with the number of pages it requested.
+    async fn resolve_walk_canned(sizes: &[usize], wanted: &[&str]) -> (Vec<u64>, bool, usize) {
+        let wanted: Vec<String> = wanted.iter().map(|w| w.to_string()).collect();
+        let requests = std::cell::Cell::new(0);
+        let (members, truncated) = walk_members_until_matched(&wanted, |page| {
+            requests.set(requests.get() + 1);
+            let body = canned_member_page(sizes, page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks");
+        let ids = members.iter().map(|m| m.id).collect();
+        (ids, truncated, requests.get())
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_resolver_walk_stops_at_the_last_requested_name() {
+        let full = [100; 12];
+        // Control: the picker's full walk over the same pages requests every page.
+        let requests = std::cell::Cell::new(0);
+        walk_members(|page| {
+            requests.set(requests.get() + 1);
+            let body = canned_member_page(&full, page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks");
+        assert_eq!(requests.get(), crate::forge::USER_LIST_MAX_PAGES);
+
+        let (ids, truncated, requests) = resolve_walk_canned(&full, &["u3-40", "u1-2"]).await;
+        assert_eq!((ids.len(), truncated, requests), (300, false, 3));
+
+        // A short page ends the list, matched or not.
+        let (_, truncated, requests) = resolve_walk_canned(&[100, 7, 100], &["ghost"]).await;
+        assert_eq!((truncated, requests), (false, 2));
+    }
+
+    /// A name past the cap still reaches the resolver as a miss on a cut list.
+    #[tokio::test]
+    async fn forge_user_list_resolver_walk_reports_a_miss_past_the_cap() {
+        let (_, truncated, requests) = resolve_walk_canned(&[100; 12], &["u1-0", "u11-0"]).await;
+        assert_eq!(
+            (truncated, requests),
+            (true, crate::forge::USER_LIST_MAX_PAGES)
+        );
+
+        let wanted: Vec<String> = vec!["u1-0".into(), "u11-0".into()];
+        let (members, truncated) = walk_members_until_matched(&wanted, |page| {
+            let body = canned_member_page(&[100; 12], page);
+            async move { Ok(body) }
+        })
+        .await
+        .expect("walks");
+        let err = assignee_ids_from(&members, truncated, &wanted).expect_err("the miss fails");
+        assert_eq!(
+            err.to_string(),
+            AppError::Glab(
+                "could not match u11-0 to GitLab project members; the member list stops at the first 1000"
+                    .into()
+            )
+            .to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_gitlab_walk_carries_its_flag_to_the_members() {
+        let (members, truncated) = walk_canned_members(&[100; 12]).await;
+        assert_eq!((members.len(), truncated), (1000, true));
+
+        let (members, truncated) = walk_canned_members(&[100, 7]).await;
+        assert_eq!((members.len(), truncated), (107, false));
+    }
+
+    #[test]
+    fn forge_user_list_gitlab_members_keep_every_username() {
+        let list = member_list_from(
+            vec![member(1, "me"), member(2, "amy"), member(1, "me")],
+            false,
+        );
+        let ids: Vec<&str> = list.users.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, ["amy", "me"], "nobody excluded; deduped and sorted");
+        assert!(!list.truncated);
+        assert_eq!(list.ceiling, crate::forge::USER_LIST_CEILING);
+        assert!(member_list_from(vec![member(1, "a")], true).truncated);
+    }
+
+    #[test]
+    fn forge_user_list_resolver_names_misses_and_the_cap() {
+        let members = [member(7, "amy"), member(9, "bob")];
+        let all = assignee_ids_from(&members, false, &["bob".into(), "amy".into()]);
+        assert_eq!(all.expect("all found"), [9, 7]);
+
+        let one = assignee_ids_from(&members, false, &["amy".into(), "zed".into()])
+            .expect_err("a miss fails the whole write");
+        assert_eq!(
+            one.to_string(),
+            AppError::Glab("could not match zed to GitLab project members".into()).to_string()
+        );
+
+        let two = assignee_ids_from(&members, true, &["zed".into(), "amy".into(), "yan".into()])
+            .expect_err("misses past the cap fail too");
+        assert_eq!(
+            two.to_string(),
+            AppError::Glab(
+                "could not match zed, yan to GitLab project members; the member list stops at the first 1000"
+                    .into()
+            )
+            .to_string()
+        );
+
+        let none = assignee_ids_from(&members, true, &[]).expect("empty");
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn rewritten_origin_preserves_transport_authority_and_git_suffix() {

@@ -1,8 +1,12 @@
 // Which line the merge strip under an open PR's header shows. Import-free (the
-// type-only imports are erased) so scripts/merge-strip-arm.test.mjs loads it
-// under Node's type stripping.
+// type-only imports are erased) so scripts/merge-strip-arm.test.mjs and
+// scripts/local-merge-strip-arm.test.mjs load it under Node's type stripping.
 import type { MergePreview, PrMergeabilityState } from "@/lib/git/types";
-import type { PrMergeabilityArm } from "./PrMergeabilityBanner";
+import type {
+  LocalMergeStripArm,
+  PrMergeabilityArm,
+  PromotionKind,
+} from "./PrMergeabilityBanner";
 
 /** Local-prediction outcomes that mean the head merges into the base cleanly.
  *  Typed on the preview's own union, so a renamed status fails to compile. */
@@ -117,5 +121,103 @@ export function mergeStripArm(input: MergeStripInputs): {
       arm === "pending" &&
       input.offline &&
       (mergeabilityPending || (!previewPending && !resolvePending)),
+  };
+}
+
+/** A local PR's strip inputs, each read as the view holds it. */
+export interface LocalMergeStripInputs {
+  /** Only an open PR has a strip. */
+  isOpen: boolean;
+  /** The conflict prediction (useConflictPreview). `enabled` is false when the record
+   *  names no base or no head, so no check can run. */
+  preview: {
+    enabled: boolean;
+    isPending: boolean;
+    isError: boolean;
+    data: Pick<MergePreview, "status"> | undefined;
+  };
+  /** The base..head comparison (useCompareBranches). `enabled` is false when base
+   *  and head are the same branch; `behindBy` is undefined until a read answers. */
+  comparison: {
+    enabled: boolean;
+    isPending: boolean;
+    behindBy: number | undefined;
+  };
+  promotionKind: PromotionKind;
+  /** The default-branch read or the branch rules are still on their first load, so a
+   *  null `promotionKind` is not yet an answer. */
+  promotionSettling: boolean;
+  /** An update-from write naming THIS head and base is running. */
+  updating: boolean;
+  /** The resolve slot; null when nothing offers a resolve. */
+  resolve: { unfinished: boolean } | null;
+}
+
+/**
+ * A running update outranks all (every input reads the head it moves); an unfinished resolve
+ * needs no read and its conflict stays predicted; an errored preview is `failed` over any
+ * retained answer. `unknown` (a base or head that no longer resolves such as a deleted
+ * branch, an empty merge-tree answer on exit 1, or any other merge-tree exit, git older
+ * than 2.38 among them), a disabled preview or an unrecognised status is `unchecked`,
+ * never behind. Conflict outranks behind; a pending read
+ * holds `checking`; `clean` claims only the prediction: a FAILED comparison never says behind.
+ */
+export function localMergeStripArm(input: LocalMergeStripInputs): {
+  arm: LocalMergeStripArm;
+  /** Update branch renders (it may still be held by a reason). */
+  offerUpdate: boolean;
+  /** Resolve conflicts renders on the conflicted arm (it may still be held). */
+  offerResolve: boolean;
+  /** An offered action must hold until the promotion inputs land. */
+  awaitingPromotion: boolean;
+} {
+  const { preview, comparison, promotionKind, resolve } = input;
+  const behind = comparison.behindBy ?? 0;
+  const arm: LocalMergeStripArm = (() => {
+    switch (true) {
+      case !input.isOpen:
+        return null;
+      case input.updating:
+        return "updating";
+      case resolve?.unfinished === true:
+        return "resume";
+      case !preview.enabled:
+        return "unchecked";
+      case preview.isPending:
+        return "checking";
+      case preview.isError:
+        return "failed";
+      case preview.data?.status === "unknown":
+        return "unchecked";
+      case preview.data?.status === "conflict":
+        return "conflicted";
+      case preview.data === undefined ||
+        !PREVIEW_NO_CONFLICT.has(preview.data.status):
+        return "unchecked";
+      case comparison.enabled && comparison.isPending:
+        return "checking";
+      case behind > 0:
+        return promotionKind !== null ? "promotion-gap" : "behind";
+      default:
+        return "clean";
+    }
+  })();
+  const offerUpdate =
+    promotionKind === null &&
+    behind > 0 &&
+    (arm === "behind" ||
+      arm === "updating" ||
+      arm === "failed" ||
+      arm === "unchecked");
+  const offerResolve =
+    arm === "conflicted" && resolve !== null && promotionKind === null;
+  return {
+    arm,
+    offerUpdate,
+    offerResolve,
+    awaitingPromotion:
+      input.promotionSettling &&
+      promotionKind === null &&
+      (offerUpdate || offerResolve),
   };
 }

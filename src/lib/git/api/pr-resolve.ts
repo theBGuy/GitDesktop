@@ -56,6 +56,17 @@ export const gitFinishLocalPrMerge = (
     opId,
   });
 
+/** What an abort did: `removed` = nothing this repository can remove backs the
+ *  record any more (a path that is not one of its minted leaves is not its to
+ *  remove, even one git still lists), false on a failed registry read or when a
+ *  leaf of ours survived the removal; `closed` = the abort ended the merge, false
+ *  when the entry was already closed as done while no registered worktree of ours
+ *  backed it, and whenever `removed` is false (the entry is then left open). */
+export interface LocalPrMergeAbortOutcome {
+  removed: boolean;
+  closed: boolean;
+}
+
 /** Rolls a paused local-PR merge back by deleting the merge worktree — the user's
  *  branch and working tree were never touched, so nothing else to undo. */
 export const gitAbortLocalPrMerge = (
@@ -63,10 +74,100 @@ export const gitAbortLocalPrMerge = (
   worktreePath: string,
   opId: string | null,
 ) =>
-  invoke<void>("git_abort_local_pr_merge", {
+  invoke<LocalPrMergeAbortOutcome>("git_abort_local_pr_merge", {
     repoPath,
     worktreePath,
     opId,
+  });
+
+/** Outcome of starting or finishing a local PR's branch update (its base merged INTO
+ *  its head): `updated` moved the head and left no worktree; `conflicts` paused in an
+ *  isolated worktree whose fields, with `opId` and `journalRepo`, feed finish and
+ *  discard. */
+export interface LocalPrUpdateOutcome {
+  status: "updated" | "conflicts";
+  conflicts: string[];
+  /** The head's new tip when updated; the tip the update started from on conflicts. */
+  headTip: string;
+  worktreePath: string | null;
+  worktreeId: string | null;
+  /** The journal entry the finish reads its anchor from; always present. */
+  opId: string;
+  /** The checkout path that entry is filed under (the journal is keyed per checkout). */
+  journalRepo: string;
+}
+
+/** `updated` when the update had already landed (its resolved commit is on the head,
+ *  even if no finish reported it): the caller treats it as a finish. */
+export interface LocalPrDiscardOutcome {
+  status: "discarded" | "updated";
+}
+
+/** Merges a local PR's base INTO its head in a hidden detached worktree. A clean merge
+ *  moves the head at once (fast-forwarding a checked-out head's working tree); on
+ *  conflicts the user's branch and working tree are untouched while they resolve. */
+export const gitUpdateLocalPrHead = (
+  repoPath: string,
+  base: string,
+  head: string,
+) =>
+  invoke<LocalPrUpdateOutcome>("git_update_local_pr_head", {
+    repoPath,
+    base,
+    head,
+  });
+
+/** Commits a paused update's staged resolution and moves the head to it. No refusal
+ *  removes the worktree or closes the entry, so the update stays retryable or
+ *  discardable; one about the update itself that a retry cannot clear says to
+ *  discard it and start again. */
+export const gitFinishLocalPrUpdate = (
+  repoPath: string,
+  base: string,
+  head: string,
+  worktreePath: string,
+  worktreeId: string,
+  opId: string,
+  journalRepo: string,
+) =>
+  invoke<LocalPrUpdateOutcome>("git_finish_local_pr_update", {
+    repoPath,
+    base,
+    head,
+    worktreePath,
+    worktreeId,
+    opId,
+    journalRepo,
+  });
+
+/** Throws a paused update away; succeeds once the repository resolves, so a stored
+ *  record stays clearable. */
+export const gitDiscardLocalPrUpdate = (
+  repoPath: string,
+  head: string,
+  worktreePath: string,
+  worktreeId: string,
+  opId: string,
+  journalRepo: string,
+) =>
+  invoke<LocalPrDiscardOutcome>("git_discard_local_pr_update", {
+    repoPath,
+    head,
+    worktreePath,
+    worktreeId,
+    opId,
+    journalRepo,
+  });
+
+/** Closes this checkout's unfinished update and paused merge journal entries whose
+ *  id is not kept; resolves to how many it closed. */
+export const gitCloseAbandonedLocalPrUpdates = (
+  repoPath: string,
+  keepOpIds: string[],
+) =>
+  invoke<number>("git_close_abandoned_local_pr_updates", {
+    repoPath,
+    keepOpIds,
   });
 
 /** Outcome of merging a remote PR's base INTO its head branch: `pushed` merged clean

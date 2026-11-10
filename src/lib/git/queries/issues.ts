@@ -17,6 +17,7 @@ import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
 import type {
+  ForgeUserList,
   ForgeUserRef,
   GitLabTimeStats,
   IssueDetails,
@@ -388,17 +389,38 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
   );
 }
 
+// Module-level so `select` keeps one identity across renders.
+const userListUsers = (list: ForgeUserList) => list.users;
+
+// One factory for both observers of the key: per-call options don't inherit across
+// observers, so the key, fetcher and staleTime must be spelled once.
+const assignableUsersOptions = (repo: string, lens: RemoteLens) =>
+  queryOptions({
+    queryKey: ["repo", repo, "assignable-users", lens] as const,
+    queryFn: () => api.forgeAssignableUsers(repo, lens),
+    staleTime: 5 * 60_000,
+  });
+
+/** The users as an array, for consumers that never show the ceiling. */
 export function useAssignableUsers(
   repo: string,
   enabled: boolean,
   lens: RemoteLens,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "assignable-users", lens] as const,
-    queryFn: () => api.forgeAssignableUsers(repo, lens),
+    ...assignableUsersOptions(repo, lens),
     enabled,
-    staleTime: 5 * 60_000,
+    select: userListUsers,
   });
+}
+
+/** The whole list, ceiling flag included, for the pickers. */
+export function useAssignableUserList(
+  repo: string,
+  enabled: boolean,
+  lens: RemoteLens,
+) {
+  return useQuery({ ...assignableUsersOptions(repo, lens), enabled });
 }
 
 export function useMilestones(

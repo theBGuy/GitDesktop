@@ -2,16 +2,18 @@ import { Popover } from "@base-ui/react/popover";
 import { UserCheckIcon } from "@phosphor-icons/react";
 import { Children, type ReactNode, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MetaValueCell, UserChip } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
-import { Checkbox } from "@/components/ui/checkbox";
-import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
+import {
+  redirectPopupFocus,
+  toUserPickerRead,
+  USER_PICKER_POPUP_CLASS,
+  UserPickerBody,
+} from "@/components/user-picker-body";
+import { sortedSnapshot } from "@/components/user-picker-model";
 import { useForgeGhHost } from "@/lib/git/host";
-import { useReviewerCandidates } from "@/lib/git/queries";
-import type { ForgeUserRef, RemoteLens } from "@/lib/git/types";
-import { useRovingRows } from "@/lib/list-keyboard-nav";
-import { cn } from "@/lib/utils";
+import { useForgeStatus, useReviewerCandidates } from "@/lib/git/queries";
+import type { ForgeProvider, ForgeUserRef, RemoteLens } from "@/lib/git/types";
 
 /**
  * A short, stable disambiguator for a reviewer whose label collides with a
@@ -30,6 +32,28 @@ export function userRefHint(
   return ref.id.replace(/[{}]/g, "").split("-")[0] || null;
 }
 
+/** Who a provider's reviewer candidates are, in its own words. */
+const REVIEWER_COPY: Partial<
+  Record<ForgeProvider, { loadFailed: string; empty: string }>
+> = {
+  bitbucket: {
+    loadFailed: "Couldn't load workspace members.",
+    empty: "No eligible reviewers — the workspace has no other members.",
+  },
+  github: {
+    loadFailed: "Couldn't load repository collaborators.",
+    empty: "No eligible reviewers — the repository has no other collaborators.",
+  },
+  gitlab: {
+    loadFailed: "Couldn't load project members.",
+    empty: "No eligible reviewers — the project has no other members.",
+  },
+};
+const REVIEWER_COPY_FALLBACK = {
+  loadFailed: "Couldn't load reviewers.",
+  empty: "No eligible reviewers.",
+};
+
 /**
  * Reviewer multi-select for the PR view — a shared control on all three
  * providers (`implemented.mrReviewers`). Mirrors `AssigneesPopover`, with one
@@ -40,9 +64,11 @@ export function userRefHint(
  * GitHub Copilot) are display-only and never enter this managed set.
  *
  * Edits batch into one `onChange` when the popover closes (each change is a
- * network PUT, like the assignees picker in the view). Candidates load only while
- * the popover is enabled; the PR author is already filtered out server-side (the
- * backend excludes them — providers reject an author-reviewer).
+ * network PUT, like the assignees picker in the view). On GitHub and GitLab the
+ * candidates load once the trigger is approached or the popup opens; Bitbucket
+ * reads them whenever enabled, since its chips' collision hints need them. The
+ * PR author is already filtered out server-side (providers reject an
+ * author-reviewer).
  */
 export function ReviewersPopover({
   repoPath,
@@ -83,29 +109,45 @@ export function ReviewersPopover({
   // rather than dropping them silently.
   | { cells?: false; children?: never }
 )) {
-  const candidates = useReviewerCandidates(repoPath, number, enabled, lens);
+  const provider = useForgeStatus(repoPath).data?.provider;
+  const [open, setOpen] = useState(false);
+  // Latched by the trigger's first hover or focus, so the list starts loading a
+  // beat before the click while a picker nobody approaches costs no read.
+  const [intent, setIntent] = useState(false);
+  const candidates = useReviewerCandidates(
+    repoPath,
+    number,
+    enabled && (open || intent || provider === "bitbucket"),
+    lens,
+  );
   // GitHub reviewer ids are logins (avatars served at `<host>/<login>.png`), so the
   // avatar is login-derived there; off GitHub it's the initial fallback unless the
   // ref carries a real avatarUrl (GitLab/Bitbucket do).
   const ghHost = useForgeGhHost(repoPath);
-  const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
+  // Per open: the body's key (fresh filter, cursor and scroll) and the users
+  // selected at open, which keep their rows at the top until it closes.
+  const [session, setSession] = useState<{
+    key: number;
+    snapshot: ForgeUserRef[];
+  }>({ key: 0, snapshot: [] });
   const portalContainer = usePanelPortalContainer();
+  const latchIntent = () => {
+    if (!disabledReason) setIntent(true);
+  };
 
-  // Collision universe for the candidate rows: candidates ∪ current value, so a
-  // selected colliding reviewer still gets a hint. For the chips: value ∪
-  // candidates when loaded, else just value (candidates aren't fetched until the
-  // popover opens, so a fresh render of the chips must stand on `value` alone).
-  const loaded = candidates.data ?? [];
-  const rowUniverse = [...loaded, ...value];
+  // Collision universe for the rows: everything the popup can show, unfiltered,
+  // so a colliding pair keeps its hints while the filter hides one of them. For
+  // the chips: value ∪ candidates once loaded, else just value (on GitHub and
+  // GitLab the candidates aren't read until the trigger is approached, so the
+  // chips must stand on `value` alone; Bitbucket reads them whenever enabled).
+  const loaded = candidates.data?.users ?? [];
+  const rowUniverse = [...loaded, ...value, ...session.snapshot];
   const chipUniverse = loaded.length > 0 ? [...value, ...loaded] : value;
-  // Tab cycles the rows: nothing else in this popup is focusable, so one-handed
-  // Tab+Space multi-select is worth its native Tab exit (Esc still closes).
-  const nav = useRovingRows({
-    items: loaded,
-    rowKey: (user) => user.id,
-    tabAdvances: true,
-  });
+  const copy = {
+    noun: "reviewers",
+    ...((provider && REVIEWER_COPY[provider]) ?? REVIEWER_COPY_FALLBACK),
+  };
 
   function toggle(user: ForgeUserRef, on: boolean) {
     setDraft((prev) => {
@@ -119,6 +161,10 @@ export function ReviewersPopover({
   function handleOpenChange(o: boolean) {
     if (o) {
       setDraft(new Map(value.map((r) => [r.id, r])));
+      setSession((prev) => ({
+        key: prev.key + 1,
+        snapshot: sortedSnapshot(value),
+      }));
       setOpen(true);
       return;
     }
@@ -139,6 +185,8 @@ export function ReviewersPopover({
       {/* Disabled on the BUTTON, never the Trigger: a disabled Trigger leaves the
           tab order, so its reason would reach hover only. */}
       <Popover.Trigger
+        onPointerEnter={latchIntent}
+        onFocus={latchIntent}
         render={
           <DisabledReasonButton
             variant="ghost"
@@ -158,68 +206,22 @@ export function ReviewersPopover({
           sideOffset={4}
           className="isolate z-50"
         >
-          <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            {/* Title names the popup via aria-labelledby — a bare caption leaves the
-                dialog unnamed; render keeps the <p> off Title's default <h2>. */}
-            <Popover.Title
-              render={<p />}
-              className="px-1 pb-1.5 text-xs font-medium"
-            >
-              Reviewers
-            </Popover.Title>
-            {(candidates.data ?? []).length === 0 && (
-              <p className="px-1 py-1 text-xs text-muted-foreground">
-                {emptyPickerCopy(candidates, {
-                  noun: "reviewers",
-                  loadFailed: "Couldn't load workspace members.",
-                  empty:
-                    "No eligible reviewers — the workspace has no other members.",
-                })}
-              </p>
-            )}
-            {/* Unstyled but NOT removable — see `useRovingRows`. */}
-            <div onKeyDown={nav.onRowKeyDown}>
-              {loaded.map((user) => {
-                const hint = userRefHint(user, rowUniverse);
-                return (
-                  <label
-                    key={user.id}
-                    title={hint ? `${user.label} (${hint})` : undefined}
-                    className={cn(
-                      "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
-                      nav.isActive(user) && "bg-muted/60",
-                    )}
-                  >
-                    <Checkbox
-                      {...nav.rowProps(user)}
-                      checked={draft.has(user.id)}
-                      onCheckedChange={(v) => toggle(user, v === true)}
-                    />
-                    <ForgeUserAvatar user={user} ghHost={ghHost} />
-                    <span
-                      className="flex-1 truncate"
-                      title={hint ? `${user.label} (${hint})` : user.label}
-                    >
-                      {user.label}
-                      {hint && (
-                        <span className="text-muted-foreground"> · {hint}</span>
-                      )}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-            {/* Tab is trapped in both directions while rows exist, so the
-                remaining keyboard exit has to be on screen AND announced —
-                Description wires it as the popup's aria-describedby. */}
-            {loaded.length > 0 && (
-              <Popover.Description
-                render={<p />}
-                className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground"
-              >
-                Tab cycles the rows; Esc closes.
-              </Popover.Description>
-            )}
+          <Popover.Popup
+            className={USER_PICKER_POPUP_CLASS}
+            onFocus={redirectPopupFocus}
+          >
+            <UserPickerBody
+              key={session.key}
+              title="Reviewers"
+              read={toUserPickerRead(candidates)}
+              copy={copy}
+              snapshot={session.snapshot}
+              checked={draft}
+              onToggle={toggle}
+              commitsOnClose
+              ghHost={ghHost}
+              hint={(user) => userRefHint(user, rowUniverse)}
+            />
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

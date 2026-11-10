@@ -20,6 +20,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DetailTitleRow } from "@/components/detail-title-row";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
@@ -64,6 +65,7 @@ import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotk
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import { ISSUE_SWITCH_LOADING_REASON } from "@/features/issues/RemoteIssueViewParts";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { type PendingRepoWrite, pendingWriteMatching } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
@@ -420,7 +422,9 @@ export function JiraAssigneePicker({
             ) : (
               <ComboboxItem key={item.id} value={item}>
                 <ForgeUserAvatar user={item} ghHost={null} />
-                <span className="truncate">{item.label}</span>
+                <span className="truncate" onMouseEnter={clipTitleFromText}>
+                  {item.label}
+                </span>
               </ComboboxItem>
             )
           }
@@ -1927,25 +1931,20 @@ export function JiraIssueView({
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="space-y-2 border-b px-4 py-3">
-        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
-            the actions would stay put and the title collapse instead. Growing also
-            replaces the spacer that used to right-align them. */}
-        <div className="flex flex-wrap items-start gap-2">
-          {/* The key is the PROP (always the issue you selected); the summary is
-              fetched, so it fades rather than disappearing — hiding it would
-              collapse the header's height mid-transition. */}
-          <h2
-            className={cn(
-              "min-w-0 flex-auto text-sm font-medium break-words",
-              PLACEHOLDER_FADE,
-              staleDim,
-            )}
-          >
-            <span className="font-mono font-normal text-muted-foreground">
-              {issueKey}
-            </span>{" "}
-            {issue.summary}
-          </h2>
+        <DetailTitleRow
+          // The key is the PROP (always the issue you selected); the summary
+          // is fetched, so it fades rather than disappearing — hiding it
+          // would collapse the header's height mid-transition.
+          headingClassName={cn(PLACEHOLDER_FADE, staleDim)}
+          heading={
+            <>
+              <span className="font-mono font-normal text-muted-foreground">
+                {issueKey}
+              </span>{" "}
+              {issue.summary}
+            </>
+          }
+        >
           {/* Absent while a placeholder is served: the verb comes from the
               LOADED issue's status, so a click during that window would fire the
               wrong transition against the issue you actually selected. */}
@@ -1986,7 +1985,7 @@ export function JiraIssueView({
             <ArrowSquareOutIcon data-icon="inline-start" />
             Jira
           </Button>
-        </div>
+        </DetailTitleRow>
         {/* Status stays in the header as a chip/dropdown next to the title
             (like the PR view's state pill); the rest of the metadata lives in
             the right-hand rail below. */}

@@ -31,6 +31,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DetailTitleRow } from "@/components/detail-title-row";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
@@ -471,9 +472,11 @@ function PrLoadingFrame({
         {PR_SWITCH_LOADING_REASON}
       </span>
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">
-        <div className="flex flex-wrap items-start gap-2">
-          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-            {title === undefined ? (
+        {/* A heading holding only the hidden skeleton is announced empty. */}
+        <DetailTitleRow
+          headingAs={title === undefined ? "div" : "h2"}
+          heading={
+            title === undefined ? (
               <Skeleton
                 aria-hidden
                 className="inline-block h-4 w-80 max-w-full align-middle"
@@ -485,10 +488,11 @@ function PrLoadingFrame({
                   #{number}
                 </span>
               </>
-            )}
-          </h2>
+            )
+          }
+        >
           {actions}
-        </div>
+        </DetailTitleRow>
         <div
           aria-hidden
           className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
@@ -3489,20 +3493,20 @@ export function RemotePrView({
     return (
       <div className="flex h-full flex-col">
         <header className="space-y-2 border-b px-4 py-3">
-          {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap,
-              so the badge would stay put and the title collapse instead. Growing
-              also replaces the spacer that used to right-align it. */}
-          <div className="flex flex-wrap items-start gap-2">
-            <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-              {pr.title}{" "}
-              <span className="font-normal text-muted-foreground">
-                #{pr.number}
-              </span>
-            </h2>
+          <DetailTitleRow
+            heading={
+              <>
+                {pr.title}{" "}
+                <span className="font-normal text-muted-foreground">
+                  #{pr.number}
+                </span>
+              </>
+            }
+          >
             <Badge variant="secondary" className="capitalize">
               {pr.state.toLowerCase()}
             </Badge>
-          </div>
+          </DetailTitleRow>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{pr.headRefName}</span>
             <span>→</span>
@@ -3780,16 +3784,16 @@ export function RemotePrView({
         className="shrink-0 border-b px-4 py-1.5"
       />
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">
-        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
-            the actions would stay put and the title collapse instead. Growing also
-            replaces the spacer that used to right-align them. */}
-        <div className="flex flex-wrap items-start gap-2">
-          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-            {pr.title}{" "}
-            <span className="font-normal text-muted-foreground">
-              #{pr.number}
-            </span>
-          </h2>
+        <DetailTitleRow
+          heading={
+            <>
+              {pr.title}{" "}
+              <span className="font-normal text-muted-foreground">
+                #{pr.number}
+              </span>
+            </>
+          }
+        >
           {isOpen && canCheckout && (
             <PrWorktreeCheckout
               ref={worktreeCheckout}
@@ -3874,7 +3878,7 @@ export function RemotePrView({
             <ArrowSquareOutIcon data-icon="inline-start" />
             {hostName ?? OPEN_IN_BROWSER}
           </Button>
-        </div>
+        </DetailTitleRow>
         <JiraRefRow
           repoPath={repoPath}
           sources={[

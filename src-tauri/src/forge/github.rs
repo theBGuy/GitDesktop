@@ -742,21 +742,29 @@ pub async fn repo_labels(
 pub async fn assignable_users(
     repo_path: &str,
     lens: Option<String>,
-) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
+) -> AppResult<crate::forge::model::ForgeUserList> {
+    let (logins, truncated) =
+        crate::github::issue::gh_assignable_users(repo_path.to_string(), lens).await?;
+    Ok(assignable_list_from(logins, truncated))
+}
+
+/// Excludes nobody: the viewer stays assignable.
+fn assignable_list_from(
+    logins: Vec<String>,
+    truncated: bool,
+) -> crate::forge::model::ForgeUserList {
     // GitHub carries no avatar in the assignees endpoint; the picker derives it
     // from the login (id), so leave `avatar_url` empty and let the frontend fill it.
-    Ok(
-        crate::github::issue::gh_assignable_users(repo_path.to_string(), lens)
-            .await?
-            .into_iter()
-            .map(|l| crate::forge::model::ForgeUserRef {
-                id: l.clone(),
-                label: l,
-                avatar_url: String::new(),
-                is_bot: false,
-            })
-            .collect(),
-    )
+    let refs = logins
+        .into_iter()
+        .map(|l| crate::forge::model::ForgeUserRef {
+            id: l.clone(),
+            label: l,
+            avatar_url: String::new(),
+            is_bot: false,
+        })
+        .collect();
+    crate::forge::model::ForgeUserList::build(refs, "", truncated, crate::forge::USER_LIST_CEILING)
 }
 
 pub async fn set_pr_reviewers(
@@ -772,7 +780,7 @@ pub async fn reviewer_candidates(
     repo_path: &str,
     number: Option<u64>,
     lens: Option<&str>,
-) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
+) -> AppResult<crate::forge::model::ForgeUserList> {
     crate::github::pr::reviewer_candidates(repo_path, number, lens).await
 }
 
@@ -1388,6 +1396,17 @@ mod tests {
     use crate::github::test_support::{
         gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
     };
+
+    #[test]
+    fn forge_user_list_github_assignable_keeps_every_login() {
+        let list = assignable_list_from(vec!["me".into(), "amy".into()], false);
+        let ids: Vec<&str> = list.users.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, ["amy", "me"], "the viewer stays assignable; sorted");
+        assert!(!list.truncated);
+        assert_eq!(list.ceiling, crate::forge::USER_LIST_CEILING);
+        assert!(assignable_list_from(vec!["a".into()], true).truncated);
+    }
+
     #[test]
     fn graphql_reset_maps_to_neutral_status_wire() {
         let gh = GhStatus {
