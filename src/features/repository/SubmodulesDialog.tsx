@@ -34,7 +34,6 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { nameFromUrl } from "@/features/welcome/clone-utils";
 import { clipTitle } from "@/lib/clip-title";
-import { validateRepo } from "@/lib/git/api";
 import {
   useAddSubmodule,
   useRemoveSubmodule,
@@ -47,11 +46,10 @@ import type { Submodule } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
-import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
-import { claimRepoOpen, useOpenRepoByPath } from "./useOpenRepoByPath";
+import { useOpenSubmoduleAsRepo } from "./useOpenSubmoduleAsRepo";
 
 /** "Modified" carries the warning tokens so it can't be mistaken for the
  *  identically-weighted "Up to date" at a glance; the labels differ too, so the
@@ -84,11 +82,6 @@ const ADDING_REASON = "Adding the submodule…";
 /** A gitlink with no `.gitmodules` entry has no URL to edit and nowhere to
  *  record a branch, so both edits would fail in git. */
 const NO_ENTRY_REASON = "no .gitmodules entry";
-
-/** The submodule's folder on disk. Its path is repo-root-relative with forward
- *  slashes, which Windows accepts mixed with the repo path's backslashes. */
-const submodulePath = (repoPath: string, sub: string) =>
-  `${repoPath.replace(/[/\\]+$/, "")}/${sub}`;
 
 /**
  * The submodule manager: lists what the parent repo references, updates them to
@@ -190,7 +183,7 @@ function SubmoduleList({
   const subs = useSubmodules(repoPath);
   const update = useUpdateSubmodule(repoPath);
   const remove = useRemoveSubmodule(repoPath);
-  const openByPath = useOpenRepoByPath();
+  const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
   const list = subs.data ?? [];
 
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -308,29 +301,9 @@ function SubmoduleList({
     }
   }
 
+  // The manager stays open beside a failed open instead of closing on it.
   async function handleOpenAsRepo(s: Submodule) {
-    const full = submodulePath(repoPath, s.path);
-    // Claimed before the probe, which is part of this open's request: a newer
-    // open during it wins, and a failed probe retires older ones like any
-    // failed open does.
-    const stillCurrent = claimRepoOpen();
-    // Probed here rather than left to useOpenRepoByPath, whose failure toast
-    // names the full path: a bad submodule reports its submodule-relative path,
-    // and the manager stays open beside it instead of closing on a failed open.
-    try {
-      await validateRepo(full);
-    } catch (e) {
-      if (isAppError(e) && e.kind === "notARepo") {
-        toast.error(`${s.path} is not a git repository.`);
-      } else {
-        toastError(e);
-      }
-      return;
-    }
-    // A submodule is an independent repository that nothing else in the app can
-    // reach, so it earns a recents row like any other opened repo.
-    await openByPath(full, "picker", stillCurrent);
-    onClose();
+    if (await openSubmodule(s.path)) onClose();
   }
 
   return (

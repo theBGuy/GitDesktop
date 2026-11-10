@@ -27,6 +27,7 @@ export * from "./pr-write";
 export * from "./projects";
 export * from "./prs";
 export * from "./reactions";
+export * from "./refs-stamp";
 export * from "./remotes";
 export * from "./repo";
 export * from "./repo-access";

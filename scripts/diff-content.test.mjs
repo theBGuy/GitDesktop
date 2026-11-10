@@ -17,6 +17,8 @@ const full = () => ({
   text: "diff --git a/src/a.txt b/src/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
   undecodable: false,
   oldPath: "src/old.txt",
+  whitespaceHidden: false,
+  whitespaceOnly: false,
 });
 
 /** The same field with another value of its type. */

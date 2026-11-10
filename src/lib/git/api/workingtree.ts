@@ -16,8 +16,15 @@ export const gitDiffFile = (
   filePath: string,
   staged: boolean,
   untracked: boolean,
+  ignoreWhitespace = false,
 ) =>
-  invoke<FileDiff>("git_diff_file", { repoPath, filePath, staged, untracked });
+  invoke<FileDiff>("git_diff_file", {
+    repoPath,
+    filePath,
+    staged,
+    untracked,
+    ignoreWhitespace,
+  });
 
 /** A single file's cumulative diff in an agent session worktree, against the
  *  session's base commit (committed turns + uncommitted edits; new untracked
@@ -26,7 +33,14 @@ export const gitSessionFileDiff = (
   repoPath: string,
   filePath: string,
   base: string,
-) => invoke<FileDiff>("git_session_file_diff", { repoPath, filePath, base });
+  ignoreWhitespace = false,
+) =>
+  invoke<FileDiff>("git_session_file_diff", {
+    repoPath,
+    filePath,
+    base,
+    ignoreWhitespace,
+  });
 
 /** Staged diff vs HEAD. With `worktree: true` it instead returns ALL in-progress
  *  tracked changes (staged + unstaged) vs HEAD — for naming a branch off work

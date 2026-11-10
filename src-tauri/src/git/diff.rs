@@ -723,12 +723,27 @@ fn sole_rename_section(stdout: &[u8]) -> Option<Vec<u8>> {
     Some([&stdout[..starts[0]], section].concat())
 }
 
+/// A view diff's options-and-revs argv, with `-w` appended when whitespace is
+/// hidden. Only the argv whose stdout becomes `FileDiff.text` take it: a
+/// `--name-status`/`--name-only` probe must keep agreeing with the file list.
+pub(crate) fn with_ignore_whitespace<'a>(
+    content: &[&'a str],
+    ignore_whitespace: Option<bool>,
+) -> Vec<&'a str> {
+    let mut args = content.to_vec();
+    if ignore_whitespace == Some(true) {
+        args.push("-w");
+    }
+    args
+}
+
 #[tauri::command]
 pub async fn git_diff_file(
     repo_path: String,
     file_path: String,
     staged: bool,
     untracked: bool,
+    ignore_whitespace: Option<bool>,
 ) -> AppResult<FileDiff> {
     let out = if untracked {
         // Full-file "added" diff for files git doesn't track yet.
@@ -736,19 +751,10 @@ pub async fn git_diff_file(
         // means "differences found" for --no-index.
         // `--no-index` takes FILESYSTEM paths, not pathspecs — `:(literal)` here
         // fails with "could not access" (measured), so this half stays raw.
-        let out = run_git_raw(
-            Some(&repo_path),
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-index",
-                "--",
-                "/dev/null",
-                &file_path,
-            ],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        let mut args =
+            with_ignore_whitespace(&["diff", "--no-ext-diff", "--no-index"], ignore_whitespace);
+        args.extend(["--", "/dev/null", file_path.as_str()]);
+        let out = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
         if out.code > 1 {
             return Err(AppError::Git {
                 code: out.code,
@@ -766,7 +772,10 @@ pub async fn git_diff_file(
         diff_with_rename_pairing(
             &repo_path,
             &file_path,
-            &["diff", "--no-ext-diff", "--no-color", "--cached"],
+            &with_ignore_whitespace(
+                &["diff", "--no-ext-diff", "--no-color", "--cached"],
+                ignore_whitespace,
+            ),
             &["diff", "--no-ext-diff", "--name-status", "-z", "--cached"],
         )
         .await?
@@ -774,7 +783,9 @@ pub async fn git_diff_file(
         // Literal pathspec: a `[slug]`-style path would otherwise splice its
         // glob-siblings' hunks into this file's diff.
         let spec = crate::git::pathspec::literal(&file_path);
-        let args = ["diff", "--no-ext-diff", "--no-color", "--", spec.as_str()];
+        let mut args =
+            with_ignore_whitespace(&["diff", "--no-ext-diff", "--no-color"], ignore_whitespace);
+        args.extend(["--", spec.as_str()]);
         PathDiff {
             stdout: run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT)
                 .await?
@@ -814,12 +825,16 @@ pub async fn git_session_file_diff(
     repo_path: String,
     file_path: String,
     base: String,
+    ignore_whitespace: Option<bool>,
 ) -> AppResult<FileDiff> {
     // base → working tree: captures both committed-turn changes and uncommitted edits.
     let out = diff_with_rename_pairing(
         &repo_path,
         &file_path,
-        &["diff", "--no-ext-diff", "--no-color", &base],
+        &with_ignore_whitespace(
+            &["diff", "--no-ext-diff", "--no-color", &base],
+            ignore_whitespace,
+        ),
         &["diff", "--no-ext-diff", "--name-status", "-z", &base],
     )
     .await?;
@@ -840,19 +855,10 @@ pub async fn git_session_file_diff(
         if !others.stdout_lossy().trim().is_empty() {
             // `--no-index` takes a FILESYSTEM path, so this one stays raw (see
             // git_diff_file); only the pathspec-taking probe above is literalized.
-            let no_index = run_git_raw(
-                Some(&repo_path),
-                &[
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-index",
-                    "--",
-                    "/dev/null",
-                    &file_path,
-                ],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
+            let mut args =
+                with_ignore_whitespace(&["diff", "--no-ext-diff", "--no-index"], ignore_whitespace);
+            args.extend(["--", "/dev/null", file_path.as_str()]);
+            let no_index = run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?;
             // exit 1 just means "differences found" for --no-index; >1 is a real error.
             if no_index.code > 1 {
                 return Err(AppError::Git {
@@ -2352,7 +2358,7 @@ mod tests {
             assert!(untracked_control.stdout_lossy().contains("EXTDIFF-RAN"));
         }
         for (path, untracked) in [("tracked.txt", false), ("untracked.txt", true)] {
-            let diff = git_diff_file(repo.clone(), path.into(), false, untracked)
+            let diff = git_diff_file(repo.clone(), path.into(), false, untracked, None)
                 .await
                 .unwrap();
             assert!(diff.text.contains("diff --git"), "{}", diff.text);
@@ -3726,7 +3732,7 @@ mod tests {
         )
         .unwrap();
 
-        let diff = git_session_file_diff(repo.clone(), "file.txt".into(), base.clone())
+        let diff = git_session_file_diff(repo.clone(), "file.txt".into(), base.clone(), None)
             .await
             .unwrap();
         assert!(diff.text.contains("FROM COMMITTED TURN"), "{}", diff.text);
@@ -3735,7 +3741,7 @@ mod tests {
 
         // A brand-new untracked file surfaces as a full add (the fallback path).
         std::fs::write(dir.join("new.txt"), "hello new file\n").unwrap();
-        let added = git_session_file_diff(repo.clone(), "new.txt".into(), base)
+        let added = git_session_file_diff(repo.clone(), "new.txt".into(), base, None)
             .await
             .unwrap();
         assert!(added.text.contains("+hello new file"), "{}", added.text);
@@ -4477,11 +4483,11 @@ mod tests {
         run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
-        let staged = git_diff_file(repo.clone(), "file.txt".into(), true, false)
+        let staged = git_diff_file(repo.clone(), "file.txt".into(), true, false, None)
             .await
             .unwrap();
         assert!(staged.undecodable);
-        let unstaged = git_diff_file(repo, "file.txt".into(), false, false)
+        let unstaged = git_diff_file(repo, "file.txt".into(), false, false, None)
             .await
             .unwrap();
         assert!(!unstaged.undecodable);
@@ -4491,18 +4497,18 @@ mod tests {
     async fn file_diff_flags_an_undecodable_unstaged_change() {
         let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-unstaged-").await;
         std::fs::write(dir.join("file.txt"), "base line\nascii edit\n").unwrap();
-        let ascii = git_diff_file(repo.clone(), "file.txt".into(), false, false)
+        let ascii = git_diff_file(repo.clone(), "file.txt".into(), false, false, None)
             .await
             .unwrap();
         assert!(ascii.text.contains("+ascii edit"), "{}", ascii.text);
         assert!(!ascii.undecodable);
 
         std::fs::write(dir.join("file.txt"), b"base line\ncaf\xFC\n").unwrap();
-        let unstaged = git_diff_file(repo.clone(), "file.txt".into(), false, false)
+        let unstaged = git_diff_file(repo.clone(), "file.txt".into(), false, false, None)
             .await
             .unwrap();
         assert!(unstaged.undecodable);
-        let staged = git_diff_file(repo, "file.txt".into(), true, false)
+        let staged = git_diff_file(repo, "file.txt".into(), true, false, None)
             .await
             .unwrap();
         assert!(!staged.undecodable);
@@ -4514,11 +4520,11 @@ mod tests {
         let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-untracked-").await;
         std::fs::write(dir.join("new.txt"), b"caf\xFC\n").unwrap();
         std::fs::write(dir.join("plain.txt"), "plain\n").unwrap();
-        let dirty = git_diff_file(repo.clone(), "new.txt".into(), false, true)
+        let dirty = git_diff_file(repo.clone(), "new.txt".into(), false, true, None)
             .await
             .unwrap();
         assert!(dirty.undecodable);
-        let plain = git_diff_file(repo, "plain.txt".into(), false, true)
+        let plain = git_diff_file(repo, "plain.txt".into(), false, true, None)
             .await
             .unwrap();
         assert!(plain.text.contains("+plain"), "{}", plain.text);
@@ -4531,7 +4537,7 @@ mod tests {
     async fn file_diff_real_replacement_char_is_not_undecodable() {
         let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-fffd-").await;
         std::fs::write(dir.join("file.txt"), "base line\ncaf\u{FFFD}\n").unwrap();
-        let diff = git_diff_file(repo, "file.txt".into(), false, false)
+        let diff = git_diff_file(repo, "file.txt".into(), false, false, None)
             .await
             .unwrap();
         assert!(diff.text.contains('\u{FFFD}'), "{}", diff.text);
@@ -4548,7 +4554,7 @@ mod tests {
             .into_bytes();
         bytes.extend_from_slice(b"tail \xFC\n");
         std::fs::write(dir.join("big.txt"), &bytes).unwrap();
-        let diff = git_diff_file(repo.clone(), "big.txt".into(), false, true)
+        let diff = git_diff_file(repo.clone(), "big.txt".into(), false, true, None)
             .await
             .unwrap();
         assert!(diff.is_truncated);
@@ -4559,7 +4565,7 @@ mod tests {
         bytes.truncate(ascii_len);
         bytes.push(b'\n');
         std::fs::write(dir.join("big.txt"), &bytes).unwrap();
-        let ascii = git_diff_file(repo, "big.txt".into(), false, true)
+        let ascii = git_diff_file(repo, "big.txt".into(), false, true, None)
             .await
             .unwrap();
         assert!(ascii.is_truncated);
@@ -4757,7 +4763,7 @@ mod tests {
     }
 
     async fn commit_diff(repo: &str, sha: &str, path: &str) -> FileDiff {
-        crate::git::history::git_commit_file_diff(repo.into(), sha.into(), path.into())
+        crate::git::history::git_commit_file_diff(repo.into(), sha.into(), path.into(), None)
             .await
             .unwrap()
     }
@@ -5033,6 +5039,7 @@ mod tests {
                 "trunk".into(),
                 "feat".into(),
                 p.into(),
+                None,
             )
         };
 
@@ -5067,12 +5074,12 @@ mod tests {
         std::fs::write(dir.join("b.txt"), format!("{TEN}unstaged\n")).unwrap();
         std::fs::write(dir.join("u.txt"), "untracked\n").unwrap();
 
-        let staged = git_diff_file(repo.clone(), "b.txt".into(), true, false)
+        let staged = git_diff_file(repo.clone(), "b.txt".into(), true, false, None)
             .await
             .unwrap();
         assert_pure_rename(&staged, "a.txt", "b.txt");
         assert!(!staged.undecodable);
-        let add = git_diff_file(repo.clone(), "n.txt".into(), true, false)
+        let add = git_diff_file(repo.clone(), "n.txt".into(), true, false, None)
             .await
             .unwrap();
         let single = git_ok(
@@ -5088,7 +5095,7 @@ mod tests {
         )
         .await;
         assert_eq!((add.text, add.old_path), (single, None));
-        let unstaged = git_diff_file(repo.clone(), "b.txt".into(), false, false)
+        let unstaged = git_diff_file(repo.clone(), "b.txt".into(), false, false, None)
             .await
             .unwrap();
         let single = git_ok(
@@ -5104,7 +5111,7 @@ mod tests {
         .await;
         assert!(unstaged.text.contains("+unstaged"), "{}", unstaged.text);
         assert_eq!((unstaged.text, unstaged.old_path), (single, None));
-        let untracked = git_diff_file(repo.clone(), "u.txt".into(), false, true)
+        let untracked = git_diff_file(repo.clone(), "u.txt".into(), false, true, None)
             .await
             .unwrap();
         let raw = run_git_raw(
@@ -5158,11 +5165,11 @@ mod tests {
         commit_all(&repo, "turn 1").await;
         std::fs::write(dir.join("new.txt"), "agent wrote\n").unwrap();
 
-        let d = git_session_file_diff(repo.clone(), "b.txt".into(), base.clone())
+        let d = git_session_file_diff(repo.clone(), "b.txt".into(), base.clone(), None)
             .await
             .unwrap();
         assert_pure_rename(&d, "a.txt", "b.txt");
-        let untracked = git_session_file_diff(repo.clone(), "new.txt".into(), base)
+        let untracked = git_session_file_diff(repo.clone(), "new.txt".into(), base, None)
             .await
             .unwrap();
         let raw = run_git_raw(
@@ -5184,7 +5191,7 @@ mod tests {
     }
 
     async fn stash_diff(repo: &str, path: &str) -> FileDiff {
-        crate::git::ops::git_stash_file_diff(repo.into(), 0, path.into())
+        crate::git::ops::git_stash_file_diff(repo.into(), 0, path.into(), None)
             .await
             .unwrap()
     }
@@ -5258,7 +5265,7 @@ mod tests {
         git_ok(repo, &["mv", old, new]).await;
         std::fs::write(dir.join(new), edit).unwrap();
         git_ok(repo, &["add", "-A"]).await;
-        let d = git_diff_file(repo.into(), new.into(), true, false)
+        let d = git_diff_file(repo.into(), new.into(), true, false, None)
             .await
             .unwrap();
         assert_eq!(d.old_path.as_deref(), Some(old), "{}", d.text);
@@ -5306,7 +5313,7 @@ mod tests {
         let names = git_ok(&repo, &["diff", "--no-ext-diff", "--name-status", "-z"]).await;
         assert!(names.starts_with('R'), "premise: git pairs it\n{names:?}");
 
-        let d = git_diff_file(repo.clone(), "b.txt".into(), false, false)
+        let d = git_diff_file(repo.clone(), "b.txt".into(), false, false, None)
             .await
             .unwrap();
         assert_eq!(d.old_path, None, "{}", d.text);
@@ -5348,7 +5355,7 @@ mod tests {
         // Negative control: the same reverse patch under the diff's own rename header
         // undoes the rename itself.
         git_ok(&repo, &["add", "-A"]).await;
-        let d = git_diff_file(repo.clone(), "b.txt".into(), true, false)
+        let d = git_diff_file(repo.clone(), "b.txt".into(), true, false, None)
             .await
             .unwrap();
         let patch = build_partial_patch(&d.text, &[sel(Side::Old, 2), sel(Side::New, 2)], true);
@@ -5387,7 +5394,7 @@ mod tests {
         std::fs::write(dir.join("b.sh"), TEN.replace("l5\n", "l5 EDIT\n")).unwrap();
         git_ok(&repo, &["add", "-A"]).await;
         git_ok(&repo, &["update-index", "--chmod=+x", "b.sh"]).await;
-        let d = git_diff_file(repo.clone(), "b.sh".into(), true, false)
+        let d = git_diff_file(repo.clone(), "b.sh".into(), true, false, None)
             .await
             .unwrap();
         assert_paired(&d, "a.sh", "b.sh");
@@ -5455,5 +5462,223 @@ mod tests {
             "{files:?}"
         );
         assert_eq!(git_ok(&repo, &["show", &format!(":{quoted}")]).await, TEN);
+    }
+
+    const WS_BASE: &str = "fn main() {\nbody();\n}\n";
+    const WS_EDIT: &str = "fn main() {\n    body();\n}\n";
+
+    fn has_hunk(text: &str) -> bool {
+        text.lines().any(|l| l.starts_with("@@"))
+    }
+
+    #[test]
+    fn with_ignore_whitespace_appends_the_flag_only_when_on() {
+        let content = ["diff", "--no-ext-diff", "--no-color"];
+        assert_eq!(with_ignore_whitespace(&content, None), content);
+        assert_eq!(with_ignore_whitespace(&content, Some(false)), content);
+        assert_eq!(
+            with_ignore_whitespace(&content, Some(true)),
+            ["diff", "--no-ext-diff", "--no-color", "-w"]
+        );
+    }
+
+    #[tokio::test]
+    async fn file_diff_ignore_whitespace_empties_a_whitespace_only_edit() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-unstaged-").await;
+        std::fs::write(dir.join("f.rs"), WS_BASE).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::write(dir.join("f.rs"), WS_EDIT).unwrap();
+        for flag in [None, Some(false)] {
+            let d = git_diff_file(repo.clone(), "f.rs".into(), false, false, flag)
+                .await
+                .unwrap();
+            assert!(has_hunk(&d.text), "{flag:?}: {}", d.text);
+        }
+        let hidden = git_diff_file(repo, "f.rs".into(), false, false, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(hidden.text, "");
+    }
+
+    #[tokio::test]
+    async fn file_diff_ignore_whitespace_keeps_only_the_real_hunk() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-mixed-").await;
+        let lines: Vec<String> = (1..=20).map(|n| format!("l{n}")).collect();
+        std::fs::write(dir.join("f.txt"), lines.join("\n") + "\n").unwrap();
+        commit_all(&repo, "base").await;
+        let mut edited = lines.clone();
+        edited[1] = "  l2".into();
+        edited[17] = "real change".into();
+        std::fs::write(dir.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        let plain = git_diff_file(repo.clone(), "f.txt".into(), false, false, None)
+            .await
+            .unwrap();
+        assert_eq!(plain.text.matches("\n@@ ").count(), 2, "{}", plain.text);
+        let hidden = git_diff_file(repo, "f.txt".into(), false, false, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(hidden.text.matches("\n@@ ").count(), 1, "{}", hidden.text);
+        assert!(hidden.text.contains("+real change"), "{}", hidden.text);
+        assert!(!hidden.text.contains("+  l2"), "{}", hidden.text);
+    }
+
+    #[tokio::test]
+    async fn file_diff_ignore_whitespace_keeps_a_staged_rename_header() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-rename-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(dir.join("b.txt"), TEN.replace("l5\n", "  l5\n")).unwrap();
+        git_ok(&repo, &["add", "-A"]).await;
+        let d = git_diff_file(repo, "b.txt".into(), true, false, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(d.old_path.as_deref(), Some("a.txt"));
+        assert!(d.text.contains("rename from"), "{}", d.text);
+        assert!(!has_hunk(&d.text), "{}", d.text);
+    }
+
+    #[tokio::test]
+    async fn file_diff_ignore_whitespace_leaves_an_untracked_add_alone() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-untracked-").await;
+        std::fs::write(dir.join("u.txt"), "x\n  y\n\n").unwrap();
+        let plain = git_diff_file(repo.clone(), "u.txt".into(), false, true, None)
+            .await
+            .unwrap();
+        let hidden = git_diff_file(repo, "u.txt".into(), false, true, Some(true))
+            .await
+            .unwrap();
+        assert!(plain.text.contains("new file mode"), "{}", plain.text);
+        assert_eq!(hidden.text, plain.text);
+    }
+
+    #[tokio::test]
+    async fn session_file_diff_ignore_whitespace_empties_a_tracked_edit() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-session-").await;
+        std::fs::write(dir.join("f.rs"), WS_BASE).unwrap();
+        let base = commit_all(&repo, "base").await;
+        std::fs::write(dir.join("f.rs"), WS_EDIT).unwrap();
+        let plain = git_session_file_diff(repo.clone(), "f.rs".into(), base.clone(), None)
+            .await
+            .unwrap();
+        assert!(has_hunk(&plain.text), "{}", plain.text);
+        let hidden = git_session_file_diff(repo, "f.rs".into(), base, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(hidden.text, "");
+    }
+
+    #[tokio::test]
+    async fn commit_and_branch_file_diffs_ignore_whitespace() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-commit-").await;
+        std::fs::write(dir.join("f.rs"), WS_BASE).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["branch", "trunk"]).await;
+        git_ok(&repo, &["checkout", "-q", "-b", "feat"]).await;
+        std::fs::write(dir.join("f.rs"), WS_EDIT).unwrap();
+        let sha = commit_all(&repo, "indent").await;
+        for (flag, shown) in [(None, true), (Some(false), true), (Some(true), false)] {
+            let commit = crate::git::history::git_commit_file_diff(
+                repo.clone(),
+                sha.clone(),
+                "f.rs".into(),
+                flag,
+            )
+            .await
+            .unwrap();
+            assert_eq!(has_hunk(&commit.text), shown, "{flag:?}: {}", commit.text);
+            let branch = crate::git::compare::git_branch_file_diff(
+                repo.clone(),
+                "trunk".into(),
+                "feat".into(),
+                "f.rs".into(),
+                flag,
+            )
+            .await
+            .unwrap();
+            assert_eq!(has_hunk(&branch.text), shown, "{flag:?}: {}", branch.text);
+        }
+    }
+
+    /// A whitespace-only tracked change `-w` empties must not fall back to the
+    /// untracked parent, which lacks the path and would show it deleted.
+    #[tokio::test]
+    async fn stash_file_diff_ignore_whitespace_never_shows_a_tracked_path_deleted() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-stash-").await;
+        std::fs::write(dir.join("f.rs"), WS_BASE).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::write(dir.join("f.rs"), WS_EDIT).unwrap();
+        std::fs::write(dir.join("u.txt"), "untracked\n").unwrap();
+        git_ok(&repo, &["stash", "push", "-q", "--include-untracked"]).await;
+        let read = |path: &'static str, flag: Option<bool>| {
+            crate::git::ops::git_stash_file_diff(repo.clone(), 0, path.into(), flag)
+        };
+
+        let hidden = read("f.rs", Some(true)).await.unwrap();
+        assert_eq!(hidden.text, "");
+        let plain = read("f.rs", None).await.unwrap();
+        assert!(has_hunk(&plain.text), "{}", plain.text);
+        let untracked = read("u.txt", Some(true)).await.unwrap();
+        assert!(
+            untracked.text.contains("new file mode"),
+            "{}",
+            untracked.text
+        );
+        assert!(untracked.text.contains("+untracked"), "{}", untracked.text);
+
+        let sha = git_ok(&repo, &["rev-parse", "stash@{0}"])
+            .await
+            .trim()
+            .to_string();
+        let by_sha = crate::git::ops::git_orphaned_stash_file_diff(
+            repo.clone(),
+            sha,
+            "f.rs".into(),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_sha.text, hidden.text);
+        assert!(
+            !by_sha.text.contains("deleted file mode"),
+            "{}",
+            by_sha.text
+        );
+    }
+
+    #[tokio::test]
+    async fn stash_file_diff_ignore_whitespace_without_an_untracked_parent() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-stash-plain-").await;
+        std::fs::write(dir.join("f.rs"), WS_BASE).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::write(dir.join("f.rs"), WS_EDIT).unwrap();
+        git_ok(&repo, &["stash", "push", "-q"]).await;
+        let read = |path: &'static str| {
+            crate::git::ops::git_stash_file_diff(repo.clone(), 0, path.into(), Some(true))
+        };
+
+        let hidden = read("f.rs").await.unwrap();
+        assert_eq!(hidden.text, "");
+        assert!(!hidden.text.contains("deleted file mode"));
+        assert!(!hidden.text.lines().any(|l| l.starts_with('-')));
+    }
+
+    #[tokio::test]
+    async fn stash_file_diff_ignore_whitespace_of_a_path_in_no_parent_is_empty() {
+        let (_tmp, dir, repo) = rename_repo("gd-ws-stash-none-").await;
+        std::fs::write(dir.join("f.rs"), WS_BASE).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::write(dir.join("f.rs"), WS_EDIT).unwrap();
+        git_ok(&repo, &["stash", "push", "-q"]).await;
+
+        let none = crate::git::ops::git_stash_file_diff(
+            repo.clone(),
+            0,
+            "nowhere.txt".into(),
+            Some(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(none.text, "");
     }
 }

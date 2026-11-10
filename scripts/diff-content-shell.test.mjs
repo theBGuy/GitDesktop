@@ -184,11 +184,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
   const textAt = returns[returns.length - 1];
   const arms = [
     ["pending", armReturn(/\bif\s*\(\s*isPending\s*\)/), false],
-    [
-      "stale-path",
-      armReturn(/\bif\s*\(\s*data\s*&&\s*data\.filePath\s*!==\s*filePath\s*\)/),
-      false,
-    ],
+    ["stale-path", armReturn(/\bif\s*\(\s*retainedOther\s*\)/), false],
     ["no-data", armReturn(/\bif\s*\(\s*!\s*data\s*\)/), false],
     ["image", imageAt, true],
     // A typechange with one binary half stacks both halves after the image arm.
@@ -202,6 +198,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
         : (returns.find((r) => r > imageAt && r !== typechangeAt) ?? -1),
       true,
     ],
+    ["whitespace-only", armReturn(/\bif\s*\(\s*whitespaceOnly\s*\)/), true],
     ["empty", armReturn(/\bif\s*\(\s*emptyDiff\s*\)/), true],
     ["header-only", headerOnlyAt, true],
     ["text", headerOnlyAt >= 0 && textAt > headerOnlyAt ? textAt : -1, true],
@@ -210,7 +207,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     arms.every(([, at]) => at >= 0) &&
       new Set(arms.map(([, at]) => at)).size === arms.length &&
       returns.length === arms.length,
-    "every DiffContent return is one of the nine named arms",
+    "every DiffContent return is one of the ten named arms",
   );
   for (const [name, at, data] of arms) {
     if (at < 0) continue;
@@ -323,17 +320,30 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
       flat(masked.slice(paOpen, paClose)).includes(":landing(null,true)"),
     "the blank pending body is busy",
   );
-  const staleArm =
-    /\bif\s*\(\s*data\s*&&\s*data\.filePath\s*!==\s*filePath\s*\)/g;
+  const staleArm = /\bif\s*\(\s*retainedOther\s*\)/g;
   staleArm.lastIndex = body.open;
   const sa = staleArm.exec(masked);
   need(
     sa !== null &&
       sa.index < body.close &&
       flat(masked.slice(sa.index, sa.index + 120)).startsWith(
-        "if(data&&data.filePath!==filePath)returnshell(landing(null,true));",
+        "if(retainedOther)returnshell(landing(null,true));",
       ),
     "the stale-path body is busy",
+  );
+  // The stale-path guard covers a retained whitespace-only answer with the
+  // mode off as well as another file's, so neither paints into the shown file.
+  const retainedDecl = /\bconst\s+retainedOther\s*=/g;
+  retainedDecl.lastIndex = body.open;
+  const rd = retainedDecl.exec(masked);
+  const rdEnd = rd === null ? -1 : masked.indexOf(";", rd.index);
+  need(
+    rd !== null &&
+      rd.index < body.close &&
+      rdEnd > rd.index &&
+      flat(masked.slice(rd.index, rdEnd + 1)) ===
+        "constretainedOther=data!==undefined&&(data.filePath!==filePath||modeStale);",
+    "the stale-path guard covers another file's and another mode's answer",
   );
 
   // A swap that drops both the toolbar and Preview lands on the new body: the
@@ -566,12 +576,13 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     ],
     [
       // The lazy run stops at the picker wrapper's own close, so the capture
-      // span wraps both the picker and Unified/Split.
+      // span wraps the picker, the view-options gear and Unified/Split, in
+      // that order (the gear must be inside it for the whitespace-only rescue).
       captureAt(
-        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*<DiffModeToggle\b[^>]*\/>\s*<\/span>`,
+        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*\{whitespaceControl\s*&&\s*\(?\s*<DiffViewOptionsMenu\b[^>]*\/>\s*\)?\s*\}\s*<DiffModeToggle\b[^>]*\/>\s*<\/span>`,
         "<span",
       ),
-      "the language picker and mode toggle render inside a capture node",
+      "the language picker, the view-options gear and the mode toggle render inside a capture node, in that order",
     ],
     [
       captureAt(
@@ -600,11 +611,18 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
   // reports.
   const reports = calls(masked, "useReportPaneSettled", body);
   need(reports.length === 1, "DiffContent calls useReportPaneSettled once");
-  if (reports.length === 1)
+  if (reports.length === 1) {
     need(
       reports[0] < returns[0],
       `DiffContent returns at line ${lineOf(surfaceRaw, returns[0])} before its settle report`,
     );
+    // A retained answer the stale-path arm blanks never reports settled.
+    need(
+      flat(masked.slice(reports[0], masked.indexOf(";", reports[0]) + 1)) ===
+        "useReportPaneSettled(!(isPending&&!isPaused)&&!retainedOther);",
+      "the settle report waits out a retained answer",
+    );
+  }
 
   // (d) Fails pre-fix. ImageDiff draws no path row of its own; its panes
   // still render inside it.
@@ -664,8 +682,8 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "if (data && data.filePath !== filePath) return shell(landing(null, true));",
-      "if (data && data.filePath !== filePath) return null;",
+      "if (retainedOther) return shell(landing(null, true));",
+      "if (retainedOther) return null;",
     ),
     image,
     UNSHELLED,
@@ -716,8 +734,8 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "  useReportPaneSettled(\n    !(isPending && !isPaused) &&",
-      "  if (isPaused) return shell(null);\n  useReportPaneSettled(\n    !(isPending && !isPaused) &&",
+      "  useReportPaneSettled(!(isPending && !isPaused) &&",
+      "  if (isPaused) return shell(null);\n  useReportPaneSettled(!(isPending && !isPaused) &&",
     ),
     image,
     "DiffContent returns at line",
@@ -736,11 +754,33 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "if (data && data.filePath !== filePath) return shell(landing(null, true));",
-      "if (data && data.filePath !== filePath) return shell(landing(null));",
+      "if (retainedOther) return shell(landing(null, true));",
+      "if (retainedOther) return shell(landing(null));",
     ),
     image,
     "the stale-path body is busy",
+  );
+  // The stale-path guard keyed on the path alone again: a retained
+  // whitespace-only answer would paint.
+  caught(
+    swap(
+      surface,
+      "(data.filePath !== filePath || modeStale);",
+      "data.filePath !== filePath;",
+    ),
+    image,
+    "the stale-path guard covers another file's and another mode's answer",
+  );
+  // The settle report keyed on the path alone: a retained whitespace-only
+  // answer would report settled while its arm is blank.
+  caught(
+    swap(
+      surface,
+      "!(isPending && !isPaused) && !retainedOther);",
+      "!(isPending && !isPaused) &&\n    !(data !== undefined && data.filePath !== filePath));",
+    ),
+    image,
+    "the settle report waits out a retained answer",
   );
   caught(
     swap(surface, ": landing(null, true),", ": landing(null),"),
@@ -1006,7 +1046,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<span aria-hidden ref={captureHeldRef} className="hidden shrink-0 @2xl/diff-pane:inline">',
     ),
     image,
-    "the language picker and mode toggle render inside a capture node",
+    "the language picker, the view-options gear and the mode toggle render inside a capture node, in that order",
   );
   // The record written from outside its two writers, by any right-hand side.
   caught(
@@ -1043,6 +1083,11 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     ["image", "        </div>,\n        notice,\n", "        </div>,\n"],
     [
       "binary placeholder",
+      `      )${NOTICE_TAIL}  // Ahead of the empty and header-only arms`,
+      "      ),\n    );\n  }\n  // Ahead of the empty and header-only arms",
+    ],
+    [
+      "whitespace-only",
       `      )${NOTICE_TAIL}  if (emptyDiff)`,
       "      ),\n    );\n  }\n  if (emptyDiff)",
     ],
@@ -1094,7 +1139,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       image,
       `the ${arm} arm passes the shell no notice`,
     );
-  // A tenth arm the pins above don't name.
+  // An eleventh arm the pins above don't name.
   caught(
     swap(
       surface,
@@ -1102,7 +1147,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       "  if (narrowPane) return shell(null);\n  if (emptyDiff) {\n",
     ),
     image,
-    "every DiffContent return is one of the nine named arms",
+    "every DiffContent return is one of the ten named arms",
   );
   // The typechange arm returning outside the shell, or dropping its notice.
   caught(

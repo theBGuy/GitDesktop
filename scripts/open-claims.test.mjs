@@ -77,3 +77,18 @@ test("a watermark holds while nothing moves, and never retires a claim", () => {
   assert.equal(w(), true);
   assert.equal(a(), true);
 });
+
+test("an order claim ignores the epoch, retires older claims and falls to newer ones", () => {
+  let epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const a = claims.claim();
+  const o = claims.claimOrder();
+  assert.equal(a(), false);
+  epoch++;
+  assert.equal(o(), true);
+  const p = claims.claimOrder();
+  assert.equal(o(), false);
+  assert.equal(p(), true);
+  claims.claim();
+  assert.equal(p(), false);
+});

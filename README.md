@@ -135,8 +135,11 @@ context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
 GitHub and Bitbucket pull requests included. A non-image binary file with
 unstaged changes (in your working copy or an agent session's) opens in its
-default program, or shows in Explorer, right from its diff; for a deleted
-file, Explorer opens the nearest folder that still exists.
+default program (a file your system would run instead is refused), or shows
+in Explorer, right from its diff; for a deleted file, Explorer opens the
+nearest folder that still exists.
+Hide whitespace changes in any local diff to read a re-indented file by the
+lines whose content changed.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.
@@ -154,9 +157,12 @@ only part of a brand-new (untracked) file. Partial staging is for UTF-8 text,
 where a long diff opens with up to 1,000 lines and Show full diff loads the
 rest; other encodings stage and discard as a whole file. Stage or unstage a
 drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`, without reaching for the
-button. Press `Space` on a focused file to stage or unstage it. Once the file
-you're viewing has nothing left to stage, whole or line by line, the next
-file in the list opens (the one above it, at the end of a section), and
+button. Press `Space` on a focused file to stage or unstage it.
+Double-click a file to open it in your external editor, or in its default
+program when none is set. A submodule opens as its own repository instead, and an
+untracked folder shows in your file manager.
+Once the file you're viewing has nothing left to stage, whole or line by line,
+the next file in the list opens (the one above it, at the end of a section), and
 unstaging works the same way in Staged. Stage, unstage, discard, stash,
 ignore, or untrack single files or a multi-selection from the context menu,
 each item counting the selected files it applies to (staging and unstaging a
@@ -282,7 +288,10 @@ terminal or a CI log finds its commit even when it isn't loaded. Per-file
 history and line blame are reachable from any file list (History, pull
 requests, Compare) or the command palette, pinned at that commit or branch
 where it applies; each blame line's commit gets a hover-card preview and a
-click to jump to it in History.
+click to jump to it in History. Commits are dated by when they were written
+(the author date), so a range you rebase or reword keeps its dates, and the
+commit detail names the committed date too when the two are a minute or more
+apart.
 
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine
@@ -291,6 +300,16 @@ click to jump to it in History.
   stops at squashing and reordering, plus amending only the latest commit).
   The list reads newest or oldest first, and remembers which.
   Cherry-pick onto the current or another branch, too.
+- **Edit commit dates**: change a commit's author and committer dates from
+  History. *Edit dates…* on the latest commit opens a small dialog that
+  changes only its dates, with a force-push warning when that commit is
+  already on the branch's upstream. For older unpushed commits, each row in
+  *Edit history* shows its date and edits it in place, alongside reword,
+  squash and reorder, and selecting several rows sets one date on all of
+  them. Dates are typed (one pasted from `git log` works) or picked. A
+  commit's own date editor keeps its UTC offset unless you type another,
+  and one date set on several rows gives them all one offset. A commit
+  that would end up dated before its parent is flagged and confirmed first.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
@@ -312,7 +331,10 @@ commit your repo records or to the tip of the branch each one tracks
 (recursing into nested submodules either way), edit a submodule's URL or
 tracked branch, and open one as its own repository. Adding, removing, and
 editing stage the change for you to commit, and the clone dialog can bring
-every submodule down with the repo.
+every submodule down with the repo. A changed submodule is tagged in Changes
+with what changed; selecting it lists the commits the submodule moved across,
+its unstaged row lists the uncommitted files inside, and **Open submodule** is
+one click away.
 
 ### Syncing and conflicts
 
@@ -1175,7 +1197,8 @@ agents read this repo through GitDesktop.
   `~/.local/bin` symlink on macOS/Linux; reversible, no admin).
 - **An escalating write ladder**: each tier is a separate flag, off by
   default, so read-only stays the default (and agent-session branches are
-  refused by the branch-mutating tools):
+  refused by the branch-mutating tools, by push and force-push, and as a
+  pull request's head):
   - **`--allow-write`**: this repo's local PRs and issues (GitDesktop's own
     app-data artifacts; nothing is pushed)
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`

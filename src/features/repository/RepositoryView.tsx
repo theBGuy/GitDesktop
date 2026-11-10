@@ -33,6 +33,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -110,6 +111,7 @@ import { OpRecoveryBanner } from "./OpRecoveryBanner";
 import { PrCreateBanner } from "./PrCreateBanner";
 import { PublishPendingBanner } from "./PublishPendingBanner";
 import { RepoHeader } from "./RepoHeader";
+import { secondaryTabRows } from "./secondary-tabs";
 import { TabPanel } from "./TabPanel";
 import { usePrNotifications } from "./usePrNotifications";
 import { useRepoVisibilityProbe } from "./useRepoVisibilityProbe";
@@ -119,6 +121,10 @@ import { WorktreeRemovalBanner } from "./WorktreeRemovalBanner";
 // "(Dev)" suffix so the dev instance is tellable apart in the taskbar / Alt-Tab
 // from an installed release — matching the tray tooltip set in `tray.rs`.
 const APP_TITLE = import.meta.env.DEV ? "GitDesktop (Dev)" : "GitDesktop";
+
+// The vendored popup pins its width to the anchor and clips overflow-x, so a
+// long rebound shortcut label would clip; size to content within the viewport.
+const SECONDARY_MENU_CLASS = "w-auto max-w-(--available-width) min-w-44";
 
 // The Insights board pulls in Recharts; lazy-load it so that chunk stays off
 // the boot path and only loads once the user first opens the Insights tab.
@@ -150,25 +156,6 @@ const DiffViewer = lazy(() =>
     default: m.DiffViewer,
   })),
 );
-
-// Secondary surfaces live behind a "More ▾" overflow so the three primary tabs
-// keep their full labels in the narrow tab rail. The trigger shows the active
-// secondary tab's name (e.g. "Issues ▾") so the rail still says where you are.
-// Compare keeps its `mod+3` shortcut here — the number keys bind per-tab, not by
-// rail position, so it stays reachable exactly like the other secondary tabs.
-const SECONDARY_TABS: { tab: RepoTab; label: string; ai?: boolean }[] = [
-  { tab: "compare", label: "Compare" },
-  { tab: "agent", label: "Agent", ai: true },
-  { tab: "issues", label: "Issues" },
-  { tab: "projects", label: "Projects" },
-  { tab: "code-todos", label: "Code TODOs" },
-  { tab: "discussions", label: "Discussions" },
-  { tab: "actions", label: "Actions" },
-  { tab: "findings", label: "Findings" },
-  { tab: "tags", label: "Tags" },
-  { tab: "tasks", label: "Tasks" },
-  { tab: "insights", label: "Insights" },
-];
 
 // Remount key per finding variant: the category number sequences overlap, so
 // the type tag has to be part of the key or two same-numbered findings would
@@ -239,7 +226,7 @@ function SidebarRail({
   onChangeTab: (tab: RepoTab) => void;
   /** Picking a secondary tab also expands the sidebar — its list is the surface. */
   onSelectSecondary: (tab: RepoTab) => void;
-  secondaryTabs: { tab: RepoTab; label: string }[];
+  secondaryTabs: { tab: RepoTab; label: string; binding: string | null }[];
   activeSecondaryLabel: string | null;
   taskRunning: boolean;
   /** The expand control, pinned to the rail's head above the tabs. An action,
@@ -338,16 +325,30 @@ function SidebarRail({
             />
           )}
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="right" className="min-w-44">
-          {secondaryTabs.map(({ tab, label }) => (
+        <DropdownMenuContent
+          align="start"
+          side="right"
+          className={SECONDARY_MENU_CLASS}
+        >
+          {secondaryTabs.map(({ tab, label, binding }) => (
             <DropdownMenuItem
               key={tab}
               onClick={() => onSelectSecondary(tab)}
+              aria-keyshortcuts={
+                binding === null
+                  ? undefined
+                  : bindingToAriaKeyshortcuts(binding)
+              }
               className={cn(
                 repoTab === tab && "bg-accent text-accent-foreground",
               )}
             >
               {label}
+              {binding !== null && (
+                <DropdownMenuShortcut aria-hidden>
+                  {formatBinding(binding)}
+                </DropdownMenuShortcut>
+              )}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>
@@ -477,7 +478,8 @@ export function RepositoryView() {
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   const sidebarPanelsId = useId();
-  const sidebarBinding = useEffectiveBindings().get("toggle-sidebar") ?? null;
+  const bindings = useEffectiveBindings();
+  const sidebarBinding = bindings.get("toggle-sidebar") ?? null;
   // Holds the collapse value whose commit should hand focus to the toggle (null
   // = nothing pending). Each mode renders its own toggle, so the hand-off can
   // only happen once the new one exists — and it is consumed on that commit
@@ -716,7 +718,7 @@ export function RepositoryView() {
 
   if (!repoPath) return null;
 
-  const secondaryTabs = SECONDARY_TABS.filter((t) => aiEnabled || !t.ai);
+  const secondaryTabs = secondaryTabRows(aiEnabled, bindings);
   const activeSecondary = secondaryTabs.find((t) => t.tab === repoTab);
   // Tooltip = the action with its effective shortcut appended, e.g. "Collapse
   // sidebar (Ctrl+Shift+B)"; unbound leaves the bare label. `aria-keyshortcuts`
@@ -854,16 +856,29 @@ export function RepositoryView() {
                     </span>
                     <CaretDownIcon data-icon="inline-end" />
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="min-w-44">
-                    {secondaryTabs.map(({ tab, label }) => (
+                  <DropdownMenuContent
+                    align="end"
+                    className={SECONDARY_MENU_CLASS}
+                  >
+                    {secondaryTabs.map(({ tab, label, binding }) => (
                       <DropdownMenuItem
                         key={tab}
                         onClick={() => changeTab(tab)}
+                        aria-keyshortcuts={
+                          binding === null
+                            ? undefined
+                            : bindingToAriaKeyshortcuts(binding)
+                        }
                         className={cn(
                           repoTab === tab && "bg-accent text-accent-foreground",
                         )}
                       >
                         {label}
+                        {binding !== null && (
+                          <DropdownMenuShortcut aria-hidden>
+                            {formatBinding(binding)}
+                          </DropdownMenuShortcut>
+                        )}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>

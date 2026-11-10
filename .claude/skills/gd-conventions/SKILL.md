@@ -776,7 +776,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   caller whose own awaits precede the navigator call claims (`claimRepoOpen`)
   before them and checks that claim before calling, so a newer click retires an
   older held landing and a newer open retires the click (My work's `openItem`,
-  the Activity dock's `navigate`).
+  the Activity dock's `navigate`). A submodule opens as a repository only through
+  `useOpenSubmoduleAsRepo` (`src/features/repository/`), which claims before its
+  probe, drops a press retired while the probe ran, and reports a bad folder by
+  its submodule-relative path.
 - **View lens** — a PR/issue number or blob is valid only in the lens that
   produced it (origin vs upstream vs local match); navigation and dock entry
   points thread the lens (`beforeSelect`), never pass a bare number across.
@@ -895,6 +898,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.
+- **View-diff whitespace mode** — a view-diff fetch (working tree, commit,
+  compare, stash, session) reads `useHideWhitespace()`, keys on it last, and
+  fetches through `readViewDiff` (`src/lib/git/whitespace-diff.ts`), which
+  stamps `whitespaceHidden` / `whitespaceOnly` on the result. Gates and arms
+  read those marks, never the setting alone, and no patch is applied from a
+  `whitespaceHidden` diff. `scripts/hide-whitespace.test.mjs` is the ratchet.
 - **Queries package boundary** — import the git query layer through the
   `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
   inside the package may import it but never re-export it, since `export *`

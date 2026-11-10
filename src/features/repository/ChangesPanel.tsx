@@ -70,7 +70,11 @@ import {
 } from "@/lib/git/queries";
 import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { ChangeKind, FileEntry, RepoStatus } from "@/lib/git/types";
-import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
+import {
+  formatBinding,
+  hasChordModifier,
+  isWindows,
+} from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { flattenPathTree, pathBasename } from "@/lib/path-tree";
@@ -105,9 +109,13 @@ import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
 import {
   type ChangeActionScope,
+  confirmEntries,
   discardConfirmCopy,
+  embeddedRepoStaysOutOfStash,
   stashConfirmCopy,
   staysOutOfStash,
+  submoduleStaysOutOfStash,
+  untrackedPathsOf,
 } from "./changes-confirm-copy";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow, MARKER_CHECK_PENDING } from "./FileRow";
@@ -124,6 +132,7 @@ import {
   selectionAfterAdvance,
   type WaitingFocus,
 } from "./next-file-after-stage";
+import { openChangedFileAction, runOpenChangedFile } from "./open-changed-file";
 import { StashesDialog } from "./StashesDialog";
 import {
   openStatusErrorDetails,
@@ -139,7 +148,16 @@ import {
   rowKeySection,
 } from "./section-collapse";
 import { selectionFollowingShownFile } from "./shown-file-follow";
+import {
+  discardReach,
+  noneStageableCopy,
+  stageBlocks,
+  submoduleDiscardBlocked,
+  submoduleStageBlocked,
+  submodulesLeftUnstagedCopy,
+} from "./submodule-row";
 import { STATUS_READ_FAILED_REASON } from "./sync-controls-state";
+import { useOpenSubmoduleAsRepo } from "./useOpenSubmoduleAsRepo";
 
 /** The pathspecs that unstage one entry — a staged rename is "delete old path +
  *  add new path", so both halves are needed or the old path's deletion stays
@@ -151,10 +169,29 @@ function unstagePaths(entry: FileEntry): string[] {
   );
 }
 
-/** Windows resolves a reserved device name to the DEVICE, so `git add` reads it
- *  and aborts the whole pathspec batch — every stage path filters these out. */
+/** Every stage path filters out two kinds of row: a Windows-reserved device
+ *  name (`git add` reads the DEVICE and aborts the whole batch), and a dirty
+ *  submodule whose commit hasn't moved (`git add` records nothing). */
 function canStage(entry: FileEntry): boolean {
-  return reservedDeviceName(entry.path) === null;
+  return (
+    reservedDeviceName(entry.path) === null &&
+    !submoduleStageBlocked(entry, false)
+  );
+}
+
+/** Whether a stash saves this row: every Stash count, pathspec and success
+ *  toast reads it, so a reserved-name, submodule or embedded-repository row
+ *  never counts as stashed or reaches git. `untrackedPaths` is
+ *  `untrackedPathsOf` the live entries. */
+function canStash(
+  entry: FileEntry,
+  untrackedPaths: ReadonlySet<string>,
+): boolean {
+  return (
+    !staysOutOfStash(entry) &&
+    !submoduleStaysOutOfStash(entry, untrackedPaths) &&
+    !embeddedRepoStaysOutOfStash(entry)
+  );
 }
 
 /** Whether a stage of `conflicted` may go ahead: true when no file still holds
@@ -533,6 +570,7 @@ export function ChangesPanel({
   const aiEnabled = useAiEnabled();
   const reviewConfigured = useReviewConfigured();
   const settings = useSettings();
+  const editorPath = (settings.data?.externalEditor ?? "").trim();
   const saveSettings = useSaveSettings();
   const stashCount = useStashCount(repoPath);
   const portalContainer = usePanelPortalContainer();
@@ -770,8 +808,10 @@ export function ChangesPanel({
       collapsedSections,
     ],
   );
-  // What "Stage all" can actually reach: the excluded rows stay listed, each
-  // wearing its own explanation, so skipping them needs no toast.
+  // What "Stage all" can actually reach: the excluded rows (reserved names,
+  // submodules with nothing to stage) stay listed, each wearing its own
+  // explanation. A submodule row's words read like changes still to stage, so
+  // a stage that skipped one says so (`stageSkippingSubmodules`).
   const stageableUnstaged = unstagedEntries.filter(canStage);
   const nothingMatches =
     entries.length > 0 &&
@@ -788,9 +828,13 @@ export function ChangesPanel({
   // (stash, ignore, untrack, exclude) take each selected path once.
   const bulk = bulkRowTargets(selectedKeys, entries);
   const stageableSelected = bulk.unstagedRows.filter(canStage);
-  const selectedDiscard = excludeConflicted(bulk.unstagedRows);
-  const stashablePathCount = bulk.pathEntries.filter(
-    (e) => !staysOutOfStash(e),
+  const selectedDiscard = excludeConflicted(discardReach(bulk.unstagedRows));
+  const untrackedPaths = useMemo(
+    () => untrackedPathsOf(status.data?.entries ?? []),
+    [status.data?.entries],
+  );
+  const stashablePathCount = bulk.pathEntries.filter((e) =>
+    canStash(e, untrackedPaths),
   ).length;
   // Any unmerged entry makes git refuse every path stash, so Stash waits.
   const anyConflicted = conflictedPaths.length > 0;
@@ -2128,8 +2172,22 @@ export function ChangesPanel({
     setMenuTarget({ kind: "global" });
   }
 
+  /** Stages `targets`, then names the submodule rows of `listed` it left
+   *  behind; true when the stage went ahead. */
+  async function stageSkippingSubmodules(
+    targets: FileEntry[],
+    listed: readonly FileEntry[],
+  ): Promise<boolean> {
+    const left = submodulesLeftUnstagedCopy(listed);
+    const staged = await stageGuarded(targets);
+    if (staged && left !== null) toast.info(left);
+    return staged;
+  }
+
   function stageAll() {
-    void stageGuarded(stageableUnstaged).catch(onError);
+    void stageSkippingSubmodules(stageableUnstaged, unstagedEntries).catch(
+      onError,
+    );
   }
 
   function unstageAll() {
@@ -2146,13 +2204,10 @@ export function ChangesPanel({
     const key = `folder:unstaged:${dir}`;
     if (pendingLeaveKeys.current.has(key)) return;
     if (refuseIfSwitched(repo, "nothing was staged")) return;
-    const targets = entriesUnderFolder(
-      unstagedEntries,
-      (e) => e.path,
-      dir,
-    ).filter(canStage);
+    const listed = entriesUnderFolder(unstagedEntries, (e) => e.path, dir);
+    const targets = listed.filter(canStage);
     if (targets.length === 0) return;
-    void stageGuarded(targets)
+    void stageSkippingSubmodules(targets, listed)
       .then((ok) => {
         if (ok && landedIn(repo).live) pendingLeaveKeys.current.add(key);
       })
@@ -2199,10 +2254,16 @@ export function ChangesPanel({
       primary: staged ? shown.length : shown.filter(canStage).length,
       discardable: staged
         ? 0
-        : shown.filter((e) => !isConflictedEntry(e)).length,
-      stashable: shown.filter((e) => !staysOutOfStash(e)).length,
+        : discardReach(shown).filter((e) => !isConflictedEntry(e)).length,
+      stashable: shown.filter((e) => canStash(e, untrackedPaths)).length,
     };
-  }, [treeMode, activeFolderKey, stagedEntries, unstagedEntries]);
+  }, [
+    treeMode,
+    activeFolderKey,
+    stagedEntries,
+    unstagedEntries,
+    untrackedPaths,
+  ]);
 
   // The menu's counts for a right-clicked folder, from the same live lists, so
   // a poll while the menu is open updates them. Hidden = same-side files under
@@ -2224,11 +2285,15 @@ export function ChangesPanel({
     return {
       fileCount: shown.length,
       stageableCount: staged ? 0 : shown.filter(canStage).length,
+      noneStageableLabel: noneStageableCopy(stageBlocks(shown)).menuLabel,
       hiddenCount: sameSide.length - shown.length,
       conflictedCount: shown.filter(isConflictedEntry).length,
-      stashableCount: shown.filter((e) => !staysOutOfStash(e)).length,
+      discardBlockedCount: staged
+        ? 0
+        : shown.filter(submoduleDiscardBlocked).length,
+      stashableCount: shown.filter((e) => canStash(e, untrackedPaths)).length,
     };
-  }, [menuTarget, entries, stagedEntries, unstagedEntries]);
+  }, [menuTarget, entries, stagedEntries, unstagedEntries, untrackedPaths]);
 
   // Bulk stage/unstage act only on the selected rows of their own side: a file
   // with staged and unstaged edits keeps the side the user didn't select.
@@ -2237,7 +2302,7 @@ export function ChangesPanel({
     const gen = selectionGen.current;
     const repo = repoPath;
     try {
-      if (await stageGuarded(stageableSelected))
+      if (await stageSkippingSubmodules(stageableSelected, bulk.unstagedRows))
         clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
@@ -2258,22 +2323,37 @@ export function ChangesPanel({
 
   function requestDiscardSelected() {
     const conflicted = selectedDiscard.conflicted.length;
+    const submodules = bulk.unstagedRows.filter(submoduleDiscardBlocked).length;
     if (selectedDiscard.targets.length > 0)
       setDiscardScope({
         kind: "files",
         entries: selectedDiscard.targets,
         repo: repoPath,
-        leftAlone: conflicted > 0 ? { hidden: 0, conflicted } : undefined,
+        leftAlone:
+          conflicted > 0 || submodules > 0
+            ? { hidden: 0, conflicted, submodules }
+            : undefined,
       });
   }
 
   function requestStashSelected() {
+    const submodules = bulk.pathEntries.filter((e) =>
+      submoduleStaysOutOfStash(e, untrackedPaths),
+    ).length;
+    const embedded = bulk.pathEntries.filter(
+      embeddedRepoStaysOutOfStash,
+    ).length;
     if (bulk.pathEntries.length > 0)
       setStashScope({
         kind: "files",
         entries: bulk.pathEntries,
         repo: repoPath,
         split: bulk.splitPaths.length > 0,
+        untrackedPaths,
+        leftAlone:
+          submodules > 0 || embedded > 0
+            ? { hidden: 0, conflicted: 0, submodules, embedded }
+            : undefined,
       });
   }
 
@@ -2304,7 +2384,10 @@ export function ChangesPanel({
   function requestDiscardFolder(dir: string, repo: string) {
     if (refuseIfSwitched(repo, "nothing was discarded")) return;
     const { rows, hidden } = folderActionTargets("unstaged", dir);
-    const { targets, conflicted } = excludeConflicted(rows.unstagedRows);
+    const { targets, conflicted } = excludeConflicted(
+      discardReach(rows.unstagedRows),
+    );
+    const submodules = rows.unstagedRows.filter(submoduleDiscardBlocked).length;
     if (targets.length === 0) return;
     setDiscardScope({
       kind: "files",
@@ -2312,8 +2395,8 @@ export function ChangesPanel({
       repo,
       folder: dir,
       leftAlone:
-        hidden > 0 || conflicted.length > 0
-          ? { hidden, conflicted: conflicted.length }
+        hidden > 0 || conflicted.length > 0 || submodules > 0
+          ? { hidden, conflicted: conflicted.length, submodules }
           : undefined,
     });
   }
@@ -2325,14 +2408,24 @@ export function ChangesPanel({
   ) {
     if (refuseIfSwitched(repo, "nothing was stashed")) return;
     const { rows, hidden } = folderActionTargets(section, dir);
+    const submodules = rows.pathEntries.filter((e) =>
+      submoduleStaysOutOfStash(e, untrackedPaths),
+    ).length;
+    const embedded = rows.pathEntries.filter(
+      embeddedRepoStaysOutOfStash,
+    ).length;
     if (rows.pathEntries.length === 0) return;
     setStashScope({
       kind: "files",
       entries: rows.pathEntries,
       repo,
       split: rows.splitPaths.length > 0,
+      untrackedPaths,
       folder: dir,
-      leftAlone: hidden > 0 ? { hidden, conflicted: 0 } : undefined,
+      leftAlone:
+        hidden > 0 || submodules > 0 || embedded > 0
+          ? { hidden, conflicted: 0, submodules, embedded }
+          : undefined,
     });
   }
 
@@ -2477,18 +2570,26 @@ export function ChangesPanel({
       }
       return;
     }
-    const targets = stashScope.entries.map((e) => e.path);
+    // Only rows the stash saves reach git: a pathspec naming a staged submodule
+    // deletion carries that deletion into the stash too (measured).
+    const stashed = stashScope.entries.filter((e) =>
+      canStash(e, stashScope.untrackedPaths ?? new Set()),
+    );
+    if (stashed.length === 0) {
+      toast.info("Nothing to stash");
+      finish();
+      return;
+    }
     try {
       // Literal pathspecs so a `[slug]`-style path can't sweep a sibling's work
       // into the stash.
       const matched = await stashPaths.mutateAsync(
-        targets.map(literalPathspec),
+        stashed.map((e) => literalPathspec(e.path)),
       );
       // `matched` is false when the paths matched nothing, so no stash exists to
       // report — the selection no longer had changes when git ran.
       if (matched) {
         useStashReapplyMarker.getState().clearFor(stashScope.repo);
-        const stashed = stashScope.entries.filter((e) => !staysOutOfStash(e));
         toast.success(
           stashed.length === 1
             ? `Stashed ${stashed[0].path}`
@@ -2585,6 +2686,21 @@ export function ChangesPanel({
     toggleViewMode,
     entries.length > 0 && settings.data !== undefined,
   );
+  // The row's double-click open; the palette's twin lives with the diff pane
+  // (DiffViewer), which stays mounted while the sidebar is collapsed.
+  const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
+  function openRow(entry: FileEntry) {
+    void runOpenChangedFile(
+      openChangedFileAction({
+        entry,
+        repoPath,
+        editorPath,
+        windows: isWindows,
+      }),
+      repoPath,
+      openSubmodule,
+    );
+  }
   // Resolve the selected conflicted file with AI, or start an all-conflicts run
   // when the selection isn't a conflict. Palette-only (no default binding).
   // The enable keys on the polled status, which lags a resolve made outside the
@@ -2709,10 +2825,12 @@ export function ChangesPanel({
   // multi-selection, or the whole tree).
   const { title: discardTitle, body: discardBody } = discardConfirmCopy(
     shownDiscardScope,
-    entries,
+    confirmEntries(shownDiscardScope?.repo, repoPath, entries),
   );
-  const { title: stashTitle, body: stashBody } =
-    stashConfirmCopy(shownStashScope);
+  const { title: stashTitle, body: stashBody } = stashConfirmCopy(
+    shownStashScope,
+    confirmEntries(shownStashScope?.repo, repoPath, entries),
+  );
 
   // One row's inner content, closing over the panel's selection/mutation state.
   // Passed to the virtualized list so all that state stays here and only the
@@ -2760,7 +2878,7 @@ export function ChangesPanel({
             }
             reason={
               row.section === "unstaged" && stageableUnstaged.length === 0
-                ? "Git can't stage Windows-reserved device names, and every file here has one"
+                ? noneStageableCopy(stageBlocks(unstagedEntries)).reason
                 : null
             }
             onClick={row.section === "staged" ? unstageAll : stageAll}
@@ -2830,6 +2948,7 @@ export function ChangesPanel({
         indentPx={treeMode ? (row.depth ?? 0) * 12 : undefined}
         onSelect={handleSelect}
         onToggle={handleToggle}
+        onOpen={openRow}
       />
     );
   };
@@ -3037,8 +3156,12 @@ export function ChangesPanel({
                   stagedRowCount={bulk.stagedRows.length}
                   unstagedRowCount={bulk.unstagedRows.length}
                   stageableCount={stageableSelected.length}
+                  noneStageableLabel={
+                    noneStageableCopy(stageBlocks(bulk.unstagedRows)).menuLabel
+                  }
                   pathCount={bulk.pathEntries.length}
                   stashablePathCount={stashablePathCount}
+                  untrackedPaths={untrackedPaths}
                   trackedPathCount={bulk.trackedPathEntries.length}
                   discardableCount={selectedDiscard.targets.length}
                   anyConflicted={anyConflicted}
@@ -3079,23 +3202,38 @@ export function ChangesPanel({
                     untrackSelected: () => void untrackSelected(),
                     toggle: handleToggle,
                     resolveWithAi: (path) => startResolveOne(path, repoPath),
-                    discardFile: (entry) =>
+                    discardFile: (entry) => {
+                      // The item is disabled on these; a later route must not
+                      // reach a restore that does nothing or deletes a file.
+                      if (submoduleDiscardBlocked(entry)) return;
                       setDiscardScope({
                         kind: "files",
                         entries: [entry],
                         repo: repoPath,
-                      }),
-                    stashFile: (entry, staged) =>
+                      });
+                    },
+                    openSubmodule,
+                    stashFile: (entry, staged) => {
+                      // The item is disabled on submodule, embedded-repository
+                      // and reserved-name rows. This refuses the first two; a
+                      // reserved-name row's confirm says it stays out.
+                      if (
+                        submoduleStaysOutOfStash(entry, untrackedPaths) ||
+                        embeddedRepoStaysOutOfStash(entry)
+                      )
+                        return;
                       setStashScope({
                         kind: "files",
                         entries: [entry],
                         repo: repoPath,
+                        untrackedPaths,
                         split:
                           bulkRowTargets(
                             new Set([keyOf(entry.path, staged)]),
                             entries,
                           ).splitPaths.length > 0,
-                      }),
+                      });
+                    },
                     viewHistory: setHistoryPath,
                     blame: setBlamePath,
                     ignore: (pattern, label) => void ignoreOne(pattern, label),

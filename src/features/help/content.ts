@@ -84,10 +84,10 @@ an **Open Recent** list of your last ten repos, with **Settings…** in the
 
 Once a repo is open you land on the **Changes** tab. The header's tab rail holds the
 three primary views — **Changes**, **History**, and **Pull Requests** — and a
-**More ▾** menu holds the rest: **Compare**, {{ai}}**Agent**, {{/ai}}**Issues**,
-**Projects**, **Code TODOs**, **Discussions**, **Actions**, **Findings**, **Tags**,
-**Tasks**, and **Insights**. The More button shows the active secondary tab's name, so the
-rail always says where you are.
+**More ▾** menu holds the rest: **Actions**, {{ai}}**Agent**, {{/ai}}**Code TODOs**,
+**Compare**, **Discussions**, **Findings**, **Insights**, **Issues**, **Projects**,
+**Tags**, and **Tasks**, each showing its shortcut when it has one. The More button shows
+the active secondary tab's name, so the rail always says where you are.
 
 The lists those tabs open (changes, commits, pull requests) fill the **sidebar** down
 the left. It narrows as you narrow the window, and collapses to a strip of tab icons:
@@ -155,6 +155,16 @@ references. Each row shows the submodule's folder, the commit it's checked out a
 and a status badge — **Up to date**, **Not initialized**, **Modified**, or **Conflict**.
 Arrow keys move between rows and Enter runs the row's button, which reads **Initialize**
 for a submodule that has never been checked out and **Update** for the rest.
+
+A submodule with changes appears in **Changes** tagged **Submodule**, with what changed
+where line counts sit on other rows: *commit changed*, *modified files*, *untracked files*.
+Selecting it lists the commits the submodule moved across (from the commit your repo
+records to the checked-out one, or to the staged one on the staged row); its unstaged row
+also lists the uncommitted files inside, read-only. Staging the row records the commit the
+submodule points at; a stash can't save a submodule's commit or the files inside it, so its
+row stays out of **Stash change** and you stash from inside it. **Open submodule** (or a
+double-click on the row) opens it as its own repository, where you stage, commit and stash
+what's inside.
 
 - **Update** checks a submodule out at the commit your repo records, initializing it and
   any nested submodules on the way; **Update all** in the footer does the whole set.
@@ -489,6 +499,19 @@ the last list up, with a line above it saying it couldn't refresh.
   In the list, {{key:tab}} stops on the file you're on, {{key:up}} and {{key:down}}
   move between files, and the next {{key:tab}} reaches that row's stage button.
   **Stage all** and **Unstage all** do the whole list.
+- Double-click a file to open it in your external editor (set in **Settings**), or in
+  its default program when none is set. A file your system would run rather than open
+  (a script, an installer, a shortcut) is refused with a note, and **Show in Explorer**
+  is a click away. A renamed file opens under its new name. A file deleted from your
+  working tree has nothing to open, and a short message says so. The command palette's
+  **Open changed file** opens the file you're viewing. A file's {{secondaryclick}} menu
+  marks the item a double-click runs, and leaves its Open items out for a deletion you
+  haven't staged yet. A submodule opens as its own repository instead, and an untracked
+  folder shows in your file manager.
+- A changed submodule's row is tagged **Submodule**, and selecting it lists its commits
+  and the files changed inside in place of a diff (see *Submodules*). A submodule whose
+  commit hasn't changed has nothing to stage: its **+** says to commit inside the
+  submodule first.
 - When the file you're viewing has nothing left to stage, the next file in
   **Changes** opens in its place (the one above it, at the end of a section),
   whether you staged it whole or line by line. Files the filter hides, files in
@@ -578,7 +601,10 @@ the last list up, with a line above it saying it couldn't refresh.
   palette ({{kbd:command-palette}}). Tracked files go back to the last commit, and untracked
   files move to the **recycle bin**, so they stay recoverable. It runs as one operation
   on the snapshot it took when you confirmed, so nothing staged or written midway is
-  swept away without a recycle-bin copy. On a large working tree that can take a while,
+  swept away without a recycle-bin copy. Two things get no copy: a new file with a
+  Windows-reserved device name (below), and a repository that replaced a tracked file,
+  which Git deletes outright, commits included — the confirm says so whenever one is
+  present. On a large working tree that can take a while,
   and another GitDesktop action started meanwhile waits for it: if the discard is still
   going after ten seconds, that action stops with *A discard is still running — try
   again when it finishes.* rather than landing partway through. On Windows, if any new
@@ -606,11 +632,11 @@ the last list up, with a line above it saying it couldn't refresh.
   A screen reader always hears the exact counts. A changed file mode gets its own line.
   GitHub and Bitbucket pull requests show sizes too; on GitHub.com that includes files
   your clone doesn't have. A non-image binary file with unstaged changes (in your
-  working tree or an agent session's) also offers **Open with default program** and
-  **Show in Explorer**; for a deleted one, **Show in Explorer** opens the nearest
-  folder that still exists. When a non-image binary file and a symbolic link trade
-  places, local diffs show both the binary side's size line and the link's text, as
-  do pull requests where a link became a binary file.
+  working tree or an agent session's) also offers **Open with default program** (a file
+  your system would run instead is refused) and **Show in Explorer**; for a deleted one,
+  **Show in Explorer** opens the nearest folder that still exists. When a non-image
+  binary file and a symbolic link trade places, local diffs show both the binary side's
+  size line and the link's text, as do pull requests where a link became a binary file.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
@@ -633,6 +659,18 @@ the last list up, with a line above it saying it couldn't refresh.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hover the **Split** button and it says so. Your preference is kept either way, so
   widening the pane brings the split view back.
+- **Hide whitespace changes** — the gear in the diff toolbar hides changes that only
+  touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
+  content changed; an added or removed blank line still shows. It applies to every
+  local diff (the working tree, commit details, a file's history, branch compare,
+  stashes and an agent session's changes) and stays on until you turn it off; a dot
+  on the gear marks it. While it is on, hunks and lines can't be staged, unstaged or
+  discarded from the Changes diff, and the note above the diff offers **Show
+  whitespace**; whole files still stage from their rows. A file whose
+  only changes are whitespace says so. The line counts in file lists keep counting
+  whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
+  the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
+  flips it too. Diffs of pull requests on a forge always show whitespace.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both
@@ -658,17 +696,22 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   returns your message to the box. If the box already holds a title or description
   other than that commit's message, Undo asks before replacing it, and Cancel does
   nothing. Undoing a branch's *first* commit also asks — it has no parent to fall
-  back to, so the branch ref goes with it. If another Git
-  process commits or switches branches after History last showed it, or while the
-  undo runs, Undo stops without undoing anything and says so. While a merge,
-  cherry-pick or revert is in progress, Undo is held: its menu item says to finish
-  or abort that first, and the shortcut and command palette say the same before any
-  other prompt. Undo also asks you to
-  resolve any conflicts first. On a detached first commit, or when the latest commit's
-  parent was never fetched (the oldest commit of a shallow clone), there is nothing
-  to undo onto, and Undo says so instead. Fetching more history from a terminal
-  (\`git fetch --deepen=1\`) gives that commit a parent, and Undo works again once
-  you're back in the app.
+  back to, so the branch ref goes with it. If another Git process commits or switches
+  branches after History last showed it, or while the undo runs, Undo stops without
+  undoing anything and says so. While a merge, cherry-pick or revert is in progress,
+  Undo is held: its menu item says to finish or abort that first, and the shortcut and
+  command palette say the same before any other prompt. With unresolved conflicts and
+  no operation in progress, Undo is held the same way until they are resolved. Undo is
+  offered only while the latest commit is unpushed: on a branch with an upstream,
+  while the branch is ahead of it; on a branch with no upstream whose latest commit a
+  remote branch already has, its menu item says the commit is already pushed. While
+  History is still checking which commits are pushed, the menu item waits and says so,
+  and the shortcut says to try again in a moment. If the repository's state can't be
+  read, Undo stops without undoing anything and says so. On a detached first commit,
+  or when the latest commit's parent was never fetched (the oldest commit of a shallow
+  clone), there is nothing to undo onto, and Undo says so instead. Fetching more
+  history from a terminal (\`git fetch --deepen=1\`) gives that commit a parent, and
+  Undo works again once you're back in the app.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright. The exception is a name Windows reserves for a device
@@ -686,8 +729,17 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 
 The **History** tab ({{kbd:tab-history}}) is the commit log for the current branch — each
 entry shows the author's avatar (from GitHub or Gravatar, or their initials). Click
-a commit to see its message, author, and full diff; **Shift + ↑ / ↓** extends the
-selection to compare a range.
+a commit to see its message, author, and full diff; {{key:shift+up}} /
+{{key:shift+down}} extends the selection to compare a range.
+
+Each commit is dated by when it was written (its author date), so a range you rebase or
+reword keeps the dates it had. When a commit's authored and committed dates are a minute
+or more apart, the commit detail names both.
+
+History's unpushed markers, the branch menu's ahead and behind counts, and the holds on
+Undo, Squash and Edit history follow fetches, pushes and branch moves made outside the
+app, including from another worktree, within a few seconds while the window is visible. A
+merge, cherry-pick or revert that stops or is aborted in a terminal shows up just as fast.
 
 If the history can't be read, the tab says why and offers **Retry**. A failed refresh or
 **Load more** keeps the commits already loaded under a line saying so.
@@ -725,6 +777,24 @@ the failed part's line when one shows.
   process moves HEAD in the instant before the amend runs, the amend still completes,
   and a toast says the amend raced another Git process and names the commit or branch
   when it can tell; the replaced commit stays in the reflog.
+- **Edit dates…** — change when a commit says it was written and committed. On the
+  latest commit it opens a small dialog that changes only the dates: the message and
+  your staged and unstaged changes stay as they are, and the commit gets a new ID. If
+  that commit is already pushed to the branch's upstream, the dialog warns that the
+  branch will need a force push, and a protected branch refuses. On an older unpushed
+  commit it opens **Edit history** with that commit's date editor open. Elsewhere the
+  item is held and says why. It's in the command palette too (palette-only by default;
+  bind a key in Settings). Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
+  separator, \`±HHMM\`, \`Z\`, no seconds, and a date pasted from \`git log\`, in its
+  default or \`--date=iso\` form and with its \`Date:\` label, all work. Where your
+  system has date and time pickers, the calendar button opens them, and a pick keeps
+  the offset you typed. Leaving the offset out keeps the commit's current one, **Now**
+  uses this computer's offset, and **Reset** restores the commit's current dates.
+  **Same as author date** is ticked when the commit's two dates are the same; untick
+  it to set the committer date on its own. Years run from 1970 to 2099 and offsets
+  from -12:00 to +14:00. A date in the future, or an author date later than the
+  committer date, is flagged and allowed. An author date earlier than the parent
+  commit's is flagged too, and the dialog asks once before changing it.
 - **Revert** — create a new commit that undoes a commit's changes. It asks first, and
   says that history keeps both commits. Reverting or cherry-picking a merge commit asks
   which of its parents counts as the mainline instead, with Parent 1 (the usual choice)
@@ -759,12 +829,29 @@ the failed part's line when one shows.
   {{key:alt+up}} and {{key:alt+down}} move the commit one place up or down the list, as
   its arrow buttons do; {{key:alt+home}} and {{key:alt+end}} send it to the top or bottom,
   in either order.{{ai}} Reword can
-  regenerate a message with AI.{{/ai}} A "Result" count shows what you'll end up with.
-  Reworded and squashed commits keep their original author; a squash keeps its first
-  commit's author. With no **edit**, it applies all at once — a conflict rolls it back. If
-  you choose **edit**, it starts a rebase that **pauses** at that commit — amend it in the
-  **Changes** tab (stage and commit/amend as usual), then **Continue** from the banner
-  there. A quick **Squash N commits…** is also on the context menu when you select adjacent
+  regenerate a message with AI.{{/ai}} Each row also shows the commit's author date:
+  click it, or press {{key:d}} on the focused commit, to open a date editor under the
+  row. Several can be open at once, and dates combine with any action in the same
+  rewrite. To give several commits one date, select them with {{key:shift+up}} /
+  {{key:shift+down}}, {{key:shift}}-click or {{key:mod}}-click; a strip above the list
+  sets the date, and **Apply to N** writes it to each selected commit. They keep their
+  order. Squashed, fixed-up and dropped rows take no dates of their own; a squash uses
+  the dates of the commit it combines into. A commit that would end up dated before
+  its parent is flagged on its row and counted in the footer, and **Rewrite history**
+  asks once before going ahead. Rewritten commits you leave alone keep their author
+  date, and Git stamps their committer date with the time of the rewrite. On a row set
+  to **edit**, its dates are applied after the pause and replace any set by hand
+  during it. Changing only a commit's dates runs no hooks of its own and keeps its
+  message. Git still runs its pick hooks when the rewrite has to move that commit, and a
+  failing hook stops the rewrite; a row set to **edit** keeps what its pause leaves, a
+  hook's trailer included. A reword with dates runs hooks as a reword does, and the
+  commits replayed above an edited one are picked as usual, hooks included. A
+  "Result" count shows what you'll end up with. Reworded and squashed commits keep
+  their original author; a squash keeps its first commit's author. With no **edit**,
+  it applies all at once — a conflict rolls it back. If you choose **edit**, it starts
+  a rebase that **pauses** at that commit — amend it in the **Changes** tab (stage
+  and commit/amend as usual), then **Continue** from the banner there. A quick
+  **Squash N commits…** is also on the context menu when you select adjacent
   commits; both it and **Edit history** wait while a merge, rebase, cherry-pick or revert
   is in progress, and the menu says to finish the operation in **Changes** first. When
   there's nothing to edit (every commit is pushed, or in a repository with no remote
@@ -807,13 +894,13 @@ refresh and a **Retry**. A file that fails to blame says why and offers **Retry*
 history and the **Blame file…** picker work the same way: a failed refresh keeps what's
 shown, and a list that can't load says why and offers **Retry**.
 
-> History-rewriting actions (Edit history, squash) are offered only for **unpushed**
-> commits: the ones your branch is ahead of its upstream by, or, with no upstream (or one
-> that's gone), the ones on no remote. In a repository with no remote, that's the commits
-> your branch adds on top of \`main\` or \`master\`, or every commit while you're on that
-> branch or when neither exists. A push of rewritten history becomes a safe
-> **force-with-lease --force-if-includes** push (the second flag needs Git 2.30+; see
-> *Syncing & conflicts*).`,
+> History-rewriting actions (Edit history, squash, and Edit dates on any commit but the
+> latest) are offered only for **unpushed** commits: the ones your branch is ahead of its
+> upstream by, or, with no upstream (or one that's gone), the ones on no remote. In a
+> repository with no remote, that's the commits your branch adds on top of \`main\` or
+> \`master\`, or every commit while you're on that branch or when neither exists. A push
+> of rewritten history becomes a safe **force-with-lease --force-if-includes** push
+> (the second flag needs Git 2.30+; see *Syncing & conflicts*).`,
   },
   {
     id: "branches",
@@ -3588,8 +3675,10 @@ which requires \`--allow-git-write\` too — on its own it grants nothing) unloc
 **irreversible** operations: delete a branch, discard changes, reset, force-push (with
 lease), delete a remote branch, drop a stash (by the sha that list stashes reports), delete
 a tag, and drop commits on a guarded rebase pull. Agent-session branches
-(\`gd/session/*\`) are refused by the branch-mutating tools, so an in-flight agent session
-is never broken.
+(\`gd/session/*\`) are refused by the branch-mutating tools; push and force-push refuse
+one, whether named or checked out, and it can't be a pull request's head. An in-flight
+agent session is never broken: these tools, and Push or Publish in the app, never
+publish its branch.
 
 The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):
 \`generate_commit_message\`, \`generate_pr_description\`, and \`generate_branch_name\` each hand
@@ -3949,10 +4038,10 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 
 ## Moving around
 
-- **↑ / ↓** navigate every list — files, commits, branches, PRs, stack members, runs,
-  sessions, and the side rails (Settings, Repository settings, and this guide).
-  **Shift + ↑ / ↓** extends a selection in History. **Enter** opens the highlighted item;
-  **Esc** closes dialogs and menus.
+- {{key:up}} / {{key:down}} navigate every list — files, commits, branches, PRs, stack
+  members, runs, sessions, and the side rails (Settings, Repository settings, and this
+  guide). {{key:shift+up}} / {{key:shift+down}} extends a selection in History.
+  {{key:enter}} opens the highlighted item; {{key:escape}} closes dialogs and menus.
 - **Tabs:** {{kbd:tab-changes}} Changes · {{kbd:tab-history}} History ·
   {{kbd:tab-compare}} Compare · {{kbd:tab-pulls}} Pull Requests · {{kbd:tab-actions}}
   Actions · {{kbd:tab-issues}} Issues · {{kbd:tab-discussions}} Discussions ·

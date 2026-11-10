@@ -3,7 +3,9 @@ import {
   REPO_SHELL_GC_TIME,
   REPO_SHELL_WARM_STALE_MS,
 } from "@/lib/query-cache-times";
+import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import * as api from "../api";
+import { readViewDiff } from "../whitespace-diff";
 import { keepPreviousDataForRepo } from "./core";
 import { useRepoMutation } from "./internal";
 
@@ -162,6 +164,7 @@ export function useOrphanedStashFileDiff(
   sha: string | null,
   filePath: string | null,
 ) {
+  const hide = useHideWhitespace();
   return useQuery({
     queryKey: [
       "repo",
@@ -169,9 +172,12 @@ export function useOrphanedStashFileDiff(
       "orphaned-stash-diff",
       sha ?? "",
       filePath ?? "",
+      hide,
     ] as const,
     queryFn: () =>
-      api.gitOrphanedStashFileDiff(repo, sha ?? "", filePath ?? ""),
+      readViewDiff(hide, (iw) =>
+        api.gitOrphanedStashFileDiff(repo, sha ?? "", filePath ?? "", iw),
+      ),
     enabled: sha !== null && filePath !== null,
     placeholderData: keepPreviousDataForRepo(repo),
     networkMode: "always",

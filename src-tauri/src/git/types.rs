@@ -34,6 +34,23 @@ pub struct FileEntry {
     pub orig_path: Option<String>,
     pub staged: Option<ChangeKind>,
     pub unstaged: Option<ChangeKind>,
+    /// Present exactly on a submodule row: porcelain v2's `S<c><m><u>` token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub submodule: Option<SubmoduleChange>,
+}
+
+/// What porcelain v2's submodule token says changed: the checked-out commit, tracked
+/// files inside, untracked files inside. It carries no direction for the commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleChange {
+    pub commit_changed: bool,
+    pub tracked_modified: bool,
+    pub untracked: bool,
+    /// The record's worktree mode is a gitlink (`mW == 160000`): true on an ordinary
+    /// submodule row and on a file that became a submodule; false when a file now sits
+    /// where the gitlink was, and on a deletion, staged or not (`000000`: no file either).
+    pub worktree_is_gitlink: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,7 +273,11 @@ pub struct CommitDetails {
     pub body: String,
     pub author: String,
     pub author_email: String,
+    /// Author date, strict ISO 8601 (%aI).
     pub date: String,
+    /// Committer date, strict ISO 8601 (%cI); may differ from `date` after a
+    /// rewrite, a cherry-pick or an applied patch.
+    pub committer_date: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -289,11 +310,21 @@ pub struct CommitAuthor {
     pub email: String,
 }
 
+/// A commit timestamp as git records it: seconds since the Unix epoch plus the UTC offset in minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDate {
+    pub epoch_seconds: i64,
+    pub offset_minutes: i32,
+}
+
 /// One resulting commit in a history rewrite: a single hash is a plain
 /// pick; several hashes squash into one commit carrying `message`. `edit`
 /// flags the commit to pause at (only the interactive-rebase path honors it;
-/// the atomic replay engine ignores it).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// the atomic replay engine ignores it). A date left `None` keeps git's own
+/// behaviour (author date kept, committer date = now); a fold group's dates apply
+/// to the one commit it makes.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RewriteStep {
     pub hashes: Vec<String>,
@@ -301,6 +332,10 @@ pub struct RewriteStep {
     pub message: Option<String>,
     #[serde(default)]
     pub edit: bool,
+    #[serde(default)]
+    pub author_date: Option<CommitDate>,
+    #[serde(default)]
+    pub committer_date: Option<CommitDate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,6 +380,61 @@ pub struct SubmoduleRemoveOutcome {
     pub module_data_deleted: bool,
     /// Deletion was requested and failed; the removal itself is still staged.
     pub module_data_error: Option<String>,
+}
+
+/// What sits at a submodule's path in the parent's working tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubmoduleCheckout {
+    /// A repository of its own, whose status read answered.
+    Ok,
+    /// A folder with no `.git` entry: git inside it would answer for the PARENT.
+    NotInitialized,
+    /// Nothing at the path.
+    Missing,
+    /// Something other than a folder (a file) at the path.
+    Replaced,
+    /// The submodule's own status read failed; `reason` says how.
+    Unreadable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleCommit {
+    pub sha: String,
+    pub subject: String,
+}
+
+/// One side of a submodule row, for the Changes pane. Every no-checkout outcome and
+/// an unreadable submodule are states here, never an error.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleChanges {
+    pub path: String,
+    pub staged: bool,
+    pub checkout: SubmoduleCheckout,
+    /// Some, and never empty, exactly when `checkout` is `Unreadable`.
+    pub reason: Option<String>,
+    /// The submodule's branch; None when detached or the checkout isn't `Ok`.
+    pub branch: Option<String>,
+    pub detached: bool,
+    /// The checked-out commit; None when unborn or the checkout isn't `Ok`.
+    pub head: Option<String>,
+    /// "Before": HEAD's gitlink on the staged side, else the index's.
+    pub from_sha: Option<String>,
+    /// "After": the index's gitlink on the staged side, else `head`.
+    pub to_sha: Option<String>,
+    /// False when the four range fields below were NOT measured.
+    pub range_known: bool,
+    /// In `to` and not in `from`, newest first, at most 50.
+    pub ahead: Vec<SubmoduleCommit>,
+    pub ahead_count: u32,
+    /// In `from` and not in `to`, newest first, at most 50.
+    pub behind: Vec<SubmoduleCommit>,
+    pub behind_count: u32,
+    /// The submodule's own status rows in git's order, at most 100; empty when staged.
+    pub files: Vec<FileEntry>,
+    pub files_total: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

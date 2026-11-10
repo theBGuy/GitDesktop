@@ -1,0 +1,7 @@
+# actionlint's built-in runner-label list stops at ubuntu-24.04 (v1.7.12; the
+# ubuntu-26.04 label is tracked in rhysd/actionlint#682). Declaring the hosted
+# label here keeps actionlint green (editor, local runs, CodeRabbit); delete
+# this file once actionlint ships the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

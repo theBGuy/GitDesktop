@@ -126,6 +126,7 @@ const LOCAL_CALLEES = [
   "gitCherryPickOnto",
   "gitCheckoutCommit",
   "gitRewriteCommits",
+  "gitAmendCommitDates",
   "gitRebaseEdit",
   "gitTag",
   "gitDeleteLocalTag",

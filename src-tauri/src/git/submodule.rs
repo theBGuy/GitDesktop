@@ -9,7 +9,9 @@ use crate::git::runner::{
     run_git_config_write_held, run_git_raw, run_git_raw_index_retry, with_config_write_lock,
     GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
-use crate::git::types::{Submodule, SubmoduleRemoveOutcome};
+use crate::git::types::{
+    Submodule, SubmoduleChanges, SubmoduleCheckout, SubmoduleCommit, SubmoduleRemoveOutcome,
+};
 use crate::state::AppState;
 
 /// Belongs on EVERY `status --porcelain` probe here whose emptiness is read as
@@ -741,6 +743,306 @@ pub(crate) async fn git_submodule_set_branch_core(
     stage_gitmodules(&repo_path).await
 }
 
+/// Commits listed per side of a submodule's range, and inner status rows returned.
+const SUBMODULE_COMMITS_CAP: usize = 50;
+const SUBMODULE_FILES_CAP: usize = 100;
+/// How much of a failed inner read's stderr line the pane shows.
+const SUBMODULE_REASON_CAP: usize = 300;
+
+/// What one side of a submodule row changed, for the Changes pane. Read-only and
+/// lock-free; every git run is sequential, so the command future stays small.
+/// `orig_path` is a staged rename's old path, where HEAD still records the gitlink.
+#[tauri::command]
+pub async fn git_submodule_changes(
+    repo_path: String,
+    path: String,
+    staged: bool,
+    orig_path: Option<String>,
+) -> AppResult<SubmoduleChanges> {
+    git_submodule_changes_core(&repo_path, &path, staged, orig_path.as_deref()).await
+}
+
+/// Only a refused path and a failed parent gitlink read are errors; every
+/// checkout state, an unreadable submodule and an unwalkable range are data.
+pub(crate) async fn git_submodule_changes_core(
+    repo_path: &str,
+    path: &str,
+    staged: bool,
+    orig_path: Option<&str>,
+) -> AppResult<SubmoduleChanges> {
+    validate_repo_relative(path, "submodule path")?;
+    if let Some(orig) = orig_path {
+        validate_repo_relative(orig, "submodule path")?;
+    }
+    let spec = crate::git::pathspec::literal(path);
+    let index_sha = index_gitlink(repo_path, path, &spec).await?;
+    let tree_sha = if staged {
+        let head_path = orig_path.unwrap_or(path);
+        let head_spec = crate::git::pathspec::literal(head_path);
+        head_gitlink(repo_path, head_path, &head_spec).await?
+    } else {
+        None
+    };
+
+    let mut changes = SubmoduleChanges {
+        path: path.to_string(),
+        staged,
+        checkout: SubmoduleCheckout::Ok,
+        reason: None,
+        branch: None,
+        detached: false,
+        head: None,
+        from_sha: None,
+        to_sha: None,
+        range_known: true,
+        ahead: Vec::new(),
+        ahead_count: 0,
+        behind: Vec::new(),
+        behind_count: 0,
+        files: Vec::new(),
+        files_total: 0,
+    };
+
+    // git inside a folder with no `.git` of its own walks up and answers for the
+    // PARENT (measured, git 2.51.1), so no git runs there unless one exists.
+    let worktree = Path::new(repo_path).join(path);
+    (changes.checkout, changes.reason) =
+        checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
+            worktree.join(".git").try_exists()
+        });
+    let dir = worktree.to_string_lossy().into_owned();
+    if changes.checkout == SubmoduleCheckout::Ok {
+        let read = run_git_raw(Some(&dir), &submodule_status_args(staged), DEFAULT_TIMEOUT).await;
+        match read {
+            Ok(out) if out.code == 0 => {
+                let status = crate::git::status::parse_status_v2(&out.stdout_lossy());
+                changes.head = status.branch.oid;
+                changes.branch = status.branch.name;
+                changes.detached = status.branch.detached;
+                if !staged {
+                    changes.files_total = u32::try_from(status.entries.len()).unwrap_or(u32::MAX);
+                    changes.files = status.entries;
+                    changes.files.truncate(SUBMODULE_FILES_CAP);
+                }
+            }
+            Ok(out) => {
+                changes.checkout = SubmoduleCheckout::Unreadable;
+                changes.reason = Some(unreadable_reason(&out.stderr, out.code));
+            }
+            Err(e) => {
+                changes.checkout = SubmoduleCheckout::Unreadable;
+                changes.reason = Some(nonempty_reason(e.to_string()));
+            }
+        }
+    }
+
+    (changes.from_sha, changes.to_sha) = if staged {
+        (tree_sha, index_sha)
+    } else {
+        (index_sha, changes.head.clone())
+    };
+    if let (Some(from_sha), Some(to_sha)) = (&changes.from_sha, &changes.to_sha) {
+        if from_sha != to_sha {
+            let walked = match changes.checkout {
+                SubmoduleCheckout::Ok => submodule_range(&dir, from_sha, to_sha).await,
+                _ => None,
+            };
+            match walked {
+                Some(range) => {
+                    (changes.ahead, changes.ahead_count) = range.ahead;
+                    (changes.behind, changes.behind_count) = range.behind;
+                }
+                None => changes.range_known = false,
+            }
+        }
+    }
+    Ok(changes)
+}
+
+/// The checkout state from an lstat of the gitlink path's final component (an
+/// intermediate junction is still traversed): git run through a link reads the
+/// link's target, a repository outside the parent. Only NotFound is missing; any
+/// other failure, the `.git` probe's included, is unreadable with its message.
+fn checkout_from_probe(
+    probe: std::io::Result<std::fs::Metadata>,
+    has_git: impl FnOnce() -> std::io::Result<bool>,
+) -> (SubmoduleCheckout, Option<String>) {
+    match probe {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (SubmoduleCheckout::Missing, None),
+        Err(e) => (
+            SubmoduleCheckout::Unreadable,
+            Some(format!("couldn't read the submodule folder: {e}")),
+        ),
+        // An lstat reports a link (a junction too) as not a directory.
+        Ok(meta) if !meta.is_dir() => (SubmoduleCheckout::Replaced, None),
+        Ok(_) => match has_git() {
+            Ok(true) => (SubmoduleCheckout::Ok, None),
+            Ok(false) => (SubmoduleCheckout::NotInitialized, None),
+            Err(e) => (
+                SubmoduleCheckout::Unreadable,
+                Some(format!("couldn't read the submodule's .git: {e}")),
+            ),
+        },
+    }
+}
+
+/// The inner status read. The staged side reads only HEAD and the branch, so it
+/// skips the untracked walk; either explicit mode overrides a
+/// `status.showUntrackedFiles` config.
+fn submodule_status_args(staged: bool) -> [&'static str; 5] {
+    let untracked = if staged {
+        "--untracked-files=no"
+    } else {
+        "--untracked-files=all"
+    };
+    ["status", "--porcelain=v2", "--branch", untracked, "-z"]
+}
+
+/// The index's stage-0 gitlink at exactly `path`; a pathspec naming a directory also
+/// lists the entries under it. A failed read (no repository, an unreadable index) is
+/// an Err carrying git's stderr, never None, which would read as "no gitlink here".
+async fn index_gitlink(repo_path: &str, path: &str, spec: &str) -> AppResult<Option<String>> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["ls-files", "-s", "-z", "--", spec],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .exit_verdict()?;
+    // `<mode> <sha> <stage>\t<path>`
+    Ok(out.stdout_lossy().split('\0').find_map(|record| {
+        let (meta, rec_path) = record.split_once('\t')?;
+        let mut meta = meta.split(' ');
+        let (mode, sha, stage) = (meta.next()?, meta.next()?, meta.next()?);
+        (rec_path == path && mode == "160000" && stage == "0").then(|| sha.to_string())
+    }))
+}
+
+/// HEAD's gitlink at exactly `path`. None for a HEAD tree without one, or when the
+/// read failed and [`crate::git::history::unborn_head`] confirms HEAD is unborn; any
+/// other failure (a broken HEAD, no repository) is an Err, never a "before" of none.
+/// A broken HEAD errs on git 2.43+ only: older git reads it as unborn (Ok(None)).
+async fn head_gitlink(repo_path: &str, path: &str, spec: &str) -> AppResult<Option<String>> {
+    let Some(out) = crate::git::history::read_unless_unborn(
+        repo_path,
+        &["ls-tree", "-z", "HEAD", "--", spec],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    // `<mode> <type> <sha>\t<path>`
+    Ok(out.stdout_lossy().split('\0').find_map(|record| {
+        let (meta, rec_path) = record.split_once('\t')?;
+        let mut meta = meta.split(' ');
+        let (mode, _kind, sha) = (meta.next()?, meta.next()?, meta.next()?);
+        (rec_path == path && mode == "160000").then(|| sha.to_string())
+    }))
+}
+
+/// Each side of a measured range: the newest commits listed, and the exact count.
+struct SubmoduleRange {
+    ahead: (Vec<SubmoduleCommit>, u32),
+    behind: (Vec<SubmoduleCommit>, u32),
+}
+
+/// Walks `from_sha...to_sha` inside the submodule; None when any read fails (a sha
+/// its object store lacks exits 128), so a defaulted zero never reads as measured.
+async fn submodule_range(dir: &str, from_sha: &str, to_sha: &str) -> Option<SubmoduleRange> {
+    if !is_full_oid(from_sha) || !is_full_oid(to_sha) {
+        return None;
+    }
+    let range = format!("{from_sha}...{to_sha}");
+    let out = run_git_raw(
+        Some(dir),
+        &["rev-list", "--left-right", "--count", &range],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    let counts = out.stdout_lossy();
+    let (left, right) = counts.trim().split_once('\t')?;
+    let behind_count: u32 = left.parse().ok()?;
+    let ahead_count: u32 = right.parse().ok()?;
+    let ahead_range = format!("{from_sha}..{to_sha}");
+    let behind_range = format!("{to_sha}..{from_sha}");
+    let ahead = if ahead_count > 0 {
+        submodule_log(dir, &ahead_range).await?
+    } else {
+        Vec::new()
+    };
+    let behind = if behind_count > 0 {
+        submodule_log(dir, &behind_range).await?
+    } else {
+        Vec::new()
+    };
+    Some(SubmoduleRange {
+        ahead: (ahead, ahead_count),
+        behind: (behind, behind_count),
+    })
+}
+
+/// The newest commits of a validated two-dot range, sha and subject each.
+async fn submodule_log(dir: &str, range: &str) -> Option<Vec<SubmoduleCommit>> {
+    let max = format!("--max-count={SUBMODULE_COMMITS_CAP}");
+    let out = run_git_raw(
+        Some(dir),
+        &[
+            "log",
+            "--no-color",
+            "--no-show-signature",
+            "--format=%H%x1f%s",
+            &max,
+            range,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    Some(
+        out.stdout_lossy()
+            .lines()
+            .filter_map(|line| {
+                let (sha, subject) = line.split_once('\x1f')?;
+                Some(SubmoduleCommit {
+                    sha: sha.to_string(),
+                    subject: subject.to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// A full object id (40 or 64 hex): the only shape a sha reaches argv in.
+fn is_full_oid(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The failed inner read's first non-empty stderr line, capped; git's exit code
+/// when stderr says nothing.
+fn unreadable_reason(stderr: &str, code: i32) -> String {
+    match stderr.lines().map(str::trim).find(|line| !line.is_empty()) {
+        Some(line) => line.chars().take(SUBMODULE_REASON_CAP).collect(),
+        None => format!("git exited with code {code}"),
+    }
+}
+
+/// A spawn error or timeout's own message, never empty.
+fn nonempty_reason(message: String) -> String {
+    if message.trim().is_empty() {
+        "git could not run in the submodule".to_string()
+    } else {
+        message
+    }
+}
+
 /// Refuses while `.gitmodules` is unsettled — unstaged edits, or a file git isn't
 /// tracking yet — the shared pre-check for all four mutations that write that file.
 /// Two reasons, both measured on git 2.51.1: `git rm` on a submodule fails "please
@@ -1011,6 +1313,553 @@ mod tests {
         assert_eq!(subs[0].branch.as_deref(), Some("main"));
         assert_eq!(subs[0].status, "ok");
         assert!(!subs[0].sha.is_empty());
+    }
+
+    /// The checked-out submodule inside `host`, as a path string.
+    fn sub_dir(host: &str) -> String {
+        Path::new(host)
+            .join("libs/dep")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Commits `file` in `repo` under `subject`; returns the new HEAD sha.
+    async fn commit_in(repo: &str, file: &str, subject: &str) -> String {
+        std::fs::write(Path::new(repo).join(file), subject).unwrap();
+        git(repo, &["add", "-A"]).await;
+        git(
+            repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                subject,
+            ],
+        )
+        .await;
+        git(repo, &["rev-parse", "HEAD"]).await.trim().to_string()
+    }
+
+    /// Points the parent's index gitlink at `sha`, the way a staged pointer bump does,
+    /// without `git add` (which an ignore config can make skip the path).
+    async fn stage_gitlink(host: &str, sha: &str) {
+        let info = format!("160000,{sha},libs/dep");
+        git(host, &["update-index", "--add", "--cacheinfo", &info]).await;
+    }
+
+    async fn changes(host: &str, staged: bool) -> SubmoduleChanges {
+        git_submodule_changes_core(host, "libs/dep", staged, None)
+            .await
+            .expect("submodule changes")
+    }
+
+    #[tokio::test]
+    async fn changes_untracked_only_lists_files_and_an_equal_pair() {
+        let (_dir, host, _dep) = host_with_submodule("changes-untracked").await;
+        let sub = sub_dir(&host);
+        std::fs::write(Path::new(&sub).join("new.txt"), "x\n").unwrap();
+        let c = changes(&host, false).await;
+        assert_eq!(c.checkout, SubmoduleCheckout::Ok);
+        assert_eq!(c.reason, None);
+        assert_eq!(c.branch.as_deref(), Some("main"));
+        assert!(!c.detached);
+        assert!(c.head.is_some());
+        assert_eq!(c.from_sha, c.head);
+        assert_eq!(c.to_sha, c.head);
+        assert!(c.range_known);
+        assert!(c.ahead.is_empty() && c.behind.is_empty());
+        assert_eq!((c.ahead_count, c.behind_count), (0, 0));
+        assert_eq!(c.files.len(), 1);
+        assert_eq!(c.files[0].path, "new.txt");
+        assert_eq!(
+            c.files[0].unstaged,
+            Some(crate::git::types::ChangeKind::Untracked)
+        );
+        assert_eq!(c.files_total, 1);
+    }
+
+    #[tokio::test]
+    async fn changes_new_commits_list_ahead_newest_first() {
+        let (_dir, host, _dep) = host_with_submodule("changes-ahead").await;
+        let sub = sub_dir(&host);
+        let recorded = git(&sub, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let first = commit_in(&sub, "a.txt", "first | pipe\tand tab").await;
+        let second = commit_in(&sub, "b.txt", "second").await;
+        let c = changes(&host, false).await;
+        assert_eq!(c.from_sha.as_deref(), Some(recorded.as_str()));
+        assert_eq!(c.to_sha.as_deref(), Some(second.as_str()));
+        assert!(c.range_known);
+        assert_eq!((c.ahead_count, c.behind_count), (2, 0));
+        let listed: Vec<(&str, &str)> = c
+            .ahead
+            .iter()
+            .map(|k| (k.sha.as_str(), k.subject.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (second.as_str(), "second"),
+                (first.as_str(), "first | pipe\tand tab")
+            ]
+        );
+        assert!(c.behind.is_empty());
+        assert!(c.files.is_empty());
+        assert_eq!(c.files_total, 0);
+    }
+
+    #[tokio::test]
+    async fn changes_rewound_checkout_lists_behind_detached() {
+        let (_dir, host, _dep) = host_with_submodule("changes-behind").await;
+        let sub = sub_dir(&host);
+        let newer = commit_in(&sub, "a.txt", "newer").await;
+        stage_gitlink(&host, &newer).await;
+        git(&host, &["commit", "-qm", "bump dep"]).await;
+        git(&sub, &["checkout", "-q", "--detach", "HEAD~1"]).await;
+        let older = git(&sub, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let c = changes(&host, false).await;
+        assert!(c.detached);
+        assert_eq!(c.branch, None);
+        assert_eq!(c.head.as_deref(), Some(older.as_str()));
+        assert_eq!(c.from_sha.as_deref(), Some(newer.as_str()));
+        assert_eq!(c.to_sha.as_deref(), Some(older.as_str()));
+        assert!(c.range_known);
+        assert_eq!((c.ahead_count, c.behind_count), (0, 1));
+        assert!(c.ahead.is_empty());
+        assert_eq!(c.behind.len(), 1);
+        assert_eq!(c.behind[0].sha, newer);
+        assert_eq!(c.behind[0].subject, "newer");
+    }
+
+    #[tokio::test]
+    async fn changes_staged_side_compares_head_gitlink_to_index() {
+        let (_dir, host, _dep) = host_with_submodule("changes-staged").await;
+        let sub = sub_dir(&host);
+        let recorded = git(&sub, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let newer = commit_in(&sub, "a.txt", "bumped").await;
+        stage_gitlink(&host, &newer).await;
+        std::fs::write(Path::new(&sub).join("loose.txt"), "x\n").unwrap();
+        let c = changes(&host, true).await;
+        assert!(c.staged);
+        assert_eq!(c.checkout, SubmoduleCheckout::Ok);
+        assert_eq!(c.from_sha.as_deref(), Some(recorded.as_str()));
+        assert_eq!(c.to_sha.as_deref(), Some(newer.as_str()));
+        assert!(c.range_known);
+        assert_eq!((c.ahead_count, c.behind_count), (1, 0));
+        assert_eq!(c.ahead[0].subject, "bumped");
+        // The staged side never lists the submodule's own files.
+        assert!(c.files.is_empty());
+        assert_eq!(c.files_total, 0);
+        // The unstaged side of the same row: index → checkout, equal, with the file.
+        let u = changes(&host, false).await;
+        assert_eq!(u.from_sha.as_deref(), Some(newer.as_str()));
+        assert_eq!(u.to_sha.as_deref(), Some(newer.as_str()));
+        assert_eq!(u.files.len(), 1);
+    }
+
+    /// An unborn parent HEAD: `ls-tree HEAD` exits 128, so "before" is absent.
+    #[tokio::test]
+    async fn changes_staged_side_on_an_unborn_parent_head() {
+        let dir = temp("changes-unborn");
+        let host = dir.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        let host = host.to_string_lossy().into_owned();
+        git(&host, &["init", "-q", "-b", "main", "."]).await;
+        let sha = "1".repeat(40);
+        stage_gitlink(&host, &sha).await;
+        let c = changes(&host, true).await;
+        assert_eq!(c.from_sha, None);
+        assert_eq!(c.to_sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(c.checkout, SubmoduleCheckout::Missing);
+        assert!(c.range_known);
+        assert!(c.ahead.is_empty() && c.behind.is_empty());
+    }
+
+    /// Failed parent gitlink reads are errors, never a payload whose absent sha reads
+    /// as "the next commit adds/removes this submodule". The tested set: a folder that
+    /// is no repository, a garbage `.git/index`, and a branch ref holding garbage.
+    #[tokio::test]
+    async fn changes_errs_when_the_parent_is_not_a_repository() {
+        let dir = temp("changes-norepo");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let plain = plain.to_string_lossy().into_owned();
+        for staged in [false, true] {
+            let result = git_submodule_changes_core(&plain, "libs/dep", staged, None).await;
+            assert!(
+                matches!(result, Err(AppError::Git { .. })),
+                "{staged}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn changes_errs_on_a_garbage_parent_index() {
+        let (_dir, host, _dep) = host_with_submodule("changes-badindex").await;
+        std::fs::write(Path::new(&host).join(".git/index"), b"not an index").unwrap();
+        for staged in [false, true] {
+            let result = git_submodule_changes_core(&host, "libs/dep", staged, None).await;
+            assert!(
+                matches!(result, Err(AppError::Git { .. })),
+                "{staged}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn changes_staged_side_errs_on_a_garbage_branch_ref() {
+        let (_dir, host, _dep) = host_with_submodule("changes-badhead").await;
+        std::fs::write(Path::new(&host).join(".git/refs/heads/main"), "garbage\n").unwrap();
+        // `show-ref --exists` arrived in git 2.43; older git reads this as unborn.
+        let exists = run_git_raw(
+            Some(&host),
+            &["show-ref", "--exists", "refs/heads/main"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        if exists.code == 129 {
+            assert!(crate::git::history::unborn_head(&host).await.unwrap());
+            return;
+        }
+        let result = git_submodule_changes_core(&host, "libs/dep", true, None).await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            matches!(
+                crate::git::history::unborn_head(&host).await,
+                Err(AppError::Command(_))
+            ),
+            "the fixture must be a broken ref, not an unborn HEAD"
+        );
+    }
+
+    /// No checkout: no git runs in the folder, so the parent's own changes (which a
+    /// walk-up would list) never appear as the submodule's files.
+    #[tokio::test]
+    async fn changes_missing_replaced_and_not_initialized_run_no_git_inside() {
+        let (dir, host, _dep) = host_with_submodule("changes-nocheckout").await;
+        std::fs::write(dir.path().join("host").join("host.txt"), "edited\n").unwrap();
+        std::fs::write(dir.path().join("host").join("stray.txt"), "x\n").unwrap();
+        let sub = sub_dir(&host);
+        let recorded = git(&sub, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let assert_no_checkout = |c: &SubmoduleChanges, want: SubmoduleCheckout| {
+            assert_eq!(c.checkout, want);
+            assert_eq!(c.reason, None);
+            assert_eq!(c.branch, None);
+            assert_eq!(c.head, None);
+            assert!(!c.detached);
+            assert!(c.files.is_empty());
+            assert_eq!(c.files_total, 0);
+            assert_eq!(c.from_sha.as_deref(), Some(recorded.as_str()));
+            assert_eq!(c.to_sha, None);
+            assert!(c.range_known);
+        };
+        std::fs::remove_dir_all(&sub).unwrap();
+        assert_no_checkout(&changes(&host, false).await, SubmoduleCheckout::Missing);
+        std::fs::write(&sub, "a file in the folder's place\n").unwrap();
+        assert_no_checkout(&changes(&host, false).await, SubmoduleCheckout::Replaced);
+        std::fs::remove_file(&sub).unwrap();
+        // A link to a repository outside the parent reads as replaced, and git never
+        // runs through it. The control: git run at the link answers for the target.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside = outside.to_string_lossy().into_owned();
+        git(&outside, &["init", "-q", "-b", "main", "."]).await;
+        std::fs::write(Path::new(&outside).join("target-only.txt"), "x\n").unwrap();
+        // A junction on Windows: mklink /J needs no privilege, unlike a symlink.
+        // It reads a `/` in a path as a switch, so both go backslashed.
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(sub.replace('/', "\\"))
+                .arg(outside.replace('/', "\\"))
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &sub).unwrap();
+        let through = git(&sub, &["status", "--porcelain"]).await;
+        assert!(
+            through.contains("target-only.txt"),
+            "walk-up control: {through}"
+        );
+        assert_no_checkout(&changes(&host, false).await, SubmoduleCheckout::Replaced);
+        let staged = changes(&host, true).await;
+        assert_eq!(staged.checkout, SubmoduleCheckout::Replaced);
+        assert_eq!((staged.head, staged.reason), (None, None));
+        assert!(staged.files.is_empty());
+        // A directory link is removed as a directory on Windows, a file on unix.
+        #[cfg(windows)]
+        std::fs::remove_dir(&sub).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&sub).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_no_checkout(
+            &changes(&host, false).await,
+            SubmoduleCheckout::NotInitialized,
+        );
+        // A staged pointer move over an empty folder differs, but can't be walked.
+        stage_gitlink(&host, &"2".repeat(40)).await;
+        let c = changes(&host, true).await;
+        assert_eq!(c.checkout, SubmoduleCheckout::NotInitialized);
+        assert_eq!(c.from_sha.as_deref(), Some(recorded.as_str()));
+        assert_eq!(c.to_sha, Some("2".repeat(40)));
+        assert!(!c.range_known);
+        assert!(c.ahead.is_empty() && c.behind.is_empty());
+        assert_eq!((c.ahead_count, c.behind_count), (0, 0));
+        assert!(c.files.is_empty());
+    }
+
+    /// The `.git` probe over a real folder. Tested set: present, absent, and an
+    /// injected PermissionDenied/Other (a real denied `.git` needs an ACL edit, so
+    /// the error arrives through the closure seam instead).
+    #[test]
+    fn changes_git_probe_errors_read_unreadable_not_uninitialized() {
+        use std::io::{Error, ErrorKind};
+        let dir = temp("changes-gitprobe");
+        let folder = || std::fs::symlink_metadata(dir.path());
+        assert_eq!(
+            checkout_from_probe(folder(), || Ok(true)),
+            (SubmoduleCheckout::Ok, None)
+        );
+        assert_eq!(
+            checkout_from_probe(folder(), || Ok(false)),
+            (SubmoduleCheckout::NotInitialized, None)
+        );
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            let (checkout, reason) = checkout_from_probe(folder(), || Err(Error::from(kind)));
+            assert_eq!(checkout, SubmoduleCheckout::Unreadable, "{kind:?}");
+            assert!(!reason.expect("a reason").trim().is_empty(), "{kind:?}");
+        }
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let no_git = || panic!("a non-folder never looks for .git");
+        assert_eq!(
+            checkout_from_probe(std::fs::symlink_metadata(&file), no_git),
+            (SubmoduleCheckout::Replaced, None)
+        );
+    }
+
+    /// A staged `git mv` of the submodule: HEAD records the gitlink at the OLD path,
+    /// so the staged side reads it there, never "the next commit adds this submodule".
+    #[tokio::test]
+    async fn changes_staged_rename_reads_head_gitlink_at_the_orig_path() {
+        let (_dir, host, _dep) = host_with_submodule("changes-rename").await;
+        let recorded = git(&sub_dir(&host), &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&host, &["mv", "libs/dep", "libs/moved"]).await;
+        let c = git_submodule_changes_core(&host, "libs/moved", true, Some("libs/dep"))
+            .await
+            .expect("submodule changes");
+        assert_eq!(c.path, "libs/moved");
+        assert_eq!(c.checkout, SubmoduleCheckout::Ok);
+        assert_eq!(c.from_sha.as_deref(), Some(recorded.as_str()));
+        assert_eq!(c.to_sha.as_deref(), Some(recorded.as_str()));
+        // The control: without the old path, HEAD has no gitlink at the new one.
+        let bare = git_submodule_changes_core(&host, "libs/moved", true, None)
+            .await
+            .expect("submodule changes");
+        assert_eq!(bare.from_sha, None);
+    }
+
+    #[test]
+    fn changes_probe_failures_other_than_not_found_are_unreadable() {
+        use std::io::{Error, ErrorKind};
+        let no_git = || panic!("a failed probe never looks for .git");
+        assert_eq!(
+            checkout_from_probe(Err(Error::from(ErrorKind::NotFound)), no_git),
+            (SubmoduleCheckout::Missing, None)
+        );
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            let (checkout, reason) = checkout_from_probe(Err(Error::from(kind)), no_git);
+            assert_eq!(checkout, SubmoduleCheckout::Unreadable, "{kind:?}");
+            assert!(!reason.expect("a reason").trim().is_empty(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn changes_status_argv_skips_untracked_files_on_the_staged_side() {
+        let staged = submodule_status_args(true);
+        assert!(staged.contains(&"--untracked-files=no"));
+        assert!(!staged.contains(&"--untracked-files=all"));
+        let unstaged = submodule_status_args(false);
+        assert!(unstaged.contains(&"--untracked-files=all"));
+        assert!(!unstaged.contains(&"--untracked-files=no"));
+    }
+
+    #[tokio::test]
+    async fn changes_unreadable_when_the_git_file_points_nowhere() {
+        let (dir, host, _dep) = host_with_submodule("changes-unreadable").await;
+        let sub = sub_dir(&host);
+        let nowhere = dir
+            .path()
+            .join("nowhere")
+            .to_string_lossy()
+            .replace('\\', "/");
+        std::fs::write(Path::new(&sub).join(".git"), format!("gitdir: {nowhere}\n")).unwrap();
+        let c = changes(&host, false).await;
+        assert_eq!(c.checkout, SubmoduleCheckout::Unreadable);
+        let reason = c.reason.expect("a reason");
+        assert!(!reason.trim().is_empty());
+        assert_eq!(c.head, None);
+        assert_eq!(c.branch, None);
+        assert!(c.files.is_empty());
+        assert!(c.from_sha.is_some());
+        assert!(c.range_known);
+    }
+
+    #[test]
+    fn changes_reason_helper_arms() {
+        assert_eq!(unreadable_reason("", 128), "git exited with code 128");
+        assert_eq!(unreadable_reason(" \n\t\n", 1), "git exited with code 1");
+        assert_eq!(
+            unreadable_reason("\n  fatal: not a git repository\nmore\n", 128),
+            "fatal: not a git repository"
+        );
+        let long = "é".repeat(400);
+        assert_eq!(unreadable_reason(&long, 1).chars().count(), 300);
+        assert_eq!(
+            nonempty_reason(String::new()),
+            "git could not run in the submodule"
+        );
+        assert_eq!(nonempty_reason("timed out".into()), "timed out");
+    }
+
+    #[tokio::test]
+    async fn changes_range_unknown_for_a_sha_the_submodule_lacks() {
+        let (_dir, host, _dep) = host_with_submodule("changes-lacks").await;
+        let missing = "3".repeat(40);
+        stage_gitlink(&host, &missing).await;
+        std::fs::write(Path::new(&sub_dir(&host)).join("new.txt"), "x\n").unwrap();
+        let c = changes(&host, false).await;
+        assert_eq!(c.checkout, SubmoduleCheckout::Ok);
+        assert_eq!(c.from_sha.as_deref(), Some(missing.as_str()));
+        assert!(c.to_sha.is_some());
+        assert!(!c.range_known);
+        assert!(c.ahead.is_empty() && c.behind.is_empty());
+        assert_eq!((c.ahead_count, c.behind_count), (0, 0));
+        // The checkout itself still answers.
+        assert_eq!(c.files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn changes_caps_files_and_counts_them_all() {
+        let (_dir, host, _dep) = host_with_submodule("changes-cap").await;
+        let sub = sub_dir(&host);
+        for i in 0..101 {
+            std::fs::write(Path::new(&sub).join(format!("f{i:03}.txt")), "x\n").unwrap();
+        }
+        let c = changes(&host, false).await;
+        assert_eq!(c.files.len(), 100);
+        assert_eq!(c.files_total, 101);
+    }
+
+    #[tokio::test]
+    async fn changes_refuses_escaping_paths() {
+        let dir = temp("changes-refuse");
+        let repo = dir.path().to_string_lossy().into_owned();
+        for bad in ["../x", "-x", "C:/x"] {
+            let err = git_submodule_changes_core(&repo, bad, false, None).await;
+            assert!(
+                matches!(err, Err(AppError::InvalidArgument(_))),
+                "{bad}: {err:?}"
+            );
+            let err = git_submodule_changes_core(&repo, "libs/dep", true, Some(bad)).await;
+            assert!(
+                matches!(err, Err(AppError::InvalidArgument(_))),
+                "orig {bad}: {err:?}"
+            );
+        }
+    }
+
+    /// The frontend reads these sixteen keys verbatim, absent options as `null`.
+    #[test]
+    fn changes_wire_shape_is_camel_case_with_explicit_nulls() {
+        let c = SubmoduleChanges {
+            path: "libs/dep".into(),
+            staged: false,
+            checkout: SubmoduleCheckout::NotInitialized,
+            reason: None,
+            branch: None,
+            detached: false,
+            head: None,
+            from_sha: None,
+            to_sha: None,
+            range_known: true,
+            ahead: vec![SubmoduleCommit {
+                sha: "a".into(),
+                subject: "s".into(),
+            }],
+            ahead_count: 1,
+            behind: Vec::new(),
+            behind_count: 0,
+            files: Vec::new(),
+            files_total: 0,
+        };
+        let json = serde_json::to_value(&c).unwrap();
+        let obj = json.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "ahead",
+                "aheadCount",
+                "behind",
+                "behindCount",
+                "branch",
+                "checkout",
+                "detached",
+                "files",
+                "filesTotal",
+                "fromSha",
+                "head",
+                "path",
+                "rangeKnown",
+                "reason",
+                "staged",
+                "toSha",
+            ]
+        );
+        for key in ["reason", "branch", "head", "fromSha", "toSha"] {
+            assert!(obj[key].is_null(), "{key}");
+        }
+        assert_eq!(obj["checkout"], serde_json::json!("notInitialized"));
+        assert_eq!(
+            obj["ahead"],
+            serde_json::json!([{ "sha": "a", "subject": "s" }])
+        );
+        let spelled = |checkout| {
+            serde_json::to_value(SubmoduleChanges {
+                checkout,
+                ..c.clone()
+            })
+            .unwrap()["checkout"]
+                .clone()
+        };
+        assert_eq!(spelled(SubmoduleCheckout::Ok), serde_json::json!("ok"));
+        assert_eq!(
+            spelled(SubmoduleCheckout::Missing),
+            serde_json::json!("missing")
+        );
+        assert_eq!(
+            spelled(SubmoduleCheckout::Replaced),
+            serde_json::json!("replaced")
+        );
+        assert_eq!(
+            spelled(SubmoduleCheckout::Unreadable),
+            serde_json::json!("unreadable")
+        );
     }
 
     /// A gitlink can exist with no `.gitmodules` section at all — the status rows

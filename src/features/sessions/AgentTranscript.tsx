@@ -26,14 +26,20 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
+import {
+  SHOW_WHITESPACE_LABEL,
+  WHITESPACE_ONLY_MESSAGE,
+} from "@/features/diff/whitespace-mode";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
 import { presentError } from "@/lib/error-summary";
 import {
   classifyHeaderOnlyDiff,
   headerOnlyMessage,
+  modeChangeMessage,
 } from "@/lib/git/diff-split";
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
+import { useSetHideWhitespace } from "@/lib/settings/hide-whitespace";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { cn } from "@/lib/utils";
 import { AgentNarration } from "./AgentNarration";
@@ -210,9 +216,11 @@ function InlineDiff({
   const { hostRef, retryRef } = useRetryFocusRescue(
     pane === "error" && diff.isError,
   );
+  const setHideWhitespace = useSetHideWhitespace();
   // No arm-swap refocus here: several steps' diffs can be open at once, and one
   // landing while focus sits on <body> would take focus it never held. The two
-  // Retry rescues cover the only focus targets an arm swap removes.
+  // Retry rescues cover the only focus targets an arm swap removes; the
+  // whitespace note's button hands focus to the host itself.
   // The host wraps the scroller rather than being it: a tabIndex on the
   // scroller would take the keyboard tab stop Chromium gives a scroller with no
   // focusable content. The notice sits above it, so it never scrolls away.
@@ -266,6 +274,32 @@ function InlineDiff({
   }
   if (diff.data.isBinary) {
     return shell(<InlineNote>Binary file — no text diff.</InlineNote>);
+  }
+  // Ahead of the empty and header-only arms, which under `-w` would say nothing
+  // changed.
+  if (diff.data.whitespaceOnly) {
+    const headerOnly = classifyHeaderOnlyDiff(diff.data.text);
+    const modeLine =
+      headerOnly?.kind === "mode" ? modeChangeMessage(headerOnly) : null;
+    return shell(
+      <InlineNote>
+        {WHITESPACE_ONLY_MESSAGE}. {modeLine !== null && <>{modeLine}. </>}
+        <button
+          type="button"
+          onClick={(e) => {
+            // It unmounts with the reload, so the host every arm keeps takes
+            // focus first.
+            const host =
+              e.currentTarget.closest<HTMLElement>("[tabindex='-1']");
+            host?.focus({ preventScroll: true });
+            setHideWhitespace(false);
+          }}
+          className={DEGRADED_ACTION_CLASS}
+        >
+          {SHOW_WHITESPACE_LABEL}
+        </button>
+      </InlineNote>,
+    );
   }
   if (!diff.data.text.trim()) {
     return shell(<InlineNote>No changes to show.</InlineNote>);

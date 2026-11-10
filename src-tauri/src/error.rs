@@ -58,6 +58,10 @@ pub enum AppError {
     },
     #[error("not a git repository: {0}")]
     NotARepo(String),
+    /// The OS default action would run this file instead of opening it, so it was
+    /// never handed over. `name` is the file name the frontend's notice shows.
+    #[error("{name} isn't opened with its default program because it would run.")]
+    DefaultOpenRefused { name: String },
     #[error("git executable not found")]
     GitNotFound,
     #[error("GitHub CLI (gh) not found")]
@@ -141,6 +145,9 @@ impl Serialize for AppError {
             AppError::PushUpstreamNameMismatch { .. } => "pushUpstreamNameMismatch",
             AppError::WorktreeDiverged { .. } => "worktreeDiverged",
             AppError::NotARepo(_) => "notARepo",
+            // Stable serialized kind — `openWithDefault` catches exactly this one
+            // and shows its own notice with a Show in Explorer action.
+            AppError::DefaultOpenRefused { .. } => "defaultOpenRefused",
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
             AppError::Gh(_) => "gh",
@@ -168,6 +175,9 @@ impl Serialize for AppError {
             }
             AppError::Busy { holder } => {
                 map.serialize_entry("holder", holder)?;
+            }
+            AppError::DefaultOpenRefused { name } => {
+                map.serialize_entry("name", name)?;
             }
             AppError::BranchHeld {
                 holder,
@@ -359,6 +369,18 @@ mod tests {
             r#"{"kind":"pushUpstreamNameMismatch","message":"Push blocked — feat/y tracks origin/feat/x, which has a different name. Choose where to push from the Push menu.","branch":"feat/y","remote":"origin","remoteBranch":"feat/x"}"#
         );
         assert!(!wire.contains("remote_branch"), "{wire}");
+    }
+
+    /// `openWithDefault` matches the kind and names the file from `name`.
+    #[test]
+    fn default_open_refused_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::DefaultOpenRefused {
+            name: "x.bat".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"defaultOpenRefused","message":"x.bat isn't opened with its default program because it would run.","name":"x.bat"}"#
+        );
     }
 
     /// A payload-free variant carries kind + message and nothing else.

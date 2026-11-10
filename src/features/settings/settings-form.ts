@@ -10,6 +10,7 @@ export type SettingsDraft = Omit<
   AppSettings,
   | "recentRepos"
   | "diffViewMode"
+  | "diffHideWhitespace"
   | "changesViewMode"
   | "editHistoryOrder"
   | "defaultBranch"
@@ -22,11 +23,12 @@ export type SettingsDraft = Omit<
 export function toDraft(settings: AppSettings): SettingsDraft {
   // defaultBranch is dropped: it now lives in global git config, edited by its
   // own form in GitSection, not the bulk Save bar. theme, zoom, diffViewMode,
-  // changesViewMode, editHistoryOrder, and the two collapse prefs are
-  // apply-on-change, owned by their own controls.
+  // diffHideWhitespace, changesViewMode, editHistoryOrder, and the two collapse
+  // prefs are apply-on-change, owned by their own controls.
   const {
     recentRepos,
     diffViewMode,
+    diffHideWhitespace,
     changesViewMode,
     editHistoryOrder,
     defaultBranch,

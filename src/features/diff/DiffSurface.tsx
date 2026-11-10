@@ -11,7 +11,7 @@ import {
   type MultiSelectState,
   SplitSide,
 } from "@git-diff-view/react";
-import { FileIcon } from "@phosphor-icons/react";
+import { FileIcon, GearSixIcon } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
   Fragment,
@@ -27,17 +27,25 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { InfoNote } from "@/components/info-note";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import {
   detailNoticeMessage,
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
+import { useCloseSettled } from "@/features/repository/publish-confirm";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import {
   classifyHeaderOnlyDiff,
@@ -51,6 +59,10 @@ import { useFileAtRev } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import type { CustomLanguage } from "@/lib/settings/api";
+import {
+  useHideWhitespace,
+  useSetHideWhitespace,
+} from "@/lib/settings/hide-whitespace";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { useEffectiveSyntax } from "@/lib/syntax/queries";
@@ -132,6 +144,11 @@ import {
   useHiddenTriggerFocus,
 } from "./use-hidden-trigger-focus";
 import { useWorkerHighlight, type WorkerAsts } from "./use-worker-highlight";
+import {
+  SHOW_WHITESPACE_LABEL,
+  WHITESPACE_COMPOSER_HELD,
+  WHITESPACE_ONLY_MESSAGE,
+} from "./whitespace-mode";
 
 /**
  * A line-anchored annotation rendered under a diff line (e.g. a PR review
@@ -1522,7 +1539,10 @@ function RenderedDiff({
         // The slot renders under the CLICKED line, not the range's end line — a
         // base-library limitation; the composer's "Lines X–Y" label carries the
         // true anchor.
-        <div className="m-2 rounded-none border bg-popover p-3 font-sans text-xs text-popover-foreground shadow-md">
+        <div
+          data-diff-line-widget
+          className="m-2 rounded-none border bg-popover p-3 font-sans text-xs text-popover-foreground shadow-md"
+        >
           {lineWidget.render({
             side: resolved.side,
             line: resolved.to,
@@ -1798,6 +1818,90 @@ export function DiffCapFooter({
 }
 
 /**
+ * The diff toolbar's view options: one checkbox for the app-wide whitespace
+ * mode. The flip waits for the menu's close to settle: Base UI returns focus
+ * to the trigger only when the popup unmounts, and a toolbar swap before that
+ * would drop focus to <body> from inside the portaled popup.
+ */
+export function DiffViewOptionsMenu({
+  onToggle,
+}: {
+  onToggle: (next: boolean) => void;
+}) {
+  const hidden = useHideWhitespace();
+  const [open, setOpen] = useState(false);
+  // The pressed value while the close settles; the menu takes no second
+  // instruction meanwhile.
+  const [pending, setPending] = useState<boolean | null>(null);
+  const { onOpenChangeComplete, waitClosed } = useCloseSettled(open);
+  const label = hidden
+    ? "View options, whitespace changes hidden"
+    : "View options";
+  return (
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        if (next && pending !== null) return;
+        setOpen(next);
+      }}
+      onOpenChangeComplete={onOpenChangeComplete}
+    >
+      <DropdownMenuTrigger
+        onKeyDown={(e) => {
+          // The item's close returns focus here while the key is still held:
+          // its auto-repeat would reopen the menu, so only a fresh press opens.
+          if (e.repeat && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            e.preventBaseUIHandler();
+          }
+        }}
+        render={
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={label}
+            title={label}
+            className="relative"
+          />
+        }
+      >
+        <GearSixIcon aria-hidden />
+        {hidden && (
+          <span
+            aria-hidden
+            className="absolute top-0.5 right-0.5 size-1.5 bg-primary"
+          />
+        )}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuCheckboxItem
+          checked={pending ?? hidden}
+          closeOnClick
+          onKeyDown={(e) => {
+            // Items activate on keydown with no repeat check, so a held key
+            // would flip the mode twice.
+            if (e.repeat && (e.key === "Enter" || e.key === " ")) {
+              e.preventDefault();
+              e.preventBaseUIHandler();
+            }
+          }}
+          onCheckedChange={(next) => {
+            if (pending !== null) return;
+            setPending(next);
+            void waitClosed().then(() => {
+              onToggle(next);
+              setPending(null);
+            });
+          }}
+        >
+          Hide whitespace changes
+        </DropdownMenuCheckboxItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
  * Renders a single file diff (with loading/binary/empty placeholders and the
  * unified/split toggle) for any diff query — working tree or a commit.
  */
@@ -1841,6 +1945,7 @@ export function DiffSurface({
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}
       stagingSide={stagingSide}
+      whitespaceControl
     />
   );
 }
@@ -1866,6 +1971,7 @@ export function DiffContent({
   lineWidget,
   stagingSide,
   anchorCommit,
+  whitespaceControl = false,
 }: {
   filePath: string;
   /** Absent only when the source query has nothing to show; never an empty
@@ -1907,6 +2013,9 @@ export function DiffContent({
   /** PR surfaces only: the commit oid gating the binary-size lookups (PR head on Files,
    *  the commit on Commits). undefined = local surface. See BinaryFileSummary. */
   anchorCommit?: string | null;
+  /** Shows the view-options gear and answers the whitespace palette action.
+   *  Only {@link DiffSurface} sets it, so the remote PR hosts get neither. */
+  whitespaceControl?: boolean;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
   // down to a rail-flanked column, and both the split gate and the toolbar's
@@ -1947,14 +2056,34 @@ export function DiffContent({
     () => (dataText === undefined ? null : classifyHeaderOnlyDiff(dataText)),
     [dataText],
   );
+  const hideWhitespace = useHideWhitespace();
+  // A host keeping previous data retains the other mode's answer through the
+  // refetch after a flip, and it keeps painting: the two answers differ only in
+  // whitespace lines, so a flip never blanks a read-only host. The one stale
+  // case is a hunkless whitespace-only `-w` answer once the mode is off: its
+  // empty text would claim "No changes to show".
+  const modeStale =
+    whitespaceControl &&
+    !hideWhitespace &&
+    data !== undefined &&
+    data.whitespaceOnly === true;
+  // Another file's retained answer, or the stale one above: none of it paints.
+  const retainedOther =
+    data !== undefined && (data.filePath !== filePath || modeStale);
+  const whitespaceOnly =
+    hideWhitespace &&
+    data !== undefined &&
+    !retainedOther &&
+    data.whitespaceOnly === true;
   // A failed refresh keeps the diff, and its toolbar, on screen.
   const showsToolbar =
     !isPending &&
     data !== undefined &&
-    data.filePath === filePath &&
+    !retainedOther &&
     !data.isBinary &&
     !emptyDiff &&
-    headerOnly === null;
+    headerOnly === null &&
+    !whitespaceOnly;
   // Preview's rev source: the diff's own pair where there is one, else the
   // new-side-only `previewRev`. Deliberately not merged into `contentRevs` — a
   // previewRev host has no old side and must not light up content mode.
@@ -2058,15 +2187,29 @@ export function DiffContent({
     () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
     interactive && canPreview,
   );
+  // Every whitespace flip this pane owns goes through here: an open line
+  // composer would unmount with the rebuilt view and lose its text.
+  const setHideWhitespaceRaw = useSetHideWhitespace();
+  function flipWhitespace(next: boolean) {
+    if (scrollerRef.current?.querySelector("[data-diff-line-widget]")) {
+      toast.info(WHITESPACE_COMPOSER_HELD);
+      return;
+    }
+    setHideWhitespaceRaw(next);
+  }
+  // Not gated on the toolbar: the whitespace-only, binary and empty arms
+  // answer it too.
+  useHotkeyAction(
+    "toggle-hide-whitespace",
+    () => flipWhitespace(!hideWhitespace),
+    interactive && whitespaceControl,
+  );
   // The two arms below with a blank body: a pending read (a parked one says so
   // instead) and another key's retained data. Every other arm's own markup is
   // final. The children report their own gates: ImagePanes its reads and image
   // decodes, MarkdownDocPreview its file read, RenderedDiff its inputs and
   // first row.
-  useReportPaneSettled(
-    !(isPending && !isPaused) &&
-      !(data !== undefined && data.filePath !== filePath),
-  );
+  useReportPaneSettled(!(isPending && !isPaused) && !retainedOther);
 
   // ~200px of unshrinkable text, so it shows only where the pane has the room;
   // the sr-only twin carries it at every width, and `aria-hidden` on the
@@ -2126,6 +2269,9 @@ export function DiffContent({
                 }}
               />
             </span>
+            {whitespaceControl && (
+              <DiffViewOptionsMenu onToggle={flipWhitespace} />
+            )}
             <DiffModeToggle splitDisabled={narrowPane} />
           </span>
         )}
@@ -2166,7 +2312,9 @@ export function DiffContent({
   // Every backend diff command echoes the requested path back verbatim, so a
   // mismatch means `data` is a stale placeholder from the previously selected
   // file's key. Re-scope this if the backend ever normalizes the path it returns.
-  if (data && data.filePath !== filePath) return shell(landing(null, true));
+  // A retained whitespace-only answer with the mode off (`modeStale`) lands
+  // here too.
+  if (retainedOther) return shell(landing(null, true));
   // Only a failure with nothing to show replaces the body: react-query keeps the
   // last good diff beside `isError`, and that stays up under a notice.
   if (!data) {
@@ -2281,6 +2429,37 @@ export function DiffContent({
                 held={dataIsPlaceholder === true}
               />
             ) : undefined
+          }
+        />,
+      ),
+      notice,
+    );
+  }
+  // Ahead of the empty and header-only arms, which under `-w` would say nothing
+  // changed. The button lands focus on this body first, since a host with no
+  // placeholder blanks the pane for the reload.
+  if (whitespaceOnly) {
+    const modeLine =
+      headerOnly?.kind === "mode" ? modeChangeMessage(headerOnly) : null;
+    return shell(
+      landing(
+        <DiffPlaceholder
+          message={WHITESPACE_ONLY_MESSAGE}
+          action={
+            <div className="flex flex-col items-center gap-2">
+              {headerOnly !== null && <HeaderOnlyDetail diff={headerOnly} />}
+              {modeLine !== null && <p className="text-xs">{modeLine}</p>}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  armLandingRef.current?.focus({ preventScroll: true });
+                  flipWhitespace(false);
+                }}
+              >
+                {SHOW_WHITESPACE_LABEL}
+              </Button>
+            </div>
           }
         />,
       ),

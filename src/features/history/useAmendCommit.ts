@@ -92,34 +92,23 @@ const selectAmendBranch = (s: RepoStatus) => ({
 });
 
 /**
- * Amend, gated by a force-push confirmation when the commit is already on the
- * remote (an upstream exists and HEAD isn't ahead of it). Returns the request
- * function plus the state to drive an `<AmendForcePushDialog>`. Pair it with
- * that dialog at the call site.
+ * Whether rewriting HEAD means force-pushing it (an upstream exists, isn't gone,
+ * and HEAD isn't ahead of it), and why such a rewrite can't run right now.
+ * Amend and Edit dates both gate on this one hook, so the two can't disagree on
+ * what "already pushed" means.
  */
-export function useAmendWithConfirm(repoPath: string) {
+export function useForcePushGate(repoPath: string) {
   const branch = useQuery({
     ...repoStatusOptions(repoPath),
     ...repoStatusPoll,
     select: selectAmendBranch,
   }).data;
-  const settings = useSettings();
   const rulesConfig = useEffectiveBranchRules(repoPath);
   // While either rules scope is on its FIRST read the effective config stands in
   // as empty, so `isForcePushBlocked` is vacuously false — the force-push arm
   // holds on this instead. A plain amend never consults the rules, so it never
   // holds on them.
   const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
-  const amend = useAmendCommit(repoPath);
-  const [pendingHash, setPendingHash] = useState<string | null>(null);
-  // A pending amend belongs to the repo it was asked in: a confirm left open
-  // across a switch would amend the old repo's commit. Reset in render: an
-  // effect would paint the dialog open over the new repo first.
-  const [pendingRepo, setPendingRepo] = useState(repoPath);
-  if (pendingRepo !== repoPath) {
-    setPendingRepo(repoPath);
-    setPendingHash(null);
-  }
 
   const upstream = branch?.upstream ?? null;
   // A gone upstream (remote branch deleted) reads as no upstream: the commit
@@ -133,25 +122,62 @@ export function useAmendWithConfirm(repoPath: string) {
   // query's 5s interval keeps asking, so the hold lifts itself as soon as any
   // read lands, and from then on the gate reads measured values.
   const statusSettling = branch === undefined;
+  const protectedBranch =
+    needsForcePush &&
+    !rulesSettling &&
+    !!branch?.name &&
+    isForcePushBlocked(rulesConfig, branch.name);
+
+  /** Why a HEAD rewrite must not run now, or null. */
+  function refusal(): string | null {
+    // Ahead of the `needsForcePush` test, which is the value this hold protects.
+    if (statusSettling) return STATUS_SETTLING_MESSAGE;
+    if (!needsForcePush) return null;
+    if (rulesSettling) return RULES_SETTLING_MESSAGE;
+    if (protectedBranch && branch?.name)
+      return protectedBranchMessage(branch.name);
+    return null;
+  }
+
+  return {
+    upstream,
+    branchName: branch?.name ?? null,
+    needsForcePush,
+    /** A branch rule blocks force-pushing this pushed HEAD. */
+    protectedBranch,
+    refusal,
+  };
+}
+
+/**
+ * Amend, gated by a force-push confirmation when the commit is already on the
+ * remote (an upstream exists and HEAD isn't ahead of it). Returns the request
+ * function plus the state to drive an `<AmendForcePushDialog>`. Pair it with
+ * that dialog at the call site.
+ */
+export function useAmendWithConfirm(repoPath: string) {
+  const gate = useForcePushGate(repoPath);
+  const settings = useSettings();
+  const amend = useAmendCommit(repoPath);
+  const [pendingHash, setPendingHash] = useState<string | null>(null);
+  // A pending amend belongs to the repo it was asked in: a confirm left open
+  // across a switch would amend the old repo's commit. Reset in render: an
+  // effect would paint the dialog open over the new repo first.
+  const [pendingRepo, setPendingRepo] = useState(repoPath);
+  if (pendingRepo !== repoPath) {
+    setPendingRepo(repoPath);
+    setPendingHash(null);
+  }
+
+  const { upstream, needsForcePush } = gate;
 
   // Amending an already-pushed commit means force-pushing it. Shared by request
   // and confirm so the two refusal paths can't drift.
   function forcePushRefused(): boolean {
-    // Ahead of the `needsForcePush` test, which is the value this hold protects.
-    if (statusSettling) {
-      toast.error(STATUS_SETTLING_MESSAGE);
-      return true;
-    }
-    if (!needsForcePush) return false;
-    if (rulesSettling) {
-      toast.error(RULES_SETTLING_MESSAGE);
-      return true;
-    }
-    if (branch?.name && isForcePushBlocked(rulesConfig, branch.name)) {
-      toast.error(protectedBranchMessage(branch.name));
-      return true;
-    }
-    return false;
+    const reason = gate.refusal();
+    if (reason === null) return false;
+    toast.error(reason);
+    return true;
   }
 
   function requestAmend(hash: string) {

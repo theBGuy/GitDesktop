@@ -362,10 +362,227 @@ pub async fn reveal_in_explorer(path: String) -> AppResult<()> {
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
 }
 
+/// Extensions whose OS default action RUNS the file instead of opening it. One
+/// list on every OS: a repository's files travel between platforms.
+const DEFAULT_OPEN_REFUSED: &[&str] = &[
+    // Windows PATHEXT: ShellExecute executes these. Static by design: a user's
+    // own PATHEXT additions are not read.
+    "com",
+    "exe",
+    "bat",
+    "cmd",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "msc",
+    // Windows handlers that launch, follow or import on open, and package
+    // installers (App Installer, MSIX/APPX, update packages) that install.
+    "lnk",
+    "url",
+    "hta",
+    "scr",
+    "pif",
+    "cpl",
+    "msi",
+    "msp",
+    "mst",
+    "appinstaller",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "msu",
+    "reg",
+    "jar",
+    "jnlp",
+    "application",
+    "appref-ms",
+    "settingcontent-ms",
+    "website",
+    "scf",
+    "library-ms",
+    "search-ms",
+    "chm",
+    "ps1",
+    "psm1",
+    "vb",
+    "diagcab",
+    "diagpkg",
+    "diagcfg",
+    "theme",
+    "themepack",
+    "deskthemepack",
+    "psc1",
+    "ppkg",
+    "wsb",
+    "xll",
+    "searchconnector-ms",
+    "rdp",
+    "vsix",
+    // Interpreter associations: the registered Open command runs the file.
+    "py",
+    "pyw",
+    "rb",
+    "pl",
+    "php",
+    "pyz",
+    "pyzw",
+    "pyc",
+    "pyo",
+    "sct",
+    "wsc",
+    "ahk",
+    "au3",
+    "tcl",
+    // macOS `open` runs these (sh, command and terminal in Terminal), follows
+    // the webloc/inetloc/fileloc shortcuts and installs pkg/mpkg; Linux
+    // desktops launch desktop, run and appimage files.
+    "app",
+    "command",
+    "tool",
+    "action",
+    "workflow",
+    "terminal",
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "pkg",
+    "mpkg",
+    "desktop",
+    "run",
+    "appimage",
+    "sh",
+];
+
+/// Directory extensions macOS `open` launches or installs as a bundle instead
+/// of browsing (pkg/mpkg are the legacy installer bundles). Elsewhere such a
+/// directory is an ordinary folder.
+const BUNDLE_DIR_REFUSED: &[&str] = &[
+    "app", "workflow", "action", "bundle", "pkg", "mpkg", "prefpane", "saver",
+];
+
+/// Whether `name` is a bundle directory's name on this OS.
+fn is_bundle_dir_name(name: &str) -> bool {
+    cfg!(target_os = "macos") && has_extension_in(name, BUNDLE_DIR_REFUSED)
+}
+
+/// Whether `name` ends in `.{<GUID>}`, which the Windows shell opens as the
+/// class the CLSID names: a folder as that namespace object (a junction folder),
+/// a file as that class's handler.
+fn is_clsid_junction_name(name: &str) -> bool {
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    let Some(guid) = ext.strip_prefix('{').and_then(|g| g.strip_suffix('}')) else {
+        return false;
+    };
+    let groups: Vec<&str> = guid.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The final component, read the way Win32 resolves it: trailing dots, spaces
+/// and separators dropped (`x.bat.` opens `x.bat`).
+fn final_name(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['.', ' ', '/', '\\']);
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+fn has_extension_in(name: &str, list: &[&str]) -> bool {
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| list.iter().any(|refused| refused.eq_ignore_ascii_case(ext)))
+}
+
+/// Whether the default action would run this path, by its name alone. On
+/// Windows any `:` in the final name is refused, since an alternate data stream
+/// (`x.txt:evil.exe`) opens as the stream's type, and so is a `.{<GUID>}` name,
+/// file or folder; elsewhere both are ordinary names. Both checks precede the
+/// directory arm: a directory's index stream (`dir::$INDEX_ALLOCATION`) reports
+/// the directory's attributes. A directory otherwise passes unless it is a
+/// macOS bundle. A leading-dot name's extension is the text after its dot, as
+/// Windows reads it (`.bat` runs).
+fn default_open_refused(path: &str) -> bool {
+    let name = final_name(path);
+    // `C:` alone is a drive, not a stream.
+    let drive = matches!(name.as_bytes(), [letter, b':'] if letter.is_ascii_alphabetic());
+    let stream = name.contains(':') && !drive;
+    if cfg!(windows) && (stream || is_clsid_junction_name(name)) {
+        return true;
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return is_bundle_dir_name(name);
+    }
+    has_extension_in(name, DEFAULT_OPEN_REFUSED)
+}
+
+/// [`default_open_refused`], plus the link's target when the final component is
+/// a symlink or junction, since the opener follows it. A target that can't be
+/// resolved is an Err, never a pass.
+fn default_open_refusal(path: &str) -> AppResult<bool> {
+    if default_open_refused(path) {
+        return Ok(true);
+    }
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(false);
+    }
+    let target = std::fs::canonicalize(path)?;
+    Ok(default_open_refused(&target.to_string_lossy()))
+}
+
 #[tauri::command]
 pub async fn open_with_default(path: String) -> AppResult<()> {
+    if default_open_refusal(&path)? {
+        let trimmed = path.trim_end_matches(['/', '\\']);
+        let name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+        return Err(AppError::DefaultOpenRefused {
+            name: name.to_string(),
+        });
+    }
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
+}
+
+/// What sits at a repo-relative path, by an lstat of its final component (a
+/// junction reads as a symlink): "missing", "file", "dir" or "symlink". Read-only;
+/// any failure other than NotFound/NotADirectory is an Err, never "missing".
+#[tauri::command]
+pub async fn path_kind(repo_path: String, rel_path: String) -> AppResult<&'static str> {
+    path_kind_at(&repo_path, &rel_path)
+}
+
+fn path_kind_at(repo: &str, rel: &str) -> AppResult<&'static str> {
+    use crate::git::diff::is_repo_relative;
+    use crate::git::ops::{discard_rel_path, discard_shown};
+
+    if !is_repo_relative(rel) {
+        return Err(AppError::InvalidArgument(format!(
+            "invalid file path: {}",
+            discard_shown(rel)
+        )));
+    }
+    let rel = discard_rel_path(rel).map_err(|why| {
+        AppError::InvalidArgument(format!("Can't check {}: {why}.", discard_shown(rel)))
+    })?;
+    match std::fs::symlink_metadata(Path::new(repo).join(rel)) {
+        Ok(meta) if meta.file_type().is_symlink() => Ok("symlink"),
+        Ok(meta) if meta.is_dir() => Ok("dir"),
+        Ok(_) => Ok("file"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok("missing")
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Only ancestors are opened, so platform restrictions never apply to the leaf.
@@ -420,7 +637,14 @@ fn nearest_existing_dir(repo: &str, rel: &str) -> AppResult<PathBuf> {
         }
         if !linked_component(repo, ancestor, true)? {
             match std::fs::symlink_metadata(&dir) {
-                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => return Ok(dir),
+                // A bundle would launch, so its parent is the nearest folder.
+                Ok(meta)
+                    if meta.is_dir()
+                        && !meta.file_type().is_symlink()
+                        && !is_bundle_dir_name(final_name(ancestor)) =>
+                {
+                    return Ok(dir)
+                }
                 Ok(_) => {}
                 Err(error)
                     if matches!(
@@ -1313,6 +1537,297 @@ mod tests {
         assert_eq!(nearest_existing_dir(repo, "a/c.bin").unwrap(), root.path());
         assert!(nearest_existing_dir(a.to_str().unwrap(), "c.bin").is_err());
         assert!(nearest_existing_dir(b.to_str().unwrap(), "c.bin").is_err());
+    }
+
+    /// The bounded set the guard is pinned on; `sh` is refused on Windows too,
+    /// since the list is one contract on every OS.
+    #[test]
+    fn default_open_refuses_bat_cmd_exe_lnk_js_sh_trailing_dot_space_and_ads() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name).to_string_lossy().into_owned();
+        for name in [
+            "x.bat",
+            "X.CMD",
+            "a.b.exe",
+            "x.bat.",
+            "x.bat  ",
+            "x.bat. .",
+            "x.txt:evil.exe",
+            "x.lnk",
+            "app.js",
+            "script.sh",
+            ".bat",
+            "x.msix",
+            "X.APPX",
+            "pkg.appinstaller",
+            "kb.msu",
+            "tool.py",
+            "gui.pyw",
+            "deploy.rb",
+            "run.pl",
+            "index.php",
+            "app.application",
+            "start.jnlp",
+            "pin.website",
+            "x.scf",
+            "docs.library-ms",
+            "find.search-ms",
+            "help.chm",
+            "site.webloc",
+            "news.inetloc",
+            "x.fileloc",
+            "x.terminal",
+            "setup.pkg",
+            "setup.mpkg",
+            "app.pyz",
+            "gui.pyzw",
+            "mod.pyc",
+            "mod.pyo",
+            "x.sct",
+            "x.wsc",
+            "dark.theme",
+            "x.themepack",
+            "x.deskthemepack",
+            "console.psc1",
+            "prov.ppkg",
+            "box.wsb",
+            "addin.xll",
+            "x.searchconnector-ms",
+            "x.diagpkg",
+            "x.diagcfg",
+            "macro.ahk",
+            "macro.au3",
+            "x.tcl",
+            "host.rdp",
+            "ext.vsix",
+        ] {
+            assert!(default_open_refused(&at(name)), "{name} should be refused");
+        }
+        assert!(default_open_refused("dir/x.bat"));
+        assert!(default_open_refused("dir\\x.bat\\."));
+        // A stream name only on Windows; elsewhere `:` is a legal name byte.
+        for name in ["x.txt:stream", "10:30.txt"] {
+            assert_eq!(default_open_refused(&at(name)), cfg!(windows), "{name}");
+        }
+    }
+
+    #[test]
+    fn default_open_allows_notes_readme_dotfile_and_a_directory_named_tools_bat() {
+        let root = tempfile::tempdir().unwrap();
+        let at = |name: &str| root.path().join(name).to_string_lossy().into_owned();
+        for name in ["notes.txt", "README", ".bashrc", "x.bat.txt", "photo.png"] {
+            assert!(!default_open_refused(&at(name)), "{name} should be allowed");
+        }
+        let dir = root.path().join("tools.bat");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(!default_open_refused(dir.to_str().unwrap()));
+    }
+
+    #[test]
+    fn default_open_refuses_a_bundle_directory_and_opens_its_parent_instead() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        for name in [
+            "Foo.app",
+            "x.workflow",
+            "y.action",
+            "z.BUNDLE",
+            "Installer.pkg",
+            "x.mpkg",
+            "x.prefpane",
+            "x.saver",
+        ] {
+            // Only macOS launches a bundle; elsewhere it is an ordinary folder.
+            let dir = root.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            let bundles = cfg!(target_os = "macos");
+            assert_eq!(
+                default_open_refused(dir.to_str().unwrap()),
+                bundles,
+                "{name}"
+            );
+            let slashed = format!("{}/", dir.display());
+            assert_eq!(default_open_refused(&slashed), bundles, "{name}/");
+        }
+        let nearest = if cfg!(target_os = "macos") {
+            root.path().to_path_buf()
+        } else {
+            root.path().join("Foo.app")
+        };
+        assert_eq!(
+            nearest_existing_dir(repo, "Foo.app/README").unwrap(),
+            nearest
+        );
+        std::fs::create_dir(root.path().join("Foo.app/Contents")).unwrap();
+        assert_eq!(
+            nearest_existing_dir(repo, "Foo.app/Contents/x").unwrap(),
+            root.path().join("Foo.app/Contents")
+        );
+    }
+
+    /// Explorer opens a `.{<GUID>}` folder as the namespace object it names.
+    #[test]
+    fn default_open_refuses_a_clsid_junction_directory_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        for name in [
+            "x.{ED7BA470-8E54-465E-825C-99712043E01C}",
+            "Panel.{ed7ba470-8e54-465e-825c-99712043e01c}",
+        ] {
+            let dir = root.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            assert_eq!(
+                default_open_refused(dir.to_str().unwrap()),
+                cfg!(windows),
+                "{name}"
+            );
+            let slashed = format!("{}/", dir.display());
+            assert_eq!(default_open_refused(&slashed), cfg!(windows), "{name}/");
+        }
+        // Not GUID-shaped: ordinary folders everywhere.
+        for name in [
+            "x.{ED7BA470-8E54-465E-825C}",
+            "x.{ED7BA470-8E54-465E-825C-99712043E01G}",
+            "x.ED7BA470-8E54-465E-825C-99712043E01C",
+            "{ED7BA470-8E54-465E-825C-99712043E01C}",
+        ] {
+            let dir = root.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            assert!(!default_open_refused(dir.to_str().unwrap()), "{name}");
+        }
+        // The shell maps a CLSID extension on a file to that class too.
+        let file = root
+            .path()
+            .join("notes.txt.{3050F4D8-98B5-11CF-BB82-00AA00BDCE0B}");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(default_open_refused(file.to_str().unwrap()), cfg!(windows));
+    }
+
+    /// A directory's index stream reports the directory's attributes, so the
+    /// stream check can't sit behind the directory arm.
+    #[cfg(windows)]
+    #[test]
+    fn default_open_refuses_a_directory_stream_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        for suffix in ["::$INDEX_ALLOCATION", ":$I30:$INDEX_ALLOCATION"] {
+            let stream = format!("{}{suffix}", dir.display());
+            assert!(std::fs::metadata(&stream).unwrap().is_dir(), "{suffix}");
+            assert!(default_open_refused(&stream), "{suffix}");
+        }
+        let stream = format!("{}:evil.exe", dir.display());
+        assert!(default_open_refused(&stream));
+        std::fs::write(&stream, b"x").unwrap();
+        assert!(default_open_refused(&stream));
+        // A drive is no stream: its root is an ordinary folder.
+        let drive = &root.path().to_str().unwrap()[..3];
+        assert!(!default_open_refused(drive), "{drive}");
+    }
+
+    /// The opener follows a final-component link, so its target is checked too.
+    #[test]
+    fn default_open_refusal_reads_a_link_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("run.command");
+        std::fs::write(&target, b"x").unwrap();
+        let link = root.path().join("notes.txt");
+        // A file symlink needs a privilege on Windows (Developer Mode or admin),
+        // so this arm only runs where one can be made.
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        if made {
+            let link = link.to_str().unwrap();
+            assert!(!default_open_refused(link), "the name alone passes");
+            assert!(default_open_refusal(link).unwrap());
+        }
+        // A dangling junction (no privilege needed) can't be resolved: an Err.
+        #[cfg(windows)]
+        {
+            let gone = root.path().join("gone");
+            std::fs::create_dir(&gone).unwrap();
+            let junction = root.path().join("docs");
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&gone)
+                .output()
+                .expect("run mklink");
+            assert!(
+                out.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            std::fs::remove_dir(&gone).unwrap();
+            assert!(default_open_refusal(junction.to_str().unwrap()).is_err());
+        }
+        let plain = root.path().join("plain.txt");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(!default_open_refusal(plain.to_str().unwrap()).unwrap());
+    }
+
+    /// The refusal returns before the opener runs: the file doesn't exist, so a
+    /// guard that let it through would surface the opener's own error instead.
+    #[tokio::test]
+    async fn open_with_default_returns_the_typed_refusal_before_the_opener() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root
+            .path()
+            .join("missing.bat")
+            .to_string_lossy()
+            .into_owned();
+        match open_with_default(path).await {
+            Err(AppError::DefaultOpenRefused { name }) => assert_eq!(name, "missing.bat"),
+            other => panic!("expected DefaultOpenRefused, got {other:?}"),
+        }
+    }
+
+    /// Tested set: missing (bare, and under a file), file, dir, a final-component
+    /// link (a junction on Windows: mklink /J needs no privilege), and refusals.
+    #[test]
+    fn path_kind_reads_missing_file_dir_and_link_without_following_it() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        std::fs::write(root.path().join("a.txt"), b"x").unwrap();
+        std::fs::create_dir_all(root.path().join("sub/inner")).unwrap();
+        // mklink reads a `/` as a switch, so the link path is joined per segment.
+        let link = root.path().join("sub").join("link");
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(outside.path())
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        for (rel, kind) in [
+            ("nope.txt", "missing"),
+            ("a.txt/below", "missing"),
+            ("a.txt", "file"),
+            ("sub", "dir"),
+            ("sub/inner", "dir"),
+            ("sub/link", "symlink"),
+        ] {
+            assert_eq!(path_kind_at(repo, rel).unwrap(), kind, "{rel}");
+        }
+        for bad in ["../x", "/etc/x", "", ".git/config", "sub/../a.txt"] {
+            assert!(
+                matches!(path_kind_at(repo, bad), Err(AppError::InvalidArgument(_))),
+                "{bad}"
+            );
+        }
+        // A drive shape only escapes on Windows; elsewhere `C:` is a folder name.
+        assert_eq!(path_kind_at(repo, "C:/x").is_err(), cfg!(windows));
     }
 
     #[test]

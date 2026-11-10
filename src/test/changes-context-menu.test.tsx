@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
+import { toast } from "sonner";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import {
@@ -14,8 +15,16 @@ import {
   type ChangesMenuActions,
   type FolderMenuCounts,
 } from "@/features/repository/ChangesContextMenu";
+import { deletedNothingToOpen } from "@/features/repository/open-changed-file";
 import { copyText } from "@/lib/clipboard";
-import { getSecret, revealInExplorer } from "@/lib/git/api";
+import {
+  getSecret,
+  openWithDefault,
+  openWithProgram,
+  pathKind,
+  revealInExplorer,
+} from "@/lib/git/api";
+import { conflictSides } from "@/lib/git/conflict";
 import type { FileEntry } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
 import { type AppSettings, loadSettings } from "@/lib/settings/api";
@@ -40,6 +49,18 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   getSecret: vi.fn(),
   revealInExplorer: vi.fn(async () => undefined),
+  openWithProgram: vi.fn(async () => undefined),
+  openWithDefault: vi.fn(async () => undefined),
+  pathKind: vi.fn(async () => "dir"),
+}));
+vi.mock("@/lib/git/conflict", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
+  conflictSides: vi.fn(),
+}));
+// The ui store's repo starts null, which a real refusal reads as closed.
+vi.mock("@/lib/stores/notifications", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/stores/notifications")>()),
+  refuseIfSwitched: vi.fn(() => false),
 }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => undefined) }));
 
@@ -75,6 +96,7 @@ const ACTION_KEYS: (keyof ChangesMenuActions)[] = [
   "untrack",
   "aiExclude",
   "aiExcludeSelected",
+  "openSubmodule",
 ];
 
 let actions: ChangesMenuActions;
@@ -131,12 +153,16 @@ async function openMenu({ settings, secret = SECRET, ...props }: Case) {
             stageableCount={1}
             pathCount={1}
             stashablePathCount={1}
+            untrackedPaths={new Set()}
             trackedPathCount={1}
             discardableCount={1}
             anyConflicted={false}
             folderCounts={null}
             actions={actions}
             {...props}
+            noneStageableLabel={
+              props.noneStageableLabel ?? "Stage files (Windows-reserved names)"
+            }
           />
         </ContextMenuContent>
       </ContextMenu>
@@ -228,7 +254,7 @@ describe("single-file menu", () => {
       "Copy file path",
       "Copy relative file path",
       "Show in Explorer",
-      "Open with default program",
+      "Open with default programDouble-click",
     ]);
     expectDisabled(item(menu, "Stage file"), false);
     expectDisabled(item(menu, "Stash change…"), false);
@@ -454,7 +480,7 @@ describe("multi-select menu", () => {
     expect(labels(none.menu).some((l) => l.startsWith("Discard"))).toBe(false);
   });
 
-  it("B4: Stash counts the files it takes, hides at none, waits on conflicts", async () => {
+  it("B4: Stash counts the files it takes, says why at none, waits on conflicts", async () => {
     const some = await openMenu({ ...BULK, target: row(modified) });
     expectHeld(item(some.menu, "Stash 1 of 8 changes…"));
     cleanup();
@@ -470,7 +496,13 @@ describe("multi-select menu", () => {
       stashablePathCount: 0,
       target: row(modified),
     });
-    expect(labels(none.menu).some((l) => l.startsWith("Stash"))).toBe(false);
+    await expectBlocked(
+      none.user,
+      item(
+        none.menu,
+        "Nothing to stash (submodules, embedded repositories and reserved names stay out of a stash)",
+      ),
+    );
     cleanup();
     const conflicted = await openMenu({
       ...BULK,
@@ -574,8 +606,10 @@ const folder = (section: "staged" | "unstaged" = "unstaged") =>
 const counts = (over: Partial<FolderMenuCounts> = {}): FolderMenuCounts => ({
   fileCount: 3,
   stageableCount: 3,
+  noneStageableLabel: "Stage files (Windows-reserved names)",
   hiddenCount: 0,
   conflictedCount: 0,
+  discardBlockedCount: 0,
   stashableCount: 3,
   ...over,
 });
@@ -694,7 +728,7 @@ describe("folder menu", () => {
     }
   });
 
-  it("FD3: Stash counts the files it takes, hides at none, waits on conflicts", async () => {
+  it("FD3: Stash counts the files it takes, says why at none, waits on conflicts", async () => {
     const some = await openMenu({
       target: folder(),
       folderCounts: counts({ stashableCount: 2 }),
@@ -706,6 +740,13 @@ describe("folder menu", () => {
       folderCounts: counts({ stashableCount: 0 }),
     });
     expect(labels(none.menu).some((l) => l.startsWith("Stash"))).toBe(false);
+    await expectBlocked(
+      none.user,
+      item(
+        none.menu,
+        "Nothing to stash (submodules, embedded repositories and reserved names stay out of a stash)",
+      ),
+    );
     cleanup();
     const conflicted = await openMenu({
       target: folder(),
@@ -953,5 +994,500 @@ describe("folder menu: enabled states and helpers", () => {
       vi.mocked(revealInExplorer).mockClear();
       cleanup();
     }
+  });
+});
+
+const EDITOR_SET: Partial<AppSettings> = {
+  externalEditor: "C:\\code.exe",
+  externalEditorName: "VS Code",
+};
+const OPEN_ITEM = /^Open (in |with default program)/;
+
+// Worktree deletions, by row: `.D`, both rows of `MD`, `AD`, `RD`.
+const STATIC_REFUSE_ROWS = [
+  row({ path: "gone.ts", staged: null, unstaged: "deleted" }),
+  row({ path: "gone.ts", staged: "modified", unstaged: "deleted" }),
+  row({ path: "gone.ts", staged: "modified", unstaged: "deleted" }, true),
+  row({ path: "gone.ts", staged: "added", unstaged: "deleted" }, true),
+  row(
+    {
+      path: "gone.ts",
+      origPath: "was.ts",
+      staged: "renamed",
+      unstaged: "deleted",
+    },
+    true,
+  ),
+];
+// The working file may or may not exist: a staged deletion, a conflict.
+const PROBE_ROWS = [
+  row({ path: "old-notes.md", staged: "deleted", unstaged: null }, true),
+  row({ path: "src/merge.ts", staged: null, unstaged: "conflicted" }),
+];
+
+/** The hint inside `el`, asserted hidden from assistive tech. */
+function expectHint(el: HTMLElement) {
+  expect(within(el).getByText("Double-click")).toHaveAttribute(
+    "aria-hidden",
+    "true",
+  );
+}
+
+describe("file menu: double-click hint", () => {
+  it("H1: the editor item carries the hint when an editor is set", async () => {
+    const { menu } = await openMenu({
+      target: row(modified),
+      settings: EDITOR_SET,
+    });
+    expectHint(item(menu, "Open in VS Code"));
+    expect(
+      within(item(menu, "Open with default program")).queryByText(
+        "Double-click",
+      ),
+    ).toBeNull();
+    expect(within(menu).getAllByText("Double-click")).toHaveLength(1);
+  });
+
+  it("H2: the default-program item carries it with no editor, or a blank one", async () => {
+    for (const settings of [{}, { externalEditor: "   " }]) {
+      const { menu } = await openMenu({ target: row(modified), settings });
+      expect(labels(menu).some((l) => l.startsWith("Open in "))).toBe(false);
+      expectHint(item(menu, "Open with default program"));
+      expect(within(menu).getAllByText("Double-click")).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it("H3: a worktree deletion shows no hint; a probe-class row shows one", async () => {
+    for (const target of STATIC_REFUSE_ROWS) {
+      const { menu } = await openMenu({ target, settings: EDITOR_SET });
+      expect(within(menu).queryByText("Double-click")).toBeNull();
+      cleanup();
+    }
+    for (const target of PROBE_ROWS) {
+      const { menu } = await openMenu({ target, settings: EDITOR_SET });
+      expect(within(menu).getAllByText("Double-click")).toHaveLength(1);
+      expectHint(item(menu, "Open in VS Code"));
+      cleanup();
+    }
+  });
+
+  it("H4: the bulk, folder and whole-tree menus show no hint", async () => {
+    for (const props of [
+      { ...BULK, target: row(modified) },
+      { target: folder(), folderCounts: counts() },
+      { target: { kind: "global" } as const },
+    ] satisfies Case[]) {
+      const { menu } = await openMenu({ ...props, settings: EDITOR_SET });
+      expect(within(menu).queryByText("Double-click")).toBeNull();
+      cleanup();
+    }
+  });
+});
+
+describe("file menu: Open items gate on the open decision", () => {
+  beforeEach(() => {
+    vi.mocked(conflictSides).mockReset();
+    vi.mocked(openWithProgram).mockClear();
+    vi.mocked(openWithDefault).mockClear();
+  });
+
+  it("G1: a worktree deletion offers no Open item, but still Show in Explorer", async () => {
+    for (const target of STATIC_REFUSE_ROWS)
+      for (const settings of [EDITOR_SET, {}]) {
+        const { menu } = await openMenu({ target, settings });
+        expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toEqual([]);
+        expect(item(menu, "Show in Explorer")).toBeInTheDocument();
+        cleanup();
+      }
+  });
+
+  it("G2: a probe-class row offers both Open items and probes before either launches", async () => {
+    const info = vi.spyOn(toast, "info");
+    for (const target of PROBE_ROWS) {
+      const path = target.entry.path;
+      const abs = `C:\\repo\\${path.replaceAll("/", "\\")}`;
+      for (const [label, launched] of [
+        [
+          "Open in VS Code",
+          () =>
+            expect(openWithProgram).toHaveBeenCalledExactlyOnceWith(
+              "C:\\code.exe",
+              abs,
+            ),
+        ],
+        [
+          "Open with default program",
+          () => expect(openWithDefault).toHaveBeenCalledExactlyOnceWith(abs),
+        ],
+      ] as const)
+        for (const workingExists of [false, true]) {
+          vi.mocked(pathKind).mockClear();
+          vi.mocked(pathKind).mockResolvedValueOnce(
+            workingExists ? "file" : "missing",
+          );
+          vi.mocked(openWithProgram).mockClear();
+          vi.mocked(openWithDefault).mockClear();
+          info.mockClear();
+          const { user, menu } = await openMenu({
+            target,
+            settings: EDITOR_SET,
+          });
+          expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toHaveLength(2);
+          await user.click(item(menu, label));
+          await vi.waitFor(() =>
+            expect(pathKind).toHaveBeenCalledExactlyOnceWith("C:\\repo", path),
+          );
+          expect(conflictSides).not.toHaveBeenCalled();
+          if (workingExists) await vi.waitFor(launched);
+          else {
+            await vi.waitFor(() =>
+              expect(info).toHaveBeenCalledWith(deletedNothingToOpen(path)),
+            );
+            expect(openWithProgram).not.toHaveBeenCalled();
+            expect(openWithDefault).not.toHaveBeenCalled();
+          }
+          cleanup();
+        }
+    }
+    info.mockRestore();
+  });
+
+  it("G3: an ordinary row's Open items launch at once, with no probe", async () => {
+    const { user, menu } = await openMenu({
+      target: row(modified),
+      settings: EDITOR_SET,
+    });
+    await user.click(item(menu, "Open in VS Code"));
+    await vi.waitFor(() =>
+      expect(openWithProgram).toHaveBeenCalledExactlyOnceWith(
+        "C:\\code.exe",
+        "C:\\repo\\src\\lib\\path-tree.ts",
+      ),
+    );
+    expect(conflictSides).not.toHaveBeenCalled();
+  });
+});
+
+/** An unstaged `.M` submodule record of the given kind (all token flags off
+ *  but `untracked`, the #634 shape). Its worktree is a gitlink only while it
+ *  is modified: a typechange here is a file on disk, a deletion nothing. */
+const subRow = (
+  unstaged: FileEntry["unstaged"],
+  commitChanged = false,
+  worktreeIsGitlink = unstaged === "modified",
+) =>
+  row({
+    path: "vendor/sub",
+    staged: null,
+    unstaged,
+    submodule: {
+      commitChanged,
+      trackedModified: false,
+      untracked: true,
+      worktreeIsGitlink,
+    },
+  });
+
+const INSIDE_STASH_HINT = "Stash change… (open the submodule to stash)";
+const COMMIT_STASH_HINT =
+  "Stash change… (a submodule's commit can't be stashed)";
+
+describe("file menu: submodule rows", () => {
+  beforeEach(() => {
+    vi.mocked(conflictSides).mockReset();
+    vi.mocked(openWithProgram).mockClear();
+    vi.mocked(openWithDefault).mockClear();
+  });
+
+  it("SM1: the hint sits on Open submodule, which opens the row's path; no file opens", async () => {
+    for (const settings of [EDITOR_SET, {}]) {
+      const { user, menu } = await openMenu({
+        target: subRow("modified"),
+        settings,
+      });
+      const open = item(menu, "Open submodule");
+      expectHint(open);
+      expect(within(menu).getAllByText("Double-click")).toHaveLength(1);
+      const tail = labels(menu).slice(
+        labels(menu).indexOf(open.textContent ?? ""),
+      );
+      expect(tail[1]).toBe("Show in Explorer");
+      // A folder row never launches an editor, configured or not.
+      expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toEqual([]);
+      expect(within(menu).queryByText("Open in VS Code")).toBeNull();
+      expect(within(menu).queryByText("Open with default program")).toBeNull();
+      await user.click(open);
+      // The folder is probed first (mocked "dir"), then opened as a submodule.
+      await vi.waitFor(() =>
+        expect(actions.openSubmodule).toHaveBeenCalledExactlyOnceWith(
+          "vendor/sub",
+        ),
+      );
+      expect(conflictSides).not.toHaveBeenCalled();
+      expect(openWithProgram).not.toHaveBeenCalled();
+      expect(openWithDefault).not.toHaveBeenCalled();
+      clearActions();
+      cleanup();
+    }
+  });
+
+  it("SM2: a removed submodule folder offers no open item, but Show in Explorer", async () => {
+    const { menu } = await openMenu({
+      target: subRow("deleted"),
+      settings: EDITOR_SET,
+    });
+    expect(
+      labels(menu).filter(
+        (l) => OPEN_ITEM.test(l) || l.startsWith("Open submodule"),
+      ),
+    ).toEqual([]);
+    expect(within(menu).queryByText("Double-click")).toBeNull();
+    expect(item(menu, "Show in Explorer")).toBeInTheDocument();
+  });
+
+  it("L7: an untracked folder (? sub/) offers only Show in Explorer, which reveals the folder", async () => {
+    for (const settings of [EDITOR_SET, {}]) {
+      vi.mocked(revealInExplorer).mockClear();
+      const { menu, user } = await openMenu({
+        target: row({ path: "sub/", staged: null, unstaged: "untracked" }),
+        settings,
+      });
+      expect(
+        labels(menu).filter(
+          (l) => OPEN_ITEM.test(l) || l.startsWith("Open submodule"),
+        ),
+      ).toEqual([]);
+      expect(within(menu).queryByText("Double-click")).toBeNull();
+      await user.click(item(menu, "Show in Explorer"));
+      expect(revealInExplorer).toHaveBeenCalledExactlyOnceWith("C:\\repo\\sub");
+      cleanup();
+    }
+  });
+
+  it("SM3: a dirty-only row can't stage; a moved pointer can", async () => {
+    const blocked = await openMenu({ target: subRow("modified") });
+    await expectBlocked(
+      blocked.user,
+      item(blocked.menu, "Stage file (commit inside the submodule first)"),
+    );
+    cleanup();
+    const moved = await openMenu({ target: subRow("modified", true) });
+    await moved.user.click(item(moved.menu, "Stage file"));
+    expectOnly("toggle");
+  });
+
+  it("SM4: Discard says why it is off on modified and typechange rows, and stays on a removed folder", async () => {
+    for (const [unstaged, label] of [
+      ["modified", "Discard changes… (open the submodule to discard)"],
+      [
+        "typechange",
+        "Discard changes… (not available when a submodule and a file swap places)",
+      ],
+    ] as const) {
+      const { user, menu } = await openMenu({ target: subRow(unstaged) });
+      await expectBlocked(user, item(menu, label));
+      cleanup();
+    }
+    const { user, menu } = await openMenu({ target: subRow("deleted") });
+    await user.click(item(menu, "Discard changes…"));
+    expectOnly("discardFile");
+  });
+
+  it("SM5: a bulk or folder target with nothing stageable shows the panel's label, disabled", async () => {
+    for (const label of [
+      "Stage files (commit inside the submodule first)",
+      "Stage files (none can be staged)",
+    ]) {
+      const bulk = await openMenu({
+        ...BULK,
+        stageableCount: 0,
+        noneStageableLabel: label,
+        target: row(modified),
+      });
+      await expectBlocked(bulk.user, item(bulk.menu, label));
+      cleanup();
+      const dir = await openMenu({
+        target: folder(),
+        folderCounts: counts({ stageableCount: 0, noneStageableLabel: label }),
+      });
+      await expectBlocked(dir.user, item(dir.menu, label));
+      cleanup();
+    }
+  });
+
+  it("SM7: Stash is off with its reason on every submodule row, conflicts or not", async () => {
+    const stagedPointer = row(
+      {
+        path: "vendor/sub",
+        staged: "modified",
+        unstaged: null,
+        submodule: {
+          commitChanged: true,
+          trackedModified: false,
+          untracked: false,
+          worktreeIsGitlink: true,
+        },
+      },
+      true,
+    );
+    const movedWithEdits = row({
+      path: "vendor/sub",
+      staged: null,
+      unstaged: "modified",
+      submodule: {
+        commitChanged: true,
+        trackedModified: true,
+        untracked: false,
+        worktreeIsGitlink: true,
+      },
+    });
+    const pointerOnly = row({
+      path: "vendor/sub",
+      staged: null,
+      unstaged: "modified",
+      submodule: {
+        commitChanged: true,
+        trackedModified: false,
+        untracked: false,
+        worktreeIsGitlink: true,
+      },
+    });
+    // A repository that replaced a file: git reports no inner flags on a
+    // typechange record, unstaged (`.T SC..`) or staged (`T. S...`).
+    const replaced = (staged: boolean) =>
+      row(
+        {
+          path: "vendor/sub",
+          staged: staged ? "typechange" : null,
+          unstaged: staged ? null : "typechange",
+          submodule: {
+            commitChanged: !staged,
+            trackedModified: false,
+            untracked: false,
+            worktreeIsGitlink: true,
+          },
+        },
+        staged,
+      );
+    // Changes inside a submodule stash from within it, whether or not its
+    // commit moved, and so do a replacing repository's; a pointer move alone
+    // or a deletion can't be stashed at all.
+    for (const [target, label] of [
+      [subRow("modified"), INSIDE_STASH_HINT],
+      [subRow("modified", true), INSIDE_STASH_HINT],
+      [movedWithEdits, INSIDE_STASH_HINT],
+      [pointerOnly, COMMIT_STASH_HINT],
+      [subRow("deleted"), COMMIT_STASH_HINT],
+      [subRow("typechange", false, true), INSIDE_STASH_HINT],
+      [replaced(false), INSIDE_STASH_HINT],
+      [replaced(true), INSIDE_STASH_HINT],
+      [stagedPointer, COMMIT_STASH_HINT],
+    ] as const)
+      for (const anyConflicted of [false, true]) {
+        const { user, menu } = await openMenu({ target, anyConflicted });
+        await expectBlocked(user, item(menu, label));
+        cleanup();
+      }
+  });
+
+  it("SM10: a file that became a submodule keeps Open submodule and no file opens", async () => {
+    for (const settings of [EDITOR_SET, {}]) {
+      const { menu } = await openMenu({
+        target: subRow("typechange", false, true),
+        settings,
+      });
+      expectHint(item(menu, "Open submodule"));
+      expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toEqual([]);
+      expect(within(menu).queryByText("Open in VS Code")).toBeNull();
+      expect(within(menu).queryByText("Open with default program")).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("SM11: an embedded repository's row stays out of Stash with its reason", async () => {
+    const embedded = row({
+      path: "vendor/inner/",
+      staged: null,
+      unstaged: "untracked",
+    });
+    const { user, menu } = await openMenu({ target: embedded });
+    await expectBlocked(
+      user,
+      item(menu, "Stash change… (an embedded repository can't be stashed)"),
+    );
+  });
+
+  it("SM8: a submodule swapped for a file offers the file opens and Stash, never Open submodule", async () => {
+    for (const settings of [EDITOR_SET, {}]) {
+      const { user, menu } = await openMenu({
+        target: subRow("typechange"),
+        settings,
+      });
+      expect(labels(menu).some((l) => l.startsWith("Open submodule"))).toBe(
+        false,
+      );
+      const byDefault = item(menu, "Open with default program");
+      if (settings === EDITOR_SET) expectHint(item(menu, "Open in VS Code"));
+      else expectHint(byDefault);
+      expect(within(menu).getAllByText("Double-click")).toHaveLength(1);
+      const stash = item(menu, "Stash change…");
+      expectDisabled(stash, false);
+      await user.click(stash);
+      expectOnly("stashFile");
+      clearActions();
+      cleanup();
+    }
+  });
+
+  it("SM9: a staged submodule deletion stashes when a file took its path, and stays out alone", async () => {
+    const deletion = row(
+      {
+        path: "vendor/sub",
+        staged: "deleted",
+        unstaged: null,
+        submodule: {
+          commitChanged: false,
+          trackedModified: false,
+          untracked: false,
+          worktreeIsGitlink: false,
+        },
+      },
+      true,
+    );
+    const paired = await openMenu({
+      target: deletion,
+      untrackedPaths: new Set(["vendor/sub"]),
+    });
+    const stash = item(paired.menu, "Stash change…");
+    expectDisabled(stash, false);
+    await paired.user.click(stash);
+    expectOnly("stashFile");
+    clearActions();
+    cleanup();
+    const alone = await openMenu({
+      target: deletion,
+      untrackedPaths: new Set(["vendor/other"]),
+    });
+    await expectBlocked(alone.user, item(alone.menu, COMMIT_STASH_HINT));
+  });
+
+  it("SM6: Discard leaves the withheld submodule rows out of its count", async () => {
+    const dir = await openMenu({
+      target: folder(),
+      folderCounts: counts({ conflictedCount: 0, discardBlockedCount: 1 }),
+    });
+    await dir.user.click(item(dir.menu, "Discard 2 of 3 changes…"));
+    expectOnly("discardFolder");
+    clearActions();
+    cleanup();
+    const bulk = await openMenu({
+      ...BULK,
+      unstagedRowCount: 3,
+      discardableCount: 2,
+      target: row(modified),
+    });
+    await bulk.user.click(item(bulk.menu, "Discard 2 of 3 changes…"));
+    expectOnly("discardSelected");
   });
 });

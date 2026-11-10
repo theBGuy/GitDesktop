@@ -241,6 +241,7 @@ pub async fn git_branch_file_diff(
     base: String,
     compare: String,
     file_path: String,
+    ignore_whitespace: Option<bool>,
 ) -> AppResult<FileDiff> {
     validate_ref(&base)?;
     validate_ref(&compare)?;
@@ -251,7 +252,10 @@ pub async fn git_branch_file_diff(
     let out = crate::git::diff::diff_with_rename_pairing(
         &repo_path,
         &file_path,
-        &["diff", "--no-ext-diff", "--no-color", &range],
+        &crate::git::diff::with_ignore_whitespace(
+            &["diff", "--no-ext-diff", "--no-color", &range],
+            ignore_whitespace,
+        ),
         &["diff", "--no-ext-diff", "--name-status", "-z", &range],
     )
     .await?;
@@ -1355,7 +1359,7 @@ mod tests {
         let diff = git_branch_diff(repo.clone(), b.clone(), f.clone(), None, None)
             .await
             .unwrap();
-        let file = git_branch_file_diff(repo.clone(), b.clone(), f.clone(), "f.txt".into())
+        let file = git_branch_file_diff(repo.clone(), b.clone(), f.clone(), "f.txt".into(), None)
             .await
             .unwrap();
         let sides = git_merge_base(repo.clone(), b.clone(), f.clone())
@@ -1829,6 +1833,7 @@ mod tests {
                 base_sha.clone(),
                 "HEAD".into(),
                 path.to_string(),
+                None,
             )
             .await
             .unwrap();

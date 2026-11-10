@@ -408,9 +408,10 @@ function pinPanel(src) {
   assert.ok(menu.includes("parseFolderRowKey(key)"), "folder key parsed");
   assert.ok(menu.includes('kind: "folder"'), "folder target minted");
   const stage = functionBody(src, "stageFolderIn");
+  // stageSkippingSubmodules wraps stageGuarded and names the skipped rows.
   assert.ok(
-    stage.includes("stageGuarded(targets)"),
-    "stage rides stageGuarded",
+    stage.includes("stageSkippingSubmodules(targets, listed)"),
+    "stage rides stageGuarded via stageSkippingSubmodules",
   );
   assert.ok(stage.includes(".filter(canStage)"), "stage filters canStage");
   assert.ok(stage.includes("refuseIfSwitched("), "stage refuses a switch");
@@ -491,7 +492,12 @@ test("wiring: registry carries both palette actions; the guide drops the old cla
 
 test("negative controls: the wiring pins catch their regressions", () => {
   const mutations = [
-    [pinPanel, panelSrc, "stageGuarded(targets)", "stage.mutateAsync(targets)"],
+    [
+      pinPanel,
+      panelSrc,
+      "stageSkippingSubmodules(targets, listed)",
+      "stage.mutateAsync(targets)",
+    ],
     [
       pinPanel,
       panelSrc,
@@ -526,8 +532,8 @@ test("negative controls: the wiring pins catch their regressions", () => {
     [
       pinPanel,
       panelSrc,
-      "excludeConflicted(rows.unstagedRows)",
-      "({ targets: rows.unstagedRows, conflicted: [] })",
+      "excludeConflicted(\n      discardReach(rows.unstagedRows),\n    )",
+      "({ targets: discardReach(rows.unstagedRows), conflicted: [] })",
     ],
   ];
   for (const [pin, src, from, to] of mutations) {

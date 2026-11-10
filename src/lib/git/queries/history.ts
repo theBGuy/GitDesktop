@@ -5,8 +5,10 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
+import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import * as api from "../api";
 import type { DiffStatEntry } from "../types";
+import { readViewDiff } from "../whitespace-diff";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
 import { commitOnRemoteOptions } from "./prs";
 
@@ -92,10 +94,16 @@ const commitFilesOptions = (repo: string, hash: string) =>
     networkMode: "always",
   });
 
-const commitFileDiffOptions = (repo: string, hash: string, file: string) =>
+const commitFileDiffOptions = (
+  repo: string,
+  hash: string,
+  file: string,
+  hide: boolean,
+) =>
   queryOptions({
-    queryKey: repoKeys.commitFileDiff(repo, hash, file),
-    queryFn: () => api.gitCommitFileDiff(repo, hash, file),
+    queryKey: [...repoKeys.commitFileDiff(repo, hash, file), hide] as const,
+    queryFn: () =>
+      readViewDiff(hide, (iw) => api.gitCommitFileDiff(repo, hash, file, iw)),
     staleTime: Number.POSITIVE_INFINITY,
     networkMode: "always",
   });
@@ -127,8 +135,9 @@ export function useCommitFileDiff(
   file: string | null,
   enabled = true,
 ) {
+  const hide = useHideWhitespace();
   return useQuery({
-    ...commitFileDiffOptions(repo, hash ?? "", file ?? ""),
+    ...commitFileDiffOptions(repo, hash ?? "", file ?? "", hide),
     enabled: enabled && hash !== null && file !== null,
     placeholderData: keepPreviousDataForRepo(repo),
   });
@@ -141,6 +150,7 @@ export function useCommitFileDiff(
  *  forge read, wait for the commit to be selected. */
 export function usePrefetchCommit(repo: string, withOnRemote: boolean) {
   const queryClient = useQueryClient();
+  const hide = useHideWhitespace();
   return useCallback(
     async (hash: string) => {
       queryClient.prefetchQuery(commitDetailsOptions(repo, hash));
@@ -152,20 +162,23 @@ export function usePrefetchCommit(repo: string, withOnRemote: boolean) {
       );
       const first = files?.[0]?.path;
       if (first) {
-        queryClient.prefetchQuery(commitFileDiffOptions(repo, hash, first));
+        queryClient.prefetchQuery(
+          commitFileDiffOptions(repo, hash, first, hide),
+        );
       }
     },
-    [queryClient, repo, withOnRemote],
+    [queryClient, repo, withOnRemote, hide],
   );
 }
 
 /** Warms a single file's diff within a commit (row hover / adjacent file). */
 export function usePrefetchCommitFileDiff(repo: string) {
   const queryClient = useQueryClient();
+  const hide = useHideWhitespace();
   return useCallback(
     (hash: string, file: string) =>
-      queryClient.prefetchQuery(commitFileDiffOptions(repo, hash, file)),
-    [queryClient, repo],
+      queryClient.prefetchQuery(commitFileDiffOptions(repo, hash, file, hide)),
+    [queryClient, repo, hide],
   );
 }
 

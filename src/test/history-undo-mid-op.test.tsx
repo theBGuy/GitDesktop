@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import {
   afterAll,
@@ -16,9 +17,17 @@ import {
   it,
   vi,
 } from "vitest";
+import { CommitDetailView } from "@/features/history/CommitDetailView";
+import {
+  ALREADY_PUSHED_HINT,
+  HISTORY_REFRESHING_HINT,
+  UNPUSHED_UNCHECKED_HINT,
+} from "@/features/history/commit-confirms";
 import { HistoryPanel } from "@/features/history/HistoryPanel";
 import {
+  gitAmendCommitDates,
   gitCommitDetails,
+  gitCommitFiles,
   gitLog,
   gitOpState,
   gitStatus,
@@ -41,10 +50,12 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
 }));
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
+  gitAmendCommitDates: vi.fn(),
   gitLog: vi.fn(),
   gitStatus: vi.fn(),
   gitOpState: vi.fn(),
   gitCommitDetails: vi.fn(),
+  gitCommitFiles: vi.fn(),
   gitUndoCommit: vi.fn(),
   gitUnpushedCount: vi.fn(),
   gitUnpushedMessages: vi.fn(),
@@ -156,17 +167,25 @@ beforeEach(() => {
   // One commit ahead of its upstream: the HEAD commit is undoable.
   setBranch({});
   vi.mocked(gitUnpushedMessages).mockResolvedValue([
-    { hash: HASH_HEAD, message: "Add the parser" },
+    {
+      hash: HASH_HEAD,
+      message: "Add the parser",
+      authorDate: { epochSeconds: 1_761_991_200, offsetMinutes: 0 },
+      committerDate: { epochSeconds: 1_761_991_200, offsetMinutes: 0 },
+    },
   ]);
-  vi.mocked(gitCommitDetails).mockResolvedValue({
-    hash: HASH_HEAD,
+  // Answers for the commit asked, so Edit dates' read of HEAD's parent lands.
+  vi.mocked(gitCommitDetails).mockImplementation(async (_repo, hash) => ({
+    hash,
     subject: "Add the parser",
     body: "",
     author: "Ada",
     authorEmail: "",
     date: "2026-11-01T10:00:00Z",
-  });
+    committerDate: "2026-11-01T10:00:00Z",
+  }));
   vi.mocked(gitUndoCommit).mockResolvedValue(undefined);
+  vi.mocked(gitAmendCommitDates).mockResolvedValue(`d${HASH_HEAD.slice(1)}`);
   useUiStore.setState({ repoPath: REPO });
 });
 
@@ -380,6 +399,7 @@ describe("Edit history with nothing to edit", () => {
       count: 0,
       basis: "default-branch",
       defaultBranch: "main",
+      headOid: HASH_HEAD,
     });
     const container = await renderPanel({});
     await waitFor(() => expect(gitUnpushedCount).toHaveBeenCalled());
@@ -409,6 +429,7 @@ describe("Edit history with nothing to edit", () => {
         count: 1,
         basis: "remotes",
         defaultBranch: null,
+        headOid: HASH_HEAD,
       });
       const container = await renderPanel({});
       const item = await openHeadMenu(container);
@@ -422,6 +443,7 @@ describe("Edit history with nothing to edit", () => {
         count: 0,
         basis: "remotes",
         defaultBranch: null,
+        headOid: HASH_HEAD,
       }));
       await footerNote("Nothing left to edit: every commit is pushed.");
     }
@@ -440,11 +462,720 @@ describe("Edit history with nothing to edit", () => {
         count: 0,
         basis: "default-branch",
         defaultBranch: "feature",
+        headOid: HASH_HEAD,
       }));
       await footerNote("Catching up with the branch…");
       expect(
         screen.queryByText("Couldn't check which commits are pushed."),
       ).toBeNull();
     });
+  });
+});
+
+describe("Edit dates from History", () => {
+  const HASH_BASE = `c${HASH_HEAD.slice(1)}`;
+  const openMenu = async (container: HTMLElement, hash: string) => {
+    const row = container.querySelector(`[data-hash="${hash}"]`);
+    if (!row) throw new Error("no row");
+    fireEvent.contextMenu(row);
+    return screen.findByRole("menuitem", { name: /^Edit dates…/ });
+  };
+  // Three commits, the top two unpushed: the middle one is editable.
+  const twoUnpushed = () => {
+    vi.mocked(gitLog).mockResolvedValue([
+      summary(HASH_HEAD, "Add the parser"),
+      summary(HASH_PARENT, "Start the project"),
+      summary(HASH_BASE, "Initial commit"),
+    ]);
+    setBranch({ ahead: 2 });
+    const date = { epochSeconds: 1_761_991_200, offsetMinutes: 0 };
+    vi.mocked(gitUnpushedMessages).mockResolvedValue([
+      {
+        hash: HASH_HEAD,
+        message: "Add the parser",
+        authorDate: date,
+        committerDate: date,
+      },
+      {
+        hash: HASH_PARENT,
+        message: "Start the project",
+        authorDate: date,
+        committerDate: date,
+      },
+    ]);
+  };
+
+  it("the HEAD row opens the Edit dates dialog", async () => {
+    const container = await renderPanel({});
+    const item = await openMenu(container, HASH_HEAD);
+    expect(item).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(item);
+    expect(
+      await screen.findByRole("dialog", { name: "Edit dates" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a pushed row is held as already pushed", async () => {
+    const container = await renderPanel({});
+    const item = await openMenu(container, HASH_PARENT);
+    expect(item).toHaveTextContent(/^Edit dates… \(already pushed\)$/);
+    expect(item).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("an unpushed older row opens Edit history on its dates", async () => {
+    twoUnpushed();
+    const container = await renderPanel({});
+    await waitFor(() =>
+      expect(
+        container.querySelector(`[data-hash="${HASH_BASE}"]`),
+      ).not.toBeNull(),
+    );
+    const item = await openMenu(container, HASH_PARENT);
+    await waitFor(() =>
+      expect(item).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    fireEvent.click(item);
+    expect(
+      await screen.findByRole("group", { name: "Dates for Start the project" }),
+    ).toBeInTheDocument();
+    // The routed row, never its field, takes the dialog's initial focus.
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(dialog.querySelector(`[data-row="${HASH_PARENT}"]`)).toHaveFocus(),
+    );
+  });
+
+  it("a HEAD date change drops the old id from the panel's selection and anchor", async () => {
+    const container = await renderPanel({});
+    const rowOf = (hash: string) => {
+      const row = container.querySelector<HTMLElement>(`[data-hash="${hash}"]`);
+      if (!row) throw new Error("no row");
+      return row;
+    };
+    // A plain click makes HEAD the selection and the anchor.
+    fireEvent.click(rowOf(HASH_HEAD));
+    expect(rowOf(HASH_HEAD)).toHaveClass("bg-accent");
+    fireEvent.click(await openMenu(container, HASH_HEAD));
+    const field = await screen.findByLabelText("Author date");
+    fireEvent.change(field, {
+      target: { value: "2026-11-02 10:00:00 +00:00" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Change dates/ }));
+    await waitFor(() =>
+      expect(gitAmendCommitDates).toHaveBeenCalledWith(
+        REPO,
+        HASH_HEAD,
+        "main",
+        expect.anything(),
+        expect.anything(),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull(),
+    );
+    // The rewrite takes the old commit's place in the store's selection.
+    expect(useUiStore.getState().selectedCommitHash).toBe(
+      `d${HASH_HEAD.slice(1)}`,
+    );
+    // The log still lists the old id, so a kept selection would still paint it.
+    expect(rowOf(HASH_HEAD)).not.toHaveClass("bg-accent");
+    // A kept anchor would turn this Shift+click into a two-row range.
+    fireEvent.click(rowOf(HASH_PARENT), { shiftKey: true });
+    expect(rowOf(HASH_PARENT)).toHaveClass("bg-accent");
+    expect(rowOf(HASH_HEAD)).not.toHaveClass("bg-accent");
+  });
+
+  it("a HEAD date change from the row menu selects and focuses the rewritten row", async () => {
+    const NEW = `d${HASH_HEAD.slice(1)}`;
+    const container = await renderPanel({});
+    const rowOf = (hash: string) =>
+      container.querySelector<HTMLElement>(`[data-hash="${hash}"]`);
+    fireEvent.click(rowOf(HASH_HEAD) as HTMLElement);
+    fireEvent.click(await openMenu(container, HASH_HEAD));
+    const field = await screen.findByLabelText("Author date");
+    fireEvent.change(field, {
+      target: { value: "2026-11-02 10:00:00 +00:00" },
+    });
+    // The refetch after the rewrite lists the new id where HEAD was.
+    vi.mocked(gitLog).mockResolvedValue([
+      summary(NEW, "Add the parser"),
+      summary(HASH_PARENT, "Start the project"),
+    ]);
+    setBranch({ oid: NEW });
+    fireEvent.click(screen.getByRole("button", { name: /Change dates/ }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull(),
+    );
+    expect(useUiStore.getState().selectedCommitHash).toBe(NEW);
+    await waitFor(() => expect(rowOf(NEW)).toHaveFocus());
+    expect(rowOf(HASH_PARENT)).not.toHaveFocus();
+  });
+
+  const NEW_HEAD = `d${HASH_HEAD.slice(1)}`;
+  const HASH_GRAND = `e${HASH_HEAD.slice(1)}`;
+
+  /** Changes HEAD's dates from the commit detail pane; the refetched log lists
+   *  the rewritten HEAD over two older rows. */
+  async function rewriteFromDetailPane() {
+    // The pane renders its actions once its file list reads.
+    vi.mocked(gitCommitFiles).mockResolvedValue([]);
+    const NEW = NEW_HEAD;
+    vi.mocked(gitOpState).mockResolvedValue(IDLE);
+    client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(
+      settingsKeys.settings,
+      structuredClone(DEFAULT_SETTINGS),
+    );
+    // RepositoryView's pairing: the detail pane follows the store selection.
+    function Detail() {
+      const hash = useUiStore((s) => s.selectedCommitHash);
+      return hash === null ? null : (
+        <CommitDetailView repoPath={REPO} hash={hash} />
+      );
+    }
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <HistoryPanel repoPath={REPO} />
+        <Detail />
+      </QueryClientProvider>,
+    );
+    const rowOf = (hash: string) =>
+      container.querySelector<HTMLElement>(`[data-hash="${hash}"]`);
+    await waitFor(() => expect(rowOf(HASH_HEAD)).not.toBeNull());
+    // A plain click makes HEAD the panel's selection and anchor.
+    fireEvent.click(rowOf(HASH_HEAD) as HTMLElement);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Commit actions" }),
+    );
+    const item = await screen.findByRole("menuitem", { name: /^Edit dates…/ });
+    await waitFor(() => expect(item).not.toHaveAttribute("aria-disabled"));
+    await userEvent.click(item);
+    fireEvent.change(await screen.findByLabelText("Author date"), {
+      target: { value: "2026-11-02 10:00:00 +00:00" },
+    });
+    vi.mocked(gitLog).mockResolvedValue([
+      summary(NEW, "Add the parser"),
+      summary(HASH_PARENT, "Start the project"),
+      summary(HASH_GRAND, "Initial commit"),
+    ]);
+    setBranch({ oid: NEW });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Change dates/ }),
+      ).not.toHaveAttribute("aria-disabled"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Change dates/ }));
+    await waitFor(() => expect(rowOf(NEW)).not.toBeNull());
+    expect(useUiStore.getState().selectedCommitHash).toBe(NEW);
+    await waitFor(() => expect(rowOf(NEW)).toHaveClass("bg-accent"));
+    return (hash: string) => rowOf(hash) as HTMLElement;
+  }
+  const highlighted = (rowOf: (hash: string) => HTMLElement) =>
+    [NEW_HEAD, HASH_PARENT, HASH_GRAND].map((h) =>
+      rowOf(h).classList.contains("bg-accent"),
+    );
+
+  // Controls: drop HistoryPanel's prune on a new log answer, and no row is
+  // highlighted; drop the fallback's anchor pin, and the second Shift+click
+  // collapses the range to one row.
+  it("a HEAD date change from the commit detail pane highlights the new row and ranges from it", async () => {
+    const rowOf = await rewriteFromDetailPane();
+    fireEvent.click(rowOf(HASH_PARENT), { shiftKey: true });
+    expect(highlighted(rowOf)).toEqual([true, true, false]);
+    fireEvent.click(rowOf(HASH_GRAND), { shiftKey: true });
+    expect(highlighted(rowOf)).toEqual([true, true, true]);
+  });
+
+  // Control: drop the fallback's anchor pin; the second Shift+Down collapses
+  // the range to one row.
+  it("a HEAD date change from the commit detail pane keeps growing a Shift+arrow range", async () => {
+    // jsdom has no scrollIntoView; arrow nav scrolls the row it focuses.
+    Element.prototype.scrollIntoView = vi.fn();
+    const rowOf = await rewriteFromDetailPane();
+    fireEvent.keyDown(rowOf(NEW_HEAD), { key: "ArrowDown", shiftKey: true });
+    expect(highlighted(rowOf)).toEqual([true, true, false]);
+    fireEvent.keyDown(rowOf(HASH_PARENT), { key: "ArrowDown", shiftKey: true });
+    expect(highlighted(rowOf)).toEqual([true, true, true]);
+  });
+
+  describe("the deferred landing on the rewritten row", () => {
+    const NEW = `d${HASH_HEAD.slice(1)}`;
+    const rewritten = (subject: string) => [
+      summary(NEW, subject),
+      summary(HASH_PARENT, "Start the project"),
+    ];
+
+    /** Changes HEAD's dates with the log's refetch held, so the dialog closes
+     *  before the rewritten row renders and the landing waits armed. */
+    async function changeWithLogHeld(container: HTMLElement) {
+      const rowOf = (hash: string) =>
+        container.querySelector<HTMLElement>(`[data-hash="${hash}"]`);
+      fireEvent.click(rowOf(HASH_HEAD) as HTMLElement);
+      fireEvent.click(await openMenu(container, HASH_HEAD));
+      fireEvent.change(await screen.findByLabelText("Author date"), {
+        target: { value: "2026-11-02 10:00:00 +00:00" },
+      });
+      let release!: () => void;
+      const held = new Promise<CommitSummary[]>((r) => {
+        release = () => r(rewritten("Add the parser"));
+      });
+      vi.mocked(gitLog).mockImplementation(() => held);
+      setBranch({ oid: NEW });
+      fireEvent.click(screen.getByRole("button", { name: /Change dates/ }));
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull(),
+      );
+      expect(rowOf(NEW)).toBeNull();
+      return { rowOf, release };
+    }
+
+    /** Lands one more log answer while focus sits on the body. */
+    async function relistWithFocusOnBody(
+      rowOf: (hash: string) => HTMLElement | null,
+    ) {
+      act(() => (document.activeElement as HTMLElement | null)?.blur());
+      vi.mocked(gitLog).mockResolvedValue(rewritten("Add the parser, again"));
+      await act(() => client.refetchQueries({ queryKey: repoKeys.log(REPO) }));
+      await waitFor(() =>
+        expect(rowOf(NEW)).toHaveTextContent("Add the parser, again"),
+      );
+    }
+
+    it("lands once the refetched log renders the row", async () => {
+      const container = await renderPanel({});
+      const { rowOf, release } = await changeWithLogHeld(container);
+      await act(async () => release());
+      await waitFor(() => expect(rowOf(NEW)).toHaveFocus());
+    });
+
+    // Control: drop the clear on focus outside the dialog; the later listing
+    // with focus on the body takes it to the row.
+    it("is dropped once focus is on a control outside the dialog", async () => {
+      const container = await renderPanel({});
+      const { rowOf, release } = await changeWithLogHeld(container);
+      const parent = rowOf(HASH_PARENT) as HTMLElement;
+      act(() => parent.focus());
+      await act(async () => release());
+      await waitFor(() => expect(rowOf(NEW)).not.toBeNull());
+      expect(parent).toHaveFocus();
+
+      await relistWithFocusOnBody(rowOf);
+      expect(rowOf(NEW)).not.toHaveFocus();
+    });
+
+    // Control: drop the focus-host exemption; the detail pane keeps focus.
+    it("lands after the commit detail pane took focus for the new selection", async () => {
+      vi.mocked(gitOpState).mockResolvedValue(IDLE);
+      client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      client.setQueryData(
+        settingsKeys.settings,
+        structuredClone(DEFAULT_SETTINGS),
+      );
+      // RepositoryView's pairing: the detail pane follows the store selection.
+      function Detail() {
+        const hash = useUiStore((s) => s.selectedCommitHash);
+        return hash === null ? null : (
+          <CommitDetailView repoPath={REPO} hash={hash} />
+        );
+      }
+      const { container } = render(
+        <QueryClientProvider client={client}>
+          <HistoryPanel repoPath={REPO} />
+          <Detail />
+        </QueryClientProvider>,
+      );
+      await waitFor(() =>
+        expect(
+          container.querySelector(`[data-hash="${HASH_HEAD}"]`),
+        ).not.toBeNull(),
+      );
+      await waitFor(() =>
+        expect(client.getQueryData(repoKeys.opState(REPO))).toBeDefined(),
+      );
+      const { rowOf, release } = await changeWithLogHeld(container);
+      expect(useUiStore.getState().selectedCommitHash).toBe(NEW);
+      const host = container.querySelector<HTMLElement>(
+        "[data-commit-detail-focus-host]",
+      );
+      if (host === null) throw new Error("no detail focus host");
+      // The pane's own move from the body to its host. Live, the selection's
+      // render lands after the dialog returned focus to the body; jsdom applies
+      // it first, so the move is made here.
+      act(() => host.focus());
+      await act(async () => release());
+      await waitFor(() => expect(rowOf(NEW)).toHaveFocus());
+    });
+
+    // Control: drop the clear on a repo mismatch; back on the repo, the row
+    // takes focus.
+    it("is dropped by a repo switch", async () => {
+      vi.mocked(gitOpState).mockResolvedValue(IDLE);
+      client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      client.setQueryData(
+        settingsKeys.settings,
+        structuredClone(DEFAULT_SETTINGS),
+      );
+      const tree = (path: string) => (
+        <QueryClientProvider client={client}>
+          <HistoryPanel repoPath={path} />
+        </QueryClientProvider>
+      );
+      const { container, rerender } = render(tree(REPO));
+      await waitFor(() =>
+        expect(
+          container.querySelector(`[data-hash="${HASH_HEAD}"]`),
+        ).not.toBeNull(),
+      );
+      await waitFor(() =>
+        expect(client.getQueryData(repoKeys.opState(REPO))).toBeDefined(),
+      );
+      const { rowOf, release } = await changeWithLogHeld(container);
+      rerender(tree("/repo-b"));
+      rerender(tree(REPO));
+      // Focus nobody placed: an armed landing would take it.
+      expect(document.activeElement).toBe(document.body);
+      await act(async () => release());
+      await waitFor(() => expect(rowOf(NEW)).not.toBeNull());
+      expect(rowOf(NEW)).not.toHaveFocus();
+    });
+  });
+
+  it("the palette routes the selected commit, and refuses a pushed one", async () => {
+    twoUnpushed();
+    const container = await renderPanel({});
+    await waitFor(() =>
+      expect(
+        container.querySelector(`[data-hash="${HASH_BASE}"]`),
+      ).not.toBeNull(),
+    );
+    act(() => useUiStore.setState({ selectedCommitHash: HASH_BASE }));
+    expect(dispatchAction("edit-commit-dates")).toBe(false);
+    act(() => useUiStore.setState({ selectedCommitHash: HASH_PARENT }));
+    await waitFor(() => expect(dispatchAction("edit-commit-dates")).toBe(true));
+    expect(
+      await screen.findByRole("group", { name: "Dates for Start the project" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a repo switch and back leaves the dialog closed", async () => {
+    vi.mocked(gitOpState).mockResolvedValue(IDLE);
+    const local = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    local.setQueryData(
+      settingsKeys.settings,
+      structuredClone(DEFAULT_SETTINGS),
+    );
+    const tree = (path: string) => (
+      <QueryClientProvider client={local}>
+        <HistoryPanel repoPath={path} />
+      </QueryClientProvider>
+    );
+    const { container, rerender } = render(tree(REPO));
+    await waitFor(() =>
+      expect(
+        container.querySelector(`[data-hash="${HASH_HEAD}"]`),
+      ).not.toBeNull(),
+    );
+    await waitFor(() =>
+      expect(local.getQueryData(repoKeys.opState(REPO))).toBeDefined(),
+    );
+    fireEvent.click(await openMenu(container, HASH_HEAD));
+    await screen.findByRole("dialog", { name: "Edit dates" });
+    rerender(tree("/repo-b"));
+    rerender(tree(REPO));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull(),
+    );
+  });
+
+  it("one mounted panel moves through its early returns without a hook-order error", async () => {
+    const container = await renderPanel({});
+    const reset = async (
+      arrange: () => void,
+      settled: () => void | Promise<void>,
+    ) => {
+      arrange();
+      // Not awaited: the unread arm's fetch never settles.
+      act(() => {
+        void client.resetQueries({ queryKey: repoKeys.log(REPO) });
+      });
+      await waitFor(settled);
+    };
+    const logState = () => client.getQueryState(repoKeys.log(REPO));
+    await reset(
+      () => vi.mocked(gitLog).mockReturnValue(new Promise(() => undefined)),
+      () => expect(logState()?.status).toBe("pending"),
+    );
+    await reset(
+      () => vi.mocked(gitLog).mockRejectedValue(new Error("log failed")),
+      () => expect(logState()?.status).toBe("error"),
+    );
+    await reset(
+      () => vi.mocked(gitLog).mockResolvedValue([]),
+      () => expect(logState()?.status).toBe("success"),
+    );
+    await reset(
+      () =>
+        vi
+          .mocked(gitLog)
+          .mockResolvedValue([
+            summary(HASH_HEAD, "Add the parser"),
+            summary(HASH_PARENT, "Start the project"),
+          ]),
+      () =>
+        expect(
+          container.querySelector(`[data-hash="${HASH_HEAD}"]`),
+        ).not.toBeNull(),
+    );
+  });
+});
+
+describe("Undo on a branch with no upstream", () => {
+  const UNDO_PUSHED_REFRESHING =
+    "Still checking which commits are pushed — try again in a moment.";
+  const UNDO_PUSHED_UNCHECKED =
+    "Couldn't check which commits are pushed; nothing was undone.";
+  const GONE_UPSTREAM: Partial<BranchHead> = {
+    ...NO_UPSTREAM,
+    upstream: "origin/feature",
+    upstreamGone: true,
+  };
+
+  const counted = (over: Partial<UnpushedCount>) =>
+    vi.mocked(gitUnpushedCount).mockResolvedValue({
+      count: 0,
+      basis: "remotes",
+      defaultBranch: null,
+      headOid: HASH_HEAD,
+      ...over,
+    });
+
+  async function openUndoRow(container: HTMLElement) {
+    const row = container.querySelector(`[data-hash="${HASH_HEAD}"]`);
+    if (!row) throw new Error("no head row");
+    fireEvent.contextMenu(row);
+    return screen.findByRole("menuitem", {
+      name: /^Undo commit \(keep changes\)/,
+    });
+  }
+
+  /** Lets a dispatched action's synchronous arms and toasts run. */
+  const settle = () => act(async () => undefined);
+
+  it.each([
+    ["no upstream", NO_UPSTREAM],
+    ["a gone upstream", GONE_UPSTREAM],
+  ])(
+    "a commit a remote branch has reads already pushed (%s)",
+    async (_n, branch) => {
+      setBranch(branch);
+      counted({ count: 0 });
+      const item = await openUndoRow(await renderPanel({}));
+      await waitFor(() =>
+        expect(item).toHaveTextContent(
+          `Undo commit (keep changes)${ALREADY_PUSHED_HINT}`,
+        ),
+      );
+      expect(item).toHaveAttribute("aria-disabled", "true");
+      dispatchAction("undo-commit");
+      await settle();
+      expect(gitCommitDetails).not.toHaveBeenCalled();
+      expect(gitUndoCommit).not.toHaveBeenCalled();
+      expect(toast.info).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["an unpushed commit on the remotes basis", { count: 1 }],
+    [
+      "the on-default-branch basis",
+      {
+        count: 0,
+        basis: "on-default-branch" as const,
+        defaultBranch: "feature",
+      },
+    ],
+    [
+      "the default-branch basis",
+      { count: 0, basis: "default-branch" as const, defaultBranch: "main" },
+    ],
+    ["the unresolved basis", { count: 0, basis: "unresolved" as const }],
+  ])("the shortcut undoes on %s", async (_n, over) => {
+    setBranch(NO_UPSTREAM);
+    counted(over);
+    await renderPanel({});
+    await waitFor(() =>
+      expect(client.getQueryData(repoKeys.unpushedCount(REPO))).toBeDefined(),
+    );
+    dispatchAction("undo-commit");
+    await waitFor(() => expect(gitUndoCommit).toHaveBeenCalled());
+  });
+
+  it("a failed count holds the row and the shortcut explains", async () => {
+    setBranch(NO_UPSTREAM);
+    vi.mocked(gitUnpushedCount).mockRejectedValue(new Error("count boom"));
+    const item = await openUndoRow(await renderPanel({}));
+    await waitFor(() =>
+      expect(item).toHaveTextContent(
+        `Undo commit (keep changes)${UNPUSHED_UNCHECKED_HINT}`,
+      ),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    dispatchAction("undo-commit");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(UNDO_PUSHED_UNCHECKED),
+    );
+    expect(gitCommitDetails).not.toHaveBeenCalled();
+    expect(gitUndoCommit).not.toHaveBeenCalled();
+  });
+
+  it("an unread count holds the row and the shortcut explains", async () => {
+    setBranch(NO_UPSTREAM);
+    vi.mocked(gitUnpushedCount).mockImplementation(
+      () => new Promise<UnpushedCount>(() => undefined),
+    );
+    const item = await openUndoRow(await renderPanel({}));
+    expect(item).toHaveTextContent(
+      `Undo commit (keep changes)${HISTORY_REFRESHING_HINT}`,
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    dispatchAction("undo-commit");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(UNDO_PUSHED_REFRESHING),
+    );
+    expect(gitCommitDetails).not.toHaveBeenCalled();
+  });
+
+  it("a count taken on another head holds the row as refreshing", async () => {
+    setBranch(NO_UPSTREAM);
+    counted({ count: 1, headOid: HASH_PARENT });
+    const item = await openUndoRow(await renderPanel({}));
+    await waitFor(() => expect(gitUnpushedCount).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(item).toHaveTextContent(
+        `Undo commit (keep changes)${HISTORY_REFRESHING_HINT}`,
+      ),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("a log trailing status holds Edit dates as refreshing, even with a failed count", async () => {
+    // Status already names a newer HEAD than the log's top row.
+    setBranch({ ...NO_UPSTREAM, oid: `e${HASH_HEAD.slice(1)}` });
+    vi.mocked(gitUnpushedCount).mockRejectedValue(new Error("count boom"));
+    const container = await renderPanel({});
+    await waitFor(() => expect(gitUnpushedCount).toHaveBeenCalled());
+    const row = await waitFor(() => {
+      const r = container.querySelector(`[data-hash="${HASH_HEAD}"]`);
+      if (!r) throw new Error("no top row");
+      return r;
+    });
+    fireEvent.contextMenu(row);
+    const item = await screen.findByRole("menuitem", {
+      name: /^Edit dates…/,
+    });
+    await waitFor(() =>
+      expect(item).toHaveTextContent(`Edit dates…${HISTORY_REFRESHING_HINT}`),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("a log refetch landing the same head keeps every gate agreed", async () => {
+    setBranch(NO_UPSTREAM);
+    counted({ count: 1 });
+    const container = await renderPanel({});
+    await waitFor(() =>
+      expect(client.getQueryData(repoKeys.unpushedCount(REPO))).toBeDefined(),
+    );
+    // The refetched log must land on a later millisecond than the count.
+    const countAt =
+      client.getQueryState(repoKeys.unpushedCount(REPO))?.dataUpdatedAt ?? 0;
+    await waitFor(() => expect(Date.now()).toBeGreaterThan(countAt));
+    await act(() => client.refetchQueries({ queryKey: repoKeys.log(REPO) }));
+    const undo = await openUndoRow(container);
+    expect(undo).toHaveTextContent(/^Undo commit \(keep changes\)$/);
+    expect(undo).not.toHaveAttribute("aria-disabled", "true");
+    const edit = screen.getByRole("menuitem", { name: /^Edit history…/ });
+    expect(edit).toHaveTextContent(/^Edit history…$/);
+    expect(edit).not.toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("Undo over unresolved conflicts", () => {
+  const UNDO_UNRESOLVED = "Resolve the conflicts first; nothing was undone.";
+
+  async function withConflict() {
+    const shown = await vi.mocked(gitStatus)(REPO);
+    vi.mocked(gitStatus).mockResolvedValue({
+      ...shown,
+      entries: [
+        { path: "a.txt", staged: "conflicted", unstaged: "conflicted" },
+      ],
+    });
+  }
+
+  it("with no stopped operation the row holds and the shortcut refuses first", async () => {
+    await withConflict();
+    const container = await renderPanel({});
+    const row = container.querySelector(`[data-hash="${HASH_HEAD}"]`);
+    if (!row) throw new Error("no head row");
+    fireEvent.contextMenu(row);
+    const item = await screen.findByRole("menuitem", {
+      name: /^Undo commit \(keep changes\)/,
+    });
+    await waitFor(() =>
+      expect(item).toHaveTextContent(
+        "Undo commit (keep changes) (resolve the conflicts first)",
+      ),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    dispatchAction("undo-commit");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(UNDO_UNRESOLVED),
+    );
+    expect(gitCommitDetails).not.toHaveBeenCalled();
+    expect(gitUndoCommit).not.toHaveBeenCalled();
+  });
+
+  // Control: drop the `unresolved` arm of editDatesRoute; the row and the
+  // palette go live.
+  it("Edit dates holds the HEAD row and the palette with Undo's reason", async () => {
+    await withConflict();
+    const container = await renderPanel({});
+    act(() => useUiStore.setState({ selectedCommitHash: HASH_HEAD }));
+    const row = container.querySelector(`[data-hash="${HASH_HEAD}"]`);
+    if (!row) throw new Error("no head row");
+    fireEvent.contextMenu(row);
+    const item = await screen.findByRole("menuitem", { name: /^Edit dates…/ });
+    await waitFor(() =>
+      expect(item).toHaveTextContent(
+        "Edit dates… (resolve the conflicts first)",
+      ),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(dispatchAction("edit-commit-dates")).toBe(false);
+    expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull();
+  });
+
+  it("a stopped merge keeps its own reason", async () => {
+    await withConflict();
+    const container = await renderPanel({ merging: true });
+    const row = container.querySelector(`[data-hash="${HASH_HEAD}"]`);
+    if (!row) throw new Error("no head row");
+    fireEvent.contextMenu(row);
+    const item = await screen.findByRole("menuitem", {
+      name: /^Undo commit \(keep changes\)/,
+    });
+    expect(item).toHaveTextContent(
+      "Undo commit (keep changes) (finish or abort the merge first)",
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
   });
 });
