@@ -493,8 +493,8 @@ the last list up, with a line above it saying it couldn't refresh.
 
 ## Staging
 
-- Click a file to see its diff. The gear at the top of the diff switches it between
-  **Unified** and **Split** (see **Diff options** below).
+- Click a file to see its diff. The gear at the top of the diff opens the
+  **Diff options** sheet, where you pick **Unified** or **Split** (see below).
 - Stage or unstage a file with the **+ / −** button on its row, or press
   {{key:space}} on the focused row; {{key:enter}} on a row opens its diff.
   In the list, {{key:tab}} stops on the file you're on, {{key:up}} and {{key:down}}
@@ -660,7 +660,7 @@ the last list up, with a line above it saying it couldn't refresh.
 - **Diff options** — the gear in the diff toolbar opens one sheet for the diff's view
   settings: **Hide whitespace changes** and the **Unified** or **Split** layout. Each
   change applies at once, and the sheet stays open while the diff it sits on stays in
-  view; Escape or a click outside closes it. *Use unified or split diff* in the command
+  view; {{key:escape}} or a click outside closes it. *Use unified or split diff* in the command
   palette (palette-only by default — bind a key in **Settings → Keyboard**) switches
   the layout too while a diff is on screen and wide enough for split, though not
   during a line selection, a discard confirmation or Markdown preview.

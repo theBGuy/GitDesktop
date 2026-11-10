@@ -404,9 +404,10 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   are: the CreatePrDialog / CreateIssueDialog field-group wrappers and
   McpServersSection's `role="group"` scope groups. A single control that carries
   its own group role (a `RadioGroup`) takes its name through `aria-labelledby`
-  on a `<Label id>` instead of a LabeledGroup wrapper, whose group would repeat
-  the name (BoardBulkFieldsDialog's mode picker, ProjectLifecycleDialogs' Layout,
-  the Diff options sheet's Diff display).
+  on an id'd caption (a `<Label id>`, or an existing caption element) instead
+  of a LabeledGroup wrapper, whose group would repeat the name
+  (BoardBulkFieldsDialog's mode picker, ProjectLifecycleDialogs' Layout,
+  RepositoryMenu's fork intent, the Diff options sheet's Diff display).
 - A lazy panel's `Suspense` fallback is `LazyPanelFallback`
   (`src/components/lazy-panel-fallback.tsx`) — never `fallback={null}`: a blank
   region has no aria-busy and announces nothing to assistive tech. The
