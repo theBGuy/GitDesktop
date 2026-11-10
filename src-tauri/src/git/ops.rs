@@ -5729,14 +5729,12 @@ fn check_plan_covers_range(
     Ok(())
 }
 
-/// Whether a plan only re-dates commits: nothing dropped, one single-hash step per
-/// range commit in the range's own oldest-first order, no composed message, no `edit`,
-/// and at least one date. Such a rebase runs with [`NO_HOOKS`] on its start and every
-/// continue, so the picks replayed above a dated commit keep their messages; that also
-/// silences post-checkout and post-rewrite, a trade taken only for this shape, since
-/// any reword, fold, reorder, drop or edit rewrites what those hooks report on. The
-/// banner's continue never carries the flag: the UI sends such a plan only through the
-/// replay route, which rolls back any stop instead of handing it to the banner.
+/// Whether a plan only re-dates: nothing dropped, one single-hash step per range commit in its
+/// oldest-first order, no composed message or `edit`, at least one date. It runs [`NO_HOOKS`]
+/// on the rebase start and every continue, so picks replayed above a dated commit keep their
+/// messages; that fidelity outranks hook notification, though EVERY hook goes quiet (post-rewrite,
+/// post-checkout, reference-transaction). The banner's continue adds no flag: the UI sends this
+/// shape only via the replay route, which rolls back any stop; a banner-finished stop runs hooks.
 fn dates_only_plan(
     steps: &[RewriteStep],
     dropped: &[String],
@@ -6256,19 +6254,15 @@ const REBASE_CONTINUE_ARGS: [&str; 10] = [
 /// The rebase start's argv onto `base`; a [`dates_only_plan`] runs it with [`NO_HOOKS`].
 fn rebase_start_args(hook_free: bool, base: &str) -> Vec<&str> {
     let hooks: &[&str] = if hook_free { &NO_HOOKS } else { &[] };
-    let mut args = hooks.to_vec();
-    args.extend(REBASE_START_ARGS);
-    args.push(base);
-    args
+    [hooks, &REBASE_START_ARGS[..], &[base][..]].concat()
 }
 
-/// A planned rebase's continue argv. `-c` config lives only in its own process, never
-/// in `rebase-merge`, so a [`dates_only_plan`] repeats [`NO_HOOKS`] on every continue.
+/// A planned rebase's continue argv. `-c` config is never persisted to `rebase-merge`
+/// (children inherit it through the environment), so a [`dates_only_plan`] repeats
+/// [`NO_HOOKS`] on every continue.
 fn rebase_continue_args(hook_free: bool) -> Vec<&'static str> {
     let hooks: &[&str] = if hook_free { &NO_HOOKS } else { &[] };
-    let mut args = hooks.to_vec();
-    args.extend(REBASE_CONTINUE_ARGS);
-    args
+    [hooks, &REBASE_CONTINUE_ARGS[..]].concat()
 }
 
 /// Which entry point a todo is built for.
@@ -13633,8 +13627,9 @@ mod tests {
         }
     }
 
-    /// A dated step's note reaches its FINAL commit, and so does its post-rewrite
-    /// mapping when the plan also drops a commit; a dates-only plan runs no post-rewrite.
+    /// A dated step's note and post-rewrite mapping reach its FINAL commit, whether its
+    /// pick fast-forwards or not. A reword above keeps the fast-forward plan's hooks on,
+    /// since a dates-only plan runs no post-rewrite.
     #[tokio::test]
     async fn a_dated_step_maps_its_commit_to_the_final_one() {
         for fast_forward in [true, false] {
@@ -13644,30 +13639,36 @@ mod tests {
             let c1 = rev(&repo, "HEAD").await;
             commit_file(&repo, dir.path(), "2.txt", "2\n", "two").await;
             let x = rev(&repo, "HEAD").await;
+            if fast_forward {
+                commit_file(&repo, dir.path(), "3.txt", "3\n", "three").await;
+            }
+            let z = rev(&repo, "HEAD").await;
             git(&repo, &["notes", "add", "-m", "note-x", &x]).await;
             let log = track_rewrites(&repo).await;
             let step = dated(&x, Some(date(1767949200, 0)), Some(date(1767999999, 0)));
             let (steps, dropped) = if fast_forward {
-                (vec![pick(&c1), step], vec![])
+                let reword = RewriteStep {
+                    hashes: vec![z.clone()],
+                    message: Some("three reworded".into()),
+                    ..Default::default()
+                };
+                (vec![pick(&c1), step, reword], vec![])
             } else {
                 (vec![step], vec![c1.clone()])
             };
             rewrite_commits(&AppState::default(), &repo, &base, &steps, &dropped)
                 .await
                 .unwrap();
-            let head = rev(&repo, "HEAD").await;
+            let x_final = if fast_forward { "HEAD~1" } else { "HEAD" };
+            let head = rev(&repo, x_final).await;
             assert_eq!(
-                raw_dates(&repo, "HEAD").await,
+                raw_dates(&repo, x_final).await,
                 "1767949200 +0000|1767999999 +0000"
             );
             assert_eq!(
-                git(&repo, &["notes", "show", "HEAD"]).await.trim(),
+                git(&repo, &["notes", "show", x_final]).await.trim(),
                 "note-x"
             );
-            if fast_forward {
-                assert!(!log.exists(), "a dates-only plan runs no post-rewrite");
-                continue;
-            }
             let log = std::fs::read_to_string(&log).expect("post-rewrite ran");
             let mapped: Vec<&str> = log
                 .lines()
@@ -14191,14 +14192,22 @@ mod tests {
         message.to_string()
     }
 
-    /// A dated commit whose own pick is not a fast-forward (its parent was dated too)
-    /// keeps its message byte for byte, though git's sequencer ran prepare-commit-msg
-    /// on that pick; a reword in the same repo still runs the hook.
+    /// In a plan that keeps its hooks (a reword below), a dated commit whose pick is not a
+    /// fast-forward keeps its message byte for byte: git's pick ran prepare-commit-msg, and
+    /// the hook-free amend copies the message back from the original object.
     #[tokio::test]
     async fn dated_non_fast_forward_picks_keep_their_original_message() {
         for replay in [true, false] {
             let (_dir, repo) = setup_repo(&format!("dates-nonff-{replay}")).await;
             let base = rev(&repo, "HEAD").await;
+            let c0 = commit_at(
+                &repo,
+                Some("c0.txt"),
+                "C0 subject",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
             let a = commit_at(
                 &repo,
                 Some("a.txt"),
@@ -14225,7 +14234,12 @@ mod tests {
                 "printf 'Hooked: yes\\n' >> \"$1\"",
             );
             let d = Some(date(1767949200, 0));
-            let steps = vec![dated(&a, d, d), dated(&b, d, d)];
+            let reword_c0 = RewriteStep {
+                hashes: vec![c0.clone()],
+                message: Some("c0 reworded".into()),
+                ..Default::default()
+            };
+            let steps = vec![reword_c0, dated(&a, d, d), dated(&b, d, d)];
             let state = AppState::default();
             if replay {
                 rewrite_commits(&state, &repo, &base, &steps, &[])
@@ -14243,6 +14257,10 @@ mod tests {
                 ],
                 originals,
                 "replay={replay}"
+            );
+            assert!(
+                raw_message(&repo, "HEAD~2").await.contains("Hooked: yes"),
+                "replay={replay}: the plan's reword ran the hook"
             );
             for r in ["HEAD", "HEAD~1"] {
                 assert_eq!(
@@ -14289,8 +14307,10 @@ mod tests {
             !dates_only_plan(&[pick("b"), dated("a", d, d)], none, &range),
             "a reorder with a date"
         );
+        // In production the coverage check runs first, so a non-empty `dropped` always
+        // shortens `steps`; this length-matched shape reaches the predicate's own clause.
         assert!(
-            !dates_only_plan(&[dated("b", d, d)], &["a".to_string()], &range),
+            !dates_only_plan(&[dated("a", d, d), pick("b")], &["c".to_string()], &range),
             "a drop with a date"
         );
         let reword = RewriteStep {
@@ -14306,7 +14326,7 @@ mod tests {
             ..dated("a", d, d)
         };
         assert!(
-            !dates_only_plan(&[fold], none, &range),
+            !dates_only_plan(&[fold, pick("b")], none, &range),
             "a fold with a date"
         );
         let edit = RewriteStep {
