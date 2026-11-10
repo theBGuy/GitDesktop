@@ -5729,6 +5729,29 @@ fn check_plan_covers_range(
     Ok(())
 }
 
+/// Whether a plan only re-dates commits: nothing dropped, one single-hash step per
+/// range commit in the range's own oldest-first order, no composed message, no `edit`,
+/// and at least one date. Such a rebase runs with [`NO_HOOKS`] on its start and every
+/// continue, so the picks replayed above a dated commit keep their messages; that also
+/// silences post-checkout and post-rewrite, a trade taken only for this shape, since
+/// any reword, fold, reorder, drop or edit rewrites what those hooks report on. The
+/// banner's continue never carries the flag: the UI sends such a plan only through the
+/// replay route, which rolls back any stop instead of handing it to the banner.
+fn dates_only_plan(
+    steps: &[RewriteStep],
+    dropped: &[String],
+    range_oldest_first: &[String],
+) -> bool {
+    dropped.is_empty()
+        && steps.len() == range_oldest_first.len()
+        && steps.iter().zip(range_oldest_first).all(|(step, h)| {
+            matches!(step.hashes.as_slice(), [only] if only == h)
+                && !step_has_message(step)
+                && !step.edit
+        })
+        && steps.iter().any(step_has_date)
+}
+
 /// [`rewrite_commits`] with the git timeouts injectable. `rebase_timeout` bounds ONLY
 /// the `rebase --continue` that replays the plan; `abort_timeout` only the failure
 /// path's `rebase --abort` (and the start's abort of a missing-commits stop). Every
@@ -5815,16 +5838,21 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             "the range contains merge commits, which can't be rewritten".into(),
         ));
     }
-    let in_range: std::collections::HashSet<String> =
-        run_git(Some(repo_path), &["rev-list", &range], DEFAULT_TIMEOUT)
-            .await?
-            .stdout_lossy()
-            .lines()
-            .map(str::to_string)
-            .collect();
+    let range_oldest_first: Vec<String> = run_git(
+        Some(repo_path),
+        &["rev-list", "--reverse", &range],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .lines()
+    .map(str::to_string)
+    .collect();
+    let in_range: std::collections::HashSet<String> = range_oldest_first.iter().cloned().collect();
     // The plan must cover `orig`'s range; a tip that moves after this read is caught
     // at the rebase start (`start_planned_rebase`).
     check_plan_covers_range(&in_range, steps, dropped)?;
+    let hook_free = dates_only_plan(steps, dropped, &range_oldest_first);
 
     // Journal a pending entry AFTER the guards + `orig` capture, BEFORE the first
     // mutation (the rebase). Best-effort: a journal failure returns None and
@@ -5856,6 +5884,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             base,
             &expected,
             &envs,
+            hook_free,
             DEFAULT_TIMEOUT,
             abort_timeout,
         )
@@ -5867,7 +5896,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         // amend on stderr), so every message below carries the full failure text.
         let resumed = run_git_raw_env(
             Some(repo_path),
-            &REBASE_CONTINUE_ARGS,
+            &rebase_continue_args(hook_free),
             &CONTINUE_EDITOR_ENV,
             rebase_timeout,
         )
@@ -6037,14 +6066,19 @@ pub(crate) async fn rebase_edit_with_timeout(
         .await
         .ok_or_else(|| AppError::InvalidArgument("couldn't resolve the git dir".into()))?;
     let range = format!("{base}..{original_sha}");
-    let in_range: std::collections::HashSet<String> =
-        run_git(Some(&repo_path), &["rev-list", &range], DEFAULT_TIMEOUT)
-            .await?
-            .stdout_lossy()
-            .lines()
-            .map(str::to_string)
-            .collect();
+    let range_oldest_first: Vec<String> = run_git(
+        Some(&repo_path),
+        &["rev-list", "--reverse", &range],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .lines()
+    .map(str::to_string)
+    .collect();
+    let in_range: std::collections::HashSet<String> = range_oldest_first.iter().cloned().collect();
     check_plan_covers_range(&in_range, &steps, &dropped)?;
+    let hook_free = dates_only_plan(&steps, &dropped, &range_oldest_first);
 
     // Journal a pending entry AFTER the guards, BEFORE the first side effect
     // (scratch-dir setup / the rebase itself). Best-effort: a journal failure
@@ -6078,6 +6112,7 @@ pub(crate) async fn rebase_edit_with_timeout(
             &base,
             &expected,
             &envs,
+            hook_free,
             DEFAULT_TIMEOUT,
             DEFAULT_TIMEOUT,
         )
@@ -6090,9 +6125,10 @@ pub(crate) async fn rebase_edit_with_timeout(
         }
         started?;
 
+        let continue_args = rebase_continue_args(hook_free);
         let resumed = run_git_raw_env(
             Some(&repo_path),
-            &REBASE_CONTINUE_ARGS,
+            &continue_args,
             &CONTINUE_EDITOR_ENV,
             continue_timeout,
         )
@@ -6101,7 +6137,7 @@ pub(crate) async fn rebase_edit_with_timeout(
             &repo_path,
             &git_dir,
             resumed,
-            &REBASE_CONTINUE_ARGS,
+            &continue_args,
             continue_timeout,
             |args, timeout| {
                 let repo = repo_path.as_str();
@@ -6173,10 +6209,11 @@ const REBASE_DIR_EXISTS: &str = "It seems that there is already a rebase-merge d
 /// and `--no-reschedule-failed-exec` set); knobs newer than that ride `-c`, which an
 /// older git ignores instead of refusing. `--no-autosquash` and `--no-rebase-merges`
 /// keep git's own fallback todo a plain pick list, which the missing-commits check
-/// compares ours against; `--no-verify` skips the pre-rebase hook. post-checkout fires
-/// at the start; post-rewrite fires at the finish, with the scripts mapping rewords and
-/// date changes on both routes and fold groups on the replay route; on the edit route
-/// git's native folds also fire their own `post-rewrite amend`.
+/// compares ours against; `--no-verify` skips the pre-rebase hook. Unless the plan is
+/// dates-only ([`rebase_start_args`]), post-checkout fires at the start and post-rewrite
+/// at the finish, with the scripts mapping rewords and date changes on both routes and
+/// fold groups on the replay route; on the edit route git's native folds also fire
+/// their own `post-rewrite amend`.
 const REBASE_START_ARGS: [&str; 22] = [
     "-c",
     "core.editor=true",
@@ -6216,6 +6253,24 @@ const REBASE_CONTINUE_ARGS: [&str; 10] = [
     "--continue",
 ];
 
+/// The rebase start's argv onto `base`; a [`dates_only_plan`] runs it with [`NO_HOOKS`].
+fn rebase_start_args(hook_free: bool, base: &str) -> Vec<&str> {
+    let hooks: &[&str] = if hook_free { &NO_HOOKS } else { &[] };
+    let mut args = hooks.to_vec();
+    args.extend(REBASE_START_ARGS);
+    args.push(base);
+    args
+}
+
+/// A planned rebase's continue argv. `-c` config lives only in its own process, never
+/// in `rebase-merge`, so a [`dates_only_plan`] repeats [`NO_HOOKS`] on every continue.
+fn rebase_continue_args(hook_free: bool) -> Vec<&'static str> {
+    let hooks: &[&str] = if hook_free { &NO_HOOKS } else { &[] };
+    let mut args = hooks.to_vec();
+    args.extend(REBASE_CONTINUE_ARGS);
+    args
+}
+
 /// Which entry point a todo is built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TodoRoute {
@@ -6224,7 +6279,7 @@ enum TodoRoute {
     /// already be present, and an inline exec line is length-limited). Only those
     /// commits and a reword's amend run the commit hooks (pre-commit, commit-msg); a
     /// plain pick runs neither, though a non-fast-forward one runs prepare-commit-msg
-    /// (measured, git 2.51.1).
+    /// (measured, git 2.51.1) unless the plan is dates-only, which runs no hook at all.
     Replay,
     /// The resumable rebase: `edit` stops, native `fixup` folds, and amends skip the
     /// commit hooks.
@@ -6592,10 +6647,10 @@ enum AmendMessage<'a> {
 /// (the amend emits no post-rewrite). Only a replay reword runs the commit hooks: an
 /// edit-route reword skips them with `--no-verify` so a resumed rebase can't stall, and a
 /// dates-only amend runs with [`NO_HOOKS`] and `--cleanup=verbatim` so its message keeps
-/// its bytes. That covers the amended commit only: the commits replayed above it go
-/// through git's normal pick, hooks included. `--allow-empty` lets an empty commit take
-/// its dates, `--allow-empty-message` an empty message, and `mv` replaces `sed -i`,
-/// which GNU and BSD spell differently.
+/// its bytes. The commits replayed above it skip hooks only in a [`dates_only_plan`];
+/// in any other plan they go through git's normal pick, hooks included. `--allow-empty`
+/// lets an empty commit take its dates, `--allow-empty-message` an empty message, and
+/// `mv` replaces `sed -i`, which GNU and BSD spell differently.
 fn amend_script(git: &str, message: AmendMessage, route: TodoRoute, dates: &DateArgs) -> String {
     let (hooks, verify) = match (route, message) {
         (TodoRoute::Replay, AmendMessage::Composed(_)) => (String::new(), ""),
@@ -7066,18 +7121,20 @@ fn failed_abort_error(
 /// `base` with the plan's own tip and branch recorded, ready to continue. Any tip
 /// move after the plan was read (a new commit or an amend trips git's missing-commits
 /// stop; a reset to an ancestor or a branch switch trips the gate) aborts and
-/// refuses; a rebase that isn't ours is never touched.
+/// refuses; a rebase that isn't ours is never touched. `hook_free` marks a
+/// [`dates_only_plan`].
+#[allow(clippy::too_many_arguments)]
 async fn start_planned_rebase(
     repo: &str,
     git_dir: &Path,
     base: &str,
     expected: &PlanStart,
     envs: &[(&str, &str)],
+    hook_free: bool,
     start_timeout: std::time::Duration,
     abort_timeout: std::time::Duration,
 ) -> AppResult<()> {
-    let mut args: Vec<&str> = REBASE_START_ARGS.to_vec();
-    args.push(base);
+    let args = rebase_start_args(hook_free, base);
     let started = run_git_raw_env(Some(repo), &args, envs, start_timeout).await;
     let rebasing = rebase_in_progress(git_dir);
     let out = match started {
@@ -10772,6 +10829,7 @@ mod tests {
             base,
             expected,
             &envs,
+            false,
             DEFAULT_TIMEOUT,
             DEFAULT_TIMEOUT,
         )
@@ -10967,6 +11025,7 @@ mod tests {
             &base,
             &expected,
             &envs,
+            false,
             NO_BUDGET,
             DEFAULT_TIMEOUT,
         )
@@ -11526,6 +11585,7 @@ mod tests {
             &base,
             &expected,
             &envs,
+            false,
             DEFAULT_TIMEOUT,
             NO_BUDGET,
         )
@@ -11914,6 +11974,7 @@ mod tests {
             &base,
             &expected,
             &envs,
+            false,
             DEFAULT_TIMEOUT,
             DEFAULT_TIMEOUT,
         )
@@ -13572,7 +13633,8 @@ mod tests {
         }
     }
 
-    /// A dated step's note and post-rewrite mapping reach its FINAL commit.
+    /// A dated step's note reaches its FINAL commit, and so does its post-rewrite
+    /// mapping when the plan also drops a commit; a dates-only plan runs no post-rewrite.
     #[tokio::test]
     async fn a_dated_step_maps_its_commit_to_the_final_one() {
         for fast_forward in [true, false] {
@@ -13602,6 +13664,10 @@ mod tests {
                 git(&repo, &["notes", "show", "HEAD"]).await.trim(),
                 "note-x"
             );
+            if fast_forward {
+                assert!(!log.exists(), "a dates-only plan runs no post-rewrite");
+                continue;
+            }
             let log = std::fs::read_to_string(&log).expect("post-rewrite ran");
             let mapped: Vec<&str> = log
                 .lines()
@@ -14201,6 +14267,182 @@ mod tests {
                     "a replay reword still runs the hook"
                 );
             }
+        }
+    }
+
+    /// One negative per `RewriteStep` field and for `dropped`, beside the two shapes
+    /// that qualify.
+    #[test]
+    fn dates_only_plan_is_in_order_single_picks_with_a_date() {
+        let range = ["a".to_string(), "b".to_string()];
+        let d = Some(date(1767949200, 0));
+        let none: &[String] = &[];
+        assert!(
+            dates_only_plan(&[dated("a", d, d), dated("b", None, d)], none, &range),
+            "in-order dated picks"
+        );
+        assert!(
+            dates_only_plan(&[dated("a", d, None), pick("b")], none, &range),
+            "one dated pick plus a plain pick"
+        );
+        assert!(
+            !dates_only_plan(&[pick("b"), dated("a", d, d)], none, &range),
+            "a reorder with a date"
+        );
+        assert!(
+            !dates_only_plan(&[dated("b", d, d)], &["a".to_string()], &range),
+            "a drop with a date"
+        );
+        let reword = RewriteStep {
+            message: Some("reworded".into()),
+            ..dated("a", d, d)
+        };
+        assert!(
+            !dates_only_plan(&[reword, pick("b")], none, &range),
+            "a reword with a date"
+        );
+        let fold = RewriteStep {
+            hashes: vec!["a".into(), "b".into()],
+            ..dated("a", d, d)
+        };
+        assert!(
+            !dates_only_plan(&[fold], none, &range),
+            "a fold with a date"
+        );
+        let edit = RewriteStep {
+            edit: true,
+            ..dated("a", d, d)
+        };
+        assert!(
+            !dates_only_plan(&[edit, pick("b")], none, &range),
+            "an edit with a date"
+        );
+        assert!(
+            !dates_only_plan(&[pick("a"), pick("b")], none, &range),
+            "no date at all"
+        );
+        assert!(
+            !dates_only_plan(&[dated("a", d, d), pick("c")], none, &range),
+            "a hash outside the range order"
+        );
+    }
+
+    /// Only a dates-only plan prepends `NO_HOOKS`; every other plan's argv is unchanged.
+    #[test]
+    fn rebase_args_prepend_no_hooks_only_when_hook_free() {
+        let mut start = REBASE_START_ARGS.to_vec();
+        start.push("base");
+        assert_eq!(rebase_start_args(false, "base"), start);
+        let mut hook_free = NO_HOOKS.to_vec();
+        hook_free.extend(&start);
+        assert_eq!(rebase_start_args(true, "base"), hook_free);
+
+        assert_eq!(rebase_continue_args(false), REBASE_CONTINUE_ARGS.to_vec());
+        let mut hook_free = NO_HOOKS.to_vec();
+        hook_free.extend(REBASE_CONTINUE_ARGS);
+        assert_eq!(rebase_continue_args(true), hook_free);
+    }
+
+    /// A dates-only plan runs no hook on the pick replayed above its dated commit, nor
+    /// post-checkout or post-rewrite; a reword over the same range runs all three.
+    #[tokio::test]
+    async fn dates_only_plans_run_no_hooks_on_the_replayed_picks() {
+        for replay in [true, false] {
+            let (_dir, repo) = setup_repo(&format!("dates-only-hooks-{replay}")).await;
+            let base = rev(&repo, "HEAD").await;
+            let a = commit_at(
+                &repo,
+                Some("a.txt"),
+                "A subject",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            let b = commit_at(
+                &repo,
+                Some("b.txt"),
+                "B subject\n\nB body",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            let git_dir = Path::new(&repo).join(".git");
+            let fwd = |p: std::path::PathBuf| p.to_string_lossy().replace('\\', "/");
+            let hooks = fwd(git_dir.join("hooks"));
+            git(&repo, &["config", "core.hooksPath", &hooks]).await;
+            let rewrote = fwd(git_dir.join("post-rewrite-ran"));
+            let checked_out = fwd(git_dir.join("post-checkout-ran"));
+            write_hook(
+                &repo,
+                "prepare-commit-msg",
+                "printf 'Hooked: yes\\n' >> \"$1\"",
+            );
+            write_hook(
+                &repo,
+                "post-rewrite",
+                &format!("cat >/dev/null\n: > '{rewrote}'"),
+            );
+            write_hook(&repo, "post-checkout", &format!(": > '{checked_out}'"));
+            let ran = || {
+                [
+                    Path::new(&rewrote).exists(),
+                    Path::new(&checked_out).exists(),
+                ]
+            };
+            let original_b = raw_message(&repo, &b).await;
+            let state = AppState::default();
+            let run = |steps: Vec<RewriteStep>| {
+                let (state, repo, base) = (&state, repo.clone(), base.clone());
+                async move {
+                    if replay {
+                        rewrite_commits(state, &repo, &base, &steps, &[]).await
+                    } else {
+                        rebase_edit(state, repo, base, steps, None).await
+                    }
+                }
+            };
+
+            let d = Some(date(1767949200, 0));
+            run(vec![dated(&a, d, d), pick(&b)]).await.unwrap();
+            let b_new = rev(&repo, "HEAD").await;
+            assert_ne!(b_new, b, "replay={replay}: b was replayed");
+            assert_eq!(
+                raw_message(&repo, &b_new).await,
+                original_b,
+                "replay={replay}: the replayed pick keeps its message"
+            );
+            assert_eq!(
+                raw_dates(&repo, "HEAD~1").await,
+                "1767949200 +0000|1767949200 +0000",
+                "replay={replay}: a's dates land"
+            );
+            assert_eq!(
+                ran(),
+                [false, false],
+                "replay={replay}: post-rewrite, post-checkout"
+            );
+            assert!(
+                !git(&repo, &["log", "--format=%B", "HEAD"])
+                    .await
+                    .contains("Hooked:"),
+                "replay={replay}: no prepare-commit-msg trailer"
+            );
+
+            let a_new = rev(&repo, "HEAD~1").await;
+            let reword = RewriteStep {
+                message: Some("reworded".into()),
+                ..pick(&a_new)
+            };
+            run(vec![reword, pick(&b_new)]).await.unwrap();
+            assert!(
+                raw_message(&repo, "HEAD").await.contains("Hooked: yes"),
+                "replay={replay}: a reword plan's replayed pick runs the hook"
+            );
+            assert_eq!(
+                ran(),
+                [true, true],
+                "replay={replay}: a reword plan runs post-rewrite and post-checkout"
+            );
         }
     }
 

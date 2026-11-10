@@ -841,11 +841,12 @@ the failed part's line when one shows.
   asks once before going ahead. Rewritten commits you leave alone keep their author
   date, and Git stamps their committer date with the time of the rewrite. On a row set
   to **edit**, its dates are applied after the pause and replace any set by hand
-  during it. Changing only a commit's dates runs no hooks of its own and keeps its
-  message. Git still runs its pick hooks when the rewrite has to move that commit, and a
-  failing hook stops the rewrite; a row set to **edit** keeps what its pause leaves, a
-  hook's trailer included. A reword with dates runs hooks as a reword does, and the
-  commits replayed above an edited one are picked as usual, hooks included. A
+  during it. A rewrite that changes only dates runs no Git hooks at all, so every
+  commit it touches, the ones above a dated commit included, keeps its message exactly.
+  Once the plan also rewords, squashes, reorders, drops or edits, Git runs its pick
+  hooks on each commit it has to move, and a failing hook stops the rewrite; a row set
+  to **edit** keeps what its pause leaves, a hook's trailer included, and a reword with
+  dates runs hooks as a reword does. A
   "Result" count shows what you'll end up with. Reworded and squashed commits keep
   their original author; a squash keeps its first commit's author. With no **edit**,
   it applies all at once — a conflict rolls it back. If you choose **edit**, it starts
