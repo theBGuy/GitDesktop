@@ -152,22 +152,23 @@ the branch you're pulling, [a rebasing pull can drop a commit you'd
 already pushed there](/blog/pull-rebase-deleted-your-commit/).
 
 Rebasing does have one cost for work that never left your clone: it flattens
-merge commits, such as the ones an earlier `git pull` made, and replays only
-ordinary commits. A merge's conflict resolutions come back as conflicts
-to redo, but anything else you added to a merge commit disappears without
-warning. `git log --oneline --merges origin/main..` lists any such merges
-before you start rebasing your pulls. If one carries changes of its own,
-merge this time instead; even `git pull --rebase=merges` rebuilds the merge
-commit without them.
+merge commits, such as the ones an earlier `git pull` made, and replays
+only ordinary commits. A merge's conflict resolutions usually come back
+as conflicts to redo. They don't when the server already has your commits
+through someone else's merge: that merge's resolution silently replaces
+yours. Anything else you added to a merge commit disappears without warning.
+`git log --oneline --merges origin/main..`, with your own upstream in place
+of `origin/main`, lists any such merges before you start rebasing your
+pulls. If one carries changes of its own, merge this time instead; even
+`git pull --rebase=merges` rebuilds the merge commit without them.
 
 ## Fast-forward only says no
 
 The hint's third setting, `pull.ff only`, never makes a merge or a rebase
 on its own. When the branches have diverged, the pull refuses and leaves
-your branch where it was. As a default, it stops just the pulls that
-need a decision. Each capture from here until the Windows one starts
-after you pushed the previous result and you and your teammate both
-committed once more:
+your branch where it was. As a default, it stops just the pulls that need a
+decision. Up to the Windows section, each capture starts after you pushed
+the previous result and you and your teammate both committed once more:
 
 ```sh
 $ git config --global pull.ff only
