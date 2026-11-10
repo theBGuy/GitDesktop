@@ -72,7 +72,7 @@ import {
 } from "@/lib/git/api";
 import {
   AUTOSTASH_WRITES_FAMILY,
-  conflictPreviewKey,
+  conflictPreviewQueryKey,
   forgeFeatureReady,
   LOCAL_PR_WRITES_KEY,
   type LocalPrUpdateDiscardVars,
@@ -1042,7 +1042,11 @@ export function LocalPrView({
   }) {
     return Promise.all([
       queryClient.refetchQueries(
-        { queryKey: conflictPreviewKey(moved.repo), type: "all" },
+        {
+          queryKey: conflictPreviewQueryKey(moved.repo, moved.base, moved.head),
+          exact: true,
+          type: "all",
+        },
         { cancelRefetch: false },
       ),
       queryClient.refetchQueries(

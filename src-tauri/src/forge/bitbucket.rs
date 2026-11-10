@@ -3564,9 +3564,8 @@ async fn workspace_members(creds: &BbCredentials, ws: &str) -> AppResult<(Vec<Bb
 }
 
 /// The members walk over `fetch_page`, with one request's timeout as the whole walk's
-/// budget (`http`'s request ceiling mirrors `GLAB_NETWORK_TIMEOUT`). The budget is
-/// checked before each page after the first; a spent one fails the read as a timed-out
-/// request does, and a page in flight is never cancelled.
+/// budget. The budget is checked before each page after the first; a spent one fails
+/// the read as a timed-out request does, and a page in flight is never cancelled.
 async fn walk_workspace_members<F, Fut>(
     first_url: String,
     now: impl Fn() -> std::time::Instant,
@@ -3576,7 +3575,7 @@ where
     F: Fn(String) -> Fut + Copy,
     Fut: std::future::Future<Output = AppResult<BbPage<BbMembership>>>,
 {
-    let budget = crate::forge::glab::GLAB_NETWORK_TIMEOUT;
+    let budget = crate::forge::http::REQUEST_TIMEOUT;
     let start = now();
     let mut first_page = true;
     let (memberships, truncated) = bb_walk_pages(first_url, |url| {

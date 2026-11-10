@@ -15,17 +15,19 @@
 // (a node array mapped before the `return` and rendered as `{rows}`), and a cap
 // applied through a class constant (it reads as missing, so it needs an entry).
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  elementRanges,
   escapeRe,
   lineOf,
+  literalText,
+  loadCorpus,
   maskNonCode,
+  openingTags,
   ScanError,
-  sourceFiles,
+  srcEntries,
   tagEnd,
 } from "./lib/ts-mask.mjs";
 
@@ -72,137 +74,6 @@ const ALLOWLIST = {
     rationale: "the user's own configured MCP servers, a short list",
   },
 };
-
-/** Every .tsx under src/ outside the vendored primitives, keyed by
- *  repo-relative forward-slash path, LF-normalized. */
-function loadCorpus() {
-  const files = new Map();
-  for (const full of sourceFiles(`${ROOT}src`)) {
-    const rel = relative(ROOT, full).split("\\").join("/");
-    if (!rel.endsWith(".tsx") || rel.startsWith(VENDORED)) continue;
-    const text = readFileSync(full, "utf8");
-    if (text.includes("\0") || text.includes("\uFFFD")) {
-      throw new ScanError(`${rel}: unreadable bytes`);
-    }
-    files.set(rel, text.replace(/\r\n/g, "\n"));
-  }
-  return files;
-}
-
-/** The [start, end) offset range of every `<name …>…</name>` (or
- *  self-closing `<name … />`) element in `masked`. Offsets are UTF-16 code
- *  units, shared by the raw text the mask came from. */
-function elementRanges(rel, text, masked, name) {
-  const tail = "(?![\\w.$-])";
-  const open = new RegExp(`<${escapeRe(name)}${tail}`, "g");
-  const either = new RegExp(`<(/?)${escapeRe(name)}${tail}`, "g");
-  const ranges = [];
-  for (const m of masked.matchAll(open)) {
-    const end = tagEnd(masked, m.index);
-    if (end < 0) {
-      throw new ScanError(
-        `${rel}:${lineOf(text, m.index)}: <${name} tag never ends`,
-      );
-    }
-    if (masked[end - 1] === "/") {
-      ranges.push([m.index, end + 1]);
-      continue;
-    }
-    let depth = 1;
-    either.lastIndex = end + 1;
-    let close = -1;
-    while (depth > 0) {
-      const n = either.exec(masked);
-      if (!n) {
-        throw new ScanError(
-          `${rel}:${lineOf(text, m.index)}: <${name} has no </${name}>`,
-        );
-      }
-      if (n[1]) {
-        depth--;
-        close = n.index;
-      } else {
-        const e = tagEnd(masked, n.index);
-        if (e < 0) {
-          throw new ScanError(
-            `${rel}:${lineOf(text, n.index)}: nested <${name} tag never ends`,
-          );
-        }
-        if (masked[e - 1] !== "/") depth++;
-      }
-    }
-    const closeEnd = masked.indexOf(">", close);
-    if (closeEnd < 0) {
-      throw new ScanError(
-        `${rel}:${lineOf(text, close)}: </${name} never ends`,
-      );
-    }
-    ranges.push([m.index, closeEnd + 1]);
-  }
-  return ranges;
-}
-
-/** The text of every string literal and template-literal text segment in
- *  `masked`'s [from, to) range, read from the raw `text`: masking keeps quote
- *  delimiters and blanks comments whole, so a comment's words never count. */
-function literalText(text, masked, from, to) {
-  const out = [];
-  const braces = [];
-  const template = (start) => {
-    let k = start;
-    while (
-      k < to &&
-      masked[k] !== "`" &&
-      !(masked[k] === "$" && masked[k + 1] === "{")
-    )
-      k++;
-    if (k >= to) throw new ScanError("a template literal runs past its tag");
-    out.push(text.slice(start, k));
-    if (masked[k] === "`") return k + 1;
-    braces.push(0);
-    return k + 2;
-  };
-  let i = from;
-  while (i < to) {
-    const c = masked[i];
-    if (c === '"' || c === "'") {
-      const j = masked.indexOf(c, i + 1);
-      if (j < 0 || j >= to) throw new ScanError("a string runs past its tag");
-      out.push(text.slice(i + 1, j));
-      i = j + 1;
-    } else if (c === "`") {
-      i = template(i + 1);
-    } else if (braces.length > 0 && c === "{") {
-      braces[braces.length - 1]++;
-      i++;
-    } else if (braces.length > 0 && c === "}") {
-      if (braces[braces.length - 1] === 0) {
-        braces.pop();
-        i = template(i + 1);
-      } else {
-        braces[braces.length - 1]--;
-        i++;
-      }
-    } else i++;
-  }
-  return out.join(" ");
-}
-
-/** Every JSX opening tag in masked's [from, to) range, as [start, end) with
- *  end just past its `>`. A tag that never ends throws. */
-function openingTags(rel, text, masked, from, to) {
-  const tags = [];
-  const re = /<[A-Za-z][\w.]*/g;
-  re.lastIndex = from;
-  for (let m = re.exec(masked); m && m.index < to; m = re.exec(masked)) {
-    const end = tagEnd(masked, m.index);
-    if (end < 0 || end >= to) {
-      throw new ScanError(`${rel}:${lineOf(text, m.index)}: tag never ends`);
-    }
-    tags.push([m.index, end + 1]);
-  }
-  return tags;
-}
 
 /** Whether one tag's literal class tokens carry both the cap and the scroll. */
 function cappedTag(literal) {
@@ -321,7 +192,10 @@ function problems(files, allowlist = ALLOWLIST) {
   return out;
 }
 
-const CORPUS = loadCorpus();
+// Every .tsx under src/ outside the vendored primitives.
+const CORPUS = loadCorpus(
+  srcEntries(ROOT, (rel) => rel.endsWith(".tsx") && !rel.startsWith(VENDORED)),
+);
 
 test("every popover popup that maps rows caps its height and scrolls", () => {
   assert.deepEqual(problems(CORPUS), []);

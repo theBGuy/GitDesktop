@@ -16,7 +16,12 @@ import {
   gitStatus,
   gitUpdateBranchFrom,
 } from "@/lib/git/api";
-import { useMergeLocalPr, useUpdateBranchFrom } from "@/lib/git/queries";
+import {
+  conflictPreviewKey,
+  conflictPreviewQueryKey,
+  useMergeLocalPr,
+  useUpdateBranchFrom,
+} from "@/lib/git/queries";
 import type {
   BranchComparison,
   CommitSummary,
@@ -193,6 +198,7 @@ function renderView(id = "a") {
   const result = render(ui(id));
   return {
     ...result,
+    client,
     showPr: (pid: string) => {
       select(pid);
       result.rerender(ui(pid));
@@ -589,6 +595,41 @@ describe("LocalPrView merge strip", () => {
     const s = await findStrip("No conflicts with main.");
     expect(screen.queryByRole("button", { name: "Update branch" })).toBeNull();
     expect(document.activeElement).toBe(s);
+  });
+
+  it("a finished update re-reads only its own PR's prediction", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    vi.mocked(gitUpdateBranchFrom).mockResolvedValue({
+      outcome: "merge",
+      holder: null,
+    });
+    const view = renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    // Another PR's prediction, read once and cached with no observer on screen.
+    await act(() =>
+      view.client.prefetchQuery({
+        queryKey: conflictPreviewQueryKey(REPO, "main", "other"),
+        queryFn: () => gitConflictPreview(REPO, "main", "other"),
+        networkMode: "always",
+      }),
+    );
+    vi.mocked(gitConflictPreview).mockClear();
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(0));
+    await user.click(screen.getByRole("button", { name: "Update branch" }));
+    await findStrip("No conflicts with main.");
+    await settle();
+    const heads = vi.mocked(gitConflictPreview).mock.calls.map((c) => c[2]);
+    expect(heads).toContain("feature");
+    expect(heads).not.toContain("other");
+    // Control: a repo-wide prefix refetch would have re-run the other PR's.
+    await act(() =>
+      view.client.refetchQueries({
+        queryKey: conflictPreviewKey(REPO),
+        type: "all",
+      }),
+    );
+    expect(gitConflictPreview).toHaveBeenCalledWith(REPO, "main", "other");
   });
 
   it("an update started outside the strip leaves the window open, offering the update again", async () => {

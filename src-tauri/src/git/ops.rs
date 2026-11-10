@@ -5985,13 +5985,17 @@ fn pr_resolve_prefix(remote: &str, number: u64) -> String {
 /// `/var/…` symlink, and a Windows runner's 8.3 short name where the caller holds the
 /// long one — so each side is canonicalized (`canonical_wt_path`) before comparing.
 /// The normalize-only spelling is a second chance for a path that no longer exists,
-/// where `canonicalize` fails on one side only. The separator after `base` is
-/// required: a bare prefix match would accept a SIBLING `<base>evil/…`.
+/// where `canonicalize` fails on one side only. The third compares the path as given
+/// against the resolved base: git lists a link at a leaf under its parents' resolved
+/// spelling, and canonicalizing the link itself would follow it out of the root. The
+/// separator after `base` is required: a bare prefix match would accept a SIBLING
+/// `<base>evil/…`.
 fn is_in_a_worktree_root(base: &Path, path: &str) -> bool {
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     let base_str = base.to_string_lossy();
     root_shaped(&canonical_wt_path(path), &canonical_wt_path(&base_str))
         || root_shaped(&normalize_wt_path(path), &normalize_wt_path(&base_str))
+        || root_shaped(&normalize_wt_path(path), &canonical_wt_path(&base_str))
 }
 
 /// The root shape over ONE spelling: both sides already spelled the same way.
@@ -21347,6 +21351,15 @@ detached
         std::os::unix::fs::symlink(target, link).unwrap();
     }
 
+    /// Whether `listed` holds its own entry for `<root>/<name>`. Git spells that entry
+    /// under the root's resolved path, and the leaf is never resolved: a link there
+    /// would match its target's entry instead, as [`is_listed_worktree`] does.
+    fn lists_leaf(listed: &[String], root: &Path, name: &str) -> bool {
+        use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+        let leaf = format!("{}/{name}", canonical_wt_path(&root.to_string_lossy()));
+        listed.iter().any(|l| normalize_wt_path(l) == leaf)
+    }
+
     #[tokio::test]
     async fn local_pr_update_clean_start_refuses_a_session_that_took_head_during_the_merge() {
         let f = UpdateFixture::new("lpu-late-session", false).await;
@@ -21648,15 +21661,12 @@ detached
         update_directory_link(wt, &victim);
         // Control: the spelled form still gives both the shape and the membership, which
         // classified this path Registered before an existing leaf had to resolve to it.
-        let listed = git(&f.repo, &["worktree", "list", "--porcelain"]).await;
-        let spelled = normalize_wt_path(&format!("{}/gd-resolve-{id}", f.root().display()));
+        let listed =
+            parse_worktree_paths(&git(&f.repo, &["worktree", "list", "--porcelain"]).await);
+        let name = format!("gd-resolve-{id}");
+        let spelled = normalize_wt_path(&format!("{}/{name}", f.root().display()));
         assert_eq!(normalize_wt_path(wt), spelled);
-        assert!(
-            parse_worktree_paths(&listed)
-                .iter()
-                .any(|l| normalize_wt_path(l) == spelled),
-            "{listed}"
-        );
+        assert!(lists_leaf(&listed, &f.root(), &name), "{listed:?}");
 
         let err = f.finish(&state, &out).await.unwrap_err();
         assert_eq!(
@@ -22145,7 +22155,8 @@ detached
         update_directory_link(&wt, &victim);
         // Control: the link path is still in the registry under its spelled form.
         let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
-        assert!(is_listed_worktree(&listed, &wt), "{listed:?}");
+        let name = format!("gd-resolve-{id}");
+        assert!(lists_leaf(&listed, &root, &name), "{listed:?}");
 
         let Err(err) = finish_local_pr_merge(
             &state,
@@ -22548,9 +22559,10 @@ detached
         update_directory_link(&relinked, &victim);
         // Control: the link is still listed and passes the sweep's shape and keep filters.
         let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
-        assert!(is_listed_worktree(&listed, &relinked), "{listed:?}");
+        let (link_name, plain_name) = ("gd-resolve-0123456789ab", "gd-resolve-ba9876543210");
+        assert!(lists_leaf(&listed, &root, link_name), "{listed:?}");
         let picked = orphaned_resolve_worktrees(&wt_base, &listed, &[]);
-        assert!(is_listed_worktree(&picked, &relinked), "{picked:?}");
+        assert!(lists_leaf(&picked, &root, link_name), "{picked:?}");
         // git 2.51.1 refuses a removal spelled as the link's absolute path (a relative
         // spelling took the checkout, measured), so the checkout surviving cannot by
         // itself show that no removal was aimed at the link. This assertion is the pin,
@@ -22578,9 +22590,9 @@ detached
             std::fs::symlink_metadata(&relinked).is_ok(),
             "the link stays"
         );
-        assert!(is_listed_worktree(&listed, &relinked), "{listed:?}");
+        assert!(lists_leaf(&listed, &root, link_name), "{listed:?}");
         assert!(!Path::new(&plain).exists(), "an ordinary orphan is removed");
-        assert!(!is_listed_worktree(&listed, &plain), "{listed:?}");
+        assert!(!lists_leaf(&listed, &root, plain_name), "{listed:?}");
     }
 
     /// A leaf named with a full uuid under the same root is swept like a minted one.
@@ -22596,6 +22608,8 @@ detached
             .into_owned();
         git(&repo, &["worktree", "add", "--detach", &legacy, "HEAD"]).await;
         let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
+        let name = format!("gd-resolve-{id}");
+        assert!(lists_leaf(&listed, &root, &name), "{listed:?}");
         let picked = orphaned_resolve_worktrees(&wt_base, &listed, &[]);
         assert!(is_listed_worktree(&picked, &legacy), "{picked:?}");
         // Control: the minted-id rule `check_update_worktree` applies rejects it, so only
@@ -22618,7 +22632,7 @@ detached
 
         assert!(!Path::new(&legacy).exists(), "the uuid leaf is removed");
         let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
-        assert!(!is_listed_worktree(&listed, &legacy), "{listed:?}");
+        assert!(!lists_leaf(&listed, &root, &name), "{listed:?}");
     }
 
     /// An in-progress resolve in a legacy checkout-keyed root is adopted as-is: a
@@ -22866,6 +22880,7 @@ detached
     #[cfg(windows)]
     #[test]
     fn worktree_root_shape_matches_across_a_linked_spelling() {
+        use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
         let tmp = tempfile::tempdir().expect("create temp dir");
         let real = tmp.path().join("real");
         let leaf = Path::new("0123456789abcdef").join("gd-pr-resolve-origin-1-abc");
@@ -22898,6 +22913,30 @@ detached
         assert!(
             is_in_a_worktree_root(&real, &child_link),
             "real base vs linked child"
+        );
+        // A leaf that is itself a link out of the root, spelled the resolved way git
+        // lists it, against the linked base.
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let relinked = dunce::canonicalize(&real).unwrap();
+        let relinked = relinked
+            .join("0123456789abcdef")
+            .join("gd-resolve-0123456789ab");
+        let relinked = relinked.to_string_lossy().into_owned();
+        update_directory_link(&relinked, &outside.to_string_lossy());
+        // Control: neither side's resolved spelling nor both as given places it.
+        let link_str = link.to_string_lossy();
+        assert!(!root_shaped(
+            &canonical_wt_path(&relinked),
+            &canonical_wt_path(&link_str)
+        ));
+        assert!(!root_shaped(
+            &normalize_wt_path(&relinked),
+            &normalize_wt_path(&link_str)
+        ));
+        assert!(
+            is_in_a_worktree_root(&link, &relinked),
+            "linked base vs relinked leaf"
         );
         // A sibling sharing the base's prefix is still refused through either.
         let sibling = tmp.path().join("realevil").join(&leaf);

@@ -472,7 +472,9 @@ function PrLoadingFrame({
         {PR_SWITCH_LOADING_REASON}
       </span>
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">
+        {/* A heading holding only the hidden skeleton is announced empty. */}
         <DetailTitleRow
+          headingAs={title === undefined ? "div" : "h2"}
           heading={
             title === undefined ? (
               <Skeleton

@@ -5,17 +5,27 @@
 // class sets as one string literal anywhere under src/ (tests included: a test
 // needing the old markup joins its classes at runtime), and the component's
 // purity, since its layout flip must stay pure CSS and never remount the actions.
+// A roster title row whose heading can hold a loading Skeleton sets `headingAs`,
+// since a heading holding only the hidden skeleton is announced empty.
 // Not covered: headers on the spacer pattern (`flex items-start gap-2` plus a
 // `flex-1` spacer span: DiscussionView, TagDetailView's release and tag
 // headers), class tokens split across `cn()` arguments, and class strings built
 // at runtime.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { maskNonCode, ScanError, sourceFiles } from "./lib/ts-mask.mjs";
+import {
+  elementRanges,
+  lineOf,
+  literalStrings,
+  loadCorpus,
+  maskNonCode,
+  openingTags,
+  readable,
+  ScanError,
+  srcEntries,
+} from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const COMPONENT = "src/components/detail-title-row.tsx";
@@ -48,84 +58,51 @@ const IMPURE = [
 const NUL = String.fromCharCode(0);
 const REPLACEMENT = String.fromCharCode(0xfffd);
 
-/** A file's text with CRLF folded, or a ScanError when it holds a NUL or a
- *  decoding replacement character: the scan can't read it, so it fails closed. */
-function readable(rel, text) {
-  if (text.includes(NUL) || text.includes(REPLACEMENT)) {
-    throw new ScanError(`${rel}: unreadable bytes`);
-  }
-  return text.replace(/\r\n/g, "\n");
-}
-
-/** Every .ts/.tsx under src/ as `[path, text]`, the path repo-relative with
- *  forward slashes. */
-function* srcFiles() {
-  for (const full of sourceFiles(`${ROOT}src`)) {
-    const rel = relative(ROOT, full).split("\\").join("/");
-    yield [rel, readFileSync(full, "utf8")];
-  }
-}
-
-/** The scanned corpus; `entries` replaces the src/ walk for the controls. */
-function loadCorpus(entries = srcFiles()) {
-  const files = new Map();
-  for (const [rel, text] of entries) files.set(rel, readable(rel, text));
-  return files;
-}
-
 const mask = (rel, text) => maskNonCode(text, rel.endsWith(".tsx"));
 
 /** The text of every string literal and template-literal text segment in
  *  `text`, read through the masked source so comments and JSX text never
- *  count. Offsets are UTF-16 code units throughout. */
+ *  count. */
 function stringLiterals(rel, text) {
-  const masked = mask(rel, text);
-  const out = [];
-  const braces = [];
-  const template = (from) => {
-    let k = from;
-    while (
-      k < masked.length &&
-      masked[k] !== "`" &&
-      !(masked[k] === "$" && masked[k + 1] === "{")
-    )
-      k++;
-    if (k >= masked.length) throw new Error(`${rel}: unclosed template`);
-    out.push(text.slice(from, k));
-    if (masked[k] === "`") return k + 1;
-    braces.push(0);
-    return k + 2;
-  };
-  let i = 0;
-  while (i < masked.length) {
-    const c = masked[i];
-    if (c === '"' || c === "'") {
-      const j = masked.indexOf(c, i + 1);
-      if (j < 0) throw new Error(`${rel}: unclosed string at ${i}`);
-      out.push(text.slice(i + 1, j));
-      i = j + 1;
-    } else if (c === "`") {
-      i = template(i + 1);
-    } else if (braces.length > 0 && c === "{") {
-      braces[braces.length - 1]++;
-      i++;
-    } else if (braces.length > 0 && c === "}") {
-      if (braces[braces.length - 1] === 0) {
-        braces.pop();
-        i = template(i + 1);
-      } else {
-        braces[braces.length - 1]--;
-        i++;
-      }
-    } else i++;
+  try {
+    return literalStrings(text, mask(rel, text));
+  } catch (e) {
+    if (e instanceof ScanError) throw new ScanError(`${rel}: ${e.message}`);
+    throw e;
   }
-  return out;
 }
 
 const hasAll = (literal, tokens) => {
   const set = new Set(literal.split(/\s+/));
   return tokens.every((t) => set.has(t));
 };
+
+/** Every roster title row whose element holds a `<Skeleton`, and the ones of
+ *  those whose opening tag carries no `headingAs`. */
+function skeletonHeadings(files) {
+  const sites = [];
+  const problems = [];
+  for (const rel of Object.keys(ROSTER)) {
+    const text = files.get(rel);
+    if (text === undefined) continue;
+    const masked = mask(rel, text);
+    for (const [from, to] of elementRanges(
+      rel,
+      text,
+      masked,
+      "DetailTitleRow",
+    )) {
+      if (!/<Skeleton\b/.test(masked.slice(from, to))) continue;
+      const at = `${rel}:${lineOf(text, from)}`;
+      sites.push(at);
+      const [[s, e]] = openingTags(rel, text, masked, from, to);
+      if (!/\sheadingAs\s*=/.test(masked.slice(s, e))) {
+        problems.push(`${at}: a skeleton heading without headingAs`);
+      }
+    }
+  }
+  return { sites, problems };
+}
 
 const adopterCount = (rel, text) =>
   (mask(rel, text).match(/<DetailTitleRow\b/g) ?? []).length;
@@ -186,7 +163,7 @@ function purityProblems(text) {
   );
 }
 
-const CORPUS = loadCorpus();
+const CORPUS = loadCorpus(srcEntries(ROOT));
 
 test("each roster file renders its expected DetailTitleRow count", () => {
   assert.deepEqual(rosterProblems(CORPUS), []);
@@ -203,6 +180,21 @@ test("no src string literal spells the old title classes", () => {
 test("DetailTitleRow stays stateless", () => {
   assert.ok(CORPUS.has(COMPONENT), `${COMPONENT} missing`);
   assert.deepEqual(purityProblems(CORPUS.get(COMPONENT)), []);
+});
+
+test("a skeleton-holding title row never renders an empty heading", () => {
+  const { sites, problems } = skeletonHeadings(CORPUS);
+  assert.deepEqual(problems, []);
+  // The PR and issue loading frames; zero sites would make the pin vacuous.
+  assert.equal(sites.length, 2, sites.join(", "));
+  const PR = "src/features/pulls/RemotePrView.tsx";
+  const anchor = 'headingAs={title === undefined ? "div" : "h2"}';
+  assert.equal(CORPUS.get(PR).split(anchor).length, 2, "the PR frame's arm");
+  const dropped = new Map([
+    ...CORPUS,
+    [PR, CORPUS.get(PR).replace(anchor, "")],
+  ]);
+  assert.equal(skeletonHeadings(dropped).problems.length, 1, "control");
 });
 
 test("mutation controls go red", () => {

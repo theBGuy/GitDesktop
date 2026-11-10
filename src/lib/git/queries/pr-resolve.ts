@@ -293,10 +293,16 @@ export function useFindRemotePrResolve(
 }
 
 /** Every conflict prediction of `repo`, whatever its branches: the prefix
- *  {@link useConflictPreview} keys under, and the one a local-PR update re-reads
- *  before it settles. */
+ *  {@link useConflictPreview} keys under, which merge writes invalidate. */
 export const conflictPreviewKey = (repo: string) =>
   ["repo", repo, "conflict-preview"] as const;
+
+/** One `base`/`head` prediction's exact key under {@link conflictPreviewKey}. */
+export const conflictPreviewQueryKey = (
+  repo: string,
+  base: string,
+  head: string,
+) => [...conflictPreviewKey(repo), base, head] as const;
 
 /** Pre-merge conflict prediction for a local PR's `base`/`head`, keyed under the
  *  repo so merge mutations invalidate it. Gate with `enabled`: its caller runs it
@@ -308,7 +314,7 @@ export function useConflictPreview(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: [...conflictPreviewKey(repo), base, head] as const,
+    queryKey: conflictPreviewQueryKey(repo, base, head),
     queryFn: () => api.gitConflictPreview(repo, base, head),
     enabled: enabled && base !== "" && head !== "",
     staleTime: 15_000,
