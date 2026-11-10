@@ -1,8 +1,12 @@
 import {
+  hashKey,
+  type InfiniteData,
   useInfiniteQuery,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useEffectEvent, useMemo, useRef } from "react";
+import { appErrorDetail } from "@/lib/error-summary";
 import {
   keepPreviousDataForKeyAxes,
   prChecksRecheck,
@@ -25,6 +29,7 @@ import { invoke } from "@/lib/tauri/invoke";
 import {
   listRunsPollIntervalMs,
   type PollRun,
+  RUN_POLL_SLOW_MS,
   runDetailPollIntervalMs,
   runJobsPollIntervalMs,
   runsPollIntervalMs,
@@ -54,6 +59,52 @@ export interface WorkflowRun {
    *  re-dispatch needs. 0 on GitLab/Bitbucket rows: neither forge has a
    *  per-workflow concept (one pipeline config per project). */
   workflowDatabaseId: number;
+  /** Who started the run; null where the provider's list payload names no one
+   *  (always on GitLab). */
+  actor: RunActor | null;
+}
+
+/** `id` is the value the actor facet filters on (GitHub login, braced Bitbucket
+ *  uuid); `name` is what a row shows. */
+export interface RunActor {
+  name: string;
+  id: string;
+}
+
+/** Server-side facets for one page of runs. The Rust side refuses unknown keys, so
+ *  these camelCase spellings are the wire contract. `workflowId` is GitHub-only;
+ *  GitLab and Bitbucket refuse it. */
+export interface RunFilters {
+  branch?: string;
+  workflowId?: number;
+  event?: string;
+  status?: string;
+  actor?: string;
+}
+
+export type WorkflowInputKind =
+  | "string"
+  | "choice"
+  | "boolean"
+  | "number"
+  | "environment";
+
+/** One `workflow_dispatch` input, in file order. `default` and `options` are the
+ *  yml's raw scalar text. */
+export interface WorkflowInput {
+  name: string;
+  type: WorkflowInputKind;
+  description: string | null;
+  default: string | null;
+  required: boolean;
+  options: string[];
+}
+
+/** One workflow's probe answer at a ref. `inputs` null = the file wasn't parsed or
+ *  didn't parse: the inputs are unknown, never "none". */
+export interface DispatchProbe {
+  declared: boolean;
+  inputs: WorkflowInput[] | null;
 }
 
 export interface RunStep {
@@ -136,19 +187,42 @@ export const forgeCiRunList = (
   });
 
 /** One page of runs (`page` is 1-based), plus the provider's total and whether more
- *  remain — the paged read behind the Actions panel's Load more. */
+ *  remain — the paged read behind the Actions panel's Load more. `filters.branch`
+ *  wins over `branch` when both are set. */
 export const forgeCiRunPage = (
   repoPath: string,
   limit: number,
   page: number,
   branch?: string,
+  filters?: RunFilters,
 ) =>
   invoke<CiRunPage>("forge_ci_run_page", {
     repoPath,
     limit,
     page,
     branch: branch?.trim() || null,
+    filters: filters ? normalizeRunFilters(filters) : null,
   });
+
+/** Drops undefined, empty and whitespace-only strings, trims the rest, and keeps
+ *  `workflowId` only when it is a positive safe integer. The result is a fresh
+ *  object with its keys in the fixed order branch, workflowId, event, status,
+ *  actor, so equal inputs give deep-equal results and one query-key hash. */
+export function normalizeRunFilters(f: RunFilters): RunFilters {
+  const out: RunFilters = {};
+  const branch = f.branch?.trim();
+  if (branch) out.branch = branch;
+  const id = f.workflowId;
+  if (id !== undefined && Number.isSafeInteger(id) && id > 0)
+    out.workflowId = id;
+  const event = f.event?.trim();
+  if (event) out.event = event;
+  const status = f.status?.trim();
+  if (status) out.status = status;
+  const actor = f.actor?.trim();
+  if (actor) out.actor = actor;
+  return out;
+}
 
 export const forgeCiRunView = (repoPath: string, runId: number | string) =>
   invoke<RunDetail>("forge_ci_run_view", { repoPath, runId: String(runId) });
@@ -234,10 +308,31 @@ export const ghWorkflowList = (repoPath: string) =>
 /** Per-workflow workflow_dispatch presence at a ref, keyed by String(workflow.id).
  *  A MISSING key means the probe couldn't tell — callers fail open (keep offering). */
 export const ghWorkflowDispatchable = (repoPath: string, gitRef: string) =>
-  invoke<Record<string, boolean>>("gh_workflow_dispatchable", {
+  invoke<Record<string, DispatchProbe>>("gh_workflow_dispatchable", {
     repoPath,
     gitRef,
   });
+
+/** The dispatch probe's query key: the one spelling the hook and any
+ *  invalidation of it share. */
+export const dispatchableKey = (repoPath: string, gitRef: string) =>
+  ["repo", repoPath, "actions-dispatchable", gitRef] as const;
+
+/** The one lead `gh_workflow_run`'s input-422 humanizer writes (github/actions.rs);
+ *  pinned byte-equal on both sides by scripts/dispatch-inputs-lead.test.mjs. */
+export const DISPATCH_INPUTS_REJECTED_LEAD = "Workflow inputs rejected: ";
+
+/** Whether a failed dispatch was GitHub refusing the INPUTS (an undeclared input,
+ *  or a required one not sent) rather than the ref or trigger: a serialized
+ *  AppError of kind "gh" whose detail starts with the lead above. */
+export function isDispatchInputsError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { kind?: unknown; message?: unknown };
+  if (e.kind !== "gh" || typeof e.message !== "string") return false;
+  return appErrorDetail("gh", e.message).startsWith(
+    DISPATCH_INPUTS_REJECTED_LEAD,
+  );
+}
 
 /** Start a run: GitHub dispatches `workflow` on the ref with `inputs`; GitLab runs
  *  a new pipeline on the ref with `inputs` as variables (send `workflow` empty);
@@ -256,6 +351,10 @@ export const forgeBbCustomPipelines = (repoPath: string) =>
   invoke<string[]>("forge_bb_custom_pipelines", { repoPath });
 
 // ── Queries ──────────────────────────────────────────────────────────────────
+
+/** The paged run list's placeholder axes: repo plus the family at key[3]. The
+ *  filters object at key[4] is never an axis (axes compare with `===`). */
+const RUNS_PAGED_AXES = [[3, "runs-paged"]] as const;
 
 /** Polls at `listRunsPollIntervalMs` while a listed run is active, otherwise
  *  stays idle, and an errored read stops polling until a retry, invalidation,
@@ -283,19 +382,69 @@ export function useWorkflowRuns(
  *  `active` (the Actions tab being visible) gates the fetch so a hidden tab stops
  *  fetching; the key stays inside the `["repo", repo, "actions"]` subtree the panel's
  *  mutations invalidate. Page 1 polls at `listRunsPollIntervalMs`, and an errored
- *  read (a refresh or a Load more) stops it, as in {@link useWorkflowRuns}. */
+ *  read (a refresh or a Load more) stops it, as in {@link useWorkflowRuns}. A
+ *  facet change keeps the previous rows as placeholder within the repo; callers
+ *  gate derived UI on `!isPlaceholderData`. */
 export function useWorkflowRunPages(
   repo: string,
   enabled: boolean,
   active: boolean,
-  branch?: string,
+  filters: RunFilters = {},
 ) {
-  // Normalize once: the key and the wire value must be the same string, or two
-  // spellings of one branch would each get their own cache entry.
-  const b = branch?.trim() || "";
-  return useInfiniteQuery({
-    queryKey: ["repo", repo, "actions", "runs-paged", b] as const,
-    queryFn: ({ pageParam }) => forgeCiRunPage(repo, 40, pageParam, b),
+  const queryClient = useQueryClient();
+  // Normalize once: the key and the wire value must be the same object, or two
+  // spellings of one facet set would each get their own cache entry.
+  const normalized = normalizeRunFilters(filters);
+  const queryKey = ["repo", repo, "actions", "runs-paged", normalized] as const;
+  const hash = hashKey(queryKey);
+  const statusFacet = normalized.status !== undefined;
+  const departing = useRef<typeof queryKey | null>(null);
+  // A facet left with several pages loaded keeps only page 1, marked stale, so a
+  // return refetches one page instead of replaying every loaded one.
+  const trimDeparted = useEffectEvent((repoNow: string, hashNow: string) => {
+    const prev = departing.current;
+    departing.current = queryKey;
+    if (!prev || prev[1] !== repoNow || hashKey(prev) === hashNow) return;
+    // An in-flight Load more would land its snapshot pages over the trim. Cancel
+    // reverts the entry synchronously and drops the late page; the queryFn never
+    // reads `signal`, so the IPC itself runs on and its answer is discarded.
+    // Only a Load more: a cancelled first read reverts to pending with nothing
+    // scheduled, stranding another observer of the key (the facet-free glyph read)
+    // without rows. The fetchMore marker is how query-core itself tells the two apart.
+    const state = queryClient
+      .getQueryCache()
+      .find({ queryKey: prev, exact: true })?.state;
+    if (
+      state !== undefined &&
+      state.fetchStatus !== "idle" &&
+      state.fetchMeta?.fetchMore?.direction === "forward"
+    ) {
+      void queryClient.cancelQueries({ queryKey: prev, exact: true });
+    }
+    const data =
+      queryClient.getQueryData<InfiniteData<CiRunPage, number>>(prev);
+    if (!data || data.pages.length <= 1) return;
+    queryClient.setQueryData<InfiniteData<CiRunPage, number>>(prev, {
+      pages: data.pages.slice(0, 1),
+      pageParams: data.pageParams.slice(0, 1),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: prev,
+      exact: true,
+      refetchType: "none",
+    });
+  });
+  const result = useInfiniteQuery({
+    queryKey,
+    queryFn: ({ pageParam }) =>
+      forgeCiRunPage(repo, 40, pageParam, undefined, normalized),
+    // A stable function: react-query re-serves the placeholder it already showed
+    // only while this identity holds, so trimming the departed entry can't shrink
+    // rows already on screen.
+    placeholderData: useMemo(
+      () => keepPreviousDataForKeyAxes(repo, RUNS_PAGED_AXES),
+      [repo],
+    ),
     initialPageParam: 1,
     getNextPageParam: (last, pages) =>
       last.hasMore ? pages.length + 1 : undefined,
@@ -315,16 +464,22 @@ export function useWorkflowRunPages(
       (query.state.data?.pages.length ?? 0) > 1
         ? Number.POSITIVE_INFINITY
         : 10_000,
+    // A status facet can filter to conclusions only, where the ladder sees no
+    // active row and would stop; keep a slow poll so newly finished runs appear.
     refetchInterval: (query) => {
       const pages = query.state.data?.pages ?? [];
-      return (
-        query.state.status !== "error" &&
-        pages.length === 1 &&
-        listRunsPollIntervalMs(pages[0].runs, Date.now())
-      );
+      if (query.state.status === "error" || pages.length !== 1) return false;
+      const ladder = listRunsPollIntervalMs(pages[0].runs, Date.now());
+      return statusFacet ? ladder || RUN_POLL_SLOW_MS : ladder;
     },
     refetchOnWindowFocus: (query) => (query.state.data?.pages.length ?? 0) <= 1,
   });
+  // Declared after the query so its observer has moved to the new key, with the
+  // departed rows as placeholder, before the departed entry is trimmed.
+  useEffect(() => {
+    trimDeparted(repo, hash);
+  }, [repo, hash]);
+  return result;
 }
 
 export function useRunDetail(
@@ -488,7 +643,7 @@ export function useWorkflowDispatchable(
     // Deliberately OUTSIDE the `["repo", repo, "actions"]` subtree the Actions
     // mutations invalidate: dispatch/re-run/cancel can't change a workflow's trigger
     // declarations, and a refetch here re-runs the whole per-workflow fan-out.
-    queryKey: ["repo", repo, "actions-dispatchable", gitRef] as const,
+    queryKey: dispatchableKey(repo, gitRef),
     queryFn: () => ghWorkflowDispatchable(repo, gitRef),
     enabled: enabled && gitRef !== "",
     staleTime: 5 * 60_000,

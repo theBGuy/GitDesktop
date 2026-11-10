@@ -3131,8 +3131,17 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   loading older runs pauses the auto-refresh, and **Refresh** updates everything
   you've loaded. **Load more** at the bottom pages older runs in, all the way back
   through the repository's history, and shows GitHub's total run count while older
-  pages remain. Filter by text or scope to the current branch; scoped to a branch,
-  GitHub pages up to 1,000 runs, and the count reads 1,000+ once there are more.
+  pages remain. **Filter** the list from the funnel beside the search box by
+  **workflow, event, status, branch, or actor** (each filter shows as a chip you can
+  remove; **Clear filters** drops them all, from the chips or the command palette), or
+  press **This branch** for the current branch; the search box narrows the loaded rows
+  by text. Filtering by branch, event, status, or actor caps what GitHub pages at 1,000
+  runs, so the count reads 1,000+ once there are more; a workflow filter alone shows
+  the full count. A **Workflows** section at the top of the list shows each workflow
+  with its latest run's status when that run is among the most recent (pick one to
+  see only its runs), and the **Open on GitHub** button beside Refresh opens the
+  repository's Actions caches, deployments, attestations, runners, and usage and
+  performance metrics on GitHub.
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run; a
@@ -3156,17 +3165,23 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   so GitDesktop offers it there only — there's no approval action on GitLab or Bitbucket
   pipelines.
 - **Run workflow…** manually dispatches a workflow (one with a \`workflow_dispatch\`
-  trigger) on a branch you choose, including any **input parameters** it defines. The
+  trigger) on a branch you choose. The workflow's \`workflow_dispatch\` inputs show as
+  fields (a picker for a choice, a checkbox for a boolean, a text field for the rest)
+  with their defaults filled in and required ones marked; anything the workflow doesn't
+  declare goes in by name under **Additional inputs**, which is also where every input
+  goes when the file can't be read on the ref you picked. The
   picker marks a workflow that has no \`workflow_dispatch\` trigger on the ref you picked
   as **(no manual trigger)** and won't let you choose it; if the workflow you already had
   selected turns out not to have one there, a line under the picker says so.
 - Expand any job for its **logs** — or a failed run's **failed-step logs** — inline, and
   **copy** them with the button in the log's top-right corner.
 
-## GitLab pipelines
+## GitLab and Bitbucket pipelines
 
 Point the app at a **GitLab** repo and the same tab lists its **pipelines** (newest first,
-filterable, optionally scoped to the current branch), with the header CI badge tracking the
+filterable by **event, status, branch, or actor** from the funnel, optionally scoped to
+the current branch; there is no workflow filter, since GitLab has one pipeline
+configuration per project), with the header CI badge tracking the
 latest one. Open a pipeline to see its **jobs** (status + durations, counting up live while
 a job runs); expand a job for its **log** (copyable from its corner). The pipeline actions
 work here too: **Cancel** a running pipeline, **Retry** a failed or canceled one (GitLab
@@ -3174,7 +3189,13 @@ restarts its failed and canceled jobs), **Retry job** on a failed job's row to r
 that job, and **Run pipeline…** starts a fresh pipeline on a branch or tag, with optional
 **CI/CD variables**. The row {{secondaryclick}} menu carries the same offers, named for
 pipelines. A **manual job** (one that waits for a manual trigger) shows a **Run job**
-button that plays it.
+button that plays it. The **Open on GitLab** button links to the project's pipelines and
+caches, environments, CI/CD settings, and CI/CD analytics.
+
+A **Bitbucket** repo lists its **pipelines** in the same tab too, filterable by **event,
+status, branch, or actor** from the funnel (again with no workflow filter), and its
+**Open on Bitbucket** button links to the repository's pipelines and caches, and to its
+deployments.
 {{ai}}
 ## Debug with AI
 

@@ -1299,6 +1299,98 @@ export const ACTIONS = [
     category: "Application",
     defaultBinding: "mod+0",
   },
+  // Actions tab run filters and forge link-outs, palette-only. One link id per
+  // provider so each static label can name its forge.
+  {
+    id: "filter-runs",
+    label: "Filter runs…",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "clear-run-filters",
+    label: "Clear filters",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "toggle-workflows-section",
+    label: "Show or hide workflows",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-github-caches",
+    label: "Open Actions caches on GitHub",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-github-deployments",
+    label: "Open Deployments on GitHub",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-github-attestations",
+    label: "Open Attestations on GitHub",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-github-runners",
+    label: "Open Runners on GitHub",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-github-usage",
+    label: "Open Actions usage on GitHub",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-github-performance",
+    label: "Open Actions performance on GitHub",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-gitlab-pipelines",
+    label: "Open Pipelines & caches on GitLab",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-gitlab-environments",
+    label: "Open Environments on GitLab",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-gitlab-ci-settings",
+    label: "Open CI/CD settings (runners) on GitLab",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-gitlab-ci-analytics",
+    label: "Open CI/CD analytics on GitLab",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-bitbucket-pipelines",
+    label: "Open Pipelines & caches on Bitbucket",
+    category: "Actions",
+    defaultBinding: null,
+  },
+  {
+    id: "open-actions-bitbucket-deployments",
+    label: "Open Deployments on Bitbucket",
+    category: "Actions",
+    defaultBinding: null,
+  },
   {
     id: "edit-commit-dates",
     label: "Edit dates…",

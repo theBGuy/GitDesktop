@@ -27,6 +27,7 @@ pub mod secrets;
 pub mod security;
 pub mod security_findings;
 pub mod teams;
+pub mod workflow_inputs;
 
 use crate::error::{AppError, AppResult};
 use crate::github::runner::GhOutput;

@@ -409,9 +409,9 @@ pub async fn run_page(
     repo_path: &str,
     limit: u32,
     page: u32,
-    branch: Option<String>,
+    filters: crate::github::actions::RunFilters,
 ) -> AppResult<crate::github::actions::CiRunPage> {
-    crate::github::actions::gh_run_page(repo_path.to_string(), limit, page, branch).await
+    crate::github::actions::gh_run_page(repo_path.to_string(), limit, page, filters).await
 }
 
 pub async fn view_run(

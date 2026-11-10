@@ -2443,21 +2443,26 @@ pub async fn forge_ci_run_list(
 /// read. `page` is 1-based; `limit` is clamped to 1..=100 by each provider arm.
 /// `total_count` is present only where the provider reports one (GitHub always,
 /// Bitbucket usually, GitLab never), so a consumer must treat `None` as unknown
-/// rather than zero.
+/// rather than zero. `filters` narrows the page server-side (a facet a provider can't
+/// honour is refused); `branch` stays for callers that pass only it, and a non-empty
+/// `filters.branch` wins over it.
 #[tauri::command]
 pub async fn forge_ci_run_page(
     repo_path: String,
     limit: u32,
     page: u32,
     branch: Option<String>,
+    filters: Option<crate::github::actions::RunFilters>,
 ) -> AppResult<crate::github::actions::CiRunPage> {
     let page = page.max(1);
+    let filters = crate::github::actions::merge_branch(branch, filters);
+    crate::github::actions::validate_run_filters(&filters)?;
     match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::run_page(&repo_path, limit, page, branch).await,
+        Some((Provider::GitLab, _)) => gitlab::run_page(&repo_path, limit, page, filters).await,
         Some((Provider::Bitbucket, _)) => {
-            bitbucket::run_page(&repo_path, limit, page, branch).await
+            bitbucket::run_page(&repo_path, limit, page, filters).await
         }
-        _ => github::run_page(&repo_path, limit, page, branch).await,
+        _ => github::run_page(&repo_path, limit, page, filters).await,
     }
 }
 

@@ -34,7 +34,7 @@ use crate::forge::{
     FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
-use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
+use crate::github::actions::{CiRunPage, RunDetail, RunFilters, RunJob, WorkflowRun};
 use crate::github::issue::{IssueDetails, IssueInfo, IssueReactions, Milestone, Reaction};
 use crate::github::pr::{
     comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
@@ -7724,6 +7724,8 @@ fn from_glab_pipeline(p: GlabPipeline) -> WorkflowRun {
         updated_at: p.updated_at,
         url: p.web_url,
         head_sha: p.sha,
+        // The list payload carries no user.
+        actor: None,
     }
 }
 
@@ -7770,8 +7772,19 @@ fn from_glab_job(j: GlabJob) -> RunJob {
     }
 }
 
-/// One page of pipelines for this repo, newest first; optionally scoped to one
-/// branch. `page` is 1-based.
+/// GitLab has no per-workflow entity, so a workflow facet is refused before any
+/// network rather than answered with every pipeline.
+fn refuse_workflow_facet(filters: &RunFilters) -> AppResult<()> {
+    if filters.workflow_id.is_some() {
+        return Err(AppError::InvalidArgument(
+            "GitLab pipelines have no workflow filter".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// One page of pipelines for this repo, newest first; optionally narrowed by
+/// `filters` (event → `source`, actor → `username`). `page` is 1-based.
 ///
 /// `total_count` stays `None`: GitLab reports totals in response HEADERS
 /// (`X-Total`), and `glab api` hands back only the body. `has_more` is therefore a
@@ -7781,17 +7794,25 @@ pub async fn run_page(
     repo_path: &str,
     limit: u32,
     page: u32,
-    branch: Option<String>,
+    filters: RunFilters,
 ) -> AppResult<CiRunPage> {
+    refuse_workflow_facet(&filters)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let per_page = limit.clamp(1, 100);
     let page = page.max(1);
     let mut endpoint = format!("projects/{enc}/pipelines?per_page={per_page}&page={page}");
-    if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
-        // Percent-encode: a branch with a query-significant char (`&`, `#`, `?`, `=`,
-        // `%`) would otherwise corrupt the query and silently return the wrong
-        // (unfiltered) pipeline set. `%2F` for `/` is accepted by GitLab's `ref`.
-        endpoint.push_str(&format!("&ref={}", encode_query_value(b)));
+    // Percent-encode every value: a query-significant char (`&`, `#`, `?`, `=`, `%`)
+    // would otherwise corrupt the query and silently return the wrong (unfiltered)
+    // pipeline set. `%2F` for `/` is accepted by GitLab's `ref`.
+    for (key, value) in [
+        ("ref", &filters.branch),
+        ("source", &filters.event),
+        ("status", &filters.status),
+        ("username", &filters.actor),
+    ] {
+        if let Some(v) = value.as_deref().filter(|s| !s.is_empty()) {
+            endpoint.push_str(&format!("&{key}={}", encode_query_value(v)));
+        }
     }
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let pipelines: Vec<GlabPipeline> = serde_json::from_str(&out.stdout_lossy())
@@ -7811,7 +7832,11 @@ pub async fn list_runs(
     limit: u32,
     branch: Option<String>,
 ) -> AppResult<Vec<WorkflowRun>> {
-    Ok(run_page(repo_path, limit, 1, branch).await?.runs)
+    let filters = RunFilters {
+        branch,
+        ..Default::default()
+    };
+    Ok(run_page(repo_path, limit, 1, filters).await?.runs)
 }
 
 /// One pipeline with its jobs, mapped onto `RunDetail` (jobs have empty `steps`).
@@ -15895,6 +15920,28 @@ mod tests {
         assert_eq!(run.status, "completed");
         assert_eq!(run.conclusion, "failure");
         assert_eq!(run.head_sha, "abc123");
+        assert!(run.actor.is_none(), "the list payload carries no user");
+    }
+
+    #[test]
+    fn refuse_workflow_facet_refuses_only_a_workflow_id() {
+        let workflow = RunFilters {
+            workflow_id: Some(1),
+            ..Default::default()
+        };
+        assert!(matches!(
+            refuse_workflow_facet(&workflow),
+            Err(AppError::InvalidArgument(_))
+        ));
+        let others = RunFilters {
+            branch: Some("main".into()),
+            event: Some("push".into()),
+            status: Some("failed".into()),
+            actor: Some("casey".into()),
+            ..Default::default()
+        };
+        assert!(refuse_workflow_facet(&others).is_ok());
+        assert!(refuse_workflow_facet(&RunFilters::default()).is_ok());
     }
 
     #[test]

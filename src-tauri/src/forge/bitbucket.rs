@@ -43,7 +43,7 @@ use crate::forge::{
     FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
-use crate::github::actions::{CiRunPage, RunDetail, RunJob, WorkflowRun};
+use crate::github::actions::{CiRunPage, RunActor, RunDetail, RunFilters, RunJob, WorkflowRun};
 use crate::github::pr::{
     comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut,
     DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
@@ -2487,6 +2487,20 @@ struct BbPipeline {
     created_on: String,
     #[serde(default)]
     completed_on: Option<String>,
+    #[serde(default)]
+    creator: Option<BbUser>,
+}
+
+/// A pipeline's creator as a run actor, keyed by the braced uuid the `creator.uuid`
+/// facet filters on and named display_name → nickname → uuid; `None` without a uuid.
+fn bb_run_actor(creator: BbUser) -> Option<RunActor> {
+    let id = creator.uuid.filter(|u| !u.is_empty())?;
+    let name = creator
+        .display_name
+        .filter(|n| !n.is_empty())
+        .or(creator.nickname.filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| id.clone());
+    Some(RunActor { name, id })
 }
 
 /// The state/result names of a pipeline or step (helper for the mapper).
@@ -2546,19 +2560,33 @@ fn from_bb_pipeline(p: BbPipeline, ws: &str, slug: &str) -> WorkflowRun {
             .unwrap_or(p.created_on),
         url: pipeline_url(ws, slug, p.build_number),
         head_sha,
+        actor: p.creator.and_then(bb_run_actor),
     }
 }
 
-/// One page of pipelines for this repo, newest first; optionally scoped to one
-/// branch. `page` is 1-based. Note the TRAILING SLASH on `pipelines/` (required).
+/// Bitbucket has no per-workflow entity, so a workflow facet is refused before any
+/// network rather than answered with every pipeline.
+fn refuse_workflow_facet(filters: &RunFilters) -> AppResult<()> {
+    if filters.workflow_id.is_some() {
+        return Err(AppError::InvalidArgument(
+            "Bitbucket pipelines have no workflow filter".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// One page of pipelines for this repo, newest first; optionally narrowed by
+/// `filters` (event → `trigger_type`, actor → `creator.uuid`), each value sent as
+/// given. `page` is 1-based. Note the TRAILING SLASH on `pipelines/` (required).
 /// The envelope's own `next`/`size` answer both paging questions, so this asks for
 /// exactly one page and never follows the link itself.
 pub async fn run_page(
     repo_path: &str,
     limit: u32,
     page: u32,
-    branch: Option<String>,
+    filters: RunFilters,
 ) -> AppResult<CiRunPage> {
+    refuse_workflow_facet(&filters)?;
     let creds = http::load_credentials().await?;
     let (ws, slug) = workspace_slug(repo_path).await?;
     let per_page = limit.clamp(1, 100);
@@ -2568,8 +2596,15 @@ pub async fn run_page(
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
-        path.push_str(&format!("&target.branch={}", encode_query_value(b)));
+    for (key, value) in [
+        ("target.branch", &filters.branch),
+        ("trigger_type", &filters.event),
+        ("status", &filters.status),
+        ("creator.uuid", &filters.actor),
+    ] {
+        if let Some(v) = value.as_deref().filter(|s| !s.is_empty()) {
+            path.push_str(&format!("&{key}={}", encode_query_value(v)));
+        }
     }
     let fetched: BbPage<BbPipeline> = http::bb_get_json(
         &creds,
@@ -2596,7 +2631,11 @@ pub async fn list_runs(
     limit: u32,
     branch: Option<String>,
 ) -> AppResult<Vec<WorkflowRun>> {
-    Ok(run_page(repo_path, limit, 1, branch).await?.runs)
+    let filters = RunFilters {
+        branch,
+        ..Default::default()
+    };
+    Ok(run_page(repo_path, limit, 1, filters).await?.runs)
 }
 
 /// A pipeline step (`{uuid, name?, state{name, result{name}}, …}`). No numeric id.
@@ -7651,6 +7690,67 @@ mod tests {
             run.url,
             "https://bitbucket.org/ws/repo/pipelines/results/17"
         );
+    }
+
+    #[test]
+    fn maps_bb_pipeline_creator_to_actor() {
+        let actor_of = |creator: &str| {
+            let json = format!(
+                r#"{{"uuid":"{{u1}}","build_number":7,"state":{{"name":"COMPLETED","result":{{"name":"SUCCESSFUL"}}}},"target":{{"ref_name":"main","commit":{{"hash":"abc"}}}},"trigger":{{"name":"PUSH"}},"created_on":"2026-01-01T00:00:00Z","creator":{creator}}}"#
+            );
+            let p: BbPipeline = serde_json::from_str(&json).unwrap();
+            from_bb_pipeline(p, "ws", "repo").actor
+        };
+        let actor = |name: &str| {
+            Some(RunActor {
+                name: name.into(),
+                id: "{u1}".into(),
+            })
+        };
+        assert_eq!(
+            actor_of(r#"{"uuid":"{u1}","display_name":"Casey","nickname":"casey"}"#),
+            actor("Casey")
+        );
+        assert_eq!(
+            actor_of(r#"{"uuid":"{u1}","nickname":"casey"}"#),
+            actor("casey")
+        );
+        assert_eq!(actor_of(r#"{"uuid":"{u1}"}"#), actor("{u1}"));
+        assert_eq!(
+            actor_of(r#"{"uuid":"{u1}","display_name":"","nickname":"casey"}"#),
+            actor("casey")
+        );
+        assert_eq!(actor_of("null"), None);
+        assert_eq!(
+            actor_of(r#"{"display_name":"Casey"}"#),
+            None,
+            "no uuid, no id"
+        );
+
+        // An absent creator key is the same as null.
+        let p: BbPipeline = serde_json::from_str(r#"{"build_number":1}"#).unwrap();
+        assert_eq!(from_bb_pipeline(p, "ws", "repo").actor, None);
+    }
+
+    #[test]
+    fn refuse_workflow_facet_refuses_only_a_workflow_id() {
+        let workflow = RunFilters {
+            workflow_id: Some(1),
+            ..Default::default()
+        };
+        assert!(matches!(
+            refuse_workflow_facet(&workflow),
+            Err(AppError::InvalidArgument(_))
+        ));
+        let others = RunFilters {
+            branch: Some("main".into()),
+            event: Some("PUSH".into()),
+            status: Some("SUCCESSFUL".into()),
+            actor: Some("{u1}".into()),
+            ..Default::default()
+        };
+        assert!(refuse_workflow_facet(&others).is_ok());
+        assert!(refuse_workflow_facet(&RunFilters::default()).is_ok());
     }
 
     #[test]
