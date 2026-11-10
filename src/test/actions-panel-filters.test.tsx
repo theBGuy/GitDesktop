@@ -476,6 +476,23 @@ describe("chips", () => {
 });
 
 describe("providers", () => {
+  it("a search matching no loaded row names the provider's noun", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(forge("gitlab"));
+    fake.read = () => ({ runs: rows(2, { actor: null }), totalCount: null });
+    const user = userEvent.setup();
+    renderPanel();
+    const search = await screen.findByPlaceholderText(
+      "Filter loaded pipelines",
+    );
+    await waitFor(() =>
+      expect(funnel()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await user.type(search, "zz-no-such-row");
+    expect(
+      await screen.findByText("No pipelines match this search."),
+    ).toBeInTheDocument();
+  });
+
   it("GitLab: no Workflow group, a note naming GitLab, free-entry actors only", async () => {
     vi.mocked(forgeStatus).mockResolvedValue(forge("gitlab"));
     fake.read = () => ({
@@ -922,7 +939,7 @@ describe("free entry", () => {
     await user.click(filterInput());
     await user.paste("a".repeat(201));
     expect(
-      (await screen.findAllByText("Too long (over 200 characters)")).length,
+      (await screen.findAllByText("Too long (over 200 bytes)")).length,
     ).toBeGreaterThan(0);
   });
 
@@ -939,9 +956,7 @@ describe("free entry", () => {
     expect(
       await screen.findByRole("option", { name: `Filter by branch "${long}"` }),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("Too long (over 200 characters)")).toHaveLength(
-      1,
-    );
+    expect(screen.getAllByText("Too long (over 200 bytes)")).toHaveLength(1);
   });
 
   it("a branch starting with a hyphen is refused, an actor is not", async () => {
@@ -971,27 +986,24 @@ describe("palette", () => {
       ["filter-runs", "Filter runs…"],
       ["clear-run-filters", "Clear filters"],
       ["toggle-workflows-section", "Show or hide workflows"],
-      ["open-actions-github-caches", "Open Actions caches on GitHub…"],
-      ["open-actions-github-deployments", "Open Deployments on GitHub…"],
-      ["open-actions-github-attestations", "Open Attestations on GitHub…"],
-      ["open-actions-github-runners", "Open Runners on GitHub…"],
-      ["open-actions-github-usage", "Open Actions usage on GitHub…"],
-      [
-        "open-actions-github-performance",
-        "Open Actions performance on GitHub…",
-      ],
-      ["open-actions-gitlab-pipelines", "Open Pipelines & caches on GitLab…"],
-      ["open-actions-gitlab-environments", "Open Environments on GitLab…"],
+      ["open-actions-github-caches", "Open Actions caches on GitHub"],
+      ["open-actions-github-deployments", "Open Deployments on GitHub"],
+      ["open-actions-github-attestations", "Open Attestations on GitHub"],
+      ["open-actions-github-runners", "Open Runners on GitHub"],
+      ["open-actions-github-usage", "Open Actions usage on GitHub"],
+      ["open-actions-github-performance", "Open Actions performance on GitHub"],
+      ["open-actions-gitlab-pipelines", "Open Pipelines & caches on GitLab"],
+      ["open-actions-gitlab-environments", "Open Environments on GitLab"],
       [
         "open-actions-gitlab-ci-settings",
-        "Open CI/CD settings (runners) on GitLab…",
+        "Open CI/CD settings (runners) on GitLab",
       ],
-      ["open-actions-gitlab-ci-analytics", "Open CI/CD analytics on GitLab…"],
+      ["open-actions-gitlab-ci-analytics", "Open CI/CD analytics on GitLab"],
       [
         "open-actions-bitbucket-pipelines",
-        "Open Pipelines & caches on Bitbucket…",
+        "Open Pipelines & caches on Bitbucket",
       ],
-      ["open-actions-bitbucket-deployments", "Open Deployments on Bitbucket…"],
+      ["open-actions-bitbucket-deployments", "Open Deployments on Bitbucket"],
     ];
     for (const [id, label] of expected)
       expect(ACTIONS.find((a) => a.id === id)).toMatchObject({

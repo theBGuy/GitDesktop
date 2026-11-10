@@ -111,7 +111,7 @@ type InputsArm =
 
 const INPUTS_STATUS: Record<
   InputsArm,
-  (ref: string, note: string | null) => string | null
+  (ref: string, note: string | null, heldRef: string | null) => string | null
 > = {
   noRef: () => "Enter a branch or tag to read this workflow's inputs.",
   noWorkflow: () => null,
@@ -124,8 +124,11 @@ const INPUTS_STATUS: Record<
       : "This workflow declares no inputs.",
   fields: (_ref, note) => note,
   checking: (ref) => `Checking inputs on ${ref}…`,
-  stale: (ref) =>
-    `Couldn't re-read inputs on ${ref}; showing the last known inputs`,
+  // The held fields keep the ref they were read on, which a ref edit can move past.
+  stale: (ref, _note, heldRef) =>
+    heldRef === null || heldRef === ref
+      ? `Couldn't re-read inputs on ${ref}; showing the last known inputs`
+      : `Couldn't read inputs on ${ref}; showing the inputs read on ${heldRef}`,
 };
 
 /** Keyed by kind as well as name, so a type change remounts the control. */
@@ -576,6 +579,7 @@ export function RunWorkflowDialog({
   const inputsStatus = INPUTS_STATUS[inputsArm](
     refTrim,
     heldHere?.note ?? null,
+    heldHere?.ref ?? null,
   );
   // Collapsed by default only over typed fields with no free row; the user's own
   // toggle wins from then on, so it never collapses under rows on its own.

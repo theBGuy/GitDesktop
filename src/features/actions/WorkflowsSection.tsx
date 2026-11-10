@@ -24,7 +24,7 @@ import { StatusIcon, statusLabel } from "./status";
 /** Workflow rows shown before "Show all (N)". */
 const WORKFLOW_ROW_CAP = 6;
 
-/** How long a palette toggle waits for the palette to unmount (~2s). */
+/** How many animation frames a palette toggle waits for the palette to unmount. */
 const PALETTE_RESTORE_FRAMES = 120;
 
 type Row =

@@ -276,7 +276,7 @@ describe("RunWorkflowDialog input arms", () => {
 
     await typeRef(user, "mai");
     await statusIs(
-      "Couldn't re-read inputs on mai; showing the last known inputs",
+      "Couldn't read inputs on mai; showing the inputs read on main",
     );
     expect(field("version")).toBe(node);
     expect(field("version")).toHaveValue("2.0");
@@ -296,7 +296,7 @@ describe("RunWorkflowDialog input arms", () => {
       probes.mai2 = answer;
       await typeRef(user, "mai2");
       await statusIs(
-        "Couldn't re-read inputs on mai2; showing the last known inputs",
+        "Couldn't read inputs on mai2; showing the inputs read on main",
       );
       expect(field("version")).toHaveValue("2.0");
       await typeRef(user, "main");

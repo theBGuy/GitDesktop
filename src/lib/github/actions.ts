@@ -408,7 +408,19 @@ export function useWorkflowRunPages(
     // An in-flight Load more would land its snapshot pages over the trim. Cancel
     // reverts the entry synchronously and drops the late page; the queryFn never
     // reads `signal`, so the IPC itself runs on and its answer is discarded.
-    void queryClient.cancelQueries({ queryKey: prev, exact: true });
+    // Only a Load more: a cancelled first read reverts to pending with nothing
+    // scheduled, stranding another observer of the key (the facet-free glyph read)
+    // without rows. The fetchMore marker is how query-core itself tells the two apart.
+    const state = queryClient
+      .getQueryCache()
+      .find({ queryKey: prev, exact: true })?.state;
+    if (
+      state !== undefined &&
+      state.fetchStatus !== "idle" &&
+      state.fetchMeta?.fetchMore?.direction === "forward"
+    ) {
+      void queryClient.cancelQueries({ queryKey: prev, exact: true });
+    }
     const data =
       queryClient.getQueryData<InfiniteData<CiRunPage, number>>(prev);
     if (!data || data.pages.length <= 1) return;

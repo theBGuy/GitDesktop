@@ -3064,7 +3064,7 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
   the full count. A **Workflows** section at the top of the list shows each workflow
   with its latest run's status (pick one to see only its runs), and the **Open on
   GitHub** button beside Refresh opens the repository's Actions caches, deployments,
-  attestations, runners, and usage and performance metrics on github.com.
+  attestations, runners, and usage and performance metrics on GitHub.
 - Click a run to see its **jobs and steps** with status and durations — a job or step
   that's still running counts its elapsed time up live.
 - **Re-run all jobs**, **Re-run failed jobs**, or **Cancel** an in-progress run; a
@@ -3099,7 +3099,7 @@ Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** sho
 - Expand any job for its **logs** — or a failed run's **failed-step logs** — inline, and
   **copy** them with the button in the log's top-right corner.
 
-## GitLab pipelines
+## GitLab and Bitbucket pipelines
 
 Point the app at a **GitLab** repo and the same tab lists its **pipelines** (newest first,
 filterable by **event, status, branch, or actor** from the funnel, optionally scoped to
@@ -3114,6 +3114,11 @@ that job, and **Run pipeline…** starts a fresh pipeline on a branch or tag, wi
 pipelines. A **manual job** (one that waits for a manual trigger) shows a **Run job**
 button that plays it. The **Open on GitLab** button links to the project's pipelines and
 caches, environments, CI/CD settings, and CI/CD analytics.
+
+A **Bitbucket** repo lists its **pipelines** in the same tab too, filterable by **event,
+status, branch, or actor** from the funnel (again with no workflow filter), and its
+**Open on Bitbucket** button links to the repository's pipelines and caches, and to its
+deployments.
 {{ai}}
 ## Debug with AI
 

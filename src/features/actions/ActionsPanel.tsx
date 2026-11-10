@@ -623,7 +623,7 @@ export function ActionsPanel({
       case "no-text-match":
         return (
           <p className="px-3 py-4 text-xs text-muted-foreground">
-            No runs match the filter.
+            No {runsNoun} match this search.
           </p>
         );
       case "no-facet-match":

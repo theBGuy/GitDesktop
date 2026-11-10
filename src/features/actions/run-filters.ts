@@ -404,7 +404,7 @@ export const INVALID_FREE_ENTRY_TEXT: Record<
   string
 > = {
   chars: "Can't contain spaces or control characters",
-  length: `Too long (over ${MAX_RUN_FACET_BYTES} characters)`,
+  length: `Too long (over ${MAX_RUN_FACET_BYTES} bytes)`,
   dash: "Can't start with a hyphen",
 };
 

@@ -367,7 +367,7 @@ test("facetValueVerdict mirrors the backend's filter-value check, length first",
   assert.equal(filters.isValidFacetValue("a b"), false);
   assert.deepEqual(filters.INVALID_FREE_ENTRY_TEXT, {
     chars: "Can't contain spaces or control characters",
-    length: "Too long (over 200 characters)",
+    length: "Too long (over 200 bytes)",
     dash: "Can't start with a hyphen",
   });
 });

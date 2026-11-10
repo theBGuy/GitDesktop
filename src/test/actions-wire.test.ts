@@ -6,6 +6,7 @@ import {
 import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { buildDispatch, seedFields } from "@/features/actions/dispatch-inputs";
 import {
   type CiRunPage,
   DISPATCH_INPUTS_REJECTED_LEAD,
@@ -365,6 +366,32 @@ describe("useWorkflowRunPages", () => {
     });
   });
 
+  it("never cancels a departed first-page read, so another observer's rows land", async () => {
+    let release: (reply: CiRunPage) => void = () => undefined;
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd !== PAGE_COMMAND) throw new Error(`unexpected command ${cmd}`);
+      if ((args as PageArgs).filters?.status === undefined)
+        return new Promise<CiRunPage>((resolve) => {
+          release = resolve;
+        });
+      return new Promise(() => undefined);
+    });
+    const qc = client();
+    const runs = renderRunPages(qc, { repo: REPO, filters: {} });
+    await waitFor(() => expect(pageCalls()).toHaveLength(1));
+    // The facet-free glyph read joins the same entry while its first page loads.
+    const glyphs = renderRunPages(qc, { repo: REPO, filters: {} });
+    runs.rerender({ repo: REPO, filters: { status: "failure" } });
+    release(page([run(1)]));
+    await waitFor(() => expect(glyphs.result.current.isSuccess).toBe(true));
+    expect(
+      glyphs.result.current.data?.pages[0].runs.map((r) => r.id),
+    ).toStrictEqual([1]);
+    expect(
+      pageCalls().filter((c) => c.filters?.status === undefined),
+    ).toHaveLength(1);
+  });
+
   describe("poll interval", () => {
     /** The live observer's refetchInterval, evaluated against its query. */
     async function intervalFor(filters: RunFilters, rows: WorkflowRun[]) {
@@ -439,5 +466,27 @@ describe("isDispatchInputsError", () => {
     ["a gh error with a non-string message", { kind: "gh", message: 1 }],
   ])("rejects %s", (_name, err) => {
     expect(isDispatchInputsError(err)).toBe(false);
+  });
+});
+
+describe("buildDispatch", () => {
+  const input = (name: string) => ({
+    name,
+    type: "string" as const,
+    description: null,
+    default: "v",
+    required: false,
+    options: [],
+  });
+
+  it("sends an input named __proto__ as its own key, typed or free", () => {
+    const typed = buildDispatch(seedFields([input("__proto__")]), []);
+    expect(typed.hold).toBeUndefined();
+    expect(Object.keys(typed.record)).toStrictEqual(["__proto__"]);
+    expect(JSON.stringify(typed.record)).toBe('{"__proto__":"v"}');
+
+    const free = buildDispatch([], [{ id: 1, key: " __proto__ ", value: "x" }]);
+    expect(Object.keys(free.record)).toStrictEqual(["__proto__"]);
+    expect(Object.getPrototypeOf(free.record)).toBe(Object.prototype);
   });
 });

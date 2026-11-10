@@ -203,12 +203,15 @@ export function buildDispatch(
     seen.set(k, row.key.trim());
   }
 
-  const record: Record<string, string> = {};
+  // Built as entries: assigning onto a plain {} would route a valid input named
+  // __proto__ through the prototype setter and drop it.
+  const entries: [string, string][] = [];
   for (const f of fields) {
     const sent = sentValue(f);
-    if (sent !== null) record[f.input.name] = sent;
+    if (sent !== null) entries.push([f.input.name, sent]);
   }
-  for (const row of named) record[row.key.trim()] = row.value;
+  for (const row of named) entries.push([row.key.trim(), row.value]);
+  const record: Record<string, string> = Object.fromEntries(entries);
 
   const count = Object.keys(record).length;
   if (count > MAX_DISPATCH_INPUTS) {

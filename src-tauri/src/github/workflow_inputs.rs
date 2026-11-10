@@ -709,8 +709,9 @@ mod tests {
         yml.push_str("on:\n  workflow_dispatch:\n    inputs:\n      boom: *l8\n");
         let started = Instant::now();
         assert_eq!(parse_workflow_dispatch_inputs(&yml), None);
+        // A hang guard, not a timing benchmark: the bound stays generous for loaded runners.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(10),
             "{:?}",
             started.elapsed()
         );

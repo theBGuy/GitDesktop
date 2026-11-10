@@ -1,5 +1,6 @@
-// The forge pages the Actions tab links out to (management surfaces with no
-// usable API), one table feeding the Manage menu and its palette actions.
+// The forge pages the Actions tab links out to: management surfaces the rail
+// deliberately leaves to the forge rather than adding data or features for them.
+// One table feeds the Manage menu and its palette actions.
 // Runtime-import-free, so the install-less guards job can import it.
 import type { ForgeProvider } from "@/lib/git/types";
 

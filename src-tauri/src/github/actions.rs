@@ -1562,10 +1562,10 @@ fn humanize_dispatch_error(raw: &str, git_ref: &str) -> String {
     } else {
         return raw.to_string();
     };
-    // Surface-neutral: the Run workflow dialog and the MCP dispatch tool both show it,
-    // and the caller evicts this ref's cached input schema before returning it.
+    // Surface-neutral: the Run workflow dialog and the MCP dispatch tool both show it, and
+    // it promises no re-read (the MCP server keeps no input schema, and a retry resends).
     format!(
-        "{DISPATCH_INPUTS_REJECTED_LEAD}this workflow on \"{git_ref}\" {clause}. Its declared inputs are re-read, so the next attempt uses the current ones.\n\n{raw}"
+        "{DISPATCH_INPUTS_REJECTED_LEAD}this workflow on \"{git_ref}\" {clause}. The workflow file on that ref decides which inputs GitHub accepts.\n\n{raw}"
     )
 }
 
@@ -1623,7 +1623,8 @@ pub async fn gh_workflow_run(
         .map_err(|e| match e {
             AppError::Gh(msg) => {
                 let message = humanize_dispatch_error(&msg, &git_ref);
-                // GitHub refused the inputs, so the cached schema for this ref is stale.
+                // GitHub refused the inputs, so this process's cached schema for the ref is
+                // stale; only the GUI's next probe reads it (the MCP server's cache is empty).
                 if message.starts_with(DISPATCH_INPUTS_REJECTED_LEAD) {
                     evict_probe_entries(&repo_path, &slug, &git_ref);
                 }
@@ -3476,7 +3477,7 @@ mod tests {
         assert!(out.starts_with(DISPATCH_INPUTS_REJECTED_LEAD), "{out}");
         assert_eq!(
             out.lines().next().unwrap(),
-            "Workflow inputs rejected: this workflow on \"main\" doesn't declare debug, extra. Its declared inputs are re-read, so the next attempt uses the current ones."
+            "Workflow inputs rejected: this workflow on \"main\" doesn't declare debug, extra. The workflow file on that ref decides which inputs GitHub accepts."
         );
         assert!(
             out.ends_with(unexpected),
@@ -3487,7 +3488,7 @@ mod tests {
         let out = humanize_dispatch_error(required, "dev");
         assert_eq!(
             out.lines().next().unwrap(),
-            "Workflow inputs rejected: this workflow on \"dev\" requires version, which wasn't sent. Its declared inputs are re-read, so the next attempt uses the current ones."
+            "Workflow inputs rejected: this workflow on \"dev\" requires version, which wasn't sent. The workflow file on that ref decides which inputs GitHub accepts."
         );
         let out = humanize_dispatch_error("HTTP 422: Required inputs 'a', 'b' not provided", "dev");
         assert!(
@@ -3498,6 +3499,8 @@ mod tests {
         );
         // The same line reaches the MCP tool, where no dialog exists to point at.
         assert!(!out.contains("Run workflow"), "{out}");
+        // Nothing re-reads the schema on the MCP surface, and a retry resends as typed.
+        assert!(!out.contains("re-read"), "{out}");
 
         // No quoted names: the clause still reads as a sentence.
         let out = humanize_dispatch_error("HTTP 422: unexpected inputs provided", "main");
