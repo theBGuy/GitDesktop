@@ -10,11 +10,12 @@ import type { FileEntry } from "../../lib/git/types";
 export const SUBMODULE_NOTHING_TO_STAGE =
   "Nothing to stage: commit inside the submodule first";
 
-/** Whether a submodule record's STAGED side is a plain index file: a nested
- *  repository replaced the file in the worktree over a staged edit (`MT SC..`)
- *  or a staged add (`AT SC..`); a staged deletion has no index entry, so git
- *  lists the repository as `? d/` with no token (measured). The `S` token marks
- *  the record, not a side; a staged typechange (`T.`, `TM`) is a gitlink. */
+/** Whether neither end of a submodule record's STAGED diff (HEAD → index) is a
+ *  gitlink: a nested repository replaced the file in the worktree over a staged
+ *  edit (`MT SC..`) or a staged add (`AT SC..`); a staged deletion has no index
+ *  entry, so git lists the repository as `? d/` with no token (measured). The
+ *  `S` token marks the record, not a side; a staged typechange keeps a gitlink
+ *  at one end (the index for `T.`/`TM`, HEAD for `TT`). */
 export function stagedSideIsFile(entry: FileEntry): boolean {
   return (
     entry.submodule?.worktreeIsGitlink === true &&

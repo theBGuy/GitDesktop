@@ -434,34 +434,38 @@ test("the verdict memory keeps the live selection's verdict once its record leav
   // The click's render: the live row still has its record.
   const m0 = new Map();
   const m1 = rememberSubmoduleVerdicts(m0, [
-    { key: R, record },
-    { key: P, record: prev },
+    { key: R, record, staged: false },
+    { key: P, record: prev, staged: false },
   ]);
   // The deferred render after status dropped the row.
   const m2 = rememberSubmoduleVerdicts(m1, [
-    { key: R, record: undefined },
-    { key: P, record: prev },
+    { key: R, record: undefined, staged: false },
+    { key: P, record: prev, staged: false },
   ]);
-  assert.equal(submoduleVerdict(m2, R, undefined), true);
+  assert.equal(submoduleVerdict(m2, R, undefined, false), true);
   // Fed only the deferred key, the memory never saw R's record.
   const onlyDeferred = rememberSubmoduleVerdicts(
-    rememberSubmoduleVerdicts(new Map(), [{ key: P, record: prev }]),
-    [{ key: P, record: prev }],
+    rememberSubmoduleVerdicts(new Map(), [
+      { key: P, record: prev, staged: false },
+    ]),
+    [{ key: P, record: prev, staged: false }],
   );
-  assert.equal(submoduleVerdict(onlyDeferred, R, undefined), false);
+  assert.equal(submoduleVerdict(onlyDeferred, R, undefined, false), false);
   // Unchanged input returns the same object; unseen keys are dropped.
   assert.equal(
     rememberSubmoduleVerdicts(m2, [
-      { key: R, record: undefined },
-      { key: P, record: prev },
+      { key: R, record: undefined, staged: false },
+      { key: P, record: prev, staged: false },
     ]),
     m2,
   );
-  const m3 = rememberSubmoduleVerdicts(m2, [{ key: P, record: prev }]);
+  const m3 = rememberSubmoduleVerdicts(m2, [
+    { key: P, record: prev, staged: false },
+  ]);
   assert.deepEqual([...m3.keys()], [P]);
-  assert.equal(submoduleVerdict(m3, R, undefined), false);
+  assert.equal(submoduleVerdict(m3, R, undefined, false), false);
   // A record always wins over the memory.
-  assert.equal(submoduleVerdict(m2, R, file("vendor/sub")), false);
+  assert.equal(submoduleVerdict(m2, R, file("vendor/sub"), false), false);
 });
 
 test("the verdict is per side: MT SC..'s staged row is a file, its unstaged row a submodule", () => {
