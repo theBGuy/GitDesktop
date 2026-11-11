@@ -748,11 +748,15 @@ column, `Alt`/`⌥`+`Home` and `Alt`/`⌥`+`End` send it to that column's top or
 bottom, and the card's menu and the command palette carry the same four
 moves. That order is the project's own, so it's the order GitHub shows
 everyone; hold the keys down and the board keeps up, writing where the card
-finally lands. With archived cards shown, the same moves work, each landing
-beside a card that isn't archived: down goes just below the next one, and up
-goes above the previous one, usually above the archived cards directly over
-it too. A saved view that sorts says so instead, since its columns are drawn
-in the sort's order rather than the board's.
+finally lands. Or **drag a card** with the mouse, to a new place in its
+column or into another column: a line shows where it will land, and `Esc` or
+letting go outside the columns cancels without writing anything. With archived
+cards shown, the same moves work, each landing beside a card that isn't
+archived: down goes just below the next one, and up goes above the previous
+one, usually above the archived cards directly over it too, and a drag
+dropped beside archived cards lands above them. A saved view that sorts says
+so instead, since its columns are drawn in the sort's order rather than the
+board's.
 Creating an issue puts it straight on a board too: the **New issue** dialog
 carries a **Projects** picker of its own. The board's **saved views** come
 along as lenses: pick one and GitHub filters the read for you, its sort

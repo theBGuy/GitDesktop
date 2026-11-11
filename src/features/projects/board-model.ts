@@ -288,6 +288,19 @@ export function reorderLanding(
   return at === null ? null : { ...at, count: columns[at.col].items.length };
 }
 
+/** What the live region says when a pointer drag ends without a move. */
+export const MOVE_CANCELLED_ANNOUNCEMENT = "Move cancelled";
+
+/** The landing sentence a reposition announces, one spelling for the keyboard and
+ *  pointer routes so the two can't drift. `position` is 1-based. */
+export function movedAnnouncement(
+  position: number,
+  count: number,
+  column: string,
+): string {
+  return `Moved to ${position} of ${count} in ${column}`;
+}
+
 /** The field kinds a saved view's sort can be honoured on. A key over any other
  *  kind — a multi-select, or a system field other than Title — is dropped
  *  rather than guessed at, which leaves the board's POSITION order for that key. */

@@ -547,6 +547,27 @@ const focusableHeldRender = ({ source }, file) => {
 const RAW_COPY_ICON_BUTTON_RE =
   /<(button|Button)\b(?:=>|[^>=]|=(?!>))*>\s*(?:\{\s*\}\s*)*<CopyIcon\b(?:=>|[^>=]|=(?!>))*\/>\s*(?:\{\s*\}\s*)*<\/\1>/g;
 
+// A hand-rolled InfoNote: one quoted class literal holding `border-b` and
+// `bg-muted/40` (any order, neither variant-prefixed) within PAIR_GAP of the
+// identifier `InfoIcon`, either order. Missed by design: the tokens split across
+// literals or built by interpolation or a far const, `border-y`/`border-b-2`, a
+// non-InfoIcon glyph (aliased import, Phosphor's bare `Info`, a Record lookup),
+// and a literal whose span is cut by a prose apostrophe inside the window.
+const infoStripToken = (s) => `(?<![\\w:-])${escapeRe(s)}(?![\\w/-])`;
+const INFO_STRIP_LITERAL = ['"', "'", "`"]
+  .map(
+    (q) =>
+      `${q}(?=(?:(?!${q}).)*?${infoStripToken("border-b")})` +
+      `(?=(?:(?!${q}).)*?${infoStripToken("bg-muted/40")})(?:(?!${q}).)*${q}`,
+  )
+  .join("|");
+const INFO_STRIP_ICON = "(?<![\\w-])InfoIcon(?![\\w-])";
+const INFO_STRIP_RE = new RegExp(
+  `(?:${INFO_STRIP_LITERAL})[\\s\\S]{0,${PAIR_GAP}}?${INFO_STRIP_ICON}` +
+    `|${INFO_STRIP_ICON}[\\s\\S]{0,${PAIR_GAP}}?(?:${INFO_STRIP_LITERAL})`,
+  "g",
+);
+
 // A local DEFINITION of the change-kind badge table — the `const KIND_BADGE`
 // binding, not a read of the shared one (an import names it without `const`).
 // Matched per line: nothing wraps between the keyword and the name. A table
@@ -5724,6 +5745,16 @@ export const CHECKS = [
     allowlist: [],
     message:
       "icon-only copy buttons use CopyIconButton (src/components/CopyIconButton.tsx) — it carries the vendored focus ring, sets aria-label and title to the same string, and stops click propagation so a copy never also activates its row; a hand-rolled button drifts on all three one site at a time (a copy control with visible text is not this idiom), and a site the component genuinely can't express needs an allowlist entry with rationale",
+  },
+  {
+    name: "hand-rolled-info-strip",
+    // The component IS the idiom; everything else routes through it.
+    appliesTo: (file) =>
+      file !== "src/components/info-note.tsx" && notVendoredUi(file),
+    scan: perFile(INFO_STRIP_RE),
+    allowlist: [],
+    message:
+      "an InfoIcon beside a `border-b bg-muted/40` class string is a hand-rolled informational strip — render it through InfoNote (src/components/info-note.tsx), whose `action` slot takes a trailing control (a dismiss) and whose `reserve` prop keeps a loading frame's placeholder in place, invisible and aria-hidden; icon-less `border-b bg-muted/40` rows (action strips, section headers) are a different class and don't match, and a strip the component genuinely can't express needs an allowlist entry with rationale",
   },
   {
     name: "kind-badge-single-source",

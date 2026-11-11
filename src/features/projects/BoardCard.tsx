@@ -1,6 +1,13 @@
 import { Popover } from "@base-ui/react/popover";
 import { CheckIcon, LockSimpleIcon, NoteIcon } from "@phosphor-icons/react";
-import { Fragment, memo, type ReactNode, useId, useRef } from "react";
+import {
+  Fragment,
+  type KeyboardEvent,
+  memo,
+  type ReactNode,
+  useId,
+  useRef,
+} from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -462,6 +469,20 @@ export const BoardCard = memo(function BoardCard({
   // (caller props merge last), which is safe here precisely BECAUSE there is no
   // trigger holding the old one in an `aria-controls`.
   const peekId = useId();
+  // A native button arms its Space activation on the KEYDOWN and clicks on the
+  // keyup, so a chord is judged at the keydown: a modifier released before Space
+  // must not let the keyup open the card. Repeats keep the first press's verdict.
+  const chordSpace = useRef(false);
+  const noteChordSpace = (e: KeyboardEvent) => {
+    if (e.code !== "Space" && e.key !== " ") return;
+    if (hasChordModifier(e)) chordSpace.current = true;
+    else if (!e.repeat) chordSpace.current = false;
+  };
+  const cancelChordSpace = (e: KeyboardEvent) => {
+    if (e.code !== "Space" && e.key !== " ") return;
+    if (chordSpace.current) e.preventDefault();
+    chordSpace.current = false;
+  };
   const content = item.content;
   const shared = {
     "data-card-index": index,
@@ -536,6 +557,8 @@ export const BoardCard = memo(function BoardCard({
                 toneClass,
                 busyClass,
               )}
+              onKeyDown={noteChordSpace}
+              onKeyUp={cancelChordSpace}
             />
           }
         >
@@ -633,10 +656,16 @@ export const BoardCard = memo(function BoardCard({
         // returns before the preventDefault, so a bound Ctrl/⌘/Alt+Space still
         // reaches the global listener, which skips defaultPrevented events.
         onKeyDown={(e) => {
+          noteChordSpace(e);
           if (e.key !== " " || hasChordModifier(e)) return;
           e.preventDefault();
+          // A bare repeat after the chord's modifier came up is still the chord.
+          if (e.repeat && chordSpace.current) return;
           onPeekChange(item.itemId);
         }}
+        // A chord's keydown stays un-prevented so a bound chord still reaches
+        // the global listener; an unbound one's activation is cancelled here.
+        onKeyUp={cancelChordSpace}
       >
         {item.isArchived && <ArchivedBadge />}
         {content.kind === "pullRequest" ? (

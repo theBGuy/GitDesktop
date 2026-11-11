@@ -3,13 +3,20 @@ import {
   type Range,
   useVirtualizer,
 } from "@tanstack/react-virtual";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { OptionValue } from "@/features/conversations/ProjectFieldValues";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { BoardItem, ProjectFieldDef } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
 import { BoardCard } from "./BoardCard";
 import type { BoardColumnModel } from "./board-model";
+import { BoardDragCardSlot, BoardDropLine } from "./drag/BoardDragRoot";
+import { slotLineY } from "./drag/drag-model";
+import {
+  BOARD_DROP_TARGET_CLASS,
+  BOARD_DROP_TARGET_MOTION,
+  useBoardDragColumn,
+} from "./drag/use-board-drag-column";
 
 /** A card's resting height — one title line, one meta line, and the row's own
  *  bottom gap. `measureElement` corrects every mounted card from there, so this
@@ -125,6 +132,28 @@ export const BoardColumn = memo(function BoardColumn({
     rangeExtractor,
     overscan: 8,
   });
+  // The drag seam reads every row, mounted or not: a measured row where the
+  // virtualizer has one, the estimate before it does.
+  const itemIds = useMemo(() => items.map((item) => item.itemId), [items]);
+  const rowAt = useCallback(
+    (index: number) => {
+      const row = virtualizer.measurementsCache[index];
+      return row === undefined
+        ? { start: index * CARD_ESTIMATE, size: CARD_ESTIMATE }
+        : { start: row.start, size: row.size };
+    },
+    [virtualizer],
+  );
+  const drag = useBoardDragColumn({
+    columnId: column.id,
+    scrollEl,
+    itemIds,
+    rowAt,
+  });
+  const dropLine =
+    drag.lineIndex === null ? null : (
+      <BoardDropLine y={slotLineY(drag.lineIndex, itemIds.length, rowAt)} />
+    );
 
   // Focus follows the KEYBOARD only. The ref starts at the nonce this column
   // mounted with, so neither an <Activity> show replaying this effect nor a
@@ -183,7 +212,13 @@ export const BoardColumn = memo(function BoardColumn({
   return (
     <section
       data-column-index={columnIndex}
-      className="flex w-76 shrink-0 flex-col border bg-muted/20"
+      data-board-drop-target={drag.tinted ? "" : undefined}
+      className={cn(
+        "flex w-76 shrink-0 flex-col border bg-muted/20",
+        BOARD_DROP_TARGET_MOTION.className,
+        drag.tinted && BOARD_DROP_TARGET_CLASS,
+      )}
+      style={BOARD_DROP_TARGET_MOTION.style}
     >
       <h3 className="flex items-center gap-1.5 border-b px-2 py-1.5 text-xs font-medium">
         {column.color === null ? (
@@ -218,9 +253,19 @@ export const BoardColumn = memo(function BoardColumn({
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {items.length === 0 ? (
-          <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">
-            No items
-          </p>
+          <>
+            {/* The empty column has no spacer to draw the drop line in, and
+                its scroll div stays unpositioned, so the line gets its own
+                zero-height box at the top of the body. */}
+            {dropLine !== null && (
+              <div role="presentation" className="relative h-0">
+                {dropLine}
+              </div>
+            )}
+            <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+              No items
+            </p>
+          </>
         ) : (
           <div
             // Presentation like the row wrapper below it: the spacer is the
@@ -263,26 +308,32 @@ export const BoardColumn = memo(function BoardColumn({
                   )}
                   style={{ transform: `translateY(${vi.start}px)` }}
                 >
-                  <BoardCard
-                    item={items[vi.index]}
-                    index={vi.index}
-                    setSize={items.length}
-                    columnIndex={columnIndex}
-                    selected={selected}
-                    checked={selected && selectionSize >= 2}
-                    busy={items[vi.index].itemId === busyItemId}
-                    peek={items[vi.index].itemId === peekItemId}
-                    rovingTab={vi.index === tabStopIndex ? 0 : -1}
-                    repoSlug={repoSlug}
-                    ghHost={ghHost}
-                    chipFields={chipFields}
-                    onFocus={onCardFocus}
-                    onPeekChange={onPeekChange}
-                    onOpen={onOpen}
-                  />
+                  <BoardDragCardSlot
+                    itemId={items[vi.index].itemId}
+                    disabled={!selectable}
+                  >
+                    <BoardCard
+                      item={items[vi.index]}
+                      index={vi.index}
+                      setSize={items.length}
+                      columnIndex={columnIndex}
+                      selected={selected}
+                      checked={selected && selectionSize >= 2}
+                      busy={items[vi.index].itemId === busyItemId}
+                      peek={items[vi.index].itemId === peekItemId}
+                      rovingTab={vi.index === tabStopIndex ? 0 : -1}
+                      repoSlug={repoSlug}
+                      ghHost={ghHost}
+                      chipFields={chipFields}
+                      onFocus={onCardFocus}
+                      onPeekChange={onPeekChange}
+                      onOpen={onOpen}
+                    />
+                  </BoardDragCardSlot>
                 </div>
               );
             })}
+            {dropLine}
           </div>
         )}
       </div>

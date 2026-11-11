@@ -3,7 +3,6 @@ import {
   CaretDownIcon,
   DotsThreeIcon,
   FadersHorizontalIcon,
-  InfoIcon,
   PlusIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -24,6 +23,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { InfoNote } from "@/components/info-note";
 import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { SelectClipText } from "@/components/select-clip-text";
@@ -161,7 +161,6 @@ import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
-import { cn } from "@/lib/utils";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
 import { BoardBulkFieldsDialog } from "./BoardBulkFieldsDialog";
 import {
@@ -191,6 +190,7 @@ import {
   itemRowKey,
   itemRowSlot,
   lensSorted,
+  movedAnnouncement,
   reorderLanding,
   resolveBoardCursor,
   resolveTableCursor,
@@ -220,6 +220,8 @@ import {
   rowRange,
   selectionMods,
 } from "./board-selection";
+import { BoardDragRoot } from "./drag/BoardDragRoot";
+import type { BoardDragHost } from "./drag/seam-context";
 import { itemTitle } from "./item-title";
 import {
   type FieldDraft,
@@ -961,9 +963,8 @@ function BoardToolbarSkeleton() {
 }
 
 /** How to build a card selection. Without `onDismiss` it is the loading
- *  frame's reservation: the same strip and wrapping text, contents invisible
- *  and out of the a11y tree, so the columns below start where the real hint
- *  leaves them. */
+ *  frame's reservation, so the columns below start where the real hint leaves
+ *  them. */
 function SelectionHintStrip({
   noun,
   onDismiss,
@@ -975,23 +976,22 @@ function SelectionHintStrip({
   const linkClass =
     "shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline";
   return (
-    <div
-      aria-hidden={reserve || undefined}
-      className="mb-2 flex shrink-0 items-center gap-2 border-b bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground"
+    <InfoNote
+      reserve={reserve}
+      className="mb-2 shrink-0 px-2.5"
+      action={
+        reserve ? (
+          <span className={linkClass}>Don't show again</span>
+        ) : (
+          <button type="button" onClick={onDismiss} className={linkClass}>
+            Don't show again
+          </button>
+        )
+      }
     >
-      <InfoIcon className={cn("size-3.5 shrink-0", reserve && "invisible")} />
-      <span className={cn("flex-1 leading-snug", reserve && "invisible")}>
-        {formatBinding("mod")}-click to select {noun}s individually, Shift-click
-        for a range.
-      </span>
-      {reserve ? (
-        <span className={cn(linkClass, "invisible")}>Don't show again</span>
-      ) : (
-        <button type="button" onClick={onDismiss} className={linkClass}>
-          Don't show again
-        </button>
-      )}
-    </div>
+      {formatBinding("mod")}-click to select {noun}s individually, Shift-click
+      for a range.
+    </InfoNote>
   );
 }
 
@@ -1381,12 +1381,12 @@ export function ProjectsBoardPanel({
   // an index alone can resolve to the neighbour while an optimistic reorder is
   // still a frame from the DOM.
   const [focusItemId, setFocusItemId] = useState<string | null>(null);
-  // What the KEYBOARD route just did, or why it refused. Only that route needs a
-  // voice: the menu's rows carry their reasons on themselves, and a card moving
-  // under the pointer is its own feedback. The seq bumps on every announce so an
-  // identical message (the same held reason twice, or the same "N of M") still
-  // changes the live region's textContent and re-announces — a plain equal set
-  // would be a no-op the screen reader never hears.
+  // What the KEYBOARD route or a pointer drop (through `dragHost`) just did, or
+  // why it refused. Only those routes need a voice: the menu's rows carry their
+  // reasons on themselves. The seq bumps on every announce so an identical
+  // message (the same held reason twice, or the same "N of M") still changes the
+  // live region's textContent and re-announces — a plain equal set would be a
+  // no-op the screen reader never hears.
   const [announcement, setAnnouncement] = useState({ text: "", seq: 0 });
   const announce = useCallback(
     (text: string) => setAnnouncement((prev) => ({ text, seq: prev.seq + 1 })),
@@ -4113,10 +4113,75 @@ export function ProjectsBoardPanel({
       colIndex: prev?.colIndex ?? 0,
     }));
     setFocusNonce((n) => n + 1);
-    announce(
-      `Moved to ${landing.idx + 1} of ${landing.count} in ${column.label}`,
-    );
+    announce(movedAnnouncement(landing.idx + 1, landing.count, column.label));
   }
+
+  // The pointer drag's view of this board. Its gates, writes and voice are the
+  // keyboard route's own: the same held functions, the same `move` and `reorder`
+  // instances (so drags count and coalesce with key presses), the same refusal
+  // toast id. Each write carries this render's repo, project and lens.
+  const dragHost: BoardDragHost = {
+    repo: repoPath,
+    signature: JSON.stringify([
+      repoPath,
+      projectId,
+      view?.id ?? null,
+      lensQuery,
+      showArchived,
+      bucketField?.id ?? null,
+    ]),
+    columns,
+    loaded,
+    restoring: restoringIds(),
+    truncated: pagesTruncated(),
+    repositionHeld: reorderHeldFor,
+    moveHeld: moveHeldFor,
+    writeStatus(item, columnId, slot) {
+      const column = columns.find((c) => c.id === columnId);
+      if (bucketField === null || projectId === null || column === undefined)
+        return null;
+      setChase(item.itemId);
+      return move.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemId: item.itemId,
+        issueId: item.content.kind === "issue" ? item.content.id : null,
+        field: bucketField,
+        bucket: moveBucketFor(bucketField, column.id),
+        query: lensQuery,
+        archived: showArchived,
+        rich: tableView !== null,
+        slot,
+      });
+    },
+    writePosition(item, afterId) {
+      if (projectId === null) return null;
+      return reorder.mutateAsync({
+        repo: repoPath,
+        projectId,
+        itemId: item.itemId,
+        afterId,
+        query: lensQuery,
+        archived: showArchived,
+        rich: tableView !== null,
+      });
+    },
+    landCursor(itemId, col, idx) {
+      setCursor({ itemId, col, idx });
+      setFocusItemId(itemId);
+      setTableCursor((prev) => ({
+        rowKey: itemRowKey(itemId),
+        colIndex: prev?.colIndex ?? 0,
+      }));
+      setFocusNonce((n) => n + 1);
+    },
+    refuse(reason) {
+      announce(reason);
+      toast(reason, { id: REORDER_REFUSAL_TOAST_ID });
+    },
+    announce,
+    card: { repoSlug, ghHost, chipFields },
+  };
 
   /**
    * Why a date shift can't write for `item` in `mode`, or undefined when it can.
@@ -5614,49 +5679,53 @@ export function ProjectsBoardPanel({
             </>,
           ),
         );
+      // Only the board layout takes a pointer drag; the table and roadmap arms
+      // above keep their capture handlers and get none.
       default:
         return settledArm(
-          boardMenu(
-            "board",
-            // One horizontal scroll region for the whole board; each column
-            // owns its own vertical one.
-            <div
-              data-board-layout="board"
-              className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
-              onKeyDown={onBoardKeyDown}
-              onPointerDownCapture={handleCardPointerDown}
-              onMouseDownCapture={handleCardMouseDown}
-              onClickCapture={handleCardClickCapture}
-              onContextMenuCapture={handleCardContextMenu}
-            />,
-            columns.map((column, i) => (
-              <BoardColumn
-                key={column.id}
-                column={column}
-                columnIndex={i}
-                // The claim's target is the STORED slot, never the re-found one:
-                // mid-reorder the card still sits at its old index, and a claim
-                // index that changed under a pending frame would cancel it.
-                activeIndex={cursor?.col === i ? cursor.idx : null}
-                activeItemId={cursor?.col === i ? focusItemId : null}
-                cursorItemId={
-                  liveCursor?.col === i ? (cursor?.itemId ?? null) : null
-                }
-                selectedIds={selectedIds}
-                selectionSize={selectionSize}
-                busyItemId={busyItemId}
-                peekItemId={peekItemId}
-                tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
-                focusNonce={focusNonce}
-                repoSlug={repoSlug}
-                ghHost={ghHost}
-                chipFields={chipFields}
-                onCardFocus={onCardFocus}
-                onPeekChange={setPeekItemId}
-                onOpen={openItem}
-              />
-            )),
-          ),
+          <BoardDragRoot host={dragHost}>
+            {boardMenu(
+              "board",
+              // One horizontal scroll region for the whole board; each column
+              // owns its own vertical one.
+              <div
+                data-board-layout="board"
+                className="flex min-h-0 flex-1 gap-2 overflow-x-auto"
+                onKeyDown={onBoardKeyDown}
+                onPointerDownCapture={handleCardPointerDown}
+                onMouseDownCapture={handleCardMouseDown}
+                onClickCapture={handleCardClickCapture}
+                onContextMenuCapture={handleCardContextMenu}
+              />,
+              columns.map((column, i) => (
+                <BoardColumn
+                  key={column.id}
+                  column={column}
+                  columnIndex={i}
+                  // The claim's target is the STORED slot, never the re-found one:
+                  // mid-reorder the card still sits at its old index, and a claim
+                  // index that changed under a pending frame would cancel it.
+                  activeIndex={cursor?.col === i ? cursor.idx : null}
+                  activeItemId={cursor?.col === i ? focusItemId : null}
+                  cursorItemId={
+                    liveCursor?.col === i ? (cursor?.itemId ?? null) : null
+                  }
+                  selectedIds={selectedIds}
+                  selectionSize={selectionSize}
+                  busyItemId={busyItemId}
+                  peekItemId={peekItemId}
+                  tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
+                  focusNonce={focusNonce}
+                  repoSlug={repoSlug}
+                  ghHost={ghHost}
+                  chipFields={chipFields}
+                  onCardFocus={onCardFocus}
+                  onPeekChange={setPeekItemId}
+                  onOpen={openItem}
+                />
+              )),
+            )}
+          </BoardDragRoot>,
         );
     }
   })();
@@ -6718,12 +6787,13 @@ export function ProjectsBoardPanel({
           </Button>
         </div>
       )}
-      {/* What the keyboard route just did, or why it refused. Mounted
-          unconditionally so each result announces as a live update, and sr-only
-          because the board itself is the visual answer: the card is already in its
-          new slot with focus on it. A zero-width space toggled by the announce seq
-          keeps the textContent changing when the message repeats, so a screen
-          reader re-announces an identical held reason or "N of M". */}
+      {/* What the keyboard route or a pointer drop just did, or why it refused.
+          Mounted unconditionally so each result announces as a live update, and
+          sr-only because the board itself is the visual answer: the card is
+          already in its new slot with focus on it. A zero-width space toggled by
+          the announce seq keeps the textContent changing when the message
+          repeats, so a screen reader re-announces an identical held reason or
+          "N of M". */}
       <span role="status" aria-live="polite" className="sr-only">
         {announcement.text}
         {ZWSP.repeat(announcement.seq % 2)}
