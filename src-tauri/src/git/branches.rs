@@ -5,8 +5,8 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::ignored_guard::{self, ignored_files_in_the_way, name_paths};
 use crate::git::runner::{
-    acquire_repo_lock, acquire_repo_lock_unbounded, is_config_lock_contention, run_git,
-    run_git_config_write, run_git_config_write_held, run_git_mutating,
+    acquire_repo_lock, acquire_repo_lock_unbounded, config_lock_busy, is_config_lock_contention,
+    run_git, run_git_config_write, run_git_config_write_held, run_git_mutating,
     run_git_mutating_config_write, run_git_raw, run_git_worktree_admin, try_acquire_repo_lock,
     ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT,
     NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
@@ -167,6 +167,10 @@ pub(crate) fn unborn_head_error() -> AppError {
 /// `heads/<name>` (or the full ref, when that is ambiguous too) and every row action
 /// would target the wrong name. `%(upstream:short)` stays short on purpose — the UI
 /// hands it back as a rev, which its disambiguated form resolves correctly.
+///
+/// The same spawn lists every remote's `HEAD` (`**`, since `*` stops at the `/` of a
+/// slash-named remote) so `upstream_is_remote_default` compares two full refs, exact
+/// under a remapped fetch refspec. A dangling remote HEAD prints no row: false.
 #[tauri::command]
 pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     let out = run_git(
@@ -174,17 +178,37 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         &[
             "for-each-ref",
             "refs/heads",
-            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)",
+            "refs/remotes/**/HEAD",
+            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)%00%(symref)",
         ],
         DEFAULT_TIMEOUT,
     )
     .await?;
     let text = out.stdout_lossy();
-    let archived = read_archived_set(&repo_path).await?;
+    let flags = read_branch_flags(&repo_path).await?;
+    let remote_heads: std::collections::HashMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split('\0').collect();
+            let refname = fields.first()?;
+            let symref = fields.get(8).filter(|s| !s.is_empty())?;
+            (refname.starts_with("refs/remotes/") && refname.ends_with("/HEAD"))
+                .then_some((*refname, *symref))
+        })
+        .collect();
     let mut branches = Vec::new();
     for line in text.lines() {
         let mut parts = line.split('\0');
-        let (Some(refname), upstream, head, date, track, upstream_remote, upstream_remote_ref) = (
+        let (
+            Some(refname),
+            upstream,
+            head,
+            date,
+            track,
+            upstream_remote,
+            upstream_remote_ref,
+            upstream_full,
+        ) = (
             parts.next(),
             parts.next(),
             parts.next(),
@@ -192,7 +216,9 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             parts.next(),
             parts.next(),
             parts.next(),
-        ) else {
+            parts.next(),
+        )
+        else {
             continue;
         };
         let Some(name) = refname
@@ -203,12 +229,20 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
         };
         let (upstream_ahead, upstream_behind, upstream_gone) =
             parse_upstream_track(track.unwrap_or(""));
+        let remote = upstream_remote.unwrap_or("");
+        let upstream_full = upstream_full.unwrap_or("");
+        let upstream_is_remote_default = !upstream_gone
+            && crate::git::remote::is_named_remote(remote)
+            && upstream_remote_ref.is_some_and(|r| r.starts_with("refs/heads/"))
+            && !upstream_full.is_empty()
+            && remote_heads.get(format!("refs/remotes/{remote}/HEAD").as_str())
+                == Some(&upstream_full);
         branches.push(Branch {
             name: name.to_string(),
             is_current: head == Some("*"),
             upstream: upstream.filter(|u| !u.is_empty()).map(str::to_string),
             last_commit_date: date.unwrap_or("").to_string(),
-            archived: archived.contains(name),
+            archived: flags.archived.contains(name),
             upstream_ahead,
             upstream_behind,
             upstream_gone,
@@ -216,6 +250,8 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             upstream_remote_ref: upstream_remote_ref
                 .filter(|r| !r.is_empty())
                 .map(str::to_string),
+            keep_local: flags.keep_local.contains(name),
+            upstream_is_remote_default,
         });
     }
     Ok(branches)
@@ -311,7 +347,8 @@ pub(crate) fn push_destination_fields(
 /// remapped fetch refspec, `team/…`) is unresolved: a wrong branch name is never an
 /// answer. A mirror push remote (`remote.<r>.mirror`) resolves here like any other; the
 /// atoms can't tell it apart, so the status read clears it from the push config, except
-/// for the branch's own same-named live upstream, where it reads no config.
+/// for the branch's own same-named live upstream, where it reads no config. Every app
+/// push to a mirror is refused before git runs (`refuse_mirror_push`).
 fn push_destination(
     local: &str,
     push_remote: &str,
@@ -412,37 +449,93 @@ pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranc
     Ok(branches)
 }
 
-/// The set of branches the user has archived, from local git config
-/// (`branch.<name>.gitdesktopArchived true`). git keeps these in sync across
-/// renames and removes them on delete, so they never go stale.
-async fn read_archived_set(
-    repo_path: &str,
-) -> AppResult<std::collections::HashSet<String>> {
+/// The per-branch flags the branch list reads from git config.
+#[derive(Debug, Default)]
+struct BranchFlags {
+    archived: HashSet<String>,
+    keep_local: HashSet<String>,
+}
+
+/// The branches the user has archived (`branch.<name>.gitdesktopArchived true`) and
+/// marked Keep local ([`keep_local_key`]), in one config read. git keeps both in sync
+/// across renames and removes them on delete, so they never go stale.
+async fn read_branch_flags(repo_path: &str) -> AppResult<BranchFlags> {
     let out = run_git_raw(
         Some(repo_path),
-        &["config", "--get-regexp", r"^branch\..*\.gitdesktoparchived$"],
+        &[
+            "config",
+            "--get-regexp",
+            r"^branch\..*\.gitdesktop(archived|localonly)$",
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let mut set = std::collections::HashSet::new();
-    if out.code == 0 {
-        for line in out.stdout_lossy().lines() {
-            // "branch.<name>.gitdesktoparchived true"
-            let Some((key, value)) = line.split_once(' ') else {
-                continue;
-            };
-            if value.trim() != "true" {
-                continue;
+    if out.code != 0 {
+        return Ok(BranchFlags::default());
+    }
+    Ok(parse_branch_flags(&out.stdout_lossy()))
+}
+
+/// Parses `--get-regexp` lines: `key value`, `key ` for an empty value, bare `key` for
+/// a valueless one. Archived keeps its literal `true` rule; Keep local is marked unless
+/// git reads the last entry as a definite false, so junk reads marked like the guard.
+fn parse_branch_flags(text: &str) -> BranchFlags {
+    let mut flags = BranchFlags::default();
+    let mut keep_local = std::collections::HashMap::new();
+    for line in text.lines() {
+        let (key, value) = match line.split_once(' ') {
+            Some((key, value)) => (key, Some(value)),
+            None => (line, None),
+        };
+        let Some(rest) = key.strip_prefix("branch.") else {
+            continue;
+        };
+        if let Some(name) = rest.strip_suffix(".gitdesktoparchived") {
+            if value.is_some_and(|v| v.trim() == "true") {
+                flags.archived.insert(name.to_string());
             }
-            if let Some(name) = key
-                .strip_prefix("branch.")
-                .and_then(|k| k.strip_suffix(".gitdesktoparchived"))
-            {
-                set.insert(name.to_string());
-            }
+        } else if let Some(name) = rest.strip_suffix(".gitdesktoplocalonly") {
+            let marked = crate::git::diff::git_config_bool(value) != Some(false);
+            keep_local.insert(name, marked);
         }
     }
-    Ok(set)
+    flags.keep_local = keep_local
+        .into_iter()
+        .filter(|&(_, marked)| marked)
+        .map(|(name, _)| name.to_string())
+        .collect();
+    flags
+}
+
+/// The git config key that marks a branch Keep local. The subsection is the exact
+/// branch name (case-sensitive), so only that spelling is marked.
+pub(crate) fn keep_local_key(name: &str) -> String {
+    format!("branch.{name}.gitdesktopLocalOnly")
+}
+
+/// Whether `name` is marked Keep local: the one Rust read, the same command the
+/// managed pre-push hook runs, across every config scope. Unset or false allows; any
+/// answer git can't give as a bool (junk, an invalid key) is an `Err`, so a guard built
+/// on it fails closed. A non-repository reads unset: nothing can be pushed from one.
+pub(crate) async fn branch_keep_local(repo_path: &str, name: &str) -> AppResult<bool> {
+    let key = keep_local_key(name);
+    let out = run_git_raw(
+        Some(repo_path),
+        &["config", "--type=bool", "--get", &key],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let stdout = out.stdout_lossy();
+    match (out.code, stdout.trim_end_matches(['\r', '\n'])) {
+        (0, "true") => Ok(true),
+        (0, "false") => Ok(false),
+        // Exit 1 is "not set" only when silent; an invalid key exits 1 with stderr.
+        (1, "") if out.stderr.trim().is_empty() => Ok(false),
+        _ => Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        }),
+    }
 }
 
 /// Archives/unarchives a branch by setting (or unsetting) a personal,
@@ -503,6 +596,63 @@ fn archive_config_busy(name: &str, archived: bool) -> AppError {
         "Another Git process was saving this repository's settings, so {name} wasn't \
          {verb} — try again."
     ))
+}
+
+/// Marks or unmarks a branch Keep local (local config), so GitDesktop and its MCP
+/// server refuse to push or publish it.
+#[tauri::command]
+pub async fn git_set_branch_keep_local(
+    repo_path: String,
+    name: String,
+    keep_local: bool,
+) -> AppResult<()> {
+    set_branch_keep_local_core(&repo_path, &name, keep_local).await
+}
+
+/// The body of `git_set_branch_keep_local`, with [`set_branch_archived_core`]'s lock
+/// policy. Any local branch may be marked, current and default included. The write is
+/// local scope while [`branch_keep_local`] reads every scope, so only a write that read
+/// confirms returns Ok; one it contradicts is reported and left in place.
+pub(crate) async fn set_branch_keep_local_core(
+    repo_path: &str,
+    name: &str,
+    keep_local: bool,
+) -> AppResult<()> {
+    validate_ref_name(name)?;
+    let key = keep_local_key(name);
+    // `--replace-all` and `--unset-all`: a plain set or `--unset` exits 5 on a key a hand
+    // edit made multi-valued and writes nothing. Exit 5 on unset is "key not found":
+    // already off.
+    let args: &[&str] = if keep_local {
+        &["config", "--replace-all", &key, "true"]
+    } else {
+        &["config", "--unset-all", &key]
+    };
+    let out = run_git_config_write(repo_path, args, DEFAULT_TIMEOUT).await?;
+    if out.code != 0 && (keep_local || out.code != 5) {
+        if is_config_lock_contention(&out.stderr) {
+            let verb = if keep_local { "on" } else { "off" };
+            return Err(config_lock_busy(&format!(
+                "Keep local wasn't turned {verb} for {name} — try again."
+            )));
+        }
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    match (keep_local, branch_keep_local(repo_path, name).await?) {
+        (false, true) => Err(AppError::Command(format!(
+            "Keep local is still on for {name}: it is set outside this repository's own Git \
+             config (a global, system, worktree or included config file), so GitDesktop can't \
+             turn it off here."
+        ))),
+        (true, false) => Err(AppError::Command(format!(
+            "Keep local is still off for {name}: another Git config scope sets it off (a \
+             worktree or included config file), so GitDesktop can't turn it on here."
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Agent-session prefix; [`refuse_session_branch_name`] guards case-insensitively, and
@@ -1157,6 +1307,11 @@ pub(crate) async fn git_delete_remote_branch_core(
 ) -> AppResult<()> {
     validate_ref_name(&remote)?;
     validate_ref_name(&name)?;
+    crate::git::status::refuse_mirror_push(
+        &repo_path,
+        crate::git::status::PushRemote::Named(&remote),
+    )
+    .await?;
 
     // Best-effort guard: if the remote's symbolic HEAD resolves (only set on
     // clone, so absence is fine — skip then) to this branch, it's the remote's
@@ -2122,7 +2277,9 @@ async fn branch_reset_to_upstream_within(
 ///   and one whose folder is missing as a plain `Command` error, with nothing to open.
 ///
 /// When `branch` IS the current branch there's nothing to avoid switching to, so it
-/// merges in place (conflicts surface in the changes list as usual — no abort).
+/// merges in place (conflicts surface in the changes list as usual — no abort), and
+/// the outcome follows what that merge did to HEAD: unchanged → `"up-to-date"`, moved
+/// to `base`'s tip → `"fast-forward"`, otherwise (or when HEAD can't be read) `"merge"`.
 #[tauri::command]
 pub async fn git_update_branch_from(
     app: tauri::AppHandle,
@@ -2167,6 +2324,32 @@ impl UpdateBranchOutcome {
             outcome: outcome.to_string(),
             holder: None,
         }
+    }
+}
+
+/// The commit `rev` names, or None when the read fails. Lock-free: callers hold the
+/// working-tree lock.
+async fn commit_oid(repo_path: &str, rev: &str) -> Option<String> {
+    let peeled = format!("{rev}^{{commit}}");
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "-q", &peeled],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    let oid = out.stdout_lossy().trim().to_string();
+    (out.code == 0 && !oid.is_empty()).then_some(oid)
+}
+
+/// The in-place arm's outcome, read from what the merge did rather than a pre-probe:
+/// the user's `merge.ff` decides whether git fast-forwards or makes a merge commit.
+/// Only two successful reads may claim "up-to-date" or "fast-forward"; else "merge".
+fn in_place_outcome(before: Option<&str>, after: Option<&str>, base: Option<&str>) -> &'static str {
+    match (before, after) {
+        (Some(b), Some(a)) if a == b => "up-to-date",
+        (Some(_), Some(a)) if base == Some(a) => "fast-forward",
+        _ => "merge",
     }
 }
 
@@ -2243,6 +2426,7 @@ pub(crate) async fn update_branch_from(
                 }
             }
         }
+        let head_before = commit_oid(repo_path, "HEAD").await;
         // Raw: a conflicted merge reports entirely on stdout and leaves stderr
         // empty (measured, git 2.51.1), which a stderr-only error renders as
         // "git exited with code 1". Lock-free runners only — the hold is ours.
@@ -2262,7 +2446,11 @@ pub(crate) async fn update_branch_from(
             )
             .await);
         }
-        return Ok(UpdateBranchOutcome::unheld("merge"));
+        return Ok(UpdateBranchOutcome::unheld(in_place_outcome(
+            head_before.as_deref(),
+            commit_oid(repo_path, "HEAD").await.as_deref(),
+            commit_oid(repo_path, &base_rev).await.as_deref(),
+        )));
     }
 
     // Read under THIS hold: the holder and diverged arms below pin it too.
@@ -6661,6 +6849,78 @@ mod tests {
         );
     }
 
+    /// An in-place update that brings nothing in says so, whatever `merge.ff` says,
+    /// and leaves HEAD where it was.
+    #[tokio::test]
+    async fn update_in_place_reports_up_to_date_when_nothing_is_merged() {
+        for ff in ["true", "false"] {
+            let (_guard, _repo, repo_s, main) = diverged_repo("update-in-place-current").await;
+            run(&repo_s, &["config", "merge.ff", ff]).await;
+            run(&repo_s, &["branch", "older", &format!("{main}~1")]).await;
+            let before = run(&repo_s, &["rev-parse", "HEAD"]).await;
+
+            let state = AppState::default();
+            let outcome =
+                update_branch_from(&state, &repo_s, &main, "older", &HashSet::new(), None)
+                    .await
+                    .expect("an in-place update of a current branch succeeds");
+            assert_eq!(outcome.outcome, "up-to-date", "merge.ff={ff}");
+            assert_eq!(
+                run(&repo_s, &["rev-parse", "HEAD"]).await,
+                before,
+                "merge.ff={ff}: no commit is made"
+            );
+        }
+    }
+
+    /// A current branch strictly behind `base` reports what git did: a fast-forward
+    /// under `merge.ff=true`, a merge commit under `merge.ff=false`.
+    #[tokio::test]
+    async fn update_in_place_reports_the_fast_forward_or_merge_git_made() {
+        for (ff, expected) in [("true", "fast-forward"), ("false", "merge")] {
+            let (_guard, _repo, repo_s, main) = diverged_repo("update-in-place-behind").await;
+            run(&repo_s, &["config", "merge.ff", ff]).await;
+            let base_tip = run(&repo_s, &["rev-parse", "HEAD"])
+                .await
+                .trim()
+                .to_string();
+            run(&repo_s, &["switch", "-qc", "behind", &format!("{main}~1")]).await;
+
+            let state = AppState::default();
+            let outcome =
+                update_branch_from(&state, &repo_s, "behind", &main, &HashSet::new(), None)
+                    .await
+                    .expect("an in-place update of a current branch succeeds");
+            assert_eq!(outcome.outcome, expected, "merge.ff={ff}");
+            let head = run(&repo_s, &["rev-parse", "HEAD"])
+                .await
+                .trim()
+                .to_string();
+            if expected == "fast-forward" {
+                assert_eq!(head, base_tip, "the branch sits on base's tip");
+            } else {
+                assert_ne!(head, base_tip, "git made a merge commit");
+                assert_eq!(
+                    run(&repo_s, &["rev-parse", "HEAD^2"]).await.trim(),
+                    base_tip,
+                    "whose second parent is base's tip"
+                );
+            }
+        }
+    }
+
+    /// Only two successful reads may claim "up-to-date" or "fast-forward".
+    #[test]
+    fn update_in_place_outcome_keeps_merge_on_a_failed_read() {
+        use super::in_place_outcome as outcome;
+        assert_eq!(outcome(Some("a"), Some("a"), Some("b")), "up-to-date");
+        assert_eq!(outcome(Some("a"), Some("b"), Some("b")), "fast-forward");
+        assert_eq!(outcome(Some("a"), Some("c"), Some("b")), "merge");
+        assert_eq!(outcome(None, Some("a"), Some("a")), "merge");
+        assert_eq!(outcome(Some("a"), None, None), "merge");
+        assert_eq!(outcome(Some("a"), Some("b"), None), "merge");
+    }
+
     /// The up-to-date probe: a base tag that IS an ancestor of the branch must not
     /// report a branch that lacks the base's work as already up to date.
     #[tokio::test]
@@ -9734,5 +9994,451 @@ mod tests {
         .await
         .unwrap_err();
         f.assert_unchanged(&err).await;
+    }
+
+    // --- Keep local flag and the remote-default branch-list field. ---
+
+    /// A repo on an explicitly named `main`, with the identity pinned repo-locally.
+    async fn keep_local_repo(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let (guard, base) = temp_base(tag);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q", "-b", "main"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "seed"]).await;
+        (guard, base, repo_s)
+    }
+
+    fn append_config(repo: &str, text: &str) {
+        use std::io::Write;
+        let path = std::path::Path::new(repo).join(".git").join("config");
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+
+    async fn listed_keep_local(repo: &str, name: &str) -> bool {
+        git_branches(repo.to_string())
+            .await
+            .unwrap()
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{name} listed"))
+            .keep_local
+    }
+
+    #[test]
+    fn keep_local_list_parse_reads_git_bools_and_the_last_entry() {
+        use super::parse_branch_flags;
+        let key = |name: &str| super::keep_local_key(name).to_ascii_lowercase();
+        assert_eq!(
+            super::keep_local_key("rel/1.2"),
+            "branch.rel/1.2.gitdesktopLocalOnly"
+        );
+        let marked = ["true", "yes", "on", "1", "TRUE", "maybe"];
+        let unmarked = ["false", "no", "off", "0", ""];
+        for value in marked {
+            let text = format!("{} {value}\n", key("rel/1.2"));
+            assert!(
+                parse_branch_flags(&text).keep_local.contains("rel/1.2"),
+                "{value:?}"
+            );
+        }
+        for value in unmarked {
+            let text = format!("{} {value}\n", key("rel/1.2"));
+            assert!(parse_branch_flags(&text).keep_local.is_empty(), "{value:?}");
+        }
+        // A valueless key is git's true.
+        assert!(parse_branch_flags(&format!("{}\n", key("x")))
+            .keep_local
+            .contains("x"));
+        // The last entry wins, a junk-first pair included (the named asymmetry: the
+        // guard's `--type=bool --get` fails on the junk entry; the list reads `false`).
+        for (first, last, expect) in [
+            ("true", "false", false),
+            ("false", "true", true),
+            ("maybe", "true", true),
+            ("maybe", "false", false),
+        ] {
+            let text = format!("{k} {first}\n{k} {last}\n", k = key("x"));
+            assert_eq!(
+                parse_branch_flags(&text).keep_local.contains("x"),
+                expect,
+                "{first} then {last}"
+            );
+        }
+        // Archived keeps its literal rule, beside a Keep local entry for another name.
+        let text = format!(
+            "branch.a.gitdesktoparchived true\nbranch.b.gitdesktoparchived yes\n\
+             branch.c.gitdesktoparchived\n{} true\n",
+            key("d")
+        );
+        let flags = parse_branch_flags(&text);
+        assert_eq!(flags.archived, HashSet::from(["a".to_string()]));
+        assert_eq!(flags.keep_local, HashSet::from(["d".to_string()]));
+    }
+
+    /// The guard's read and the list agree on every value git can hold, except the named
+    /// junk-first asymmetry, where the read fails closed.
+    #[tokio::test]
+    async fn keep_local_read_and_list_agree_on_real_config() {
+        let (_guard, base, repo_s) = keep_local_repo("keep-local-read").await;
+        run(&repo_s, &["branch", "x"]).await;
+        let key = super::keep_local_key("x");
+        let reset = |repo_s: String, key: String| async move {
+            run_git_raw(
+                Some(&repo_s),
+                &["config", "--unset-all", &key],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        };
+
+        assert!(
+            !super::branch_keep_local(&repo_s, "x").await.unwrap(),
+            "unset"
+        );
+        assert!(!listed_keep_local(&repo_s, "x").await);
+        for (values, read, listed) in [
+            (&["true"][..], Some(true), true),
+            (&["yes"][..], Some(true), true),
+            (&["false"][..], Some(false), false),
+            (&[""][..], Some(false), false),
+            (&["maybe"][..], None, true),
+            (&["true", "false"][..], Some(false), false),
+            (&["maybe", "true"][..], None, true),
+            (&["maybe", "false"][..], None, false),
+        ] {
+            reset(repo_s.clone(), key.clone()).await;
+            for value in values {
+                run(&repo_s, &["config", "--add", &key, value]).await;
+            }
+            let got = super::branch_keep_local(&repo_s, "x").await;
+            match read {
+                Some(expect) => assert_eq!(got.unwrap(), expect, "{values:?}"),
+                None => {
+                    let err = got.expect_err("junk fails closed");
+                    assert!(
+                        err.to_string().contains("bad boolean config value"),
+                        "{values:?}: {err}"
+                    );
+                }
+            }
+            assert_eq!(listed_keep_local(&repo_s, "x").await, listed, "{values:?}");
+        }
+        // A valueless key reads true on both.
+        reset(repo_s.clone(), key.clone()).await;
+        append_config(&repo_s, "[branch \"x\"]\n\tgitdesktopLocalOnly\n");
+        assert!(super::branch_keep_local(&repo_s, "x").await.unwrap());
+        assert!(listed_keep_local(&repo_s, "x").await);
+
+        // Exact-name match: the subsection is case-sensitive.
+        assert!(!super::branch_keep_local(&repo_s, "X").await.unwrap());
+        // An invalid key (exit 1 WITH stderr) is an error, not unset.
+        super::branch_keep_local(&repo_s, "x\ny")
+            .await
+            .expect_err("an invalid key is not 'unset'");
+        // git exits 1 silently outside a repository; no route can push from one.
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(
+            !super::branch_keep_local(&plain.to_string_lossy(), "x")
+                .await
+                .expect("a non-repository reads as unmarked, not an error"),
+            "a non-repository reads as unmarked"
+        );
+    }
+
+    /// Both directions on the current branch, a branch that is the remote default, and a
+    /// dotted name; the read follows each write, and a repeat turn-off stays Ok.
+    #[tokio::test]
+    async fn keep_local_setter_round_trips_and_the_read_follows() {
+        let (_guard, _base, repo_s) = keep_local_repo("keep-local-set").await;
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        run(
+            &repo_s,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .await;
+        run(&repo_s, &["branch", "rel/1.2"]).await;
+        run(
+            &repo_s,
+            &["branch", "--set-upstream-to", "origin/main", "main"],
+        )
+        .await;
+        let main = git_branches(repo_s.clone()).await.unwrap();
+        let main = main.iter().find(|b| b.name == "main").unwrap();
+        assert!(
+            main.is_current && main.upstream_is_remote_default,
+            "{main:?}"
+        );
+
+        for name in ["main", "rel/1.2"] {
+            super::set_branch_keep_local_core(&repo_s, name, true)
+                .await
+                .expect("turn on");
+            assert!(super::branch_keep_local(&repo_s, name).await.unwrap());
+            assert!(listed_keep_local(&repo_s, name).await);
+            for _ in 0..2 {
+                super::set_branch_keep_local_core(&repo_s, name, false)
+                    .await
+                    .expect("turn off, twice");
+            }
+            assert!(!super::branch_keep_local(&repo_s, name).await.unwrap());
+            assert!(!listed_keep_local(&repo_s, name).await);
+        }
+        // A multi-valued local flag is fully cleared.
+        let key = super::keep_local_key("main");
+        run(&repo_s, &["config", "--add", &key, "true"]).await;
+        run(&repo_s, &["config", "--add", &key, "true"]).await;
+        super::set_branch_keep_local_core(&repo_s, "main", false)
+            .await
+            .expect("clears a multi-valued flag");
+        assert!(!super::branch_keep_local(&repo_s, "main").await.unwrap());
+        // A doubled local flag turns on too (a plain set exits 5 there), leaving one value.
+        run(&repo_s, &["config", "--add", &key, "false"]).await;
+        run(&repo_s, &["config", "--add", &key, "false"]).await;
+        super::set_branch_keep_local_core(&repo_s, "main", true)
+            .await
+            .expect("turns on a multi-valued flag");
+        assert!(super::branch_keep_local(&repo_s, "main").await.unwrap());
+        assert_eq!(
+            run(&repo_s, &["config", "--local", "--get-all", &key]).await,
+            "true\n"
+        );
+        // An invalid name never reaches a config key.
+        let err = super::set_branch_keep_local_core(&repo_s, "a b", true)
+            .await
+            .expect_err("invalid name");
+        assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
+    }
+
+    /// A mark set in an included file survives a local turn-off: the setter says so
+    /// and the read still refuses. Twin: a local mark turns off with Ok.
+    #[tokio::test]
+    async fn keep_local_setter_reports_a_mark_set_in_another_scope() {
+        let (_guard, base, repo_s) = keep_local_repo("keep-local-scope-off").await;
+        run(&repo_s, &["branch", "x"]).await;
+        run(&repo_s, &["branch", "y"]).await;
+        let inc = base.join("inc.gitconfig");
+        std::fs::write(&inc, "[branch \"x\"]\n\tgitdesktopLocalOnly = true\n").unwrap();
+        let inc_s = inc.to_string_lossy().replace('\\', "/");
+        run(&repo_s, &["config", "include.path", &inc_s]).await;
+
+        let err = super::set_branch_keep_local_core(&repo_s, "x", false)
+            .await
+            .expect_err("the included mark still reads marked");
+        assert!(
+            matches!(&err, AppError::Command(m) if m == "Keep local is still on for x: it is \
+                set outside this repository's own Git config (a global, system, worktree or \
+                included config file), so GitDesktop can't turn it off here."),
+            "{err:?}"
+        );
+        assert!(super::branch_keep_local(&repo_s, "x").await.unwrap());
+
+        super::set_branch_keep_local_core(&repo_s, "y", true)
+            .await
+            .unwrap();
+        super::set_branch_keep_local_core(&repo_s, "y", false)
+            .await
+            .expect("a local mark turns off");
+        assert!(!super::branch_keep_local(&repo_s, "y").await.unwrap());
+    }
+
+    /// An included `false` after the branch's own section outranks a local turn-on: the
+    /// setter says so, the write stays, and the read allows. Twin: no include, Ok.
+    #[tokio::test]
+    async fn keep_local_setter_reports_an_off_set_in_another_scope() {
+        let (_guard, base, repo_s) = keep_local_repo("keep-local-scope-on").await;
+        run(&repo_s, &["branch", "x"]).await;
+        run(&repo_s, &["branch", "y"]).await;
+        run(&repo_s, &["config", "branch.x.remote", "origin"]).await;
+        let inc = base.join("inc.gitconfig");
+        std::fs::write(&inc, "[branch \"x\"]\n\tgitdesktopLocalOnly = false\n").unwrap();
+        let inc_s = inc.to_string_lossy().replace('\\', "/");
+        run(&repo_s, &["config", "include.path", &inc_s]).await;
+
+        let err = super::set_branch_keep_local_core(&repo_s, "x", true)
+            .await
+            .expect_err("the included false still reads unmarked");
+        assert!(
+            matches!(&err, AppError::Command(m) if m == "Keep local is still off for x: another \
+                Git config scope sets it off (a worktree or included config file), so \
+                GitDesktop can't turn it on here."),
+            "{err:?}"
+        );
+        assert!(!super::branch_keep_local(&repo_s, "x").await.unwrap());
+        let local = run_git_raw(
+            Some(&repo_s),
+            &["config", "--local", "--get", &super::keep_local_key("x")],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            local.stdout_lossy().trim(),
+            "true",
+            "the local write is kept"
+        );
+
+        super::set_branch_keep_local_core(&repo_s, "y", true)
+            .await
+            .expect("no include: the mark takes");
+        assert!(super::branch_keep_local(&repo_s, "y").await.unwrap());
+    }
+
+    /// A config lock held through the retry reads as the try-again copy, both ways.
+    #[tokio::test]
+    async fn keep_local_setter_held_config_lock_reads_try_again() {
+        let (_guard, _base, repo_s) = keep_local_repo("keep-local-lock").await;
+        let lock = std::path::Path::new(&repo_s)
+            .join(".git")
+            .join("config.lock");
+        std::fs::write(&lock, b"").unwrap();
+        for (on, verb) in [(true, "on"), (false, "off")] {
+            let err = super::set_branch_keep_local_core(&repo_s, "main", on)
+                .await
+                .expect_err("a held lock refuses");
+            assert!(
+                matches!(&err, AppError::Command(m) if *m == format!(
+                    "Another Git process was saving this repository's settings, so Keep \
+                     local wasn't turned {verb} for main — try again."
+                )),
+                "{err:?}"
+            );
+        }
+        std::fs::remove_file(&lock).unwrap();
+    }
+
+    /// git moves the whole `branch.<name>` section on rename and drops it on delete.
+    #[tokio::test]
+    async fn keep_local_flag_follows_rename_and_delete() {
+        let (_guard, _base, repo_s) = keep_local_repo("keep-local-rename").await;
+        run(&repo_s, &["branch", "old"]).await;
+        super::set_branch_keep_local_core(&repo_s, "old", true)
+            .await
+            .unwrap();
+        run(&repo_s, &["branch", "-m", "--", "old", "new"]).await;
+        assert_eq!(branch_section(&repo_s, "old").await, "");
+        let moved = branch_section(&repo_s, "new").await;
+        assert!(moved.contains("gitdesktoplocalonly true"), "{moved}");
+        assert!(super::branch_keep_local(&repo_s, "new").await.unwrap());
+        run(&repo_s, &["branch", "-D", "--", "new"]).await;
+        assert_eq!(branch_section(&repo_s, "new").await, "");
+        assert!(!super::branch_keep_local(&repo_s, "new").await.unwrap());
+    }
+
+    #[test]
+    fn keep_local_branch_serializes_camel_case_fields() {
+        let branch = crate::git::types::Branch {
+            name: "x".into(),
+            is_current: false,
+            upstream: None,
+            last_commit_date: String::new(),
+            archived: false,
+            upstream_ahead: 0,
+            upstream_behind: 0,
+            upstream_gone: false,
+            upstream_remote: None,
+            upstream_remote_ref: None,
+            keep_local: true,
+            upstream_is_remote_default: true,
+        };
+        let value = serde_json::to_value(&branch).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.get("keepLocal"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            object.get("upstreamIsRemoteDefault"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(!object.contains_key("keep_local"));
+        assert!(!object.contains_key("upstream_is_remote_default"));
+    }
+
+    /// Every remote-default shape, from the one list spawn: default, non-default, a
+    /// slash-named remote, no HEAD symref, a dangling one, gone, local `.`, a non-branch
+    /// upstream, untracked; a remote branch named `feat/HEAD` and the remote HEAD rows
+    /// never become branch rows.
+    #[tokio::test]
+    async fn remote_default_flag_matches_each_probe_row() {
+        let (_guard, _base, repo_s) = keep_local_repo("remote-default").await;
+        for remote in ["origin", "team/fork", "nohead", "dangle"] {
+            run(&repo_s, &["remote", "add", remote, &repo_s]).await;
+        }
+        for tracking in [
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/dev",
+            "refs/remotes/origin/feat/HEAD",
+            "refs/remotes/team/fork/trunk",
+            "refs/remotes/nohead/main",
+        ] {
+            run(&repo_s, &["update-ref", tracking, "HEAD"]).await;
+        }
+        for (head, target) in [
+            ("refs/remotes/origin/HEAD", "refs/remotes/origin/main"),
+            (
+                "refs/remotes/team/fork/HEAD",
+                "refs/remotes/team/fork/trunk",
+            ),
+            ("refs/remotes/dangle/HEAD", "refs/remotes/dangle/gone"),
+        ] {
+            run(&repo_s, &["symbolic-ref", head, target]).await;
+        }
+        let rows = [
+            ("on-default", Some(("origin", "refs/heads/main")), true),
+            ("on-dev", Some(("origin", "refs/heads/dev")), false),
+            ("slash", Some(("team/fork", "refs/heads/trunk")), true),
+            ("gone-b", Some(("origin", "refs/heads/deleted")), false),
+            ("nohead-b", Some(("nohead", "refs/heads/main")), false),
+            ("dangle-b", Some(("dangle", "refs/heads/gone")), false),
+            ("local-up", Some((".", "refs/heads/main")), false),
+            ("pr-b", Some(("origin", "refs/pull/1/head")), false),
+            ("untracked", None, false),
+        ];
+        for (name, upstream, _) in rows {
+            run(&repo_s, &["branch", name]).await;
+            if let Some((remote, merge)) = upstream {
+                run(
+                    &repo_s,
+                    &["config", &format!("branch.{name}.remote"), remote],
+                )
+                .await;
+                run(&repo_s, &["config", &format!("branch.{name}.merge"), merge]).await;
+            }
+        }
+
+        let branches = git_branches(repo_s.clone()).await.unwrap();
+        let mut names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = rows.iter().map(|(n, _, _)| *n).collect();
+        expected.push("main");
+        expected.sort_unstable();
+        assert_eq!(names, expected, "only refs/heads rows");
+        for (name, _, default) in rows {
+            let row = branches.iter().find(|b| b.name == name).unwrap();
+            assert_eq!(row.upstream_is_remote_default, default, "{row:?}");
+        }
+        assert!(
+            branches
+                .iter()
+                .find(|b| b.name == "gone-b")
+                .unwrap()
+                .upstream_gone
+        );
+
+        // No remotes at all: nothing is a remote default.
+        let (_guard2, _base2, bare_s) = keep_local_repo("remote-default-none").await;
+        let only = git_branches(bare_s).await.unwrap();
+        assert_eq!(only.len(), 1);
+        assert!(!only[0].upstream_is_remote_default && !only[0].keep_local);
     }
 }

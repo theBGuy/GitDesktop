@@ -33,10 +33,14 @@ import {
   type LocalPrUpdateOutcome,
 } from "@/lib/git/api";
 import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
   conflictPreviewKey,
   MERGE_UPDATE_ABORT_FAILED_NOTE,
   MERGE_UPDATE_UNFINISHED_MESSAGE,
+  usePush,
 } from "@/lib/git/queries";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import type {
   BranchComparison,
   CommitSummary,
@@ -92,8 +96,23 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   // The Files tab's fork-point read and the Review tab's key read.
   gitMergeBase: vi.fn(() => new Promise(() => undefined)),
   getSecret: vi.fn(async () => null),
+  // The closed Promote dialog's Keep local read; never answered.
+  gitBranches: vi.fn(() => new Promise(() => undefined)),
   // The forge probe never answers: a local PR needs none of it.
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
+  // A push started by PushHarness stays pending for the whole test.
+  gitPush: vi.fn(() => new Promise(() => undefined)),
+}));
+// usePush keys on the repository identity; it answers without a backend.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+  // C:/repo-wt is another worktree of the same repository.
+  peekRepoIdentity: (path: string) =>
+    path === "C:/repo" || path === "C:/repo-wt" ? "C:/repo/.git" : undefined,
+  repoIdentityStrict: (path: string) =>
+    path === "C:/repo" || path === "C:/repo-wt"
+      ? Promise.resolve("C:/repo/.git")
+      : new Promise<string>(() => undefined),
 }));
 // Publish renders only for a forge that can open pull requests; the probe above
 // never answers, so this one capability is answered here.
@@ -325,6 +344,150 @@ afterEach(() => {
 });
 
 afterAll(() => expect(unmockedCommands).toEqual([]));
+
+/** One usePush binding per file: the usePush scan reads a second `const push`
+ *  as a use of the first. */
+function PushHarness({
+  branch,
+  path,
+}: {
+  branch: "feat" | "other" | "main";
+  path: string;
+}) {
+  const push = usePush(path);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (branch === "feat")
+          void push.mutateAsync({ setUpstream: false, branch: "feat" });
+        else if (branch === "main")
+          void push.mutateAsync({ setUpstream: false, branch: "main" });
+        else void push.mutateAsync({ setUpstream: false, branch: "other" });
+      }}
+    >
+      start {branch} in {path}
+    </button>
+  );
+}
+
+/** Starts a push of `branch` from `path` (the view's checkout by default) in
+ *  the view's own cache, left pending. */
+async function startPush(
+  client: QueryClient,
+  branch: "feat" | "other" | "main",
+  path = REPO,
+) {
+  render(
+    <QueryClientProvider client={client}>
+      <PushHarness branch={branch} path={path} />
+    </QueryClientProvider>,
+  );
+  // The identity must land first: a push filed without it is path-keyed.
+  await waitFor(() =>
+    expect(
+      client.getQueryData(repoIdentityQueryOptions(path).queryKey),
+    ).toBeDefined(),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: `start ${branch} in ${path}` }),
+  );
+  await waitFor(() =>
+    expect(
+      client.getMutationCache().findAll({ status: "pending" }),
+    ).toHaveLength(1),
+  );
+}
+
+describe("LocalPrView: Update branch while a push runs", () => {
+  async function offerUpdate(current: string) {
+    repoStatus = statusOn(current, false);
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    const view = renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    await settle();
+    return view;
+  }
+
+  it("a push of the head holds the update", async () => {
+    const view = await offerUpdate("main");
+    await startPush(view.client, "feat");
+    await userEvent.click(stripButton("Update branch"));
+    expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+    expect(gitUpdateBranchFrom).not.toHaveBeenCalled();
+  });
+
+  it("an unrelated push holds an in-place update of the current head", async () => {
+    const view = await offerUpdate("feat");
+    await startPush(view.client, "other");
+    await userEvent.click(stripButton("Update branch"));
+    expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+    expect(gitUpdateBranchFrom).not.toHaveBeenCalled();
+  });
+
+  it("an unrelated push leaves a head that isn't checked out free", async () => {
+    const view = await offerUpdate("main");
+    await startPush(view.client, "other");
+    await userEvent.click(stripButton("Update branch"));
+    await waitFor(() =>
+      expect(gitUpdateBranchFrom).toHaveBeenCalledWith(REPO, "feat", "main"),
+    );
+    expect(toast.info).not.toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+  });
+});
+
+describe("LocalPrView: Merge while the base pushes", () => {
+  for (const [where, path, message] of [
+    ["this checkout", REPO, BRANCH_PUSH_ACTIVE_MESSAGE],
+    ["another worktree", "C:/repo-wt", BRANCH_PUSH_ELSEWHERE_MESSAGE],
+  ] as const)
+    it(`a push of the base in ${where} refuses the merge`, async () => {
+      const user = userEvent.setup();
+      records = [makePr({ approved: true })];
+      const view = renderView();
+      await findStrip(/will conflict/);
+      await startPush(view.client, "main", path);
+      await user.click(screen.getByRole("button", { name: "Merge" }));
+      await user.click(
+        await screen.findByRole("menuitem", { name: "Create a merge commit" }),
+      );
+      await waitFor(() => expect(toast.info).toHaveBeenCalledWith(message));
+      expect(gitMergeLocalPr).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Merge" })).toBeVisible();
+    });
+
+  it("a push of the head leaves the merge free", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(new Promise(() => undefined));
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await findStrip(/will conflict/);
+    await startPush(view.client, "feat");
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Create a merge commit" }),
+    );
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("LocalPrView: Update branch reports its outcome", () => {
+  it.each([
+    ["up-to-date", "feat is already up to date with main"],
+    ["merge", "Updated feat from main"],
+  ] as const)("a %s outcome toasts %j", async (outcome, message) => {
+    vi.mocked(gitUpdateBranchFrom).mockResolvedValue({ outcome, holder: null });
+    repoStatus = statusOn("feat", false);
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    await settle();
+    await userEvent.click(stripButton("Update branch"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(message));
+  });
+});
 
 describe("LocalPrView: resolving conflicts before approval", () => {
   it("Resolve conflicts starts once and holds the PR's other actions while preparing", async () => {

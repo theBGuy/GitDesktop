@@ -45,6 +45,9 @@ export const PUBLISH_HOLD_REASON = "A publish is running.";
 /** A push route's menu-item parenthetical while the repository publishes. */
 export const PUBLISH_HOLD_ITEM_REASON = "a publish is running";
 
+/** Publish's hold reason while the repository identity loads. */
+export const PUBLISH_IDENTITY_PENDING = "Checking this repository…";
+
 /** The fire-time refusal of a push route while the repository publishes. */
 export function publishRunningMessage(p: PendingPublish): string {
   return `A publish to ${PUBLISH_PROVIDER_LABELS[p.provider]} is running — wait for it to finish.`;

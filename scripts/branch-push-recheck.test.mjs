@@ -1,6 +1,9 @@
 // Pins the fire-time push re-checks on the routes that move or remove a branch
-// ref (rename, local delete, archive, reset to upstream, pull-drop, the
-// stash-reapply reruns) or delete branches in bulk (Clean up), every HEAD push
+// ref (rename, local delete, archive, reset to upstream, update, the current
+// branch's rebases, pull-drop, the stash-reapply reruns, a local PR's update,
+// merge and resolve finish, undo, reset to commit, amend, squash, Edit history,
+// Edit dates, Cherry-pick to branch) or delete branches in bulk (Clean up), the one
+// shared helper they call (sync.ts), every HEAD push
 // recording the branch it starts on, and the Ctrl+B modal gate. A dialog
 // opened before a push started still submits after it, so each submit reads
 // the pending pushes live; render state alone predates them.
@@ -12,12 +15,15 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { test } from "node:test";
-import { pushesBranch } from "../src/features/repository/branch-sync-state.ts";
+import { pushesBranch } from "../src/lib/git/queries/push-writes.ts";
 import { elementInOpenModal } from "../src/lib/hotkeys/open-modal.ts";
 
 const R = "src/features/repository/";
+const SYNC = "src/lib/git/queries/sync.ts";
 const DERIVED =
   "`A push is already running — ${fallback} is checked out and ${deleteTarget} was kept.`";
+const DERIVED_ELSEWHERE =
+  "`Another worktree is pushing this branch — ${fallback} is checked out and ${deleteTarget} was kept.`";
 
 /** Each pin: a handler anchor in `file`, and needles that must appear in its
  *  body IN ORDER. `mutate` lists the needles whose removal must fail the pin. */
@@ -37,15 +43,36 @@ const PINS = [
     ],
   },
   {
-    name: "rename helper",
-    file: `${R}RenameBranchDialog.tsx`,
-    anchor: "function refuseWhileBranchPushes(",
+    name: "shared helper",
+    file: SYNC,
+    anchor:
+      "    elsewhereMessage?: string;\n    alsoHeld?: boolean;\n  } = {},\n): boolean {",
     seq: [
-      "branchPushKey(repoPath)",
-      "pushesBranch(pushes, branch, currentName)",
-      "toast.info(BRANCH_PUSH_ACTIVE_MESSAGE)",
+      'findAll({ mutationKey: BRANCH_PUSH_KEY, status: "pending" })',
+      "peekRepoIdentity(repo)",
+      "pushesBranch([p], branch, currentName)",
+      "opts.alsoHeld !== true && holding.length === 0",
+      "holding.every((p) => p.foreign)",
+      "opts.elsewhereMessage ??",
+      "BRANCH_PUSH_ELSEWHERE_MESSAGE",
+      "BRANCH_PUSH_ACTIVE_MESSAGE",
     ],
-    mutate: ["pushesBranch(pushes, branch, currentName)"],
+    mutate: [
+      "peekRepoIdentity(repo)",
+      "pushesBranch([p], branch, currentName)",
+      "holding.every((p) => p.foreign)",
+      "opts.elsewhereMessage ??",
+    ],
+  },
+  {
+    name: "usePush files its identity",
+    file: SYNC,
+    anchor: "export function usePush(repo: string) {",
+    seq: [
+      "const identity = useRepoIdentity(repo).data;",
+      "identity: branchPushKey(repo, identity),",
+    ],
+    mutate: ["identity: branchPushKey(repo, identity),"],
   },
   {
     name: "local delete",
@@ -53,28 +80,33 @@ const PINS = [
     anchor: "async function doDelete() {",
     seq: [
       "isDeletionBlocked(rulesConfig, deleteTarget)",
-      "if (refuseWhileBranchPushes(deleteTarget)) return;",
+      "if (refuseWhileRowPushes(deleteTarget)) return;",
       "try {",
       "await listUserWorktrees(repoPath)",
       '"before the delete started"',
-      "if (refuseWhileBranchPushes(deleteTarget)) return;",
+      "if (refuseWhileRowPushes(deleteTarget)) return;",
       "await checkout.mutateAsync(fallback)",
       "`before ${deleteTarget} was deleted`",
-      "refuseWhileBranchPushes(",
+      "refuseWhileRowPushes(",
       DERIVED,
+      DERIVED_ELSEWHERE,
       "await deleteBranch.mutateAsync(deleteTarget)",
     ],
-    mutate: ["if (refuseWhileBranchPushes(deleteTarget)) return;", DERIVED],
+    mutate: [
+      "if (refuseWhileRowPushes(deleteTarget)) return;",
+      DERIVED,
+      DERIVED_ELSEWHERE,
+    ],
   },
   {
     name: "archive",
     file: `${R}BranchSwitcher.tsx`,
     anchor: "async function setArchived(name: string, archived: boolean) {",
     seq: [
-      "if (archived && refuseWhileBranchPushes(name)) return;",
+      "if (archived && refuseWhileRowPushes(name)) return;",
       "await setBranchArchived.mutateAsync",
     ],
-    mutate: ["if (archived && refuseWhileBranchPushes(name)) return;"],
+    mutate: ["if (archived && refuseWhileRowPushes(name)) return;"],
   },
   {
     name: "switcher reset to upstream",
@@ -83,31 +115,72 @@ const PINS = [
     seq: [
       "useConfirm.getState().ask",
       'if (refuseIfSwitched(resetIn, "nothing was reset")) return;',
-      "if (refuseWhileBranchPushes(branch.name)) return;",
+      "if (refuseWhileRowPushes(branch.name)) return;",
       "branchRewriteStatusOptions(repoPath, branch.name)",
       'if (refuseIfSwitched(resetIn, "nothing was reset")) return;',
-      "if (refuseWhileBranchPushes(branch.name)) return;",
+      "if (refuseWhileRowPushes(branch.name)) return;",
       "await hardReset.mutateAsync",
     ],
-    mutate: ["if (refuseWhileBranchPushes(branch.name)) return;"],
+    mutate: ["if (refuseWhileRowPushes(branch.name)) return;"],
   },
   {
     name: "switcher helper",
     file: `${R}BranchSwitcher.tsx`,
-    anchor: "function refuseWhileBranchPushes(",
+    anchor:
+      "function refuseWhileRowPushes(\n    branch: string,\n    message?: string,\n    elsewhereMessage?: string,\n  ): boolean {",
     seq: [
       "publishDetectRef.current",
-      "branchPushKey(repoPath)",
+      "refuseWhileBranchPushes(",
+      "currentNameRef.current,",
+      "message,",
+      "elsewhereMessage,",
       "detect.branch === branch",
-      "!branchPushing(branch)",
-      "!pushesBranch(live, branch, currentNameRef.current)",
-      "toast.info(message)",
+      "branchPushing(branch)",
     ],
     mutate: [
+      "elsewhereMessage,",
       "detect.branch === branch",
-      "!branchPushing(branch)",
-      "!pushesBranch(live, branch, currentNameRef.current)",
+      "branchPushing(branch)",
     ],
+  },
+  {
+    name: "switcher update",
+    file: `${R}BranchSwitcher.tsx`,
+    anchor: "function refuseUpdateWhilePushing(",
+    seq: [
+      "if (refuseWhileRowPushes(target)) return true;",
+      "return target === currentName && pushAlreadyActive();",
+    ],
+    mutate: ["if (refuseWhileRowPushes(target)) return true;"],
+  },
+  {
+    name: "switcher current-branch hold",
+    file: `${R}BranchSwitcher.tsx`,
+    anchor: "function refuseWhileCurrentPushes(",
+    seq: [
+      "const current = currentNameRef.current;",
+      "refuseWhileRowPushes(current)",
+    ],
+    mutate: ["refuseWhileRowPushes(current)"],
+  },
+  {
+    name: "picker rebase",
+    file: `${R}BranchSwitcher.tsx`,
+    anchor: "async function runPicker(",
+    seq: [
+      'mode === "rebase" ? refuseWhileCurrentPushes() : pushAlreadyActive();',
+      "await rebaseBranch.mutateAsync(",
+    ],
+    mutate: [
+      'mode === "rebase" ? refuseWhileCurrentPushes() : pushAlreadyActive();',
+    ],
+  },
+  {
+    name: "rebase onto a new base",
+    file: `${R}BranchSwitcher.tsx`,
+    anchor: "async function runRebaseOnto(",
+    seq: ["refuseWhileCurrentPushes()", "await rebaseOnto.mutateAsync("],
+    mutate: ["refuseWhileCurrentPushes()"],
   },
   {
     name: "show-branches modal gate",
@@ -124,13 +197,15 @@ const PINS = [
       "useConfirm.getState().ask",
       'if (refuseIfSwitched(resetIn, "nothing was reset")) return;',
       "if (headNameRef.current !== branch) {",
-      "if (refuseWhileBranchPushes(branch)) return;",
+      "refuseWhileBranchPushes(",
+      "headNameRef.current ?? null,",
       "branchRewriteStatusOptions(repoPath, branch)",
       'if (refuseIfSwitched(resetIn, "nothing was reset")) return;',
-      "if (refuseWhileBranchPushes(branch)) return;",
+      "refuseWhileBranchPushes(",
+      "headNameRef.current ?? null,",
       "await hardReset.mutateAsync",
     ],
-    mutate: ["if (refuseWhileBranchPushes(branch)) return;"],
+    mutate: ["refuseWhileBranchPushes("],
   },
   {
     // The header's push is the one push that can name no branch.
@@ -148,25 +223,17 @@ const PINS = [
     ],
   },
   {
-    name: "sync helper",
-    file: `${R}SyncControls.tsx`,
-    anchor: "function refuseWhileBranchPushes(branch: string): boolean {",
-    seq: [
-      "branchPushKey(repoPath)",
-      "pushesBranch(pushes, branch, headNameRef.current ?? null)",
-      "toast.info(BRANCH_PUSH_ACTIVE_MESSAGE)",
-    ],
-    mutate: ["pushesBranch(pushes, branch, headNameRef.current ?? null)"],
-  },
-  {
     name: "clean up batch",
     file: `${R}CleanupBranchesDialog.tsx`,
     anchor: "async function runBatch() {",
     seq: [
-      "if (refuseWhilePushRuns(queryClient, repoPath)) return;",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "names.some((n) =>",
+      "refuseWhileBranchPushes(queryClient, repoPath, n, currentBranch)",
       "setFailed(new Map());",
       "for (let i = 0; i < names.length; i++) {",
-      "if (refuseWhilePushRuns(queryClient, repoPath)) {",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "refuseWhileBranchPushes(queryClient, repoPath, names[i], currentBranch)",
       "processed = i;",
       "break;",
       "await api.gitSetBranchArchived",
@@ -178,8 +245,9 @@ const PINS = [
       "onClose();",
     ],
     mutate: [
-      "if (refuseWhilePushRuns(queryClient, repoPath)) return;",
-      "if (refuseWhilePushRuns(queryClient, repoPath)) {",
+      "refuseWhilePushRuns(queryClient, repoPath) ||",
+      "refuseWhileBranchPushes(queryClient, repoPath, n, currentBranch)",
+      "refuseWhileBranchPushes(queryClient, repoPath, names[i], currentBranch)",
       "const ok = processed - fails.size - skipped.size;",
       "if (processed < names.length) {",
     ],
@@ -190,25 +258,14 @@ const PINS = [
     anchor: "async function decide(decision: PullDecision) {",
     seq: [
       "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
-      "if (refuseWhileBranchPushes(queryClient, repoPath, refusal.branch)) return;",
-      "setRunning(decision);",
-    ],
-    mutate: [
-      "if (refuseWhileBranchPushes(queryClient, repoPath, refusal.branch)) return;",
-    ],
-  },
-  {
-    name: "pull-drop helper",
-    file: `${R}usePullDropGuard.tsx`,
-    anchor: "function refuseWhileBranchPushes(",
-    seq: [
       "repoKeys.branches(repoPath)",
       "b.isCurrent",
-      "branchPushKey(repoPath)",
-      "pushesBranch(pushes, branch, currentName)",
-      "toast.info(BRANCH_PUSH_ACTIVE_MESSAGE)",
+      "refuseWhileBranchPushes(",
+      "refusal.branch,",
+      "currentName,",
+      "setRunning(decision);",
     ],
-    mutate: ["pushesBranch(pushes, branch, currentName)"],
+    mutate: ["refuseWhileBranchPushes("],
   },
   {
     name: "stash-reapply rerun",
@@ -233,16 +290,159 @@ const PINS = [
       "return refuseWhilePushRuns(queryClient, repoPath);",
       "repoKeys.branches(repoPath)",
       'run.op === "pullRebaseDecided" ? run.branch : currentName',
-      "branch === null",
-      "isBranchPushActive(queryClient, repoPath)",
-      "pushesBranch(",
-      "toast.info(BRANCH_PUSH_ACTIVE_MESSAGE)",
+      "if (branch === null) return refuseWhilePushRuns(queryClient, repoPath);",
+      "refuseWhileBranchPushes(queryClient, repoPath, branch, currentName)",
     ],
     mutate: [
       "return refuseWhilePushRuns(queryClient, repoPath);",
-      "isBranchPushActive(queryClient, repoPath)",
       'run.op === "pullRebaseDecided" ? run.branch : currentName',
+      "refuseWhileBranchPushes(queryClient, repoPath, branch, currentName)",
     ],
+  },
+  // The history routes have no await before the mutate except undo, so the
+  // needle before each re-check is its last synchronous guard.
+  {
+    name: "local PR update branch",
+    file: "src/features/pulls/LocalPrView.tsx",
+    anchor: "async function doUpdateBranch(",
+    seq: [
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhileBranchPushes(",
+      "refuseWhilePushRuns(",
+      "await updateBranchFrom.mutateAsync(",
+    ],
+    mutate: ["refuseWhileBranchPushes(", "refuseWhilePushRuns("],
+  },
+  {
+    name: "undo last commit",
+    file: "src/features/history/HistoryPanel.tsx",
+    anchor: "async function undoLast(",
+    // Refused before the first prompt, and again after the last await.
+    seq: [
+      "refuseWhilePinnedBranchPushes(",
+      "await useConfirm.getState().ask(UNDO_ROOT_COMMIT_CONFIRM)",
+      'replacesMessageConfirm("undo", lastCommit.hash)',
+      "refuseWhilePinnedBranchPushes(",
+      "await undoCommit.mutateAsync(",
+    ],
+    mutate: ["refuseWhilePinnedBranchPushes("],
+  },
+  {
+    // `async function run() {` opens four dialogs' handlers in this file, and the
+    // component's own anchor is followed by its destructured parameter brace.
+    name: "reset to commit",
+    file: "src/features/history/HistoryDialogs.tsx",
+    anchor: "const resetMutation = useResetToCommit(repoPath);",
+    seq: [
+      'refuseIfSwitched(openedIn, "nothing was reset")',
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhilePinnedBranchPushes(",
+      "await resetMutation.mutateAsync(",
+    ],
+    mutate: ["refuseWhilePinnedBranchPushes("],
+  },
+  {
+    name: "amend",
+    file: "src/features/commit/useCommitSubmit.ts",
+    anchor: "async function doCommit(",
+    // Amend only: a plain commit adds a commit and is never held.
+    seq: [
+      "if (rulesSettling || locked || amendHeld) return;",
+      "wasAmending &&",
+      "refuseWhilePinnedBranchPushes(",
+      "amendingBranch ?? (",
+      "clearCommitDraft();",
+      "await commit.mutateAsync(",
+    ],
+    mutate: ["wasAmending &&", "refuseWhilePinnedBranchPushes("],
+  },
+  {
+    // `async function run() {` opens four handlers in this file; this anchor
+    // ends at the FIRST, Cherry-pick to branch's, and the merge-parent dialog's
+    // twin of it lacks the first needle.
+    name: "cherry-pick to branch",
+    file: "src/features/history/HistoryDialogs.tsx",
+    anchor:
+      "    choice.reset();\n    onClose();\n  }\n\n  async function run() {",
+    seq: [
+      'refuseIfSwitched(openedIn, "nothing was cherry-picked")',
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhileBranchPushes(queryClient, repoPath, branch, currentName)",
+      "await cherryPickOnto.mutateAsync(",
+    ],
+    mutate: [
+      "refuseWhileBranchPushes(queryClient, repoPath, branch, currentName)",
+    ],
+  },
+  {
+    name: "local PR merge",
+    file: "src/features/pulls/LocalPrView.tsx",
+    anchor: "async function doMerge(",
+    seq: [
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhileBranchPushes(queryClient, repoPath, pr.base, current)",
+      "await merge.mutateAsync(",
+    ],
+    mutate: [
+      "refuseWhileBranchPushes(queryClient, repoPath, pr.base, current)",
+    ],
+  },
+  {
+    name: "local PR resolve finish",
+    file: "src/features/pulls/ResolveConflictsView.tsx",
+    anchor: "async function onFinish() {",
+    seq: [
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      'mode === "update" ? pr.head : pr.base',
+      "refuseWhileBranchPushes(queryClient, repoPath, moving, currentName)",
+      "retireWalk(pending.worktreePath);",
+      "await finishUpdate.mutateAsync(",
+      "await finish.mutateAsync(",
+    ],
+    mutate: [
+      'mode === "update" ? pr.head : pr.base',
+      "refuseWhileBranchPushes(queryClient, repoPath, moving, currentName)",
+    ],
+  },
+  {
+    name: "edit dates",
+    file: "src/features/history/EditDatesDialog.tsx",
+    anchor: "async function run() {",
+    // Refused before the prompt, and again after the last synchronous guard.
+    seq: [
+      "refuseWhilePinnedBranchPushes(",
+      "await useConfirm",
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhilePinnedBranchPushes(",
+      "await amendDates.mutateAsync(",
+    ],
+    mutate: ["refuseWhilePinnedBranchPushes("],
+  },
+  {
+    name: "edit history",
+    file: "src/features/history/EditHistoryDialog.tsx",
+    anchor: "async function apply() {",
+    seq: [
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhilePinnedBranchPushes(",
+      "await useConfirm",
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhilePinnedBranchPushes(",
+      "await rebaseEdit.mutateAsync(",
+      "await rewrite.mutateAsync(",
+    ],
+    mutate: ["refuseWhilePinnedBranchPushes("],
+  },
+  {
+    name: "squash",
+    file: "src/features/history/RewriteDialogs.tsx",
+    anchor: "onSubmit: async ({ value }) =>",
+    seq: [
+      "toast.info(PROMOTION_BLOCKS_CHECKOUT);",
+      "refuseWhilePinnedBranchPushes(",
+      "await rewrite.mutateAsync(",
+    ],
+    mutate: ["refuseWhilePinnedBranchPushes("],
   },
 ];
 
@@ -345,6 +545,37 @@ const START_ROWS = [
   // A named push ignores any start it carries, and the current branch.
   ["named, its start", [{ branch: "c", startedOn: "a" }], "a", "a", false],
   ["named, its branch", [{ branch: "c", startedOn: "a" }], "c", "a", true],
+  // Another worktree's push: a named one holds its branch, a HEAD one only its
+  // recorded start, never this checkout's current branch.
+  ["foreign named", [{ branch: "c", foreign: true }], "c", "a", true],
+  [
+    "foreign start",
+    [{ branch: null, startedOn: "a", foreign: true }],
+    "a",
+    "b",
+    true,
+  ],
+  [
+    "foreign start, current",
+    [{ branch: null, startedOn: "a", foreign: true }],
+    "b",
+    "b",
+    false,
+  ],
+  [
+    "foreign start, unknown",
+    [{ branch: null, startedOn: "a", foreign: true }],
+    "c",
+    null,
+    false,
+  ],
+  [
+    "foreign no start, unknown",
+    [{ branch: null, startedOn: null, foreign: true }],
+    "a",
+    null,
+    false,
+  ],
 ];
 
 test("pushesBranch: a HEAD push holds its recorded start and the current branch", () => {
@@ -399,6 +630,23 @@ const PUSHES_BRANCH_MUTANTS = {
         p.branch === null &&
         (p.startedOn === branch || current === null || current === branch),
     ),
+  "a foreign HEAD push reads this checkout's current branch": (
+    pushes,
+    branch,
+    current,
+  ) =>
+    pushes.some((p) => {
+      if (p.branch !== null) return p.branch === branch;
+      if ((p.startedOn ?? null) === branch) return true;
+      return current === null || current === branch;
+    }),
+  "a foreign push holds nothing": (pushes, branch, current) =>
+    pushes.some((p) => {
+      if (p.foreign === true) return false;
+      if (p.branch !== null) return p.branch === branch;
+      if ((p.startedOn ?? null) === branch) return true;
+      return current === null || current === branch;
+    }),
 };
 
 test("pushesBranch mutants each fail a truth row, and every row fails one", () => {
@@ -1081,13 +1329,47 @@ test("every route re-checks the running push where it fires", () => {
   assert.deepEqual(checkPins(PINS, realSources()), []);
 });
 
-test("each file's helper is the one pushesBranch caller in it", () => {
-  const sources = realSources();
-  for (const file of FILES) {
-    if (file.endsWith("CleanupBranchesDialog.tsx")) continue;
-    const calls = sources[file].split("pushesBranch(").length - 1;
-    assert.equal(calls, 1, `${file}: ${calls} pushesBranch( calls`);
-  }
+// The push cache is read for a ref-moving hold only through the shared helper:
+// outside the queries package (and the tests), no file calls the pure readers
+// or names the key prefix a direct cache read would filter on.
+const QUERIES_DIR = "src/lib/git/queries/";
+const READERS = [
+  "pushesBranch(",
+  "branchPushKey(",
+  "pendingBranchPushesFor(",
+  "BRANCH_PUSH_KEY",
+];
+function readerFails(sources) {
+  const files = Object.keys(sources).filter(
+    (f) => !f.startsWith(QUERIES_DIR) && !f.startsWith("src/test/"),
+  );
+  if (files.length === 0) return ["no src files read"];
+  const fails = [];
+  for (const f of files)
+    for (const r of READERS)
+      if (sources[f].includes(r)) fails.push(`${f}: ${r}`);
+  const defs = Object.entries(sources).filter(([, t]) =>
+    t.includes("function refuseWhileBranchPushes("),
+  );
+  if (defs.length !== 1 || defs[0][0] !== SYNC)
+    fails.push(`refuseWhileBranchPushes defined in: ${defs.map(([f]) => f)}`);
+  return fails;
+}
+
+test("one shared ref-moving hold, and no feature file reads the push cache", () => {
+  assert.deepEqual(readerFails(walkSrc()), []);
+});
+
+test("the reader scan fails a feature reader, a second helper, and no files", () => {
+  const src = walkSrc();
+  const probe = `${R}probe.tsx`;
+  for (const r of READERS)
+    assert.notDeepEqual(readerFails({ ...src, [probe]: `x(${r}a)` }), [], r);
+  assert.notDeepEqual(
+    readerFails({ ...src, [probe]: "function refuseWhileBranchPushes() {}" }),
+    [],
+  );
+  assert.notDeepEqual(readerFails({ [SYNC]: src[SYNC] }), []);
 });
 
 // One mutant per OCCURRENCE of each needle in the pin's body, so a doubled
@@ -1119,8 +1401,29 @@ test("mutants with a check removed fail", () => {
       }
     }
   }
-  // doDelete's and both doResetToUpstream's second boundaries.
-  assert.equal(doubled, 3, "doubled needles");
+  // doDelete's and both doResetToUpstream's second boundaries, Clean up's
+  // per-row check, the stash-reapply helper's branchless arm, and the late
+  // boundaries of undo, Edit dates and Edit history.
+  assert.equal(doubled, 8, "doubled needles");
+});
+
+test("an amend pin that drops its amend gate or its pin expression fails", () => {
+  const file = "src/features/commit/useCommitSubmit.ts";
+  const pin = PINS.find((p) => p.file === file);
+  const text = realSources()[file].replace(/\r\n/g, "\n");
+  const expr =
+    "amendingBranch ?? (shownHead != null ? headBranchPin(shownHead) : null)";
+  for (const [from, to] of [
+    ["wasAmending &&", ""],
+    [expr, "null"],
+  ]) {
+    assert.ok(text.includes(from), from);
+    assert.notDeepEqual(
+      checkPins([pin], { [file]: text.replace(from, to) }),
+      [],
+      `${from} -> ${to} still passes`,
+    );
+  }
 });
 
 test("fails closed on a missing file or anchor", () => {

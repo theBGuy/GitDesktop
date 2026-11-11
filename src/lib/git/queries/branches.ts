@@ -13,11 +13,12 @@ import {
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
-import type { BranchRewriteStatus } from "../types";
+import type { Branch, BranchRewriteStatus, RepoStatus } from "../types";
 import { repoKeys, settlesOnRepoWrite } from "./core";
 import { useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
 import { recheckListsLater } from "./push-writes";
+import { repoStatusOptions } from "./status";
 
 /** Shared by the hook and the shell warm-up, so the branch menu's local list is
  *  cached before the menu first opens. */
@@ -184,6 +185,38 @@ export function useSetBranchArchived(repo: string) {
       networkMode: "always",
     },
   );
+}
+
+export function useSetBranchKeepLocal(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: { name: string; keepLocal: boolean }) =>
+      api.gitSetBranchKeepLocal(repo, args.name, args.keepLocal),
+    {
+      // A local config write that can't change forge state.
+      networkMode: "always",
+      localOnly: true,
+    },
+  );
+}
+
+const selectHeadName = (s: RepoStatus) => s.branch?.name ?? null;
+
+/** HEAD's branch name when its branch-list row is marked Keep local, else null
+ *  (detached, unloaded list, unmarked). Two narrowed reads of shared entries, no
+ *  new IPC: the status poll other observers drive, and the branch list. */
+export function useKeptLocalHead(repo: string): string | null {
+  const headName = useQuery({
+    ...repoStatusOptions(repo),
+    select: selectHeadName,
+  }).data;
+  const name = headName ?? null;
+  const kept = useQuery({
+    ...branchesOptions(repo),
+    select: (branches: Branch[]) =>
+      name !== null && branches.some((b) => b.name === name && b.keepLocal),
+  }).data;
+  return kept === true ? name : null;
 }
 
 export function useDeleteBranch(repo: string) {

@@ -243,7 +243,7 @@ test("mutants restoring the old labels are caught", () => {
   const syncMutants = [
     sync.replace("`Force pushed${away}`", '"Force pushed"'),
     sync.replace("else if (outcome !== undefined", "if (outcome !== undefined"),
-    sync.replace('outcome === "created"', "true"),
+    sync.replace(/outcome === "created"(\s*\?)/, "true$1"),
     sync.replace(
       "`Published ${branch} to ${remote}${away} — ",
       "`Published ${branch} to ${remote} — ",

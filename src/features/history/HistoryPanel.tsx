@@ -66,6 +66,7 @@ import {
   isShaPrefixQuery,
   isShortHexQuery,
   opStateOptions,
+  refuseWhilePinnedBranchPushes,
   remoteBranchesOptions,
   repoKeys,
   repoStatusOptions,
@@ -1161,6 +1162,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       toast.info(UNDO_DETACHED_ROOT);
       return;
     }
+    // Before the first prompt, so a running push refuses before any question;
+    // checked again after the last await below.
+    if (
+      refuseWhilePinnedBranchPushes(queryClient, repoPath, headBranchPin(head))
+    )
+      return;
     const undoIn = repoPath;
     // The root case is the only one that asks about the commit itself: an
     // ordinary undo is gated to unpushed commits and leaves everything staged.
@@ -1212,6 +1219,16 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           return;
         }
       }
+      // After the last await on both paths: a push of this branch began while
+      // a prompt or the message read was pending.
+      if (
+        refuseWhilePinnedBranchPushes(
+          queryClient,
+          repoPath,
+          headBranchPin(head),
+        )
+      )
+        return;
       await undoCommit.mutateAsync({
         expectedHead: lastCommit.hash,
         expectedBranch: headBranchPin(head),

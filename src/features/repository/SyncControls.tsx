@@ -45,18 +45,18 @@ import {
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
 import {
-  BRANCH_PUSH_ACTIVE_MESSAGE,
   branchPushHoldItemReason,
   branchPushHoldReason,
   branchRewriteStatusOptions,
   carriesAllLocalCommits,
-  pendingMutationEntries,
+  refuseWhileBranchPushes,
   refuseWhilePushRuns,
   remoteBranchesOptions,
   repoStatusOptions,
   useBranchRewriteStatus,
   useFetchRemote,
   useHardResetToCommit,
+  useKeptLocalHead,
   usePendingBranchPushes,
   usePendingPublishes,
   usePull,
@@ -66,10 +66,6 @@ import {
   useRepoStatus,
   useUpdateFromUpstream,
 } from "@/lib/git/queries";
-import {
-  branchPushKey,
-  pendingBranchPushesFor,
-} from "@/lib/git/queries/push-writes";
 import type { BranchRewriteStatus, ForkPrMatch } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
@@ -98,7 +94,6 @@ import { toastError, toastErrorWithNote } from "@/lib/toast";
 import {
   type PushOutcome,
   presenceUnderUrls,
-  pushesBranch,
   pushOutcome,
   pushSuccessCopy,
   pushWouldCreate,
@@ -127,7 +122,9 @@ import {
 import { statusReadFailed } from "./StatusReadError";
 import {
   deriveSyncControls,
+  forceConfirmKeptBranch,
   headFacts,
+  keptLocalReason,
   type MismatchMenu,
   type MismatchMenuItem,
   SYNC_BUSY_REASON,
@@ -355,6 +352,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     remoteBranches.data?.some(
       (r) => r.remote === head?.upstreamRemote && r.name === head?.name,
     ) ?? false;
+  // HEAD's Keep local mark, from its branch-list row (no extra status read). A
+  // stale or unloaded list leaves Push live; Rust refuses the push.
+  const keptHead = useKeptLocalHead(repoPath);
   // Sticky failure predicates, never `isError`: a never-loaded query that errored
   // goes back to pending on every refetch, which would flip the reason per poll.
   const syncInput = {
@@ -370,6 +370,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     mixedRewrite,
     localAtRisk,
     remoteNewExists,
+    keptLocal: keptHead !== null && keptHead === head?.name,
   };
   const sync = deriveSyncControls(syncInput);
   // A fork-PR check holds Push alone, at both of its render sites; derive's own
@@ -670,7 +671,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       toast.info("HEAD moved while the dialog was open — nothing was reset.");
       return;
     }
-    if (refuseWhileBranchPushes(branch)) return;
+    if (
+      refuseWhileBranchPushes(
+        queryClient,
+        repoPath,
+        branch,
+        headNameRef.current ?? null,
+      )
+    )
+      return;
     // An outside fetch can move the upstream while the prompt sits open, so the
     // reset re-measures before it acts. A read that joins one in flight may have
     // begun before that fetch's ref write and return the older tip; the reset
@@ -687,7 +696,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     }
     if (refuseIfSwitched(resetIn, "nothing was reset")) return;
     // A push can start during the re-read; the reset moves the tip it sends.
-    if (refuseWhileBranchPushes(branch)) return;
+    if (
+      refuseWhileBranchPushes(
+        queryClient,
+        repoPath,
+        branch,
+        headNameRef.current ?? null,
+      )
+    )
+      return;
     // No measurable upstream tip proves nothing moved.
     if (fresh.upstreamTip === null) {
       toast.info(UNCONFIRMED_NOTICE(upstream, branch));
@@ -756,6 +773,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         // A HEAD push names no branch, so it records the one it starts on, which
         // keeps that branch held after a checkout; the current one is held too.
         startedOn: branch === undefined ? headNameRef.current : undefined,
+        creates: outcome === "created",
       });
     })();
     try {
@@ -851,6 +869,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const forceEvidence =
     forceConfirm?.open === true && head?.name === forceConfirm.branch;
   const forceActPending = headerPushPending || forceReading;
+  const forceKeptBranch = forceConfirmKeptBranch(
+    forceConfirm?.branch ?? null,
+    keptHead,
+  );
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
   // head pushes a separate copy to origin and leaves the PR untouched — check
@@ -1249,6 +1271,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           branch,
           remote,
           source: "header",
+          creates: outcome === "created",
         });
         const { away } = landedIn(capture.repo);
         // A create keeps the retrack tail; the other outcomes' description
@@ -1318,23 +1341,6 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     return refuseWhilePushRuns(queryClient, repoPath);
   }
 
-  // A reset moves `branch`'s ref, so only that branch's push holds it. Read live:
-  // a push can start while the confirm or the re-measure is pending.
-  function refuseWhileBranchPushes(branch: string): boolean {
-    const pushes = pendingBranchPushesFor(
-      pendingMutationEntries(
-        queryClient
-          .getMutationCache()
-          .findAll({ mutationKey: branchPushKey(repoPath), status: "pending" }),
-      ),
-      repoPath,
-    );
-    if (!pushesBranch(pushes, branch, headNameRef.current ?? null))
-      return false;
-    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-    return true;
-  }
-
   // Hotkeys mirror the buttons' own holds (sync-controls-state.ts); the routes
   // they start refuse while another surface's push runs. The held Publish arm
   // renders none of these four buttons, so every one of their hotkeys holds too.
@@ -1351,6 +1357,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "push",
     () => {
+      if (sync.pushKeptLocalReason) {
+        toast.info(sync.pushKeptLocalReason);
+        return;
+      }
       if (!refuseWhilePushing()) pressPush();
     },
     hotkeys.push && !publishPending && !detecting,
@@ -1694,9 +1704,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </Button>
             <DisabledReasonButton
               variant="destructive"
-              disabled={forceActPending || otherPushRunning || !!offlineHold}
+              disabled={
+                forceKeptBranch !== null ||
+                forceActPending ||
+                otherPushRunning ||
+                !!offlineHold
+              }
               reason={(() => {
                 switch (true) {
+                  case forceKeptBranch !== null:
+                    return keptLocalReason(forceKeptBranch, "push");
                   case forceActPending:
                     return ACT_PENDING_REASON;
                   case otherPushRunning:

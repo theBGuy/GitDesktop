@@ -658,9 +658,10 @@ impl GitDesktopMcp {
                        GitHub/GitLab-only; create-time reviewers are Bitbucket-only (elsewhere use \
                        request_reviewers after creation) — the forge layer rejects an unsupported \
                        combination. Refuses a GitDesktop agent-session `head` (gd/session/*, in any \
-                       letter case). Returns the created PR ref (number + URL) as JSON. Requires \
-                       BOTH --allow-remote-write AND --allow-git-write, because it pushes `head` to \
-                       origin first.",
+                       letter case) or a `head` marked Keep local in GitDesktop, and refuses when \
+                       pushing `head` would go to a remote configured as a mirror. Returns the \
+                       created PR ref (number + URL) as JSON. Requires BOTH --allow-remote-write \
+                       AND --allow-git-write, because it pushes `head` to origin first.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_pull_request(
@@ -672,7 +673,7 @@ impl GitDesktopMcp {
         // --allow-git-write-tier action, so require that tier too (a tier never
         // grants another).
         self.ensure_git_write()?;
-        super::write_git::ensure_not_publishing_session_branch(&args.head)?;
+        super::write_git::ensure_not_publishing_branch(&self.repo, &args.head).await?;
         // Branch names reach a git/CLI argv position, but every provider arm already
         // rejects an empty or '-'-leading branch, so no extra guard is needed here.
         let pr_ref = crate::forge::forge_pr_create_core(
@@ -690,7 +691,7 @@ impl GitDesktopMcp {
             None,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(super::write_git::push_refusal_err)?;
         json_result(&pr_ref)
     }
 
@@ -1741,6 +1742,72 @@ mod tests {
                 assert!(error.message.contains("won't push or publish it"));
             }
         }
+    }
+
+    /// NETWORK BAN: the repository has NO `origin` and every call carries an empty title,
+    /// so a removed guard ends in the GitHub arm's local title refusal.
+    #[tokio::test]
+    async fn keep_local_refuses_create_pull_request_as_invalid_params() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-keep-local-pr-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        // A hostless three-slash origin, pinned non-mirror against a global
+        // `remote.origin.*`, keeps `detect_non_github` off any host read.
+        let url = format!(
+            "file:///{}",
+            repo.replace('\\', "/").trim_start_matches('/')
+        ) + "/nowhere.git";
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "t"],
+            &["config", "user.email", "t@example.com"],
+            &["config", "remote.origin.url", url.as_str()],
+            &["config", "remote.origin.mirror", "false"],
+            &["commit", "-q", "--allow-empty", "-m", "seed"],
+            &["branch", "feat/x"],
+        ] {
+            let out = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .expect("spawn git");
+            assert!(out.status.success(), "git {args:?}");
+        }
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", true)
+            .await
+            .unwrap();
+        let h = GitDesktopMcp::with_options(repo.clone(), false, true, true, false);
+        let create = || {
+            h.create_pull_request(Parameters(CreatePullRequestArgs {
+                base: "main".into(),
+                head: "feat/x".into(),
+                title: String::new(),
+                body: String::new(),
+                draft: false,
+                labels: None,
+                assignees: None,
+                reviewers: None,
+            }))
+        };
+        let error = create().await.expect_err("a marked head must not publish");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            error.message.contains("\"feat/x\" is marked Keep local"),
+            "{error:?}"
+        );
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", false)
+            .await
+            .unwrap();
+        let error = create()
+            .await
+            .expect_err("the empty title is refused locally");
+        assert!(
+            error.message.contains("a PR title is required"),
+            "{error:?}"
+        );
     }
 
     #[test]

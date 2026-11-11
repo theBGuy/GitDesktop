@@ -23,6 +23,7 @@ import {
   isPublishActive,
   useBbWorkspaces,
   useGhPublishOwners,
+  useKeptLocalHead,
   usePendingPublishes,
   usePublishRepo,
   useRepoIdentity,
@@ -49,7 +50,9 @@ import {
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
+import { keptLocalPublishRepoReason } from "./keep-local-copy";
 import {
+  PUBLISH_IDENTITY_PENDING,
   PUBLISH_PROVIDER_LABELS,
   publishingHold,
 } from "./PublishPendingBanner";
@@ -195,6 +198,8 @@ export function PublishDialog({
   // while it resolves the submit fails closed. An identity error is settled and
   // publishes under the path-only key.
   const identity = useRepoIdentity(repoPath);
+  // Publishing pushes HEAD's branch, so a kept-local HEAD holds the submit.
+  const keptHead = useKeptLocalHead(repoPath);
   const identityLoading = identity.data === undefined && !identity.isError;
   // The one spelling of draft identity: every draft-store read and write keys
   // on it. The store keeps a failed draft per repo across unmounts and dialog
@@ -504,28 +509,38 @@ export function PublishDialog({
   const offlineHold = useOfflineHold();
   // A publish of this repo from any instance blocks a second one.
   const submitBlocked =
+    keptHead !== null ||
     descGen.generating ||
     bbBlocked ||
     ghBlocked ||
     !!offlineHold ||
     pendingPublish !== undefined ||
     identityLoading;
-  // The running description draft, the running publish, and offline carry a
-  // reason, ranked running-first, so a flip between them never drops focus to a
-  // native disable; the name refusals keep their field hints and a plain disable.
+  // Keep local, the running description draft, the running publish, offline and
+  // the identity read carry a reason, Keep local first (no wait lifts it), then
+  // running-first, so a flip between them never drops focus to a native disable;
+  // the name refusals keep their field hints and a plain disable. The identity
+  // read ranks last: it settles in milliseconds, so above offline it would flip
+  // the reason twice.
   // This dialog's own submit keeps ACT_PENDING_REASON; another's names its publish.
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked || isSubmitting,
     reason: (() => {
       switch (true) {
+        case keptHead !== null:
+          return keptLocalPublishRepoReason(keptHead);
         case descGen.generating:
           return AI_DRAFT_PENDING_REASON;
         case isSubmitting:
           return ACT_PENDING_REASON;
         case pendingPublish !== undefined:
           return publishingHold(pendingPublish);
-        default:
+        case offlineHold !== undefined:
           return offlineHold;
+        case identityLoading:
+          return PUBLISH_IDENTITY_PENDING;
+        default:
+          return undefined;
       }
     })(),
   });

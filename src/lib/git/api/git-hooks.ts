@@ -1,5 +1,5 @@
 import { invoke } from "@/lib/tauri/invoke";
-import type { HooksInfo } from "../types";
+import type { HooksInfo, KeepLocalHookStatus } from "../types";
 
 export const gitHooksList = (repoPath: string) =>
   invoke<HooksInfo>("git_hooks_list", { repoPath });
@@ -18,6 +18,18 @@ export const gitHookSetEnabled = (
 
 export const gitHookDelete = (repoPath: string, name: string) =>
   invoke<void>("git_hook_delete", { repoPath, name });
+
+export const gitKeepLocalHookStatus = (repoPath: string) =>
+  invoke<KeepLocalHookStatus>("git_keep_local_hook_status", { repoPath });
+
+/** Installs the Keep local pre-push hook. A blocked clone is left untouched and
+ *  its blocked status is RETURNED, not thrown. */
+export const gitKeepLocalHookInstall = (repoPath: string) =>
+  invoke<KeepLocalHookStatus>("git_keep_local_hook_install", { repoPath });
+
+/** Removes the Keep local pre-push hook; returns the status after. */
+export const gitKeepLocalHookRemove = (repoPath: string) =>
+  invoke<KeepLocalHookStatus>("git_keep_local_hook_remove", { repoPath });
 
 /** Runs a hook manager's install (pre-commit/lefthook), which only writes the
  *  `.git/hooks` shim; returns its output. */

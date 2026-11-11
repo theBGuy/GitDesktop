@@ -14,7 +14,15 @@ import { test } from "node:test";
 import {
   headTrackingMatchesRow,
   rowTrackingMatches,
+  upstreamBranchName,
 } from "../src/lib/git/push-tracking.ts";
+
+test("upstreamBranchName: the merge ref minus refs/heads/, else null", () => {
+  assert.equal(upstreamBranchName(null), null);
+  assert.equal(upstreamBranchName("refs/heads/a/b"), "a/b");
+  assert.equal(upstreamBranchName("refs/pull/1/head"), null);
+  assert.equal(upstreamBranchName("main"), null);
+});
 
 const source = (rel) =>
   readFileSync(new URL(`../${rel}`, import.meta.url), "utf8").replace(

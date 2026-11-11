@@ -40,6 +40,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import {
   ContextMenu,
+  ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
@@ -73,11 +74,12 @@ import { normPath } from "@/lib/git/path";
 import {
   headTrackingMatchesRow,
   rowTrackingMatches,
+  upstreamBranchName,
 } from "@/lib/git/push-tracking";
 import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   type BranchPushState,
-  branchPublishLabel,
+  branchPreparingLabel,
   branchPushHoldItemReason,
   branchPushHoldReason,
   branchPushLabel,
@@ -85,8 +87,8 @@ import {
   carriesAllLocalCommits,
   forgeFeatureReady,
   nextPushLatch,
-  pendingMutationEntries,
   REMOTE_BRANCHES_STALE_TIME,
+  refuseWhileBranchPushes,
   refuseWhilePushRuns,
   remoteBranchesOptions,
   repoKeys,
@@ -104,6 +106,7 @@ import {
   useDiscardAll,
   useForgeStatus,
   useHardResetToCommit,
+  useKeepLocalHookStatus,
   useMergeBranch,
   usePendingBranchPushes,
   usePendingBranchPushIds,
@@ -118,6 +121,7 @@ import {
   useRepoStatus,
   userWorktreesOptions,
   useSetBranchArchived,
+  useSetBranchKeepLocal,
   useStashAll,
   useStashCount,
   useStashPop,
@@ -126,10 +130,6 @@ import {
   useUpdateBranchFrom,
   useUserWorktrees,
 } from "@/lib/git/queries";
-import {
-  branchPushKey,
-  pendingBranchPushesFor,
-} from "@/lib/git/queries/push-writes";
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type {
   Branch,
@@ -168,6 +168,7 @@ import {
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import {
   landedIn,
+  originNoteFor,
   refuseIfSwitched,
   repoNameFromPath,
 } from "@/lib/stores/notifications";
@@ -211,7 +212,6 @@ import {
   isLocalUpstream,
   type PushOutcome,
   presenceUnderUrls,
-  pushesBranch,
   pushOutcome,
   pushSuccessCopy,
   remoteHasBranch,
@@ -240,6 +240,17 @@ import {
 } from "./checkout-copy";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
+import { KeepLocalHookDialog } from "./KeepLocalHookDialog";
+import { KeptLocalChip } from "./KeptLocalChip";
+import {
+  KEEP_LOCAL_HOOK_ITEM,
+  KEEP_LOCAL_ITEM,
+  KEEP_LOCAL_ON_DESCRIPTION,
+  KEEP_LOCAL_PALETTE_NO_BRANCH,
+  KEEP_LOCAL_PALETTE_SESSION,
+  keepLocalOffTitle,
+  keepLocalOnTitle,
+} from "./keep-local-copy";
 import { OperationHistoryDialog } from "./OperationHistoryDialog";
 import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import {
@@ -262,6 +273,12 @@ import { StashesDialog } from "./StashesDialog";
 import { statusReadFailed } from "./StatusReadError";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
 import {
+  deriveMismatchMenu,
+  KEPT_LOCAL_SUFFIX,
+  keptLocalReason,
+  type RowUpstreamFacts,
+  rowNameMismatch,
+  rowSyncIndicator,
   STATUS_PENDING_REASON,
   STATUS_READ_FAILED_REASON,
 } from "./sync-controls-state";
@@ -281,6 +298,11 @@ import {
  *  status-icon hints where the phrase leads a sentence. */
 const secondaryClickCapitalized =
   secondaryClickLabel.charAt(0).toUpperCase() + secondaryClickLabel.slice(1);
+
+/** A list row's upstream facts for the shared indicator and menu derivations. */
+function rowUpstreamFacts(b: Branch): RowUpstreamFacts {
+  return { ...b, upstreamBranch: upstreamBranchName(b.upstreamRemoteRef) };
+}
 
 /** How many closed PRs the branch surfaces scan. Merged state lives only in the
  *  closed list, and gh's default 30 covers too little history for the cleanup
@@ -661,6 +683,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const offlineSuffix = offlineHold ? ` (${OFFLINE_ITEM_REASON})` : "";
   const remotes = useRemotes(repoPath);
   const setBranchArchived = useSetBranchArchived(repoPath);
+  const setBranchKeepLocal = useSetBranchKeepLocal(repoPath);
   const openWorktree = useOpenWorktree();
   const unlockWorktree = useUnlockUserWorktree(repoPath);
   const recovery = useStashReapplyRecovery(repoPath);
@@ -744,12 +767,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     repo: string;
   } | null>(null);
   const [rebaseOntoIn, setRebaseOntoIn] = useState<string | null>(null);
+  // The terminal push guard dialog: the repo it opened for and its open-session
+  // token, minted by the menu item after the list's close settles. A close drops
+  // the token and keeps the repo, so the dialog stays mounted for its exit; a
+  // repo switch drops the whole state in the render that switches.
+  const [hookDialog, setHookDialog] = useState<{
+    repo: string;
+    session: object | null;
+  } | null>(null);
+  if (hookDialog !== null && hookDialog.repo !== repoPath) setHookDialog(null);
+  // The live state, readable after an install or remove settles. A layout effect,
+  // so a settle landing between a close's commit and its passive effects reads it
+  // closed. No cleanup: an <Activity> hide would run it and orphan the settle.
+  const hookDialogRef = useRef(hookDialog);
+  useLayoutEffect(() => {
+    hookDialogRef.current = hookDialog;
+  }, [hookDialog]);
   // The publish intercepted by the fork-PR guard, with everything needed to
   // resume it verbatim if the user publishes anyway.
   const [forkGuard, setForkGuard] = useState<{
     match: ForkPrMatch;
     branch: Branch;
     remote?: string;
+    retrack: boolean;
     repo: string;
   } | null>(null);
   // A publish still deciding, with the repo it runs in: from the press until
@@ -1263,6 +1303,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const shownMenuRow = useRetained<Branch | RemoteBranch | undefined>(
     menuLocal ?? menuRemote,
   );
+  // The terminal push guard item's read, while the menu is open on a kept-local
+  // row; the dialog observes the same entry while it is open.
+  const hookStatus = useKeepLocalHookStatus(
+    repoPath,
+    branchMenuOpen && menuLocal?.keepLocal === true,
+  );
+  const hookItem = ((): keyof typeof KEEP_LOCAL_HOOK_ITEM => {
+    switch (true) {
+      case hookStatus.isFetching:
+        return "checking";
+      case hookStatus.data !== undefined:
+        return hookStatus.data.state === "installed" ? "on" : "block";
+      case hookStatus.isError:
+        return "unknown";
+      default:
+        return "checking";
+    }
+  })();
   // An open menu whose row is gone (deleted, now local, or cleared by a repo
   // switch) closes before that frame paints. Through the actions handle, so
   // both close callbacks run.
@@ -1284,16 +1342,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     renameTarget === null
       ? undefined
       : branches.data?.find((b) => b.name === renameTarget);
+  const renameUpstreamBranch = upstreamBranchName(
+    renameRow?.upstreamRemoteRef ?? null,
+  );
   const renameTargetUpstream =
     renameRow &&
     !renameRow.upstreamGone &&
     renameRow.upstreamRemote &&
     renameRow.upstreamRemote !== "." &&
-    renameRow.upstreamRemoteRef?.startsWith("refs/heads/")
-      ? {
-          remote: renameRow.upstreamRemote,
-          branch: renameRow.upstreamRemoteRef.slice("refs/heads/".length),
-        }
+    renameUpstreamBranch !== null
+      ? { remote: renameRow.upstreamRemote, branch: renameUpstreamBranch }
       : null;
   // The same ref in rev form: a branch by its full ref (a bare name resolves to a
   // same-named tag first); the detached literal stays as it is.
@@ -1445,7 +1503,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // the outcome would never reach the user. Every mutation below follows suit.
   async function setArchived(name: string, archived: boolean) {
     // Unarchiving is exempt, as in the menu's render hold.
-    if (archived && refuseWhileBranchPushes(name)) return;
+    if (archived && refuseWhileRowPushes(name)) return;
     const done = archived ? `Archived ${name}` : `Unarchived ${name}`;
     try {
       await setBranchArchived.mutateAsync({ name, archived });
@@ -1453,6 +1511,38 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     } catch (e) {
       onError(e);
     }
+  }
+
+  // Held in both directions while the row pushes. No await precedes the write,
+  // so it lands in the repo it started in; the toast names that repo once left.
+  async function setKeepLocal(name: string, on: boolean) {
+    if (refuseWhileRowPushes(name)) return;
+    const toggledIn = repoPath;
+    try {
+      await setBranchKeepLocal.mutateAsync({ name, keepLocal: on });
+    } catch (e) {
+      const note = originNoteFor(toggledIn);
+      if (note) toastErrorWithNote(e, note);
+      else onError(e);
+      return;
+    }
+    const { away } = landedIn(toggledIn);
+    if (on)
+      toast.success(`${keepLocalOnTitle(name)}${away}`, {
+        description: KEEP_LOCAL_ON_DESCRIPTION[aiEnabled ? "ai" : "noAi"],
+      });
+    else toast.success(`${keepLocalOffTitle(name)}${away}`);
+  }
+
+  // The dialog opens once the list's close has returned focus to its trigger,
+  // and only in the repo the item was pressed in: a switch meanwhile started
+  // nothing, so it opens nothing and says nothing.
+  async function openKeepLocalHook() {
+    const pinned = repoPath;
+    setOpen(false);
+    await listClose.waitClosed();
+    if (!landedIn(pinned).live) return;
+    setHookDialog({ repo: pinned, session: {} });
   }
 
   async function doUnlockWorktree(path: string) {
@@ -1767,7 +1857,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return;
     }
     // Outside the try, whose `.finally` cleanup would close the confirm.
-    if (refuseWhileBranchPushes(deleteTarget)) return;
+    if (refuseWhileRowPushes(deleteTarget)) return;
     await (async () => {
       try {
         // Between freeing its branch and checking it out, a promote leaves that
@@ -1808,7 +1898,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             return;
           // Inside the try, so the `.finally` clearTarget closes the confirm on
           // this refusal; the one before the try leaves it open.
-          if (refuseWhileBranchPushes(deleteTarget)) return;
+          if (refuseWhileRowPushes(deleteTarget)) return;
           const free = (b: string | null | undefined): b is string =>
             Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
           let fallback: string | undefined;
@@ -1842,9 +1932,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           )
             return;
           if (
-            refuseWhileBranchPushes(
+            refuseWhileRowPushes(
               deleteTarget,
               `A push is already running — ${fallback} is checked out and ${deleteTarget} was kept.`,
+              `Another worktree is pushing this branch — ${fallback} is checked out and ${deleteTarget} was kept.`,
             )
           )
             return;
@@ -2303,10 +2394,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // holds. Any other branch updates in a throwaway worktree, off that lock. Read at
   // fire time, for a menu or shortcut pressed from before the push started.
   function refuseUpdateWhilePushing(target: string): boolean {
-    if (branchPushing(target)) {
-      toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-      return true;
-    }
+    if (refuseWhileRowPushes(target)) return true;
     return target === currentName && pushAlreadyActive();
   }
 
@@ -2379,7 +2467,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // move's `expectedTip` refuses only when that branch sits elsewhere. A switch
     // under the prompt refuses instead.
     if (refuseIfSwitched(resetIn, "nothing was reset")) return;
-    if (refuseWhileBranchPushes(branch.name)) return;
+    if (refuseWhileRowPushes(branch.name)) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -2416,7 +2504,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
       if (refuseIfSwitched(resetIn, "nothing was reset")) return;
       // A push can start during the re-read; the reset moves the tip it sends.
-      if (refuseWhileBranchPushes(branch.name)) return;
+      if (refuseWhileRowPushes(branch.name)) return;
       // No measurable upstream tip proves nothing moved.
       if (fresh.upstreamTip === null) {
         toast.info(UNCONFIRMED_NOTICE(base, branch.name));
@@ -2469,21 +2557,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }
 
   // Push a branch's ref without checking it out — the outbound counterpart of
-  // doUpdateFromUpstream. Whether this publishes (-u) or plain pushes is decided
-  // backend-side from the branch's tracking state. The publish arms pass an
-  // explicit `remote` (the chosen destination); a tracked push passes none and
-  // the backend resolves to the branch's own upstream remote. A tracked push or
-  // a publish the remote already has leaves the list open: a push holds only the
-  // network lock, so the row shows its progress and the rest of the list stays
-  // usable. A publish that would create the branch closes it for its prompt.
-  function doPushBranch(branch: Branch, remote?: string) {
+  // doUpdateFromUpstream. An untracked or gone branch publishes (-u) from its
+  // tracking state alone; `retrack` asks for -u on a TRACKED branch (the mismatch
+  // menu's publish item), which its tracking state can't express. The publish
+  // arms pass an explicit `remote` (the chosen destination); a tracked push
+  // passes none and the backend resolves to the branch's own upstream remote. A
+  // tracked push or a publish the remote already has leaves the list open: a
+  // push holds only the network lock, so the row shows its progress and the rest
+  // of the list stays usable. A publish that would create the branch closes it
+  // for its prompt.
+  function doPushBranch(branch: Branch, remote?: string, retrack = false) {
     if (
       refuseWhileOffline() ||
       pushAlreadyActive() ||
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
-    if (willPublish(branch)) void beginPublishBranch(branch, remote);
+    if (willPublish({ ...branch, setUpstream: retrack }))
+      void beginPublishBranch(branch, remote, retrack);
     else
       void runPushBranch(
         branch,
@@ -2493,6 +2584,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           create: undefined,
           presence: undefined,
         }),
+        false,
       );
   }
 
@@ -2511,31 +2603,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     return refuseWhilePushRuns(queryClient, repoPath);
   }
 
-  // Fire-time hold for routes that move or remove `branch`'s ref: the fork-PR
-  // detection, the latched render read, and the live cache for pushes started
-  // after this render. A HEAD push's recorded start keeps that branch held after
-  // a checkout, and the current branch is held too.
-  function refuseWhileBranchPushes(
+  // Fire-time hold for routes that move or remove `branch`'s ref: this switcher's
+  // fork-PR detection and the latched render read hold on top of the shared live
+  // check, which also sees pushes started after this render or in a sibling
+  // worktree of the repository.
+  function refuseWhileRowPushes(
     branch: string,
-    message = BRANCH_PUSH_ACTIVE_MESSAGE,
+    message?: string,
+    elsewhereMessage?: string,
   ): boolean {
     const detect = publishDetectRef.current;
-    const live = pendingBranchPushesFor(
-      pendingMutationEntries(
-        queryClient
-          .getMutationCache()
-          .findAll({ mutationKey: branchPushKey(repoPath), status: "pending" }),
-      ),
+    return refuseWhileBranchPushes(
+      queryClient,
       repoPath,
+      branch,
+      currentNameRef.current,
+      {
+        message,
+        elsewhereMessage,
+        alsoHeld:
+          (detect?.repo === repoPath && detect.branch === branch) ||
+          branchPushing(branch),
+      },
     );
-    if (
-      !(detect?.repo === repoPath && detect.branch === branch) &&
-      !branchPushing(branch) &&
-      !pushesBranch(live, branch, currentNameRef.current)
-    )
-      return false;
-    toast.info(message);
-    return true;
   }
 
   // Publishing a branch that is really a local copy of a fork PR's head pushes a
@@ -2543,7 +2633,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // before publishing, and let the guard offer the fork instead. Advisory: a
   // detection failure is indistinguishable from no match and falls through to
   // the publish confirm.
-  async function beginPublishBranch(branch: Branch, remote?: string) {
+  async function beginPublishBranch(
+    branch: Branch,
+    remote?: string,
+    retrack = false,
+  ) {
     const publishIn = repoPath;
     const mine: PublishDetect = {
       branch: branch.name,
@@ -2574,7 +2668,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // The guard dialog takes over from the list.
     const openGuard = (match: ForkPrMatch) => {
       setOpen(false);
-      setForkGuard({ match, branch, remote, repo: publishIn });
+      setForkGuard({ match, branch, remote, retrack, repo: publishIn });
     };
     // A match lands only on this press's own prompt, still showing, in the repo
     // it was asked in; anything later is dropped without a word.
@@ -2639,6 +2733,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
     const create = willCreateOnRemote({
       upstream: branch.upstream,
+      setUpstream: retrack,
       upstreamGone: branch.upstreamGone,
       remoteHasSameName: presence,
     });
@@ -2672,9 +2767,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             : null,
           goneUpstream: branch.upstreamGone,
           upstreamRemote: branch.upstreamRemote,
-          upstreamBranch: branch.upstreamRemoteRef?.startsWith("refs/heads/")
-            ? branch.upstreamRemoteRef.slice("refs/heads/".length)
-            : null,
+          upstreamBranch: upstreamBranchName(branch.upstreamRemoteRef),
           heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON,
         },
         publishAsk,
@@ -2721,6 +2814,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       branch,
       remote,
       pushOutcome({ willPublish: true, create, presence }),
+      retrack,
     );
   }
 
@@ -2730,6 +2824,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     branch: Branch,
     remote: string | undefined,
     outcome: PushOutcome,
+    retrack = false,
   ) {
     // The fork-PR guard's "Publish anyway" and the detection's fall-through land
     // here without passing doPushBranch.
@@ -2743,9 +2838,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const pushedIn = repoPath;
     try {
       await push.mutateAsync({
-        setUpstream: false,
+        setUpstream: retrack,
         branch: branch.name,
         remote,
+        creates: outcome === "created",
       });
       const { away } = landedIn(pushedIn);
       const copy = pushSuccessCopy({
@@ -3024,10 +3120,20 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       queryKey: repoKeys.branches(pushIn),
     });
   }
+  // Both push-to-origin routes refuse a kept-local branch before their fresh
+  // read; the hotkey stays live so the press says why.
+  function refuseKeptLocalPush(branch: Branch): boolean {
+    if (!branch.keepLocal) return false;
+    toast.info(
+      keptLocalReason(branch.name, willPublish(branch) ? "publish" : "push"),
+    );
+    return true;
+  }
   // The branch list refreshes on focus and after in-app actions, never on the
   // status poll, so its current row can lag a checkout or tracking change made
   // outside the app; a fresh status read confirms HEAD before this route acts.
   async function pushCurrentBranchToOrigin(listed: Branch) {
+    if (refuseKeptLocalPush(listed)) return;
     if (pushHotkeyChecking.current) return;
     // Every value the continuation acts on, pinned before the read: the repo, and
     // the listed row whose name and destination facts decide the push. The fresh
@@ -3070,6 +3176,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Opening the list doesn't refetch it, so the highlighted row's tracking can
   // be just as stale; a fresh branch-list read confirms it before this route acts.
   async function pushListedBranchToOrigin(row: Branch) {
+    if (refuseKeptLocalPush(row)) return;
     if (pushHotkeyChecking.current) return;
     const pushIn = repoPath;
     pushHotkeyChecking.current = true;
@@ -3095,6 +3202,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhileListCatchesUp(pushIn);
       return;
     }
+    if (refuseKeptLocalPush(freshRow)) return;
     pushBranchToOrigin(row, true);
   }
   // `fromRow`: the highlighted row of the open list, rather than the current
@@ -3108,23 +3216,32 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       !!branch.upstreamRemote &&
       branch.upstreamRemote !== "origin" &&
       remoteNames.includes(branch.upstreamRemote);
-    // The upstream's exact branch name, from its merge ref: the short upstream
-    // string can't be split (remote names may contain `/`), and a non-branch
-    // upstream (`refs/pull/N/head`) is no cross-name push.
-    const upstreamBranch = branch.upstreamRemoteRef?.startsWith("refs/heads/")
-      ? branch.upstreamRemoteRef.slice("refs/heads/".length)
-      : null;
-    if (
-      tracksOrigin &&
-      upstreamBranch !== null &&
-      upstreamBranch !== branch.name
-    ) {
+    // The rows' one different-name predicate (merge-ref split; a non-branch
+    // upstream is no cross-name push). `enabled` guarantees origin exists.
+    const mismatch = rowNameMismatch(rowUpstreamFacts(branch), remoteNames);
+    if (mismatch?.remote === "origin") {
       // An origin push of this branch would land on a differently-named
       // branch, which this origin-scoped shortcut never decides for the user.
+      // A row tracking its start point has no Push item, only the publish.
       toast.info(
-        fromRow
-          ? `${branch.name} tracks ${branch.upstream}, which has a different name — push it from its context menu`
-          : `${branch.name} tracks ${branch.upstream}, which has a different name — use the sync bar's Push instead`,
+        (() => {
+          switch (true) {
+            case fromRow &&
+              mismatch.isRemoteDefault &&
+              remoteHasBranch(
+                remoteBranchesQuery.data,
+                mismatch.remote,
+                branch.name,
+              ) === true:
+              return `${branch.name} tracks ${branch.upstream}, where it started. ${mismatch.remote}/${branch.name} exists, so track it from its context menu`;
+            case fromRow && mismatch.isRemoteDefault:
+              return `${branch.name} tracks ${branch.upstream}, where it started — publish it from its context menu`;
+            case fromRow:
+              return `${branch.name} tracks ${branch.upstream}, which has a different name — push it from its context menu`;
+            default:
+              return `${branch.name} tracks ${branch.upstream}, which has a different name — use the sync bar's Push instead`;
+          }
+        })(),
       );
     } else if (
       tracksOrigin &&
@@ -3159,8 +3276,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         `${branch.name} tracks a local branch (${branch.upstream}), not a remote`,
       );
     } else if (tracksOtherKnownRemote) {
+      // A start point on that remote: its menu offers only the publish item.
       toast.info(
-        `${branch.name} tracks ${branch.upstreamRemote} — push it from its context menu`,
+        (() => {
+          switch (true) {
+            case mismatch?.isRemoteDefault &&
+              remoteHasBranch(
+                remoteBranchesQuery.data,
+                mismatch.remote,
+                branch.name,
+              ) === true:
+              return `${branch.name} tracks ${branch.upstream}, where it started. ${mismatch.remote}/${branch.name} exists, so track it from its context menu`;
+            case mismatch?.isRemoteDefault:
+              return `${branch.name} tracks ${branch.upstream}, where it started — publish it as ${mismatch.remote}/${branch.name} from its context menu`;
+            default:
+              return `${branch.name} tracks ${branch.upstreamRemote} — push it from its context menu`;
+          }
+        })(),
       );
     } else {
       // Tracked, but the upstream's remote is no longer configured.
@@ -3195,14 +3327,31 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   );
 
   useHotkeyAction("new-branch", openCreate);
+  // Palette-only. `allBranches` never lists a gd/session row, so that arm
+  // refuses outright rather than waiting for the list.
+  useHotkeyAction("toggle-keep-local", () => {
+    if (!currentName) {
+      toast.info(KEEP_LOCAL_PALETTE_NO_BRANCH);
+      return;
+    }
+    if (isSessionBranchName(currentName)) {
+      toast.info(KEEP_LOCAL_PALETTE_SESSION);
+      return;
+    }
+    const row = allBranches.find((b) => b.name === currentName);
+    if (!row) {
+      refuseWhileListCatchesUp(repoPath);
+      return;
+    }
+    void setKeepLocal(row.name, !row.keepLocal);
+  });
   // The hotkeys a push holds stay live and refuse with the toast, so a press
   // never goes silent; their menu rows hold with a reason instead. The rename,
   // delete and rebase twins wait on the CURRENT branch's push: each moves or
   // removes the ref it is sending.
   function refuseWhileCurrentPushes(): boolean {
-    if (!currentRowPushing) return false;
-    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-    return true;
+    const current = currentNameRef.current;
+    return current !== null && refuseWhileRowPushes(current);
   }
   useHotkeyAction(
     "rename-branch",
@@ -3446,7 +3595,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const rowSpinnerLabel = (() => {
       if (rowUpdating) return `Updating from ${rowUpdateBase}`;
       if (rowDetecting)
-        return branchPublishLabel(publishDetect?.remote ?? null);
+        return branchPreparingLabel(publishDetect?.remote ?? null);
       if (rowPush !== undefined) return branchPushLabel(rowPush, branch);
       return null;
     })();
@@ -3517,6 +3666,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               {rowCopy.noun}
             </span>
           )}
+          {/* Outside the remotes gate: the mark can be set before a remote
+              exists. Its label joins the row button's accessible name. */}
+          {branch.keepLocal && <KeptLocalChip />}
           {/* Two distinct indicators: the sync indicator shows the
               branch's OWN upstream state in ARROW vocabulary (matching
               the header's Push/Pull counts); the divergence indicator
@@ -3525,95 +3677,79 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               skipped on a remoteless repo. */}
           {remoteNames.length > 0 &&
             (() => {
-              // A branch tracking a REMOVED remote offers neither Push
-              // nor Publish, so arrows would imply an action the menu
-              // can't honor — muted marker with a no-action title
-              // instead. The `isLocalUpstream` conjunct keeps a
-              // LOCAL-upstream branch (git's `%(upstream:remotename)`
-              // reads `.`) out of this case so its truthful arrows still
-              // show below.
-              if (
-                branch.upstream &&
-                !branch.upstreamGone &&
-                !isLocalUpstream(branch.upstreamRemote) &&
-                !remoteNames.includes(branch.upstreamRemote)
-              ) {
-                const label = `Tracks ${branch.upstream}, but that remote is no longer configured.`;
-                return (
-                  <span
-                    role="img"
-                    aria-label={label}
-                    className="flex shrink-0 items-center text-muted-foreground"
-                    title={label}
-                  >
-                    <CloudSlashIcon className="size-3" />
-                  </span>
-                );
-              }
-              if (branch.upstream && !branch.upstreamGone) {
-                if (branch.upstreamAhead === 0 && branch.upstreamBehind === 0) {
-                  // In sync with the upstream — silence means synced.
-                  return null;
-                }
-                const parts: string[] = [];
-                if (branch.upstreamAhead > 0)
-                  parts.push(`${branch.upstreamAhead} to push`);
-                if (branch.upstreamBehind > 0)
-                  parts.push(`${branch.upstreamBehind} to pull`);
-                const label = `${parts.join(", ")} — vs ${branch.upstream}`;
-                return (
-                  <span
-                    // No text color: inherits the row foreground (a step
-                    // stronger than the muted divergence) and follows the
-                    // hover accent-foreground automatically. The arrow SVGs are
-                    // aria-hidden, so the span carries the name for readers —
-                    // role="img" because aria-label is not valid (nor reliably
-                    // announced) on a generic span.
-                    role="img"
-                    aria-label={label}
-                    className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums"
-                    title={label}
-                  >
-                    {branch.upstreamAhead > 0 && (
-                      <span className="flex items-center gap-0.5">
-                        <ArrowUpIcon className="size-3" weight="bold" />
-                        {branch.upstreamAhead}
-                      </span>
-                    )}
-                    {branch.upstreamBehind > 0 && (
-                      <span className="flex items-center gap-0.5">
-                        <ArrowDownIcon className="size-3" weight="bold" />
-                        {branch.upstreamBehind}
-                      </span>
-                    )}
-                  </span>
-                );
-              }
-              if (branch.upstreamGone) {
-                const label = `Upstream ${branch.upstream} was deleted on the remote — likely merged. ${secondaryClickCapitalized} to publish again or delete.`;
-                return (
-                  <span
-                    role="img"
-                    aria-label={label}
-                    className="flex shrink-0 items-center text-muted-foreground"
-                    title={label}
-                  >
-                    <CloudXIcon className="size-3" />
-                  </span>
-                );
-              }
-              // !branch.upstream
-              const publishHint = `Local only — never published. ${secondaryClickCapitalized} to publish.`;
-              return (
-                <span
-                  role="img"
-                  aria-label={publishHint}
-                  className="flex shrink-0 items-center text-muted-foreground"
-                  title={publishHint}
-                >
-                  <CloudSlashIcon className="size-3" />
-                </span>
+              const sync = rowSyncIndicator(
+                rowUpstreamFacts(branch),
+                remoteNames,
+                secondaryClickCapitalized,
+                branch.upstreamRemote !== null &&
+                  remoteHasBranch(
+                    remoteBranchesQuery.data,
+                    branch.upstreamRemote,
+                    branch.name,
+                  ) === true,
               );
+              switch (sync.kind) {
+                case "none":
+                  return null;
+                case "arrows":
+                  return (
+                    <span
+                      // No text color: inherits the row foreground (a step
+                      // stronger than the muted divergence) and follows the
+                      // hover accent-foreground automatically. The arrow SVGs
+                      // are aria-hidden, so the span carries the name for
+                      // readers — role="img" because aria-label is not valid
+                      // (nor reliably announced) on a generic span. A named
+                      // upstream may shrink; its label already names it.
+                      role="img"
+                      aria-label={sync.label}
+                      className={cn(
+                        "flex items-center gap-1 text-[11px] tabular-nums",
+                        sync.upstreamName === null ? "shrink-0" : "min-w-0",
+                      )}
+                      title={sync.label}
+                    >
+                      {sync.ahead > 0 && (
+                        <span className="flex items-center gap-0.5">
+                          <ArrowUpIcon className="size-3" weight="bold" />
+                          {sync.ahead}
+                        </span>
+                      )}
+                      {sync.behind > 0 && (
+                        <span className="flex items-center gap-0.5">
+                          <ArrowDownIcon className="size-3" weight="bold" />
+                          {sync.behind}
+                        </span>
+                      )}
+                      {sync.upstreamName !== null && (
+                        <span
+                          className="min-w-0 truncate"
+                          onMouseEnter={clipTitle(sync.upstreamName)}
+                        >
+                          {sync.upstreamName}
+                        </span>
+                      )}
+                    </span>
+                  );
+                default:
+                  // Muted markers with a no-arrow title: a deleted upstream
+                  // wears CloudX, the rest (never published, a start point,
+                  // a removed remote) CloudSlash.
+                  return (
+                    <span
+                      role="img"
+                      aria-label={sync.label}
+                      className="flex shrink-0 items-center text-muted-foreground"
+                      title={sync.label}
+                    >
+                      {sync.kind === "gone" ? (
+                        <CloudXIcon className="size-3" />
+                      ) : (
+                        <CloudSlashIcon className="size-3" />
+                      )}
+                    </span>
+                  );
+              }
             })()}
           {div &&
             (div.ahead > 0 || div.behind > 0) &&
@@ -3712,9 +3848,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // alone holds carry the reason in the label. A structural reason always
     // wins — this arm shows only where nothing else explains the dimming.
     const busySuffix = busy ? " (operation in progress)" : "";
-    // Push and Publish: one push at a time, never while this row updates.
+    // Push and Publish: one push at a time, never while this row updates. Keep
+    // local is structural, so it outranks every transient hold.
     const pushItemSuffix = (() => {
       switch (true) {
+        case branch.keepLocal:
+          return KEPT_LOCAL_SUFFIX;
         case publishActive:
           return ` (${PUBLISH_HOLD_ITEM_REASON})`;
         case rowPushing:
@@ -3728,6 +3867,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
     })();
     const pushItemDisabled =
+      branch.keepLocal ||
       rowPushing ||
       rowUpdating ||
       pushActive ||
@@ -3809,7 +3949,32 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       remoteNames.includes(branch.upstreamRemote)
         ? branch.upstreamRemote
         : null;
-    const pushable = Boolean(upstreamRemote) && branch.upstreamAhead > 0;
+    // A different-name upstream follows the sync bar's mismatch menu: no push
+    // into the remote's default branch, and a publish under the row's own name.
+    // The remote-branches read can land after paint and relabel the publish
+    // item to "and track it": same action, destination and confirm.
+    const rowMismatch = rowNameMismatch(rowUpstreamFacts(branch), remoteNames);
+    const mismatchMenu =
+      rowMismatch &&
+      deriveMismatchMenu({
+        branch: branch.name,
+        remote: rowMismatch.remote,
+        remoteBranch: rowMismatch.remoteBranch,
+        ahead: branch.upstreamAhead,
+        behind: branch.upstreamBehind,
+        upstreamIsRemoteDefault: rowMismatch.isRemoteDefault,
+        remoteNewExists:
+          remoteHasBranch(
+            remoteBranchesQuery.data,
+            rowMismatch.remote,
+            branch.name,
+          ) === true,
+        keptLocal: branch.keepLocal,
+      });
+    const pushable =
+      Boolean(upstreamRemote) &&
+      branch.upstreamAhead > 0 &&
+      !(mismatchMenu && mismatchMenu.pushToTracked === null);
     const publishable =
       (!branch.upstream || branch.upstreamGone) && remoteNames.length > 0;
     // Publish destinations: origin first, then the rest alphabetical.
@@ -3862,7 +4027,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         {(rowUpdateSources.length > 0 ||
           (branch.upstream && branch.upstreamBehind > 0) ||
           pushable ||
-          publishable) && (
+          publishable ||
+          mismatchMenu !== null) && (
           <>
             {rowUpdateSources.map((source) => (
               <ContextMenuItem
@@ -3964,9 +4130,33 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   doPushBranch(branch);
                 }}
               >
-                {branch.upstreamBehind > 0
-                  ? `Push to ${branch.upstream} (diverged)`
-                  : `Push to ${branch.upstream}${pushItemSuffix}`}
+                {(() => {
+                  switch (true) {
+                    case branch.keepLocal:
+                      return `Push to ${branch.upstream}${KEPT_LOCAL_SUFFIX}`;
+                    case branch.upstreamBehind > 0:
+                      return `Push to ${branch.upstream} (diverged)`;
+                    default:
+                      return `Push to ${branch.upstream}${pushItemSuffix}`;
+                  }
+                })()}
+              </ContextMenuItem>
+            )}
+            {/* Publish under the row's own name and track it there. A held
+                label already carries its reason; a live one takes the
+                row's push hold. */}
+            {mismatchMenu && (
+              <ContextMenuItem
+                className={MENU_HELD_ROW_CLASS}
+                disabled={mismatchMenu.publish.disabled || pushItemDisabled}
+                onClick={() => {
+                  fallThroughGuardUntil.current = Date.now() + 300;
+                  doPushBranch(branch, mismatchMenu.remote, true);
+                }}
+              >
+                {mismatchMenu.publish.disabled
+                  ? mismatchMenu.publish.label
+                  : `${mismatchMenu.publish.label}${pushItemSuffix}`}
               </ContextMenuItem>
             )}
             {/* Publish an unpushed / upstream-deleted branch: one remote → a
@@ -4043,6 +4233,33 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             ? archiveLabel
             : `${archiveLabel} (${archiveBlockedReason})`}
         </ContextMenuItem>
+        <ContextMenuCheckboxItem
+          checked={branch.keepLocal}
+          closeOnClick
+          className={MENU_HELD_ROW_CLASS}
+          disabled={rowPushing}
+          onClick={() => void setKeepLocal(branch.name, !branch.keepLocal)}
+        >
+          {rowPushing
+            ? `${KEEP_LOCAL_ITEM} (${rowPushHeldReason})`
+            : KEEP_LOCAL_ITEM}
+        </ContextMenuCheckboxItem>
+        {branch.keepLocal && (
+          // The slot waits disabled, with no handler, until the read answers:
+          // an enabled item never changes meaning under the pointer, and a
+          // failed read opens its own dialog state, never "not installed".
+          <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
+            disabled={hookItem === "checking"}
+            onClick={
+              hookItem === "checking"
+                ? undefined
+                : () => void openKeepLocalHook()
+            }
+          >
+            {KEEP_LOCAL_HOOK_ITEM[hookItem]}
+          </ContextMenuItem>
+        )}
         <ContextMenuSeparator />
         {rowWorktree && (
           <>
@@ -4233,10 +4450,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             switch (true) {
               case deletionBlocked:
                 return `Delete on ${branch.remote}… (protected)`;
-              case publishActive:
-                return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`;
               case pushActive:
                 return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`;
+              case publishActive:
+                return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`;
               default:
                 return `Delete on ${branch.remote}…${offlineSuffix}`;
             }
@@ -5092,9 +5309,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 create: undefined,
                 presence: undefined,
               }),
+              forkGuard.retrack,
             );
         }}
       />
+
+      {hookDialog && (
+        // Keyed and bound to the repo it opened for, never the live one.
+        <KeepLocalHookDialog
+          key={hookDialog.repo}
+          repoPath={hookDialog.repo}
+          open={hookDialog.session !== null}
+          session={hookDialog.session}
+          isLiveSession={(s) => hookDialogRef.current?.session === s}
+          onOpenChange={(o) => {
+            if (!o) setHookDialog((d) => d && { ...d, session: null });
+          }}
+        />
+      )}
 
       <SwitchWithChangesDialog
         target={switchTarget}

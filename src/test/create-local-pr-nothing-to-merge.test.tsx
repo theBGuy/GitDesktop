@@ -212,6 +212,30 @@ describe("Create local PR: nothing to merge", () => {
     await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
   });
 
+  it("creates for a kept-local head, which a local pull request never pushes", async () => {
+    vi.mocked(gitBranches).mockResolvedValue(
+      ["main", "feat"].map(
+        (name) =>
+          ({
+            name,
+            isCurrent: name === "feat",
+            archived: false,
+            keepLocal: name === "feat",
+          }) as Branch,
+      ),
+    );
+    vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
+    const user = userEvent.setup();
+    renderDialog();
+    await fillTitle(user);
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    expect(createButton()).toBeEnabled();
+    expect(createButton()).not.toHaveAttribute("aria-disabled");
+    await user.click(createButton());
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
+  });
+
   it("holds Create and names why when there is no base branch to choose", async () => {
     const user = userEvent.setup();
     renderDialog({ base: "" });

@@ -5857,19 +5857,7 @@ pub async fn publish_repo(
 
     // Origin must not already exist (an externally-added origin would strand an
     // orphaned repo when the post-create `remote add` fails).
-    if crate::git::runner::run_git_raw(
-        Some(repo_path),
-        &["remote", "get-url", "origin"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await
-    .map(|o| o.code == 0)
-    .unwrap_or(false)
-    {
-        return Err(AppError::InvalidArgument(
-            "this repository already has an origin remote — push to it instead".into(),
-        ));
-    }
+    crate::git::remote::refuse_existing_origin(repo_path).await?;
 
     let creds = http::load_credentials().await?;
 
@@ -8974,6 +8962,76 @@ definitions:
         assert!(headline.contains("WAS created"));
         assert!(!headline.contains("Could not resolve host"));
         assert_eq!(detail, stderr);
+    }
+
+    /// `publish_repo`'s local guards precede its first network or keyring call, pinned
+    /// by source: no test may run it (the credential read and the create POST follow the
+    /// origin check). The mutation controls run on the carved text.
+    #[test]
+    fn bitbucket_publish_guards_precede_the_network_existing_origin() {
+        fn guards_precede(body: &str) -> bool {
+            let network = [
+                "load_credentials(",
+                "bb_send_request",
+                "seed_git_credential(",
+                "run_git_mutating_with_creds(",
+            ]
+            .iter()
+            .filter_map(|marker| body.find(marker))
+            .min();
+            let origin = body.find("refuse_existing_origin(repo_path).await?;");
+            let fail_open = body.lines().any(|line| {
+                line.contains("refuse_existing_origin(")
+                    && (line.contains("unwrap_or(") || line.contains(".ok()"))
+            });
+            match (body.find("publish_branch("), origin, network) {
+                (Some(branch), Some(origin), Some(network)) => {
+                    branch < network && origin < network && !fail_open
+                }
+                _ => false,
+            }
+        }
+        fn without(body: &str, needle: &str) -> String {
+            body.lines()
+                .filter(|line| !line.contains(needle))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn moved_after(body: &str, needle: &str, anchor: &str) -> String {
+            let moved = body.lines().find(|line| line.contains(needle)).unwrap();
+            let mut out = Vec::new();
+            for line in body.lines().filter(|line| !line.contains(needle)) {
+                out.push(line);
+                if line.contains(anchor) {
+                    out.push(moved);
+                }
+            }
+            out.join("\n")
+        }
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("bitbucket.rs"),
+            "publish_repo",
+        );
+        assert!(guards_precede(&body), "{body}");
+        assert!(
+            !body.contains("\"get-url\""),
+            "the inline origin read is gone"
+        );
+        let mutants = [
+            (
+                "origin check deleted",
+                without(&body, "refuse_existing_origin("),
+            ),
+            (
+                "origin check after load_credentials",
+                moved_after(&body, "refuse_existing_origin(", "load_credentials("),
+            ),
+            ("publish_branch deleted", without(&body, "publish_branch(")),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}: the mutation changed nothing");
+            assert!(!guards_precede(&mutant), "{what}");
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { useId, useState } from "react";
 import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -14,10 +15,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { presentError } from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
-import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
+import { useBranches, useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
 import {
@@ -40,7 +42,13 @@ import {
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useRetained } from "@/lib/use-retained";
+import { cn } from "@/lib/utils";
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
@@ -127,6 +135,12 @@ export function PromoteLocalPrDialog({
       ? undefined
       : pendingWriteReason(createPr.isPaused, `Creating the ${prNoun}…`);
   const shownPendingReason = useRetained(pendingReason, open);
+  // Publishing pushes the head, which Keep local refuses. The live value gates
+  // the press; the retained one only keeps the look through the close fade.
+  const branches = useBranches(repoPath);
+  const headKeptLocal =
+    branches.data?.some((b) => b.name === pr.head && b.keepLocal) === true;
+  const shownHeadKeptLocal = useRetained(headKeptLocal, open);
 
   // Visible comments, in order — skip empty + hidden (collapsed) ones.
   const carried = pr.comments.filter((c) => c.body.trim() && !c.hidden);
@@ -191,7 +205,13 @@ export function PromoteLocalPrDialog({
   async function promote() {
     // The look is retained through the close fade; these live gates add `open`
     // and one run at a time, since `pendingPub` holds a single run.
-    if (!open || pendingPub !== null || refuseWhileOffline()) return;
+    if (!open || pendingPub !== null) return;
+    // Ahead of the local close, so a kept-local head never closes the local PR.
+    if (headKeptLocal) {
+      toast.info(keptLocalPromoteReason(pr.head));
+      return;
+    }
+    if (refuseWhileOffline()) return;
     // The create pushes its head, which a running repository publish holds.
     if (refuseWhilePublishing(queryClient, repoPath)) return;
     // Fire-time admission, claimed before the first await: the push plus the
@@ -360,6 +380,8 @@ export function PromoteLocalPrDialog({
     switch (true) {
       case shownPending:
         return shownPendingReason;
+      case shownHeadKeptLocal:
+        return keptLocalPromoteReason(pr.head);
       // The lane hint describes its own hold (aria-describedby below), and
       // outranks offline.
       case shownCreatingElsewhere:
@@ -372,6 +394,20 @@ export function PromoteLocalPrDialog({
         return undefined;
     }
   })();
+  const publishBlocked =
+    shownPending ||
+    shownHeadKeptLocal ||
+    shownOtherPublishing ||
+    shownCreatingElsewhere ||
+    !!offlineHold;
+  const publishHeld = useDisabledReason({
+    disabled: publishBlocked,
+    reason: publishReason,
+    describedBy: shownLaneHint ? creatingHintId : undefined,
+  });
+  // A kept-local head is a hold the user must act on, so its reason is visible
+  // text (and the button's description) rather than a hover title alone.
+  const keptLocalLine = shownHeadKeptLocal && !shownPending;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -399,6 +435,14 @@ export function PromoteLocalPrDialog({
               {shownLaneHint}
             </p>
           )}
+          {keptLocalLine && (
+            <p
+              id={publishHeld.reasonId}
+              className="basis-full text-xs text-warning"
+            >
+              {keptLocalPromoteReason(pr.head)}
+            </p>
+          )}
           <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
             <Checkbox
               checked={draft}
@@ -414,20 +458,32 @@ export function PromoteLocalPrDialog({
           >
             Cancel
           </DisabledReasonButton>
-          <DisabledReasonButton
-            onClick={promote}
-            disabled={
-              shownPending ||
-              shownOtherPublishing ||
-              shownCreatingElsewhere ||
-              !!offlineHold
-            }
-            reason={publishReason}
-            aria-describedby={shownLaneHint ? creatingHintId : undefined}
+          {/* DisabledReasonButton's own sr-only copy would repeat the visible
+              kept-local line, so the reason contract is spelled out here. */}
+          <span
+            className={cn(
+              "inline-flex shrink-0",
+              publishHeld.blockedReason && "cursor-not-allowed",
+            )}
+            title={publishHeld.wrapperTitle}
           >
-            {shownPending && <Spinner data-icon="inline-start" />}
-            {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
-          </DisabledReasonButton>
+            <Button
+              onClick={promote}
+              focusableWhenDisabled={!!publishHeld.blockedReason}
+              disabled={publishBlocked}
+              aria-describedby={publishHeld.describedBy}
+              className={ARIA_DISABLED_CLASS}
+              render={heldButtonRender(!!publishHeld.blockedReason)}
+            >
+              {shownPending && <Spinner data-icon="inline-start" />}
+              {draft ? "Publish as draft" : `Publish to ${remoteLabel}`}
+            </Button>
+            {publishHeld.blockedReason && !keptLocalLine ? (
+              <span id={publishHeld.reasonId} className="sr-only">
+                {publishHeld.blockedReason}
+              </span>
+            ) : null}
+          </span>
         </DialogFooter>
       </DialogContent>
     </Dialog>

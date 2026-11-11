@@ -7170,22 +7170,8 @@ pub async fn publish_repo(
     // that fires after it would strand an orphaned GitLab project whose name
     // then blocks every retry with "has already been taken".
     let branch = crate::git::remote::publish_branch(repo_path).await?;
-    // An origin remote may have appeared since the UI's (cached) no-origin
-    // check — adding one externally then publishing would otherwise strand an
-    // orphaned project when the post-create `remote add` fails.
-    if crate::git::runner::run_git_raw(
-        Some(repo_path),
-        &["remote", "get-url", "origin"],
-        crate::git::runner::DEFAULT_TIMEOUT,
-    )
-    .await
-    .map(|o| o.code == 0)
-    .unwrap_or(false)
-    {
-        return Err(AppError::InvalidArgument(
-            "this repository already has an origin remote — push to it instead".into(),
-        ));
-    }
+    // An origin remote may have appeared since the UI's (cached) no-origin check.
+    crate::git::remote::refuse_existing_origin(repo_path).await?;
     let me = current_user(repo_path).await?;
 
     let visibility = if private { "--private" } else { "--public" };
@@ -12003,6 +11989,74 @@ mod tests {
             gl_publish_create_error("demo", AppError::GlabNotFound),
             AppError::GlabNotFound,
         ));
+    }
+
+    /// `publish_repo`'s local guards precede its first network call, pinned by source:
+    /// no test may run it (`glab api user` follows the origin check). The mutation
+    /// controls run on the carved text.
+    #[test]
+    fn gitlab_publish_guards_precede_the_network_existing_origin() {
+        fn guards_precede(body: &str) -> bool {
+            let network = [
+                "current_user(",
+                "run_glab(",
+                "clone_credential_config(",
+                "run_git_mutating_with_creds(",
+            ]
+            .iter()
+            .filter_map(|marker| body.find(marker))
+            .min();
+            let origin = body.find("refuse_existing_origin(repo_path).await?;");
+            let fail_open = body.lines().any(|line| {
+                line.contains("refuse_existing_origin(")
+                    && (line.contains("unwrap_or(") || line.contains(".ok()"))
+            });
+            match (body.find("publish_branch("), origin, network) {
+                (Some(branch), Some(origin), Some(network)) => {
+                    branch < network && origin < network && !fail_open
+                }
+                _ => false,
+            }
+        }
+        fn without(body: &str, needle: &str) -> String {
+            body.lines()
+                .filter(|line| !line.contains(needle))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn moved_after(body: &str, needle: &str, anchor: &str) -> String {
+            let moved = body.lines().find(|line| line.contains(needle)).unwrap();
+            let mut out = Vec::new();
+            for line in body.lines().filter(|line| !line.contains(needle)) {
+                out.push(line);
+                if line.contains(anchor) {
+                    out.push(moved);
+                }
+            }
+            out.join("\n")
+        }
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("gitlab.rs"), "publish_repo");
+        assert!(guards_precede(&body), "{body}");
+        assert!(
+            !body.contains("\"get-url\""),
+            "the inline origin read is gone"
+        );
+        let mutants = [
+            (
+                "origin check deleted",
+                without(&body, "refuse_existing_origin("),
+            ),
+            (
+                "origin check after current_user",
+                moved_after(&body, "refuse_existing_origin(", "current_user("),
+            ),
+            ("publish_branch deleted", without(&body, "publish_branch(")),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}: the mutation changed nothing");
+            assert!(!guards_precede(&mutant), "{what}");
+        }
     }
 
     #[test]

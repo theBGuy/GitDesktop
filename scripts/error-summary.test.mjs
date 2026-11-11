@@ -1716,3 +1716,21 @@ test("a one-line failure and a lone progress line keep their headline", () => {
     "Preparing worktree (new branch 'x')",
   );
 });
+
+// The push refusals Rust types: each wire payload, exactly as serialized, takes
+// the kind label "Push blocked" (shown in Details) with its message as the summary.
+test("the Keep local, mirror, local-upstream and agent-session push refusals label as Push blocked", () => {
+  const payloads = [
+    `{"kind":"branchKeptLocal","message":"\\"feat/x\\" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.","branch":"feat/x"}`,
+    `{"kind":"pushRemoteIsMirror","message":"\\"origin\\" is a mirror remote, so GitDesktop won't push to it. Push from a terminal instead.","remote":"origin"}`,
+    '{"kind":"pushUpstreamIsLocal","message":"Push blocked — feat tracks a local branch (main), not a remote.","branch":"feat","upstream":"main"}',
+    `{"kind":"branchIsAgentSession","message":"\\"gd/session/x\\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.","branch":"gd/session/x"}`,
+    `{"kind":"pushDestinationIsAgentSession","message":"\\"topic\\" would push to origin/gd/session/x, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it.","branch":"topic","remote":"origin","dest":"gd/session/x"}`,
+  ];
+  for (const wire of payloads) {
+    const e = JSON.parse(wire);
+    const p = presentError(e);
+    assert.equal(p.label, "Push blocked", e.kind);
+    assert.equal(p.summary, e.message, e.kind);
+  }
+});

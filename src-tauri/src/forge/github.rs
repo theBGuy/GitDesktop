@@ -659,6 +659,7 @@ pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVis
 }
 
 pub async fn publish_repo(
+    state: &crate::state::AppState,
     repo_path: &str,
     name: &str,
     private: bool,
@@ -667,6 +668,7 @@ pub async fn publish_repo(
     topics: Vec<String>,
 ) -> AppResult<String> {
     crate::github::pr::gh_publish_repo(
+        state,
         repo_path.to_string(),
         name.to_string(),
         private,

@@ -128,21 +128,21 @@ pub(crate) async fn run_git_mutating_with_creds(
     sub: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
-    run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, false).await
+    run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, None).await
 }
 
-/// [`run_git_mutating_with_creds`], refusing a gd/session/ HEAD right before each
-/// spawn when `recheck_session_head` is set: an argv that resolves HEAD at spawn (an
-/// argv naming no branch: a bare or forced push, or a publish to `HEAD`) would
-/// otherwise publish a branch checked out during the credential and lock waits. A
-/// checkout between that read and git's own is out of reach.
+/// [`run_git_mutating_with_creds`], re-running [`refuse_head_push`] on `recheck`'s route
+/// right before each spawn: an argv that resolves HEAD at spawn (an argv naming no
+/// branch: a bare or forced push, or a publish to `HEAD`) would otherwise publish a
+/// branch checked out during the credential and lock waits. A checkout between that
+/// read and git's own is out of reach.
 async fn run_git_mutating_with_creds_checked(
     state: &AppState,
     repo_path: &str,
     cred: &[String],
     sub: &[&str],
     timeout: Duration,
-    recheck_session_head: bool,
+    recheck: Option<HeadRoute>,
 ) -> AppResult<GitOutput> {
     let tracked = push_upstream_branch(sub);
     let domain = state.network_lock(repo_path).await;
@@ -156,8 +156,8 @@ async fn run_git_mutating_with_creds_checked(
     .await?;
 
     let spawn = || async move {
-        if recheck_session_head {
-            refuse_session_head(repo_path).await?;
+        if let Some(route) = recheck {
+            refuse_head_push(repo_path, route).await?;
         }
         run_git_with_creds_once(repo_path, cred, sub, timeout).await
     };
@@ -1025,20 +1025,135 @@ enum CrossNameUpstream {
 }
 
 /// Refuses publishing a branch reserved for agent-session work.
-pub(crate) fn refuse_publishing_session_branch(name: &str) -> AppResult<()> {
+fn refuse_publishing_session_branch(name: &str) -> AppResult<()> {
     if crate::git::branches::is_session_branch_name(name) {
-        return Err(AppError::InvalidArgument(format!(
-            "\"{name}\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
-        )));
+        return Err(AppError::BranchIsAgentSession {
+            branch: name.to_string(),
+        });
     }
     Ok(())
 }
 
-/// HEAD's branch (`None` when detached), refused when it is a gd/session/ branch.
-async fn refuse_session_head(repo_path: &str) -> AppResult<Option<String>> {
-    let head = crate::git::branches::current_branch_name(repo_path).await?;
+/// The one publishing refusal every push, Publish and Create PR route runs on the branch
+/// it sends: the gd/session/ prefix, then the Keep local mark, failing closed on an
+/// unreadable mark. It sees only the branch a route names or HEAD's branch, so a bare
+/// push sending more (`push.default=matching`, a push remote's own push refspecs) can
+/// carry another marked branch: out of reach by decision (0 of 109 owner repos use
+/// either), and the optional pre-push hook stops it.
+pub(crate) async fn refuse_publishing_branch(repo_path: &str, name: &str) -> AppResult<()> {
+    refuse_publishing_session_branch(name)?;
+    if crate::git::branches::branch_keep_local(repo_path, name).await? {
+        return Err(AppError::BranchKeptLocal {
+            branch: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a push whose DESTINATION on a named remote is in gd/session/, whatever the
+/// local branch is called; the local name is [`refuse_publishing_branch`]'s.
+fn refuse_session_destination(branch: &str, remote: &str, dest: &str) -> AppResult<()> {
+    if crate::git::branches::is_session_branch_name(dest) {
+        return Err(AppError::PushDestinationIsAgentSession {
+            branch: branch.to_string(),
+            remote: remote.to_string(),
+            dest: dest.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Where a bare push of `local` lands, off the first line of a HEAD tracking read
+/// ([`UPSTREAM_TRACKING_FORMAT`]'s four fields, then the push atoms): None/None when the
+/// line is missing (an unborn HEAD), names another ref, or carries no atoms. Out of
+/// reach: an upstream remote with no fetch refspec leaves `%(upstream)` and `%(push)`
+/// empty while push.default=upstream still pushes to `branch.<b>.merge` (git 2.51.1).
+fn bare_push_destination(
+    text: &str,
+    refname: &str,
+    local: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(line) = text.lines().next() else {
+        return (None, None);
+    };
+    let fields: Vec<&str> = line.split('\0').collect();
+    if fields.first() != Some(&refname) {
+        return (None, None);
+    }
+    let upstream_remoteref = fields.get(1).copied().unwrap_or("");
+    let upstream_remote = fields.get(2).copied().unwrap_or("");
+    let atoms = fields.get(4..).unwrap_or(&[]);
+    crate::git::branches::push_destination_fields(local, atoms, upstream_remote, upstream_remoteref)
+}
+
+/// The local branch a bare push would update in this repository, off the same line as
+/// [`bare_push_destination`]: a BRANCH upstream whose push remote (`%(push:remotename)`)
+/// is `.`. A line read without the atoms falls back to the upstream's own remote, so an
+/// old git refuses rather than guesses; non-branch and untracked upstreams never answer.
+fn bare_push_local_upstream(text: &str, refname: &str) -> Option<String> {
+    let (Upstream::Branch(up), remotename, _) = parse_upstream_tracking(text, refname)? else {
+        return None;
+    };
+    let line = text.lines().next()?;
+    let push_remote = line.split('\0').nth(4).unwrap_or(&remotename);
+    (push_remote == ".").then_some(up)
+}
+
+/// Where a HEAD push goes: `Bare` resolves the remote from HEAD at spawn, and
+/// `PublishOrigin` is the `-u origin HEAD` publish.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum HeadRoute {
+    Bare,
+    PublishOrigin,
+}
+
+/// Every pre-spawn read of a HEAD push, run early and again at spawn for an argv that
+/// resolves HEAD there: HEAD's branch (`None` when detached), its publishing refusal,
+/// and one config listing for the mirror refusal on the remote the route pushes to.
+async fn refuse_head_push(repo_path: &str, route: HeadRoute) -> AppResult<Option<String>> {
+    use crate::git::status::{mirror_refusal, push_config_strict, PushRemote};
+    // git's own full ref, so the destination read's pattern is never rebuilt from a name.
+    let head_ref = crate::git::branches::current_branch_ref(repo_path).await?;
+    let head = head_ref
+        .as_deref()
+        .and_then(|r| r.strip_prefix("refs/heads/"))
+        .map(str::to_string);
     if let Some(b) = &head {
-        refuse_publishing_session_branch(b)?;
+        refuse_publishing_branch(repo_path, b).await?;
+    }
+    let config = push_config_strict(repo_path).await?;
+    let target = match route {
+        HeadRoute::Bare => PushRemote::Bare {
+            head: head.as_deref(),
+        },
+        HeadRoute::PublishOrigin => PushRemote::Named("origin"),
+    };
+    mirror_refusal(&config, target)?;
+    // A bare push of a non-session HEAD lands on a session branch only under
+    // push.default=upstream, which the push atoms resolve; matching and a push remote's
+    // own refspecs send refs the user configured and stay out of reach. The atom's push
+    // remote agrees with the mirror verdict's for every tracked HEAD; an untracked one
+    // reads empty, which resolves nothing here.
+    if let (HeadRoute::Bare, Some(refname), Some(b)) = (route, head_ref.as_deref(), head.as_deref())
+    {
+        let text = crate::git::branches::read_refs_with_push_destination(
+            repo_path,
+            refname,
+            UPSTREAM_TRACKING_FORMAT,
+        )
+        .await?;
+        // A push remote of `.` beside a branch upstream pushes into this repository, under
+        // every push.default; a push remote configured beside it sends the push there.
+        // A GONE `.` upstream is refused too: the named arm retargets it at origin, git doesn't.
+        if let Some(upstream) = bare_push_local_upstream(&text, refname) {
+            return Err(AppError::PushUpstreamIsLocal {
+                branch: b.to_string(),
+                upstream,
+            });
+        }
+        if let (Some(remote), Some(dest)) = bare_push_destination(&text, refname, b) {
+            refuse_session_destination(b, &remote, &dest)?;
+        }
     }
     Ok(head)
 }
@@ -1078,7 +1193,12 @@ async fn git_push_with_policy(
             // Bare and force pushes resolve HEAD at spawn, after the credential and lock
             // waits, so the spawn re-checks too; pinning them would change push.default
             // semantics. This early read is the fast failure.
-            let head = refuse_session_head(&repo_path).await?;
+            let route = if set_upstream {
+                HeadRoute::PublishOrigin
+            } else {
+                HeadRoute::Bare
+            };
+            let head = refuse_head_push(&repo_path, route).await?;
             if set_upstream && crate::git::branches::head_is_unborn(&repo_path).await? {
                 return Err(crate::git::branches::unborn_head_error());
             }
@@ -1104,7 +1224,7 @@ async fn git_push_with_policy(
         }
         Some(b) => {
             crate::git::branches::validate_ref_name(b)?;
-            refuse_publishing_session_branch(b)?;
+            refuse_publishing_branch(&repo_path, b).await?;
             // A caller-chosen remote is validated for shape AND verified to exist
             // BEFORE any mutation: the existence check is the primary guard (a URL
             // can never appear in `git remote` output — and it requires `:`, which
@@ -1163,6 +1283,37 @@ async fn git_push_with_policy(
             // always origin — a branch tracking a fork's `upstream` (or an explicit
             // `remote`) authenticates against THAT host, not origin's.
             cred_remote = resolve_push_target(remote.as_deref(), &remotename, gone).to_string();
+            crate::git::status::refuse_mirror_push(
+                &repo_path,
+                crate::git::status::PushRemote::Named(&cred_remote),
+            )
+            .await?;
+            // A live `.` upstream targets this repository (an explicit remote never is `.`),
+            // set_upstream included. A non-branch `.` upstream is a same-name self-push.
+            if let (".", Upstream::Branch(up)) = (cred_remote.as_str(), &upstream) {
+                return Err(AppError::PushUpstreamIsLocal {
+                    branch: b.clone(),
+                    upstream: up.clone(),
+                });
+            }
+            // The destination is the named one, else the tracked upstream's branch; the
+            // local name is already checked above. Before the cross-name refusal, so both
+            // policies answer with the session copy.
+            if is_named_remote(&cred_remote) {
+                let dest = remote_branch.as_deref().or_else(|| {
+                    tracked_push_upstream(
+                        &upstream,
+                        &remotename,
+                        gone,
+                        set_upstream,
+                        remote.as_deref(),
+                        None,
+                    )
+                });
+                if let Some(dest) = dest {
+                    refuse_session_destination(b, &cred_remote, dest)?;
+                }
+            }
             // Refuse from the same tracking snapshot as the argv, before credentials or
             // a mutating spawn. Local `.` tracking has no named-remote remedy.
             if cross_name == CrossNameUpstream::Refuse {
@@ -1197,7 +1348,11 @@ async fn git_push_with_policy(
     let cred = crate::forge::credential_config_for_remote(&repo_path, &cred_remote).await?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
     // Only an argv naming no branch resolves HEAD at spawn; a pinned publish doesn't.
-    let recheck = branch.is_none() && head_branch.is_none();
+    let recheck = match (branch.is_none() && head_branch.is_none(), set_upstream) {
+        (false, _) => None,
+        (true, false) => Some(HeadRoute::Bare),
+        (true, true) => Some(HeadRoute::PublishOrigin),
+    };
     let (repo, timeout) = (repo_path.as_str(), NETWORK_TIMEOUT);
     match run_git_mutating_with_creds_checked(state, repo, &cred, &argv, timeout, recheck).await {
         Ok(_) => Ok(PushGuard::LeaseAndIncludes),
@@ -1573,9 +1728,9 @@ fn build_push_args(
 }
 
 /// The branch a forge publish pushes: HEAD's branch NAME, validated for the publish
-/// refspec. Shared by the GitLab and Bitbucket publishes, which run it BEFORE they
-/// create the remote project — a refusal after the create would orphan it. The two
-/// refusal strings are the publish dialog's contract.
+/// refspec. Every provider's publish runs it BEFORE it creates the remote project — a
+/// refusal after the create would orphan it. The two refusal strings are the publish
+/// dialog's contract.
 pub(crate) async fn publish_branch(repo_path: &str) -> AppResult<String> {
     let Some(branch) = crate::git::branches::current_branch_name(repo_path).await? else {
         return Err(AppError::InvalidArgument(
@@ -1588,7 +1743,48 @@ pub(crate) async fn publish_branch(repo_path: &str) -> AppResult<String> {
         ));
     }
     crate::git::branches::validate_ref_name(&branch)?;
+    // The dispatch refused HEAD's branch as it read it then; this is the name the
+    // provider pushes, so a checkout between the two reads can't publish past the guard.
+    refuse_publishing_branch(repo_path, &branch).await?;
     Ok(branch)
+}
+
+/// Refuses a publish when `origin` already exists, since the post-create `remote add`
+/// would fail and strand the new project. Fails closed: only git's "No such remote"
+/// proceeds; any other failure refuses with git's own text.
+pub(crate) async fn refuse_existing_origin(repo_path: &str) -> AppResult<()> {
+    existing_origin_verdict(repo_path, &[]).await
+}
+
+/// The verdict over one `remote get-url origin` run. git before 2.30 answers a missing
+/// remote with exit 128 and "No such remote" (2.30.0 release notes: `git remote` exit
+/// codes made scriptable); the runner pins LC_ALL=C, so that text is stable.
+fn existing_origin_decision(out: &GitOutput) -> AppResult<()> {
+    match out.code {
+        0 => Err(AppError::InvalidArgument(
+            "this repository already has an origin remote — push to it instead".into(),
+        )),
+        2 => Ok(()),
+        128 if out.stderr.contains("No such remote") => Ok(()),
+        code => Err(AppError::Git {
+            code,
+            stderr: out.full_failure_text(),
+        }),
+    }
+}
+
+/// `remote get-url` counts only repository-scope config, the same test `remote add`
+/// makes: a url-less local `[remote "origin"]` exits 0, a global-only `remote.origin.*`
+/// key exits 2 (measured, git 2.51.1). `envs` is the tests' per-spawn config seam.
+async fn existing_origin_verdict(repo_path: &str, envs: &[(&str, &str)]) -> AppResult<()> {
+    let out = crate::git::runner::run_git_raw_env(
+        Some(repo_path),
+        &["remote", "get-url", "origin"],
+        envs,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    existing_origin_decision(&out)
 }
 
 /// Fully-qualified same-name push refspec. Qualification alone only stops a
@@ -2916,8 +3112,8 @@ mod tests {
                 git_push_core(&state, work.clone(), set_upstream, force, None, None, None).await
             };
             match result.expect_err("session HEAD must not publish") {
-                AppError::InvalidArgument(message) => assert_eq!(
-                    message,
+                e @ AppError::BranchIsAgentSession { .. } => assert_eq!(
+                    e.to_string(),
                     "\"GD/Session/Mixed\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
                 ),
                 other => panic!("expected the publishing refusal, got {other:?}"),
@@ -2946,8 +3142,8 @@ mod tests {
         .await
         .expect_err("named session branch must not publish");
         match error {
-            AppError::InvalidArgument(message) => assert_eq!(
-                message,
+            e @ AppError::BranchIsAgentSession { .. } => assert_eq!(
+                e.to_string(),
                 "\"gd/session/abc\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
             ),
             other => panic!("expected the publishing refusal, got {other:?}"),
@@ -2956,6 +3152,681 @@ mod tests {
             .await
             .to_ascii_lowercase()
             .contains("gd/session/"));
+    }
+
+    /// A work repo pinned against a hostile global config, with a local bare `origin`
+    /// holding `main` and `feat/x` (tracked), HEAD on `feat/x` one commit ahead of it.
+    /// Returns (guard, work, origin).
+    async fn keep_local_origin(tag: &str) -> (tempfile::TempDir, String, String) {
+        let (guard, base) = temp_base(tag);
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work").to_string_lossy().into_owned();
+        let origin = base.join("origin.git").to_string_lossy().replace('\\', "/");
+        run(
+            &base_s,
+            &["init", "-q", "--bare", "-b", "main", "origin.git"],
+        )
+        .await;
+        run(&base_s, &["init", "-q", "-b", "main", "work"]).await;
+        for (key, value) in [
+            ("user.name", "t"),
+            ("user.email", "t@example.com"),
+            ("push.default", "simple"),
+            ("branch.autoSetupMerge", "true"),
+        ] {
+            run(&work, &["config", key, value]).await;
+        }
+        run(&work, &["remote", "add", "origin", &origin]).await;
+        run(&work, &["config", "remote.origin.mirror", "false"]).await;
+        run(&work, &["config", "remote.pushDefault", "origin"]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        run(&work, &["push", "-q", "-u", "origin", "main"]).await;
+        run(&work, &["switch", "-q", "-c", "feat/x"]).await;
+        run(&work, &["push", "-q", "-u", "origin", "feat/x"]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "ahead"]).await;
+        (guard, work, origin)
+    }
+
+    fn assert_kept_local(
+        result: crate::error::AppResult<impl std::fmt::Debug>,
+        branch: &str,
+        row: &str,
+    ) {
+        match result.expect_err(row) {
+            AppError::BranchKeptLocal { branch: b } => assert_eq!(b, branch, "{row}"),
+            other => panic!("{row}: expected the Keep local refusal, got {other:?}"),
+        }
+    }
+
+    /// The guard reads git's own bool, failing closed: marked spellings refuse, unmarked
+    /// ones pass, a junk value is an error, the key is case-sensitive, and the session
+    /// prefix answers first, before any spawn.
+    #[tokio::test]
+    async fn keep_local_guard_reads_every_flag_spelling() {
+        let (_guard, work, _origin) = keep_local_origin("keep-local-spellings").await;
+        let config = std::path::Path::new(&work).join(".git").join("config");
+        let set = |values: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .current_dir(&work)
+                .args([
+                    "config",
+                    "--unset-all",
+                    "branch.rel/1.2.gitdesktopLocalOnly",
+                ])
+                .output();
+            for v in values {
+                let mut text = std::fs::read_to_string(&config).unwrap();
+                match *v {
+                    "<valueless>" => text.push_str("[branch \"rel/1.2\"]\n\tgitdesktopLocalOnly\n"),
+                    _ => text.push_str(&format!(
+                        "[branch \"rel/1.2\"]\n\tgitdesktopLocalOnly = {v}\n"
+                    )),
+                }
+                std::fs::write(&config, text).unwrap();
+            }
+        };
+        for values in [
+            &["true"][..],
+            &["<valueless>"],
+            &["yes"],
+            &["false", "true"],
+        ] {
+            set(values);
+            assert_kept_local(
+                super::refuse_publishing_branch(&work, "rel/1.2").await,
+                "rel/1.2",
+                &format!("{values:?}"),
+            );
+        }
+        for values in [&[][..], &["false"], &["\"\""], &["0"], &["true", "false"]] {
+            set(values);
+            super::refuse_publishing_branch(&work, "rel/1.2")
+                .await
+                .unwrap_or_else(|e| panic!("{values:?} must read unmarked: {e:?}"));
+        }
+        // A junk value anywhere on the key makes git refuse the read, so the guard refuses
+        // with git's own error, even when the last value is a valid bool.
+        for values in [&["maybe"][..], &["maybe", "true"], &["maybe", "false"]] {
+            set(values);
+            match super::refuse_publishing_branch(&work, "rel/1.2").await {
+                Err(AppError::Git { stderr, .. }) => {
+                    assert!(
+                        stderr.contains("bad boolean config value"),
+                        "{values:?}: {stderr}"
+                    )
+                }
+                other => panic!("{values:?}: expected git's refusal, got {other:?}"),
+            }
+        }
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        super::refuse_publishing_branch(&work, "Feat/X")
+            .await
+            .expect("only the marked spelling refuses");
+        match super::refuse_publishing_branch("C:/gd-no-such-repo", "gd/session/x").await {
+            Err(AppError::BranchIsAgentSession { branch }) => assert_eq!(branch, "gd/session/x"),
+            other => panic!("expected the session refusal, got {other:?}"),
+        }
+    }
+
+    /// Every GUI push arm refuses a marked branch before git runs and lands nothing; with
+    /// the mark off, the same push lands.
+    #[tokio::test]
+    async fn keep_local_refuses_every_push_arm_and_the_unmarked_twin_lands() {
+        let (_guard, work, origin) = keep_local_origin("keep-local-arms").await;
+        let state = AppState::default();
+        let published = run(&origin, &["rev-parse", "refs/heads/feat/x"])
+            .await
+            .trim()
+            .to_string();
+        let some = |s: &str| Some(s.to_string());
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        for (row, set_upstream, force, branch, remote, remote_branch) in [
+            ("HEAD bare", false, false, None, None, None),
+            ("HEAD forced", false, true, None, None, None),
+            ("HEAD -u", true, false, None, None, None),
+            ("named", false, false, some("feat/x"), None, None),
+            (
+                "named + remote",
+                false,
+                false,
+                some("feat/x"),
+                some("origin"),
+                None,
+            ),
+            (
+                "named + remote branch",
+                true,
+                false,
+                some("feat/x"),
+                some("origin"),
+                some("other"),
+            ),
+        ] {
+            let result = git_push_core(
+                &state,
+                work.clone(),
+                set_upstream,
+                force,
+                branch,
+                remote,
+                remote_branch,
+            )
+            .await;
+            assert_kept_local(result, "feat/x", row);
+        }
+        assert_kept_local(
+            super::git_force_push_head_core(&state, work.clone()).await,
+            "feat/x",
+            "MCP force core",
+        );
+        assert_kept_local(
+            git_push_same_name_core(&state, work.clone(), false, Some("feat/x".into()), None).await,
+            "feat/x",
+            "MCP named core",
+        );
+        // The remote default, marked and pushed by name from another branch.
+        crate::git::branches::set_branch_keep_local_core(&work, "main", true)
+            .await
+            .unwrap();
+        assert_kept_local(
+            git_push_core(
+                &state,
+                work.clone(),
+                false,
+                false,
+                Some("main".into()),
+                None,
+                None,
+            )
+            .await,
+            "main",
+            "remote default",
+        );
+        let refs = run(&work, &["ls-remote", "origin"]).await;
+        assert!(
+            refs.contains(&format!("{published}\trefs/heads/feat/x")),
+            "{refs}"
+        );
+        assert!(!refs.contains("refs/heads/other"), "{refs}");
+
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", false)
+            .await
+            .unwrap();
+        git_push_core(&state, work.clone(), false, false, None, None, None)
+            .await
+            .expect("the unmarked twin lands");
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/feat/x"]).await,
+            run(&work, &["rev-parse", "refs/heads/feat/x"]).await
+        );
+    }
+
+    /// Keep local does not reach remote-branch delete: a marked branch's remote copy is
+    /// deleted.
+    #[tokio::test]
+    async fn keep_local_leaves_remote_branch_delete_allowed() {
+        let (_guard, work, _origin) = keep_local_origin("keep-local-delete").await;
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        crate::git::branches::git_delete_remote_branch_core(
+            &AppState::default(),
+            work.clone(),
+            "origin".into(),
+            "feat/x".into(),
+        )
+        .await
+        .expect("the remote copy of a marked branch can be deleted");
+        assert!(!run(&work, &["ls-remote", "origin"])
+            .await
+            .contains("refs/heads/feat/x"));
+    }
+
+    /// A bare or forced HEAD push pressed on an unmarked branch re-reads the mark at spawn:
+    /// a switch to a marked branch during the lock wait refuses, and nothing lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_local_queued_head_push_rechecks_at_spawn() {
+        use crate::git::runner::acquire_repo_lock;
+        let (_guard, work, origin) = keep_local_origin("keep-local-queued").await;
+        run(&work, &["config", "push.autoSetupRemote", "true"]).await;
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        let published = run(&origin, &["rev-parse", "refs/heads/feat/x"])
+            .await
+            .trim()
+            .to_string();
+        for force in [false, true] {
+            run(&work, &["switch", "-q", "-C", "pressed"]).await;
+            let state = std::sync::Arc::new(AppState::default());
+            let domain = state.network_lock(&work).await;
+            let held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+                .await
+                .expect("the network domain is free");
+            let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+            let queued_tx = std::sync::Mutex::new(Some(queued_tx));
+            let queued: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                if let Some(tx) = queued_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
+            let push = tokio::spawn({
+                let (state, work) = (std::sync::Arc::clone(&state), work.clone());
+                let run = async move {
+                    if force {
+                        super::git_force_push_head_core(&state, work).await
+                    } else {
+                        git_push_core(&state, work, false, false, None, None, None).await
+                    }
+                };
+                NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
+            });
+            queued_rx.await.expect("the push reached the network lock");
+            run(&work, &["switch", "-q", "feat/x"]).await;
+            drop(held);
+            let result = tokio::time::timeout(Duration::from_secs(60), push)
+                .await
+                .expect("the push finishes once the domain frees")
+                .unwrap();
+            assert_kept_local(result, "feat/x", &format!("force={force}"));
+            let pushed = run(&work, &["ls-remote", "origin"]).await;
+            assert!(!pushed.contains("pressed"), "force={force}: {pushed}");
+            assert!(
+                pushed.contains(&format!("{published}\trefs/heads/feat/x")),
+                "force={force}: {pushed}"
+            );
+        }
+    }
+
+    /// A marked HEAD is refused by the early check, before the network lock: with the
+    /// domain held, a bare and a forced push return the refusal without ever queueing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_local_early_head_check_refuses_before_the_network_lock() {
+        use crate::git::runner::acquire_repo_lock;
+        let (_guard, work, _origin) = keep_local_origin("keep-local-early").await;
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.network_lock(&work).await;
+        let _held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+            .await
+            .expect("the network domain is free");
+        for force in [false, true] {
+            let queued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+                let queued = std::sync::Arc::clone(&queued);
+                move || queued.store(true, std::sync::atomic::Ordering::SeqCst)
+            });
+            let (state, work) = (std::sync::Arc::clone(&state), work.clone());
+            let push = async move {
+                if force {
+                    super::git_force_push_head_core(&state, work).await
+                } else {
+                    git_push_core(&state, work, false, false, None, None, None).await
+                }
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                NETWORK_LOCK_WAIT_HOOK.scope(hook, push),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("force={force}: the refusal waited on the held lock"));
+            assert_kept_local(result, "feat/x", &format!("force={force}"));
+            assert!(
+                !queued.load(std::sync::atomic::Ordering::SeqCst),
+                "force={force}: the push reached the network lock"
+            );
+        }
+    }
+
+    /// [`keep_local_origin`] plus a second bare remote, both pinned non-mirror, with
+    /// `extra` on origin, a branch the clone lacks (a mirror push would delete it).
+    /// Returns (guard, work, origin, second).
+    async fn mirror_origin(tag: &str) -> (tempfile::TempDir, String, String, String) {
+        let (guard, work, origin) = keep_local_origin(tag).await;
+        let second = guard
+            .path()
+            .join("second.git")
+            .to_string_lossy()
+            .replace('\\', "/");
+        run(
+            &guard.path().to_string_lossy(),
+            &["init", "-q", "--bare", "-b", "main", "second.git"],
+        )
+        .await;
+        run(&work, &["remote", "add", "second", &second]).await;
+        run(&work, &["config", "remote.second.mirror", "false"]).await;
+        run(&work, &["push", "-q", "second", "main"]).await;
+        run(&work, &["push", "-q", "origin", "main:refs/heads/extra"]).await;
+        run(&work, &["update-ref", "-d", "refs/remotes/origin/extra"]).await;
+        (guard, work, origin, second)
+    }
+
+    fn assert_mirror(
+        result: crate::error::AppResult<impl std::fmt::Debug>,
+        remote: &str,
+        row: &str,
+    ) {
+        match result.expect_err(row) {
+            AppError::PushRemoteIsMirror { remote: r } => assert_eq!(r, remote, "{row}"),
+            other => panic!("{row}: expected the mirror refusal, got {other:?}"),
+        }
+    }
+
+    /// Every GUI and MCP push arm refuses a mirror remote before git runs, the remote's
+    /// refs untouched (`extra` survives); a mirror on a remote the push doesn't use never
+    /// refuses, and the push lands.
+    #[tokio::test]
+    async fn mirror_refusal_on_every_push_arm_and_the_twin_lands() {
+        let (_guard, work, origin, second) = mirror_origin("mirror-arms").await;
+        let state = AppState::default();
+        let refs_before = run(&origin, &["for-each-ref"]).await;
+        let some = |s: &str| Some(s.to_string());
+        run(&work, &["config", "remote.origin.mirror", "true"]).await;
+        for (row, set_upstream, force, branch, remote, remote_branch) in [
+            ("HEAD bare", false, false, None, None, None),
+            ("HEAD forced", false, true, None, None, None),
+            ("HEAD -u", true, false, None, None, None),
+            ("named", false, false, some("feat/x"), None, None),
+            (
+                "named + remote",
+                false,
+                false,
+                some("feat/x"),
+                some("origin"),
+                None,
+            ),
+            (
+                "named + remote branch",
+                true,
+                false,
+                some("feat/x"),
+                some("origin"),
+                some("other"),
+            ),
+        ] {
+            let result = git_push_core(
+                &state,
+                work.clone(),
+                set_upstream,
+                force,
+                branch,
+                remote,
+                remote_branch,
+            )
+            .await;
+            assert_mirror(result, "origin", row);
+        }
+        assert_mirror(
+            super::git_force_push_head_core(&state, work.clone()).await,
+            "origin",
+            "MCP force core",
+        );
+        assert_mirror(
+            git_push_same_name_core(&state, work.clone(), false, Some("feat/x".into()), None).await,
+            "origin",
+            "MCP named core",
+        );
+        // A detached bare push routes by remote.pushDefault: a mirror there refuses.
+        run(&work, &["config", "remote.second.mirror", "true"]).await;
+        run(&work, &["config", "remote.pushDefault", "second"]).await;
+        run(&work, &["switch", "-q", "--detach", "feat/x"]).await;
+        assert_mirror(
+            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            "second",
+            "detached pushDefault",
+        );
+        run(&work, &["switch", "-q", "feat/x"]).await;
+        run(&work, &["config", "remote.pushDefault", "origin"]).await;
+        assert_eq!(run(&origin, &["for-each-ref"]).await, refs_before);
+        assert!(!run(&second, &["for-each-ref"]).await.contains("feat/x"));
+
+        // The twin: the mirror only on `second`, which this push doesn't use.
+        run(&work, &["config", "remote.origin.mirror", "false"]).await;
+        assert_mirror(
+            git_push_core(
+                &state,
+                work.clone(),
+                false,
+                false,
+                some("feat/x"),
+                some("second"),
+                None,
+            )
+            .await,
+            "second",
+            "named on the mirror second",
+        );
+        git_push_core(&state, work.clone(), false, false, None, None, None)
+            .await
+            .expect("a mirror on another remote doesn't refuse");
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/feat/x"]).await,
+            run(&work, &["rev-parse", "refs/heads/feat/x"]).await
+        );
+        assert!(run(&origin, &["for-each-ref"])
+            .await
+            .contains("refs/heads/extra"));
+    }
+
+    /// Remote-branch delete, tag push and tag delete refuse a mirror `origin` before git
+    /// runs: the remote branch and tag stay, and the refused tag delete keeps the LOCAL
+    /// tag. With the mirror off, each lands.
+    #[tokio::test]
+    async fn mirror_refusal_on_remote_delete_and_tag_routes() {
+        let (_guard, work, origin, _second) = mirror_origin("mirror-delete-tags").await;
+        let state = AppState::default();
+        run(&work, &["tag", "v1"]).await;
+        run(&work, &["push", "-q", "origin", "refs/tags/v1"]).await;
+        run(&work, &["tag", "v2"]).await;
+        run(&work, &["config", "remote.origin.mirror", "true"]).await;
+        assert_mirror(
+            crate::git::branches::git_delete_remote_branch_core(
+                &state,
+                work.clone(),
+                "origin".into(),
+                "extra".into(),
+            )
+            .await,
+            "origin",
+            "remote branch delete",
+        );
+        assert_mirror(
+            crate::git::ops::git_push_tag_core(&state, work.clone(), "v2".into()).await,
+            "origin",
+            "tag push",
+        );
+        assert_mirror(
+            crate::git::ops::git_delete_tag_core(&state, work.clone(), "v1".into(), true).await,
+            "origin",
+            "tag delete",
+        );
+        assert!(
+            !run(&work, &["tag", "--list", "v1"]).await.trim().is_empty(),
+            "the refused tag delete keeps the local tag"
+        );
+        let refs = run(&origin, &["for-each-ref"]).await;
+        assert!(refs.contains("refs/heads/extra"), "{refs}");
+        assert!(refs.contains("refs/tags/v1"), "{refs}");
+        assert!(!refs.contains("refs/tags/v2"), "{refs}");
+
+        run(&work, &["config", "remote.origin.mirror", "false"]).await;
+        crate::git::branches::git_delete_remote_branch_core(
+            &state,
+            work.clone(),
+            "origin".into(),
+            "extra".into(),
+        )
+        .await
+        .expect("the delete lands");
+        crate::git::ops::git_push_tag_core(&state, work.clone(), "v2".into())
+            .await
+            .expect("the tag push lands");
+        crate::git::ops::git_delete_tag_core(&state, work.clone(), "v1".into(), true)
+            .await
+            .expect("the tag delete lands");
+        let refs = run(&origin, &["for-each-ref"]).await;
+        assert!(!refs.contains("refs/heads/extra"), "{refs}");
+        assert!(refs.contains("refs/tags/v2"), "{refs}");
+        assert!(!refs.contains("refs/tags/v1"), "{refs}");
+    }
+
+    /// A bare or forced HEAD push pressed on a branch that routes to a plain remote
+    /// re-reads the route at spawn: a switch during the lock wait to a branch whose
+    /// pushRemote is a mirror refuses, and nothing lands there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mirror_refusal_queued_head_push_rechecks_at_spawn() {
+        use crate::git::runner::acquire_repo_lock;
+        let (_guard, work, _origin, second) = mirror_origin("mirror-queued").await;
+        run(&work, &["config", "push.autoSetupRemote", "true"]).await;
+        run(&work, &["config", "remote.second.mirror", "true"]).await;
+        run(&work, &["config", "branch.feat/x.pushRemote", "second"]).await;
+        let second_before = run(&second, &["for-each-ref"]).await;
+        for force in [false, true] {
+            run(&work, &["switch", "-q", "-C", "pressed"]).await;
+            let state = std::sync::Arc::new(AppState::default());
+            let domain = state.network_lock(&work).await;
+            let held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+                .await
+                .expect("the network domain is free");
+            let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+            let queued_tx = std::sync::Mutex::new(Some(queued_tx));
+            let queued: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                if let Some(tx) = queued_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
+            let push = tokio::spawn({
+                let (state, work) = (std::sync::Arc::clone(&state), work.clone());
+                let run = async move {
+                    if force {
+                        super::git_force_push_head_core(&state, work).await
+                    } else {
+                        git_push_core(&state, work, false, false, None, None, None).await
+                    }
+                };
+                NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
+            });
+            queued_rx.await.expect("the push reached the network lock");
+            run(&work, &["switch", "-q", "feat/x"]).await;
+            drop(held);
+            let result = tokio::time::timeout(Duration::from_secs(60), push)
+                .await
+                .expect("the push finishes once the domain frees")
+                .unwrap();
+            assert_mirror(result, "second", &format!("force={force}"));
+            assert_eq!(
+                run(&second, &["for-each-ref"]).await,
+                second_before,
+                "force={force}"
+            );
+        }
+    }
+
+    /// git's last resort for a bare push is the ONLY remote when there is one, whatever its
+    /// name: a mirror `up` with no `origin` refuses naming `up`, on a branch and detached,
+    /// with `extra` (a branch only `up` holds) kept. Skips when a global config adds a
+    /// remote or a push remote, since either moves git's route.
+    #[tokio::test]
+    async fn mirror_refusal_routes_a_bare_push_to_the_only_remote() {
+        let (_guard, base) = temp_base("mirror-only-remote");
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work").to_string_lossy().into_owned();
+        let up = base.join("up.git").to_string_lossy().replace('\\', "/");
+        run(&base_s, &["init", "-q", "--bare", "-b", "main", "up.git"]).await;
+        run(&base_s, &["init", "-q", "-b", "main", "work"]).await;
+        for (key, value) in [
+            ("user.name", "t"),
+            ("user.email", "t@example.com"),
+            ("push.default", "simple"),
+        ] {
+            run(&work, &["config", key, value]).await;
+        }
+        run(&work, &["remote", "add", "up", &up]).await;
+        run(&work, &["config", "remote.up.mirror", "false"]).await;
+        let leaked = run(
+            &work,
+            &["config", "--name-only", "--get-regexp", "^remote\\."],
+        )
+        .await;
+        if leaked.lines().any(|k| !k.starts_with("remote.up.")) {
+            eprintln!("skipping: a global config sets {leaked:?}");
+            return;
+        }
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        run(
+            &work,
+            &["push", "-q", "up", "main", "main:refs/heads/extra"],
+        )
+        .await;
+        run(&work, &["update-ref", "-d", "refs/remotes/up/extra"]).await;
+        run(&work, &["switch", "-q", "-c", "loose"]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "ahead"]).await;
+        let state = AppState::default();
+        let before = run(&up, &["for-each-ref"]).await;
+
+        run(&work, &["config", "remote.up.mirror", "true"]).await;
+        assert_mirror(
+            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            "up",
+            "untracked bare",
+        );
+        assert_mirror(
+            super::git_force_push_head_core(&state, work.clone()).await,
+            "up",
+            "untracked forced",
+        );
+        run(&work, &["switch", "-q", "--detach"]).await;
+        assert_mirror(
+            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            "up",
+            "detached bare",
+        );
+        assert_eq!(run(&up, &["for-each-ref"]).await, before);
+
+        // Two remotes, neither `origin`: git routes to `origin`, which is no mirror, and
+        // refuses on its own; nothing lands.
+        run(&work, &["remote", "add", "second", &up]).await;
+        run(&work, &["config", "remote.second.mirror", "false"]).await;
+        run(&work, &["switch", "-q", "loose"]).await;
+        match git_push_core(&state, work.clone(), false, false, None, None, None).await {
+            Err(AppError::Git { stderr, .. }) => {
+                assert!(
+                    stderr.contains("No configured push destination"),
+                    "{stderr}"
+                )
+            }
+            other => panic!("two remotes: expected git's own refusal, got {other:?}"),
+        }
+        run(&work, &["remote", "remove", "second"]).await;
+        assert_eq!(run(&up, &["for-each-ref"]).await, before);
+
+        // The twins, mirror off: the bare push lands on `up`; detached, git refuses on its own.
+        run(&work, &["config", "remote.up.mirror", "false"]).await;
+        run(&work, &["config", "push.autoSetupRemote", "true"]).await;
+        run(&work, &["switch", "-q", "--detach"]).await;
+        match git_push_core(&state, work.clone(), false, false, None, None, None).await {
+            Err(AppError::Git { stderr, .. }) => {
+                assert!(stderr.contains("not currently on a branch"), "{stderr}")
+            }
+            other => panic!("detached twin: expected git's own refusal, got {other:?}"),
+        }
+        run(&work, &["switch", "-q", "loose"]).await;
+        git_push_core(&state, work.clone(), false, false, None, None, None)
+            .await
+            .expect("the bare push lands on the only remote");
+        assert_eq!(
+            run(&up, &["rev-parse", "refs/heads/loose"]).await,
+            run(&work, &["rev-parse", "refs/heads/loose"]).await
+        );
+        assert!(run(&up, &["for-each-ref"])
+            .await
+            .contains("refs/heads/extra"));
     }
 
     /// A bare or force HEAD push re-reads HEAD after its lock wait: a switch to a
@@ -3001,8 +3872,8 @@ mod tests {
                 .expect("the push finishes once the domain frees")
                 .unwrap();
             match result.expect_err("a session HEAD at spawn must not publish") {
-                AppError::InvalidArgument(message) => assert_eq!(
-                    message,
+                e @ AppError::BranchIsAgentSession { .. } => assert_eq!(
+                    e.to_string(),
                     "\"gd/session/x\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.",
                     "force={force}"
                 ),
@@ -3014,6 +3885,569 @@ mod tests {
                 "force={force}: {pushed}"
             );
         }
+    }
+
+    /// Whether every key reads unset (git exits 1); otherwise logs the skip.
+    async fn unset_outside(repo: &str, what: &str, keys: &[&str]) -> bool {
+        for key in keys {
+            let out = run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            if out.code != 1 {
+                eprintln!("skipping {what}: {key} is set outside the fixture");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A work repo pinned against a hostile global config: a bare `origin` behind a
+    /// three-slash `file:///` URL (mirror off, `remote.pushDefault` pinned to it) holding
+    /// `main`, `feature` and the full ref `dest_ref`; HEAD on `topic`, one commit ahead,
+    /// tracking `dest_ref`. `None` when `branch.topic.pushRemote` is set outside the
+    /// fixture. Returns (guard, work, origin).
+    async fn session_destination_origin(
+        tag: &str,
+        dest_ref: &str,
+    ) -> Option<(tempfile::TempDir, String, String)> {
+        let (guard, base) = temp_base(tag);
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work").to_string_lossy().into_owned();
+        let origin = base.join("origin.git").to_string_lossy().replace('\\', "/");
+        run(
+            &base_s,
+            &["init", "-q", "--bare", "-b", "main", "origin.git"],
+        )
+        .await;
+        run(&base_s, &["init", "-q", "-b", "main", "work"]).await;
+        if !unset_outside(&work, "session destination", &["branch.topic.pushRemote"]).await {
+            return None;
+        }
+        for (key, value) in [
+            ("user.name", "t"),
+            ("user.email", "t@example.com"),
+            ("push.default", "simple"),
+            ("branch.autoSetupMerge", "false"),
+            ("remote.pushDefault", "origin"),
+        ] {
+            run(&work, &["config", key, value]).await;
+        }
+        let url = format!("file:///{}", origin.trim_start_matches('/'));
+        run(&work, &["remote", "add", "origin", &url]).await;
+        run(&work, &["config", "remote.origin.mirror", "false"]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        run(
+            &work,
+            &["push", "-q", "origin", "main", "main:refs/heads/feature"],
+        )
+        .await;
+        run(&origin, &["update-ref", dest_ref, "refs/heads/main"]).await;
+        run(&work, &["fetch", "-q", "origin"]).await;
+        run(&work, &["switch", "-q", "-c", "topic"]).await;
+        run(&work, &["config", "branch.topic.remote", "origin"]).await;
+        run(&work, &["config", "branch.topic.merge", dest_ref]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "ahead"]).await;
+        Some((guard, work, origin))
+    }
+
+    fn session_destination_copy(branch: &str, remote: &str, dest: &str) -> String {
+        format!(
+            "\"{branch}\" would push to {remote}/{dest}, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it."
+        )
+    }
+
+    fn assert_session_destination(
+        result: crate::error::AppResult<impl std::fmt::Debug>,
+        expected: &str,
+        row: &str,
+    ) {
+        match result.expect_err(row) {
+            e @ AppError::PushDestinationIsAgentSession { .. } => {
+                assert_eq!(e.to_string(), expected, "{row}")
+            }
+            other => panic!("{row}: expected the session-destination refusal, got {other:?}"),
+        }
+    }
+
+    /// A named push whose tracked or explicit destination is a session branch is refused on
+    /// both policies, in any case spelling, and nothing lands; a cross-name non-session
+    /// upstream still pushes under Follow.
+    #[tokio::test]
+    async fn session_destination_refuses_named_pushes_onto_a_session_branch() {
+        for dest_ref in ["refs/heads/gd/session/x", "refs/heads/GD/Session/X"] {
+            let dest = dest_ref.strip_prefix("refs/heads/").unwrap();
+            let Some((_guard, work, origin)) =
+                session_destination_origin("session-dest-named", dest_ref).await
+            else {
+                return;
+            };
+            let state = AppState::default();
+            let before = run(&origin, &["for-each-ref"]).await;
+            let refused = session_destination_copy("topic", "origin", dest);
+            let topic = || Some("topic".to_string());
+            for (row, force) in [("tracked", false), ("tracked, forced", true)] {
+                let result =
+                    git_push_core(&state, work.clone(), false, force, topic(), None, None).await;
+                assert_session_destination(result, &refused, &format!("{dest}: {row}"));
+            }
+            assert_session_destination(
+                git_push_same_name_core(&state, work.clone(), false, topic(), None).await,
+                &refused,
+                &format!("{dest}: MCP same-name"),
+            );
+            run(
+                &work,
+                &["config", "branch.topic.merge", "refs/heads/feature"],
+            )
+            .await;
+            let explicit = git_push_core(
+                &state,
+                work.clone(),
+                false,
+                false,
+                topic(),
+                Some("origin".into()),
+                Some(dest.into()),
+            )
+            .await;
+            assert_session_destination(explicit, &refused, &format!("{dest}: explicit"));
+            assert_eq!(run(&origin, &["for-each-ref"]).await, before, "{dest}");
+
+            git_push_core(&state, work.clone(), false, false, topic(), None, None)
+                .await
+                .expect("a cross-name non-session upstream pushes under Follow");
+            assert_eq!(
+                run(&origin, &["rev-parse", "refs/heads/feature"]).await,
+                run(&work, &["rev-parse", "refs/heads/topic"]).await,
+                "{dest}"
+            );
+        }
+    }
+
+    /// Under push.default=upstream a bare or forced HEAD push resolves to the tracked session
+    /// branch and is refused by the early check, before the network lock; under `current`
+    /// the same push resolves to HEAD's own name and lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_destination_refuses_bare_and_forced_head_pushes_under_upstream() {
+        use crate::git::runner::acquire_repo_lock;
+        let Some((_guard, work, origin)) =
+            session_destination_origin("session-dest-bare", "refs/heads/gd/session/x").await
+        else {
+            return;
+        };
+        run(&work, &["config", "push.default", "upstream"]).await;
+        let before = run(&origin, &["for-each-ref"]).await;
+        let refused = session_destination_copy("topic", "origin", "gd/session/x");
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.network_lock(&work).await;
+        let held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+            .await
+            .expect("the network domain is free");
+        for force in [false, true] {
+            let queued = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+                let queued = std::sync::Arc::clone(&queued);
+                move || queued.store(true, std::sync::atomic::Ordering::SeqCst)
+            });
+            let (state, work) = (std::sync::Arc::clone(&state), work.clone());
+            let push = async move {
+                if force {
+                    super::git_force_push_head_core(&state, work).await
+                } else {
+                    git_push_core(&state, work, false, false, None, None, None).await
+                }
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                NETWORK_LOCK_WAIT_HOOK.scope(hook, push),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("force={force}: the refusal waited on the held lock"));
+            assert_session_destination(result, &refused, &format!("force={force}"));
+            assert!(
+                !queued.load(std::sync::atomic::Ordering::SeqCst),
+                "force={force}: the push reached the network lock"
+            );
+        }
+        drop(held);
+        assert_eq!(run(&origin, &["for-each-ref"]).await, before);
+
+        run(&work, &["config", "push.default", "current"]).await;
+        git_push_core(&state, work.clone(), false, false, None, None, None)
+            .await
+            .expect("under current the bare push lands on topic");
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/topic"]).await,
+            run(&work, &["rev-parse", "refs/heads/topic"]).await
+        );
+        assert_eq!(
+            run(&origin, &["rev-parse", "refs/heads/gd/session/x"]).await,
+            run(&work, &["rev-parse", "refs/heads/main"]).await
+        );
+    }
+
+    /// The bare arm's destination check is case-insensitive too; its own bare repository,
+    /// since two case spellings of one ref can't share one on Windows.
+    #[tokio::test]
+    async fn session_destination_refuses_a_mixed_case_bare_push() {
+        let dest_ref = "refs/heads/GD/Session/X";
+        let Some((_guard, work, origin)) =
+            session_destination_origin("session-dest-bare-case", dest_ref).await
+        else {
+            return;
+        };
+        run(&work, &["config", "push.default", "upstream"]).await;
+        let before = run(&origin, &["for-each-ref"]).await;
+        let refused = session_destination_copy("topic", "origin", "GD/Session/X");
+        let state = AppState::default();
+        let bare = git_push_core(&state, work.clone(), false, false, None, None, None).await;
+        assert_session_destination(bare, &refused, "bare, mixed case");
+        let forced = super::git_force_push_head_core(&state, work.clone()).await;
+        assert_session_destination(forced, &refused, "forced, mixed case");
+        assert_eq!(run(&origin, &["for-each-ref"]).await, before);
+    }
+
+    /// A bare or forced push queued behind the network lock re-reads HEAD's destination at
+    /// spawn: an upstream re-pointed at a session branch during the wait refuses, and
+    /// nothing lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_destination_rechecks_a_queued_bare_push_at_spawn() {
+        use crate::git::runner::acquire_repo_lock;
+        let Some((_guard, work, origin)) =
+            session_destination_origin("session-dest-queued", "refs/heads/gd/session/x").await
+        else {
+            return;
+        };
+        run(&work, &["config", "push.default", "upstream"]).await;
+        let before = run(&origin, &["for-each-ref"]).await;
+        let refused = session_destination_copy("topic", "origin", "gd/session/x");
+        for force in [false, true] {
+            run(
+                &work,
+                &["config", "branch.topic.merge", "refs/heads/feature"],
+            )
+            .await;
+            let state = std::sync::Arc::new(AppState::default());
+            let domain = state.network_lock(&work).await;
+            let held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+                .await
+                .expect("the network domain is free");
+            let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+            let queued_tx = std::sync::Mutex::new(Some(queued_tx));
+            let queued: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                if let Some(tx) = queued_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
+            let push = tokio::spawn({
+                let (state, work) = (std::sync::Arc::clone(&state), work.clone());
+                let run = async move {
+                    if force {
+                        super::git_force_push_head_core(&state, work).await
+                    } else {
+                        git_push_core(&state, work, false, false, None, None, None).await
+                    }
+                };
+                NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
+            });
+            queued_rx.await.expect("the push reached the network lock");
+            run(
+                &work,
+                &["config", "branch.topic.merge", "refs/heads/gd/session/x"],
+            )
+            .await;
+            drop(held);
+            let result = tokio::time::timeout(Duration::from_secs(60), push)
+                .await
+                .expect("the push finishes once the domain frees")
+                .unwrap();
+            assert_session_destination(result, &refused, &format!("force={force}"));
+            assert_eq!(
+                run(&origin, &["for-each-ref"]).await,
+                before,
+                "force={force}"
+            );
+        }
+    }
+
+    /// The atom's push remote and the mirror verdict's agree beside a session upstream: a
+    /// `pushRemote` naming `second` makes the atom read `second`, so nothing resolves to the
+    /// session branch on origin and nothing lands; marking `second` a mirror refuses naming
+    /// `second` on the identical config.
+    #[tokio::test]
+    async fn session_destination_push_remote_agreement_rows() {
+        let Some((guard, work, origin)) =
+            session_destination_origin("session-dest-agree", "refs/heads/gd/session/x").await
+        else {
+            return;
+        };
+        let second = guard
+            .path()
+            .join("second.git")
+            .to_string_lossy()
+            .replace('\\', "/");
+        run(
+            &guard.path().to_string_lossy(),
+            &["init", "-q", "--bare", "-b", "main", "second.git"],
+        )
+        .await;
+        let url = format!("file:///{}", second.trim_start_matches('/'));
+        run(&work, &["remote", "add", "second", &url]).await;
+        run(&work, &["config", "remote.second.mirror", "false"]).await;
+        run(&work, &["push", "-q", "second", "main"]).await;
+        run(&work, &["config", "push.default", "upstream"]).await;
+        run(&work, &["config", "branch.topic.pushRemote", "second"]).await;
+        let state = AppState::default();
+        let (origin_before, second_before) = (
+            run(&origin, &["for-each-ref"]).await,
+            run(&second, &["for-each-ref"]).await,
+        );
+        let atom = run(
+            &work,
+            &[
+                "for-each-ref",
+                "refs/heads/topic",
+                "--format=%(push:remotename)",
+            ],
+        )
+        .await;
+        assert_eq!(atom.trim(), "second");
+
+        match git_push_core(&state, work.clone(), false, false, None, None, None).await {
+            Err(e @ AppError::PushDestinationIsAgentSession { .. }) => {
+                panic!("row a: refused as a session destination: {e:?}")
+            }
+            Err(e @ AppError::PushUpstreamIsLocal { .. }) => {
+                panic!("row a: refused as a local upstream: {e:?}")
+            }
+            _ => {}
+        }
+        assert_eq!(run(&origin, &["for-each-ref"]).await, origin_before);
+        assert_eq!(run(&second, &["for-each-ref"]).await, second_before);
+
+        run(&work, &["config", "remote.second.mirror", "true"]).await;
+        assert_mirror(
+            git_push_core(&state, work.clone(), false, false, None, None, None).await,
+            "second",
+            "row b",
+        );
+        assert_eq!(run(&origin, &["for-each-ref"]).await, origin_before);
+        assert_eq!(run(&second, &["for-each-ref"]).await, second_before);
+    }
+
+    /// A work repo pinned against a hostile global config, with three bare remotes
+    /// (`origin` holding `main`, `up`, `second`) behind three-slash `file:///` URLs, mirror
+    /// off; HEAD on `feat`, one commit ahead of local `main`, which it tracks (remote `.`).
+    /// `None` when a push remote is set outside the fixture. Returns (guard, work, remotes
+    /// by name).
+    async fn local_upstream_repo(
+        tag: &str,
+    ) -> Option<(tempfile::TempDir, String, Vec<(&'static str, String)>)> {
+        let (guard, base) = temp_base(tag);
+        let base_s = base.to_string_lossy().into_owned();
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&base_s, &["init", "-q", "-b", "main", "work"]).await;
+        let keys = ["remote.pushDefault", "branch.feat.pushRemote"];
+        if !unset_outside(&work, "local upstream", &keys).await {
+            return None;
+        }
+        for (key, value) in [
+            ("user.name", "t"),
+            ("user.email", "t@example.com"),
+            ("push.default", "simple"),
+            ("branch.autoSetupMerge", "false"),
+        ] {
+            run(&work, &["config", key, value]).await;
+        }
+        let mut remotes = Vec::new();
+        for name in ["origin", "up", "second"] {
+            let dir = format!("{name}.git");
+            run(&base_s, &["init", "-q", "--bare", "-b", "main", &dir]).await;
+            let path = base.join(&dir).to_string_lossy().replace('\\', "/");
+            let url = format!("file:///{}", path.trim_start_matches('/'));
+            run(&work, &["remote", "add", name, &url]).await;
+            let mirror = format!("remote.{name}.mirror");
+            run(&work, &["config", &mirror, "false"]).await;
+            remotes.push((name, path));
+        }
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "seed"]).await;
+        run(&work, &["push", "-q", "origin", "main"]).await;
+        run(&work, &["switch", "-q", "-c", "feat"]).await;
+        run(&work, &["config", "branch.feat.remote", "."]).await;
+        run(&work, &["config", "branch.feat.merge", "refs/heads/main"]).await;
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "ahead"]).await;
+        Some((guard, work, remotes))
+    }
+
+    fn assert_local_upstream(result: crate::error::AppResult<impl std::fmt::Debug>, row: &str) {
+        match result.expect_err(row) {
+            AppError::PushUpstreamIsLocal { branch, upstream } => {
+                let got = (branch.as_str(), upstream.as_str());
+                assert_eq!(got, ("feat", "main"), "{row}")
+            }
+            other => panic!("{row}: expected the local-upstream refusal, got {other:?}"),
+        }
+    }
+
+    async fn tip(repo: &str, refname: &str) -> String {
+        run(repo, &["rev-parse", refname]).await
+    }
+
+    async fn push_remote_atom(work: &str) -> String {
+        let format = "--format=%(push:remotename)";
+        let atom = run(work, &["for-each-ref", "refs/heads/feat", format]).await;
+        atom.trim().to_string()
+    }
+
+    /// Named pushes (Follow, MCP same-name, set_upstream) and bare / forced HEAD pushes of a
+    /// branch tracking a local branch refuse with the typed error under push.default simple
+    /// and upstream, and local `main` never moves; an explicit remote and a GONE `.`
+    /// upstream still push to origin.
+    #[tokio::test]
+    async fn local_upstream_refuses_named_and_bare_pushes() {
+        let Some((_guard, work, remotes)) = local_upstream_repo("local-upstream").await else {
+            return;
+        };
+        let origin = &remotes[0].1;
+        let state = AppState::default();
+        let main_before = run(&work, &["rev-parse", "refs/heads/main"]).await;
+        let feat = || Some("feat".to_string());
+        for force in [false, true] {
+            let row = format!("named, force={force}");
+            let result = git_push_core(&state, work.clone(), false, force, feat(), None, None);
+            assert_local_upstream(result.await, &row);
+        }
+        for set_upstream in [false, true] {
+            let row = format!("MCP same-name, set_upstream={set_upstream}");
+            let result = git_push_same_name_core(&state, work.clone(), set_upstream, feat(), None);
+            assert_local_upstream(result.await, &row);
+        }
+        for push_default in ["simple", "upstream"] {
+            run(&work, &["config", "push.default", push_default]).await;
+            assert_eq!(push_remote_atom(&work).await, ".", "{push_default}");
+            let bare = git_push_core(&state, work.clone(), false, false, None, None, None);
+            assert_local_upstream(bare.await, &format!("bare, {push_default}"));
+            let forced = super::git_force_push_head_core(&state, work.clone());
+            assert_local_upstream(forced.await, &format!("forced, {push_default}"));
+        }
+        assert_eq!(tip(&work, "refs/heads/main").await, main_before);
+        assert!(!run(origin, &["for-each-ref"]).await.contains("feat"));
+
+        run(&work, &["config", "push.default", "simple"]).await;
+        let explicit = Some("origin".to_string());
+        git_push_core(&state, work.clone(), false, false, feat(), explicit, None)
+            .await
+            .expect("an explicit remote pushes to it");
+        let feat_tip = run(&work, &["rev-parse", "refs/heads/feat"]).await;
+        assert_eq!(tip(origin, "refs/heads/feat").await, feat_tip);
+        assert_eq!(tip(&work, "refs/heads/main").await, main_before);
+
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "more"]).await;
+        run(&work, &["branch", "-q", "-D", "main"]).await;
+        // The bare arm refuses a gone `.` upstream; the named arm then publishes it.
+        let pushed = tip(origin, "refs/heads/feat").await;
+        let bare = git_push_core(&state, work.clone(), false, false, None, None, None);
+        assert_local_upstream(bare.await, "bare, gone `.` upstream");
+        let forced = super::git_force_push_head_core(&state, work.clone());
+        assert_local_upstream(forced.await, "forced, gone `.` upstream");
+        assert_eq!(tip(origin, "refs/heads/feat").await, pushed);
+        assert!(!run(&work, &["for-each-ref"])
+            .await
+            .contains("refs/heads/main"));
+
+        git_push_core(&state, work.clone(), false, false, feat(), None, None)
+            .await
+            .expect("a gone local upstream publishes to origin");
+        let feat_tip = run(&work, &["rev-parse", "refs/heads/feat"]).await;
+        assert_eq!(tip(origin, "refs/heads/feat").await, feat_tip);
+    }
+
+    /// Beside a `.` upstream the bare push follows the push remote git resolves: a
+    /// configured one (`remote.pushDefault`, a `pushRemote` outranking it) sends the push
+    /// there and it lands, while `remote.pushDefault=.` refuses. Each allowed row pairs
+    /// the atom it read with its mirror twin, where 1a's config order names the same remote.
+    #[tokio::test]
+    async fn local_upstream_bare_push_follows_the_push_remote() {
+        let Some((_guard, work, remotes)) = local_upstream_repo("local-upstream-remote").await
+        else {
+            return;
+        };
+        let path = |name: &str| remotes.iter().find(|(n, _)| *n == name).unwrap().1.clone();
+        let state = AppState::default();
+        let main_before = run(&work, &["rev-parse", "refs/heads/main"]).await;
+        let bare = || git_push_core(&state, work.clone(), false, false, None, None, None);
+        let rows = [
+            (
+                "pushDefault",
+                vec![("remote.pushDefault", "second")],
+                "second",
+            ),
+            (
+                "pushRemote over pushDefault",
+                vec![
+                    ("remote.pushDefault", "second"),
+                    ("branch.feat.pushRemote", "up"),
+                ],
+                "up",
+            ),
+        ];
+        for (row, config, lands_on) in rows {
+            for (key, value) in config {
+                run(&work, &["config", key, value]).await;
+            }
+            assert_eq!(push_remote_atom(&work).await, lands_on, "{row}");
+            bare().await.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+            assert_eq!(
+                run(&path(lands_on), &["rev-parse", "refs/heads/feat"]).await,
+                run(&work, &["rev-parse", "refs/heads/feat"]).await,
+                "{row}"
+            );
+            let mirror = format!("remote.{lands_on}.mirror");
+            run(&work, &["config", &mirror, "true"]).await;
+            assert_mirror(bare().await, lands_on, &format!("{row}: mirror twin"));
+            run(&work, &["config", &mirror, "false"]).await;
+            run(&work, &["commit", "-q", "--allow-empty", "-m", row]).await;
+        }
+        run(&work, &["config", "--unset", "branch.feat.pushRemote"]).await;
+        run(&work, &["config", "remote.pushDefault", "."]).await;
+        assert_eq!(push_remote_atom(&work).await, ".");
+        assert_local_upstream(bare().await, "pushDefault=.");
+        assert_eq!(tip(&work, "refs/heads/main").await, main_before);
+
+        // A non-branch `.` upstream and an untracked HEAD are never this refusal.
+        run(&work, &["config", "--unset", "remote.pushDefault"]).await;
+        run(&work, &["tag", "v1", "refs/heads/main"]).await;
+        run(&work, &["config", "branch.feat.merge", "refs/tags/v1"]).await;
+        let result = bare().await;
+        assert!(
+            !matches!(result, Err(AppError::PushUpstreamIsLocal { .. })),
+            "not a branch: {result:?}"
+        );
+        run(&work, &["config", "--unset", "branch.feat.merge"]).await;
+        run(&work, &["config", "--unset", "branch.feat.remote"]).await;
+        let result = bare().await;
+        assert!(
+            !matches!(result, Err(AppError::PushUpstreamIsLocal { .. })),
+            "untracked: {result:?}"
+        );
+        assert_eq!(tip(&work, "refs/heads/main").await, main_before);
+    }
+
+    /// The bare arm's verdict off one tracking line: the push-remote atom decides, and a
+    /// line read without the atoms falls back to the upstream's own remote.
+    #[test]
+    fn local_upstream_bare_line_reads_the_push_remote_atom() {
+        use super::bare_push_local_upstream as local;
+        let r = "refs/heads/feat";
+        let line = |rest: &str| format!("{r}\0refs/heads/main\0.\0{rest}");
+        let main = Some("main".to_string());
+        assert_eq!(local(&line("\0.\0\0\0"), r), main);
+        assert_eq!(local(&line(""), r), main, "no atoms");
+        assert_eq!(local(&line("\0up\0\0\0"), r), None);
+        let tag = format!("{r}\0refs/tags/v1\0.\0\0.\0\0\0");
+        assert_eq!(local(&tag, r), None, "not a branch");
+        assert_eq!(local(&format!("{r}\0\0\0"), r), None);
+        assert_eq!(local("", r), None, "unborn");
     }
 
     #[tokio::test]
@@ -3077,6 +4511,115 @@ mod tests {
             refusal(super::publish_branch(&repo_s).await.unwrap_err()),
             "check out a branch before publishing (detached HEAD)"
         );
+    }
+
+    /// The branch every provider pushes is re-checked where it is read, so a HEAD switched
+    /// to a session or Keep local branch after the dispatch's read is still refused.
+    #[tokio::test]
+    async fn head_switch_publish_branch_refuses_session_and_keep_local() {
+        let (_base, base) = temp_base("head-switch");
+        let repo_s = base.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["switch", "-q", "-c", "feat/x"]).await;
+        run(&repo_s, &["branch", "gd/session/x"]).await;
+        assert_eq!(super::publish_branch(&repo_s).await.unwrap(), "feat/x");
+        crate::git::branches::set_branch_keep_local_core(&repo_s, "feat/x", true)
+            .await
+            .unwrap();
+        assert_kept_local(super::publish_branch(&repo_s).await, "feat/x", "kept local");
+        run(&repo_s, &["switch", "-q", "gd/session/x"]).await;
+        match super::publish_branch(&repo_s).await {
+            Err(AppError::BranchIsAgentSession { branch }) => assert_eq!(branch, "gd/session/x"),
+            other => panic!("expected the session refusal, got {other:?}"),
+        }
+    }
+
+    /// Only git's "No such remote" lets a publish proceed: a url, a url-less section and
+    /// a failed read (not a repository) all refuse before anything is created, while
+    /// `remote.origin.*` keys from a global file alone do not.
+    #[tokio::test]
+    async fn existing_origin_refusal_fails_closed() {
+        let copy = "this repository already has an origin remote — push to it instead";
+        let (_base, base) = temp_base("existing-origin");
+        let repo = base.join("repo");
+        let other = base.join("not-a-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q"]).await;
+        super::refuse_existing_origin(&repo_s)
+            .await
+            .expect("no origin: the publish proceeds");
+
+        let global = base.join("global.gitconfig");
+        std::fs::write(
+            &global,
+            "[remote \"origin\"]\n\turl = file:///C:/nowhere.git\n\tprune = true\n\tmirror = true\n",
+        )
+        .unwrap();
+        let global_s = global.to_string_lossy().into_owned();
+        let envs = [("GIT_CONFIG_GLOBAL", global_s.as_str())];
+        let seen = crate::git::runner::run_git_raw_env(
+            Some(&repo_s),
+            &["config", "--get", "remote.origin.url"],
+            &envs,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(seen.code, 0, "the seam reads the global file");
+        super::existing_origin_verdict(&repo_s, &envs)
+            .await
+            .expect("global-only origin keys: the publish proceeds");
+
+        run(&repo_s, &["config", "remote.origin.mirror", "false"]).await;
+        match super::refuse_existing_origin(&repo_s).await {
+            Err(AppError::InvalidArgument(m)) => assert_eq!(m, copy, "url-less section"),
+            other => panic!("url-less section: expected the origin copy, got {other:?}"),
+        }
+        run(
+            &repo_s,
+            &["config", "remote.origin.url", "file:///C:/nowhere.git"],
+        )
+        .await;
+        match super::refuse_existing_origin(&repo_s).await {
+            Err(AppError::InvalidArgument(m)) => assert_eq!(m, copy, "origin url"),
+            other => panic!("origin url: expected the origin copy, got {other:?}"),
+        }
+
+        let other_s = other.to_string_lossy().into_owned();
+        match super::refuse_existing_origin(&other_s).await {
+            Err(AppError::Git { code, stderr }) => {
+                assert_ne!(code, 2, "{stderr}");
+                assert!(stderr.contains("not a git repository"), "{stderr}");
+            }
+            other => panic!("not a repository: expected git's failure, got {other:?}"),
+        }
+    }
+
+    /// The verdict over git's answer, old git's exit-128 "No such remote" included.
+    #[test]
+    fn existing_origin_decision_reads_old_and_new_missing_remote_exits() {
+        let out = |code: i32, stdout: &str, stderr: &str| crate::git::runner::GitOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        };
+        let decide = super::existing_origin_decision;
+        decide(&out(2, "", "error: No such remote 'origin'\n")).expect("exit 2: no origin");
+        decide(&out(128, "", "fatal: No such remote 'origin'\n"))
+            .expect("old git's exit 128: no origin");
+        match decide(&out(0, "file:///C:/nowhere.git\n", "")) {
+            Err(AppError::InvalidArgument(m)) => assert!(m.contains("already has an origin")),
+            other => panic!("exit 0: expected the origin copy, got {other:?}"),
+        }
+        let repo = "fatal: not a git repository (or any of the parent directories): .git\n";
+        match decide(&out(128, "", repo)) {
+            Err(AppError::Git { code: 128, stderr }) => {
+                assert!(stderr.contains("not a git repository"), "{stderr}")
+            }
+            other => panic!("not a repository: expected git's failure, got {other:?}"),
+        }
     }
 
     fn assert_unborn_push_refusal(error: AppError) {

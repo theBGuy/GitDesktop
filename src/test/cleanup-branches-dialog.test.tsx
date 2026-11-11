@@ -152,6 +152,8 @@ function branch(name: string, days: number, archived = false): Branch {
     upstreamGone: false,
     upstreamRemote: null,
     upstreamRemoteRef: null,
+    keepLocal: false,
+    upstreamIsRemoteDefault: false,
   };
 }
 

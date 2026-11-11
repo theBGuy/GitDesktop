@@ -45,6 +45,29 @@ pub enum AppError {
         remote: String,
         remote_branch: String,
     },
+    /// A push, Publish or Create PR refused because the branch carries the Keep local
+    /// mark; the Display line is what GUI toasts and MCP clients read.
+    #[error("\"{branch}\" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.")]
+    BranchKeptLocal { branch: String },
+    /// A push refused before git runs because its remote is a mirror: a bare push there
+    /// mirrors every ref and deletes what the clone lacks.
+    #[error("\"{remote}\" is a mirror remote, so GitDesktop won't push to it. Push from a terminal instead.")]
+    PushRemoteIsMirror { remote: String },
+    /// A push refused because the branch tracks a LOCAL branch (upstream remote `.`): git
+    /// would push into this repository. `upstream` is the bare local branch name.
+    #[error("Push blocked — {branch} tracks a local branch ({upstream}), not a remote.")]
+    PushUpstreamIsLocal { branch: String, upstream: String },
+    /// A push or publish refused because the branch itself is an agent-session branch.
+    #[error("\"{branch}\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.")]
+    BranchIsAgentSession { branch: String },
+    /// A push refused because it would land on an agent-session branch of `remote`;
+    /// `branch` is the local branch, `dest` the remote branch it resolves to.
+    #[error("\"{branch}\" would push to {remote}/{dest}, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it.")]
+    PushDestinationIsAgentSession {
+        branch: String,
+        remote: String,
+        dest: String,
+    },
     #[error("{}", crate::git::worktree::diverged_message(shown_path, commits.len(), *more, *dirty))]
     WorktreeDiverged {
         path: String,
@@ -143,6 +166,11 @@ impl Serialize for AppError {
             AppError::Busy { .. } => "busy",
             AppError::BranchHeld { .. } => "branchHeld",
             AppError::PushUpstreamNameMismatch { .. } => "pushUpstreamNameMismatch",
+            AppError::BranchKeptLocal { .. } => "branchKeptLocal",
+            AppError::PushRemoteIsMirror { .. } => "pushRemoteIsMirror",
+            AppError::PushUpstreamIsLocal { .. } => "pushUpstreamIsLocal",
+            AppError::BranchIsAgentSession { .. } => "branchIsAgentSession",
+            AppError::PushDestinationIsAgentSession { .. } => "pushDestinationIsAgentSession",
             AppError::WorktreeDiverged { .. } => "worktreeDiverged",
             AppError::NotARepo(_) => "notARepo",
             // Stable serialized kind — `openWithDefault` catches exactly this one
@@ -197,6 +225,28 @@ impl Serialize for AppError {
                 map.serialize_entry("branch", branch)?;
                 map.serialize_entry("remote", remote)?;
                 map.serialize_entry("remoteBranch", remote_branch)?;
+            }
+            AppError::BranchKeptLocal { branch } => {
+                map.serialize_entry("branch", branch)?;
+            }
+            AppError::PushRemoteIsMirror { remote } => {
+                map.serialize_entry("remote", remote)?;
+            }
+            AppError::PushUpstreamIsLocal { branch, upstream } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("upstream", upstream)?;
+            }
+            AppError::BranchIsAgentSession { branch } => {
+                map.serialize_entry("branch", branch)?;
+            }
+            AppError::PushDestinationIsAgentSession {
+                branch,
+                remote,
+                dest,
+            } => {
+                map.serialize_entry("branch", branch)?;
+                map.serialize_entry("remote", remote)?;
+                map.serialize_entry("dest", dest)?;
             }
             AppError::WorktreeDiverged {
                 path,
@@ -369,6 +419,81 @@ mod tests {
             r#"{"kind":"pushUpstreamNameMismatch","message":"Push blocked — feat/y tracks origin/feat/x, which has a different name. Choose where to push from the Push menu.","branch":"feat/y","remote":"origin","remoteBranch":"feat/x"}"#
         );
         assert!(!wire.contains("remote_branch"), "{wire}");
+    }
+
+    /// The TS union reads `branch` by key and the toast shows `message`, so both are the contract.
+    #[test]
+    fn branch_kept_local_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::BranchKeptLocal {
+            branch: "feat/x".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"branchKeptLocal","message":"\"feat/x\" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.","branch":"feat/x"}"#
+        );
+    }
+
+    /// The TS union reads `remote` by key and the toast shows `message`, so both are the contract.
+    #[test]
+    fn push_remote_is_mirror_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushRemoteIsMirror {
+            remote: "origin".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushRemoteIsMirror","message":"\"origin\" is a mirror remote, so GitDesktop won't push to it. Push from a terminal instead.","remote":"origin"}"#
+        );
+    }
+
+    /// The TS union reads `branch` and `upstream` by key and the toast shows `message`.
+    #[test]
+    fn push_upstream_is_local_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushUpstreamIsLocal {
+            branch: "feat".to_string(),
+            upstream: "main".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Push blocked — feat tracks a local branch (main), not a remote."
+        );
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushUpstreamIsLocal","message":"Push blocked — feat tracks a local branch (main), not a remote.","branch":"feat","upstream":"main"}"#
+        );
+    }
+
+    /// The TS union reads `branch` by key and the toast shows `message`, so both are the contract.
+    #[test]
+    fn branch_is_agent_session_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::BranchIsAgentSession {
+            branch: "gd/session/x".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "\"gd/session/x\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
+        );
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"branchIsAgentSession","message":"\"gd/session/x\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.","branch":"gd/session/x"}"#
+        );
+    }
+
+    /// The TS union reads `branch`, `remote` and `dest` by key and the toast shows `message`.
+    #[test]
+    fn push_destination_is_agent_session_serializes_to_the_pinned_wire_shape() {
+        let err = AppError::PushDestinationIsAgentSession {
+            branch: "topic".to_string(),
+            remote: "origin".to_string(),
+            dest: "gd/session/x".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "\"topic\" would push to origin/gd/session/x, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it."
+        );
+        assert_eq!(
+            serde_json::to_string(&err).unwrap(),
+            r#"{"kind":"pushDestinationIsAgentSession","message":"\"topic\" would push to origin/gd/session/x, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it.","branch":"topic","remote":"origin","dest":"gd/session/x"}"#
+        );
     }
 
     /// `openWithDefault` matches the kind and names the file from `name`.

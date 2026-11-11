@@ -26,7 +26,13 @@ import {
   gitOpState,
   gitStatus,
 } from "@/lib/git/api";
-import { repoKeys } from "@/lib/git/queries";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
+  repoKeys,
+  usePush,
+} from "@/lib/git/queries";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import type { CommitDetails, CommitSummary, RepoStatus } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
@@ -41,7 +47,28 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitLog: vi.fn(),
   gitOpState: vi.fn(),
   gitAmendCommitDates: vi.fn(),
+  // A push started by PushHarness stays pending for the whole test.
+  gitPush: vi.fn(() => new Promise(() => undefined)),
 }));
+
+// usePush keys on the repository identity; /repo-a-wt is another worktree of
+// the same repository. Any other path never resolves.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => {
+  const ids = new Map([
+    ["/repo-a", "/repo-a/.git"],
+    ["/repo-a-wt", "/repo-a/.git"],
+  ]);
+  return {
+    ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+    peekRepoIdentity: (path: string) => ids.get(path),
+    repoIdentityStrict: (path: string) => {
+      const id = ids.get(path);
+      return id === undefined
+        ? new Promise<string>(() => undefined)
+        : Promise.resolve(id);
+    },
+  };
+});
 
 vi.mock("@/lib/branch-rules/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/branch-rules/queries")>()),
@@ -831,5 +858,146 @@ describe("Edit dates dialog against HEAD's parent", () => {
     );
     expect(gitAmendCommitDates).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+/** One usePush binding per file: the usePush scan reads a second `const push`
+ *  as a use of the first. */
+function PushHarness({
+  branch,
+  path,
+}: {
+  branch: "main" | "dev";
+  path: string;
+}) {
+  const push = usePush(path);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (branch === "main")
+          void push.mutateAsync({ setUpstream: false, branch: "main" });
+        else void push.mutateAsync({ setUpstream: false, branch: "dev" });
+      }}
+    >
+      start {branch} in {path}
+    </button>
+  );
+}
+
+/** Starts a push of `branch` from `path` in the dialog's cache, left pending. */
+async function startPush(
+  client: QueryClient,
+  branch: "main" | "dev",
+  path = REPO,
+) {
+  const before = client.getMutationCache().findAll({ status: "pending" });
+  render(
+    <QueryClientProvider client={client}>
+      <PushHarness branch={branch} path={path} />
+    </QueryClientProvider>,
+  );
+  // The identity must land first: a push filed without it is path-keyed.
+  await waitFor(() =>
+    expect(
+      client.getQueryData(repoIdentityQueryOptions(path).queryKey),
+    ).toBeDefined(),
+  );
+  // Not user-event: the open modal dialog makes the page behind it inert.
+  fireEvent.click(
+    screen.getByRole("button", { name: `start ${branch} in ${path}` }),
+  );
+  await waitFor(() =>
+    expect(
+      client.getMutationCache().findAll({ status: "pending" }),
+    ).toHaveLength(before.length + 1),
+  );
+}
+
+describe("Edit dates while the branch pushes", () => {
+  const TYPED = "2026-11-08 10:00:00 +01:00";
+  const EARLIER = "2026-11-07 19:00:00 +01:00";
+
+  beforeEach(() => {
+    vi.mocked(toast.info).mockClear();
+  });
+
+  for (const [where, path, message] of [
+    ["this checkout", REPO, BRANCH_PUSH_ACTIVE_MESSAGE],
+    ["another worktree", "/repo-a-wt", BRANCH_PUSH_ELSEWHERE_MESSAGE],
+  ] as const)
+    it(`a push of the branch in ${where} refuses and keeps the typed date`, async () => {
+      const { client } = renderHost();
+      await retype(await authorField(), TYPED);
+      await startPush(client, "main", path);
+      await userEvent.click(primary());
+      expect(toast.info).toHaveBeenCalledWith(message);
+      expect(gitAmendCommitDates).not.toHaveBeenCalled();
+      expect(screen.getByTestId("open").textContent).toBe("true");
+      expect(await authorField()).toHaveValue(TYPED);
+    });
+
+  // Control: drop the check before the ask; the prompt opens first.
+  it("refuses before the out-of-order prompt opens", async () => {
+    vi.mocked(gitLog).mockResolvedValue([logRow(HASH), logRow(PARENT)]);
+    vi.mocked(gitCommitDetails).mockImplementation((_repo, hash) =>
+      Promise.resolve(
+        hash === PARENT
+          ? details({
+              hash: PARENT,
+              date: "2026-11-07T20:00:00+01:00",
+              committerDate: "2026-11-07T20:00:00+01:00",
+            })
+          : details(),
+      ),
+    );
+    const { client } = renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await startPush(client, "main");
+    await userEvent.click(primary());
+    expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+    expect(useConfirm.getState().request).toBeNull();
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+    expect(await authorField()).toHaveValue(EARLIER);
+  });
+
+  // Control: drop the check after the ask; the confirmed change is sent.
+  it("refuses a push that started while the prompt was open", async () => {
+    vi.mocked(gitLog).mockResolvedValue([logRow(HASH), logRow(PARENT)]);
+    vi.mocked(gitCommitDetails).mockImplementation((_repo, hash) =>
+      Promise.resolve(
+        hash === PARENT
+          ? details({
+              hash: PARENT,
+              date: "2026-11-07T20:00:00+01:00",
+              committerDate: "2026-11-07T20:00:00+01:00",
+            })
+          : details(),
+      ),
+    );
+    const { client } = renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await userEvent.click(primary());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    expect(toast.info).not.toHaveBeenCalled();
+    await startPush(client, "main");
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE),
+    );
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+    expect(screen.getByTestId("open").textContent).toBe("true");
+    expect(await authorField()).toHaveValue(EARLIER);
+  });
+
+  it("a push of another branch lets the change run", async () => {
+    const { client } = renderHost();
+    await retype(await authorField(), TYPED);
+    await startPush(client, "dev", "/repo-a-wt");
+    await userEvent.click(primary());
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalledTimes(1));
+    expect(toast.info).not.toHaveBeenCalled();
   });
 });

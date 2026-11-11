@@ -3,6 +3,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -21,6 +22,8 @@ import {
   type LocalPrUpdateFinishVars,
   type LocalPrWriteKind,
   pendingWriteMatching,
+  refuseWhileBranchPushes,
+  repoStatusOptions,
   useAbortLocalPrMerge,
   useDiscardLocalPrUpdate,
   useFinishLocalPrMerge,
@@ -28,7 +31,7 @@ import {
   usePendingRepoWrites,
   useRepoStatus,
 } from "@/lib/git/queries";
-import type { FileEntry } from "@/lib/git/types";
+import type { FileEntry, RepoStatus } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { type LocalPr, openPendingUpdate } from "@/lib/pulls/local";
@@ -217,6 +220,7 @@ export function ResolveConflictsView({
   const copy = MODE_COPY[mode];
   const worktreePath = pending?.worktreePath ?? "";
   const status = useRepoStatus(worktreePath);
+  const queryClient = useQueryClient();
   const updateRecord = useUpdateLocalPr(repoPath);
   const finish = useFinishLocalPrMerge(repoPath);
   const abort = useAbortLocalPrMerge(repoPath);
@@ -343,6 +347,14 @@ export function ResolveConflictsView({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // The finish moves head (update) or base (merge) in the main checkout, whose
+    // HEAD is read from its own status, never the worktree's `status` above.
+    const moving = mode === "update" ? pr.head : pr.base;
+    const currentName =
+      queryClient.getQueryData<RepoStatus>(repoStatusOptions(repoPath).queryKey)
+        ?.branch?.name ?? null;
+    if (refuseWhileBranchPushes(queryClient, repoPath, moving, currentName))
+      return;
     retireWalk(pending.worktreePath);
     try {
       if (mode === "update" && update) {

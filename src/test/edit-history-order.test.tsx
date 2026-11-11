@@ -3,8 +3,16 @@
 // routing the moves back through newest-first arithmetic (visualMoveTarget's
 // `reversed` forced false) turns the oldest-first move cases red.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 import {
   afterEach,
   beforeAll,
@@ -19,11 +27,20 @@ import {
   resetOrderBaselineForTests,
 } from "@/features/history/EditHistoryDialog";
 import {
+  gitCommitDetails,
   gitRebaseEdit,
   gitRewriteCommits,
+  gitStatus,
   gitUnpushedMessages,
 } from "@/lib/git/api";
-import type { CommitSummary } from "@/lib/git/types";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
+  repoStatusOptions,
+  usePush,
+} from "@/lib/git/queries";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
+import type { CommitSummary, RepoStatus } from "@/lib/git/types";
 import {
   type AppSettings,
   loadSettings,
@@ -33,13 +50,37 @@ import {
 } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
+import { useUiStore } from "@/lib/stores/ui";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitUnpushedMessages: vi.fn(),
   gitRewriteCommits: vi.fn(),
   gitRebaseEdit: vi.fn(),
+  gitStatus: vi.fn(),
+  gitCommitDetails: vi.fn(),
+  // A push started by PushHarness stays pending for the whole test.
+  gitPush: vi.fn(() => new Promise(() => undefined)),
 }));
+// usePush keys on the repository identity; /repo-wt is another worktree of
+// the same repository. Any other path never resolves.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => {
+  const ids = new Map([
+    ["/repo", "/repo/.git"],
+    ["/repo-wt", "/repo/.git"],
+  ]);
+  return {
+    ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+    peekRepoIdentity: (path: string) => ids.get(path),
+    repoIdentityStrict: (path: string) => {
+      const id = ids.get(path);
+      return id === undefined
+        ? new Promise<string>(() => undefined)
+        : Promise.resolve(id);
+    },
+  };
+});
 // Writes land through the real settings writer over an in-memory
 // settings.json, so each landed snapshot reaches subscribeSettingsWritten as it
 // does in the app; the mocks only decide when (and whether) a write runs.
@@ -261,6 +302,11 @@ beforeEach(() => {
   vi.mocked(gitRewriteCommits).mockResolvedValue(undefined as never);
   vi.mocked(gitRebaseEdit).mockReset();
   vi.mocked(gitRebaseEdit).mockResolvedValue(undefined as never);
+  // As an unmocked command answers: the base's date reads as unread.
+  vi.mocked(gitStatus).mockReset().mockRejectedValue(new Error("unmocked"));
+  vi.mocked(gitCommitDetails)
+    .mockReset()
+    .mockRejectedValue(new Error("unmocked"));
 });
 
 describe("Edit history order toggle", () => {
@@ -856,5 +902,180 @@ describe.each(FOLD_CASES)("Fold copy in %s", (order, position, towardOlder) => {
     expect(status()).toHaveTextContent(
       `Moved to ${order === "oldest-first" ? 3 : 1} of 3. "Second" can't be squashed — no older commit ${position} in this list is kept to combine it into.`,
     );
+  });
+});
+
+/** One usePush binding per file: the usePush scan reads a second `const push`
+ *  as a use of the first. */
+function PushHarness({
+  branch,
+  path,
+}: {
+  branch: "main" | "dev";
+  path: string;
+}) {
+  const push = usePush(path);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (branch === "main")
+          void push.mutateAsync({ setUpstream: false, branch: "main" });
+        else void push.mutateAsync({ setUpstream: false, branch: "dev" });
+      }}
+    >
+      start {branch} in {path}
+    </button>
+  );
+}
+
+/** Starts a push of `branch` from `path` in the dialog's cache, left pending. */
+async function startPush(
+  client: QueryClient,
+  branch: "main" | "dev",
+  path = "/repo",
+) {
+  const before = client.getMutationCache().findAll({ status: "pending" });
+  render(
+    <QueryClientProvider client={client}>
+      <PushHarness branch={branch} path={path} />
+    </QueryClientProvider>,
+  );
+  // The identity must land first: a push filed without it is path-keyed.
+  await waitFor(() =>
+    expect(
+      client.getQueryData(repoIdentityQueryOptions(path).queryKey),
+    ).toBeDefined(),
+  );
+  // Not user-event: the open modal dialog makes the page behind it inert.
+  fireEvent.click(
+    screen.getByRole("button", { name: `start ${branch} in ${path}` }),
+  );
+  await waitFor(() =>
+    expect(
+      client.getMutationCache().findAll({ status: "pending" }),
+    ).toHaveLength(before.length + 1),
+  );
+}
+
+describe("Edit history while the branch pushes", () => {
+  const HEAD_STATUS = {
+    branch: {
+      name: "main",
+      detached: false,
+      oid: THIRD.hash,
+      upstream: "origin/main",
+      ahead: 3,
+      behind: 0,
+      upstreamGone: false,
+      upstreamRemote: "origin",
+      upstreamBranch: "main",
+      pushNameMismatch: false,
+      upstreamIsRemoteDefault: true,
+      pushRemote: "origin",
+      pushBranch: "main",
+    },
+    entries: [],
+  } satisfies RepoStatus;
+  const EDITED = "2025-10-01 10:00:00 +01:00";
+
+  let info: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    vi.mocked(gitStatus).mockResolvedValue(HEAD_STATUS);
+    useUiStore.setState({ repoPath: "/repo" });
+    useConfirm.setState({ request: null, requestHold: null });
+    info = vi.spyOn(toast, "info");
+  });
+  afterEach(() => info.mockRestore());
+
+  function clientOnMain() {
+    const client = newClient("newest-first");
+    client.setQueryData(repoStatusOptions("/repo").queryKey, HEAD_STATUS);
+    return client;
+  }
+
+  /** The oldest commit's author date edited: with the base's date unread, the
+   *  plan asks before it runs. */
+  async function renderDatedPlan(client: QueryClient) {
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={client}>
+        <EditHistoryDialog
+          repoPath="/repo"
+          base={BASE}
+          commits={COMMITS}
+          emptyNote=""
+          open
+          onOpenChange={vi.fn()}
+          onDone={vi.fn()}
+          initialDatesFor={FIRST.hash}
+        />
+      </QueryClientProvider>,
+    );
+    const field = within(
+      await screen.findByRole("group", { name: "Dates for First" }),
+    ).getByLabelText("Author date");
+    await user.clear(field);
+    await user.type(field, EDITED);
+    const primary = screen.getByRole("button", { name: "Rewrite history" });
+    await waitFor(() => expect(primary).not.toHaveAttribute("aria-disabled"));
+    return { user, primary, field };
+  }
+
+  for (const [where, path, message] of [
+    ["this checkout", "/repo", BRANCH_PUSH_ACTIVE_MESSAGE],
+    ["another worktree", "/repo-wt", BRANCH_PUSH_ELSEWHERE_MESSAGE],
+  ] as const)
+    it(`a push of the branch in ${where} refuses and keeps the plan`, async () => {
+      const user = userEvent.setup();
+      const client = clientOnMain();
+      renderDialog(client);
+      await user.click(screen.getByRole("button", { name: "Move Second up" }));
+      await startPush(client, "main", path);
+      await user.click(screen.getByRole("button", { name: "Rewrite history" }));
+      expect(info).toHaveBeenCalledWith(message);
+      expect(gitRewriteCommits).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(shownSubjects()).toEqual(["Second", "Third", "First"]);
+    });
+
+  // Control: drop the check before the ask; the prompt opens first.
+  it("refuses before the out-of-order prompt opens", async () => {
+    const client = clientOnMain();
+    const { user, primary, field } = await renderDatedPlan(client);
+    await startPush(client, "main");
+    await user.click(primary);
+    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+    expect(useConfirm.getState().request).toBeNull();
+    expect(gitRewriteCommits).not.toHaveBeenCalled();
+    expect(field).toHaveValue(EDITED);
+  });
+
+  // Control: drop the check after the ask; the confirmed rewrite is sent.
+  it("refuses a push that started while the prompt was open", async () => {
+    const client = clientOnMain();
+    const { user, primary, field } = await renderDatedPlan(client);
+    await user.click(primary);
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    expect(info).not.toHaveBeenCalled();
+    await startPush(client, "main");
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE),
+    );
+    expect(gitRewriteCommits).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(field).toHaveValue(EDITED);
+  });
+
+  it("a push of another branch lets the rewrite run", async () => {
+    const user = userEvent.setup();
+    const client = clientOnMain();
+    renderDialog(client);
+    await user.click(screen.getByRole("button", { name: "Move Second up" }));
+    await startPush(client, "dev", "/repo-wt");
+    await user.click(screen.getByRole("button", { name: "Rewrite history" }));
+    await waitFor(() => expect(gitRewriteCommits).toHaveBeenCalledTimes(1));
+    expect(info).not.toHaveBeenCalled();
   });
 });

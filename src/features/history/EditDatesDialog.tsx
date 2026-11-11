@@ -20,6 +20,7 @@ import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { headBranchPin } from "@/lib/git/api";
 import {
+  refuseWhilePinnedBranchPushes,
   repoStatusOptions,
   repoStatusPoll,
   useAmendCommitDates,
@@ -336,6 +337,11 @@ function EditDatesForm({
     const t = target;
     if (t === null || t.repo !== repoPath || resolved === null) return;
     if (parentFlag !== null) {
+      // A running push refuses before the prompt, and again after it below.
+      if (
+        refuseWhilePinnedBranchPushes(queryClient, repoPath, t.expectedBranch)
+      )
+        return;
       // Asked first, so every check below reads the state after the prompt; a
       // dialog closed or retargeted under it drops the change.
       const unread = parentFlag.label === null;
@@ -378,6 +384,8 @@ function EditDatesForm({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (refuseWhilePinnedBranchPushes(queryClient, repoPath, t.expectedBranch))
+      return;
     const oldHash = t.hash;
     const requestEpoch = useUiStore.getState().interactionEpoch;
     let newHash: string;

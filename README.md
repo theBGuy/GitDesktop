@@ -192,7 +192,11 @@ GitDesktop moves its open local pull requests to the new name. Each
 switcher row shows the branch's push/pull state vs. its upstream (↑ to
 push, ↓ to pull, plus markers for never-published and upstream-deleted
 branches), its +/− divergence vs. the default branch (labeled with the
-default's name), and a PR badge.
+default's name), and a PR badge. A branch that still tracks the remote's
+default branch it started from reads as not published. When the remote
+already has a branch of that name, its marker says so and points to
+tracking it. A branch tracking a differently named one names it beside its
+arrows, and a branch marked Keep local wears a `kept local` chip.
 
 - **Clean up branches** ⭐: one reviewed list that archives or deletes your
   stale branches. Toggles narrow it to branches merged into the default
@@ -233,11 +237,28 @@ default's name), and a PR badge.
   push a branch that's ahead of the remote it tracks (its own remote, not
   just `origin`) or publish an unpushed one, choosing the remote when
   there's more than one. Works even when the branch is checked out in
-  another worktree. A publish that would create the branch on the remote
-  asks first, naming the branch and its destination, and the list closes
-  for the prompt. Otherwise the list stays open while it runs: the
-  branch's row shows the push's progress and destination, and you can
-  keep switching and browsing.
+  another worktree. A branch tracking a differently named one offers
+  **Publish as _origin/name_**; one still tracking the remote's default
+  branch it started from gets that in place of a push into the default
+  branch. A publish that would create the branch on the remote asks first,
+  naming the branch and its destination, and the list closes for the
+  prompt. Otherwise the list stays open while it runs: the branch's row
+  shows the push's progress and destination ("Publishing" only when the
+  push creates the branch there), and you can keep switching and browsing.
+  While a branch pushes, renaming, deleting, archiving, resetting or
+  updating it is held until the push finishes, and history rewrites (undo,
+  reset, amend, squash, Edit history, Edit dates), Cherry-pick to branch and
+  a local pull request's merge or Update branch are turned away with the
+  reason, including when the push runs in another worktree of the same
+  repository.
+- **Keep a branch local**: mark a branch **Keep local** from its menu in the
+  switcher (or toggle the current branch from the command palette) and
+  GitDesktop holds Push, Publish, force push, Create PR, publishing a local
+  pull request and publishing the repository for it, each with the reason;
+  the MCP server's push, force-push and pull-request creation tools refuse
+  it too. Turn the mark off the same way. An optional **terminal push
+  guard** from the same menu installs a pre-push hook so `git push` stops
+  as well; it covers this clone only, and `git push --no-verify` skips it.
 - **Start a branch from any base**: the new-branch dialog's *Base it on*
   picker is a searchable list of local and remote branches. Basing on a
   remote branch (e.g. `origin/epic/big-feature`) starts from the remote tip
@@ -347,8 +368,12 @@ Git releases older than 2.30, or when the branch has no reflog for the
 check to read). When a branch tracks a remote branch with a different
 name and Git would refuse a plain push, **Push** opens a menu to push to
 the tracked branch or publish under the branch's own name; there's no
-force push until the names match. A push that would create a branch on a
-remote asks first, naming the branch and where it's going, with **Cancel**
+force push until the names match. When Git knows the tracked branch is
+the remote's default branch, only the publish item appears, and it stays
+available while you're behind that branch. Pushes to a mirror remote, and
+pushes of a branch into the local branch it tracks, are refused with the
+reason before Git runs. A push that would create a branch on a remote
+asks first, naming the branch and where it's going, with **Cancel**
 focused so a stray Enter backs out; a branch the remote already has (as of
 the last fetch) just pushes. When the *remote* itself was rewritten (a
 server-side rebase) and every local commit already landed there under new
@@ -1209,7 +1234,10 @@ agents read this repo through GitDesktop.
 - **An escalating write ladder**: each tier is a separate flag, off by
   default, so read-only stays the default (and agent-session branches are
   refused by the branch-mutating tools, by push and force-push, and as a
-  pull request's head):
+  pull request's head; push, force-push and pull-request creation also
+  refuse a branch marked Keep local or a push to a remote configured as a
+  mirror, and push and force-push refuse to push a branch into the local
+  branch it tracks or onto an agent-session branch):
   - **`--allow-write`**: this repo's local PRs and issues (GitDesktop's own
     app-data artifacts; nothing is pushed)
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`

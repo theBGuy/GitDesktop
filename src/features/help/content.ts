@@ -928,7 +928,12 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   (↑ commits to push, ↓ commits to pull, plus a marker for a never-published branch and one
   for a branch whose upstream was deleted on the remote — or whose tracked remote is no
   longer configured), and its **+/− divergence vs. the default branch**, written \`+N −M\`
-  and labeled with the default branch's name.
+  and labeled with the default branch's name. A branch that still tracks the remote's
+  default branch it was started from shows the not-published marker instead of arrows (its
+  hover text says when the remote already has a branch of its name, which its context menu
+  can track), and a branch tracking a differently named branch names that branch after its
+  arrows. A branch marked **Keep local** shows a **kept local** chip, and its markers
+  never suggest publishing it.
 - **Create** a branch ({{kbd:new-branch}}), **rename** ({{kbd:rename-branch}}), **delete**
   ({{kbd:delete-branch}}), or **archive** it — archiving hides a branch without deleting
   it, collapsing it into an "Archived" section. The branch you're on, the default branch,
@@ -942,6 +947,22 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   Renaming changes only the local name: a branch already on a remote keeps its name there
   (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
   for agent sessions.
+- **Keep a branch local.** Tick **Keep local** in a branch's context menu, or toggle the
+  current branch with *Turn Keep local on or off for the current branch* in the command
+  palette, and GitDesktop{{ai}} and its MCP server{{/ai}} won't push or publish it. Push,
+  Publish branch, force push, creating a pull request, publishing a local pull request and
+  publishing the repository are held with the reason, the branch's row shows a **kept
+  local** chip, and its menu's push and publish items read **(kept local)**. Any local
+  branch can be marked, the current and default branch included; marking one that's
+  already on a remote stops further pushes, and unticking the item lifts the mark. A
+  kept-local branch's menu also offers **Block terminal pushes too…**, which installs a
+  pre-push hook so \`git push\` in a terminal stops as well. The hook lives in this clone
+  only, and \`git push --no-verify\` skips it. Once it's installed the item reads
+  **Terminal push guard (on)…** and opens a dialog with **Remove hook**. When the clone
+  already has a pre-push hook of its own, keeps its hooks in a custom folder, or uses a
+  hook manager, GitDesktop doesn't add one and shows the check to paste into your own hook
+  instead; if a hook from an earlier install is still in the clone, that dialog offers
+  **Remove hook** too.
 - **Clean up branches** opens from the switcher's menu or the command palette and gathers
   stale branches into one reviewed list. Three toggles choose what it lists, in any mix:
   **Merged** (into the default branch directly, or through a recent pull request where the
@@ -1001,11 +1022,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
   out. The update brings in the newest base: when your local default branch is behind its
   own upstream (**_origin/…_** in the common case), it merges that upstream tip instead,
-  and the menu item and the toast name the tip that was merged. When the local default has
-  commits its upstream lacks, the item says how many, and a second item offers the
-  upstream. On a branch listed under **Promotion branches** in *Branch rules*, that update
-  offer is withheld, since a promotion branch takes its changes through promotions; the
-  reason rides the menu item's label, and its own **Update from _origin/…_** is unaffected.
+  and the menu item and the toast name the tip that was merged. When there's nothing to
+  bring in, the current branch included, the toast says it's already up to date. When the
+  local default has commits its upstream lacks, the item says how many, and a second item
+  offers the upstream. On a branch listed under **Promotion branches** in *Branch rules*,
+  that update offer is withheld, since a promotion branch takes its changes through
+  promotions; the reason rides the menu item's label, and its own **Update from
+  _origin/…_** is unaffected.
 - **Change base…** — from the switcher's menu or the command palette — rebases the current
   branch onto a *different* branch, for the "I branched off the wrong one" case: pick the
   branch you meant to base on and the branch you actually did, and only your branch's own
@@ -1049,14 +1072,24 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   of the remote it tracks offers **Push to _its remote/…_** in its context menu — so a
   branch tracking a fork's _upstream_ is pushed there, not to origin. An unpushed or
   upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
-  destination (one **Publish to _…_** item per remote). Neither checks the branch out or
-  touches your working tree, so it works even for a branch checked out in another worktree.
+  destination (one **Publish to _…_** item per remote). A branch tracking a differently
+  named branch also offers **Publish as _origin/…_** (**Push to _origin/…_ and track it**
+  when the remote already has its name), which pushes it under its own name and tracks
+  that. When the tracked branch is the remote's default branch, as for a branch still
+  tracking the branch it was started from, that item takes the place of a push into the
+  default branch and isn't held while the branch is behind it. On a branch marked **Keep
+  local**, these items stay in the menu, held with **(kept local)** on the label, and
+  {{kbd:push-to-origin}} says why instead of pushing. None of them checks the branch out
+  or touches your working tree, so they work even for a branch checked out in another
+  worktree.
   A publish that would create the branch on the remote asks first, from these items and
   from {{kbd:push-to-origin}} alike: a prompt names the branch and its destination, with
   **Cancel** focused, and the list closes for it if it was open. A branch the remote
   already has (as of the last fetch) just pushes and starts tracking it. Otherwise the
   list stays open while the push runs, so you can keep switching and browsing, and the
-  branch's row shows a spinner naming where the push is going. A push from the sync bar
+  branch's row shows a spinner naming where the push is going: **Preparing to push to
+  _…_** while GitDesktop checks whether the push creates the branch there, **Publishing
+  to _…_** only when it does, and **Pushing to _…_** otherwise. A push from the sync bar
   may not name one, since git's own push settings decide where it lands.
   {{kbd:push-to-origin}} is the keyboard shortcut for pushing to **origin** specifically:
   with the **branches** list open it targets the **highlighted** branch, otherwise the
@@ -1069,14 +1102,21 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 - **While a push runs, its branch is held.** The pushing branch can't be renamed, deleted,
   archived, reset or updated until the push finishes, and **Clean up branches…**, which
   could remove it, waits too; while it's the current branch it can't be rebased or given a
-  new base either. One push runs at a time, and anything that would wait behind it holds
-  with the reason: another push or publish, merging into the current branch, updating the
-  current branch, deleting a branch on a remote, and the sync bar's **Fetch**, **Pull**
-  and **Push**. The branch menu's shortcuts say why instead of starting, and so does a
-  press in a menu that was already open when the push started. A dialog that was already
-  open checks again when you confirm it, so renaming, deleting, archiving or cleaning up
-  branches, resetting a branch to its upstream, and retrying a pull, merge or rebase from
-  its prompt leave the running push to finish.
+  new base either. **Undo last commit**, **Reset to commit…**, amending the last commit,
+  squashing, **Edit history**, **Edit dates…**, **Cherry-pick to branch…**, and a local
+  pull request's merge, **Update branch**, **Finish merge** and **Finish update** are
+  turned away with the reason too while the branch they would move is pushing. The
+  hold also applies when another worktree of the same repository is the one pushing
+  the branch, and the message then says so. A plain commit isn't held, and pushes
+  started from a terminal{{ai}} or the MCP server{{/ai}} aren't seen. One push runs
+  at a time, and anything that would wait behind it holds with the reason: another push or
+  publish, merging into the current branch, updating the current branch, deleting a branch
+  on a remote, and the sync bar's **Fetch**, **Pull** and **Push**. The branch menu's
+  shortcuts say why instead of starting, and so does a press in a menu that was already
+  open when the push started. A dialog that was already open checks again when you
+  confirm it, so renaming, deleting, archiving or cleaning up branches, resetting a branch
+  to its upstream or to a commit, and retrying a pull, merge or rebase from its prompt
+  leave the running push to finish.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
@@ -1300,9 +1340,17 @@ right on the **Push** and **Pull** buttons.
   branch, say) and Git would refuse a plain push, **Push** opens a small menu: push to
   the branch it tracks, or publish under its own name and track that, which asks the
   same question when it would create the branch there. When Git knows the tracked branch
-  is the remote's default branch, only the publish item appears. While the names differ
-  there's no force push: a diverged branch is reconciled from the **Pull** menu first.
-  Setups that route pushes elsewhere keep a plain **Push**.
+  is the remote's default branch, only the publish item appears, and it stays available
+  while you're behind that branch: those commits are the default branch's, not yours.
+  While the names differ there's no force push: a diverged branch is reconciled from the
+  **Pull** menu first. Setups that route pushes elsewhere keep a plain **Push**.
+- On a branch marked **Keep local** (see *Branches & compare*), **Push**, **Publish
+  branch** and force push are held with the reason, and so are the Push menu's items;
+  {{kbd:push}} says why instead of pushing.
+- A push to a **mirror remote** (one set up with \`remote.<name>.mirror\`), including a tag
+  push and deleting a branch or tag there, is refused with the reason before Git runs,
+  since a mirror push can remove branches on that remote. So is a push of a branch that
+  tracks another local branch rather than a remote one.
 
 ## Publish a local repo
 
@@ -1320,6 +1368,14 @@ leaves the cached list in place.
 
 **GitLab** publishes into your own namespace, and **Bitbucket** asks for a **workspace**
 (see *Bitbucket repositories*).
+
+Before creating anything, publishing checks that the repository has no \`origin\` yet, that
+a branch is checked out, and that it has a first commit, and stops with the reason if not.
+When the current branch is marked **Keep local**, the dialog's publish button is held with
+the reason instead. The repository is created first and the current branch pushed to it
+after, so a large first push has as long as any other push. On GitHub, if only the push
+fails, the message says the repository was created and \`origin\` points at it; publish the
+branch from the sync bar's **Publish branch** to finish.
 
 Publishing pushes the current branch's full history, so it can take a few minutes.
 Closing the dialog doesn't stop it: a status line at the top of the repository shows it
@@ -3714,9 +3770,13 @@ which requires \`--allow-git-write\` too — on its own it grants nothing) unloc
 lease), delete a remote branch, drop a stash (by the sha that list stashes reports), delete
 a tag, and drop commits on a guarded rebase pull. Agent-session branches
 (\`gd/session/*\`) are refused by the branch-mutating tools; push and force-push refuse
-one, whether named or checked out, and it can't be a pull request's head. An in-flight
+one, whether named or checked out, and it can't be a pull request's head. Push and
+force-push also refuse a push that would land on a \`gd/session/*\` branch through another
+branch, and a push of a branch into the local branch it tracks. An in-flight
 agent session is never broken: these tools, and Push or Publish in the app, never
-publish its branch.
+publish its branch. A branch marked **Keep local** is refused the same way: push,
+force-push and pull-request creation won't publish it, and none of the three pushes to a
+remote configured as a mirror.
 
 The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):
 \`generate_commit_message\`, \`generate_pr_description\`, and \`generate_branch_name\` each hand
@@ -4001,6 +4061,12 @@ the small programs Git runs at points like *before commit* or *before push*.
   template stops a push carrying WIP, \`fixup!\` or \`squash!\` commits, checking only the
   commits not already on the destination remote as this clone last fetched it, and
   refuses a push whose commits it can't list.
+- The **terminal push guard** for branches marked **Keep local** is installed from a
+  kept-local branch's context menu (**Block terminal pushes too…**), not from here. It's a
+  pre-push hook that stops \`git push\` for a kept-local branch{{ai}}, in a terminal or in an
+  agent's own shell{{/ai}}. It covers this clone only, and \`git push --no-verify\` skips
+  it. Once installed it's listed here like any other pre-push hook, so editing, disabling
+  or deleting it here changes the guard too.
 - If your repo uses a hook manager — **husky**, **pre-commit**, or **lefthook** —
   GitDesktop detects it, opens its config, and can run the right install/update command
   for you.`,

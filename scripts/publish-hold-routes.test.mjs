@@ -88,6 +88,46 @@ const EXCLUDED = {
     reason:
       "it is the publish; its own fire-time twin (isPublishActive) refuses a second one, pinned in HANDLERS",
   },
+  "test/branch-push-hold.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test the ref-moving hold",
+  },
+  "test/history-undo-mid-op.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts a push only to test undo's fire-time hold",
+  },
+  "test/local-pr-update-flow.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test Update branch's fire-time hold",
+  },
+  "test/edit-dates-dialog.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test Edit dates' fire-time hold",
+  },
+  "test/edit-history-order.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test Edit history's fire-time hold",
+  },
+  "test/squash-generate-close-abort.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test the squash's fire-time hold",
+  },
+  "test/resolve-conflicts-update-mode.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test the resolve Finish's fire-time hold",
+  },
+  "test/branch-switcher-keep-local.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test the local delete's fire-time hold",
+  },
 };
 
 const REFUSE = "refuseWhilePublishing(";
@@ -98,8 +138,20 @@ const REFUSE = "refuseWhilePublishing(";
 const HANDLERS = [
   { file: `${R}BranchSwitcher.tsx`, name: "doPushBranch", refusals: 1 },
   { file: `${R}BranchSwitcher.tsx`, name: "beginPublishBranch", refusals: 1 },
-  { file: `${R}BranchSwitcher.tsx`, name: "runPushBranch", refusals: 1 },
-  { file: `${R}BranchSwitcher.tsx`, name: "doDeleteRemoteBranch", refusals: 1 },
+  {
+    file: `${R}BranchSwitcher.tsx`,
+    name: "runPushBranch",
+    refusals: 1,
+    // The row reads "Publishing" only for a push its starter recorded creating.
+    needs: ['creates: outcome === "created",'],
+  },
+  {
+    file: `${R}BranchSwitcher.tsx`,
+    name: "doDeleteRemoteBranch",
+    refusals: 1,
+    // The push reason before the publish reason, as in its label and confirm.
+    order: ["pushAlreadyActive(", "refuseWhilePublishing("],
+  },
   {
     file: `${R}BranchSwitcher.tsx`,
     prop: "onPublishAnyway",
@@ -107,10 +159,20 @@ const HANDLERS = [
     // Refused before the dialog closes, so it stays open to retry from.
     order: ["refuseWhilePublishing(", "setForkGuard(null)"],
   },
-  { file: `${R}SyncControls.tsx`, name: "doPush", refusals: 1 },
+  {
+    file: `${R}SyncControls.tsx`,
+    name: "doPush",
+    refusals: 1,
+    needs: ['creates: outcome === "created",'],
+  },
   { file: `${R}SyncControls.tsx`, name: "beginPush", refusals: 1 },
   { file: `${R}SyncControls.tsx`, name: "beginBarePush", refusals: 2 },
-  { file: `${R}SyncControls.tsx`, name: "pushFromMenu", refusals: 2 },
+  {
+    file: `${R}SyncControls.tsx`,
+    name: "pushFromMenu",
+    refusals: 2,
+    needs: ['creates: outcome === "created",'],
+  },
   {
     file: `${R}SyncControls.tsx`,
     prop: "onPublishAnyway",
@@ -132,6 +194,9 @@ const HANDLERS = [
     order: ["refuseWhilePublishing(", "startPrCreate("],
     needs: [
       "if (refuseWhilePublishing(queryClient, repoPath)) {try {await reopenLocal(closedAt, prior);} catch (e) {toastError(e);} return;}",
+      // The live kept-local gate: after the own-run guard, ahead of the offline
+      // refusal and so of the local close.
+      "if (!open || pendingPub !== null) return; if (headKeptLocal) {toast.info(keptLocalPromoteReason(pr.head)); return;} if (refuseWhileOffline()) return;",
     ],
   },
   { file: "features/tags/TagDetailView.tsx", name: "onPushTag", refusals: 1 },
@@ -172,20 +237,29 @@ const RENDER_PINS = {
     need: [
       "const publishActive = usePendingPublishes(repoPath).length > 0;",
       // The publish arm comes first, ahead of the push arms.
-      "const pushItemSuffix = (() => {switch (true) {case publishActive: return ` (${PUBLISH_HOLD_ITEM_REASON})`; case rowPushing:",
-      "const pushItemDisabled = rowPushing || rowUpdating || pushActive || busy || !!offlineHold || publishActive;",
+      "const pushItemSuffix = (() => {switch (true) {case branch.keepLocal: return KEPT_LOCAL_SUFFIX; case publishActive: return ` (${PUBLISH_HOLD_ITEM_REASON})`; case rowPushing:",
+      "const pushItemDisabled = branch.keepLocal || rowPushing || rowUpdating || pushActive || busy || !!offlineHold || publishActive;",
       "disabled={deletionBlocked || pushActive || !!offlineHold || publishActive}",
-      // After the protected arm, before the push arm.
-      "case deletionBlocked: return `Delete on ${branch.remote}… (protected)`; case publishActive: return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`; case pushActive:",
+      // The protected arm, then the push arm, then the publish arm.
+      "case deletionBlocked: return `Delete on ${branch.remote}… (protected)`; case pushActive: return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`; case publishActive: return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`; default:",
       // The push arm first, then the publish arm, then offline.
       "heldReason={(() => {switch (true) {case pushActive: return branchPushHoldReason(pushPaused); case publishActive: return PUBLISH_HOLD_REASON; default: return offlineHold;",
+      // The row says "Publishing" only for a push recorded as a create, never
+      // while the pre-push detection is still deciding.
+      "if (rowDetecting) return branchPreparingLabel(publishDetect?.remote ?? null);",
+    ],
+    stale: [],
+  },
+  [`${R}PublishPendingBanner.tsx`]: {
+    need: [
+      'export const PUBLISH_IDENTITY_PENDING = "Checking this repository…";',
     ],
     stale: [],
   },
   [`${R}PublishRepoControl.tsx`]: {
     need: [
       // Held while the identity loads; an identity error is settled, never held.
-      "const identityHold = identity.data === undefined && !identity.isError ? publishPendingReason(offlineHold) : undefined;",
+      "const identityHold = identity.data === undefined && !identity.isError ? PUBLISH_IDENTITY_PENDING : undefined;",
       "disabled={!!busyReason || !!identityHold}",
       "disabled={!soleTarget || !!busyReason || !!identityHold}",
       "reason={busyReason ?? (soleTarget ? identityHold : disabledTitle)}",
@@ -195,6 +269,9 @@ const RENDER_PINS = {
   [`${R}PublishDialog.tsx`]: {
     need: [
       "const identityLoading = identity.data === undefined && !identity.isError;",
+      // The submit held only by the identity read carries its reason. Spelled
+      // from this arm's own case, so a case added above it leaves the pin valid.
+      "case identityLoading: return PUBLISH_IDENTITY_PENDING;",
     ],
     stale: [],
     // The submit's own disable carries the loading arm.
@@ -633,6 +710,15 @@ export function checkPublishHoldRoutes(sources) {
       if (!re.test(flat)) problems.push(`${file}: missing ${re}`);
   }
 
+  // A row's spinner says "Publishing" only through branchPushLabel's recorded
+  // create, so no feature file calls branchPublishLabel itself.
+  for (const path of paths) {
+    const t = sources[path];
+    if (typeof t !== "string" || !path.startsWith("features/")) continue;
+    if (/\bbranchPublishLabel\(/.test(blank(path, t)))
+      problems.push(`${path}: calls branchPublishLabel(`);
+  }
+
   // ResolveRemotePrView's exclusion: RemotePrView.tsx is its only host.
   const hosts = paths.filter(
     (p) =>
@@ -758,6 +844,21 @@ test("dropping a render hold fails the check", () => {
   failsWith(sources, "const pushItemDisabled");
 });
 
+test("dropping the row menu's Keep local hold or its suffix fails the check", () => {
+  const file = `${R}BranchSwitcher.tsx`;
+  const term = mutate(realSources(), file, (text) =>
+    text.replace(/(const pushItemDisabled =)\s*branch\.keepLocal \|\|/, "$1"),
+  );
+  failsWith(term, "const pushItemDisabled");
+  const suffix = mutate(realSources(), file, (text) =>
+    text.replace(
+      /\n\s*case branch\.keepLocal:\n\s*return KEPT_LOCAL_SUFFIX;/,
+      "",
+    ),
+  );
+  failsWith(suffix, "const pushItemSuffix");
+});
+
 test("a remote delete's held reason without its publish arm, or out of order, fails the check", () => {
   const file = `${R}BranchSwitcher.tsx`;
   const push =
@@ -769,6 +870,127 @@ test("a remote delete's held reason without its publish arm, or out of order, fa
     (text) => text.replace(`${push}${publish}`, `${publish}${push}`),
   ])
     failsWith(mutate(realSources(), file, edit), "heldReason={(() => {");
+  // The menu label's two arms swapped back to publish-first.
+  const labelPush =
+    "              case pushActive:\n                return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`;\n";
+  const labelPublish =
+    "              case publishActive:\n                return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`;\n";
+  failsWith(
+    mutate(realSources(), file, (text) =>
+      text.replace(
+        `${labelPush}${labelPublish}`,
+        `${labelPublish}${labelPush}`,
+      ),
+    ),
+    "case deletionBlocked:",
+  );
+  // The press checking the publish ahead of the push.
+  failsWith(
+    mutate(realSources(), file, (text) => {
+      const h = HANDLERS.find(
+        (x) => x.file === file && x.name === "doDeleteRemoteBranch",
+      );
+      const body = handlerBody(text, h);
+      assert.ok(body.includes("\n"), body);
+      return text.replace(
+        body,
+        body
+          .replace("pushAlreadyActive()", "PUSH_SLOT")
+          .replace(
+            "refuseWhilePublishing(queryClient, repoPath)",
+            "pushAlreadyActive()",
+          )
+          .replace("PUSH_SLOT", "refuseWhilePublishing(queryClient, repoPath)"),
+      );
+    }),
+    "doDeleteRemoteBranch: `pushAlreadyActive(` must precede",
+  );
+});
+
+test("the push and publish copy pins fail on their old spellings", () => {
+  // The detecting row claiming a publish again.
+  failsWith(
+    mutate(realSources(), `${R}BranchSwitcher.tsx`, (text) =>
+      text.replace(
+        "branchPreparingLabel(publishDetect?.remote ?? null)",
+        "branchPublishLabel(publishDetect?.remote ?? null)",
+      ),
+    ),
+    "if (rowDetecting)",
+  );
+  // Any feature file calling it, not only the switcher; a comment naming it is
+  // not a call (push-writes.ts's own call is outside features/).
+  failsWith(
+    mutate(realSources(), `${R}SyncControls.tsx`, (text) =>
+      text.concat("\nconst x = branchPublishLabel(null);\n"),
+    ),
+    `${R}SyncControls.tsx: calls branchPublishLabel(`,
+  );
+  failsWith(
+    mutate(realSources(), "features/pulls/LocalPrView.tsx", (text) =>
+      text.concat("\nconst x = branchPublishLabel(null);\n"),
+    ),
+    "features/pulls/LocalPrView.tsx: calls branchPublishLabel(",
+  );
+  const quiet = mutate(realSources(), `${R}SyncControls.tsx`, (text) =>
+    text.concat("\n// branchPublishLabel(remote) is push-writes' own.\n"),
+  );
+  assert.deepEqual(checkPublishHoldRoutes(quiet), []);
+  // A starter that stops recording the create, one handler at a time.
+  for (const [file, name] of [
+    [`${R}BranchSwitcher.tsx`, "runPushBranch"],
+    [`${R}SyncControls.tsx`, "doPush"],
+    [`${R}SyncControls.tsx`, "pushFromMenu"],
+  ])
+    failsWith(
+      mutate(realSources(), file, (text) => {
+        const body = handlerBody(text, { file, name });
+        assert.ok(body.includes("\n"), body);
+        return text.replace(
+          body,
+          body.replace('creates: outcome === "created",', ""),
+        );
+      }),
+      `${name}: missing \`creates:`,
+    );
+  // The publish trigger borrowing the accounts copy again.
+  failsWith(
+    mutate(realSources(), `${R}PublishRepoControl.tsx`, (text) =>
+      text.replace(
+        "? PUBLISH_IDENTITY_PENDING",
+        "? publishPendingReason(undefined)",
+      ),
+    ),
+    "const identityHold",
+  );
+  // The dialog's submit held by the identity read with no reason.
+  failsWith(
+    mutate(realSources(), `${R}PublishDialog.tsx`, (text) =>
+      text.replace(
+        /\n\s*case identityLoading:\n\s*return PUBLISH_IDENTITY_PENDING;/,
+        "",
+      ),
+    ),
+    "case identityLoading:",
+  );
+  // A new first case in the dialog's switch leaves the pin green.
+  const firstCase = mutate(realSources(), `${R}PublishDialog.tsx`, (text) =>
+    text.replace(
+      "      switch (true) {\n        case keptHead !== null:",
+      "      switch (true) {\n        case someNewHold:\n          return SOME_REASON;\n        case keptHead !== null:",
+    ),
+  );
+  assert.deepEqual(checkPublishHoldRoutes(firstCase), []);
+  // The constant's definition gone, or its file missing.
+  failsWith(
+    mutate(realSources(), `${R}PublishPendingBanner.tsx`, (text) =>
+      text.replace("Checking this repository…", "Checking…"),
+    ),
+    "PUBLISH_IDENTITY_PENDING",
+  );
+  const sources = realSources();
+  delete sources[`${R}PublishPendingBanner.tsx`];
+  failsWith(sources, `${R}PublishPendingBanner.tsx: missing or unreadable`);
 });
 
 test("a missing roster file fails closed", () => {
@@ -813,6 +1035,23 @@ test("a refusal moved below the write it guards fails the check", () => {
     );
   });
   failsWith(sources, "pushFromMenu: write 2 (.mutateAsync() has no");
+});
+
+test("Promote's kept-local gate dropped, or moved below the local close, fails the check", () => {
+  const file = "features/pulls/PromoteLocalPrDialog.tsx";
+  const gate = /\r?\n[ \t]*if \(headKeptLocal\) \{[^}]*\}/;
+  const close = "await closeLocal(stamp);";
+  const dropped = mutate(realSources(), file, (text) => {
+    assert.match(text, gate);
+    return text.replace(gate, "");
+  });
+  failsWith(dropped, "promote: missing `if (!open");
+  const moved = mutate(realSources(), file, (text) => {
+    const block = gate.exec(text)?.[0];
+    assert.ok(block && text.split(close).length === 2, "spellings moved");
+    return text.replace(block, "").replace(close, () => `${close}${block}`);
+  });
+  failsWith(moved, "promote: missing `if (!open");
 });
 
 test("a push api wrapper reached from outside its hook fails the check", () => {

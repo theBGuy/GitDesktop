@@ -3,6 +3,14 @@ import type { Branch, BranchHead } from "./types/branches";
 // Pure on purpose: scripts/push-tracking.test.mjs imports this file straight
 // under Node's type stripping, which resolves no aliases, so imports stay type-only.
 
+/** The upstream's branch name on its remote: the merge ref minus refs/heads/;
+ *  null for no upstream or a non-branch ref. */
+export function upstreamBranchName(remoteRef: string | null): string | null {
+  return remoteRef?.startsWith("refs/heads/")
+    ? remoteRef.slice("refs/heads/".length)
+    : null;
+}
+
 /** Whether a fresh status read of HEAD tracks what the branch list's row of the
  *  same branch says it tracks. Compared on the canonical remote + branch split,
  *  never the short `upstream` strings (two different git reads spell them), and
@@ -15,12 +23,9 @@ export function headTrackingMatchesRow(head: BranchHead, row: Branch): boolean {
   // so only a row the list reports as local (git's `.` passes through) matches.
   if (head.upstreamRemote === null)
     return row.upstreamRemote === null || row.upstreamRemote === ".";
-  const rowBranch = row.upstreamRemoteRef?.startsWith("refs/heads/")
-    ? row.upstreamRemoteRef.slice("refs/heads/".length)
-    : null;
   return (
     head.upstreamRemote === row.upstreamRemote &&
-    head.upstreamBranch === rowBranch
+    head.upstreamBranch === upstreamBranchName(row.upstreamRemoteRef)
   );
 }
 

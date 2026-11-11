@@ -7,7 +7,13 @@
 // span turns its hide case red; dropping the removal watch turns the no-chunk
 // case red.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Activity, createElement, type ReactNode, useState } from "react";
 import { toast } from "sonner";
@@ -21,9 +27,17 @@ import type { AiClient } from "@/lib/ai/types";
 import {
   gitBranchDiff,
   gitRecentCommits,
+  gitRewriteCommits,
   readRepoInstructions,
 } from "@/lib/git/api";
-import type { StagedDiff } from "@/lib/git/types";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
+  repoStatusOptions,
+  usePush,
+} from "@/lib/git/queries";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
+import type { RepoStatus, StagedDiff } from "@/lib/git/types";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
 import { type Feed, feedingClient } from "./ai-feed-client";
@@ -43,7 +57,29 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitBranchDiff: vi.fn(),
   gitRecentCommits: vi.fn(),
   readRepoInstructions: vi.fn(),
+  gitRewriteCommits: vi.fn(),
+  // A push started by PushHarness stays pending for the whole test.
+  gitPush: vi.fn(() => new Promise(() => undefined)),
 }));
+
+// usePush keys on the repository identity; /repo-wt is another worktree of
+// the same repository. Any other path never resolves.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => {
+  const ids = new Map([
+    ["/repo", "/repo/.git"],
+    ["/repo-wt", "/repo/.git"],
+  ]);
+  return {
+    ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+    peekRepoIdentity: (path: string) => ids.get(path),
+    repoIdentityStrict: (path: string) => {
+      const id = ids.get(path);
+      return id === undefined
+        ? new Promise<string>(() => undefined)
+        : Promise.resolve(id);
+    },
+  };
+});
 
 vi.mock("@/lib/ai/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/client")>()),
@@ -375,5 +411,119 @@ describe("SquashDialog's generation", () => {
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(signals[0].aborted).toBe(true);
+  });
+});
+
+/** One usePush binding per file: the usePush scan reads a second `const push`
+ *  as a use of the first. */
+function PushHarness({
+  branch,
+  path,
+}: {
+  branch: "main" | "dev";
+  path: string;
+}) {
+  const push = usePush(path);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (branch === "main")
+          void push.mutateAsync({ setUpstream: false, branch: "main" });
+        else void push.mutateAsync({ setUpstream: false, branch: "dev" });
+      }}
+    >
+      start {branch} in {path}
+    </button>
+  );
+}
+
+describe("SquashDialog while the branch pushes", () => {
+  const HEAD_STATUS = {
+    branch: {
+      name: "main",
+      detached: false,
+      oid: "b".repeat(40),
+      upstream: "origin/main",
+      ahead: 2,
+      behind: 0,
+      upstreamGone: false,
+      upstreamRemote: "origin",
+      upstreamBranch: "main",
+      pushNameMismatch: false,
+      upstreamIsRemoteDefault: true,
+      pushRemote: "origin",
+      pushBranch: "main",
+    },
+    entries: [],
+  } satisfies RepoStatus;
+
+  let info: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    vi.mocked(gitRewriteCommits).mockReset().mockResolvedValue(undefined);
+    info = vi.spyOn(toast, "info");
+  });
+  afterEach(() => info.mockRestore());
+
+  /** The dialog on `main`, with a push of `branch` from `path` left pending in
+   *  its cache. */
+  async function renderWithPush(branch: "main" | "dev", path: string) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(repoStatusOptions("/repo").queryKey, HEAD_STATUS);
+    render(
+      <QueryClientProvider client={client}>
+        <PushHarness branch={branch} path={path} />
+        <SquashHost />
+      </QueryClientProvider>,
+    );
+    // The identity must land first: a push filed without it is path-keyed.
+    await waitFor(() =>
+      expect(
+        client.getQueryData(repoIdentityQueryOptions(path).queryKey),
+      ).toBeDefined(),
+    );
+    // Not user-event: the open modal dialog hides the page behind it.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: `start ${branch} in ${path}`,
+        hidden: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        client.getMutationCache().findAll({ status: "pending" }),
+      ).toHaveLength(1),
+    );
+  }
+
+  for (const [where, path, message] of [
+    ["this checkout", "/repo", BRANCH_PUSH_ACTIVE_MESSAGE],
+    ["another worktree", "/repo-wt", BRANCH_PUSH_ELSEWHERE_MESSAGE],
+  ] as const)
+    it(`a push of the branch in ${where} refuses and keeps the message`, async () => {
+      await renderWithPush("main", path);
+      const box = screen.getByRole("textbox", { name: "Commit message" });
+      await userEvent.clear(box);
+      await userEvent.type(box, "Squashed");
+      await userEvent.click(
+        screen.getByRole("button", { name: "Squash commits" }),
+      );
+      await waitFor(() => expect(info).toHaveBeenCalledWith(message));
+      expect(gitRewriteCommits).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(
+        screen.getByRole("textbox", { name: "Commit message" }),
+      ).toHaveValue("Squashed");
+    });
+
+  it("a push of another branch lets the squash run", async () => {
+    await renderWithPush("dev", "/repo-wt");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Squash commits" }),
+    );
+    await waitFor(() => expect(gitRewriteCommits).toHaveBeenCalledTimes(1));
+    expect(info).not.toHaveBeenCalled();
   });
 });

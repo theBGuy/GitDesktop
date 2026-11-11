@@ -67,6 +67,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   // The Files tab's fork-point read and the Review tab's key read.
   gitMergeBase: vi.fn(() => new Promise(() => undefined)),
   getSecret: vi.fn(async () => null),
+  // The closed Promote dialog's Keep local read; never answered.
+  gitBranches: vi.fn(() => new Promise(() => undefined)),
   // The forge probe never answers: a local PR needs none of it.
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
 }));

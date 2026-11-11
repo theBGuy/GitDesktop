@@ -1,6 +1,6 @@
 use tauri::State;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
 };
@@ -212,28 +212,97 @@ fn remote_is_mirror(config: &[ConfigEntry], remote: &str) -> bool {
         .is_some_and(|(_, v)| git_config_bool(v.as_deref()) != Some(false))
 }
 
-/// The one config listing the push decisions read; `None` when it failed, which callers
-/// treat as "not refused" and "no destination claimed".
-async fn push_config(repo_path: &str) -> Option<Vec<ConfigEntry>> {
+/// The parsed `git config -z --list` one push decision reads, so a single listing serves
+/// every check of that decision.
+pub(crate) struct PushConfig(Vec<ConfigEntry>);
+
+/// The push config listing, strict: a failed listing is that error, never "no mirror".
+pub(crate) async fn push_config_strict(repo_path: &str) -> AppResult<PushConfig> {
     let out = run_git(
         Some(repo_path),
         &["config", "-z", "--list"],
         DEFAULT_TIMEOUT,
     )
-    .await
-    .ok()?;
-    Some(parse_config_list(&out.stdout_lossy()))
+    .await?;
+    Ok(PushConfig(parse_config_list(&out.stdout_lossy())))
+}
+
+/// The status read's listing; `None` when it failed, which callers treat as "not
+/// refused" and "no destination claimed".
+async fn push_config(repo_path: &str) -> Option<Vec<ConfigEntry>> {
+    push_config_strict(repo_path).await.ok().map(|c| c.0)
+}
+
+/// git's push remote ahead of the branch's own remote: `branch.<n>.pushRemote`, then
+/// `remote.pushDefault`. A detached HEAD (`None`) reads only the latter.
+fn configured_push_remote<'a>(config: &'a [ConfigEntry], name: Option<&str>) -> Option<&'a str> {
+    name.and_then(|n| config_last(config, &format!("branch.{n}.pushRemote")))
+        .or_else(|| config_last(config, "remote.pushDefault"))
+}
+
+/// The remote git routes a bare push to: the configured push remote, else HEAD's own
+/// `branch.<n>.remote`, else [`default_remote`] (a detached HEAD skips both branch keys).
+fn bare_push_remote<'a>(config: &'a [ConfigEntry], head: Option<&str>) -> &'a str {
+    configured_push_remote(config, head)
+        .or_else(|| head.and_then(|h| config_last(config, &format!("branch.{h}.remote"))))
+        .unwrap_or_else(|| default_remote(config))
+}
+
+/// git's last-resort remote: the only configured remote when exactly one exists, else
+/// `origin`. Any `remote.<name>.*` key in any scope makes a remote, url or not, except a
+/// name starting with `/` (all measured, git 2.51.1).
+fn default_remote(config: &[ConfigEntry]) -> &str {
+    let mut names = config.iter().filter_map(|(k, _)| {
+        let (name, _) = k.strip_prefix("remote.")?.rsplit_once('.')?;
+        (!name.starts_with('/')).then_some(name)
+    });
+    match names.next() {
+        Some(first) if names.all(|n| n == first) => first,
+        _ => "origin",
+    }
+}
+
+/// The remote a push goes to: one the op names, or a bare push's, resolved from HEAD.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PushRemote<'a> {
+    Named(&'a str),
+    Bare { head: Option<&'a str> },
+}
+
+/// [`PushRemoteIsMirror`](AppError::PushRemoteIsMirror) when `target`'s remote is a
+/// mirror ([`remote_is_mirror`]), naming the remote the op itself uses.
+pub(crate) fn mirror_refusal(config: &PushConfig, target: PushRemote<'_>) -> AppResult<()> {
+    let remote = match target {
+        PushRemote::Named(r) => r,
+        PushRemote::Bare { head } => bare_push_remote(&config.0, head),
+    };
+    if remote_is_mirror(&config.0, remote) {
+        return Err(AppError::PushRemoteIsMirror {
+            remote: remote.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Every app push to a mirror remote is refused here, before git runs: a bare push to
+/// one mirrors every ref and deletes what the clone lacks, detached HEAD included, and
+/// git refuses any refspec push to one (both measured, git 2.51.1). The remote is the
+/// one the op itself uses.
+pub(crate) async fn refuse_mirror_push(repo_path: &str, target: PushRemote<'_>) -> AppResult<()> {
+    mirror_refusal(&push_config_strict(repo_path).await?, target)
 }
 
 /// Reads the push config [`bare_push_would_be_refused`] decides on. The branch's own
-/// remote is the upstream's, which exists only while `branch.<n>.remote` is set.
+/// remote is the upstream's, which exists only while `branch.<n>.remote` is set. A
+/// mirror push remote is never refused by name: git mirror-pushes there instead.
 fn bare_push_refused(config: &[ConfigEntry], name: &str, upstream_remote: &str) -> bool {
     let push_default = config_last(config, "push.default");
     let branch_push_remote = config_last(config, &format!("branch.{name}.pushRemote"));
     let remote_push_default = config_last(config, "remote.pushDefault");
-    let push_remote = branch_push_remote
-        .or(remote_push_default)
-        .unwrap_or(upstream_remote);
+    let push_remote = configured_push_remote(config, Some(name)).unwrap_or(upstream_remote);
+    if remote_is_mirror(config, push_remote) {
+        return false;
+    }
     let remote_has_push_refspec = config_values(config, &format!("remote.{push_remote}.push"))
         .any(|refspec| !refspec.trim().is_empty());
     bare_push_would_be_refused(
@@ -251,7 +320,7 @@ fn bare_push_refused(config: &[ConfigEntry], name: &str, upstream_remote: &str) 
 /// branch under its own name there, yet `%(push)` resolves nothing for it (measured
 /// empty, git 2.51.1, in `push_destination_matrix`). A push remote with its own push
 /// refspecs claims nothing: git's bare push sends every one of them, as configured. A
-/// mirror push remote is left to [`configured_destination`], which clears it on both paths.
+/// mirror push remote is cleared by [`configured_destination`], on both paths.
 fn triangular_simple_destination(
     config: &[ConfigEntry],
     name: &str,
@@ -260,9 +329,7 @@ fn triangular_simple_destination(
     if !matches!(config_last(config, "push.default"), None | Some("simple")) {
         return (None, None);
     }
-    let push_remote = config_last(config, &format!("branch.{name}.pushRemote"))
-        .or(config_last(config, "remote.pushDefault"))
-        .unwrap_or(upstream_remote);
+    let push_remote = configured_push_remote(config, Some(name)).unwrap_or(upstream_remote);
     let has_refspec = config_values(config, &format!("remote.{push_remote}.push"))
         .any(|refspec| !refspec.trim().is_empty());
     if push_remote == upstream_remote || !is_named_remote(push_remote) || has_refspec {
@@ -275,8 +342,11 @@ fn triangular_simple_destination(
 /// `push.default=matching` resolves `%(push)` like `current` but only updates branches
 /// both ends already have, so it never creates one; triangular `simple` lands where the
 /// atoms resolve nothing. The remote must be a configured one (a pushRemote can name a
-/// URL) and no mirror (`remote.<r>.mirror`: git's bare push mirrors every ref there, as
-/// configured); a failed listing claims nothing.
+/// URL) and no mirror (every app push to one is refused, [`refuse_mirror_push`]); a
+/// failed listing claims nothing. Still out of reach, counted on the owner's 109 repos:
+/// a push remote's own push refspecs (0), several pushurls (0), narrow or remapped fetch
+/// refspecs (1, a fixture), a git without the `%(push)` atoms, force pushes (their own
+/// confirm), and presence as last-fetch remote-tracking state (no network read here).
 fn configured_destination(
     config: Option<&[ConfigEntry]>,
     name: &str,
@@ -1230,6 +1300,137 @@ mod tests {
         assert_eq!(
             tracking_line_push_destination(&extended, "refs/heads/feat", "feat"),
             ((None, None), String::new())
+        );
+    }
+
+    fn mirror_verdict(listing: &str, target: PushRemote<'_>) -> AppResult<()> {
+        mirror_refusal(&PushConfig(parse_config_list(listing)), target)
+    }
+
+    fn refused_on(result: AppResult<()>, remote: &str, row: &str) {
+        match result {
+            Err(AppError::PushRemoteIsMirror { remote: r }) => assert_eq!(r, remote, "{row}"),
+            other => panic!("{row}: expected the mirror refusal, got {other:?}"),
+        }
+    }
+
+    /// Mirror spellings: anything git doesn't read as false refuses, valueless and junk
+    /// included; the last entry wins; another remote's mirror never refuses.
+    #[test]
+    fn mirror_refusal_reads_every_spelling() {
+        for mirror in [
+            "remote.origin.mirror\ntrue\0",
+            "remote.origin.mirror\nyes\0",
+            "remote.origin.mirror\n1\0",
+            "remote.origin.mirror\0",
+            "remote.origin.mirror\nmaybe\0",
+            "remote.origin.mirror\nfalse\0remote.origin.mirror\non\0",
+        ] {
+            refused_on(
+                mirror_verdict(mirror, PushRemote::Named("origin")),
+                "origin",
+                mirror,
+            );
+        }
+        for not_mirror in [
+            "",
+            "remote.origin.mirror\nfalse\0",
+            "remote.origin.mirror\n0\0",
+            "remote.origin.mirror\n\0",
+            "remote.origin.mirror\ntrue\0remote.origin.mirror\noff\0",
+            "remote.second.mirror\ntrue\0",
+            "remote.Origin.mirror\ntrue\0",
+        ] {
+            mirror_verdict(not_mirror, PushRemote::Named("origin"))
+                .unwrap_or_else(|e| panic!("{not_mirror:?} must not refuse: {e:?}"));
+        }
+    }
+
+    /// A bare push's remote, in git's own order: pushRemote, pushDefault, the branch's own
+    /// remote, then the only remote or `origin`; a detached HEAD skips the two branch keys.
+    #[test]
+    fn mirror_refusal_resolves_the_bare_push_remote() {
+        let on = |listing: &str, head: Option<&str>| {
+            bare_push_remote(&parse_config_list(listing), head).to_string()
+        };
+        let all = "branch.x.pushRemote\npr\0remote.pushDefault\npd\0branch.x.remote\nbr\0";
+        assert_eq!(on(all, Some("x")), "pr");
+        assert_eq!(
+            on("remote.pushDefault\npd\0branch.x.remote\nbr\0", Some("x")),
+            "pd"
+        );
+        assert_eq!(on("branch.x.remote\nbr\0", Some("x")), "br");
+        assert_eq!(on("", Some("x")), "origin");
+        assert_eq!(on(all, None), "pd");
+        assert_eq!(
+            on("branch.x.pushRemote\npr\0branch.x.remote\nbr\0", None),
+            "origin"
+        );
+        // Another branch's keys don't route this one.
+        assert_eq!(on("branch.y.pushRemote\npr\0", Some("x")), "origin");
+        // The last resort is the only configured remote, counted by any key it has.
+        let up = "remote.up.url\n/u.git\0remote.up.mirror\ntrue\0";
+        assert_eq!(on(up, Some("x")), "up");
+        assert_eq!(on(up, None), "up");
+        assert_eq!(on("remote.up.fetch\n+r\0", Some("x")), "up");
+        assert_eq!(on("remote.a.b.url\n/u.git\0", Some("x")), "a.b");
+        assert_eq!(on(&format!("{up}remote.pushDefault\npd\0"), None), "pd");
+        assert_eq!(on(&format!("{up}branch.x.remote\nbr\0"), Some("x")), "br");
+        assert_eq!(on(&format!("{up}remote./s.foo\nbar\0"), Some("x")), "up");
+        for two in [
+            "remote.up.url\n/u.git\0remote.second.url\n/s.git\0",
+            "remote.up.url\n/u.git\0remote.ghost.foo\nbar\0",
+            "remote.up.url\n/u.git\0remote.UP.foo\nbar\0",
+            "remote.up.url\n/u.git\0remote..foo\nbar\0",
+        ] {
+            assert_eq!(on(two, Some("x")), "origin", "{two:?}");
+            assert_eq!(on(two, None), "origin", "{two:?}");
+        }
+        refused_on(
+            mirror_verdict(up, PushRemote::Bare { head: Some("x") }),
+            "up",
+            "single mirror remote",
+        );
+        refused_on(
+            mirror_verdict(up, PushRemote::Bare { head: None }),
+            "up",
+            "single mirror remote, detached",
+        );
+
+        let second = "remote.second.mirror\ntrue\0";
+        refused_on(
+            mirror_verdict(
+                &format!("{second}branch.x.pushRemote\nsecond\0"),
+                PushRemote::Bare { head: Some("x") },
+            ),
+            "second",
+            "pushRemote",
+        );
+        refused_on(
+            mirror_verdict(
+                &format!("{second}remote.pushDefault\nsecond\0"),
+                PushRemote::Bare { head: None },
+            ),
+            "second",
+            "detached pushDefault",
+        );
+        // A mirror on a remote the op does not use never refuses (`origin` exists, so
+        // `second` is not the only remote).
+        let both = format!("remote.origin.url\n/o.git\0{second}");
+        mirror_verdict(&both, PushRemote::Bare { head: Some("x") }).unwrap();
+        mirror_verdict(&both, PushRemote::Bare { head: None }).unwrap();
+        mirror_verdict(second, PushRemote::Named("origin")).unwrap();
+    }
+
+    /// The listing is strict: a listing git can't run is that error, never "no mirror".
+    #[tokio::test]
+    async fn mirror_refusal_fails_closed_on_a_failed_listing() {
+        let missing = std::env::temp_dir().join("gd-mirror-no-such-dir-7f3a");
+        let result =
+            refuse_mirror_push(&missing.to_string_lossy(), PushRemote::Named("origin")).await;
+        assert!(
+            !matches!(result, Ok(()) | Err(AppError::PushRemoteIsMirror { .. })),
+            "{result:?}"
         );
     }
 
@@ -2271,6 +2472,40 @@ mod tests {
         if measured == 0 {
             eprintln!("skipping the mirror push rows: every row met leaked config");
         }
+    }
+
+    /// A cross-name live upstream whose remote is a mirror is no name mismatch: git
+    /// mirror-pushes that bare push rather than refusing it by name, and the app refuses
+    /// it as a mirror push. The same fixture without the mirror is the control.
+    #[tokio::test]
+    async fn mirror_refusal_clears_the_name_mismatch_on_a_mirror_upstream_remote() {
+        let (_guard, base) = temp_base("mirror-mismatch");
+        let work = renamed_branch_fixture(&base, "w").await;
+        for (key, value) in [
+            ("push.default", "simple"),
+            ("remote.pushDefault", "origin"),
+            ("remote.origin.mirror", "false"),
+        ] {
+            git(&work, &["config", key, value]).await;
+        }
+        if !all_unset(
+            &work,
+            "the mirror mismatch check",
+            &["branch.feat/y.pushRemote", "remote.origin.push"],
+        )
+        .await
+        {
+            return;
+        }
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.push_name_mismatch, "control");
+        assert_eq!(head.upstream_is_remote_default, Some(false), "control");
+
+        git(&work, &["config", "remote.origin.mirror", "true"]).await;
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(!head.push_name_mismatch);
+        assert_eq!(head.upstream_is_remote_default, None);
+        assert_eq!(head.upstream_branch.as_deref(), Some("feat/x"));
     }
 
     #[test]
