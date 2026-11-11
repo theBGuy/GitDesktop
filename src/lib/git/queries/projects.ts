@@ -91,6 +91,7 @@ import {
   refetchOnMountUnlessHeld,
   refetchRepoQueriesOnFocus,
   releaseLens,
+  shiftChasedLenses,
   statusWriteKind,
 } from "./board-writes";
 import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
@@ -1369,6 +1370,12 @@ function dropBoardItem(
  * The write TARGET rides the variables, never this hook's scope: they are the one
  * record of it fixed at fire time, which the board's pending-write holds match on
  * ({@link usePendingBoardWrites}).
+ *
+ * A pointer drop also names its SLOT (`slot`), and the same patch splices the card
+ * there, so the column and the slot draw together. The slot itself is written by the
+ * drop's own reposition once this settles; until then the board's reorder count
+ * ({@link reorderingBoards}) keeps another card's converged reposition from
+ * re-asserting an order that still holds this card at its old place.
  */
 export function useMoveBoardCard() {
   const queryClient = useQueryClient();
@@ -1395,6 +1402,10 @@ export function useMoveBoardCard() {
       archived: boolean;
       /** Whether that lens was the rich read — its key's last axis. */
       rich: boolean;
+      /** The dropped slot as the id the card follows in the project order (null =
+       *  the top), for the patch to draw at once; absent for a move that names no
+       *  slot, which keeps the card at its project-wide place. Never written here. */
+      slot?: { afterId: string | null } | undefined;
     }) =>
       trackBoardWrite(args.repo, () => {
         // The wire takes the field id and the bucket's own id, so the field's
@@ -1422,47 +1433,98 @@ export function useMoveBoardCard() {
       );
       const railKey = itemFieldValuesFamilyKey(args.repo);
       await queryClient.cancelQueries({ queryKey: key });
+      const cached =
+        queryClient.getQueryData<InfiniteData<BoardItems, string | null>>(key);
       // The one card's values, not the whole tree: that is all the rollback needs,
       // and all it may safely carry.
-      const before = queryClient
-        .getQueryData<InfiniteData<BoardItems, string | null>>(key)
-        ?.pages.flatMap((page) => page.items)
+      const before = cached?.pages
+        .flatMap((page) => page.items)
         .find((item) => item.itemId === args.itemId)?.fieldValues;
+      const { slot } = args;
+      // A slot counts only where this lens draws the card; elsewhere the move
+      // settles as an unslotted one.
+      const slotted = slot !== undefined && before !== undefined;
+      // Where the card sat before the splice, for a rollback one card wide.
+      const beforeSlot = slotted
+        ? boardPredecessorId(cached, args.itemId)
+        : undefined;
       if (before !== undefined)
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
           key,
-          (data) =>
-            patchBoardItem(
+          (data) => {
+            const patched = patchBoardItem(
               data,
               args.itemId,
               withGroupValue(before, args.field, args.bucket),
-            ),
+            );
+            return slot === undefined
+              ? patched
+              : reorderBoardItem(patched, args.itemId, slot.afterId);
+          },
         );
+      // The card's own failed reposition still waiting on a read would restore it
+      // off the dropped slot mid-write, so it reports now and restores nothing.
+      if (slotted)
+        pendingRepositionVerdicts
+          .get(reorderCardKey(args))
+          ?.settle({ type: "contested" });
+      // Taken last, so nothing that throws in here can leave the count held.
+      const releaseBoard = slotted
+        ? holdReorderingBoard(reorderBoardKey(args))
+        : null;
       // The settle handlers read these rather than rebuilding them, so the rollback
       // and the re-read address exactly the board this patch wrote.
-      return { before, itemId: args.itemId, key, railKey, repo: args.repo };
+      return {
+        before,
+        beforeSlot,
+        itemId: args.itemId,
+        key,
+        railKey,
+        repo: args.repo,
+        releaseBoard,
+      };
     },
     // Reporting and rollback live here, not in the caller's `mutate` options: the
     // context menu that fires this closes as it does, and react-query drops
     // mutate-scoped callbacks once the observer loses its listeners.
     onError: (e, _args, ctx) => {
       if (ctx !== undefined && ctx.before !== undefined) {
-        const { key, itemId, before } = ctx;
+        const { key, itemId, before, beforeSlot } = ctx;
+        // A slotted card goes back after its former predecessor too. One this lens
+        // no longer draws leaves the order as it is, for a later read to heal.
         queryClient.setQueryData<InfiniteData<BoardItems, string | null>>(
           key,
-          (data) => patchBoardItem(data, itemId, before),
+          (data) => {
+            const restored = patchBoardItem(data, itemId, before);
+            return beforeSlot === undefined
+              ? restored
+              : reorderBoardItem(restored, itemId, beforeSlot);
+          },
         );
       }
       toastError(e);
     },
-    // Cancel-before-invalidate on both families, for the reason
-    // {@link invalidateProjectBoards} states: a read already in flight would
-    // otherwise resolve afterwards and stamp itself fresh, erasing the
-    // invalidation. Invalidate-only past that — no forced refetch, so a rail
-    // behind a closed sidebar still re-reads on its own terms.
-    onSettled: (_d, _e, _args, ctx) => {
+    // The rail, and the boards after an unslotted or failed move, cancel before
+    // they invalidate, for the reason {@link invalidateProjectBoards} states: a
+    // read already in flight would otherwise resolve afterwards and stamp itself
+    // fresh, erasing the invalidation. Invalidate-only past that — no forced
+    // refetch, so a rail behind a closed sidebar still re-reads on its own terms.
+    onSettled: (_d, e, _args, ctx) => {
       if (ctx === undefined) return;
-      invalidateProjectBoards(queryClient, ctx.repo);
+      // First, so a throw further down can't keep the count held.
+      ctx.releaseBoard?.();
+      if (e === null && ctx.releaseBoard !== null) {
+        // A slotted success reads nothing now: a read landing before the drop's
+        // slot write draws the card at its project-wide place, and one inside the
+        // replica window can serve the pre-write column. The recovery re-read waits
+        // for a quiet board instead; the restart covers a read this write's cancel
+        // left with nothing. No stale mark either, which would only pull the other
+        // lenses' reads into that window: another saved view, the table layout or
+        // Show archived cards still shows the card in its old column until a read
+        // of it, the recovery re-read at the latest.
+        restartDatalessBoardReads(queryClient, ctx.repo);
+        scheduleOwedReread(queryClient, ctx.repo, true);
+      } else invalidateProjectBoards(queryClient, ctx.repo);
       void queryClient
         .cancelQueries({ queryKey: ctx.railKey })
         .then(() => queryClient.invalidateQueries({ queryKey: ctx.railKey }));
@@ -1519,12 +1581,29 @@ const newestRepositionPress = new Map<string, number>();
  * position in this write's payload, and re-asserting would revert it. The lens is
  * out of the key on purpose: a concurrent reorder under another saved view still
  * has to be seen. Distinct from {@link reorderingCards}, which keys the
- * fold-vs-run decision per card.
+ * fold-vs-run decision per card. A slotted move ({@link useMoveBoardCard}) counts
+ * too, from its splice to its settle ({@link holdReorderingBoard}).
  */
 const reorderingBoards = new Map<string, number>();
 
 const reorderBoardKey = (args: { repo: string; projectId: string }) =>
   JSON.stringify([args.repo, args.projectId]);
+
+/** Count one write against {@link reorderingBoards} until the returned release
+ *  runs. The release is idempotent: query-core re-enters a settle callback through
+ *  its error arm when the success arm throws, and a second decrement would take
+ *  another write's count off the board. */
+function holdReorderingBoard(boardKey: string): () => void {
+  reorderingBoards.set(boardKey, (reorderingBoards.get(boardKey) ?? 0) + 1);
+  let held = true;
+  return () => {
+    if (!held) return;
+    held = false;
+    const left = (reorderingBoards.get(boardKey) ?? 1) - 1;
+    if (left > 0) reorderingBoards.set(boardKey, left);
+    else reorderingBoards.delete(boardKey);
+  };
+}
 
 /** How long any position write, the initial one or a follow-up, waits before each
  *  re-attempt — one entry per re-attempt, so the list's length is the retry
@@ -2085,11 +2164,6 @@ const shiftingItems = new Map<
   { fieldIds: Set<string>; presses: number }
 >();
 
-/** How many live shift chases read each board LENS, by query hash, held for the
- *  whole burst alongside its {@link shiftingItems} entry. Its own map because the
- *  fold key carries the card too, and a focus or mount read is held per lens. */
-const shiftChasedLenses = new Map<string, number>();
-
 /**
  * The app's window-focus refresh (the native-focus bridge in App.tsx), which
  * query-core's own `refetchOnWindowFocus` never sees. It refetches only ACTIVE repo
@@ -2099,7 +2173,7 @@ const shiftChasedLenses = new Map<string, number>();
  * it last sent, so a read landing mid-chase would have it write the server's older
  * dates back. The chase's own settle re-reads that lens ({@link useShiftItemDates});
  * a mount of it is held the same way, through {@link useProjectItems}'
- * `refetchOnMount`.
+ * `refetchOnMount`, and a whole-repo write settle skips it (`settlesOnRepoWrite`).
  *
  * Repositions need no hold: their chase steers by
  * {@link desiredRepositionTargets}, never a lens's cache. Focus reads still land
@@ -2200,10 +2274,11 @@ function shiftUpdates(
  * and a press arriving meanwhile patches the cache and folds in. The live
  * write re-reads the card's dates from that cache after each round trip (a
  * CALL-TIME read, never a render closure) and writes again until the two agree,
- * so a held key converges on where the bar is drawn; neither a window-focus read
- * nor a mount refetch of that lens runs during the burst
- * ({@link refreshRepoOnFocus}, {@link useProjectItems}). The write target rides
- * the variables for the family's reason.
+ * so a held key converges on where the bar is drawn; neither a window-focus read,
+ * a mount refetch nor a whole-repo write settle refetches that lens during the
+ * burst ({@link refreshRepoOnFocus}, {@link useProjectItems},
+ * `settlesOnRepoWrite`), though they are not the only routes to it. The write
+ * target rides the variables for the family's reason.
  *
  * The rollback is one card's touched fields wide. The settle is the field
  * writes' own ({@link useBulkSetItemFieldValues}): the boards and the rail

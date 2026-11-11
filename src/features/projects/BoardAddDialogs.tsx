@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StateIcon } from "@/features/issues/IssueRelations";
+import { PINNED_DIALOG_CLASS } from "@/features/shortcuts/palette-dialog";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
@@ -368,7 +369,7 @@ export function AddExistingItemsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
+      <DialogContent className={cn(PINNED_DIALOG_CLASS, "sm:max-w-2xl")}>
         <DialogHeader>
           <DialogTitle>Add issue or pull request</DialogTitle>
           <DialogDescription>
@@ -393,7 +394,7 @@ export function AddExistingItemsDialog({
             stop and take focus as the selection moves. */}
         <div
           onKeyDown={onListKeyDown}
-          className="max-h-[55vh] min-h-40 overflow-y-auto px-1"
+          className="min-h-40 flex-1 overflow-y-auto px-1"
         >
           {body}
         </div>

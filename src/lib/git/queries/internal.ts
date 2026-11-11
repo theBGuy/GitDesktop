@@ -298,12 +298,14 @@ export function boardReadFailed(queryHash: string): boolean {
  * the sibling's own settle re-reads. Deferring costs nothing while the last write
  * out is one of THESE — projects.ts's `trackBoardWrite` decrements before any
  * `onSettled` runs, so it sees a clear count and performs the one real refetch.
- * The gap: when the last one out settles through `markProjectBoardsStale` or
- * `holdBoardsForVerdict` (both projects.ts) instead, nothing refetches at once.
- * That is the point of those modes — the first's own patch is already on screen,
- * and the boards stay marked stale for the next natural read; the second records
- * its board's lenses owed, and its caller arms the full re-read that judges the
- * failed reposition. A write under the shield (writeThroughBoards'
+ * The gap: when the last one out settles through `markProjectBoardsStale`,
+ * `holdBoardsForVerdict` or a slotted board move's success (all projects.ts)
+ * instead, nothing refetches at once. That is the point of those modes — the
+ * first's own patch is already on screen, and the boards stay marked stale for the
+ * next natural read; the second records its board's lenses owed, and its caller
+ * arms the full re-read that judges the failed reposition; the third marks nothing
+ * and starts no read beyond restarting the reads its cancel left dataless; the
+ * recovery re-read follows. A write under the shield (writeThroughBoards'
  * `markStale: false`) marks only the FILTERED lenses it patches, whose membership
  * no payload can settle, and preserves every mark it found — so a mark laid here
  * still reaches its refetch. A lone write here sees zero and refetches
@@ -319,7 +321,7 @@ export function boardReadFailed(queryHash: string): boolean {
  * The refetching branch RESTARTS what it cancelled — `refetchQueries` under the
  * default active type re-runs every cancelled read that still has an enabled
  * observer, dataless ones included. The deferred branch does not, and relies on the
- * last write out to do it; when that last write settles through one of the two
+ * last write out to do it; when that last write settles through one of the three
  * modes above instead, its own repo-wide rescue is what covers the reads this
  * branch left with nothing.
  */

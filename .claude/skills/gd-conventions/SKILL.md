@@ -306,9 +306,11 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   `border-b bg-muted/40` row; a plain div, not a live region, with a trailing
   `action` slot for a dismiss control. Icon-less `border-b bg-muted/40` rows
   (action strips, section headers) are a different class and stay as they are.
-  One known icon-led exception: ProjectsBoardPanel's `SelectionHintStrip`, whose
-  `reserve` mode (an invisible, `aria-hidden` placeholder) and `mb-2` need an
-  InfoNote reserve arm before it can move.
+  A note that must hold its place while hidden (a loading frame's reservation)
+  passes `reserve`: same box, children invisible, the whole strip `aria-hidden`.
+  The `hand-rolled-info-strip` guard in `pnpm run checks` fails an InfoIcon beside
+  a `border-b bg-muted/40` class string outside `src/components/info-note.tsx`
+  and the vendored `src/components/ui/`.
 - A conversation surface's own actions sit before the submit button via
   `CommentComposer`'s `leadingActions` slot when submit is the row's last
   action (the issue views); a surface whose right-slot action is itself a
@@ -592,6 +594,11 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   it, and form-dialog field groups (CreatePrDialog / CreateIssueDialog's `Label`
   + `aria-labelledby` wrappers) are a richer separate pattern this rule doesn't
   govern.
+- A dialog whose search input sits over a filtered list pins to the top inset
+  through `PINNED_DIALOG_CLASS` (`src/features/shortcuts/palette-dialog.ts`), so
+  a filter moves only the bottom edge and the input never shifts under typing.
+  The caller adds its own width and lets the list be the member that shrinks
+  (`min-h-* flex-1`); `scripts/palette-dialog.test.mjs` covers the adopters.
 
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
 `min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. A Dialog/Sheet
@@ -947,7 +954,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   the update-from holder release in `queries/branches.ts`) carries
   `settlesOnRepoWrite` (`queries/repo-mutation-options.ts`), which leaves
   `repoKeys.starHistory` alone, since an infinite-query refetch re-walks every
-  loaded page. Its key ends in the series it reads, host and slug
+  loaded page, and also leaves alone a board lens a date-shift chase holds
+  (`shiftChasedLenses`, `queries/board-writes.ts`, matched by query hash), since
+  a read landing mid-chase would have it write the server's older dates back. Star
+  history's key ends in the series it reads, host and slug
   (`starHistorySeries`, from the forge status), and the backend reads only
   that series (`--hostname` pinned to origin's gh login spelling, refused
   while that login's host isn't the series host), so a write that re-points

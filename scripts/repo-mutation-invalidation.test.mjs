@@ -7,8 +7,8 @@
 // builder settles as defense in depth: the keys `onMutate` captured plus the
 // settle-time ones, so the starting repo is refreshed whichever options settle.
 //
-// The builder lives in an import-free module so Node's type stripping can load it
-// directly. The import is DYNAMIC because this file also pulls
+// The builder's module imports only its import-free sibling board-writes.ts, so
+// Node's type stripping can load it directly. The import is DYNAMIC because this file also pulls
 // @tanstack/react-query, which the CI `guards` job (no install step) can't
 // resolve: unresolved deps skip every test here, and GD_EXPECT_DEPS turns that
 // skip into a failure on an installed run.
@@ -18,10 +18,15 @@ import { test } from "node:test";
 let deps = null;
 try {
   const rq = await import("@tanstack/react-query");
+  const boardWrites = await import("../src/lib/git/queries/board-writes.ts");
   deps = {
     ...(await import("../src/lib/git/queries/repo-mutation-options.ts")),
+    shiftChasedLenses: boardWrites.shiftChasedLenses,
+    holdLens: boardWrites.holdLens,
+    releaseLens: boardWrites.releaseLens,
     QueryClient: rq.QueryClient,
     MutationObserver: rq.MutationObserver,
+    QueryObserver: rq.QueryObserver,
     onlineManager: rq.onlineManager,
   };
 } catch (e) {
@@ -30,9 +35,13 @@ try {
 const {
   QueryClient,
   MutationObserver,
+  QueryObserver,
   onlineManager,
   repoMutationCallbacks,
   settlesOnRepoWrite,
+  shiftChasedLenses,
+  holdLens,
+  releaseLens,
 } = deps ?? {};
 
 const NEEDS_DEPS =
@@ -340,4 +349,98 @@ test("a bare whole-repo entry settles through the star-skipping filter, once", a
     settlesOnRepoWrite({ queryKey: ["repo", "C:/a", "insights", "community"] }),
     true,
   );
+});
+
+/** A board lens key for `query`, as projects.ts `projectItemsKey` builds it. */
+const lensKey = (query) => [
+  "repo",
+  "C:/a",
+  "project-items",
+  "PVT_1",
+  query,
+  false,
+  false,
+];
+
+test("a whole-repo settle skips a lens a date-shift chase holds, until its last release", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const queryKey = lensKey(null);
+  const queryHash = JSON.stringify(queryKey);
+  let holds = 0;
+  t.after(() => {
+    for (; holds > 0; holds -= 1) releaseLens(shiftChasedLenses, queryHash);
+  });
+  const release = () => {
+    releaseLens(shiftChasedLenses, queryHash);
+    holds -= 1;
+  };
+  holdLens(shiftChasedLenses, queryHash);
+  holdLens(shiftChasedLenses, queryHash);
+  holds = 2;
+  // NEGATIVE CONTROL: without settlesOnRepoWrite's held-lens statement this
+  // reads true, and a settle refetches the lens the chase compares against.
+  assert.equal(settlesOnRepoWrite({ queryKey, queryHash }), false);
+  // The insights.ts shape: a bare key names no hash, so it is never held.
+  assert.equal(settlesOnRepoWrite({ queryKey }), true);
+  release();
+  assert.equal(settlesOnRepoWrite({ queryKey, queryHash }), false);
+  release();
+  assert.equal(shiftChasedLenses.has(queryHash), false);
+  assert.equal(settlesOnRepoWrite({ queryKey, queryHash }), true);
+  const star = ["repo", "C:/a", "insights", "starHistory", "o/a"];
+  assert.equal(
+    settlesOnRepoWrite({ queryKey: star, queryHash: JSON.stringify(star) }),
+    false,
+  );
+});
+
+test("a whole-repo settle refetches every active read but the held lens, which stays unmarked", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const reads = new Map();
+  const observe = (queryKey) => {
+    const label = JSON.stringify(queryKey);
+    const observer = new QueryObserver(qc, {
+      queryKey,
+      queryFn: () => {
+        reads.set(label, (reads.get(label) ?? 0) + 1);
+        return reads.get(label);
+      },
+      staleTime: Number.POSITIVE_INFINITY,
+      retry: false,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    t.after(unsubscribe);
+    return label;
+  };
+  const held = observe(lensKey(null));
+  const sibling = observe(lensKey("status:Todo"));
+  const status = observe(["repo", "C:/a", "status"]);
+  await sleep(0);
+  assert.deepEqual([...reads.values()], [1, 1, 1]);
+  const queryHash = qc
+    .getQueryCache()
+    .find({ queryKey: lensKey(null) })?.queryHash;
+  assert.equal(typeof queryHash, "string");
+  holdLens(shiftChasedLenses, queryHash);
+  t.after(() => releaseLens(shiftChasedLenses, queryHash));
+  const settle = repoMutationCallbacks(
+    qc,
+    { invalidate: [["repo", "C:/a"]], invalidateAfter: [] },
+    false,
+    () => {},
+  );
+  settle.onSettled("ok", null, undefined, undefined);
+  await sleep(0);
+  // NEGATIVE CONTROL: without settlesOnRepoWrite's held-lens statement the held
+  // lens reads twice too, and its answer replaces the chase's patched dates.
+  assert.deepEqual(
+    {
+      held: reads.get(held),
+      sibling: reads.get(sibling),
+      status: reads.get(status),
+    },
+    { held: 1, sibling: 2, status: 2 },
+  );
+  assert.equal(qc.getQueryState(lensKey(null))?.isInvalidated, false);
 });

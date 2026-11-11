@@ -1,7 +1,9 @@
-// Import-free on purpose: `scripts/repo-mutation-invalidation.test.mjs` loads this
-// module directly under Node's type stripping, which resolves no path aliases and
-// no extensionless specifiers. Type-only imports are erased, so they may stay.
+// `scripts/repo-mutation-invalidation.test.mjs` loads this module directly under
+// Node's type stripping, which resolves no path aliases and no extensionless
+// specifiers. Its one runtime import is the import-free sibling below, spelled
+// with its `.ts` suffix so Node resolves it; type-only imports are erased.
 import type { Query, QueryClient } from "@tanstack/react-query";
+import { shiftChasedLenses } from "./board-writes.ts";
 
 /** A prefix-matched key, or a prefix narrowed by a predicate over each match. */
 export type InvalidationEntry =
@@ -25,14 +27,20 @@ export interface RepoMutationKeys {
 export const STAR_HISTORY_SEGMENTS = ["insights", "starHistory"] as const;
 
 /** Whether a whole-repo write settle refreshes this read: all but star
- *  history, whose refetch re-walks every loaded page. Its key follows the
- *  forge status's series, and the writes that move its stars (Star/Unstar,
- *  delete, visibility) settle it themselves. Repo-agnostic, since the settle's
- *  key already names the repo: one stable function, so `union` dedupes it by
- *  identity. */
+ *  history, whose refetch re-walks every loaded page, and a board lens a
+ *  date-shift chase holds, since a read landing mid-chase would have it write
+ *  the server's older dates back (the chase's own settle re-reads the lens).
+ *  Star history's key follows the forge status's series, and the writes that
+ *  move its stars (Star/Unstar, delete, visibility) settle it themselves. A
+ *  candidate without a `queryHash` is never held. Repo-agnostic, since the
+ *  settle's key already names the repo: one stable function, so `union`
+ *  dedupes it by identity. */
 export function settlesOnRepoWrite(query: {
   queryKey: readonly unknown[];
+  queryHash?: string;
 }): boolean {
+  if (query.queryHash !== undefined && shiftChasedLenses.has(query.queryHash))
+    return false;
   return !(
     query.queryKey[2] === STAR_HISTORY_SEGMENTS[0] &&
     query.queryKey[3] === STAR_HISTORY_SEGMENTS[1]

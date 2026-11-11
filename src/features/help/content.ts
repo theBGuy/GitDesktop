@@ -2960,6 +2960,15 @@ card, so the arrows carry on from where it landed; if GitHub refuses the write, 
 returns to its old column and a message says why. A **draft** card carries no **Open** row,
 since its notes already open from the card itself.
 
+With the mouse, drag the card there instead: press it, move into another column and let
+go where the line shows. The card lands in that column at the place the line marked, with
+its new column written to GitHub first and its place right after. A column that can't
+take the card shows no line, and letting go over it says why instead of writing. The
+reasons are the ones that hold **Move to**, below, plus one of a drag's own: on a board
+still paging in, a drop below a column's last card may need **Load more** first. Which
+cards lift, and dragging inside a column, are covered under **Ordering a card inside its
+column**.
+
 One move at a time: while a write is in flight the menu says so in place of the columns, and
 it waits the same way while **Load more** is still fetching, so a move can't cut the page you
 asked for short. **Load more** waits for a move to finish for the same reason, and says so —
@@ -2984,6 +2993,15 @@ the bottom of its column. The card's menu carries the same four as **Move up**, 
 down**, **Move to top** and **Move to bottom**, and so does the command palette for the
 card you're on (**Move board card up**, and its three siblings). Your keyboard place
 follows the card each time, and the board says where it landed.
+
+With the mouse, drag the card instead: press it and move, and a copy of it follows the
+pointer while a line shows where it will land. Let go and the card takes that place, and
+the board says where it landed, as it does from the keyboard. A press that barely moves is
+still a click, so opening and selecting cards work as before, and a press on a card in a
+selection drags that card alone. Dragging works on the board layout; table and roadmap
+views don't drag. {{key:escape}}, a right press, switching to another window or letting go
+outside the columns cancels the drag without writing anything, and letting go on the
+card's own place changes nothing.
 
 Hold the keys down and the board keeps up: the cards move as fast as you press, and
 GitDesktop writes where the card finally rests rather than every step it passed through.
@@ -3010,6 +3028,12 @@ drawn in the sort's order there, not the board's own, so **Clear view** (or a vi
 a sort) is what brings the project order back. Reordering needs the same write access and
 \`project\` scope every other board write does, and waits the same way while another change
 to that card, or a **Load more** page, is still finishing.
+
+A drag keeps the same rules. A drop beside archived cards lands above them, where the line
+shows it. An archived card doesn't lift, and neither does a card in a view that sorts, one
+with another change still finishing, or any card on a board you can't write to: each says
+why instead. On a board that's still paging in, a drop at the very end of a column, below
+its last card, may need **Load more** first; every other place works.
 
 ## Editing, converting, archiving and removing
 

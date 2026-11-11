@@ -32,6 +32,7 @@ import {
   refreshFailed,
   splitInfiniteFailure,
 } from "@/features/conversations/remote-section-state";
+import { PINNED_DIALOG_CLASS } from "@/features/shortcuts/palette-dialog";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { isAuthError, rateLimitClause } from "@/lib/forge-backoff";
@@ -59,7 +60,21 @@ import {
   heldButtonRender,
 } from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { cn } from "@/lib/utils";
 import { HostAllowNote } from "../HostAllowNote";
+
+type Source = "registry" | "github";
+
+const SOURCES = [
+  ["registry", "Official registry"],
+  ["github", "GitHub"],
+] as const satisfies readonly (readonly [Source, string])[];
+
+const SOURCE_BLURB: Record<Source, string> = {
+  registry: "Public servers from the official Model Context Protocol registry.",
+  github:
+    "MCP-server repositories on GitHub, ranked by stars. Rougher than the registry — some need manual setup after adding.",
+};
 
 /** Compact number for stars/installs (87729 → "87.7K"). */
 const compactNumber = new Intl.NumberFormat(undefined, {
@@ -99,7 +114,7 @@ export function BrowseRegistryDialog({
   onAdd: (server: McpServer) => void;
   onClose: () => void;
 }) {
-  const [source, setSource] = useState<"registry" | "github">("registry");
+  const [source, setSource] = useState<Source>("registry");
   const [query, setQuery] = useState("");
   const debounced = useDebouncedValue(query.trim(), 300);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -277,34 +292,32 @@ export function BrowseRegistryDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className={cn(PINNED_DIALOG_CLASS, "sm:max-w-2xl")}>
         <DialogHeader>
           <DialogTitle>Browse MCP servers</DialogTitle>
-          <DialogDescription>
-            {source === "github" ? (
-              <>
-                MCP-server repositories on GitHub, ranked by stars. Rougher than
-                the registry — some need manual setup after adding.
-              </>
-            ) : (
-              <>
-                Public servers from the official Model Context Protocol
-                registry.
-              </>
-            )}{" "}
-            Added servers start{" "}
-            <strong className="font-medium">disabled</strong> — review what each
-            one runs, add any secret, then enable it.
+          {/* Both sources' text share one grid cell, the other one invisible (and
+              so outside the accessible description), so the box is as tall as the
+              longer one and the toggle never moves the input. */}
+          <DialogDescription className="grid">
+            {SOURCES.map(([value]) => (
+              <span
+                key={value}
+                aria-hidden={value !== source || undefined}
+                className={cn(
+                  "col-start-1 row-start-1",
+                  value !== source && "invisible",
+                )}
+              >
+                {SOURCE_BLURB[value]} Added servers start{" "}
+                <strong className="font-medium">disabled</strong> — review what
+                each one runs, add any secret, then enable it.
+              </span>
+            ))}
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex gap-1">
-          {(
-            [
-              ["registry", "Official registry"],
-              ["github", "GitHub"],
-            ] as const
-          ).map(([value, label]) => (
+          {SOURCES.map(([value, label]) => (
             <Button
               key={value}
               type="button"
@@ -342,7 +355,7 @@ export function BrowseRegistryDialog({
           }}
           tabIndex={-1}
           onKeyDown={onListKeyDown}
-          className="max-h-[55vh] min-h-40 space-y-2 overflow-y-auto px-1 outline-none"
+          className="min-h-40 flex-1 space-y-2 overflow-y-auto px-1 outline-none"
         >
           {/* First, so space-y's end margins skip it. Pre-mounted: a live
               region created together with its text announces unreliably. */}
