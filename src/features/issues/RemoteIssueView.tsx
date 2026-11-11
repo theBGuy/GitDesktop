@@ -14,6 +14,7 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { HeldFrame, heldParentProps } from "@/components/held-frame";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { RelativeTime } from "@/components/relative-time";
@@ -62,6 +63,22 @@ import {
   type TimelineEntry,
   TimelineEventRow,
 } from "@/features/pulls/PrTimeline";
+import {
+  failCommentPost,
+  landCommentPost,
+  withFailedReferences,
+} from "@/lib/attachments/comment-post";
+import { uploadingReason } from "@/lib/attachments/references";
+import {
+  beginAttachmentPost,
+  draftKeyFor,
+  endDraftAttachments,
+} from "@/lib/attachments/store";
+import { useAttachmentSupport } from "@/lib/attachments/use-attachment-support";
+import {
+  useAttachmentOwner,
+  useDraftAttachments,
+} from "@/lib/attachments/use-draft-attachments";
 import { copyText } from "@/lib/clipboard";
 import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
 import { presentError } from "@/lib/error-summary";
@@ -502,6 +519,22 @@ export function RemoteIssueView({
   // dialogs — a render-time state adjustment, not an effect. The SHOWN identity
   // keys the draft and the sidebar below, remounting its per-issue drafts.
   const compose = useKeyedEntityState(shownIdentity, "");
+  const attachOwner = useAttachmentOwner("issue-comment", true);
+  const attachGate = useAttachmentSupport({
+    forge: forge.data,
+    access: writeAccess.data,
+    enabled: canComment,
+  });
+  // The composer lays its own hold over this one; the draft key carries the
+  // shown identity, so a late stage appends to the draft it started for.
+  const attachments = useDraftAttachments({
+    draftKey: draftKeyFor("issue-comment", shownIdentity),
+    owner: attachOwner,
+    gateReason: attachGate,
+    holdReason: null,
+    writeDraft: (key, update) =>
+      compose.setFor(key.slice(key.indexOf("|") + 1), update),
+  });
   const [lastIdentity, setLastIdentity] = useState(issueIdentity);
   if (issueIdentity !== lastIdentity) {
     setLastIdentity(issueIdentity);
@@ -815,7 +848,9 @@ export function RemoteIssueView({
       case commenting !== undefined:
         return pendingWriteReason(
           commenting.paused,
-          COMMENT_POST_PENDING_REASON,
+          attachments.posting > 0
+            ? uploadingReason(attachments.posting, "posting")
+            : COMMENT_POST_PENDING_REASON,
         );
       case closing !== undefined:
         return pendingWriteReason(closing.paused, "Closing this issue…");
@@ -837,13 +872,35 @@ export function RemoteIssueView({
     // synthetic comment optimistically; on error restore the draft, but only if
     // that issue's composer is still empty so we never clobber newly-typed text.
     const submittedFor = issueIdentity;
+    const draftKey = draftKeyFor("issue-comment", submittedFor);
+    const ticket = beginAttachmentPost(
+      draftKey,
+      body,
+      hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost) !== undefined,
+    );
     compose.set("");
     void comment
-      .mutateAsync({ number, body, author: forge.data?.login ?? "You" })
-      .catch((e) => {
-        compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
-        onError(e);
-      });
+      .mutateAsync({
+        number,
+        body,
+        author: forge.data?.login ?? "You",
+        attachments: ticket?.refs,
+        postToken: ticket?.token,
+      })
+      .then(
+        (outcome) => {
+          const failed = landCommentPost(draftKey, ticket, body, outcome);
+          if (failed !== null)
+            compose.setFor(submittedFor, (prev) =>
+              withFailedReferences(prev, failed),
+            );
+        },
+        (e) => {
+          failCommentPost(ticket);
+          compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
+          onError(e);
+        },
+      );
   }
 
   // Deferred into the handler: calling makeQuoteReply(ref) during render made the
@@ -869,16 +926,27 @@ export function RemoteIssueView({
     if (!draftRidesStateChange) return true;
     const body = compose.value.trim();
     const submittedFor = issueIdentity;
+    const draftKey = draftKeyFor("issue-comment", submittedFor);
+    const ticket = beginAttachmentPost(
+      draftKey,
+      body,
+      hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost) !== undefined,
+    );
     try {
-      await comment.mutateAsync({
+      const outcome = await comment.mutateAsync({
         number,
         body,
         author: forge.data?.login ?? "You",
+        attachments: ticket?.refs,
+        postToken: ticket?.token,
       });
-      // Only a landed comment clears the draft.
-      compose.clearFor(submittedFor);
+      // Only a landed comment clears the draft; images it posted without stay.
+      const failed = landCommentPost(draftKey, ticket, body, outcome);
+      if (failed !== null) compose.setFor(submittedFor, () => failed);
+      else compose.clearFor(submittedFor);
       return true;
     } catch (e) {
+      failCommentPost(ticket);
       onError(e);
       return false;
     }
@@ -1211,8 +1279,12 @@ export function RemoteIssueView({
         <Thread
           key={`comment-${c.id}`}
           thread={c}
+          // A just-posted row is not quoted: its staged names are re-issued to
+          // this same draft, so a quote could bind to a later paste.
           onQuote={
-            canWrite && !detailsStale ? () => quoteReply(c.body) : undefined
+            canWrite && !detailsStale && c.postToken === undefined
+              ? () => quoteReply(c.body)
+              : undefined
           }
           onSaveEdit={
             canEditOwnComments && c.viewerDidAuthor && !detailsStale
@@ -1680,7 +1752,15 @@ export function RemoteIssueView({
                   </DropdownMenu>
                 </p>
                 {hasVisibleBody(issue.body) ? (
-                  <Markdown refs={mentions.refs}>{issue.body}</Markdown>
+                  <Markdown
+                    refs={mentions.refs}
+                    hostedImages={hostedImagesFor(
+                      mentions.refs?.repoPath,
+                      mentions.ghHost,
+                    )}
+                  >
+                    {issue.body}
+                  </Markdown>
                 ) : (
                   <p className="text-xs text-muted-foreground italic">
                     No description provided.
@@ -1790,6 +1870,7 @@ export function RemoteIssueView({
           onChange={compose.set}
           onSubmit={submitComment}
           mentions={mentions}
+          attachments={attachments}
           submitLabel="Comment"
           busy={busy}
           reason={composerReason}
@@ -1807,7 +1888,10 @@ export function RemoteIssueView({
                   size="sm"
                   disabled={busy}
                   reason={composerReason}
-                  onClick={() => compose.set("")}
+                  onClick={() => {
+                    compose.set("");
+                    endDraftAttachments(attachments.draftKey);
+                  }}
                   title="Discard this draft (e.g. a quote reply)"
                 >
                   Clear

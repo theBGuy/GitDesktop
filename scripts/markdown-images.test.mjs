@@ -15,11 +15,17 @@ import {
   createBudgetStore,
   createImageBudget,
   decodedByteLength,
+  hostedAssetHost,
+  hostedImagesFor,
+  hostedWebUrl,
   IMAGE_CAPTION_REASON,
   imageFate,
   isRepoRelativeImageUrl,
   isSvgDocument,
   keepsShownImage,
+  normalizeHref,
+  OPEN_IN_BROWSER,
+  ownsImageUrl,
   parseSrcset,
   RELATIVE_URL_ATTRS,
   REPO_IMAGE_ATTRS,
@@ -220,7 +226,11 @@ test("captions name the image and give the owner-approved reason", () => {
     notImage: "Can't show this file",
     readFailed: "Couldn't read the file",
     noRepo: "Images can't load in this view",
+    webMissing: "Not available from GitHub",
+    webSignedOut: "Sign in to GitHub CLI to load it",
+    webFailed: "Couldn't load from GitHub",
   });
+  assert.equal(OPEN_IN_BROWSER, "Open in browser");
   assert.equal(repoDocBaseDir("README.md"), "");
   assert.equal(repoDocBaseDir("docs/guide/README.md"), "docs/guide");
   assert.equal(decodedByteLength(b64("abcd")), 4);
@@ -558,6 +568,184 @@ test("a budget refusal keeps a shown image and captions an unshown one as too la
   assert.equal(keepsShownImage(true, ["tooLarge"]), false);
 });
 
+test("a failed hosted fetch or a sign-out keeps a shown image; a missing asset doesn't", () => {
+  for (const reason of ["webFailed", "webSignedOut"]) {
+    assert.equal(keepsShownImage(true, [reason]), true, reason);
+    assert.equal(keepsShownImage(true, ["webMissing", reason]), true, reason);
+    assert.equal(keepsShownImage(false, [reason]), false, reason);
+  }
+  assert.equal(keepsShownImage(true, ["webMissing"]), false);
+});
+
+// The shared URL fixture table: the backend's `is_hosted_asset_url` pins the
+// same rows (src-tauri/src/hosted_image.rs, yes_rows/no_rows).
+const T = "c162f463-c831-4173-8a80-4197acc4a8ac";
+const asset = (host, id = T) => `https://${host}/user-attachments/assets/${id}`;
+const GH = asset("github.com");
+
+const HOSTED_YES = [
+  [GH, "github.com"],
+  [asset("acme.ghe.com"), "acme.ghe.com"],
+  [asset(`${"a".repeat(63)}.ghe.com`), `${"a".repeat(63)}.ghe.com`],
+  [asset("a-1.ghe.com"), "a-1.ghe.com"],
+  [asset("9.ghe.com"), "9.ghe.com"],
+];
+
+/** Each uuid group one character short and one long. */
+function groupLengthRows() {
+  const groups = T.split("-");
+  const rows = [];
+  for (let i = 0; i < groups.length; i++) {
+    for (const g of [groups[i].slice(1), `${groups[i]}a`]) {
+      const next = [...groups];
+      next[i] = g;
+      rows.push(asset("github.com", next.join("-")));
+    }
+  }
+  return rows;
+}
+
+const HOSTED_NO = [
+  `http://github.com/user-attachments/assets/${T}`,
+  `${GH}?x=1`,
+  `${GH}#f`,
+  `${GH}/`,
+  `https://u@github.com/user-attachments/assets/${T}`,
+  `https://github.com:443/user-attachments/assets/${T}`,
+  `https://GitHub.com/user-attachments/assets/${T}`,
+  asset("github.com", T.toUpperCase()),
+  `https://github.com/user-attachments/assets/../${T}`,
+  `${GH}%20`,
+  asset("github.com.evil.com"),
+  asset("ghe.com"),
+  asset("a.b.ghe.com"),
+  `https://github.com/o/r/assets/123/${T}`,
+  asset("github.acme.com"),
+  `//github.com/user-attachments/assets/${T}`,
+  asset("github.com.evil.example"),
+  asset("evilgithub.com"),
+  asset("github.com@evil.example"),
+  asset(`g${String.fromCharCode(0x456)}thub.com`),
+  asset("xn--gthub-n2e.com"),
+  asset("github.com."),
+  `https://Github.Com/User-Attachments/assets/${T}`,
+  `https://github.com/user%2Dattachments/assets/${T}`,
+  `https://github.com/user-attachments/assets/%2e%2e/${T}`,
+  `https://github.com/user-attachments%2Fassets/${T}`,
+  `https://github.com//user-attachments/assets/${T}`,
+  `https://github.com/user-attachments//assets/${T}`,
+  `https://github.com/user-attachments/assets/../../x/${T}`,
+  `${GH}?raw=1`,
+  `${GH}#x`,
+  `https://github.com:8443/user-attachments/assets/${T}`,
+  `https://user:pw@github.com/user-attachments/assets/${T}`,
+  ` ${GH} `,
+  asset("-acme.ghe.com"),
+  asset("acme-.ghe.com"),
+  asset(`${"a".repeat(64)}.ghe.com`),
+  asset(".ghe.com"),
+  asset("github.com", `g${T.slice(1)}`),
+  ...groupLengthRows(),
+];
+
+test("the hosted-image URL rule passes exactly the table's yes rows", () => {
+  for (const [url, host] of HOSTED_YES)
+    assert.equal(hostedAssetHost(url), host, url);
+  for (const url of HOSTED_NO) assert.equal(hostedAssetHost(url), null, url);
+  assert.equal(groupLengthRows().length, 10);
+  // The punycode row is what the URL parser makes of the lookalike.
+  assert.equal(
+    new URL(asset(`g${String.fromCharCode(0x456)}thub.com`)).hostname,
+    "xn--gthub-n2e.com",
+  );
+  // Edge whitespace is the frontend's to trim before the rule reads it.
+  assert.equal(hostedAssetHost(normalizeHref(` ${GH} `)), "github.com");
+});
+
+test("the URL-rule pin fails a rule that admits a query or a lookalike host", () => {
+  const loose = (url) =>
+    /^https:\/\/([^/]*github\.com|[^/]*\.ghe\.com)\/user-attachments\/assets\/[0-9a-f-]{36}/.exec(
+      url,
+    )?.[1] ?? null;
+  // The table's own rows: each is present, and a loose rule would admit it.
+  for (const row of [`${GH}?x=1`, asset("evilgithub.com")]) {
+    assert.ok(HOSTED_NO.includes(row), row);
+    assert.notEqual(loose(row), null, row);
+  }
+});
+
+test("a render owns a hosted URL only on its source's host", () => {
+  assert.equal(ownsImageUrl(GH, "github.com"), true);
+  assert.equal(ownsImageUrl(` ${GH}`, "github.com"), true);
+  assert.equal(ownsImageUrl(asset("acme.ghe.com"), "github.com"), false);
+  assert.equal(ownsImageUrl(asset("acme.ghe.com"), "acme.ghe.com"), true);
+  assert.equal(ownsImageUrl(GH, null), false);
+  assert.equal(ownsImageUrl("docs/a.png", null), true);
+  assert.equal(ownsImageUrl("https://example.com/a.png", "github.com"), false);
+});
+
+test("a hosted source exists only for a repo on a host the rule can match", () => {
+  assert.deepEqual(hostedImagesFor("/r", "github.com"), {
+    repoPath: "/r",
+    host: "github.com",
+  });
+  assert.deepEqual(hostedImagesFor("/r", "acme.ghe.com"), {
+    repoPath: "/r",
+    host: "acme.ghe.com",
+  });
+  for (const host of [
+    null,
+    undefined,
+    "",
+    "github.com:8443",
+    "GitHub.com",
+    "github.acme.com",
+    "a.b.ghe.com",
+    "gitlab.com",
+  ])
+    assert.equal(hostedImagesFor("/r", host), undefined, String(host));
+  assert.equal(hostedImagesFor(undefined, "github.com"), undefined);
+});
+
+test("an image's one web URL: shown candidate, else own src, else first owned srcset candidate", () => {
+  const G2 = asset("github.com", "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0");
+  const gh = (u) => ownsImageUrl(u, "github.com");
+  const none = (u) => ownsImageUrl(u, null);
+  assert.equal(hostedWebUrl(G2, GH, null, gh), G2);
+  assert.equal(hostedWebUrl(undefined, ` ${GH}`, null, gh), GH);
+  assert.equal(
+    hostedWebUrl(null, undefined, `https://example.com/a.png 1x, ${G2} 2x`, gh),
+    G2,
+  );
+  // An owned candidate wins over an unowned one before it.
+  assert.equal(
+    hostedWebUrl(
+      undefined,
+      undefined,
+      `${asset("acme.ghe.com")} 1x, ${GH} 2x`,
+      gh,
+    ),
+    GH,
+  );
+  // A repository image, or a relative candidate first, has no web URL.
+  assert.equal(hostedWebUrl(undefined, "docs/a.png", null, gh), null);
+  assert.equal(
+    hostedWebUrl(undefined, undefined, `a.png 1x, ${GH} 2x`, gh),
+    null,
+  );
+  assert.equal(hostedWebUrl(undefined, undefined, undefined, gh), null);
+  // Without a source, a hosted candidate isn't owned: the relative file is the
+  // image's first owned value, and there is no web URL.
+  const set = `${GH} 1x, docs/shot.png 2x`;
+  assert.equal(
+    parseSrcset(set)
+      .map((c) => c.url)
+      .find(none),
+    "docs/shot.png",
+  );
+  assert.equal(hostedWebUrl(undefined, undefined, set, none), null);
+});
+
 /** The `data-repo-*` names a source spells, as attributes or dataset keys. */
 function repoDataAttrs(src) {
   const names = new Set(src.match(/data-repo-[a-z][a-z0-9-]*/g) ?? []);
@@ -615,6 +803,8 @@ test("the loader decides through the pinned helpers and stamps its run key", () 
     "unmarkLightboxImage(",
     "SHOWN_SRC_ATTR",
     "rescueFocus(home)",
+    "hostedSourceKey(",
+    "budget.admit(size, key)",
   ])
     assert.ok(masked.includes(call), call);
 });

@@ -336,7 +336,32 @@ async fn run_gh_raw_resolved_with(
     epoch: u64,
 ) -> AppResult<GhOutput> {
     run_gh_gated(gh, gh_host, args, gate, epoch, || {
-        spawn_gh_resolved(gh, repo_path, gh_host, args, timeout)
+        spawn_gh_resolved(
+            gh,
+            repo_path.map(std::path::Path::new),
+            gh_host,
+            args,
+            timeout,
+        )
+    })
+    .await
+}
+
+/// `run_gh_raw` with the child's cwd set to `cwd` instead of the repo; GH_HOST, the
+/// rate gate and the auth epoch still key on `repo_path` and `args`, never the cwd.
+pub(crate) async fn run_gh_raw_in_dir(
+    repo_path: &str,
+    cwd: &std::path::Path,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
+    let gh = gh_bin().await?;
+    let gh_host = gh_host_for_repo(repo_path).await;
+    let host = gh_host.as_deref();
+    let epoch = gh_auth_epoch();
+    run_gh_gated(&gh, host, args, rate_gate(), epoch, || {
+        spawn_gh_resolved(&gh, Some(cwd), host, args, timeout)
     })
     .await
 }
@@ -360,7 +385,7 @@ async fn run_gh_gated<F: std::future::Future<Output = AppResult<GhOutput>>>(
 
 async fn spawn_gh_resolved(
     gh: &std::path::Path,
-    repo_path: Option<&str>,
+    cwd: Option<&std::path::Path>,
     gh_host: Option<&str>,
     args: &[&str],
     timeout: Duration,
@@ -368,8 +393,8 @@ async fn spawn_gh_resolved(
     let mut cmd = Command::new(gh);
     apply_gh_env(&mut cmd, gh_host);
     cmd.args(args);
-    if let Some(repo) = repo_path {
-        cmd.current_dir(repo);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())

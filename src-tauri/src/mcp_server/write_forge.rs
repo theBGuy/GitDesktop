@@ -579,7 +579,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
-        crate::forge::forge_issue_comment(self.repo.clone(), args.number, body, None)
+        crate::forge::forge_issue_comment(self.repo.clone(), args.number, body, None, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "action": "commented" }))
@@ -645,7 +645,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         let body = format!("{}{GD_COMMENT_FOOTER}", args.body);
-        crate::forge::forge_pr_comment(self.repo.clone(), args.number, body, None, None)
+        crate::forge::forge_pr_comment(self.repo.clone(), args.number, body, None, None, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "action": "commented" }))

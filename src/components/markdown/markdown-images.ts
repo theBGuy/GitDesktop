@@ -100,13 +100,18 @@ export function createBudgetStore(
   };
 }
 
-/** Why an image in rendered markdown shows a caption instead of itself. */
+/** Why an image in rendered markdown shows a caption instead of itself. The
+ *  `web*` reasons are a GitHub-hosted image's (`absent`, `readFailed` and
+ *  `noRepo` speak of a version, a file or a view, which a hosted image isn't). */
 export type ImageCaptionReason =
   | "absent"
   | "tooLarge"
   | "notImage"
   | "readFailed"
-  | "noRepo";
+  | "noRepo"
+  | "webMissing"
+  | "webSignedOut"
+  | "webFailed";
 
 /** The one spelling of each reason, shared by the markdown captions and the
  *  image diff's failed and refused panes. */
@@ -116,7 +121,13 @@ export const IMAGE_CAPTION_REASON: Record<ImageCaptionReason, string> = {
   notImage: "Can't show this file",
   readFailed: "Couldn't read the file",
   noRepo: "Images can't load in this view",
+  webMissing: "Not available from GitHub",
+  webSignedOut: "Sign in to GitHub CLI to load it",
+  webFailed: "Couldn't load from GitHub",
 };
+
+/** The text of the link a hosted image's caption ends with. */
+export const OPEN_IN_BROWSER = "Open in browser";
 
 /** Why a relative image value didn't load: a caption reason, or the document's
  *  budget refusing it, which says nothing about the file and captions as too
@@ -202,6 +213,76 @@ export function isRepoRelativeImageUrl(raw: string): boolean {
     !AUTHORITY_PREFIX.test(s) &&
     !s.startsWith("#")
   );
+}
+
+/** The one GitHub-hosted image URL shape the app loads through the user's
+ *  GitHub CLI sign-in: an upload on github.com or a single-label GitHub
+ *  Enterprise Cloud tenant, lowercase, whole string. The backend's byte matcher
+ *  (`is_hosted_asset_url`) pins the same fixture rows. */
+const HOSTED_ASSET_URL =
+  /^https:\/\/(github\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ghe\.com)\/user-attachments\/assets\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The hosts a hosted-image source may name, the same rule as the URL's. */
+const HOSTED_ASSET_HOST =
+  /^(github\.com|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ghe\.com)$/;
+
+/** The host of a GitHub-hosted image URL, or null for any other string.
+ *  Matches the string as given: callers normalize it first (normalizeHref). */
+export function hostedAssetHost(url: string): string | null {
+  return HOSTED_ASSET_URL.exec(url)?.[1] ?? null;
+}
+
+/** Where a body's GitHub-hosted images load from: the repository whose GitHub
+ *  sign-in reads them, and the host whose URLs this render owns. */
+export interface MarkdownHostedImages {
+  repoPath: string;
+  host: string;
+}
+
+/** A body's hosted-image source on a GitHub repository, or undefined: no repo,
+ *  no GitHub host (`ghHost` is null off GitHub and until forge status
+ *  resolves), or a host the URL rule can never match, ports included. */
+export function hostedImagesFor(
+  repoPath: string | undefined,
+  ghHost: string | null | undefined,
+): MarkdownHostedImages | undefined {
+  if (repoPath === undefined || ghHost == null) return undefined;
+  return HOSTED_ASSET_HOST.test(ghHost)
+    ? { repoPath, host: ghHost }
+    : undefined;
+}
+
+/** Whether a render whose hosted source names `host` (null without one) takes
+ *  an image value off the webview: a repository-relative value always, a
+ *  hosted URL on that host once normalized. */
+export function ownsImageUrl(raw: string, host: string | null): boolean {
+  if (isRepoRelativeImageUrl(raw)) return true;
+  return host !== null && hostedAssetHost(normalizeHref(raw)) === host;
+}
+
+/** An image's one web URL (the read key, the caption link, the viewer's Open
+ *  in browser): the first value present among the candidate it shows, its own
+ *  moved src and its own first srcset candidate the render `owns`, normalized,
+ *  when that is a hosted URL; null otherwise. The shown and src values are
+ *  owned already: only the loader and the neutralize hook write them, from
+ *  owned values. A moved srcset keeps its unowned candidates, hence `owns`. */
+export function hostedWebUrl(
+  shown: string | null | undefined,
+  src: string | null | undefined,
+  srcset: string | null | undefined,
+  owns: (raw: string) => boolean,
+): string | null {
+  const first =
+    shown ??
+    src ??
+    (srcset == null
+      ? undefined
+      : parseSrcset(srcset)
+          .map((c) => c.url)
+          .find(owns));
+  if (first == null) return null;
+  const url = normalizeHref(first);
+  return hostedAssetHost(url) === null ? null : url;
 }
 
 /** A control character or DEL anywhere in a string. */
@@ -360,17 +441,24 @@ export function unitNeedsWalk(
   return writtenFor !== runKey;
 }
 
-/** Whether a unit already showing an image keeps it untouched. A failed read
- *  or a budget refusal says nothing about the file, so any one among the unit's
- *  failures keeps a shown image; only a unit whose failures are all definite
- *  (absent, too large, not an image: the file's state now) is rewritten. */
+/** Failures that say nothing about the file: a failed read, a budget refusal,
+ *  a failed hosted fetch, a signed-out GitHub CLI. */
+const TRANSIENT_FAILURES: ReadonlySet<ImageFailure> = new Set([
+  "readFailed",
+  "overBudget",
+  "webFailed",
+  "webSignedOut",
+]);
+
+/** Whether a unit already showing an image keeps it untouched. Any one
+ *  transient failure among the unit's keeps a shown image; only a unit whose
+ *  failures are all definite (absent, too large, not an image, missing from
+ *  GitHub: the file's state now) is rewritten. */
 export function keepsShownImage(
   showing: boolean,
   failures: readonly ImageFailure[],
 ): boolean {
-  return (
-    showing && failures.some((f) => f === "readFailed" || f === "overBudget")
-  );
+  return showing && failures.some((f) => TRANSIENT_FAILURES.has(f));
 }
 
 /** URL attributes the neutralize hook removes when relative, by lowercase

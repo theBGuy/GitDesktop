@@ -1,6 +1,8 @@
 import {
   CodeIcon,
   type Icon,
+  ImageIcon,
+  InfoIcon,
   LinkIcon,
   ListBulletsIcon,
   ListChecksIcon,
@@ -9,11 +11,16 @@ import {
   TextBIcon,
   TextHIcon,
   TextItalicIcon,
+  UploadSimpleIcon,
+  WarningIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import {
+  type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
   type Ref,
+  type RefObject,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -21,12 +28,37 @@ import {
   useRef,
   useState,
 } from "react";
+import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { useMentionAutocomplete } from "@/components/mention-autocomplete";
 import { Button } from "@/components/ui/button";
+import { ImageLightbox } from "@/components/ui/image-lightbox";
 import { Textarea } from "@/components/ui/textarea";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
-import { formatBinding } from "@/lib/hotkeys/binding";
+import type { StagedRecord } from "@/lib/attachments/draft-attachments";
+import {
+  nextFocusSeq,
+  registerAttachEditor,
+  runAttachImage,
+} from "@/lib/attachments/editor-registry";
+import {
+  type AttachSource,
+  imageReference,
+  insertionFor,
+  referencedNames,
+  removalSplice,
+  uploadingReason,
+} from "@/lib/attachments/references";
+import {
+  type DraftAttachmentsHandle,
+  uploadActFor,
+} from "@/lib/attachments/use-draft-attachments";
+import { clipTitle } from "@/lib/clip-title";
+import { formatBytes } from "@/lib/format-bytes";
+import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { isActivationKey } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 export interface MarkdownEditorHandle {
@@ -216,6 +248,128 @@ const TOOLBAR_GROUPS: {
   ],
 ];
 
+const ACCEPTED_IMAGE_TYPES = "image/png,image/jpeg,image/gif,image/webp";
+
+type AttachStatusKind = "warning" | "info" | "uploading";
+
+const ATTACH_STATUS_ICON: Record<
+  AttachStatusKind,
+  { Glyph: Icon; className: string }
+> = {
+  warning: { Glyph: WarningIcon, className: "text-warning" },
+  info: { Glyph: InfoIcon, className: "text-muted-foreground" },
+  uploading: { Glyph: UploadSimpleIcon, className: "text-muted-foreground" },
+};
+
+/**
+ * Registers the `attach-image` palette action for one attachments editor. The
+ * editor mounts it only with the prop: `useHotkeyAction` registers an entry
+ * even when disabled, so an editor without attachments must never call it.
+ */
+function AttachImageAction({
+  enabled,
+  rootRef,
+  inputRef,
+  lastFocusRef,
+}: {
+  enabled: boolean;
+  rootRef: RefObject<HTMLDivElement | null>;
+  inputRef: RefObject<HTMLInputElement | null>;
+  lastFocusRef: RefObject<number>;
+}) {
+  useHotkeyAction("attach-image", runAttachImage, enabled);
+  useLayoutEffect(
+    () =>
+      registerAttachEditor({
+        enabled,
+        lastFocus: () => lastFocusRef.current,
+        root: () => rootRef.current,
+        open: () => inputRef.current?.click(),
+      }),
+    [enabled, rootRef, inputRef, lastFocusRef],
+  );
+  return null;
+}
+
+/** The staged images the text references, as a named list of Tab stops. */
+function AttachmentChips({
+  images,
+  removeDisabled,
+  removeReason,
+  onPreview,
+  onRemove,
+}: {
+  images: readonly StagedRecord[];
+  removeDisabled: boolean;
+  removeReason: string | null;
+  onPreview: (index: number) => void;
+  onRemove: (name: string, index: number) => void;
+}) {
+  return (
+    <ul aria-label="Attached images" className="flex flex-wrap gap-1.5">
+      {images.map((image, i) => (
+        <li
+          key={image.name}
+          className="flex max-w-64 min-w-0 items-center gap-1.5 border border-input p-0.5 text-xs"
+        >
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            className="size-7 shrink-0 overflow-hidden p-0"
+            aria-label={`Preview ${image.name}`}
+            onClick={() => onPreview(i)}
+          >
+            <img src={image.url} alt="" className="size-full object-cover" />
+          </Button>
+          <span
+            className="min-w-0 truncate"
+            onMouseEnter={clipTitle(image.name)}
+          >
+            {image.name}
+          </span>
+          <span className="shrink-0 text-muted-foreground">
+            {formatBytes(image.size)}
+          </span>
+          <DisabledReasonButton
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Remove ${image.name}`}
+            data-attachment-remove={image.name}
+            disabled={removeDisabled}
+            reason={removeReason}
+            // Focus lands on the next chip's Remove: a held Enter stops here.
+            onKeyDown={ignoreHeldEnter}
+            onClick={() => onRemove(image.name, i)}
+          >
+            <XIcon />
+          </DisabledReasonButton>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The status line under the chips: an icon plus its sentence. Its words reach
+ *  assistive tech through the editor's always-mounted status region, since a
+ *  live region inserted together with its text is often not announced. */
+function AttachmentStatusLine({
+  kind,
+  text,
+}: {
+  kind: AttachStatusKind;
+  text: string;
+}) {
+  const { Glyph, className } = ATTACH_STATUS_ICON[kind];
+  return (
+    <p aria-hidden className="flex items-start gap-1.5 text-xs">
+      <Glyph aria-hidden className={cn("mt-px size-3.5 shrink-0", className)} />
+      <span>{text}</span>
+    </p>
+  );
+}
+
 /**
  * A description editor with GitHub-style Write/Preview tabs and a formatting
  * toolbar. Preview renders through the same Markdown component PR bodies use,
@@ -236,6 +390,7 @@ export function MarkdownEditor({
   textareaClassName,
   actions,
   mentions,
+  attachments,
   "aria-label": ariaLabel,
 }: {
   ref?: Ref<MarkdownEditorHandle>;
@@ -260,6 +415,10 @@ export function MarkdownEditor({
    *  forge wouldn't autolink the result — the editor adds no listener, query or
    *  node for it. */
   mentions?: MentionSource;
+  /** Opt in to image attachments (paste, the Attach button, chips, the palette
+   *  action). Omitted, the editor adds no listener, node, subscription or
+   *  hotkey handler for them. */
+  attachments?: DraftAttachmentsHandle;
   "aria-label"?: string;
 }) {
   const [mode, setMode] = useState<"write" | "preview">("write");
@@ -268,6 +427,51 @@ export function MarkdownEditor({
   const pendingSelection = useRef<[number, number] | null>(null);
   // A focus() requested while in Preview mode, honored once Write remounts.
   const pendingFocus = useRef(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const previewTabRef = useRef<HTMLButtonElement>(null);
+  const lastFocusRef = useRef(0);
+  // Where focus goes once a chip removal lands: the named chip's remove button,
+  // else the textarea. Tagged with its draft, so a switch drops it.
+  const pendingChipFocus = useRef<{
+    draftKey: string;
+    name: string | null;
+  } | null>(null);
+  // Read after a stage's await, so an insert targets what the editor shows THEN.
+  const liveRef = useRef({
+    draftKey: attachments?.draftKey,
+    attachments,
+    mode,
+    onChange,
+    mounted: false,
+  });
+  // Set while the editor inserts its own reference: that input event is no
+  // user edit, so it retires no status line or partial-failure strip.
+  const insertingRef = useRef(false);
+  // The lightbox belongs to the draft it opened on; another draft shows it closed.
+  const [lightbox, setLightbox] = useState<{
+    draftKey: string;
+    index: number;
+  } | null>(null);
+  useLayoutEffect(() => {
+    liveRef.current.draftKey = attachments?.draftKey;
+    liveRef.current.attachments = attachments;
+    liveRef.current.mode = mode;
+    liveRef.current.onChange = onChange;
+  });
+  // An `<Activity>` hide runs this cleanup too: a hidden editor takes no insert.
+  useEffect(() => {
+    liveRef.current.mounted = true;
+    return () => {
+      liveRef.current.mounted = false;
+    };
+  }, []);
+  // The hold that gave a held attach's reason has ended: drop it from the
+  // store, so the same hold returning later doesn't show it again unasked.
+  const heldNoteStale = attachments?.heldNoteStale === true;
+  useEffect(() => {
+    if (heldNoteStale) liveRef.current.attachments?.retireHeldNote();
+  }, [heldNoteStale]);
 
   const mention = useMentionAutocomplete({
     mentions,
@@ -386,6 +590,155 @@ export function MarkdownEditor({
     onKeyDown?.(e);
   }
 
+  // `document.execCommand` keeps the native undo stack; where it is missing or
+  // refuses, a controlled rewrite applies the same edit off that stack.
+  function spliceText(
+    ta: HTMLTextAreaElement,
+    start: number,
+    end: number,
+    replacement: string,
+    caret: number | null,
+  ) {
+    const text = ta.value;
+    if (typeof document.execCommand === "function") {
+      ta.focus({ preventScroll: true });
+      ta.setSelectionRange(start, end);
+      const ok =
+        replacement === ""
+          ? document.execCommand("delete", false)
+          : document.execCommand("insertText", false, replacement);
+      if (ok) {
+        if (caret !== null) ta.setSelectionRange(caret, caret);
+        return;
+      }
+    }
+    if (caret !== null) pendingSelection.current = [caret, caret];
+    liveRef.current.onChange(
+      text.slice(0, start) + replacement + text.slice(end),
+    );
+  }
+
+  // A stage that resolves inserts at the caret only while this editor still
+  // shows its draft in Write and focus is here (or on <body>, after a picker or
+  // the palette); otherwise the started draft gains the reference at its end.
+  function insertReference(handle: DraftAttachmentsHandle, reference: string) {
+    const live = liveRef.current;
+    const ta = textareaRef.current;
+    const root = rootRef.current;
+    const active = document.activeElement;
+    const here =
+      live.mounted &&
+      live.mode === "write" &&
+      live.draftKey === handle.draftKey &&
+      ta !== null &&
+      root !== null &&
+      (active === null || active === document.body || root.contains(active));
+    if (!here || ta === null) {
+      handle.appendReference(reference);
+      return;
+    }
+    const at = ta.selectionStart ?? ta.value.length;
+    const { insert, caret } = insertionFor(ta.value, at, reference);
+    insertingRef.current = true;
+    try {
+      spliceText(ta, at, at, insert, caret);
+    } finally {
+      insertingRef.current = false;
+    }
+  }
+
+  // One pick or paste is one gesture. Each file re-reads the started draft's
+  // live handle, so a hold or gate engaging mid-batch stops it, and a draft
+  // that moved on (Clear, a post, a reseed) takes no later file. A file's own
+  // refusal never stops the rest.
+  async function attachFiles(files: File[], source: AttachSource) {
+    const first = attachments;
+    if (!first) return;
+    let stillLive: (() => boolean) | null = null;
+    for (const file of files) {
+      const latest = liveRef.current.attachments;
+      const handle = latest?.draftKey === first.draftKey ? latest : first;
+      if (stillLive !== null && !stillLive()) return;
+      if ((handle.holdReason ?? handle.gateReason) !== null) {
+        handle.noteBlocked();
+        return;
+      }
+      stillLive ??= handle.startAttach();
+      const staged = await handle.stage(file, source);
+      if (!staged) continue;
+      insertReference(
+        handle,
+        imageReference(
+          source,
+          source === "picker" ? file.name : null,
+          staged.name,
+        ),
+      );
+    }
+  }
+
+  const attachReason = attachments
+    ? (attachments.holdReason ?? attachments.gateReason)
+    : null;
+
+  function handlePaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const data = e.clipboardData;
+    const files = Array.from(data?.files ?? []);
+    if (
+      files.length === 0 ||
+      Array.from(data?.types ?? []).includes("text/plain")
+    )
+      return;
+    e.preventDefault();
+    if (attachReason !== null) {
+      attachments?.noteBlocked();
+      return;
+    }
+    void attachFiles(files, "paste");
+  }
+
+  function removeChip(name: string, index: number, names: string[]) {
+    const ta = textareaRef.current;
+    if (!ta || !attachments) return;
+    const splice = removalSplice(ta.value, name);
+    if (!splice) return;
+    pendingChipFocus.current = {
+      draftKey: attachments.draftKey,
+      name: names[index + 1] ?? names[index - 1] ?? null,
+    };
+    if (mode === "write")
+      spliceText(ta, splice.start, splice.end, splice.replacement, null);
+    else
+      onChange(
+        ta.value.slice(0, splice.start) +
+          splice.replacement +
+          ta.value.slice(splice.end),
+      );
+    // A removal is the user's edit on every route, the input event's included.
+    attachments.noteEdited();
+  }
+
+  // A chip removal's focus lands once the text without it has rendered: the
+  // next chip's remove button, else the previous, else the input.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `value` is the trigger — the chips re-render only once the removal's controlled update has landed.
+  useLayoutEffect(() => {
+    const pending = pendingChipFocus.current;
+    if (!pending) return;
+    pendingChipFocus.current = null;
+    if (pending.draftKey !== liveRef.current.draftKey) return;
+    const chip =
+      pending.name === null
+        ? null
+        : Array.from(
+            rootRef.current?.querySelectorAll<HTMLElement>(
+              "[data-attachment-remove]",
+            ) ?? [],
+          ).find((el) => el.dataset.attachmentRemove === pending.name);
+    if (chip) chip.focus();
+    else if (liveRef.current.mode === "write") textareaRef.current?.focus();
+    else previewTabRef.current?.focus();
+  }, [value]);
+
   // Honor a focus() that arrived while Preview was showing, once Write remounts.
   useEffect(() => {
     if (mode === "write" && pendingFocus.current) {
@@ -409,12 +762,54 @@ export function MarkdownEditor({
     if (autoFocus && mode === "write") focusIntoView();
   }, [focusIntoView]);
 
+  const chipImages = attachments
+    ? referencedNames(
+        value,
+        attachments.images.map((i) => i.name),
+      ).flatMap((name) => attachments.images.filter((i) => i.name === name))
+    : [];
+  const chipNames = chipImages.map((i) => i.name);
+  // A lightbox left open on another draft, or over chips that have since gone,
+  // never reopens when that draft returns or its chips refill.
+  if (
+    lightbox !== null &&
+    (lightbox.draftKey !== attachments?.draftKey || chipImages.length === 0)
+  )
+    setLightbox(null);
+  const lightboxIndex =
+    lightbox !== null && lightbox.draftKey === attachments?.draftKey
+      ? Math.min(lightbox.index, Math.max(chipImages.length - 1, 0))
+      : null;
+  const statusLine: { kind: AttachStatusKind; text: string } | null = (() => {
+    if (!attachments) return null;
+    if (attachments.posting > 0) {
+      // The host's hold names a parked post (offline) over the uploading text.
+      const uploading = uploadingReason(
+        attachments.posting,
+        uploadActFor(attachments.draftKey),
+      );
+      const text = attachments.holdReason ?? uploading;
+      return { kind: text === uploading ? "uploading" : "info", text };
+    }
+    const status = attachments.status;
+    return status && { kind: status.tone, text: status.text };
+  })();
+  const removeReason = attachments?.holdReason ?? null;
+
   return (
     <div
+      ref={rootRef}
       // No `min-h-0` on the fill root: `min-height: auto` floors it at its content
       // minimum, so a short window scrolls the parent instead of shrinking the
       // editor past the textarea's floor and painting it over the fields below.
       className={fill ? "flex flex-1 flex-col gap-1.5" : "space-y-1.5"}
+      onFocus={
+        attachments
+          ? () => {
+              lastFocusRef.current = nextFocusSeq();
+            }
+          : undefined
+      }
     >
       <div className="flex items-center gap-1">
         <Button
@@ -427,6 +822,7 @@ export function MarkdownEditor({
           Write
         </Button>
         <Button
+          ref={previewTabRef}
           type="button"
           variant={mode === "preview" ? "secondary" : "ghost"}
           size="xs"
@@ -471,6 +867,39 @@ export function MarkdownEditor({
               })}
             </div>
           ))}
+          {attachments && (
+            <div className="flex items-center gap-0.5">
+              <span aria-hidden className="mx-0.5 h-4 w-px bg-border" />
+              {/* A held button swallows its own press, so a pointer press falls
+                  through to this wrapper and a bare Enter/Space bubbles to it:
+                  either puts the reason on the status line. */}
+              <span
+                className="inline-flex"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  if (attachReason !== null) attachments.noteBlocked();
+                }}
+                onKeyDown={(e) => {
+                  if (hasChordModifier(e)) return;
+                  if (isActivationKey(e) && attachReason !== null)
+                    attachments.noteBlocked();
+                }}
+              >
+                <DisabledReasonButton
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="Attach image"
+                  title="Attach image"
+                  disabled={!!disabled || attachReason !== null}
+                  reason={attachReason}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <ImageIcon />
+                </DisabledReasonButton>
+              </span>
+            </div>
+          )}
         </div>
       )}
       {/* The textarea stays mounted across the Preview toggle (hidden, not
@@ -484,6 +913,7 @@ export function MarkdownEditor({
         value={value}
         onChange={(e) => {
           onChange(e.target.value);
+          if (!insertingRef.current) attachments?.noteEdited();
           mention.sync(
             e.target.value,
             e.target.selectionStart ?? e.target.value.length,
@@ -498,6 +928,8 @@ export function MarkdownEditor({
           mode === "preview" && "hidden",
         )}
         {...mention.textareaProps}
+        // After the spread, so the mention props can never drop it.
+        onPaste={attachments ? handlePaste : undefined}
       />
       {mention.popover}
       {mode === "preview" && (
@@ -512,11 +944,81 @@ export function MarkdownEditor({
             // host dialog via the identity-change reset and discards the draft.
             // Repository-relative links stay inert here for the same reason —
             // this preview is for reading your own draft, not for navigating.
-            <Markdown>{value}</Markdown>
+            // Staged names resolve to this draft's own local copies, never the
+            // repository; the text renders exactly as typed.
+            <Markdown
+              stagedImages={
+                attachments
+                  ? {
+                      draftKey: attachments.draftKey,
+                      owner: attachments.owner,
+                    }
+                  : undefined
+              }
+            >
+              {value}
+            </Markdown>
           ) : (
             <p className="text-xs text-muted-foreground">Nothing to preview</p>
           )}
         </div>
+      )}
+      {attachments && chipImages.length > 0 && (
+        <AttachmentChips
+          images={chipImages}
+          removeDisabled={!!disabled || removeReason !== null}
+          removeReason={removeReason}
+          onPreview={(index) =>
+            setLightbox({ draftKey: attachments.draftKey, index })
+          }
+          onRemove={(name, index) => removeChip(name, index, chipNames)}
+        />
+      )}
+      {statusLine && (
+        <AttachmentStatusLine kind={statusLine.kind} text={statusLine.text} />
+      )}
+      {attachments && (
+        <>
+          <span role="status" className="sr-only">
+            {statusLine?.text}
+          </span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_IMAGE_TYPES}
+            multiple
+            hidden
+            tabIndex={-1}
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              if (files.length > 0) void attachFiles(files, "picker");
+            }}
+          />
+          <ImageLightbox
+            images={chipImages.map((i) => ({
+              src: i.url,
+              alt: i.name,
+              label: i.name,
+              naturalWidth: i.width,
+              naturalHeight: i.height,
+            }))}
+            index={lightboxIndex ?? 0}
+            onIndexChange={(index) =>
+              setLightbox({ draftKey: attachments.draftKey, index })
+            }
+            open={lightboxIndex !== null && chipImages.length > 0}
+            onOpenChange={(open) => {
+              if (!open) setLightbox(null);
+            }}
+          />
+          <AttachImageAction
+            enabled={mode === "write" && !disabled && attachReason === null}
+            rootRef={rootRef}
+            inputRef={fileInputRef}
+            lastFocusRef={lastFocusRef}
+          />
+        </>
       )}
     </div>
   );

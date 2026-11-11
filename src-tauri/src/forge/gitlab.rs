@@ -3834,6 +3834,308 @@ pub async fn commit_comment_delete(repo_path: &str, sha: &str, comment_id: &str)
 // stay GitHub-only.) Same glab `-f` raw-field + `state_event` shape as the issue
 // writes. Unlike issue close, MR close has no reason on either platform.
 
+/// `glab --version` read as the health probe reads it, or `None` when the probe fails
+/// for any reason.
+async fn glab_version_line() -> Option<String> {
+    let out = run_glab_raw(None, &["--version"], GLAB_TIMEOUT)
+        .await
+        .ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    crate::attachments::version_line(&out.stdout_lossy(), &out.stderr)
+}
+
+/// Check steps 1-5 for a GitLab post: the glab version gate (GitLab has no host gate),
+/// the as-bot refusal, then the structural checks. `None` (or no names) skips them all.
+pub(crate) async fn glab_attach_checks(
+    body: &str,
+    refs: Option<crate::attachments::AttachmentRefs>,
+    as_bot: bool,
+) -> AppResult<Option<crate::attachments::StagedRefs>> {
+    let Some(refs) = crate::attachments::normalize(refs) else {
+        return Ok(None);
+    };
+    let version = glab_version_line().await;
+    crate::attachments::attach_gate_verdict(
+        crate::attachments::AttachForge::GitLab,
+        None,
+        version.as_deref(),
+        as_bot,
+    )?;
+    crate::attachments::checked_refs(body, refs).await
+}
+
+/// The 413 reason in the upload refusal.
+const UPLOAD_TOO_LARGE: &str = "it is larger than this project allows";
+/// The reason when an upload exited 0 without a usable `url`.
+const UPLOAD_UNREADABLE: &str = "GitLab's reply couldn't be read";
+
+fn upload_refusal(name: &str, reason: &str) -> AppError {
+    AppError::Glab(format!(
+        "Nothing was posted. GitLab didn't accept {name}: {reason}."
+    ))
+}
+
+/// Why a failed upload call was refused: the 413 sentence, else glab's stderr without
+/// its `glab: ` lead or a trailing period.
+fn upload_failure_reason(code: i32, stderr: &str) -> String {
+    if glab_http_status(stderr) == Some(413) {
+        return UPLOAD_TOO_LARGE.to_string();
+    }
+    let reason = stderr.trim();
+    let reason = reason.strip_prefix("glab: ").unwrap_or(reason);
+    let reason = reason.strip_suffix('.').unwrap_or(reason);
+    if reason.is_empty() {
+        format!("glab exited with code {code}")
+    } else {
+        reason.to_string()
+    }
+}
+
+/// A project-relative upload URL that can sit inside `](...)` unchanged and stays
+/// under `/uploads/`. The secret and file name keep GitLab's own shape, which it
+/// sanitizes and has changed, so only escapes, controls and dot segments are refused.
+fn upload_url_ok(url: &str) -> bool {
+    url.strip_prefix("/uploads/").is_some_and(|rest| {
+        !rest.contains(|c: char| {
+            c.is_whitespace() || c.is_control() || matches!(c, '(' | ')' | '\\' | '<' | '>')
+        }) && !rest.split('/').any(|seg| {
+            // A server or browser may decode `%2e` before resolving dot segments.
+            let seg = seg.to_ascii_lowercase().replace("%2e", ".");
+            seg == "." || seg == ".."
+        })
+    })
+}
+
+#[derive(Deserialize)]
+struct UploadReply {
+    url: Option<String>,
+}
+
+/// One upload call's result: the `url` of an exit-0 reply, else the upload refusal.
+fn upload_outcome(name: &str, out: &GlabOutput) -> AppResult<String> {
+    if out.code != 0 {
+        return Err(upload_refusal(
+            name,
+            &upload_failure_reason(out.code, &out.stderr),
+        ));
+    }
+    serde_json::from_str::<UploadReply>(&out.stdout_lossy())
+        .ok()
+        .and_then(|r| r.url)
+        .filter(|url| upload_url_ok(url))
+        .ok_or_else(|| upload_refusal(name, UPLOAD_UNREADABLE))
+}
+
+/// Uploads one staged file to the project `enc` and returns its `/uploads/...` URL.
+async fn glab_upload(
+    repo_path: &str,
+    enc: &str,
+    path: &std::path::Path,
+    name: &str,
+) -> AppResult<String> {
+    let endpoint = format!("projects/{enc}/uploads");
+    let file_arg = format!("file=@{}", path.display());
+    let out = run_glab_raw(
+        Some(repo_path),
+        &["api", "--method", "POST", &endpoint, "--form", &file_arg],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| upload_refusal(name, &e.to_string()))?;
+    upload_outcome(name, &out)
+}
+
+/// Replaces every `](NAME)` with `](URL)`, the reference rule the checks used.
+pub(crate) fn rewrite_body(body: &str, uploaded: &[(String, String)]) -> String {
+    use crate::attachments::reference_token;
+    uploaded.iter().fold(body.to_string(), |text, (name, url)| {
+        text.replace(&reference_token(name), &reference_token(url))
+    })
+}
+
+/// Uploads every staged file in order to the project `enc`, then returns `body` with
+/// each reference pointing at its upload. Any failure stops before anything is posted.
+async fn upload_and_rewrite(
+    repo_path: &str,
+    enc: &str,
+    body: &str,
+    staged: &crate::attachments::StagedRefs,
+) -> AppResult<String> {
+    let mut uploaded = Vec::with_capacity(staged.names.len());
+    for name in &staged.names {
+        let path = staged.dir.join(name);
+        if !path.is_file() {
+            return Err(crate::attachments::no_longer_attached(name));
+        }
+        let url = glab_upload(repo_path, enc, &path, name).await?;
+        uploaded.push((name.clone(), url));
+    }
+    Ok(rewrite_body(body, &uploaded))
+}
+
+/// Posts a note whose body references staged images: uploads them to this project,
+/// rewrites the references, then POSTs `projects/<enc>/<endpoint_tail>`. An Err keeps
+/// every staged file; the Ok path has deleted them all.
+pub async fn post_note_with_images(
+    repo_path: &str,
+    endpoint_tail: &str,
+    body: &str,
+    staged: &crate::attachments::StagedRefs,
+) -> AppResult<crate::attachments::CommentOutcome> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    let body = upload_and_rewrite(repo_path, &enc, body, staged).await?;
+    let endpoint = format!("projects/{enc}/{endpoint_tail}");
+    let body_arg = format!("body={body}");
+    run_glab(
+        Some(repo_path),
+        &["api", "--method", "POST", &endpoint, "-f", &body_arg],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    crate::attachments::release_posted(staged, &[]).await;
+    Ok(crate::attachments::CommentOutcome::default())
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    fn out(code: i32, stdout: &str, stderr: &str) -> GlabOutput {
+        GlabOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        }
+    }
+
+    fn glab_msg(r: AppResult<String>) -> String {
+        match r {
+            Err(AppError::Glab(m)) => m,
+            other => panic!("expected AppError::Glab, got {other:?}"),
+        }
+    }
+
+    // T-GL1
+    #[test]
+    fn rewrite_body_replaces_every_reference() {
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(n, u)| (n.to_string(), u.to_string()))
+                .collect()
+        };
+        let body = "![a](image-1.png) text ![b](image-11.png) again [link](image-1.png)";
+        assert_eq!(
+            rewrite_body(
+                body,
+                &pairs(&[
+                    ("image-1.png", "/uploads/aa/image-1.png"),
+                    ("image-11.png", "/uploads/bb/image-11.png"),
+                ])
+            ),
+            "![a](/uploads/aa/image-1.png) text ![b](/uploads/bb/image-11.png) again [link](/uploads/aa/image-1.png)"
+        );
+        // A prefix name never rewrites the longer one, in either order.
+        assert_eq!(
+            rewrite_body(
+                "![x](image-11.png)",
+                &pairs(&[("image-1.png", "/uploads/aa/image-1.png")])
+            ),
+            "![x](image-11.png)"
+        );
+        assert_eq!(
+            rewrite_body(
+                "![x](image-1.png) ![y](image-11.png)",
+                &pairs(&[
+                    ("image-11.png", "/uploads/bb/image-11.png"),
+                    ("image-1.png", "/uploads/aa/image-1.png"),
+                ])
+            ),
+            "![x](/uploads/aa/image-1.png) ![y](/uploads/bb/image-11.png)"
+        );
+        assert_eq!(rewrite_body("no refs", &[]), "no refs");
+    }
+
+    #[test]
+    fn upload_reply_needs_a_project_upload_url() {
+        let ok = r#"{"id":1,"alt":"image-1","url":"/uploads/0123abcd/image-1.png","full_path":"/-/project/1/uploads/0123abcd/image-1.png","markdown":"![image-1](/uploads/0123abcd/image-1.png)"}"#;
+        assert_eq!(
+            upload_outcome("image-1.png", &out(0, ok, "")).unwrap(),
+            "/uploads/0123abcd/image-1.png"
+        );
+        for url in [
+            "/uploads/0123456789abcdef0123456789abcdef/image-1.png",
+            "/uploads/ab/a.b-c_d.webp",
+            "/uploads/ab/..png",
+            "/uploads/abc/a%20b.png",
+        ] {
+            assert!(upload_url_ok(url), "{url}");
+        }
+        let unreadable =
+            "Nothing was posted. GitLab didn't accept image-1.png: GitLab's reply couldn't be read.";
+        for reply in [
+            "<html>Created</html>",
+            "{}",
+            r#"{"url":null}"#,
+            r#"{"url":"https://evil.example/x.png"}"#,
+            r#"{"url":"/uploads/a b.png"}"#,
+            r#"{"url":"/uploads/a).png"}"#,
+            r#"{"url":"/uploads/a(.png"}"#,
+            r#"{"url":"uploads/x.png"}"#,
+            r#"{"url":"/uploads/abc\\"}"#,
+            r#"{"url":"/uploads/a\\b/x.png"}"#,
+            r#"{"url":"/uploads/a<b/x.png"}"#,
+            r#"{"url":"/uploads/ab/x>.png"}"#,
+            r#"{"url":"/uploads/ab/x\u0000.png"}"#,
+            r#"{"url":"/uploads/ab/x\u001b.png"}"#,
+            r#"{"url":"/uploads/ab/x\u007f.png"}"#,
+            r#"{"url":"/uploads/../../-/x"}"#,
+            r#"{"url":"/uploads/ab/../x.png"}"#,
+            r#"{"url":"/uploads/./x.png"}"#,
+            r#"{"url":"/uploads/ab/.."}"#,
+            r#"{"url":"/uploads/%2e%2e/%2e%2e/x"}"#,
+            r#"{"url":"/uploads/.%2E/x"}"#,
+            r#"{"url":"/uploads/%2E/x"}"#,
+        ] {
+            assert_eq!(
+                glab_msg(upload_outcome("image-1.png", &out(0, reply, ""))),
+                unreadable,
+                "{reply}"
+            );
+        }
+    }
+
+    #[test]
+    fn upload_refusals_name_the_file_and_reason() {
+        let refused = |stderr: &str| glab_msg(upload_outcome("image-1.png", &out(1, "", stderr)));
+        let too_large =
+            "Nothing was posted. GitLab didn't accept image-1.png: it is larger than this project allows.";
+        assert_eq!(
+            refused("glab: Request Entity Too Large (HTTP 413)"),
+            too_large
+        );
+        assert_eq!(refused("glab: HTTP 413\n"), too_large);
+        assert_eq!(
+            refused("glab: 403 Forbidden (HTTP 403)"),
+            "Nothing was posted. GitLab didn't accept image-1.png: 403 Forbidden (HTTP 403)."
+        );
+        assert_eq!(
+            refused("  glab: something broke.\n"),
+            "Nothing was posted. GitLab didn't accept image-1.png: something broke."
+        );
+        assert_eq!(
+            refused(""),
+            "Nothing was posted. GitLab didn't accept image-1.png: glab exited with code 1."
+        );
+        assert!(matches!(
+            upload_refusal("image-2.png", &AppError::GlabNotFound.to_string()),
+            AppError::Glab(ref m)
+                if m == "Nothing was posted. GitLab didn't accept image-2.png: GitLab CLI (glab) not found."
+        ));
+    }
+}
+
 /// Post a comment (note) on a merge request. When `as_bot` is set and a review-bot
 /// token is stored for this repo's GitLab host, the POST runs with the bot
 /// `GITLAB_TOKEN` in the env (which overrides glab's configured auth); with no token
@@ -7374,6 +7676,7 @@ pub async fn create_mr(
     draft: bool,
     labels: &[String],
     assignees: &[String],
+    attachments: Option<crate::attachments::AttachmentRefs>,
 ) -> AppResult<PrRef> {
     for b in [base, head] {
         // The shared ref validator (empty / leading `-` / refspec metacharacters);
@@ -7385,6 +7688,7 @@ pub async fn create_mr(
     if title.is_empty() {
         return Err(AppError::InvalidArgument("an MR title is required".into()));
     }
+    let staged = glab_attach_checks(body, attachments, false).await?;
 
     // Resolve assignee usernames→ids up front (before the push), so a resolution
     // miss aborts cleanly rather than leaving a branch pushed with no MR opened.
@@ -7392,6 +7696,14 @@ pub async fn create_mr(
         Vec::new()
     } else {
         resolve_assignee_ids(repo_path, assignees).await?
+    };
+    // Uploads also run before the push, into the project the MR is created in.
+    let body = match &staged {
+        Some(s) => {
+            let enc = encode_project(&project_path(repo_path).await?);
+            upload_and_rewrite(repo_path, &enc, body, s).await?
+        }
+        None => body.to_string(),
     };
 
     // An MR needs the branch on the remote first.
@@ -7474,6 +7786,9 @@ pub async fn create_mr(
                 format!("could not parse the created merge request: {e}"),
             )
         })?;
+    if let Some(s) = &staged {
+        crate::attachments::release_posted(s, &[]).await;
+    }
     Ok(PrRef {
         number: created.iid,
         url: created.web_url,

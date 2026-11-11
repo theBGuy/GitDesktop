@@ -122,6 +122,12 @@ const NETWORKED_ALWAYS = [
       "the About screen's diagnostics are most wanted offline; a failed auth check maps to a status",
   },
   {
+    file: "src/lib/attachments/use-attachment-support.ts",
+    queryKey: '["system-health"]',
+    reason:
+      "a pending or failed probe leaves the attach gate open, and Rust refuses the post with the same sentence",
+  },
+  {
     file: "src/lib/git/queries/accounts.ts",
     queryKey: '["gh-accounts"]',
     reason:

@@ -33,6 +33,9 @@ export interface LightboxImage {
   /** Natural dimensions when the host already knows them. */
   naturalWidth?: number;
   naturalHeight?: number;
+  /** The web page Open in browser opens, for an image whose `src` isn't one
+   *  (a data: URL loaded from the web); omitted, an http(s) `src` is used. */
+  webUrl?: string;
 }
 
 type ZoomMode = "fit" | "actual";
@@ -140,7 +143,7 @@ export function ImageLightbox({
   const height = image.naturalHeight ?? loaded?.h;
   const caption =
     image.label || image.alt || fileNameFromSrc(image.src) || "Image";
-  const webUrl = HTTP_SRC.test(image.src) ? image.src : null;
+  const webUrl = image.webUrl ?? (HTTP_SRC.test(image.src) ? image.src : null);
   const hasNav = images.length > 1;
 
   async function openInBrowser() {

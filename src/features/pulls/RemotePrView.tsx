@@ -39,6 +39,7 @@ import { SelectControl } from "@/components/form/fields";
 import { HeldFrame, heldParentProps } from "@/components/held-frame";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import type { MarkdownEditorHandle } from "@/components/markdown-editor";
 import {
   MetaFieldLabel,
@@ -96,6 +97,27 @@ import {
   filterDiffByAiIgnore,
   unreadableNameCount,
 } from "@/lib/ai/ignore";
+import {
+  failCommentPost,
+  landCommentPost,
+  REQUEST_CHANGES_IMAGES_REASON,
+  referencesStaged,
+  withFailedReferences,
+} from "@/lib/attachments/comment-post";
+import {
+  failedAttachmentsOf,
+  uploadingReason,
+} from "@/lib/attachments/references";
+import {
+  beginAttachmentPost,
+  draftKeyFor,
+  endDraftAttachments,
+} from "@/lib/attachments/store";
+import { useAttachmentSupport } from "@/lib/attachments/use-attachment-support";
+import {
+  useAttachmentOwner,
+  useDraftAttachments,
+} from "@/lib/attachments/use-draft-attachments";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { prOpenEligible } from "@/lib/automations/sync";
 import {
@@ -2009,6 +2031,25 @@ export function RemotePrView({
 
   // Keyed on the PR on screen, so a hold keeps showing the held PR's draft.
   const compose = useKeyedEntityState(hold.shownKey, "");
+  const attachOwner = useAttachmentOwner("pr-comment", true);
+  const attachGate = useAttachmentSupport({
+    forge: forge.data,
+    access: writeAccess.data,
+    enabled: canComment,
+  });
+  // The composer lays its own hold over this one; the draft key carries the
+  // shown PR, so a late stage appends to the draft it started for.
+  const attachments = useDraftAttachments({
+    draftKey: draftKeyFor("pr-comment", hold.shownKey),
+    owner: attachOwner,
+    gateReason: attachGate,
+    holdReason: null,
+    writeDraft: (key, update) =>
+      compose.setFor(key.slice(key.indexOf("|") + 1), update),
+  });
+  // Request changes posts the draft through a command that carries no images.
+  const requestHeldForImages = (requested: boolean) =>
+    !requested && referencesStaged(compose.value, attachments.images);
   const { archived, latchIfArchived } = useArchivedLatch(entityKey);
   // Read off the rendered PR's own details only: a placeholder is another PR's.
   // The provider only picks the hold's copy, so it names the shown one.
@@ -2203,6 +2244,7 @@ export function RemotePrView({
     // (its title says how to clear); a re-click must not fire the Premium-only
     // undo path. Bitbucket falls through to the revoke below.
     if (requested && !canUnrequestChanges) return;
+    if (requestHeldForImages(requested)) return;
     // Same as toggleApproval: mirror usePrApprovals' literal "origin" lens segment.
     const key = [
       "repo",
@@ -2240,6 +2282,7 @@ export function RemotePrView({
       });
       toast.success("Requested changes");
       compose.clearFor(submittedFor);
+      endDraftAttachments(draftKeyFor("pr-comment", submittedFor));
     } catch (e) {
       if (prev) queryClient.setQueryData(key, prev);
       onError(e);
@@ -2253,15 +2296,31 @@ export function RemotePrView({
     // synthetic comment optimistically; on error restore the draft, but only if
     // that PR's composer is still empty so we never clobber newly-typed text.
     const submittedFor = entityKey;
+    const draftKey = draftKeyFor("pr-comment", submittedFor);
+    const ticket = beginAttachmentPost(
+      draftKey,
+      body,
+      hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost) !== undefined,
+    );
     compose.set("");
     try {
-      await comment.mutateAsync({
+      const outcome = await comment.mutateAsync({
         number,
         body,
         author: forge.data?.login ?? "You",
+        attachments: ticket?.refs,
+        postToken: ticket?.token,
       });
-      toast.success("Comment added");
+      // A partial post says so in the strip above the editor instead.
+      if (failedAttachmentsOf(outcome).length === 0)
+        toast.success("Comment added");
+      const failed = landCommentPost(draftKey, ticket, body, outcome);
+      if (failed !== null)
+        compose.setFor(submittedFor, (prev) =>
+          withFailedReferences(prev, failed),
+        );
     } catch (e) {
+      failCommentPost(ticket);
       compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
       latchIfArchived(submittedFor, e);
       onError(e);
@@ -2281,16 +2340,27 @@ export function RemotePrView({
     if (!draftRidesStateChange) return true;
     const body = compose.value.trim();
     const submittedFor = entityKey;
+    const draftKey = draftKeyFor("pr-comment", submittedFor);
+    const ticket = beginAttachmentPost(
+      draftKey,
+      body,
+      hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost) !== undefined,
+    );
     try {
-      await comment.mutateAsync({
+      const outcome = await comment.mutateAsync({
         number,
         body,
         author: forge.data?.login ?? "You",
+        attachments: ticket?.refs,
+        postToken: ticket?.token,
       });
-      // Only a landed comment clears the draft.
-      compose.clearFor(submittedFor);
+      // Only a landed comment clears the draft; images it posted without stay.
+      const failed = landCommentPost(draftKey, ticket, body, outcome);
+      if (failed !== null) compose.setFor(submittedFor, () => failed);
+      else compose.clearFor(submittedFor);
       return true;
     } catch (e) {
+      failCommentPost(ticket);
       latchIfArchived(submittedFor, e);
       onError(e);
       return false;
@@ -2690,7 +2760,9 @@ export function RemotePrView({
       case commentPending:
         return pendingWriteReason(
           writePaused("comment"),
-          COMMENT_POST_PENDING_REASON,
+          attachments.posting > 0
+            ? uploadingReason(attachments.posting, "posting")
+            : COMMENT_POST_PENDING_REASON,
         );
       case mergePending:
         return pendingWriteReason(
@@ -4189,11 +4261,14 @@ export function RemotePrView({
                 author: forge.data?.login ?? "You",
                 asBot: opts?.asBot,
               })
-              .catch((e) => {
-                latchIfArchived(postedFor, e);
-                onError(e);
-                throw e; // let the panel skip its success toast / text clear
-              });
+              .then(
+                () => undefined,
+                (e) => {
+                  latchIfArchived(postedFor, e);
+                  onError(e);
+                  throw e; // let the panel skip its success toast / text clear
+                },
+              );
           }}
         />
       )}
@@ -4212,7 +4287,15 @@ export function RemotePrView({
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     {pr.body.trim() ? (
-                      <Markdown refs={mentions.refs}>{pr.body}</Markdown>
+                      <Markdown
+                        refs={mentions.refs}
+                        hostedImages={hostedImagesFor(
+                          mentions.refs?.repoPath,
+                          mentions.ghHost,
+                        )}
+                      >
+                        {pr.body}
+                      </Markdown>
                     ) : (
                       <p className="text-xs text-muted-foreground">
                         No description provided.
@@ -4484,7 +4567,11 @@ export function RemotePrView({
               value={compose.value}
               onChange={compose.set}
               onSubmit={submitComment}
-              onClear={() => compose.set("")}
+              onClear={() => {
+                compose.set("");
+                endDraftAttachments(attachments.draftKey);
+              }}
+              attachments={attachments}
               submitLabel="Comment"
               ariaLabel="Leave a comment"
               placeholder="Leave a comment…"
@@ -4597,7 +4684,12 @@ export function RemotePrView({
                       // rather than lost. Every term of `disabled` gets words this
                       // way, `busy`'s via `composerReason`.
                       disabled={
-                        busy || approvals.isPending || approvals.isError
+                        busy ||
+                        approvals.isPending ||
+                        approvals.isError ||
+                        requestHeldForImages(
+                          approval?.viewerRequestedChanges ?? false,
+                        )
                       }
                       reason={(() => {
                         switch (true) {
@@ -4607,6 +4699,10 @@ export function RemotePrView({
                             return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
                           case approvals.isPending:
                             return "Checking review state…";
+                          case requestHeldForImages(
+                            approval?.viewerRequestedChanges ?? false,
+                          ):
+                            return REQUEST_CHANGES_IMAGES_REASON;
                           default:
                             return undefined;
                         }

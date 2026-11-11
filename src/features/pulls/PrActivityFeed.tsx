@@ -484,7 +484,13 @@ export function PrActivityFeed({
         <div key={`comment-${c.id}`} data-comment-id={c.id}>
           <Thread
             thread={c}
-            onQuote={onQuote && canWrite ? () => onQuote(c.body) : undefined}
+            // A just-posted row is not quoted: its staged names are re-issued
+            // to this same draft, so a quote could bind to a later paste.
+            onQuote={
+              onQuote && canWrite && c.postToken === undefined
+                ? () => onQuote(c.body)
+                : undefined
+            }
             onSaveEdit={
               onEditComment && canEditOwnComments && c.viewerDidAuthor
                 ? (body) => onEditComment(c.id, body)
