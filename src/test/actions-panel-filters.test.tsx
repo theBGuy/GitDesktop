@@ -314,12 +314,16 @@ describe("facets reach the run read", () => {
       expect(funnel()).not.toHaveAttribute("aria-disabled", "true"),
     );
     await openFilters(user);
-    const failed = () => screen.getByRole("option", { name: "Failed" });
-    await screen.findByRole("option", { name: "Failed" });
+    const row = await screen.findByRole("option", { name: "Failed" });
     // The Event group comes first; step down to the Status row.
-    for (let i = 0; i < 100 && !failed().hasAttribute("data-highlighted"); i++)
-      await user.keyboard("{ArrowDown}");
-    const row = failed();
+    const steps =
+      [
+        ...screen.getByRole("listbox").querySelectorAll('[role="option"]'),
+      ].indexOf(row) + 1;
+    expect(steps).toBeGreaterThan(0);
+    // One call: each separate user-event call adds its own trailing wait and
+    // async-wrapper drain.
+    await user.keyboard("{ArrowDown}".repeat(steps));
     expect(row).toHaveAttribute("data-highlighted");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(lastFilters()).toEqual({ status: "failure" }));
@@ -411,7 +415,8 @@ describe("chips", () => {
     );
     const long = `feature/${"x".repeat(72)}`;
     await openFilters(user);
-    await user.type(filterInput(), long);
+    await user.click(filterInput());
+    await user.paste(long);
     await user.click(
       await screen.findByRole("option", { name: `Filter by branch "${long}"` }),
     );
