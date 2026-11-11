@@ -200,6 +200,8 @@ async fn fetch_pr_tip(
         FetchFrom::BitbucketUrl(url) => (url.as_str(), None),
     };
     let domain = state.network_lock(repo_path).await;
+    #[cfg(test)]
+    let _ = super::remote::NETWORK_LOCK_WAIT_HOOK.try_with(|hook| hook());
     let _hold =
         acquire_repo_lock(&domain, NETWORK_LOCK_WAIT_TIMEOUT, holder_label("fetch")).await?;
     // Narrowing only, deliberately not the admin lock (a long removal would hold every
@@ -1655,9 +1657,8 @@ mod tests {
     }
 
     /// The worktree flavor from an open checkout unlinked while its fetch waits on the
-    /// network lock: refused before the fetch, so no pin or remote-tracking ref lands and
-    /// no worktree is added. No file signal precedes that lock, so the 1.5 s margin alone
-    /// covers the checkout reaching it (its entry steps are a single git read).
+    /// network lock is refused before the fetch: no pin, tracking ref or worktree. The test
+    /// holds the network domain from the start and unlinks when the lock-wait hook fires.
     #[tokio::test]
     async fn an_unlinked_open_checkout_is_refused_before_the_fetch() {
         let fx = forge_fixture("lk-fetch").await;
@@ -1674,18 +1675,36 @@ mod tests {
         let state = AppState::default();
         let src = gl("feat", false, None);
         let mode = force_mode(false, None).unwrap();
-        let (got, ()) = tokio::join!(
-            worktree_checkout_core(&state, &open, 7, "GitLab", &src, &[], &target, mode),
-            async {
-                let domain = state.network_lock(&fx.clone).await;
-                let _hold = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test fetch")
-                    .await
-                    .unwrap();
-                after_signal(|| true, async {
-                    std::fs::remove_file(std::path::Path::new(&open).join(".git")).unwrap();
-                })
-                .await;
+        let domain = state.network_lock(&fx.clone).await;
+        let held = acquire_repo_lock(&domain, std::time::Duration::ZERO, "a test fetch")
+            .await
+            .expect("the network domain is free");
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+        let queued_tx = std::sync::Mutex::new(Some(queued_tx));
+        let queued: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+            if let Some(tx) = queued_tx.lock().unwrap().take() {
+                let _ = tx.send(());
             }
+        });
+        let link = std::path::Path::new(&open).join(".git");
+        let (got, fired) = tokio::join!(
+            crate::git::remote::NETWORK_LOCK_WAIT_HOOK.scope(
+                queued,
+                worktree_checkout_core(&state, &open, 7, "GitLab", &src, &[], &target, mode),
+            ),
+            // A checkout that ends before the lock drops the sender; the hold still frees.
+            async move {
+                let fired = queued_rx.await.is_ok();
+                if fired {
+                    std::fs::remove_file(&link).unwrap();
+                }
+                drop(held);
+                fired
+            }
+        );
+        assert!(
+            fired,
+            "the checkout never reached the network lock: {got:?}"
         );
         let err = got.unwrap_err();
         assert!(
