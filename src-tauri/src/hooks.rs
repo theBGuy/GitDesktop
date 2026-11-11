@@ -354,7 +354,8 @@ const KEEP_LOCAL_HOOK_MARKER: &str = "# gitdesktop:keep-local-pre-push";
 
 /// The managed pre-push hook: plain POSIX sh, LF endings, ASCII. An inline literal,
 /// since a checked-out file would gain CRLF on Windows. It reads Keep local with the
-/// same `git config --type=bool --get` as `branch_keep_local`, so the two agree.
+/// same `git config --type=bool --get` as `branch_keep_local`, so the two agree. Exit
+/// codes are captured with `|| gd_rc=$?`, so a host hook under `set -e` keeps running.
 const KEEP_LOCAL_HOOK_SCRIPT: &str = concat!(
     "#!/bin/sh\n",
     "# gitdesktop:keep-local-pre-push\n",
@@ -365,8 +366,9 @@ const KEEP_LOCAL_HOOK_SCRIPT: &str = concat!(
     "  case \"$gd_local\" in\n",
     "    refs/heads/*) gd_branch=${gd_local#refs/heads/} ;;\n",
     "    HEAD)\n",
-    "      gd_branch=$(git symbolic-ref -q HEAD)\n",
-    "      case $? in\n",
+    "      gd_rc=0\n",
+    "      gd_branch=$(git symbolic-ref -q HEAD) || gd_rc=$?\n",
+    "      case $gd_rc in\n",
     "        0) ;;\n",
     "        1) continue ;;\n",
     "        *)\n",
@@ -380,8 +382,9 @@ const KEEP_LOCAL_HOOK_SCRIPT: &str = concat!(
     "      esac ;;\n",
     "    *) continue ;;\n",
     "  esac\n",
-    "  gd_flag=$(git config --type=bool --get \"branch.$gd_branch.gitdesktopLocalOnly\" 2>/dev/null)\n",
-    "  case \"$?:$gd_flag\" in\n",
+    "  gd_rc=0\n",
+    "  gd_flag=$(git config --type=bool --get \"branch.$gd_branch.gitdesktopLocalOnly\" 2>/dev/null) || gd_rc=$?\n",
+    "  case \"$gd_rc:$gd_flag\" in\n",
     "    0:true)\n",
     "      printf 'GitDesktop: \"%s\" is marked Keep local, so this push was stopped. Turn off Keep local in GitDesktop, or bypass once with: git push --no-verify\\n' \"$gd_branch\" >&2\n",
     "      gd_blocked=1 ;;\n",
@@ -920,7 +923,12 @@ mod tests {
         assert!(script.ends_with("[ \"$gd_blocked\" = 0 ] || exit 1\n"));
         assert!(script.lines().any(|l| l == KEEP_LOCAL_HOOK_MARKER));
         // Only a detached HEAD (exit 1) passes; any other symbolic-ref failure stops.
-        assert!(script.contains("gd_branch=$(git symbolic-ref -q HEAD)\n      case $? in\n"));
+        let head_read = "gd_branch=$(git symbolic-ref -q HEAD) || gd_rc=$?\n      case $gd_rc in\n";
+        assert!(script.contains(head_read));
+        // Every command substitution captures its status errexit-safely.
+        for line in script.lines().filter(|l| l.contains("=$(")) {
+            assert!(line.ends_with(" || gd_rc=$?"), "{line}");
+        }
         assert!(script.contains("        1) continue ;;\n"));
         assert!(script.contains("could not read which branch HEAD is on"));
         // The hook reads the same key the Rust guard and setter use.
@@ -1663,5 +1671,89 @@ mod tests {
         // --no-verify skips the hook.
         push_ok(&["push", "--no-verify", "origin", "HEAD"]).await;
         assert_eq!(remote_tip(&remote, "feat/x").await, Some(c3));
+    }
+
+    /// Writes `body` as the repository's own pre-push hook, executable.
+    fn write_pre_push(repo: &str, body: &str) {
+        let file = managed_file(repo, "pre-push");
+        std::fs::write(&file, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// The managed script run with errexit on (git runs the hook through its own sh)
+    /// passes an unmarked branch and stops a marked one.
+    #[tokio::test]
+    async fn keep_local_hook_script_runs_under_errexit() {
+        let (_g, _base, repo, remote) = hook_repo("errexit").await;
+        let body = KEEP_LOCAL_HOOK_SCRIPT.strip_prefix("#!/bin/sh\n").unwrap();
+        write_pre_push(&repo, &format!("#!/bin/sh\nset -e\n{body}"));
+        git_ok(&repo, &["checkout", "-q", "-b", "feat/x"]).await;
+        let tip = commit(&repo, "unmarked").await;
+        let out = git(&repo, &["push", "origin", "HEAD"]).await;
+        assert_eq!(out.code, 0, "unmarked: {}", out.full_failure_text());
+        assert_eq!(remote_tip(&remote, "feat/x").await, Some(tip.clone()));
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", true)
+            .await
+            .unwrap();
+        commit(&repo, "marked").await;
+        let marked = "is marked Keep local";
+        assert_stopped(&repo, &["push", "origin", "HEAD"], "feat/x", marked).await;
+        assert_eq!(remote_tip(&remote, "feat/x").await, Some(tip));
+    }
+
+    /// The snippet pasted into a host hook under `flags`: an unmarked branch (a quoted
+    /// name included) and a detached HEAD pushing `HEAD` let the host hook run on to its
+    /// last line; a marked branch stops it there.
+    async fn assert_host_hook_continues(flags: &str, tag: &str) {
+        const SENTINEL: &str = "host hook reached its last line";
+        let (_g, _base, repo, remote) = hook_repo(tag).await;
+        let snippet = keep_local_hook_snippet();
+        let host = format!("#!/bin/sh\nset {flags}\n{snippet}echo '{SENTINEL}' >&2\n");
+        assert!(host.is_ascii() && !host.contains('\r'));
+        write_pre_push(&repo, &host);
+        // A `"` would be a valid ref name, but no Windows file name can carry one.
+        for branch in ["feat/x", "it's"] {
+            let row = format!("set {flags}, {branch}");
+            git_ok(&repo, &["checkout", "-q", "-b", branch]).await;
+            let tip = commit(&repo, &format!("{branch} unmarked")).await;
+            let out = git(&repo, &["push", "origin", "HEAD"]).await;
+            assert_eq!(out.code, 0, "{row}: {}", out.full_failure_text());
+            assert!(out.stderr.contains(SENTINEL), "{row}: {}", out.stderr);
+            let landed = remote_tip(&remote, branch).await;
+            assert_eq!(landed, Some(tip.clone()), "{row}");
+            let key = crate::git::branches::keep_local_key(branch);
+            git_ok(&repo, &["config", &key, "true"]).await;
+            commit(&repo, &format!("{branch} marked")).await;
+            let out = git(&repo, &["push", "origin", "HEAD"]).await;
+            assert_ne!(out.code, 0, "{row}: marked");
+            assert!(
+                out.stderr
+                    .contains(&format!("\"{branch}\" is marked Keep local"))
+                    && !out.stderr.contains(SENTINEL),
+                "{row}: {}",
+                out.stderr
+            );
+            assert_eq!(remote_tip(&remote, branch).await, Some(tip), "{row}");
+        }
+        git_ok(&repo, &["checkout", "-q", "--detach"]).await;
+        let out = git(&repo, &["push", "origin", "HEAD:refs/heads/d"]).await;
+        assert_eq!(out.code, 0, "detached: {}", out.full_failure_text());
+        assert!(out.stderr.contains(SENTINEL), "set {flags}: {}", out.stderr);
+        let head = git_ok(&repo, &["rev-parse", "HEAD"]).await;
+        assert_eq!(remote_tip(&remote, "d").await, Some(head));
+    }
+
+    #[tokio::test]
+    async fn keep_local_hook_snippet_keeps_a_set_e_host_hook_running() {
+        assert_host_hook_continues("-e", "host-e").await;
+    }
+
+    #[tokio::test]
+    async fn keep_local_hook_snippet_keeps_a_set_eu_host_hook_running() {
+        assert_host_hook_continues("-eu", "host-eu").await;
     }
 }

@@ -46,7 +46,7 @@ export const KEPT_LOCAL_PULL_REASON: Record<
   (branch: string, upstream: string) => string
 > = {
   untracked: (branch) =>
-    `Pull — ${branch} is kept local, so it has no remote branch to pull from`,
+    `Pull — ${branch} is kept local and has no upstream branch to pull from`,
   gone: (branch, upstream) =>
     `Pull — ${branch} is kept local and its upstream ${upstream} was deleted on the remote, so there is nothing to pull`,
 };
@@ -605,9 +605,10 @@ export function deriveSyncControls(input: SyncControlsInput) {
         hasUpstream &&
         !diverged &&
         !offlineHold,
-      // A kept-local HEAD keeps the key live so the press reaches its toast.
+      // A kept-local HEAD keeps the key live so the press reaches its toast,
+      // except with no origin, where the bar shows only Publish repository.
       push:
-        pushKeptLocalReason !== undefined ||
+        (pushKeptLocalReason !== undefined && !noOrigin) ||
         (statusKnown &&
           hasOrigin &&
           !busy &&

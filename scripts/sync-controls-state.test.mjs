@@ -955,6 +955,32 @@ test("Keep local outranks busy, offline and an unknown remotes read", () => {
   }
 });
 
+// With no origin the bar shows only Publish repository, so a toast naming the
+// branch menu's Keep local would point at a control that isn't there.
+test("Keep local's live push key needs an origin", () => {
+  const rows = [
+    ["tracked", head({ ahead: 1 })],
+    ["untracked", head({ upstream: null })],
+  ];
+  for (const [what, h] of rows) {
+    const bare = deriveSyncControls(
+      input({ head: h, keptLocal: true, remotes: [] }),
+    );
+    assert.equal(bare.hotkeys.push, false, `no remotes, ${what}`);
+    const other = deriveSyncControls(
+      input({ head: h, keptLocal: true, remotes: ["upstream"] }),
+    );
+    assert.equal(other.hotkeys.push, false, `no origin, ${what}`);
+    const withOrigin = deriveSyncControls(input({ head: h, keptLocal: true }));
+    assert.equal(withOrigin.hotkeys.push, true, `origin, ${what}`);
+    // Unmarked, the key reads exactly as before.
+    const plain = deriveSyncControls(input({ head: h, remotes: [] }));
+    assert.equal(plain.hotkeys.push, false, `unmarked no origin, ${what}`);
+    const plainOrigin = deriveSyncControls(input({ head: h }));
+    assert.equal(plainOrigin.hotkeys.push, true, `unmarked origin, ${what}`);
+  }
+});
+
 test("Keep local holds both mismatch items and names no mismatch remedy", () => {
   const rows = [
     ["ahead", renamed({ ahead: 2 })],

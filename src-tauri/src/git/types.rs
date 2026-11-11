@@ -134,8 +134,8 @@ pub struct Branch {
     /// never the short `upstream` string (remote names may contain `/`).
     pub upstream_remote_ref: Option<String>,
     /// Marked Keep local (the `keep_local_key` config key): true for any value git
-    /// does not read as false, a junk one included, so the list never shows unmarked a
-    /// branch the push guard refuses (the last entry wins).
+    /// does not read as false, a junk one included; the last entry wins. One exception:
+    /// a junk entry before a final false lists unmarked while the push guard refuses.
     pub keep_local: bool,
     /// The live upstream on a named remote is that remote's default branch: its
     /// `refs/remotes/<remote>/HEAD` symref targets `%(upstream)`. False whenever that is

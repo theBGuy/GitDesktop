@@ -92,6 +92,21 @@ pub(crate) async fn run_git_with_creds_once(
     sub: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
+    run_git_with_creds_rechecked(repo_path, cred, sub, timeout, None).await
+}
+
+/// [`run_git_with_creds_once`], running `recheck` right before each of its spawns, the
+/// ambient retry included: that retry is a second push of the same argv.
+async fn run_git_with_creds_rechecked(
+    repo_path: &str,
+    cred: &[String],
+    sub: &[&str],
+    timeout: Duration,
+    recheck: Option<SpawnRecheck<'_>>,
+) -> AppResult<GitOutput> {
+    if let Some(recheck) = recheck {
+        recheck.run(repo_path).await?;
+    }
     let args = with_credentials(cred, sub);
     let out = run_git_raw(
         Some(repo_path),
@@ -102,6 +117,9 @@ pub(crate) async fn run_git_with_creds_once(
 
     // Injected credentials present but rejected → one-shot ambient retry.
     if !cred.is_empty() && out.code != 0 && is_auth_class_failure(&out.stderr) {
+        if let Some(recheck) = recheck {
+            recheck.run(repo_path).await?;
+        }
         return run_git_raw(Some(repo_path), sub, timeout).await;
     }
     Ok(out)
@@ -131,18 +149,16 @@ pub(crate) async fn run_git_mutating_with_creds(
     run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, None).await
 }
 
-/// [`run_git_mutating_with_creds`], re-running [`refuse_head_push`] on `recheck`'s route
-/// right before each spawn: an argv that resolves HEAD at spawn (an argv naming no
-/// branch: a bare or forced push, or a publish to `HEAD`) would otherwise publish a
-/// branch checked out during the credential and lock waits. A checkout between that
-/// read and git's own is out of reach.
+/// [`run_git_mutating_with_creds`], running `recheck` right before each spawn, so a
+/// checkout or a Keep local mark made during the credential and lock waits is refused.
+/// A change between that read and git's own is out of reach.
 async fn run_git_mutating_with_creds_checked(
     state: &AppState,
     repo_path: &str,
     cred: &[String],
     sub: &[&str],
     timeout: Duration,
-    recheck: Option<HeadRoute>,
+    recheck: Option<SpawnRecheck<'_>>,
 ) -> AppResult<GitOutput> {
     let tracked = push_upstream_branch(sub);
     let domain = state.network_lock(repo_path).await;
@@ -155,12 +171,7 @@ async fn run_git_mutating_with_creds_checked(
     )
     .await?;
 
-    let spawn = || async move {
-        if let Some(route) = recheck {
-            refuse_head_push(repo_path, route).await?;
-        }
-        run_git_with_creds_once(repo_path, cred, sub, timeout).await
-    };
+    let spawn = || run_git_with_creds_rechecked(repo_path, cred, sub, timeout, recheck);
     // index.lock contention from an external tool (editor, other client) is
     // transient — retry once. Expressed here rather than via `run_git_mutating`
     // because the injection half must stay lock-free.
@@ -1107,6 +1118,24 @@ pub(crate) enum HeadRoute {
     PublishOrigin,
 }
 
+/// What a push re-reads under the network lock before each spawn. `Head` re-runs every
+/// HEAD read; `Named` is an argv pinned to a branch, remote and destination, so it re-runs
+/// only the branch's publishing refusal (the remote's mirror flag is read once, early).
+#[derive(Clone, Copy, Debug)]
+enum SpawnRecheck<'a> {
+    Head(HeadRoute),
+    Named(&'a str),
+}
+
+impl SpawnRecheck<'_> {
+    async fn run(self, repo_path: &str) -> AppResult<()> {
+        match self {
+            SpawnRecheck::Head(route) => refuse_head_push(repo_path, route).await.map(drop),
+            SpawnRecheck::Named(branch) => refuse_publishing_branch(repo_path, branch).await,
+        }
+    }
+}
+
 /// Every pre-spawn read of a HEAD push, run early and again at spawn for an argv that
 /// resolves HEAD there: HEAD's branch (`None` when detached), its publishing refusal,
 /// and one config listing for the mirror refusal on the remote the route pushes to.
@@ -1347,12 +1376,13 @@ async fn git_push_with_policy(
     };
     let cred = crate::forge::credential_config_for_remote(&repo_path, &cred_remote).await?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    // Only an argv naming no branch resolves HEAD at spawn; a pinned publish doesn't.
-    let recheck = match (branch.is_none() && head_branch.is_none(), set_upstream) {
-        (false, _) => None,
-        (true, false) => Some(HeadRoute::Bare),
-        (true, true) => Some(HeadRoute::PublishOrigin),
+    // Only an argv naming no branch resolves HEAD at spawn; a pinned one re-reads its mark.
+    let recheck = match (branch.as_deref().or(head_branch.as_deref()), set_upstream) {
+        (Some(pinned), _) => SpawnRecheck::Named(pinned),
+        (None, false) => SpawnRecheck::Head(HeadRoute::Bare),
+        (None, true) => SpawnRecheck::Head(HeadRoute::PublishOrigin),
     };
+    let recheck = Some(recheck);
     let (repo, timeout) = (repo_path.as_str(), NETWORK_TIMEOUT);
     match run_git_mutating_with_creds_checked(state, repo, &cred, &argv, timeout, recheck).await {
         Ok(_) => Ok(PushGuard::LeaseAndIncludes),
@@ -3482,6 +3512,126 @@ mod tests {
                 "force={force}: the push reached the network lock"
             );
         }
+    }
+
+    /// A push pinned to a branch (named, a named publish, a HEAD publish pinned to its
+    /// branch) re-reads the mark at spawn: a mark set while it waits on the network lock
+    /// refuses and nothing lands; with no mark set, the same push lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_local_pinned_push_rechecks_the_mark_at_spawn() {
+        let (_guard, work, origin) = keep_local_origin("keep-local-pinned").await;
+        let state = AppState::default();
+        let tip = |repo: String| async move {
+            run(&repo, &["rev-parse", "refs/heads/feat/x"])
+                .await
+                .trim()
+                .to_string()
+        };
+        for (row, set_upstream, branch, remote) in [
+            ("named", false, Some("feat/x"), None),
+            ("named publish", true, Some("feat/x"), Some("origin")),
+            ("pinned HEAD publish", true, None, None),
+        ] {
+            run(&work, &["commit", "-q", "--allow-empty", "-m", row]).await;
+            let published = tip(origin.clone()).await;
+            for mark in [true, false] {
+                let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+                    let (fired, work) = (std::sync::Arc::clone(&fired), work.clone());
+                    move || {
+                        fired.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if mark {
+                            let key = crate::git::branches::keep_local_key("feat/x");
+                            let set = std::process::Command::new("git")
+                                .current_dir(&work)
+                                .args(["config", &key, "true"])
+                                .status()
+                                .unwrap();
+                            assert!(set.success(), "the mark is set during the wait");
+                        }
+                    }
+                });
+                let push = git_push_core(
+                    &state,
+                    work.clone(),
+                    set_upstream,
+                    false,
+                    branch.map(str::to_string),
+                    remote.map(str::to_string),
+                    None,
+                );
+                let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+                let row = format!("{row}, mark={mark}");
+                assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{row}");
+                if mark {
+                    assert_kept_local(result, "feat/x", &row);
+                    assert_eq!(tip(origin.clone()).await, published, "{row}");
+                    crate::git::branches::set_branch_keep_local_core(&work, "feat/x", false)
+                        .await
+                        .unwrap();
+                } else {
+                    result.unwrap_or_else(|e| panic!("{row}: the unmarked twin lands: {e:?}"));
+                    assert_eq!(tip(origin.clone()).await, tip(work.clone()).await, "{row}");
+                }
+            }
+        }
+    }
+
+    /// The ambient-credential retry spawns the push again, so it re-reads the mark first:
+    /// a mark set while the injected run is rejected refuses the retry, and nothing
+    /// lands. The rejection is a pre-push hook in the injected config only.
+    #[tokio::test]
+    async fn keep_local_ambient_retry_rechecks_the_mark() {
+        let (_guard, work, origin) = keep_local_origin("keep-local-ambient").await;
+        let hooks = |name: &str, body: &str| {
+            let dir = std::path::Path::new(&work).with_file_name(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("pre-push");
+            std::fs::write(&file, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            vec![format!(
+                "core.hooksPath={}",
+                dir.to_string_lossy().replace('\\', "/")
+            )]
+        };
+        let reject = "echo 'fatal: Authentication failed for origin' >&2\nexit 1\n";
+        let marking = hooks(
+            "reject-and-mark",
+            &format!("#!/bin/sh\ngit config branch.feat/x.gitdesktopLocalOnly true\n{reject}"),
+        );
+        let rejecting = hooks("reject", &format!("#!/bin/sh\n{reject}"));
+        let tip = |repo: String| async move {
+            run(&repo, &["rev-parse", "refs/heads/feat/x"])
+                .await
+                .trim()
+                .to_string()
+        };
+        let published = tip(origin.clone()).await;
+        let argv = ["push", "origin", "feat/x"];
+        let recheck = Some(super::SpawnRecheck::Named("feat/x"));
+        let result =
+            super::run_git_with_creds_rechecked(&work, &marking, &argv, NETWORK_TIMEOUT, recheck)
+                .await;
+        assert_kept_local(
+            result.map(|out| out.code),
+            "feat/x",
+            "marked before the retry",
+        );
+        assert_eq!(tip(origin.clone()).await, published);
+
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", false)
+            .await
+            .unwrap();
+        let out =
+            super::run_git_with_creds_rechecked(&work, &rejecting, &argv, NETWORK_TIMEOUT, recheck)
+                .await
+                .unwrap();
+        assert_eq!(out.code, 0, "ambient retry: {}", out.full_failure_text());
+        assert_eq!(tip(origin.clone()).await, tip(work.clone()).await);
     }
 
     /// [`keep_local_origin`] plus a second bare remote, both pinned non-mirror, with

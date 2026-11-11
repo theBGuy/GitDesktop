@@ -677,6 +677,28 @@ export function isTransportError(error: unknown): boolean {
   );
 }
 
+/** A forge publish that failed after creating the repository says so on line
+ *  one with an uppercase `WAS created` (github/pr.rs, forge/gitlab.rs,
+ *  forge/bitbucket.rs; keep the marker in step). That fact decides the retry,
+ *  so it outranks every family but push protection, whose advice is the one
+ *  thing a plain retry can't get past. */
+const CREATED_DISCLOSURE_KINDS: ReadonlySet<AppError["kind"]> = new Set([
+  "gh",
+  "glab",
+  "bitbucket",
+]);
+const CREATED_DISCLOSURE = /\bWAS created\b/;
+
+/** Line one of a post-create publish failure, or null for any other message. */
+function createdDisclosure(
+  kind: AppError["kind"],
+  message: string,
+): string | null {
+  if (!CREATED_DISCLOSURE_KINDS.has(kind)) return null;
+  const headline = firstMeaningfulLine(message);
+  return CREATED_DISCLOSURE.test(headline) ? headline : null;
+}
+
 /** The `git` kind is the only one carrying a stderr blob distinct from its
  *  message; every other kind folds its detail into `message` itself. */
 function gitStderr(e: AppError): string {
@@ -927,6 +949,7 @@ export function presentError(e: unknown): ErrorPresentation {
     const network = networkSummary(e.kind, message);
     const summary =
       pushProtectionSummary(combined) ??
+      createdDisclosure(e.kind, message) ??
       longPathSummary(combined) ??
       (isConflict
         ? conflictSummary(combined)

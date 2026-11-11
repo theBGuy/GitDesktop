@@ -42,7 +42,7 @@ test("the held-push reasons", () => {
   );
   assert.equal(
     KEPT_LOCAL_PULL_REASON.untracked("feat/x", ""),
-    "Pull — feat/x is kept local, so it has no remote branch to pull from",
+    "Pull — feat/x is kept local and has no upstream branch to pull from",
   );
   assert.equal(
     KEPT_LOCAL_PULL_REASON.gone("feat/x", "origin/feat/x"),

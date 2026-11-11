@@ -941,10 +941,10 @@ impl GitDesktopMcp {
                        force_push (destructive) for that. Refuses a GitDesktop agent-session branch \
                        (gd/session/*, in any letter case) or a branch marked Keep local in \
                        GitDesktop, whether named in `branch` or checked out when `branch` is \
-                       omitted, and refuses when the checked-out branch can't be read. Refuses a \
-                       branch that tracks a local branch (upstream remote `.`), a push that \
-                       resolves to a gd/session/* branch on the remote, and a push to a remote \
-                       configured as a mirror. Requires --allow-git-write.",
+                       omitted, and refuses when the checked-out branch can't be read. Refuses to \
+                       push a branch into the local branch it tracks (upstream remote `.`), and \
+                       refuses a push that resolves to a gd/session/* branch on the remote or \
+                       goes to a remote configured as a mirror. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -1421,10 +1421,10 @@ impl GitDesktopMcp {
                        2.30, or a branch with no reflog for the check to read, the push falls back \
                        to the lease alone). Rewrites the remote branch. Refuses when the checked-out \
                        branch is a GitDesktop agent-session branch (gd/session/*, in any letter case) \
-                       or a branch marked Keep local in GitDesktop, or can't be read. Refuses when \
-                       the checked-out branch tracks a local branch, when its push resolves to \
-                       a gd/session/* branch, or when its push would go to a remote configured \
-                       as a mirror. Requires --allow-git-write AND --allow-destructive.",
+                       or a branch marked Keep local in GitDesktop, or can't be read. Refuses to \
+                       push the checked-out branch into the local branch it tracks, and refuses \
+                       when its push resolves to a gd/session/* branch or would go to a remote \
+                       configured as a mirror. Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {

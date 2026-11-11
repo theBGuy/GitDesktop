@@ -952,8 +952,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   palette, and GitDesktop{{ai}} and its MCP server{{/ai}} won't push or publish it. Push,
   Publish branch, force push, creating a pull request, publishing a local pull request and
   publishing the repository are held with the reason, the branch's row shows a **kept
-  local** chip, and its menu's push and publish items read **(kept local)**. Any local
-  branch can be marked, the current and default branch included; marking one that's
+  local** chip, and its menu's push and publish items read **(kept local)**. Resolving a
+  hosted pull request's conflicts won't push a kept-local branch either: when the pull
+  request's head branch is marked here, GitDesktop won't start or finish the resolve. Any
+  local branch can be marked, the current and default branch included; marking one that's
   already on a remote stops further pushes, and unticking the item lifts the mark. A
   kept-local branch's menu also offers **Block terminal pushes too…**, which installs a
   pre-push hook so \`git push\` in a terminal stops as well. The hook lives in this clone
@@ -1349,8 +1351,8 @@ right on the **Push** and **Pull** buttons.
   {{kbd:push}} says why instead of pushing.
 - A push to a **mirror remote** (one set up with \`remote.<name>.mirror\`), including a tag
   push and deleting a branch or tag there, is refused with the reason before Git runs,
-  since a mirror push can remove branches on that remote. So is a push of a branch that
-  tracks another local branch rather than a remote one.
+  since a mirror push can remove branches on that remote. So is a push of a branch into
+  the local branch it tracks.
 
 ## Publish a local repo
 

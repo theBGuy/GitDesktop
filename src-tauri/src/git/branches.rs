@@ -518,19 +518,39 @@ pub(crate) fn keep_local_key(name: &str) -> String {
 /// answer git can't give as a bool (junk, an invalid key) is an `Err`, so a guard built
 /// on it fails closed. A non-repository reads unset: nothing can be pushed from one.
 pub(crate) async fn branch_keep_local(repo_path: &str, name: &str) -> AppResult<bool> {
+    branch_keep_local_env(repo_path, name, &[]).await
+}
+
+/// [`branch_keep_local`] with extra spawn environment: the tests' per-spawn seam.
+async fn branch_keep_local_env(
+    repo_path: &str,
+    name: &str,
+    envs: &[(&str, &str)],
+) -> AppResult<bool> {
     let key = keep_local_key(name);
-    let out = run_git_raw(
+    let out = crate::git::runner::run_git_raw_env(
         Some(repo_path),
         &["config", "--type=bool", "--get", &key],
+        envs,
         DEFAULT_TIMEOUT,
     )
     .await?;
+    keep_local_answer(&out)
+}
+
+/// The verdict over one Keep local read. Exit 1 is "not set" unless git's stderr carries
+/// its own `error:`/`fatal:` line (an invalid key): inherited GIT_TRACE* variables put
+/// trace lines on stderr of every run, and the runner's LC_ALL=C keeps the prefixes.
+fn keep_local_answer(out: &GitOutput) -> AppResult<bool> {
     let stdout = out.stdout_lossy();
+    let diagnosed = out.stderr.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("error:") || line.starts_with("fatal:")
+    });
     match (out.code, stdout.trim_end_matches(['\r', '\n'])) {
         (0, "true") => Ok(true),
         (0, "false") => Ok(false),
-        // Exit 1 is "not set" only when silent; an invalid key exits 1 with stderr.
-        (1, "") if out.stderr.trim().is_empty() => Ok(false),
+        (1, "") if !diagnosed => Ok(false),
         _ => Err(AppError::Git {
             code: out.code,
             stderr: out.full_failure_text(),
@@ -10151,6 +10171,72 @@ mod tests {
                 .expect("a non-repository reads as unmarked, not an error"),
             "a non-repository reads as unmarked"
         );
+    }
+
+    /// Exit 1 reads "not set" through trace output on stderr, and fails closed only on
+    /// git's own `error:`/`fatal:` line.
+    #[test]
+    fn keep_local_answer_reads_exit_1_through_trace_lines() {
+        let out = |code: i32, stdout: &str, stderr: &str| crate::git::runner::GitOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        };
+        let trace = "11:32:43.281828 exec-cmd.c:266    trace: resolved executable dir: C:/git\n\
+                     11:32:43.283829 git.c:502         trace: built-in: git config --get k\n";
+        let invalid = format!("{trace}error: key does not contain a section: k\n");
+        for (row, given, expect) in [
+            ("true", out(0, "true\n", ""), Some(true)),
+            ("false", out(0, "false\n", ""), Some(false)),
+            ("unset", out(1, "", ""), Some(false)),
+            ("unset under GIT_TRACE", out(1, "", trace), Some(false)),
+            (
+                "invalid key",
+                out(1, "", "error: invalid key (newline): branch.x\ny.k\n"),
+                None,
+            ),
+            ("invalid key under GIT_TRACE", out(1, "", &invalid), None),
+            ("exit 1 with stdout", out(1, "true\n", ""), None),
+            ("fatal", out(128, "", "fatal: bad boolean value\n"), None),
+            ("junk", out(0, "maybe\n", ""), None),
+        ] {
+            match (super::keep_local_answer(&given), expect) {
+                (Ok(got), Some(want)) => assert_eq!(got, want, "{row}"),
+                (Err(AppError::Git { .. }), None) => {}
+                (got, _) => panic!("{row}: {got:?}"),
+            }
+        }
+    }
+
+    /// A real read with GIT_TRACE in the spawn's environment still answers the mark.
+    #[tokio::test]
+    async fn keep_local_read_answers_under_git_trace() {
+        let (_guard, _base, repo_s) = keep_local_repo("keep-local-trace").await;
+        run(&repo_s, &["branch", "x"]).await;
+        for var in ["GIT_TRACE", "GIT_TRACE2", "GIT_TRACE_SETUP"] {
+            let envs = [(var, "1")];
+            let traced = crate::git::runner::run_git_raw_env(
+                Some(&repo_s),
+                &["config", "--get", &super::keep_local_key("x")],
+                &envs,
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert!(!traced.stderr.trim().is_empty(), "{var} reaches the spawn");
+            let unmarked = super::branch_keep_local_env(&repo_s, "x", &envs).await;
+            assert!(!unmarked.expect("unmarked under trace"), "{var}");
+            super::branch_keep_local_env(&repo_s, "x\ny", &envs)
+                .await
+                .expect_err("an invalid key still fails closed under trace");
+        }
+        super::set_branch_keep_local_core(&repo_s, "x", true)
+            .await
+            .unwrap();
+        let envs = [("GIT_TRACE", "1")];
+        assert!(super::branch_keep_local_env(&repo_s, "x", &envs)
+            .await
+            .expect("marked under trace"));
     }
 
     /// Both directions on the current branch, a branch that is the remote default, and a
