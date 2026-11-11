@@ -498,7 +498,7 @@ pub async fn gh_project_items(
 
 /// The board read for callers that want at most `limit` items (the MCP tools); not an
 /// IPC command. `limit` is clamped into `1..=ITEMS_MAX` here as well as by callers.
-pub async fn gh_project_items_limited(
+pub(crate) async fn gh_project_items_limited(
     repo_path: String,
     project_id: String,
     after: Option<String>,
@@ -524,7 +524,7 @@ pub async fn gh_project_items_limited(
 }
 
 /// One project item read by its own node id, with the project it belongs to.
-pub struct ProjectItemNode {
+pub(crate) struct ProjectItemNode {
     pub project_id: String,
     pub item: BoardItem,
 }
@@ -538,7 +538,7 @@ fn item_node_query() -> String {
 
 /// One item by its PVTI_ id, wherever it lives (the caller checks the project); not an
 /// IPC command. `None` when GitHub resolves no node, or a node that isn't a project item.
-pub async fn gh_project_item_node(
+pub(crate) async fn gh_project_item_node(
     repo_path: String,
     item_id: String,
 ) -> AppResult<Option<ProjectItemNode>> {

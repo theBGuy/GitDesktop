@@ -244,17 +244,17 @@ fn allowed_set(catalog: &AvailableProjects) -> String {
     text
 }
 
-/// Find the selected project in the catalog. A number shared by projects of two owners
-/// is refused rather than guessed.
-pub(super) fn resolve_project<'a>(
-    catalog: &'a AvailableProjects,
+/// Find the selected project's index in the catalog. A number shared by projects of two
+/// owners is refused rather than guessed.
+pub(super) fn resolve_project(
+    catalog: &AvailableProjects,
     sel: &Selector,
-) -> Result<&'a ProjectV2Ref, McpError> {
+) -> Result<usize, McpError> {
     match sel {
         Selector::ById(id) => catalog
             .projects
             .iter()
-            .find(|p| p.id == *id)
+            .position(|p| p.id == *id)
             .ok_or_else(|| {
                 McpError::invalid_request(
                     format!(
@@ -267,8 +267,9 @@ pub(super) fn resolve_project<'a>(
                 )
             }),
         Selector::ByNumber(n) => {
-            let matches: Vec<&ProjectV2Ref> =
-                catalog.projects.iter().filter(|p| p.number == *n).collect();
+            let matches: Vec<usize> = (0..catalog.projects.len())
+                .filter(|&i| catalog.projects[i].number == *n)
+                .collect();
             match matches.as_slice() {
                 [one] => Ok(*one),
                 [] => Err(McpError::invalid_request(
@@ -279,7 +280,10 @@ pub(super) fn resolve_project<'a>(
                     None,
                 )),
                 many => {
-                    let ids: Vec<&str> = many.iter().map(|p| p.id.as_str()).collect();
+                    let ids: Vec<&str> = many
+                        .iter()
+                        .map(|&i| catalog.projects[i].id.as_str())
+                        .collect();
                     Err(McpError::invalid_request(
                         format!(
                             "Project #{n} matches {} projects in this repository's catalog: {}. \
@@ -399,12 +403,7 @@ impl GitDesktopMcp {
     ) -> Result<ProjectV2Ref, McpError> {
         let sel = classify_selector(sel)?;
         let mut catalog = self.catalog().await?;
-        let found = resolve_project(&catalog, &sel)?;
-        let index = catalog
-            .projects
-            .iter()
-            .position(|p| std::ptr::eq(p, found))
-            .ok_or_else(|| McpError::internal_error("resolved project left the catalog", None))?;
+        let index = resolve_project(&catalog, &sel)?;
         // `ProjectV2Ref` has no Clone, so the resolved entry is moved out.
         Ok(catalog.projects.swap_remove(index))
     }
@@ -836,10 +835,10 @@ mod tests {
         );
         // By id.
         let hit = resolve_project(&catalog, &Selector::ById("PVT_one".into())).unwrap();
-        assert_eq!(hit.id, "PVT_one");
+        assert_eq!(catalog.projects[hit].id, "PVT_one");
         // By number, one match.
         let hit = resolve_project(&catalog, &Selector::ByNumber(1)).unwrap();
-        assert_eq!(hit.id, "PVT_one");
+        assert_eq!(catalog.projects[hit].id, "PVT_one");
 
         // An unknown id: entries listed by number and id, never by title; the echo quoted.
         let err = resolve_project(&catalog, &Selector::ById("PVT_zz".into()))
@@ -879,7 +878,7 @@ mod tests {
             false,
         );
         let hit = resolve_project(&single, &Selector::ByNumber(7)).unwrap();
-        assert_eq!(hit.id, "PVT_linked7");
+        assert_eq!(single.projects[hit].id, "PVT_linked7");
     }
 
     #[test]

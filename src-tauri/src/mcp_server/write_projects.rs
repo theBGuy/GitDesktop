@@ -923,14 +923,9 @@ fn status_result(
 }
 
 impl GitDesktopMcp {
-    /// Read a caller-named item and require it to be a card on `project`.
-    async fn item_on(
-        &self,
-        project: &ProjectV2Ref,
-        param: &str,
-        item_id: &str,
-    ) -> Result<BoardItem, McpError> {
-        let item_id = parse_item_id(param, item_id)?;
+    /// Read a caller-named item and require it to be a card on `project`. The caller has
+    /// already passed `item_id` through `parse_item_id`.
+    async fn item_on(&self, project: &ProjectV2Ref, item_id: &str) -> Result<BoardItem, McpError> {
         let node = crate::github::project_items::gh_project_item_node(
             self.repo.clone(),
             item_id.to_string(),
@@ -948,7 +943,7 @@ impl GitDesktopMcp {
         let item_id = parse_item_id("item_id", &args.item_id)?;
         let project = self.project_for(&args.project).await?;
         // The read checks membership only; the mutation is always sent.
-        let item = self.item_on(&project, "item_id", item_id).await?;
+        let item = self.item_on(&project, item_id).await?;
         let (repo, project_id, id) = (self.repo.clone(), project.id.clone(), item_id.to_string());
         let previously_archived = if archive {
             archive_outcome(
@@ -1069,7 +1064,7 @@ impl GitDesktopMcp {
                 .map_err(app_err)?;
         let def = find_field(&defs, project.number, &args.field)?;
         let write = field_write(def, args.value.as_ref(), args.clear)?;
-        let item = self.item_on(&project, "item_id", item_id).await?;
+        let item = self.item_on(&project, item_id).await?;
         let result = field_result(
             &project,
             item_id,
@@ -1125,7 +1120,7 @@ impl GitDesktopMcp {
             .transpose()?;
         check_not_self(item_id, after)?;
         let project = self.project_for(&args.project).await?;
-        let subject = self.item_on(&project, "item_id", item_id).await?;
+        let subject = self.item_on(&project, item_id).await?;
         let anchor = match after {
             Some(after) => Some((
                 after,
@@ -1224,7 +1219,7 @@ impl GitDesktopMcp {
         let item_id = parse_item_id("item_id", &args.item_id)?;
         check_draft_args(args.title.as_deref(), args.body.as_deref())?;
         let project = self.project_for(&args.project).await?;
-        let item = self.item_on(&project, "item_id", item_id).await?;
+        let item = self.item_on(&project, item_id).await?;
         let (draft_id, old_title, old_body) = draft_parts(&item)?;
         let draft = crate::github::project_item_edits::update_draft_fields(
             self.repo.clone(),
@@ -2528,6 +2523,13 @@ mod tests {
             "ProjectFieldDef::Date { .. } =>",
             "ProjectFieldDef::SingleSelect {",
         );
+        // `item_on` doesn't parse its id, so each item body parses it before any read.
+        let parses_item_id = |header: &str| {
+            let item = body(write, header, METHOD_END);
+            let resolve = item.find("self.project_for(");
+            item.find("parse_item_id(\"item_id\", &args.item_id)?;")
+                .is_some_and(|at| resolve.is_some_and(|resolve| at < resolve))
+        };
         vec![
             (
                 "draft",
@@ -2568,6 +2570,17 @@ mod tests {
                 body(write, "async fn set_project_item_field(", METHOD_END)
                     .contains("number_refused(&e.to_string(), def_id_name(def).1, number_set)"),
             ),
+            (
+                "item id",
+                [
+                    "async fn set_archived(",
+                    "async fn set_project_item_field(",
+                    "async fn move_project_item(",
+                    "async fn update_project_draft(",
+                ]
+                .into_iter()
+                .all(parses_item_id),
+            ),
         ]
     }
 
@@ -2581,7 +2594,7 @@ mod tests {
         }
         // Mutation controls: reverting each call site fails exactly its own check. A
         // scope names the item whose text the replacement starts from.
-        let mutations: [(&str, bool, Option<&str>, &str, &str); 10] = [
+        let mutations: [(&str, bool, Option<&str>, &str, &str); 11] = [
             (
                 "draft",
                 true,
@@ -2651,6 +2664,13 @@ mod tests {
                 Some("async fn set_project_item_field("),
                 "number_refused(&e.to_string(), def_id_name(def).1, number_set)",
                 "None::<McpError>",
+            ),
+            (
+                "item id",
+                true,
+                Some("async fn move_project_item("),
+                "parse_item_id(\"item_id\", &args.item_id)?",
+                "args.item_id.as_str()",
             ),
         ];
         for (site, in_write, scope, from, to) in mutations {
