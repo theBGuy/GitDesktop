@@ -20,7 +20,7 @@ import {
   fileNameFromSrc,
   ImageLightbox,
   type LightboxImage,
-} from "@/components/ui/image-lightbox";
+} from "@/components/image-lightbox";
 import { diffLang } from "@/features/diff/diff-lang";
 import { referencesName } from "@/lib/attachments/references";
 import {
@@ -1278,6 +1278,16 @@ export function Markdown({
       releaseCard(card);
     };
   }, [html]);
+
+  // A settle or release changes what the staged source resolves under the same
+  // text (a failed image's name leaves the row; an ended draft's or a released
+  // hold's URLs are revoked), so a viewer holding src copies closes. A
+  // held row's full-success settle resolves every name to the same URL, an
+  // equal snapshot, so an open viewer stays.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stagedState is the intentional reset trigger
+  useEffect(() => {
+    setLightbox(null);
+  }, [stagedState]);
 
   // The card is pinned to the rect its anchor had when it opened, so anything
   // that moves the reference strands it: the hover routes end at the pointer

@@ -30,10 +30,10 @@ import {
 } from "react";
 import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ImageLightbox } from "@/components/image-lightbox";
 import { Markdown } from "@/components/markdown/markdown";
 import { useMentionAutocomplete } from "@/components/mention-autocomplete";
 import { Button } from "@/components/ui/button";
-import { ImageLightbox } from "@/components/ui/image-lightbox";
 import { Textarea } from "@/components/ui/textarea";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import type { StagedRecord } from "@/lib/attachments/draft-attachments";

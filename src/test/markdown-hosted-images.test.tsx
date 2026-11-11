@@ -22,6 +22,7 @@ import {
   it,
   vi,
 } from "vitest";
+import { ImageLightbox } from "@/components/image-lightbox";
 import { Markdown } from "@/components/markdown/markdown";
 import {
   IMAGE_CAPTION_REASON,
@@ -29,7 +30,6 @@ import {
   REPO_IMAGE_DOC_BUDGET_BYTES,
   RUN_ATTR,
 } from "@/components/markdown/markdown-images";
-import { ImageLightbox } from "@/components/ui/image-lightbox";
 import { attachmentStage } from "@/lib/attachments/api";
 import { stageAttachment } from "@/lib/attachments/store";
 import { ghHostedImage, type HostedImage } from "@/lib/hosted-images/api";

@@ -1,7 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type Mock,
+  vi,
+} from "vitest";
 import { CommentComposer as Composer } from "@/features/conversations/CommentComposer";
 import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import {
@@ -13,12 +21,22 @@ import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachm
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 
+type Reservation = () => (() => boolean) | null;
+
+// The claim functions run on the real request-order factory (wired in by the
+// useOpenRepoByPath mock), so racing drops resolve as the app's opens do.
 const drop = vi.hoisted(() => ({
   handler: null as null | ((e: unknown) => Promise<void>),
-  claim: vi.fn(() => () => true),
-  watermark: vi.fn((): (() => boolean) => () => true),
+  claim: vi.fn((): (() => boolean) => () => true),
+  reserve: vi.fn((): Reservation => () => null),
+  /** Each reservation a drop took, in order, as a spy. */
+  reservations: [] as Mock<Reservation>[],
+  /** An open claimed elsewhere in the app, not by the drop. */
+  claimElsewhere: (): (() => boolean) => () => true,
   validate: vi.fn(async (path: string) => ({ path })),
-  open: vi.fn(async () => undefined),
+  open: vi.fn(async (_info: { path: string }, _stillCurrent: () => boolean) => {
+    return undefined;
+  }),
   toast: vi.fn(),
   toastError: vi.fn(),
 }));
@@ -31,11 +49,24 @@ vi.mock("@tauri-apps/api/window", () => ({
     },
   }),
 }));
-vi.mock("@/features/repository/useOpenRepoByPath", () => ({
-  claimRepoOpen: drop.claim,
-  repoOpenWatermark: drop.watermark,
-  useOpenRecordedRepo: () => drop.open,
-}));
+vi.mock("@/features/repository/useOpenRepoByPath", async () => {
+  const { createOpenClaims } = await import(
+    "@/features/repository/open-claims"
+  );
+  const claims = createOpenClaims(() => 0);
+  drop.claim.mockImplementation(claims.claim);
+  drop.claimElsewhere = claims.claim;
+  drop.reserve.mockImplementation(() => {
+    const reservation = vi.fn(claims.reserve());
+    drop.reservations.push(reservation);
+    return reservation;
+  });
+  return {
+    claimRepoOpen: drop.claim,
+    reserveRepoOpen: drop.reserve,
+    useOpenRecordedRepo: () => drop.open,
+  };
+});
 vi.mock("@/lib/toast", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/toast")>()),
   toastError: drop.toastError,
@@ -242,7 +273,8 @@ describe("useRepoDrop image hint", () => {
   };
   beforeEach(() => {
     drop.claim.mockClear();
-    drop.watermark.mockClear();
+    drop.reserve.mockClear();
+    drop.reservations.length = 0;
     drop.validate.mockReset();
     drop.validate.mockImplementation(async (path: string) => ({ path }));
     drop.open.mockClear();
@@ -265,6 +297,8 @@ describe("useRepoDrop image hint", () => {
       );
       expect(drop.toastError).not.toHaveBeenCalled();
       expect(drop.claim).not.toHaveBeenCalled();
+      expect(drop.reservations).toHaveLength(1);
+      expect(drop.reservations[0]).not.toHaveBeenCalled();
       expect(drop.open).not.toHaveBeenCalled();
     },
   );
@@ -281,7 +315,8 @@ describe("useRepoDrop image hint", () => {
   it("opens a repository whose folder name ends in an image extension", async () => {
     await dropPath("C:/repos/diagram.png");
     expect(drop.validate).toHaveBeenCalledWith("C:/repos/diagram.png");
-    expect(drop.claim).toHaveBeenCalledTimes(1);
+    expect(drop.reservations).toHaveLength(1);
+    expect(drop.reservations[0]).toHaveBeenCalledTimes(1);
     expect(drop.open).toHaveBeenCalledWith(
       { path: "C:/repos/diagram.png" },
       expect.any(Function),
@@ -290,10 +325,79 @@ describe("useRepoDrop image hint", () => {
   });
 
   it("yields to an open that arrived while it asked", async () => {
-    drop.watermark.mockReturnValueOnce(() => false);
+    drop.validate.mockImplementationOnce(async (path: string) => {
+      drop.claimElsewhere();
+      return { path };
+    });
     await dropPath("C:/repos/diagram.png");
-    expect(drop.claim).not.toHaveBeenCalled();
     expect(drop.open).not.toHaveBeenCalled();
+  });
+
+  // a is dropped before b; the later drop lands either way, and an earlier one
+  // validating last is dropped silently.
+  it.each([
+    {
+      first: "a",
+      order: ["C:/repos/a.png", "C:/repos/b.png"],
+      opened: ["C:/repos/a.png", "C:/repos/b.png"],
+    },
+    {
+      first: "b",
+      order: ["C:/repos/b.png", "C:/repos/a.png"],
+      opened: ["C:/repos/b.png"],
+    },
+  ])(
+    "opens the later of two image-named checkouts when $first validates first",
+    async ({ order, opened }) => {
+      const pending = new Map<string, () => void>();
+      drop.validate.mockImplementation(
+        (path: string) =>
+          new Promise((resolve) => pending.set(path, () => resolve({ path }))),
+      );
+      render(wrap(<Host />));
+      const drops = new Map(
+        ["C:/repos/a.png", "C:/repos/b.png"].map((path) => [
+          path,
+          drop.handler?.({ payload: { type: "drop", paths: [path] } }),
+        ]),
+      );
+      for (const path of order) {
+        pending.get(path)?.();
+        await drops.get(path);
+      }
+      expect(drop.open.mock.calls.map(([info]) => info.path)).toEqual(opened);
+      const landed = drop.open.mock.calls
+        .filter(([, stillCurrent]) => stillCurrent())
+        .map(([info]) => info.path);
+      expect(landed).toEqual(["C:/repos/b.png"]);
+      expect(drop.toast).not.toHaveBeenCalled();
+      expect(drop.toastError).not.toHaveBeenCalled();
+    },
+  );
+
+  it("an image file dropped while a folder open is in flight leaves that open standing", async () => {
+    let finish: () => void = () => undefined;
+    drop.validate.mockImplementationOnce(
+      (path: string) =>
+        new Promise((resolve) => (finish = () => resolve({ path }))),
+    );
+    render(wrap(<Host />));
+    const folder = drop.handler?.({
+      payload: { type: "drop", paths: ["C:/repos/project"] },
+    });
+    drop.validate.mockRejectedValueOnce(NOT_A_REPO);
+    await drop.handler?.({
+      payload: { type: "drop", paths: ["C:/shots/photo.png"] },
+    });
+    expect(drop.toast).toHaveBeenCalledWith(
+      "To add an image to a comment, paste it or use Attach image.",
+    );
+    finish();
+    await folder;
+    expect(drop.open).toHaveBeenCalledTimes(1);
+    const [info, stillCurrent] = drop.open.mock.calls[0];
+    expect(info.path).toBe("C:/repos/project");
+    expect(stillCurrent()).toBe(true);
   });
 
   it("names the error for a plain folder that is no repository", async () => {

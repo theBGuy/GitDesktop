@@ -22,6 +22,7 @@ import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Thread } from "@/features/conversations/Thread";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
+import { encodeBase64 } from "@/lib/attachments/encode";
 import {
   beginAttachmentPost,
   draftEntry,
@@ -47,6 +48,12 @@ vi.mock("@/lib/attachments/api", () => ({
   attachmentStage: vi.fn(),
   attachmentDiscard: vi.fn(async () => undefined),
 }));
+// The file reader every stage runs first, observed as is.
+vi.mock("@/lib/attachments/encode", async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import("@/lib/attachments/encode")>();
+  return { ...real, encodeBase64: vi.fn(real.encodeBase64) };
+});
 
 // The store is module state: every test stages into its own session and key.
 let SESSION = "";
@@ -79,6 +86,7 @@ beforeEach(() => {
     return `blob:life-${urlSeq}`;
   });
   URL.revokeObjectURL = vi.fn();
+  vi.mocked(encodeBase64).mockClear();
 });
 
 afterEach(() => {
@@ -194,6 +202,19 @@ const flush = () =>
     await new Promise((r) => setTimeout(r, 30));
   });
 
+/** A later file reaches its stage only through its own file read: one task
+ *  turn runs every queued continuation, then every read so far settles, then
+ *  one more turn, so any stage a finished read would start has been called. */
+const readsDrained = () =>
+  act(async () => {
+    const turn = () => new Promise((r) => setTimeout(r, 0));
+    await turn();
+    const files = vi.mocked(encodeBase64).mock.results.map((r) => r.value);
+    const settled = await Promise.allSettled(files);
+    await turn();
+    expect(settled.map((s) => s.status)).not.toContain("rejected");
+  });
+
 describe("one attach gesture, one status line", () => {
   it("keeps a too-big refusal while a later file of the same paste stages", async () => {
     const key = freshKey();
@@ -289,7 +310,9 @@ describe("a batch stops when its draft moves on", () => {
     const release = await pasteFour(key);
     act(() => endDraftAttachments(key));
     release(stagedAs("image-1.png"));
-    await flush();
+    await readsDrained();
+    // File 1 was read; file 2 never was.
+    expect(encodeBase64).toHaveBeenCalledTimes(1);
     expect(attachmentStage).toHaveBeenCalledTimes(1);
     expect(textOf(key)).toBe("");
     expect(draftEntry(key)).toBeUndefined();
@@ -302,7 +325,8 @@ describe("a batch stops when its draft moves on", () => {
       beginAttachmentPost(key, "", true);
     });
     release(stagedAs("image-1.png"));
-    await flush();
+    await readsDrained();
+    expect(encodeBase64).toHaveBeenCalledTimes(1);
     expect(attachmentStage).toHaveBeenCalledTimes(1);
     expect(textOf(key)).toBe("");
   });

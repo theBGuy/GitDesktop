@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import {
   claimRepoOpen,
-  repoOpenWatermark,
+  reserveRepoOpen,
   useOpenRecordedRepo,
 } from "@/features/repository/useOpenRepoByPath";
 import { validateRepo } from "@/lib/git/api";
@@ -32,10 +32,11 @@ export function useRepoDrop() {
       const path = event.payload.paths[0];
       if (!path) return;
       // A checkout's name can end in an image extension, so such a path is
-      // asked about first. A watermark, not a claim: an image file is no open
-      // request and must not retire one in flight.
+      // asked about first. Its place in the request order is reserved at the
+      // drop and claimed only once it proves a checkout: an image file is no
+      // open request and must not retire one in flight.
       if (IMAGE_PATH.test(path)) {
-        const noNewerOpen = repoOpenWatermark();
+        const reservation = reserveRepoOpen();
         let info: Awaited<ReturnType<typeof validateRepo>>;
         try {
           info = await validateRepo(path);
@@ -46,9 +47,10 @@ export function useRepoDrop() {
           else toastError(e);
           return;
         }
-        if (!noNewerOpen()) return;
+        const stillCurrent = reservation();
+        if (!stillCurrent) return;
         try {
-          await openRecordedRef.current(info, claimRepoOpen());
+          await openRecordedRef.current(info, stillCurrent);
         } catch (e) {
           toastError(e);
         }

@@ -74,8 +74,72 @@ export function imageReference(
   return `![${alt}](${stagedName})`;
 }
 
-/** An image reference ending right where the text does. */
-const TRAILING_IMAGE_REFERENCE = /!\[(?:\\.|[^\]\\\n])*\]\([^()\s]*\)$/;
+/** What a backslash pairs with in bracket text (`.`): anything but a line
+ *  terminator. */
+const PAIRABLE = /./;
+
+/** What ends a reference's target: a parenthesis or whitespace. */
+const TARGET_STOP = /[()\s]/;
+
+/**
+ * Bracket text as `!\[(?:\\.|[^\]\\\n])*\]` reads it, walked once forward: a
+ * backslash pairs with the next pairable character, a `\n` or an unpaired
+ * backslash ends all open bracket text, and the first unescaped `]` closes it.
+ * `\r`, U+2028 and U+2029 stay inside bracket text; a backslash cannot pair
+ * with them. Returns the earliest `![` whose `]` `accept` takes, with that
+ * `]`, or null. One pass whatever the `![` count, so it stays linear.
+ */
+function findImageBracket(
+  text: string,
+  accept: (close: number) => boolean,
+): [number, number] | null {
+  let open = -1;
+  for (let p = 0; p < text.length; p++) {
+    const c = text[p];
+    if (c === "\\") {
+      if (p + 1 < text.length && PAIRABLE.test(text[p + 1])) {
+        p += 1;
+        // The regex has no lookbehind: an escaped `!` still opens `![`.
+        if (open === -1 && text[p] === "!" && text[p + 1] === "[") open = p;
+      } else open = -1;
+    } else if (c === "\n") open = -1;
+    else if (c === "]") {
+      if (open !== -1 && accept(p)) return [open, p];
+      open = -1;
+    } else if (open === -1 && c === "!" && text[p + 1] === "[") open = p;
+  }
+  return null;
+}
+
+/** How many backslashes directly precede `at`. */
+function backslashRunBefore(text: string, at: number): number {
+  let n = 0;
+  while (at - 1 - n >= 0 && text[at - 1 - n] === "\\") n += 1;
+  return n;
+}
+
+/** Whether an image reference ends right where the text does: a `)` closing a
+ *  target with no parenthesis or whitespace, after an unescaped `]` whose
+ *  bracket text some `![` opens. Read back from the end, each backslash run
+ *  once, and stops at the nearest `![` or at what ends bracket text. */
+function endsInImageReference(text: string): boolean {
+  if (!text.endsWith(")")) return false;
+  let open = text.length - 2;
+  while (open >= 0 && !TARGET_STOP.test(text[open])) open -= 1;
+  const close = open - 1;
+  if (close < 0 || text[open] !== "(" || text[close] !== "]") return false;
+  let run = backslashRunBefore(text, close);
+  if (run % 2 === 1) return false;
+  for (let j = close - 1 - run; j >= 0; j -= 1 + run) {
+    run = backslashRunBefore(text, j);
+    const c = text[j];
+    const escaped = run % 2 === 1;
+    if (c === "\n" || (c === "]" && !escaped)) return false;
+    if (escaped && !PAIRABLE.test(c)) return false;
+    if (c === "[" && text[j - 1] === "!") return true;
+  }
+  return false;
+}
 
 /** What an insert at `caret` adds, separators included, and where the caret
  *  lands: right after the reference's `)`. Before it: nothing at the start or
@@ -89,7 +153,7 @@ export function insertionFor(
   const before = text.slice(0, caret);
   let lead = " ";
   if (before === "" || /\s$/.test(before)) lead = "";
-  else if (TRAILING_IMAGE_REFERENCE.test(before)) lead = "\n";
+  else if (endsInImageReference(before)) lead = "\n";
   const next = text.charAt(caret);
   const trail = next !== "" && !/\s/.test(next) ? " " : "";
   return {
@@ -103,47 +167,55 @@ export function appendReferenceText(text: string, reference: string): string {
   return text + insertionFor(text, text.length, reference).insert;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+/** The first image reference in `text` whose target is exactly `name`, as
+ *  written there, or null. */
+function imageReferenceTo(text: string, name: string): string | null {
+  const token = `](${name})`;
+  let next = text.indexOf(token);
+  if (next === -1) return null;
+  const found = findImageBracket(text, (close) => {
+    if (next !== -1 && next < close) next = text.indexOf(token, close);
+    return next === close;
+  });
+  return found === null ? null : text.slice(found[0], found[1] + token.length);
 }
 
-function referencePattern(name: string): RegExp {
-  return new RegExp(
-    `${String.raw`!\[(?:\\.|[^\]\\\n])*\]\(`}${escapeRegExp(name)}\\)`,
-    "g",
-  );
-}
-
-/** Whether the character at `at` is backslash-escaped. */
-function escapedAt(text: string, at: number): boolean {
-  let n = 0;
-  for (let j = at - 1; j >= 0 && text[j] === "\\"; j--) n += 1;
-  return n % 2 === 1;
-}
-
-/** A text ending in a line break plus blanks: the line after it is blank, which
- *  bracket text never spans. */
-const BLANK_LINE_BEFORE = /\n[ \t]*$/;
-
-/** Where the bracket text closed by the `]` at `close` opens: its matching
- *  unescaped `[` (nesting counted), widened over a directly preceding unescaped
- *  `!`. `close` itself when there is none before a blank line or the start, or
- *  when that `]` is escaped and so closes nothing. */
-function referenceStart(text: string, close: number): number {
-  if (escapedAt(text, close)) return close;
-  let depth = 0;
-  for (let j = close - 1; j >= 0; j--) {
-    const c = text[j];
-    if (c === "\n" && BLANK_LINE_BEFORE.test(text.slice(0, j))) return close;
-    if ((c !== "[" && c !== "]") || escapedAt(text, j)) continue;
-    if (c === "]") depth += 1;
-    else if (depth > 0) depth -= 1;
-    else
-      return j > 0 && text[j - 1] === "!" && !escapedAt(text, j - 1)
-        ? j - 1
-        : j;
+/**
+ * For each `]` at the ascending positions `closes`, where the bracket text it
+ * closes opens: its matching unescaped `[` (nesting counted), widened over a
+ * directly preceding unescaped `!`. A `]` with no such `[` since a blank line or
+ * the start, or an escaped one, has no entry. One forward pass to the last of
+ * them, so a line of many occurrences stays linear.
+ */
+function bracketStarts(
+  text: string,
+  closes: readonly number[],
+): Map<number, number> {
+  const starts = new Map<number, number>();
+  const opens: number[] = [];
+  let next = 0; // the first of `closes` not yet reached
+  let run = 0; // backslashes directly before `p`
+  let prevBang = false; // the character before `p` is an unescaped `!`
+  let blankLine = false; // a line break came, then only blanks
+  for (let p = 0; next < closes.length && p < text.length; p++) {
+    const c = text[p];
+    const escaped = run % 2 === 1;
+    if (c === "\n") {
+      // Bracket text never spans a blank line.
+      if (blankLine) opens.length = 0;
+      blankLine = true;
+    } else if (c !== " " && c !== "\t") blankLine = false;
+    if (c === "[" && !escaped) opens.push(prevBang ? p - 1 : p);
+    else if (c === "]") {
+      const wanted = p === closes[next];
+      if (wanted) next += 1;
+      const open = escaped ? undefined : opens.pop();
+      if (wanted && open !== undefined) starts.set(p, open);
+    }
+    prevBang = c === "!" && !escaped;
+    run = c === "\\" ? run + 1 : 0;
   }
-  return close;
+  return starts;
 }
 
 /** A reference alone on its line takes one adjoining line break with it (the
@@ -162,19 +234,70 @@ function withOwnLineBreak(
   return start > 0 ? [start - 1, end] : [start, end];
 }
 
+/**
+ * The start `bracketStarts` gives the `]` at `close` (`close` itself where it
+ * gives none), read backward from it, which is cheap when its `[` is near.
+ * Every character it steps over, in backslash runs and blank-line checks too,
+ * spends one step of `budget`. A start it returns is exact even when the walk
+ * overdrew the budget; undefined only when a step finds the budget already
+ * spent.
+ */
+function walkedStart(
+  text: string,
+  close: number,
+  budget: { left: number },
+): number | undefined {
+  const escaped = (at: number) => {
+    const run = backslashRunBefore(text, at);
+    budget.left -= run;
+    return run % 2 === 1;
+  };
+  if (escaped(close)) return close;
+  let depth = 0;
+  for (let j = close - 1; j >= 0; j--) {
+    if (--budget.left < 0) return undefined;
+    const c = text[j];
+    if (c === "\n") {
+      // Bracket text never spans a blank line.
+      let k = j - 1;
+      while (k >= 0 && (text[k] === " " || text[k] === "\t")) k -= 1;
+      budget.left -= j - 1 - k;
+      if (k >= 0 && text[k] === "\n") return close;
+    } else if ((c === "[" || c === "]") && !escaped(j)) {
+      if (c === "]") depth += 1;
+      else if (depth > 0) depth -= 1;
+      else return j > 0 && text[j - 1] === "!" && !escaped(j - 1) ? j - 1 : j;
+    }
+  }
+  return close;
+}
+
 /** `text` without one pass of `](NAME)` occurrences, each taken back to its
  *  opening bracket. */
 function removeOnce(text: string, name: string): string {
   const token = `](${name})`;
-  const ranges: [number, number][] = [];
+  const closes: number[] = [];
   for (
     let at = text.indexOf(token);
     at !== -1;
     at = text.indexOf(token, at + 1)
   )
-    ranges.push(
-      withOwnLineBreak(text, referenceStart(text, at), at + token.length),
-    );
+    closes.push(at);
+  // Walks back from each occurrence until their total steps reach three
+  // forward scans' worth (a scan step costs more than a walk step), then one
+  // scan to the last occurrence answers the rest. A removal pass therefore
+  // costs at most a few times the cheaper of the two methods.
+  const end = (closes.at(-1) ?? -1) + 1;
+  const budget = { left: end * 3 };
+  let starts: Map<number, number> | undefined;
+  const ranges = closes.map((at) => {
+    let start = starts ? undefined : walkedStart(text, at, budget);
+    if (start === undefined) {
+      starts ??= bracketStarts(text, closes);
+      start = starts.get(at) ?? at;
+    }
+    return withOwnLineBreak(text, start, at + token.length);
+  });
   ranges.sort((a, b) => a[0] - b[0]);
   let out = "";
   let cursor = 0;
@@ -231,10 +354,7 @@ export function failedReferencesDraft(
   failedNames: readonly string[],
 ): string {
   return failedNames
-    .map((name) => {
-      const found = postedBody.match(new RegExp(referencePattern(name).source));
-      return found ? found[0] : `![image](${name})`;
-    })
+    .map((name) => imageReferenceTo(postedBody, name) ?? `![image](${name})`)
     .join("\n");
 }
 

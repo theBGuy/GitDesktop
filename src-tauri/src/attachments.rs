@@ -142,6 +142,12 @@ fn too_big(label: &str, bytes: usize) -> AppError {
     ))
 }
 
+fn too_many_pixels(label: &str, width: u32, height: u32) -> AppError {
+    AppError::InvalidArgument(format!(
+        "{label} is {width} \u{d7} {height} pixels. Images can be at most 40 megapixels."
+    ))
+}
+
 fn invalid(msg: &str) -> AppError {
     AppError::InvalidArgument(msg.to_string())
 }
@@ -520,7 +526,8 @@ fn decoded_len(b64: &str) -> usize {
 }
 
 /// Stages one image. Order: session grammar, too big (from the base64 length), too
-/// many, not an image. A valid session id whose folder is missing is re-created.
+/// many, not an image, too many pixels. A valid session id whose folder is missing is
+/// re-created.
 pub(crate) fn stage_in(
     root: &Path,
     session: Option<&str>,
@@ -558,6 +565,11 @@ pub(crate) fn stage_in(
     let (mime, width, height) =
         crate::image_sniff::sniff_image(&bytes).ok_or_else(|| not_an_image(label))?;
     let ext = ext_for_mime(mime).ok_or_else(|| not_an_image(label))?;
+    // Area only: the webview decodes a staged image at once, but a tall screenshot over
+    // the loader's per-axis cap still attaches.
+    if !crate::image_sniff::pixels_within_cap(width, height) {
+        return Err(too_many_pixels(label, width, height));
+    }
 
     create_private_dir(&dir)?;
     // Names are taken case-insensitively on every filesystem, as `post_checks` refuses
@@ -1254,6 +1266,42 @@ mod tests {
         bytes.resize(MAX_IMAGE_BYTES, 0);
         let staged = stage_in(root.path(), None, None, &b64(&bytes)).unwrap();
         assert_eq!(staged.size as usize, MAX_IMAGE_BYTES);
+    }
+
+    // The area ceiling is an accept at exactly 40 MP; the per-axis cap never applies.
+    #[test]
+    fn stage_accepts_up_to_the_pixel_cap_on_any_axis() {
+        let root = private_root();
+        for (width, height) in [(8000, 5000), (1440, 12000)] {
+            let staged =
+                stage_in(root.path(), None, None, &b64(&png_fixture(width, height))).unwrap();
+            assert_eq!((staged.width, staged.height), (width, height));
+        }
+    }
+
+    #[test]
+    fn stage_refuses_over_the_pixel_cap_without_writing() {
+        let root = private_root();
+        let over = b64(&png_fixture(8000, 5001));
+        assert_eq!(
+            msg(stage_in(root.path(), Some(SID), Some("huge.png"), &over)),
+            "huge.png is 8000 \u{d7} 5001 pixels. Images can be at most 40 megapixels."
+        );
+        assert_eq!(
+            msg(stage_in(root.path(), None, None, &over)),
+            "The pasted file is 8000 \u{d7} 5001 pixels. Images can be at most 40 megapixels."
+        );
+        assert!(!root.path().join(SID).exists());
+        assert!(entries(root.path()).is_empty());
+
+        // An existing session is left as it was, and the refusal takes no slot.
+        let dir = root.path().join(SID);
+        fill(&dir, MAX_IMAGES - 1);
+        let before = entries(&dir);
+        msg(stage_in(root.path(), Some(SID), None, &over));
+        assert_eq!(entries(&dir), before);
+        stage_in(root.path(), Some(SID), None, &b64(&png_fixture(1, 1))).unwrap();
+        assert_eq!(staged_count(&dir).unwrap(), MAX_IMAGES);
     }
 
     #[test]

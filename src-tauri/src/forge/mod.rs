@@ -1922,7 +1922,8 @@ pub async fn forge_pr_comment(
 ) -> AppResult<crate::attachments::CommentOutcome> {
     let detected = detect_non_github(&repo_path).await;
     let attachments = crate::attachments::normalize(attachments);
-    // Attachment check steps 1-5 run here, before any arm posts.
+    // Every attachment check runs here, before any arm posts: `attach_gate_verdict`,
+    // then `post_checks` on the staged files.
     if attachments.is_some() {
         match detected {
             Some((Provider::Bitbucket, _)) => return Err(attachments_refused_on_bitbucket()),
@@ -1959,9 +1960,9 @@ pub async fn forge_pr_comment(
     Ok(Default::default())
 }
 
-/// The first check for a comment with attachments: the cores' own empty-body refusal
-/// outranks every attachment check, as it does on a post without attachments. The
-/// GitHub arms then check the lens, the cores' next guard, the same way.
+/// The cores' own empty-body refusal outranks every attachment check after the provider
+/// gate, as it does on a post without attachments. The GitHub arms then check the lens,
+/// the cores' next guard, the same way.
 fn refuse_empty_comment(body: &str) -> AppResult<()> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -2945,8 +2946,9 @@ pub async fn forge_issue_comment(
 ) -> AppResult<crate::attachments::CommentOutcome> {
     let detected = detect_non_github(&repo_path).await;
     let attachments = crate::attachments::normalize(attachments);
-    // Attachment check steps 1-5 run here, before any arm posts. Bitbucket keeps its
-    // issues refusal first, so its arm below answers either way.
+    // Every attachment check runs here, before any arm posts: `attach_gate_verdict`,
+    // then `post_checks` on the staged files.
+    // Bitbucket keeps its issues refusal first, so its arm below answers either way.
     if attachments.is_some() {
         match detected {
             Some((Provider::Bitbucket, _)) => {}
@@ -4760,8 +4762,8 @@ pub(crate) async fn forge_pr_create_core(
 }
 
 /// The provider-dispatch core of [`forge_pr_create`], taking a plain `&AppState` (not
-/// a Tauri-managed `State`). It runs the provider gate (check step 1); the GitHub and
-/// GitLab cores run steps 2-5 before their push.
+/// a Tauri-managed `State`). It runs the provider gate; the GitHub and GitLab cores run
+/// the rest of `attach_gate_verdict` and `post_checks` before their push.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forge_pr_create_with_attachments(
     state: &crate::state::AppState,

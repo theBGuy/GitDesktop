@@ -9,6 +9,7 @@ import {
   REQUEST_CHANGES_IMAGES_REASON,
   referencesStaged,
 } from "@/lib/attachments/comment-post";
+import { encodeBase64 } from "@/lib/attachments/encode";
 import {
   beginAttachmentPost,
   draftEntry,
@@ -35,6 +36,21 @@ vi.mock("@/lib/attachments/api", () => ({
   attachmentStage: vi.fn(),
   attachmentDiscard: vi.fn(async () => undefined),
 }));
+// The file reader behind both staging and a post's seeds, observed as is.
+vi.mock("@/lib/attachments/encode", async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import("@/lib/attachments/encode")>();
+  return { ...real, encodeBase64: vi.fn(real.encodeBase64) };
+});
+
+/** Waits on every file read so far, the posted file's seed read included,
+ *  then one microtask more, so each read's `.then` has stored its bytes. */
+async function encoded() {
+  const files = vi.mocked(encodeBase64).mock.results.map((r) => r.value);
+  const settled = await Promise.allSettled(files);
+  await Promise.resolve();
+  expect(settled.map((s) => s.status)).not.toContain("rejected");
+}
 
 const REPO = "C:/reconcile";
 const KEY = draftKeyFor("issue-comment", `${REPO}#origin#7`);
@@ -114,6 +130,7 @@ beforeEach(() => {
     };
   });
   vi.mocked(attachmentDiscard).mockClear();
+  vi.mocked(encodeBase64).mockClear();
   let urls = 0;
   URL.createObjectURL = vi.fn(() => {
     urls += 1;
@@ -324,8 +341,10 @@ describe("a seed lands only on a row the post made", () => {
     await stage();
     const token = await post("![image](image-1.png)");
     await waitFor(() => expect(reads).toHaveLength(2));
-    // Let the posted file finish encoding before the landing decides.
-    await act(async () => new Promise((r) => setTimeout(r, 30)));
+    // The posted file finishes encoding before the landing decides: its
+    // stage's read and its seed's.
+    await act(encoded);
+    expect(encodeBase64).toHaveBeenCalledTimes(2);
     // The landing holds only the older comment, not yet the new one.
     await act(async () => reads[1].resolve(issue([`![image](${URL1})`])));
     await waitFor(() => expect(hasHeldCopies(token)).toBe(false));
@@ -337,7 +356,7 @@ describe("a seed lands only on a row the post made", () => {
     await stage();
     const token = await post("![image](image-1.png)");
     await waitFor(() => expect(reads).toHaveLength(2));
-    await act(async () => new Promise((r) => setTimeout(r, 30)));
+    await act(encoded);
     await act(async () =>
       reads[1].resolve(issue([`![image](${URL1})`, `![image](${URL2})`])),
     );

@@ -1410,6 +1410,31 @@ mod attach_tests {
             ns
         );
     }
+
+    #[test]
+    fn followup_failure_text_names_the_images_that_did_not_upload() {
+        let lead = "The pull request was created, but applying its labels/assignees failed: \
+                    boom. Add them from the PR.";
+        let at = " (https://github.com/o/r/pull/7)";
+        let lead_at = "The pull request was created (https://github.com/o/r/pull/7), but \
+                       applying its labels/assignees failed: boom. Add them from the PR.";
+        let one = vec!["a.png".to_string()];
+        let two = vec!["a.png".to_string(), "b.png".to_string()];
+        let one_tail = " This image didn't upload: a.png. Add it in a comment on the pull request.";
+        let two_tail = " These images didn't upload: a.png, b.png. Add them in a comment on the \
+                        pull request.";
+        let cases: [(&str, &[String], String); 6] = [
+            ("", &[], lead.to_string()),
+            (at, &[], lead_at.to_string()),
+            ("", &one, format!("{lead}{one_tail}")),
+            (at, &one, format!("{lead_at}{one_tail}")),
+            ("", &two, format!("{lead}{two_tail}")),
+            (at, &two, format!("{lead_at}{two_tail}")),
+        ];
+        for (at, failed, want) in cases {
+            assert_eq!(followup_failure_text(at, "boom", failed), want);
+        }
+    }
 }
 
 /// The outcome of a successful merge — the merge was accepted; `cleanup_warning`
@@ -8609,11 +8634,7 @@ pub(crate) async fn gh_pr_create_core(
         followup = run_gh(Some(&repo_path), &edit_args, GH_NETWORK_TIMEOUT)
             .await
             .map(drop)
-            .map_err(move |e| {
-                AppError::Gh(format!(
-                    "The pull request was created{at}, but applying its labels/assignees failed: {e}. Add them from the PR."
-                ))
-            });
+            .map_err(|e| AppError::Gh(followup_failure_text(&at, &e.to_string(), &failed)));
     }
     // The follow-up's Err keeps every staged file; only its Ok releases the posted ones.
     let failed = crate::attachments::finish_attached(followup, staged.as_ref(), failed).await?;
@@ -8622,6 +8643,25 @@ pub(crate) async fn gh_pr_create_core(
         pr: PrRef { number, url },
         failed_attachments: failed,
     })
+}
+
+/// The labels/assignees follow-up's error. It also names the images that didn't upload,
+/// since the Err replaces the outcome that would have listed them.
+fn followup_failure_text(at: &str, cause: &str, failed: &[String]) -> String {
+    let mut text = format!(
+        "The pull request was created{at}, but applying its labels/assignees failed: {cause}. Add them from the PR."
+    );
+    match failed {
+        [] => {}
+        [one] => text.push_str(&format!(
+            " This image didn't upload: {one}. Add it in a comment on the pull request."
+        )),
+        many => text.push_str(&format!(
+            " These images didn't upload: {}. Add them in a comment on the pull request.",
+            many.join(", ")
+        )),
+    }
+    text
 }
 
 /// Pre-mutation guard for the upstream-lens PR create: the v1 cross-repo flow has no

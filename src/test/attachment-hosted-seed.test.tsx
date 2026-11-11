@@ -81,6 +81,7 @@ beforeEach(() => {
     return `blob:seed-${urlSeq}`;
   });
   URL.revokeObjectURL = vi.fn();
+  vi.mocked(encodeBase64).mockClear();
   // Every case starts from a store no earlier case still holds anything in.
   sweepOtherOwners("issue-comment", {});
 });
@@ -92,8 +93,17 @@ afterEach(() => {
 
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
-/** Lets FileReader finish encoding the posted files. */
-const encoded = () => new Promise((r) => setTimeout(r, 30));
+/** Waits on every file read so far, the posted files' seed reads included,
+ *  then one microtask more, so each read's `.then` has stored its bytes. */
+async function encoded() {
+  const files = vi.mocked(encodeBase64).mock.results.map((r) => r.value);
+  const settled = await Promise.allSettled(files);
+  await Promise.resolve();
+  expect(settled.map((s) => s.status)).not.toContain("rejected");
+}
+
+/** A seedable image's two reads: its stage's and its post's seed. */
+const readsPerImage = 2;
 
 /**
  * Stages `count` images into a fresh issue-comment draft, posts `body`, lets
@@ -203,6 +213,7 @@ describe("seeding the server copy of a post", () => {
     "seeds nothing when the server copy %s, and the read runs",
     async (_, bodies) => {
       const { land } = await landed(1, "see ![shot](image-1.png)");
+      expect(encodeBase64).toHaveBeenCalledTimes(readsPerImage);
       land(...bodies);
       expect(hostedEntries()).toHaveLength(0);
       renderServer(`see ![shot](${URL1})`);
@@ -223,6 +234,7 @@ describe("seeding the server copy of a post", () => {
     ],
   ])("seeds nothing for %s", async (_, posted, server) => {
     const { land } = await landed(1, posted);
+    expect(encodeBase64).toHaveBeenCalledTimes(readsPerImage);
     land(server);
     expect(hostedEntries()).toHaveLength(0);
   });
@@ -277,6 +289,7 @@ describe("only a row the post made takes a seed", () => {
     const { landRows } = await landed(1, "![image](image-1.png)", [], {
       before: ["C_old"],
     });
+    expect(encodeBase64).toHaveBeenCalledTimes(readsPerImage);
     landRows({ id: "C_old", body: `![image](${URL1})` });
     expect(hostedEntries()).toHaveLength(0);
   });
@@ -300,6 +313,7 @@ describe("only a row the post made takes a seed", () => {
     ["a numeric id", { id: 7, body: `![image](${URL1})` }],
   ])("a row with %s is never seeded", async (_, row) => {
     const { landRows } = await landed(1, "![image](image-1.png)");
+    expect(encodeBase64).toHaveBeenCalledTimes(readsPerImage);
     landRows(row);
     expect(hostedEntries()).toHaveLength(0);
   });
@@ -339,6 +353,8 @@ describe("a raster the loader would refuse", () => {
   ])("%i x %i seeded: %s", async (width, height, seeds) => {
     staged = { width, height };
     const { land } = await landed(1, "![a](image-1.png)");
+    // A refused raster is never read for a seed: only the stage's read ran.
+    expect(encodeBase64).toHaveBeenCalledTimes(seeds ? readsPerImage : 1);
     land(`![a](${URL1})`);
     expect(hostedEntries()).toHaveLength(seeds ? 1 : 0);
   });

@@ -5,6 +5,7 @@
 // copy. Stdlib only, importing the import-free module under Node's
 // type stripping.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import {
@@ -284,6 +285,159 @@ test("a partial failure's draft keeps each failed reference's alt", () => {
     failedReferencesDraft("nothing", ["image-9.png"]),
     "![image](image-9.png)",
   );
+});
+
+test("an image reference's bracket text reads backslash pairs and line breaks", () => {
+  const ref = "![image](image-2.png)";
+  const leadAtEnd = (text) => insertionFor(text, text.length, ref).insert[0];
+  const rows = [
+    // An escaped `]` stays in the alt; the unescaped one closes it.
+    [String.raw`![a \] b](x.png)`, "\n"],
+    // A backslash run before `]`: odd escapes it, even leaves it closing.
+    [String.raw`![a\](x.png)`, " "],
+    [String.raw`![a\\](x.png)`, "\n"],
+    [String.raw`![a\\\](x.png)`, " "],
+    // Bracket text never spans a line break, escaped or not.
+    ["![two\nlines](x.png)", " "],
+    ["![a\\\nb](x.png)", " "],
+    // A carriage return is alt text alone, but no backslash pairs with it.
+    ["![a\r b](x.png)", "\n"],
+    ["![a\\\r b](x.png)", " "],
+    // `[` never nests: the first unescaped `]` closes.
+    ["![a [b](x.png)", "\n"],
+    ["![a [b] c](x.png)", " "],
+    ["![[v2]](x.png)", " "],
+    // The target holds no whitespace or parenthesis.
+    ["![a](x y.png)", " "],
+    ["![a](x(1).png)", " "],
+    ["![a](x.png", " "],
+    // Any `![` on the line may open it, an escaped `!` included.
+    ["![a] ![b](x.png)", "\n"],
+    [String.raw`\![esc](x.png)`, "\n"],
+    ["![](x.png)", "\n"],
+    ["![a]()", "\n"],
+    ["[link](x.png)", " "],
+  ];
+  for (const [text, lead] of rows)
+    assert.equal(leadAtEnd(text), lead, JSON.stringify(text));
+
+  const draft = (body) => failedReferencesDraft(body, ["x.png"]);
+  assert.equal(draft("see ![one](x.png) and ![two](x.png)"), "![one](x.png)");
+  assert.equal(
+    draft(String.raw`![a \] b](x.png)`),
+    String.raw`![a \] b](x.png)`,
+  );
+  // The earliest `![` wins, even when its alt spans another reference.
+  assert.equal(
+    draft(String.raw`![a\](x.png) ![b](x.png)`),
+    String.raw`![a\](x.png) ![b](x.png)`,
+  );
+  assert.equal(draft("![a [b](x.png)"), "![a [b](x.png)");
+  assert.equal(draft("x ![a] ![b](x.png)"), "![b](x.png)");
+  assert.equal(draft(String.raw`\![esc](x.png)`), "![esc](x.png)");
+  assert.equal(draft("![two\nlines](x.png)"), "![image](x.png)");
+  assert.equal(draft("[link](x.png)"), "![image](x.png)");
+  assert.equal(draft("![a](x.png.png)"), "![image](x.png)");
+});
+
+// The cost is linear in the text. A child process, so a regression is killed at
+// the timeout instead of hanging the suite.
+test("a long line of `![` costs linear time", { timeout: 30_000 }, () => {
+  const moduleUrl = new URL(
+    "../src/lib/attachments/references.ts",
+    import.meta.url,
+  ).href;
+  const script = [
+    `import { failedReferencesDraft, insertionFor } from ${JSON.stringify(moduleUrl)};`,
+    "const bs = String.fromCharCode(92);",
+    'const lines = ["![".repeat(500_000), `![${bs}`.repeat(333_334)];',
+    "const out = [];",
+    "const t0 = performance.now();",
+    "for (const line of lines) {",
+    '  out.push(insertionFor(line, line.length, "![i](i.png)").insert);',
+    '  for (const tail of ["", `${bs}](x.png)`, "](x.png)"])',
+    '    out.push(failedReferencesDraft(line + tail, ["x.png"]).length);',
+    "}",
+    "console.log(JSON.stringify({ ms: performance.now() - t0, out }));",
+  ].join("\n");
+  const child = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    { timeout: 20_000, encoding: "utf8", windowsHide: true },
+  );
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  const { ms, out } = JSON.parse(child.stdout);
+  // Lengths: 15 is the `![image](x.png)` fallback, the rest a whole line's
+  // match from its first `![` (a doubled backslash leaves the `]` closing).
+  assert.deepEqual(out, [
+    " ![i](i.png)",
+    15,
+    15,
+    1_000_008,
+    " ![i](i.png)",
+    15,
+    1_000_011,
+    15,
+  ]);
+  assert.ok(ms < 8_000, `${ms} ms`);
+});
+
+// The cost is linear in the text. A child process, so a regression is killed at
+// the timeout instead of hanging the suite.
+test("removal over long texts costs linear time", { timeout: 30_000 }, () => {
+  const moduleUrl = new URL(
+    "../src/lib/attachments/references.ts",
+    import.meta.url,
+  ).href;
+  const script = [
+    `import { removeReferences } from ${JSON.stringify(moduleUrl)};`,
+    "const texts = [",
+    '  "](x.png)".repeat(125_000),',
+    '  `${"a\\n".repeat(500_000)}](x.png)`,',
+    '  "a](x.png)\\n".repeat(100_000),',
+    "];",
+    "const t0 = performance.now();",
+    'const out = texts.map((t) => removeReferences(t, "x.png").length);',
+    "console.log(JSON.stringify({ ms: performance.now() - t0, out }));",
+  ].join("\n");
+  const child = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    { timeout: 20_000, encoding: "utf8", windowsHide: true },
+  );
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  const { ms, out } = JSON.parse(child.stdout);
+  // A reference alone on the last line takes the line break before it.
+  assert.deepEqual(out, [0, 999_999, 200_000]);
+  assert.ok(ms < 8_000, `${ms} ms`);
+});
+
+// Each deletion here joins a new occurrence, so removal runs one pass per join;
+// a pass whose `[` sits right before its `]` finds it without reading the text
+// ahead of it. A child process, so a regression is killed at the timeout
+// instead of hanging the suite.
+test("removal passes find an adjacent `[` cheaply", { timeout: 30_000 }, () => {
+  const moduleUrl = new URL(
+    "../src/lib/attachments/references.ts",
+    import.meta.url,
+  ).href;
+  const script = [
+    `import { removeReferences } from ${JSON.stringify(moduleUrl)};`,
+    'const text = `${"[]".repeat(496_500)}${"[](x".repeat(700)}[](x.png)${".png)".repeat(700)}`;',
+    "const t0 = performance.now();",
+    'const out = removeReferences(text, "x.png").length;',
+    "console.log(JSON.stringify({ ms: performance.now() - t0, out }));",
+  ].join("\n");
+  const child = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    { timeout: 20_000, encoding: "utf8", windowsHide: true },
+  );
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  const { ms, out } = JSON.parse(child.stdout);
+  // Every joined reference goes; the `[]` pairs close no reference and stay.
+  assert.equal(out, 993_000);
+  assert.ok(ms < 8_000, `${ms} ms`);
 });
 
 test("failedAttachmentsOf tolerates every outcome shape", () => {

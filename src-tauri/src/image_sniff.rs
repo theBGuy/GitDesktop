@@ -274,7 +274,13 @@ pub(crate) fn dimensions_within_caps(width: u32, height: u32) -> bool {
         && height > 0
         && width <= MAX_IMAGE_DIMENSION
         && height <= MAX_IMAGE_DIMENSION
-        && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
+        && pixels_within_cap(width, height)
+}
+
+/// The area ceiling alone, for callers that must not apply the per-axis cap: attachment
+/// staging admits a tall screenshot the loader would refuse to inline.
+pub(crate) fn pixels_within_cap(width: u32, height: u32) -> bool {
+    u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
 }
 
 // ---------------------------------------------------------------------------
