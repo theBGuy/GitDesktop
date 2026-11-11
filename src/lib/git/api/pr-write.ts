@@ -1,5 +1,10 @@
 import { invoke } from "@/lib/tauri/invoke";
-import type { PrRef, RemoteLens, StackWriteOutcome } from "../types";
+import type {
+  AttachmentRefs,
+  PrRef,
+  RemoteLens,
+  StackWriteOutcome,
+} from "../types";
 
 /** Create a merge/pull request (pushes the head branch first). Provider-neutral:
  *  GitHub via `gh pr create`, GitLab via `glab` with a one-shot credential-helper
@@ -15,6 +20,7 @@ export const forgePrCreate = (
   labels: string[] | undefined,
   assignees: string[] | undefined,
   lens: RemoteLens,
+  attachments?: AttachmentRefs,
 ) =>
   invoke<PrRef>("forge_pr_create", {
     repoPath,
@@ -31,6 +37,7 @@ export const forgePrCreate = (
     labels: labels ?? null,
     assignees: assignees ?? null,
     lens,
+    attachments: attachments ?? null,
   });
 
 /** Edits a PR's title/body, and — when `base` is supplied — retargets it. An

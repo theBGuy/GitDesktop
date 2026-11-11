@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
@@ -731,7 +732,14 @@ export function ReviewThreadCard({
                   <div className="space-y-3">
                     {splitSuggestionSegments(body).map((seg, i) =>
                       seg.kind === "md" ? (
-                        <Markdown key={i} refs={mentions?.refs}>
+                        <Markdown
+                          key={i}
+                          refs={mentions?.refs}
+                          hostedImages={hostedImagesFor(
+                            mentions?.refs?.repoPath,
+                            mentions?.ghHost,
+                          )}
+                        >
                           {seg.text}
                         </Markdown>
                       ) : (

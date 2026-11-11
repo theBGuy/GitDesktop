@@ -1654,7 +1654,9 @@ commits since**), so an out-of-date verdict never reads as current. The feed wor
 events each one reports.
 A locked conversation shows a **locked** badge in the header, with GitHub's lock reason
 when it gives one. When GitHub or GitLab won't take a comment from you, the comment box
-and reactions turn read-only and the disabled button says why.
+and reactions turn read-only and the disabled button says why. With the box open, the
+reason also sits on its own line above the editor, and when you've written a draft it
+adds that the draft is kept until you clear it.
 {{ai}}Posting an AI review is held the same way.{{/ai}} On an archived GitHub pull
 request, the first refused comment{{ai}} or AI review post{{/ai}} explains the archive,
 and the box and reactions{{ai}}, and AI review posting,{{/ai}} stay read-only until you
@@ -1715,6 +1717,32 @@ so collapsing leaves the pointer on the control that opens the box back up. Fold
 surface's own actions stay on the strip and a saved draft shows its first line there;
 the choice is remembered across every conversation surface and across restarts, and the
 command palette's **Collapse or expand the comment box** toggles it too.
+
+The comment box of a **GitHub** or **GitLab** pull request or merge request takes images.
+Paste one from the clipboard, or pick files with **Attach image**, the image button at the
+end of the formatting toolbar (the command palette's **Attach image** opens the same
+picker). PNG, JPEG, GIF and WebP work, up to 10 MB and 40 megapixels each, 10 per draft.
+Each image adds a Markdown reference at the cursor (\`![image](image-1.png)\` for a paste;
+a picked file's name, minus its extension, becomes the alt text), so you edit the alt text
+in the text itself. A chip under the editor shows each image's thumbnail, name and size:
+click the thumbnail for the full-size image, or the remove button to take the image and its
+reference out (deleting the reference removes the chip too). **Preview** shows the images
+in place, and nothing uploads until you post. Attached images stay with the draft when you
+fold the box or switch away and come back, and go when it's posted or cleared. If GitHub
+takes the comment but an image fails to upload, the comment posts and the failed images
+stay attached for a follow-up comment. Images need GitHub CLI 2.99 or newer on GitHub.com
+or GitHub Enterprise Cloud (not GitHub Enterprise Server) with write access to the
+repository, or GitLab CLI 1.91 or newer; Bitbucket has no image attachments. With some
+GitHub CLI sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so
+when you post. Where they aren't available, the button stays visible, disabled, and says
+why. An image file dropped on the window isn't attached; the app reminds you to paste it or
+use **Attach image**. An image posted to GitLab shows here as its alt text with a note that
+it can't load in this view; GitLab shows the picture itself. On GitHub.com and GitHub
+Enterprise Cloud, an attached image that GitHub hosts at a \`user-attachments\` link loads
+through your GitHub CLI sign-in, so it shows in a private repository too. That covers issue
+and pull request descriptions, comments, review threads, discussions and release notes. One
+the app can't load that way shows a short reason, with an **Open on GitHub** link unless
+the image is itself a link.
 
 Those references are links once a body is rendered. On **GitHub** and **GitLab**, a
 **#123** in a description, comment, review thread,{{ai}} AI review,{{/ai}} or release note opens that
@@ -1990,6 +2018,9 @@ Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare
 a **draft** if you like, and set its **labels** and **assignees** right in the dialog
 (GitHub and GitLab; Bitbucket PRs have neither, so it shows only its reviewers picker
 instead); the label picker says when labels couldn't be loaded.
+On GitHub and GitLab the description takes pasted or attached images the same way the
+comment box does; if GitHub creates the pull request but an image doesn't upload, a notice
+says which image, or how many, didn't make it.
 A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
 tracker) lets you reference real repo issues on create: chips are **auto-detected** from
 your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, validated
@@ -2364,9 +2395,11 @@ The comment box sits at the bottom of the issue,
 past the side rail, and the command palette's **Focus the comment box** jumps straight
 to it — no default shortcut, so give it one in **Settings → Keyboard**. It folds to a
 one-line strip and completes **@** mentions and **#** references the same way it does on
-the Pull Requests tab. On a long thread (local and Jira issues included), the arrow
-buttons by the scrollbar jump to its top or bottom, and the command palette's **Jump to
-the top of the thread** and **Jump to the bottom of the thread** do the same.
+the Pull Requests tab. On a GitHub or GitLab issue it also takes pasted or attached
+images, just as a pull request's comment box does. On a long thread (local and Jira
+issues included), the arrow buttons by the scrollbar jump to its top or bottom, and the
+command palette's **Jump to the top of the thread** and **Jump to the bottom of the
+thread** do the same.
 
 Comments share the issue with a **date-sorted activity feed**: timeline events interleave
 with the conversation oldest-to-newest, each a calm one-line entry carrying the actor's

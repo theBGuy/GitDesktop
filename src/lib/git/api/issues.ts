@@ -1,5 +1,7 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
+  AttachmentRefs,
+  CommentOutcome,
   ForgeTimelineEvent,
   ForgeUserList,
   GitLabLinkedIssue,
@@ -204,7 +206,15 @@ export const forgeIssueComment = (
   number: number,
   body: string,
   lens: RemoteLens,
-) => invoke<void>("forge_issue_comment", { repoPath, number, body, lens });
+  attachments?: AttachmentRefs,
+) =>
+  invoke<CommentOutcome>("forge_issue_comment", {
+    repoPath,
+    number,
+    body,
+    lens,
+    attachments: attachments ?? null,
+  });
 
 export const forgeIssueClose = (
   repoPath: string,

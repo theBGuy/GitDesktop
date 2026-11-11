@@ -9,6 +9,7 @@ import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -1097,7 +1098,15 @@ export function DiscussionView({
               </DropdownMenu>
             </p>
             {hasVisibleBody(d.body) ? (
-              <Markdown refs={mentions.refs}>{d.body}</Markdown>
+              <Markdown
+                refs={mentions.refs}
+                hostedImages={hostedImagesFor(
+                  mentions.refs?.repoPath,
+                  mentions.ghHost,
+                )}
+              >
+                {d.body}
+              </Markdown>
             ) : (
               <p className="text-xs text-muted-foreground italic">
                 No description provided.

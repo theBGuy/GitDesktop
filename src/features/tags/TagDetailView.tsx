@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -717,7 +718,15 @@ export function TagDetailView({
         <ScrollArea className="min-h-0 flex-1 overflow-hidden">
           <div className={cn("space-y-4 p-4", PLACEHOLDER_FADE, staleDim)}>
             {rel.body.trim() ? (
-              <Markdown refs={mentions.refs}>{rel.body}</Markdown>
+              <Markdown
+                refs={mentions.refs}
+                hostedImages={hostedImagesFor(
+                  mentions.refs?.repoPath,
+                  mentions.ghHost,
+                )}
+              >
+                {rel.body}
+              </Markdown>
             ) : (
               <p className="text-xs text-muted-foreground italic">
                 No release notes.

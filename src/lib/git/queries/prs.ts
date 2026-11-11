@@ -6,12 +6,14 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { watchPostedCopies } from "@/lib/attachments/store";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
 import { filterPlaceholderRows } from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import type {
+  AttachmentRefs,
   CiStatus,
   CommitCommentOut,
   DraftCommentIn,
@@ -1138,7 +1140,14 @@ export function useCommentIssue(repo: string, lens: RemoteLens) {
     repo,
     "issue",
     lens,
-    (args) => api.forgeIssueComment(repo, args.number, args.body, lens),
+    (args) =>
+      api.forgeIssueComment(
+        repo,
+        args.number,
+        args.body,
+        lens,
+        args.attachments,
+      ),
     issueWriteKey("comment", repo),
   );
 }
@@ -1149,7 +1158,14 @@ export function useCommentPr(repo: string, lens: RemoteLens) {
     "pr",
     lens,
     (args) =>
-      api.forgePrComment(repo, args.number, args.body, args.asBot, lens),
+      api.forgePrComment(
+        repo,
+        args.number,
+        args.body,
+        args.asBot,
+        lens,
+        args.attachments,
+      ),
     prWriteKey("comment", repo),
   );
 }
@@ -1157,6 +1173,11 @@ export function useCommentPr(repo: string, lens: RemoteLens) {
 /** Monotonic counter for synthetic optimistic-comment ids — combined with the
  *  `optimistic:` prefix it can never collide with a real provider node id. */
 let optimisticCommentSeq = 0;
+
+/** Each attachment post's thread comment ids from just before its optimistic
+ *  row went in (null: no thread data then), by the mutation's variables, so the
+ *  watcher seeds only a row the post could have made. */
+const commentIdsBeforePost = new WeakMap<object, ReadonlySet<string> | null>();
 
 /**
  * Optimistically appends a synthetic conversation comment to a PR/issue detail cache
@@ -1170,22 +1191,40 @@ function useOptimisticCreateCommentMutation<TData>(
   repo: string,
   kind: "pr" | "issue",
   lens: RemoteLens,
-  // `asBot` posts as the configured GitLab review-bot identity (ignored elsewhere).
+  // `asBot` posts as the configured GitLab review-bot identity (ignored elsewhere);
+  // never combined with `attachments`, which Rust refuses for the bot.
   mutationFn: (args: {
     number: number;
     body: string;
     asBot?: boolean;
+    attachments?: AttachmentRefs;
   }) => Promise<TData>,
   mutationKey?: QueryKey,
 ) {
+  const keyFor = (args: { number: number }) =>
+    ["repo", repo, kind, lens, args.number] as const;
   return useOptimisticCacheMutation<
-    { number: number; body: string; author: string; asBot?: boolean },
+    {
+      number: number;
+      body: string;
+      author: string;
+      asBot?: boolean;
+      attachments?: AttachmentRefs;
+      /** The post ticket's token, carried by the optimistic row only. */
+      postToken?: string;
+    },
     TData,
     PrDetails | IssueDetails
   >(
     (args) => mutationFn(args),
-    (args) => ["repo", repo, kind, lens, args.number] as const,
+    keyFor,
     (d, args) => {
+      // Runs once, inside onMutate's write: `d` is the data before this row.
+      if (args.attachments && args.postToken)
+        commentIdsBeforePost.set(
+          args,
+          d ? new Set(d.comments.map((c) => c.id)) : null,
+        );
       const synthetic: PrThreadOut = {
         author: args.author,
         // Optimistic: login-derived (GitHub) / initial until the refetch fills it.
@@ -1200,10 +1239,25 @@ function useOptimisticCreateCommentMutation<TData>(
         minimizedReason: "",
         // Synthetic conversation comment — belongs to no review.
         reviewId: "",
+        // Shows this post's staged images until the server row replaces it.
+        ...(args.attachments && args.postToken
+          ? { postToken: args.postToken }
+          : {}),
       };
       return d ? { ...d, comments: [...d.comments, synthetic] } : d;
     },
-    (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
+    (queryClient, args) => {
+      // Subscribed before the refetch starts, so its settle is the first one seen.
+      if (args.attachments && args.postToken)
+        watchPostedCopies(
+          queryClient,
+          keyFor(args),
+          args.postToken,
+          args.body,
+          commentIdsBeforePost.get(args) ?? null,
+        );
+      void invalidateRepoAfterWrite(queryClient, repo);
+    },
     mutationKey,
   );
 }

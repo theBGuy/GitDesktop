@@ -1,12 +1,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { toast } from "sonner";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CreatePrDialog,
+  type CreatePrHost,
   type CreatePrPreset,
 } from "@/features/pulls/CreatePrDialog";
+import { TabPanel } from "@/features/repository/TabPanel";
+import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
+import { attachmentStoreSizes } from "@/lib/attachments/store";
 import {
   forgeStatus,
   gitBranchAhead,
@@ -63,6 +74,16 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitDefaultBranch: vi.fn(() => new Promise(() => undefined)),
   gitRemoteUrl: vi.fn(() => new Promise(() => undefined)),
   forgeRepoLabels: vi.fn(() => new Promise(() => undefined)),
+  forgeRepoWriteAccess: vi.fn(() => new Promise(() => undefined)),
+}));
+
+// The attachments gate reads the CLI health probe; these cases never attach.
+vi.mock("@/lib/attachments/use-attachment-support", () => ({
+  useAttachmentSupport: () => null,
+}));
+vi.mock("@/lib/attachments/api", () => ({
+  attachmentStage: vi.fn(),
+  attachmentDiscard: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/ai/ignore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/ignore")>()),
@@ -145,15 +166,21 @@ function renderDialog(props: {
   preset?: CreatePrPreset;
   defaultBase?: string;
   defaultHead?: string;
+  host?: CreatePrHost;
+  /** Hosts the dialog in a repository tab, which `hide`/`show` toggle. */
+  tab?: boolean;
 }) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  let active = true;
+  let isOpen = true;
   const ui = (
     open: boolean,
     opener: { preset?: CreatePrPreset; defaultBase?: string } = props,
-  ) => (
-    <QueryClientProvider client={client}>
+  ) => {
+    isOpen = open;
+    const dialog = (
       <CreatePrDialog
         repoPath={REPO}
         defaultHead={props.defaultHead ?? "feat"}
@@ -161,12 +188,25 @@ function renderDialog(props: {
         preset={opener.preset}
         open={open}
         onOpenChange={() => undefined}
+        host={props.host ?? "compare"}
       />
-    </QueryClientProvider>
-  );
+    );
+    return (
+      <QueryClientProvider client={client}>
+        {props.tab ? <TabPanel active={active}>{dialog}</TabPanel> : dialog}
+      </QueryClientProvider>
+    );
+  };
   const view = render(ui(true));
+  const setActive = (next: boolean) => {
+    active = next;
+    view.rerender(ui(isOpen));
+  };
   return {
     client,
+    unmount: () => view.unmount(),
+    hide: () => setActive(false),
+    show: () => setActive(true),
     close: () => view.rerender(ui(false)),
     reopen: () => view.rerender(ui(true)),
     /** Reopens with the props Compare passes for `preset`: a parent preset
@@ -735,6 +775,7 @@ describe("CreatePrDialog frozen target", () => {
           defaultBase="main"
           open={open}
           onOpenChange={setOpen}
+          host="compare"
         />
       );
     }
@@ -1007,5 +1048,412 @@ describe("Add upstream remote offer", () => {
     expect(
       screen.queryByRole("button", { name: "Add upstream remote" }),
     ).toBeNull();
+  });
+});
+
+describe("CreatePrDialog image attachments", () => {
+  const SESSION = "c".repeat(32);
+
+  beforeEach(() => {
+    let n = 0;
+    vi.mocked(attachmentStage).mockImplementation(async (session) => {
+      n += 1;
+      return {
+        session: session ?? SESSION,
+        name: `image-${n}.png`,
+        mime: "image/png",
+        size: 2,
+        width: 1,
+        height: 1,
+      };
+    });
+    let urls = 0;
+    URL.createObjectURL = vi.fn(() => {
+      urls += 1;
+      return `blob:create-${urls}`;
+    });
+    URL.revokeObjectURL = vi.fn();
+  });
+
+  const description = () =>
+    screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+
+  /** Opens the dialog ready to create, with `count` pasted images staged. */
+  async function readyWithImages(count: number) {
+    const view = renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+    });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "A title" },
+    });
+    const files = Array.from(
+      { length: count },
+      () => new File([new Uint8Array([1])], "shot.png", { type: "image/png" }),
+    );
+    fireEvent.paste(description(), {
+      clipboardData: { files, types: ["Files"], getData: () => "" },
+    });
+    await waitFor(() =>
+      expect(description().value).toContain(`](image-${count}.png)`),
+    );
+    vi.mocked(attachmentDiscard).mockClear();
+    return view;
+  }
+
+  const create = () =>
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+
+  const ATTACHING = "Wait for the image to finish attaching.";
+  const statusSaysAttaching = () =>
+    screen.getAllByRole("status").some((s) => s.textContent === ATTACHING);
+
+  /** Opens the dialog ready to create with one pasted image still staging. */
+  async function readyWithStageInFlight() {
+    const view = renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+    });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "A title" },
+    });
+    let settle: {
+      resolve: (v: Awaited<ReturnType<typeof attachmentStage>>) => void;
+      reject: (e: unknown) => void;
+    } = { resolve: () => undefined, reject: () => undefined };
+    vi.mocked(attachmentStage).mockReturnValueOnce(
+      new Promise((resolve, reject) => {
+        settle = { resolve, reject };
+      }),
+    );
+    fireEvent.paste(description(), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "shot.png", { type: "image/png" }),
+        ],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await waitFor(() => expect(attachmentStage).toHaveBeenCalledTimes(1));
+    return { view, settle };
+  }
+
+  const createButton = () =>
+    screen.getByRole("button", { name: "Create pull request" });
+
+  it("creates nothing while a stage is in flight, by button, chord or form submit", async () => {
+    const { settle } = await readyWithStageInFlight();
+    await waitFor(() =>
+      expect(createButton()).toHaveAccessibleDescription(ATTACHING),
+    );
+    expect(createButton()).toHaveAttribute("aria-disabled", "true");
+    create();
+    fireEvent.submit(description().closest("form") as HTMLFormElement);
+    expect(statusSaysAttaching()).toBe(true);
+    act(() => description().focus());
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await act(async () => undefined);
+    expect(forgePrCreate).not.toHaveBeenCalled();
+    await act(async () =>
+      settle.resolve({
+        session: SESSION,
+        name: "image-1.png",
+        mime: "image/png",
+        size: 2,
+        width: 1,
+        height: 1,
+      }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(statusSaysAttaching()).toBe(false);
+  });
+
+  it("notes the held chord on the status line", async () => {
+    const { settle } = await readyWithStageInFlight();
+    await waitFor(() =>
+      expect(createButton()).toHaveAccessibleDescription(ATTACHING),
+    );
+    expect(statusSaysAttaching()).toBe(false);
+    act(() => description().focus());
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(statusSaysAttaching()).toBe(true));
+    expect(forgePrCreate).not.toHaveBeenCalled();
+    await act(async () => settle.reject(new Error("refused")));
+  });
+
+  it("gives the attaching reason only while nothing plain holds Create", async () => {
+    // Nothing to merge is a plain hold: it explains itself in the dialog.
+    vi.mocked(gitBranchAhead).mockResolvedValue([]);
+    renderDialog({ preset: ORIGIN_PRESET, defaultBase: "feature-x" });
+    await waitFor(() => expect(gitBranchAhead).toHaveBeenCalled());
+    await act(async () => undefined);
+    let refuse: (e: unknown) => void = () => undefined;
+    vi.mocked(attachmentStage).mockReturnValueOnce(
+      new Promise((_, reject) => {
+        refuse = reject;
+      }),
+    );
+    fireEvent.paste(description(), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "shot.png", { type: "image/png" }),
+        ],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await waitFor(() => expect(attachmentStage).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    const button = createButton();
+    expect(
+      button.hasAttribute("disabled") ||
+        button.getAttribute("aria-disabled") === "true",
+    ).toBe(true);
+    expect(button).not.toHaveAccessibleDescription(ATTACHING);
+    await act(async () => refuse(new Error("refused")));
+  });
+
+  it("frees Create when the stage is refused", async () => {
+    const { settle } = await readyWithStageInFlight();
+    await waitFor(() =>
+      expect(createButton()).toHaveAttribute("aria-disabled", "true"),
+    );
+    await act(async () => settle.reject(new Error("refused")));
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(forgePrCreate).not.toHaveBeenCalled();
+  });
+
+  it("sends the attachments and, on a partial create, warns and discards the session", async () => {
+    const warning = vi.spyOn(toast, "warning");
+    const success = vi.spyOn(toast, "success");
+    await readyWithImages(2);
+    forgePrCreate.mockResolvedValueOnce({
+      number: 7,
+      url: "https://github.com/me/project/pull/7",
+      failedAttachments: ["image-2.png"],
+    } as never);
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    expect((forgePrCreate.mock.calls[0] as unknown[])[10]).toEqual({
+      session: SESSION,
+      names: ["image-1.png", "image-2.png"],
+    });
+    await waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
+    expect(warning.mock.calls[0][0]).toBe(
+      "Pull request created, but image-2.png didn't upload. Add it in a comment on the pull request.",
+    );
+    expect(success).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+    warning.mockRestore();
+    success.mockRestore();
+  });
+
+  it("keeps the chips and every staged file when the create fails", async () => {
+    await readyWithImages(1);
+    forgePrCreate.mockRejectedValueOnce(new Error("push rejected"));
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create pull request" }),
+      ).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+  });
+
+  it("discards the images when a close leaves the draft to the next open's reset", async () => {
+    const view = await readyWithImages(1);
+    view.close();
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+    view.reopen();
+    await waitFor(() => expect(description().value).toBe(""));
+    expect(
+      screen.queryByRole("button", { name: "Remove image-1.png" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the images through a close after a failed create, for the reopen", async () => {
+    const view = await readyWithImages(1);
+    forgePrCreate.mockRejectedValueOnce(new Error("push rejected"));
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create pull request" }),
+      ).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    view.close();
+    await act(async () => undefined);
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    view.reopen();
+    await waitFor(() =>
+      expect(description().value).toContain("](image-1.png)"),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+  });
+
+  /** Mounts a dialog for `host`, waits for its mount's sweep of what an earlier
+   *  instance left, and returns the store's sizes from then on as the baseline. */
+  async function mountHost(props: { host?: CreatePrHost; tab?: boolean } = {}) {
+    const view = renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+      ...props,
+    });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await waitFor(() => expect(attachmentStoreSizes().chains).toBe(0));
+    return { view, baseline: attachmentStoreSizes() };
+  }
+
+  /** Titles the open dialog and stages one pasted image into it. */
+  async function stageOne() {
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "A title" },
+    });
+    fireEvent.paste(description(), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "shot.png", { type: "image/png" }),
+        ],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await waitFor(() =>
+      expect(description().value).toContain("](image-1.png)"),
+    );
+    vi.mocked(attachmentDiscard).mockClear();
+    vi.mocked(URL.revokeObjectURL).mockClear();
+  }
+
+  async function failCreate() {
+    forgePrCreate.mockRejectedValueOnce(new Error("push rejected"));
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+  }
+
+  it("ends a failed create's images once its host is gone and mounts again", async () => {
+    const { view, baseline } = await mountHost();
+    await stageOne();
+    await failCreate();
+    view.close();
+    view.unmount();
+    await act(async () => undefined);
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    const next = await mountHost();
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:create-1");
+    await waitFor(() => expect(attachmentStoreSizes()).toEqual(baseline));
+    expect(next.baseline).toEqual(baseline);
+    expect(description().value).toBe("");
+  });
+
+  it("keeps a failed create's draft and chip through a tab hide and show", async () => {
+    const { view } = await mountHost({ tab: true });
+    await stageOne();
+    await failCreate();
+    view.close();
+    view.hide();
+    await act(async () => undefined);
+    view.show();
+    view.reopen();
+    await waitFor(() =>
+      expect(description().value).toContain("](image-1.png)"),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("never ends the other host's kept draft", async () => {
+    // Both hosts live in one React tree, as in the repository view.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const dialog = (host: CreatePrHost, open: boolean) => (
+      <CreatePrDialog
+        repoPath={REPO}
+        defaultHead="feat"
+        defaultBase="feature-x"
+        preset={ORIGIN_PRESET}
+        open={open}
+        onOpenChange={() => undefined}
+        host={host}
+      />
+    );
+    const tree = (compareOpen: boolean, listMounted: boolean) => (
+      <QueryClientProvider client={client}>
+        {dialog("compare", compareOpen)}
+        {listMounted && dialog("pull-requests", false)}
+      </QueryClientProvider>
+    );
+    const view = render(tree(true, false));
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await stageOne();
+    await failCreate();
+    view.rerender(tree(false, true));
+    await act(async () => undefined);
+    await waitFor(() => expect(attachmentStoreSizes().chains).toBe(0));
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    view.rerender(tree(true, true));
+    await waitFor(() =>
+      expect(description().value).toContain("](image-1.png)"),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+  });
+
+  it("ends the images at the settle of a create whose host left mid-flight", async () => {
+    const { view, baseline } = await mountHost();
+    await stageOne();
+    let fail: (e: unknown) => void = () => undefined;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }) as never,
+    );
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    view.unmount();
+    const next = await mountHost();
+    expect(next.baseline.entries).toBeGreaterThan(baseline.entries);
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    await act(async () => fail(new Error("push rejected")));
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:create-1");
+    await waitFor(() => expect(attachmentStoreSizes()).toEqual(baseline));
   });
 });

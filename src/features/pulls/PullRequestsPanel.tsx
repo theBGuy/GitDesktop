@@ -1400,6 +1400,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           repoPath={repoPath}
           open={ghCreateOpen}
           onOpenChange={setGhCreateOpen}
+          host="pull-requests"
         />
 
         {/* Confirm for the palette "Delete pull request" action (the row menu owns

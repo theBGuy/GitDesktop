@@ -2,6 +2,7 @@ mod agent;
 mod agent_sandbox;
 mod app_menu;
 mod app_store;
+mod attachments;
 mod automation_claims;
 mod dependabot;
 mod error;
@@ -12,6 +13,7 @@ mod git;
 mod github;
 mod health;
 mod hooks;
+mod hosted_image;
 mod image_sniff;
 // Dev-only, like the cold-start mode it serves: gated so release builds carry no
 // unused reader (and no dead_code warning for it).
@@ -134,6 +136,14 @@ pub fn run() {
                 tauri::async_runtime::spawn_blocking(|| {
                     git::compare::sweep_stale_persistent_review_worktrees();
                 });
+                // Remove image-staging sessions a day idle. Startup only, never at exit:
+                // a second instance's drafts may still point at their folders. The root
+                // is the per-user cache dir; unresolved, staging refuses instead.
+                match tauri::Manager::path(app).app_cache_dir() {
+                    Ok(cache) => attachments::init_root(&cache),
+                    Err(e) => eprintln!("gitdesktop: image staging unavailable: {e}"),
+                }
+                tauri::async_runtime::spawn_blocking(attachments::sweep_stale_sessions);
                 // Capture the login shell's PATH for children spawned through
                 // sanitize_child_env (a Finder/Dock launch inherits launchd's minimal
                 // one). Fire-and-forget: most spawns use the inherited PATH until it
@@ -451,6 +461,8 @@ pub fn run() {
             forge::forge_release_upload_asset,
             forge::forge_release_delete_asset,
             forge::forge_issue_comment,
+            attachments::attachment_stage,
+            attachments::attachment_discard,
             forge::forge_issue_edit_comment,
             forge::forge_issue_delete_comment,
             forge::forge_issue_close,
@@ -699,6 +711,7 @@ pub fn run() {
             dependabot::dependabot_set,
             dependabot::dependabot_delete,
             link_preview::fetch_link_preview,
+            hosted_image::github_hosted_image,
             github::insights::gh_community_insights,
             github::insights::gh_repo_traffic,
             github::insights::gh_repo_dependencies,

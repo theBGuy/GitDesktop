@@ -64,6 +64,9 @@ export interface PrThreadOut {
    *  review/conversation rows and on GitLab/Bitbucket. Lets the timeline tie
    *  GitHub's empty reply-wrapper reviews back to the thread they wrap. */
   reviewId: string;
+  /** Client-only, never from the wire: the optimistic comment row's post token,
+   *  which lets that row (and no other) show the post's staged images. */
+  postToken?: string;
 }
 
 /** One file:line-anchored review thread, provider-neutral (GitHub reviewThread /

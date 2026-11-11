@@ -274,7 +274,13 @@ pub(crate) fn dimensions_within_caps(width: u32, height: u32) -> bool {
         && height > 0
         && width <= MAX_IMAGE_DIMENSION
         && height <= MAX_IMAGE_DIMENSION
-        && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
+        && pixels_within_cap(width, height)
+}
+
+/// The area ceiling alone, for callers that must not apply the per-axis cap: attachment
+/// staging admits a tall screenshot the loader would refuse to inline.
+pub(crate) fn pixels_within_cap(width: u32, height: u32) -> bool {
+    u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +412,7 @@ fn webp_fixture(fourcc: &[u8], payload: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
+pub(crate) fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
     let mut payload = vec![0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a];
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
