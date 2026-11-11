@@ -134,7 +134,8 @@ export type DropVerdict =
  *  noop -> own-slot; move -> valid(false, afterId). (4) other column: moveHeld defined ->
  *  refused(moveHeld); plan held -> refused(truncatedReason); move -> valid(true, afterId); noop ->
  *  valid(true, undefined): a status write, and no slot write unless the re-plan after it finds one.
- *  "Own slot" is never computed here: it is planDrop's same-column `noop` (its rule 2b), passed in. */
+ *  "Own slot" is never computed here: it is planDrop's same-column `noop` (no live card of its
+ *  column between the card and the slot), passed in. */
 export function classifyDrop(args: {
   target: { columnId: string; beforeId: string | null } | null;
   /** The column that draws the moved card NOW, read from the live host at this hover or drop; null
