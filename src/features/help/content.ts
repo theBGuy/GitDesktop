@@ -2971,7 +2971,11 @@ organization doesn't let you set its fields; a move across a selection takes onl
 issues it can. An ungrouped board has no columns to move between, so its cards carry
 no **Move to** section, and a card whose contents you can't see carries none either.
 
-## Ordering a card inside its column
+{{ai}}An agent connected to GitDesktop's MCP server can read this repository's boards too.
+With remote writes allowed it can add, move, archive and restore cards, set their fields,
+edit drafts and post status updates (see *Agent sessions*).
+
+{{/ai}}## Ordering a card inside its column
 
 A column's cards sit in the **project order** — the one GitHub keeps for the board itself,
 shared with everyone who opens it. {{key:alt+up}} and {{key:alt+down}} move the card you're
@@ -3641,18 +3645,21 @@ and tells you when a pick needs a container session — with Codex it points you
 applies from your next turn.
 
 **The other direction — GitDesktop *as* a server.** At the bottom of the panel, **Use
-GitDesktop as an MCP server** lets any external MCP client — Claude Desktop, Cursor, Claude
-Code — use *this* repo's tools. **Reads are always on and are the default**: status, log,
+GitDesktop as an MCP server** lets any external MCP client (Claude Desktop, Cursor, Claude
+Code) use *this* repo's tools. **Reads are always on and are the default**: status, log,
 diffs, blame, branches, file history/read, PRs, issues, CI logs, labels, milestones,
-releases, and a PR's full timeline. The PR, issue, and CI tools work
+releases, a PR's full timeline, and **project boards** (their fields, cards, saved views
+and status updates). The PR, issue, and CI tools work
 across **GitHub, GitLab, and Bitbucket** — they route through GitDesktop's forge layer and
 dispatch by the repo's remote (Bitbucket covers PRs and pipelines, but not issues — its
-native tracker is deprecated). If the repo has a **linked Jira project**, a set of
-\`jira_*\` tools list and read that project's issues too — the tools resolve the repo's
-stored link themselves, so an agent never passes a site or project. The app itself runs as a stdio server — on macOS and Linux
-that's the app binary directly (a Personal config embeds its absolute path), and on Windows a
-dedicated update-safe \`gitdesktop-mcp\` copy (so running servers never block app updates) — so
-an agent can understand a repo without changing it.
+native tracker is deprecated). The project tools are GitHub-only and reach this
+repository's linked projects, then its owner's, resolved from the **origin** remote. If the
+repo has a **linked Jira project**, a set of \`jira_*\` tools list and read that project's
+issues too — the tools resolve the repo's stored link themselves, so an agent never passes
+a site or project. The app itself runs as a stdio server, so an agent can understand a repo
+without changing it: on macOS and Linux that's the app binary directly (a Personal config
+embeds its absolute path), and on Windows a dedicated update-safe \`gitdesktop-mcp\` copy
+(so running servers never block app updates).
 **Copy** the snippet and paste it into your client's config, or hit **Write to
 .mcp.json** to merge the \`gitdesktop\` entry into the open repo's \`.mcp.json\` for you —
 existing servers are preserved, and you're asked before an existing GitDesktop entry is
@@ -3693,16 +3700,22 @@ dissolve** a GitHub PR stack, toggle **draft** state, **request reviewers**, **e
 set **assignees** (on issues and PRs), **approve**, **request changes**, or **withdraw**
 either, **start**, **reply to**, and **resolve** review threads, add or remove
 **reactions**, **rerun/cancel/dispatch** CI, **create/update releases**,
-**create, comment on, close/reopen**, and set the **milestone** of issues, and — on GitHub —
-**create, comment on, answer, and close/reopen discussions**. One caveat: **creating** a
-pull request pushes its head branch first, so it additionally needs \`--allow-git-write\`
-(below). The same flag also unlocks the
+**create, comment on, close/reopen**, and set the **milestone** of issues, and, on GitHub,
+edit **project boards** (**add** this repo's issues and PRs or new drafts as cards,
+**move**, **archive** or **restore** cards, set their **fields**, **edit drafts**, and post
+**status updates**) and **create, comment on, answer, and close/reopen discussions**. An agent
+can set text, number, date, single-select and iteration fields, and setting **Status**
+moves a card between columns on a board grouped by Status. One caveat: **creating** a
+pull request pushes its head branch first, so it additionally needs
+\`--allow-git-write\` (below). The same flag also unlocks the
 linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**,
-**assign**, and **update** (due date, priority, labels) its issues. Issue
-writes cover GitHub and GitLab (not Bitbucket); discussions are GitHub-only; PR comments cover all three. PR comments an
-agent posts carry a small **Posted by GitDesktop** footer so they're identifiable as
-automated, and on the read side an agent can pull a pull request's full comment set — the
-conversation, review summaries, and the file:line review threads.
+**assign**, and **update** (due date, priority, labels) its issues. Issue writes cover
+GitHub and GitLab (not Bitbucket); discussions and project boards are GitHub-only; PR
+comments cover all three. PR comments an agent posts carry a small **Posted by GitDesktop**
+footer so they're identifiable as automated, and on the read side an agent can pull a pull
+request's full comment set — the conversation, review summaries, and the file:line review
+threads. A board open in the app picks up an agent's project change on its next refresh:
+when you switch back to the app or reopen the board, once its data is over a minute old.
 
 **Allow git write** (\`--allow-git-write\`) is a further, independent tier for **recoverable
 local-git mutations** of the bound repo — stage/unstage, commit (and undo the last commit),

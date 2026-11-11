@@ -802,7 +802,8 @@ converting, archiving, restoring, removing, posting status updates and
 managing projects and views all need write access to the board and the
 `project` sign-in scope (a new project needs the scope alone); reading one
 needs only the `project` or `read:project` scope the Projects picker already
-asks for.
+asks for. An agent connected to GitDesktop's [MCP server](#mcp-servers) can
+read these boards too and, with remote writes enabled, change them.
 
 ### Code TODOs
 
@@ -1191,13 +1192,14 @@ agents read this repo through GitDesktop.
   can vet before adding) or **Import** existing config.
 - **Use GitDesktop *as* an MCP server**: the reverse direction. Expose this
   repo's **read-only-by-default** git and forge tools (status, log, diff,
-  blame, branches, file read/history, PRs, issues, CI logs) to any external
-  MCP client: **Claude Desktop**, **Cursor**, **Claude Code**. PR/issue/CI
-  tools route across **GitHub, GitLab & Bitbucket** by the repo's remote
-  (Bitbucket covers PRs and pipelines, not issues). The app runs as a
-  **stdio server** (its own binary on macOS/Linux, an update-safe
-  `gitdesktop-mcp` copy on Windows), so an agent can *understand* a repo
-  without touching it.
+  blame, branches, file read/history, PRs, issues, CI logs, project boards)
+  to any external MCP client: **Claude Desktop**, **Cursor**, **Claude
+  Code**. PR/issue/CI tools route across **GitHub, GitLab & Bitbucket** by
+  the repo's remote (Bitbucket covers PRs and pipelines, not issues;
+  project boards are GitHub-only and cover the repo's linked projects and
+  its owner's). The app runs as a **stdio server** (its own binary on
+  macOS/Linux, an update-safe `gitdesktop-mcp` copy on Windows), so an
+  agent can *understand* a repo without touching it.
 - **Set up in one click**: Settings → MCP servers gives a ready-to-paste
   snippet, **writes it into the repo's `.mcp.json`** (with a **Shareable**
   toggle for portable, committable paths), or **installs it globally** for
@@ -1213,11 +1215,13 @@ agents read this repo through GitDesktop.
   - **`--allow-write`**: this repo's local PRs and issues (GitDesktop's own
     app-data artifacts; nothing is pushed)
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`
-    / `glab` / Bitbucket token): create/merge/update PRs,
+    / `glab` / Bitbucket token): create/merge/update PRs (creating a PR
+    pushes its head branch, so it also needs `--allow-git-write`),
     create/extend/dissolve GitHub PR stacks, request reviewers, edit labels
     and assignees, approve or resolve review threads, rerun or dispatch CI,
-    cut releases, and file or comment on issues (creating a PR pushes its
-    head branch, so it also needs `--allow-git-write`)
+    cut releases, file or comment on issues, and on GitHub project boards
+    add cards and drafts, move, archive or restore them, set their fields,
+    edit drafts and post status updates
   - **`--allow-git-write`**: recoverable git ops (stage, commit, branch,
     push/pull/fetch, stash, merge, rebase, revert, cherry-pick, tags)
   - **`--allow-destructive`**: the irreversible ones (discard, reset,

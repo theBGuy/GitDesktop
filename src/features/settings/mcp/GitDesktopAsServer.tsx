@@ -209,7 +209,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   ].filter(Boolean);
   const modeNote = writeTiers.length
     ? `Read-write · stdio · ${writeTiers.join(" + ")}.`
-    : "Read-only · stdio · exposes git & forge tools (status, log, diff, blame, PRs, issues, CI).";
+    : "Read-only · stdio · exposes git & forge tools (status, log, diff, blame, PRs, issues, CI, project boards).";
 
   async function copy() {
     await copyText(snippet);
@@ -548,7 +548,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
             </label>
             <p className="text-xs text-muted-foreground">
               {allowRemoteWrite
-                ? "Adds --allow-remote-write — real forge writes under your CLI identity: create, edit, merge, and comment on PRs, create/extend/dissolve GitHub PR stacks, manage issues, reviewers, labels and assignees, trigger CI, manage releases, and manage GitHub discussions. Separate opt-in from Allow write tools."
+                ? "Adds --allow-remote-write — real forge writes under your CLI identity: create, edit, merge, and comment on PRs, create/extend/dissolve GitHub PR stacks, manage issues, reviewers, labels and assignees, trigger CI, manage releases, manage GitHub discussions, and add, move, archive and edit cards and post status updates on GitHub project boards. Separate opt-in from Allow write tools."
                 : "No real forge writes — issues and pull requests on the remote are left untouched."}
             </p>
           </div>

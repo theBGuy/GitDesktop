@@ -992,6 +992,12 @@ export const capabilities: Capability[] = [
   {
     group: "AI · MCP & providers",
     ai: true,
+    label:
+      "Projects over MCP — agents read GitHub project boards, and with remote writes on add & move cards, set fields and post status updates",
+  },
+  {
+    group: "AI · MCP & providers",
+    ai: true,
     label: "Trigger GitDesktop's AI generation from an external MCP client",
   },
   {
