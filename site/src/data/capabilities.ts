@@ -437,7 +437,7 @@ export const capabilities: Capability[] = [
   {
     group: "Projects",
     label:
-      "Project boards — GitHub Projects as a kanban, table or roadmap, with saved views and keyboard reordering",
+      "Project boards — GitHub Projects as a kanban, table or roadmap, with saved views and drag or keyboard reordering",
     highlight: true,
   },
   {
@@ -448,7 +448,7 @@ export const capabilities: Capability[] = [
   {
     group: "Projects",
     label:
-      "Project card order — reorder cards within a column from the keyboard, saved as the project's own order GitHub shows everyone",
+      "Project card order — drag cards to a new place or another column, or reorder them from the keyboard, saved as the project's own order GitHub shows everyone",
   },
   {
     group: "Projects",
@@ -993,6 +993,12 @@ export const capabilities: Capability[] = [
     label:
       "Use GitDesktop as an MCP server — read-only default, opt-in write ladder",
     highlight: true,
+  },
+  {
+    group: "AI · MCP & providers",
+    ai: true,
+    label:
+      "Projects over MCP — agents read GitHub project boards, and with remote writes on add & move cards, set fields and post status updates",
   },
   {
     group: "AI · MCP & providers",

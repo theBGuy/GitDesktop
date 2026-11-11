@@ -201,7 +201,8 @@ async fn run_git_mutating_with_creds_checked(
 #[cfg(test)]
 tokio::task_local! {
     /// Runs just before a network-domain acquire, so a test can act while a command
-    /// is provably queued on the domain it holds.
+    /// is provably queued on the domain it holds. Raised by
+    /// `run_git_mutating_with_creds_checked` and `pr_checkout::fetch_pr_tip`.
     pub(crate) static NETWORK_LOCK_WAIT_HOOK: std::sync::Arc<dyn Fn() + Send + Sync>;
 }
 

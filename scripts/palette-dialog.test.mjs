@@ -14,7 +14,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { PALETTE_DIALOG_CLASS } from "../src/features/shortcuts/palette-dialog.ts";
+import {
+  PALETTE_DIALOG_CLASS,
+  PINNED_DIALOG_CLASS,
+} from "../src/features/shortcuts/palette-dialog.ts";
 
 let twMerge = null;
 let skip = false;
@@ -35,21 +38,47 @@ const CALL_SITES = [
   "src/features/scripts/RunTaskPicker.tsx",
 ];
 
+// Search dialogs that take the pinned box with their own width and padding.
+const PINNED_SITES = [
+  "src/features/projects/BoardAddDialogs.tsx",
+  "src/features/settings/mcp/BrowseRegistryDialog.tsx",
+];
+
 const tokens = (cls) => cls.split(/\s+/).filter(Boolean);
 
-test("the constant carries the pinning classes", () => {
+for (const [name, cls] of [
+  ["PINNED_DIALOG_CLASS", PINNED_DIALOG_CLASS],
+  ["PALETTE_DIALOG_CLASS", PALETTE_DIALOG_CLASS],
+]) {
+  test(`${name} carries the pinning classes`, () => {
+    const t = tokens(cls);
+    for (const need of ["translate-y-0", "origin-top", "flex", "flex-col"]) {
+      assert.ok(t.includes(need), `missing ${need}`);
+    }
+    assert.ok(
+      t.some((c) => /^top-\[/.test(c)),
+      "missing a fixed top inset (top-[…])",
+    );
+    assert.ok(
+      t.some((c) => /^max-h-\[calc\(100dvh-/.test(c)),
+      "missing the viewport cap (max-h-[calc(100dvh-…)])",
+    );
+  });
+}
+
+test("the palette keeps every token it had", () => {
   const t = tokens(PALETTE_DIALOG_CLASS);
-  for (const need of ["translate-y-0", "origin-top", "flex", "flex-col"]) {
+  for (const need of tokens(
+    "top-[12vh] flex max-h-[calc(100dvh-12vh-1rem)] translate-y-0 origin-top flex-col gap-0 p-0 sm:max-w-md",
+  )) {
     assert.ok(t.includes(need), `missing ${need}`);
   }
-  assert.ok(
-    t.some((c) => /^top-\[/.test(c)),
-    "missing a fixed top inset (top-[…])",
-  );
-  assert.ok(
-    t.some((c) => /^max-h-\[calc\(100dvh-/.test(c)),
-    "missing the viewport cap (max-h-[calc(100dvh-…)])",
-  );
+});
+
+test("the pinned class carries no width or padding of its own", () => {
+  for (const c of tokens(PINNED_DIALOG_CLASS)) {
+    assert.ok(!/^(sm:)?max-w-|^p-|^gap-/.test(c), `unexpected ${c}`);
+  }
 });
 
 test("merged over the vendored base, the centring on y is gone", {
@@ -66,15 +95,47 @@ test("merged over the vendored base, the centring on y is gone", {
     tokens(base).includes("top-1/2"),
     "base no longer centres; re-check",
   );
-  const merged = tokens(twMerge(base, PALETTE_DIALOG_CLASS));
-  assert.ok(!merged.includes("top-1/2"), "top-1/2 survived the merge");
-  assert.ok(
-    !merged.includes("-translate-y-1/2"),
-    "-translate-y-1/2 survived the merge",
-  );
-  assert.ok(merged.includes("-translate-x-1/2"), "lost horizontal centring");
-  assert.ok(!merged.includes("grid"), "the grid display survived the merge");
+  for (const cls of [PALETTE_DIALOG_CLASS, PINNED_DIALOG_CLASS]) {
+    const merged = tokens(twMerge(base, cls));
+    assert.ok(!merged.includes("top-1/2"), "top-1/2 survived the merge");
+    assert.ok(
+      !merged.includes("-translate-y-1/2"),
+      "-translate-y-1/2 survived the merge",
+    );
+    assert.ok(merged.includes("-translate-x-1/2"), "lost horizontal centring");
+    assert.ok(!merged.includes("grid"), "the grid display survived the merge");
+  }
 });
+
+for (const file of PINNED_SITES) {
+  test(`${file} pins its search dialog with a shrinking list`, () => {
+    const src = read(file);
+    const contents = src.match(/<DialogContent\b[^>]*>/g) ?? [];
+    const pinned = contents.filter((c) =>
+      /className=\{cn\(PINNED_DIALOG_CLASS,/.test(c),
+    );
+    assert.equal(
+      pinned.length,
+      1,
+      "expected one DialogContent taking cn(PINNED_DIALOG_CLASS, …)",
+    );
+    assert.match(
+      src,
+      /import \{ PINNED_DIALOG_CLASS \} from "[^"]*palette-dialog"/,
+    );
+    assert.ok(!src.includes("max-h-[55vh]"), "a fixed list cap is back");
+    // The list is the element carrying the arrow-key handler.
+    const list = src.match(/onKeyDown=\{onListKeyDown\}\s+className="([^"]*)"/);
+    assert.ok(list, "result list not found");
+    const t = tokens(list[1]);
+    assert.ok(t.includes("flex-1"), "the list must take the free height");
+    assert.ok(t.includes("overflow-y-auto"), "the list must scroll");
+    assert.ok(
+      t.some((c) => /^min-h-/.test(c)),
+      "the list needs a min-h so it can shrink under the cap",
+    );
+  });
+}
 
 for (const file of CALL_SITES) {
   test(`${file} uses the shared constant with a shrinking list`, () => {

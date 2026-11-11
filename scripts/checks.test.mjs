@@ -8615,6 +8615,98 @@ test("raw-copy-icon-button exempts the component file and vendored ui only", () 
   assert.deepEqual(runCheck(check, [file], views).violations, []);
 });
 
+const infoStrip = scanner("hand-rolled-info-strip");
+
+test("hand-rolled-info-strip flags an InfoIcon beside a strip class literal", () => {
+  // Sorted tokens, one line.
+  assert.deepEqual(
+    infoStrip(
+      '<div className="flex items-center gap-2 border-b bg-muted/40 px-3"><InfoIcon className="size-3.5" /><span>hint</span></div>',
+    ),
+    [1],
+  );
+  // Reversed tokens (no class sort is enforced), the icon on the next line.
+  const reversed = [
+    '<div className="bg-muted/40 flex border-b px-3">',
+    '  <InfoIcon className="size-3.5" />',
+    "  <span>hint</span>",
+    "</div>",
+  ].join("\n");
+  assert.deepEqual(infoStrip(reversed), [1]);
+  // A cn() call whose first literal holds both tokens.
+  const viaCn = [
+    '<div className={cn("flex border-b bg-muted/40", className)}>',
+    "  <InfoIcon aria-hidden />",
+    "</div>",
+  ].join("\n");
+  assert.deepEqual(infoStrip(viaCn), [1]);
+  // The icon BEFORE the strip literal.
+  const iconFirst = [
+    "const icon = <InfoIcon aria-hidden />;",
+    'return <div className="border-b bg-muted/40 px-3">{icon}</div>;',
+  ].join("\n");
+  assert.deepEqual(infoStrip(iconFirst), [1]);
+  // Single-quoted and backtick literals.
+  assert.deepEqual(
+    infoStrip("<div className={'border-b bg-muted/40'}><InfoIcon /></div>"),
+    [1],
+  );
+  assert.deepEqual(
+    infoStrip(
+      "<div className={`border-b bg-muted/40 ${x}`}><InfoIcon /></div>",
+    ),
+    [1],
+  );
+});
+
+test("hand-rolled-info-strip leaves InfoNote, icon-less rows and its named gaps alone", () => {
+  const pad = `const pad = "${"x".repeat(200)}";`;
+  for (const source of [
+    "<InfoNote action={dismiss}>hint</InfoNote>",
+    // An icon-less strip: action rows and section headers are a different class.
+    '<div className="flex border-b bg-muted/40 px-3"><span>Section</span></div>',
+    // An InfoIcon callout without the strip classes.
+    '<div className="flex gap-2 rounded-md border px-3"><InfoIcon className="size-4" /><p>Note</p></div>',
+    // Variant-prefixed and longer spellings are other tokens.
+    '<button className="border-b focus-visible:bg-muted/40"><InfoIcon /></button>',
+    '<div className="border-b-0 bg-muted/40"><InfoIcon /></div>',
+    // A strip led by another glyph.
+    '<div className="flex border-b bg-muted/40"><TreeStructureIcon /><span>x</span></div>',
+    // Known gap: the two tokens in separate literals.
+    '<div className={cn("border-b", "bg-muted/40")}><InfoIcon /></div>',
+    // Known gap: an aliased import, the alias used beyond the window.
+    [
+      'import { InfoIcon as Hint } from "@phosphor-icons/react";',
+      pad,
+      '<div className="flex border-b bg-muted/40"><Hint className="size-3.5" /></div>',
+    ].join("\n"),
+    // The idiom named in a comment is not a use of it.
+    '// <div className="border-b bg-muted/40"><InfoIcon /></div>',
+  ]) {
+    assert.deepEqual(infoStrip(source), [], source);
+  }
+});
+
+test("hand-rolled-info-strip exempts the component file and vendored ui only", () => {
+  const check = CHECKS.find((c) => c.name === "hand-rolled-info-strip");
+  assert.equal(check.appliesTo("src/components/info-note.tsx"), false);
+  assert.equal(check.appliesTo("src/components/ui/sonner.tsx"), false);
+  assert.equal(
+    check.appliesTo("src/features/projects/ProjectsBoardPanel.tsx"),
+    true,
+  );
+  // The component's own body IS the idiom, so appliesTo is what keeps it clean —
+  // pinned against the real file so a rename can't turn the exemption stale.
+  const file = "src/components/info-note.tsx";
+  const source = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", file),
+    "utf8",
+  );
+  assert.notDeepEqual(infoStrip(source), []);
+  const views = new Map([[file, view(source)]]);
+  assert.deepEqual(runCheck(check, [file], views).violations, []);
+});
+
 // The PR-description prompt ships twice: `buildPrPrompt` for the app and
 // `assemble_pr_recipe` for the MCP recipe tool, synced by hand. These are the
 // label-policy sentences a one-sided edit would silently fork. Each source is

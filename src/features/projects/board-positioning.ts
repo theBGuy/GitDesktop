@@ -1,6 +1,6 @@
 /**
- * Where a card lands when it is moved inside its own column, expressed as the
- * `afterId` GitHub's position mutation takes.
+ * Where a card lands when it is moved inside its own column or dropped into any
+ * column, expressed as the `afterId` GitHub's position mutation takes.
  *
  * Import-free and structurally typed on purpose: `scripts/board-positioning.test.mjs`
  * loads this module through Node's type stripping, which erases types rather than
@@ -135,4 +135,84 @@ export function planReorder(args: {
       return landBefore(order, column[first].itemId);
     }
   }
+}
+
+/** A pointer drop's arguments, shared by `dropAnchor` and `planDrop`. */
+interface DropArgs {
+  /** Loaded project-global order (the deduped page flatten), archived cards INCLUDED. */
+  order: readonly PositionedCard[];
+  /** The TARGET column in drawn order, archived cards included when drawn. It holds the
+   *  moved card when the drop stays in its own column, and does not when it crosses. */
+  column: readonly PositionedCard[];
+  /** The dragged card. */
+  movedId: string;
+  /** The card in `column` the drop slot sits immediately before; null = end of the column. */
+  beforeId: string | null;
+  /** Last loaded page's truncated flag. */
+  truncated: boolean;
+}
+
+/**
+ * The anchor that puts `movedId` immediately before `beforeId` in `column`, or
+ * at the column's end when it is null, whether or not the card already sits
+ * there: a board that already draws the card at the slot (the status write's
+ * optimistic patch) still gets its position written.
+ *
+ * Both lists are read with the moved card removed, so a slot is named by the
+ * cards that stay. An end drop on a truncated board is held for the same reason
+ * `bottom` is, since cards may exist past the loaded end. A column with no other
+ * live card is the exception and plans nothing: the status write alone lands the
+ * card there, so a truncated board can still take a drag into an empty column.
+ */
+export function dropAnchor(args: DropArgs): ReorderPlan {
+  const { order, column, movedId, beforeId, truncated } = args;
+  const at = order.findIndex((card) => card.itemId === movedId);
+  if (at === -1 || order[at].isArchived || beforeId === movedId) return NOOP;
+  const staying = (card: PositionedCard) => card.itemId !== movedId;
+  const rest = order.filter(staying);
+  const target = column.filter(staying);
+  if (beforeId !== null) {
+    // A slot neighbour the column no longer draws is a board that moved under
+    // the drag; refuse rather than anchor on a card the user never dropped by.
+    if (!target.some((card) => card.itemId === beforeId)) return NOOP;
+    return landBefore(rest, beforeId);
+  }
+  const last = target.findLast((card) => !card.isArchived);
+  if (last === undefined) return NOOP;
+  if (truncated) return HELD_TRUNCATED;
+  return { kind: "move", afterId: last.itemId };
+}
+
+/**
+ * Where a pointer drop puts `movedId`: `dropAnchor`'s answer, unless the write
+ * would change nothing. Position only; the caller owns the status write a
+ * cross-column drop also needs, and decides it by comparing columns.
+ *
+ * A drop into the card's own slot (no live card of its column between the card
+ * and the slot) is a no-op. The anchor check can't see that on an interleaved
+ * board: another column's card sits between, so the write would still rewrite
+ * the global order while the drawn column stays the same. An end drop on a
+ * truncated board skips that test and is held, even from the card's own slot.
+ * A plan whose anchor is the card's current nearest live predecessor is a
+ * no-op: the write would leave the global order unchanged.
+ */
+export function planDrop(args: DropArgs): ReorderPlan {
+  const { order, column, movedId, beforeId, truncated } = args;
+  const at = order.findIndex((card) => card.itemId === movedId);
+  if (at === -1 || order[at].isArchived || beforeId === movedId) return NOOP;
+  const live = (card: PositionedCard) => !card.isArchived;
+  const from = column.findIndex((card) => card.itemId === movedId);
+  const slot =
+    beforeId === null
+      ? column.length
+      : column.findIndex((card) => card.itemId === beforeId);
+  if (from !== -1 && slot !== -1 && !(beforeId === null && truncated)) {
+    const between =
+      slot > from ? column.slice(from + 1, slot) : column.slice(slot, from);
+    if (!between.some(live)) return NOOP;
+  }
+  const candidate = dropAnchor(args);
+  if (candidate.kind !== "move") return candidate;
+  const current = order.slice(0, at).findLast(live)?.itemId ?? null;
+  return candidate.afterId === current ? NOOP : candidate;
 }

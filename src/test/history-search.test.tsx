@@ -678,7 +678,7 @@ describe("debounce and the search-all button", () => {
 
     for (const q of ["62016g63", "abc", "a".repeat(65)]) {
       await user.clear(filterInput());
-      await user.type(filterInput(), q);
+      await user.paste(q);
       await user.click(cta());
       await waitFor(() => expect(grepCalls()).toContain(q));
     }

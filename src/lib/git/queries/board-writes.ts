@@ -1,13 +1,15 @@
 /**
  * The import-free pieces of the board-write bookkeeping: the keys a board write
  * and a board read are filed under, how a write's variables name its repo, the
- * predicates the settle, window-focus and mount paths decide by, and the
- * window-focus pass over a client handed in.
+ * predicates the settle, window-focus and mount paths decide by, the date-shift
+ * chase registry those paths read, and the window-focus pass over a client
+ * handed in.
  *
- * Import-free at runtime on purpose (types only, erased): internal.ts, core.ts and
- * projects.ts all import this file, so it can sit under each of them without a
- * cycle, and `scripts/board-writes.test.mjs` loads it straight from `src/` under
- * Node's type stripping. A runtime import added here fails that test.
+ * Import-free at runtime on purpose (types only, erased): internal.ts, core.ts,
+ * projects.ts and repo-mutation-options.ts all import this file, so it can sit
+ * under each of them without a cycle, and `scripts/board-writes.test.mjs` loads it
+ * straight from `src/` under Node's type stripping. A runtime import added here
+ * fails that test.
  */
 import type {
   InvalidateQueryFilters,
@@ -222,6 +224,13 @@ export function pausedBoardWriteOn(
 ): boolean {
   return mutation.state.isPaused && boardWriteVars(mutation).repo === repo;
 }
+
+/** How many live date-shift chases read each board LENS, by query hash, held for
+ *  the whole burst alongside the chase's fold entry (projects.ts
+ *  `useShiftItemDates`). Its own map because the fold key carries the card too,
+ *  and these reads are held per lens: the focus pass, the lens's
+ *  `refetchOnMount`, and `settlesOnRepoWrite` (repo-mutation-options.ts). */
+export const shiftChasedLenses = new Map<string, number>();
 
 /** Count one more live chase on the lens `hash`. */
 export function holdLens(held: Map<string, number>, hash: string): void {

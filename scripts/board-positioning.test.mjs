@@ -15,6 +15,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  dropAnchor,
+  planDrop,
   plannerCards,
   planReorder,
 } from "../src/features/projects/board-positioning.ts";
@@ -622,4 +624,325 @@ test("a card with a restore in flight is never named as an anchor", () => {
 test("plannerCards hands the same cards back when nothing is restoring", () => {
   const raw = cards("a", "b");
   assert.equal(plannerCards(raw, new Set()), raw);
+});
+
+// ---------------------------------------------------------- pointer drops
+//
+// A drop names its slot by the card it sits before (null = the column's end) and
+// lands through the same anchor walk as the keyboard verbs. Two columns, P and Q,
+// interleave in the project's order; P draws an archived card at its top and one
+// directly above p4, which also sits directly before p4 globally.
+
+const DROP_IDS = ["p0*", "p1", "q1", "p2", "q2", "q3", "p3*", "p4", "q4"];
+const DROP_ORDER = cards(...DROP_IDS);
+const COL_P = cards("p0*", "p1", "p2", "p3*", "p4");
+const COL_Q = cards("q1", "q2", "q3", "q4");
+
+/** One drop on the P/Q board, fully loaded unless a case says otherwise. */
+const drop = (column, movedId, beforeId, extra = {}) =>
+  planDrop({
+    order: DROP_ORDER,
+    column,
+    movedId,
+    beforeId,
+    truncated: false,
+    ...extra,
+  });
+
+test("a drop before a card BELOW the moved one anchors on that card's live global predecessor", () => {
+  // p4's global predecessor is the archived p3, so the anchor walks on to q3.
+  assert.deepEqual(drop(COL_P, "p1", "p4"), { kind: "move", afterId: "q3" });
+});
+
+test("a drop before a card ABOVE the moved one anchors the same way", () => {
+  assert.deepEqual(drop(COL_P, "p4", "p2"), { kind: "move", afterId: "q1" });
+});
+
+test("a drop before an archived card lands after that card's live predecessor", () => {
+  assert.deepEqual(drop(COL_P, "p1", "p3"), { kind: "move", afterId: "q3" });
+});
+
+test("a drop's anchor is the GLOBAL predecessor, which belongs to the other column", () => {
+  // q4 above q2: q2 sits after p2 in the project's order.
+  assert.deepEqual(drop(COL_Q, "q4", "q2"), { kind: "move", afterId: "p2" });
+});
+
+test("a drop that leaves the card where it is plans nothing", () => {
+  const column = cards("a", "b", "c", "d");
+  const at = (movedId, beforeId) =>
+    planDrop({ order: column, column, movedId, beforeId, truncated: false });
+  // Immediately before its own next card.
+  assert.deepEqual(at("a", "b"), { kind: "noop" });
+  assert.deepEqual(at("b", "c"), { kind: "noop" });
+  // Onto itself.
+  assert.deepEqual(at("b", "b"), { kind: "noop" });
+  // At the end when it is already the last live card, archived cards trailing.
+  const trailing = cards("a", "b", "z*");
+  assert.deepEqual(
+    planDrop({
+      order: trailing,
+      column: trailing,
+      movedId: "b",
+      beforeId: null,
+      truncated: false,
+    }),
+    { kind: "noop" },
+  );
+  // The same last card dropped at the end of a fully drawn column.
+  assert.deepEqual(at("d", null), { kind: "noop" });
+});
+
+test("a drop into its own slot plans nothing on an INTERLEAVED board too", () => {
+  // Another column's card sits between the moved card and its slot globally, so
+  // only the drawn column can tell the drop moved nothing.
+  const at = (movedId, beforeId, truncated = false) =>
+    planDrop({ order: ORDER, column: COL_A, movedId, beforeId, truncated });
+  assert.deepEqual(at("a2", "a3"), { kind: "noop" });
+  assert.deepEqual(at("a3", null), { kind: "noop" });
+  // The column's last card at the end of a truncated board is still held: its
+  // column may go on past the loaded end.
+  assert.deepEqual(at("a3", null, true), { kind: "held", reason: "truncated" });
+  assert.deepEqual(drop(COL_P, "p4", null, { truncated: true }), {
+    kind: "held",
+    reason: "truncated",
+  });
+});
+
+test("only archived cards between the moved card and its slot is still its own slot", () => {
+  // p2, then the archived p3, then p4: below and above.
+  assert.deepEqual(drop(COL_P, "p2", "p4"), { kind: "noop" });
+  assert.deepEqual(drop(COL_P, "p4", "p3"), { kind: "noop" });
+  // p1 above the archived p0 at the column's top.
+  assert.deepEqual(drop(COL_P, "p1", "p0"), { kind: "noop" });
+});
+
+test("one live card between the moved card and its slot is a move", () => {
+  // Below: p2 sits between p1 and the slot before p3.
+  assert.deepEqual(drop(COL_P, "p1", "p3"), { kind: "move", afterId: "q3" });
+  // Above: p2 sits between the slot before p2 and p4 (with the archived p3).
+  assert.deepEqual(drop(COL_P, "p4", "p2"), { kind: "move", afterId: "q1" });
+  // To the end past one live card.
+  assert.deepEqual(drop(COL_P, "p2", null), { kind: "move", afterId: "p4" });
+});
+
+test("a cross-column drop into the middle anchors on the target neighbour's global predecessor", () => {
+  assert.deepEqual(drop(COL_P, "q4", "p2"), { kind: "move", afterId: "q1" });
+});
+
+test("a cross-column drop whose global slot already sits there plans nothing", () => {
+  // q1 sits between p1 and p2 globally, so landing before p2 means after p1, where
+  // it already is: only the caller's status write remains.
+  assert.deepEqual(drop(COL_P, "q1", "p2"), { kind: "noop" });
+});
+
+test("a cross-column drop at the end lands after the target's last live card", () => {
+  assert.deepEqual(drop(COL_P, "q1", null), { kind: "move", afterId: "p4" });
+});
+
+test("a cross-column drop into an empty or archived-only column plans nothing", () => {
+  assert.deepEqual(drop([], "q1", null), { kind: "noop" });
+  assert.deepEqual(drop(cards("r*", "s*"), "q1", null), { kind: "noop" });
+});
+
+test("an end drop is HELD on a truncated board, within a column and across", () => {
+  const held = { kind: "held", reason: "truncated" };
+  assert.deepEqual(drop(COL_P, "p1", null, { truncated: true }), held);
+  assert.deepEqual(drop(COL_P, "q1", null, { truncated: true }), held);
+});
+
+test("an end drop into a column with no other live card plans nothing even when truncated", () => {
+  // The caller's status write alone lands the card there; there is no loaded end
+  // to move past, so holding would refuse a drag the card menu's Move allows.
+  const truncated = { truncated: true };
+  assert.deepEqual(drop([], "q1", null, truncated), { kind: "noop" });
+  assert.deepEqual(drop(cards("r*", "s*"), "q1", null, truncated), {
+    kind: "noop",
+  });
+  // A card alone in its own column skips the own-slot rule's truncated case and
+  // lands here.
+  assert.deepEqual(drop(cards("p1"), "p1", null, truncated), { kind: "noop" });
+  // One other live card brings the hold back, within the column and across.
+  const held = { kind: "held", reason: "truncated" };
+  assert.deepEqual(drop(cards("p1", "p2"), "p1", null, truncated), held);
+  assert.deepEqual(drop(cards("p2"), "q1", null, truncated), held);
+});
+
+test("a drop before a card plans normally on a truncated board", () => {
+  // Its anchor is a loaded card, so the unloaded tail can't move it.
+  assert.deepEqual(drop(COL_P, "p1", "p4", { truncated: true }), {
+    kind: "move",
+    afterId: "q3",
+  });
+  assert.deepEqual(drop(COL_P, "q4", "p2", { truncated: true }), {
+    kind: "move",
+    afterId: "q1",
+  });
+});
+
+test("a drop walks past an archived card directly above its slot", () => {
+  const column = cards("a", "b", "z*", "c");
+  assert.deepEqual(
+    planDrop({
+      order: column,
+      column,
+      movedId: "a",
+      beforeId: "c",
+      truncated: false,
+    }),
+    { kind: "move", afterId: "b" },
+  );
+});
+
+test("with no live card ahead of the slot a drop lands at the head, unless already first live", () => {
+  const column = cards("z*", "a", "b");
+  const at = (movedId, beforeId) =>
+    planDrop({ order: column, column, movedId, beforeId, truncated: false });
+  assert.deepEqual(at("b", "a"), { kind: "move", afterId: null });
+  assert.deepEqual(at("a", "b"), { kind: "noop" });
+  // The same on the P/Q board: only the archived p0 precedes p1.
+  assert.deepEqual(drop(COL_P, "p2", "p1"), { kind: "move", afterId: null });
+});
+
+test("a drop plans nothing for an archived, absent or unknown subject or slot", () => {
+  assert.deepEqual(drop(COL_P, "p0", "p4"), { kind: "noop" });
+  assert.deepEqual(drop(COL_P, "p3", null), { kind: "noop" });
+  assert.deepEqual(drop(COL_P, "nope", "p4"), { kind: "noop" });
+  // A slot neighbour the target column doesn't draw: the board moved under the drag.
+  assert.deepEqual(drop(COL_P, "p1", "q2"), { kind: "noop" });
+  // One the column draws but the flatten doesn't hold.
+  assert.deepEqual(drop(cards("p1", "x"), "q1", "x"), { kind: "noop" });
+});
+
+test("no drop ever names an archived anchor", () => {
+  const archived = new Set(
+    DROP_ORDER.filter((card) => card.isArchived).map((card) => card.itemId),
+  );
+  let moves = 0;
+  for (const column of [COL_P, COL_Q])
+    for (const moved of DROP_ORDER)
+      for (const before of [...column, null]) {
+        const got = drop(column, moved.itemId, before?.itemId ?? null);
+        if (got.kind !== "move") continue;
+        moves += 1;
+        assert.equal(
+          archived.has(got.afterId),
+          false,
+          `${moved.itemId} before ${before?.itemId}: ${got.afterId}`,
+        );
+      }
+  assert.ok(moves > 0);
+});
+
+// ------------------------------------------------------------ drop anchors
+//
+// The re-plan after a slotted status write: that write already draws the card at
+// the dropped slot, so the anchor is derived whether or not the card sits there.
+
+/** One anchor on the P/Q board, fully loaded unless a case says otherwise. */
+const anchor = (column, movedId, beforeId, extra = {}) =>
+  dropAnchor({
+    order: DROP_ORDER,
+    column,
+    movedId,
+    beforeId,
+    truncated: false,
+    ...extra,
+  });
+
+test("dropAnchor: a card already at the slot still gets its anchor", () => {
+  const column = cards("a", "b", "c", "d");
+  const at = (movedId, beforeId) =>
+    dropAnchor({ order: column, column, movedId, beforeId, truncated: false });
+  // Before its own next card, and at the end as the last card.
+  assert.deepEqual(at("a", "b"), { kind: "move", afterId: null });
+  assert.deepEqual(at("b", "c"), { kind: "move", afterId: "a" });
+  assert.deepEqual(at("d", null), { kind: "move", afterId: "c" });
+  // Interleaved: the own slot's anchor is the other column's card between.
+  assert.deepEqual(
+    dropAnchor({
+      order: ORDER,
+      column: COL_A,
+      movedId: "a2",
+      beforeId: "a3",
+      truncated: false,
+    }),
+    { kind: "move", afterId: "b2" },
+  );
+  // Only archived cards between: still an anchor, never past them.
+  assert.deepEqual(anchor(COL_P, "p2", "p4"), { kind: "move", afterId: "q3" });
+  // Across columns, where the global slot already sits there.
+  assert.deepEqual(anchor(COL_P, "q1", "p2"), { kind: "move", afterId: "p1" });
+  // The status write's patch already draws q1 in P, right before p2.
+  const patched = cards("p1", "q1", "p2");
+  assert.deepEqual(
+    dropAnchor({
+      order: patched,
+      column: patched,
+      movedId: "q1",
+      beforeId: "p2",
+      truncated: false,
+    }),
+    { kind: "move", afterId: "p1" },
+  );
+});
+
+test("dropAnchor: a slot neighbour the column no longer draws plans nothing", () => {
+  assert.deepEqual(anchor(COL_P, "p1", "q2"), { kind: "noop" });
+  // One the column draws but the flatten doesn't hold.
+  assert.deepEqual(anchor(cards("p1", "x"), "q1", "x"), { kind: "noop" });
+});
+
+test("dropAnchor: an end drop on a truncated board is held, from its own slot too", () => {
+  const held = { kind: "held", reason: "truncated" };
+  assert.deepEqual(anchor(COL_P, "p1", null, { truncated: true }), held);
+  assert.deepEqual(anchor(COL_P, "q1", null, { truncated: true }), held);
+  assert.deepEqual(anchor(COL_P, "p4", null, { truncated: true }), held);
+});
+
+test("dropAnchor: a column with no other live card plans nothing", () => {
+  for (const truncated of [false, true]) {
+    assert.deepEqual(anchor([], "q1", null, { truncated }), { kind: "noop" });
+    assert.deepEqual(anchor(cards("r*", "s*"), "q1", null, { truncated }), {
+      kind: "noop",
+    });
+    assert.deepEqual(anchor(cards("p1"), "p1", null, { truncated }), {
+      kind: "noop",
+    });
+  }
+});
+
+test("dropAnchor: an archived, unknown or self-named drop plans nothing", () => {
+  assert.deepEqual(anchor(COL_P, "p0", "p4"), { kind: "noop" });
+  assert.deepEqual(anchor(COL_P, "nope", "p4"), { kind: "noop" });
+  assert.deepEqual(anchor(COL_P, "p2", "p2"), { kind: "noop" });
+});
+
+test("dropAnchor equals planDrop wherever planDrop moves the card", () => {
+  const boards = [
+    { order: DROP_ORDER, columns: [COL_P, COL_Q] },
+    { order: ORDER, columns: [COL_A, COL_B, COL_C] },
+  ];
+  let moves = 0;
+  for (const { order, columns } of boards)
+    for (const truncated of [false, true])
+      for (const column of columns)
+        for (const moved of order)
+          for (const before of [...column, null]) {
+            const args = {
+              order,
+              column,
+              movedId: moved.itemId,
+              beforeId: before?.itemId ?? null,
+              truncated,
+            };
+            const planned = planDrop(args);
+            if (planned.kind !== "move") continue;
+            moves += 1;
+            assert.deepEqual(
+              dropAnchor(args),
+              planned,
+              `${moved.itemId} before ${before?.itemId} (truncated ${truncated})`,
+            );
+          }
+  assert.ok(moves > 0);
 });

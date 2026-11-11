@@ -537,8 +537,6 @@ async fn run_git_spawn(
         }
     };
     let run = async {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let mut child = cmd.spawn().map_err(spawn_err)?;
         #[cfg(windows)]
         let job = child.raw_handle().and_then(GitJob::arm);
@@ -554,28 +552,9 @@ async fn run_git_spawn(
         // Local futures rather than `tokio::spawn`, because `input` is borrowed and
         // a `'static` copy would clone a multi-MB patch on every hunk stage.
         let stdin_pipe = child.stdin.take();
-        let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
-        let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
-        let write = async move {
-            let (Some(mut pipe), Some(bytes)) = (stdin_pipe, input) else {
-                return Ok(());
-            };
-            let written = pipe.write_all(bytes).await;
-            // Close the pipe the moment the write ends (error path included) so
-            // git sees EOF while the drains still poll — `--stdin` blocks forever
-            // without it; the explicit drop pins that close point across refactors.
-            drop(pipe);
-            written
-        };
-        let drain_stdout = async move {
-            let mut buf = Vec::new();
-            stdout_pipe.read_to_end(&mut buf).await.map(|_| buf)
-        };
-        let drain_stderr = async move {
-            let mut buf = Vec::new();
-            stderr_pipe.read_to_end(&mut buf).await.map(|_| buf)
-        };
-        let (written, stdout, stderr) = tokio::join!(write, drain_stdout, drain_stderr);
+        let stdout_pipe = child.stdout.take().expect("stdout was piped");
+        let stderr_pipe = child.stderr.take().expect("stderr was piped");
+        let (written, stdout, stderr) = exchange(stdin_pipe, input, stdout_pipe, stderr_pipe).await;
 
         // The child's own verdict outranks a failed stdin write: that write fails
         // almost exclusively as a broken pipe from git exiting early, and git's
@@ -607,6 +586,47 @@ async fn run_git_spawn(
     tokio::time::timeout(timeout, run)
         .await
         .map_err(|_| AppError::Timeout(timeout.as_secs()))?
+}
+
+/// `run_git_spawn`'s stdin write and output drains, generic over the pipes so the
+/// concurrency contract is testable over in-memory streams without spawning git.
+async fn exchange<W, O, E>(
+    stdin_pipe: Option<W>,
+    input: Option<&[u8]>,
+    mut stdout_pipe: O,
+    mut stderr_pipe: E,
+) -> (
+    std::io::Result<()>,
+    std::io::Result<Vec<u8>>,
+    std::io::Result<Vec<u8>>,
+)
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    O: tokio::io::AsyncRead + Unpin,
+    E: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let write = async move {
+        let (Some(mut pipe), Some(bytes)) = (stdin_pipe, input) else {
+            return Ok(());
+        };
+        let written = pipe.write_all(bytes).await;
+        // Close the pipe the moment the write ends (error path included) so
+        // git sees EOF while the drains still poll — `--stdin` blocks forever
+        // without it; the explicit drop pins that close point across refactors.
+        drop(pipe);
+        written
+    };
+    let drain_stdout = async move {
+        let mut buf = Vec::new();
+        stdout_pipe.read_to_end(&mut buf).await.map(|_| buf)
+    };
+    let drain_stderr = async move {
+        let mut buf = Vec::new();
+        stderr_pipe.read_to_end(&mut buf).await.map(|_| buf)
+    };
+    tokio::join!(write, drain_stdout, drain_stderr)
 }
 
 /// With core.autocrlf on, git emits a "LF will be replaced by CRLF the next
@@ -1261,15 +1281,15 @@ mod stdin_tests {
         }
     }
 
-    /// Both sides have to clear the point where a write-then-read runner wedges,
-    /// and that point is platform-specific: on unix the stdin write blocks once the
-    /// 64KB pipe buffer fills, while on Windows tokio absorbs the first
-    /// `DEFAULT_MAX_BUF_SIZE` (2 MiB, measured against tokio 1.53) into its
-    /// `Blocking` wrapper before the write can stall at all. 50k paths of 100 bytes
-    /// send ~4.8 MiB and draw ~5.5 MiB back (four NUL-joined tokens per match, 15
-    /// bytes of them fixed), which clears both by a wide margin.
-    const PATH_COUNT: usize = 50_000;
-    const PAD: usize = 80;
+    /// Both sides must pass where a write-then-read runner wedges: the 64 KiB stdin
+    /// pipe on unix, tokio's `Blocking` write buffer (`DEFAULT_MAX_BUF_SIZE`, 2 MiB) on
+    /// Windows. git flushes once per record under `--stdin`, so the cost under load
+    /// scales with the record count, not the byte count: keep records few and long.
+    /// Each path is 16 directories of 250 bytes, since one component past NAME_MAX
+    /// (255) is a different input on unix.
+    const PATH_COUNT: usize = 1_200;
+    const SEGMENT: usize = 250;
+    const SEGMENTS: usize = 16;
 
     /// Output far larger than the pipe buffer, produced while stdin is still being
     /// written: the shape that deadlocked a write-then-read runner into a spurious
@@ -1289,11 +1309,11 @@ mod stdin_tests {
         // machine happens to carry, so every path matches this one rule.
         std::fs::write(dir.path().join(".gitignore"), "*\n").unwrap();
 
-        // One directory, long names: the bytes come from the filename so git has a
-        // single parent to look for nested ignore files in.
-        let pad = "f".repeat(PAD);
+        // One shared directory chain, so git has a single set of parents to look
+        // for nested ignore files in.
+        let dirs = format!("{}/", "d".repeat(SEGMENT)).repeat(SEGMENTS);
         let paths: Vec<String> = (0..PATH_COUNT)
-            .map(|i| format!("generated/{pad}{i:06}.bin"))
+            .map(|i| format!("generated/{dirs}{i:06}.bin"))
             .collect();
         let input: String = paths.iter().map(|p| format!("{p}\0")).collect();
         assert!(
@@ -1302,9 +1322,9 @@ mod stdin_tests {
             input.len()
         );
 
-        // The deadlock can only present as a timeout, so any explicit bound keeps
-        // a regression finite; 30s leaves ~10x headroom for slow contended CI
-        // runners (measured ~0.8s idle on a 32-thread dev machine).
+        // Over real pipes a deadlock can only present as a timeout, so the bound
+        // keeps a regression finite; the clock-free contract is
+        // `exchange_writes_while_draining_both_outputs`.
         let out = run_git_raw_input(
             Some(&repo),
             &["check-ignore", "--verbose", "-z", "--stdin"],
@@ -1332,6 +1352,83 @@ mod stdin_tests {
             assert_eq!(tokens[i * 4 + 2], b"*");
             assert_eq!(tokens[i * 4 + 3], path.as_bytes(), "record {i}");
         }
+    }
+
+    /// The exchange over 64-byte in-memory pipes, against a peer that answers each
+    /// record before reading the next, as `check-ignore --stdin` does: writing all of
+    /// stdin first, holding it open, or draining one output before the other wedges.
+    /// One thread and no clock, so a correct run takes the same polls under any load
+    /// and a wedge always exhausts the yield budget.
+    #[tokio::test(flavor = "current_thread")]
+    async fn exchange_writes_while_draining_both_outputs() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        const RECORDS: usize = 2_000;
+        // A correct run used 2,375 yields on every run (measured on tokio 1.54.1,
+        // Windows); about 100x that keeps a wedge's failure fast.
+        const BUDGET: usize = 250_000;
+
+        let record = |i: usize| format!("generated/{}{i:06}.bin\0", "f".repeat(40));
+        let input: String = (0..RECORDS).map(record).collect();
+        let mut expected_stdout = Vec::new();
+        let mut expected_stderr = Vec::new();
+        for i in 0..RECORDS {
+            expected_stdout.extend_from_slice(b".gitignore\0");
+            expected_stdout.extend_from_slice(b"1\0*\0");
+            expected_stdout.extend_from_slice(record(i).as_bytes());
+            expected_stderr.extend_from_slice(format!("{i}\n").as_bytes());
+        }
+
+        let (stdin, peer_stdin) = tokio::io::duplex(64);
+        let (mut peer_stdout, stdout) = tokio::io::duplex(64);
+        let (mut peer_stderr, stderr) = tokio::io::duplex(64);
+        // The peer owns its write halves, so they close when it returns and the
+        // drains see EOF; each answer alone outgrows the 64-byte pipe.
+        let peer = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(peer_stdin);
+            let mut record = Vec::new();
+            let mut answered = 0usize;
+            while reader.read_until(0, &mut record).await.unwrap() > 0 {
+                let answer = [&b".gitignore\0"[..], b"1\0*\0", &record].concat();
+                peer_stdout.write_all(&answer).await.unwrap();
+                let token = format!("{answered}\n");
+                peer_stderr.write_all(token.as_bytes()).await.unwrap();
+                answered += 1;
+                record.clear();
+            }
+            answered
+        });
+
+        let (written, stdout, stderr) = tokio::select! {
+            biased;
+            r = exchange(Some(stdin), Some(input.as_bytes()), stdout, stderr) => r,
+            () = async {
+                for _ in 0..BUDGET {
+                    tokio::task::yield_now().await;
+                }
+            } => panic!("exchange wedged: no completion within {BUDGET} yields"),
+        };
+        let answered = match peer.await {
+            Ok(answered) => answered,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        };
+
+        written.expect("stdin write");
+        assert_eq!(answered, RECORDS, "the peer answers every record sent");
+        let stdout = stdout.expect("stdout drain");
+        let stderr = stderr.expect("stderr drain");
+        assert!(
+            stdout == expected_stdout,
+            "stdout differs: {} bytes, expected {}",
+            stdout.len(),
+            expected_stdout.len()
+        );
+        assert!(
+            stderr == expected_stderr,
+            "stderr differs: {} bytes, expected {}",
+            stderr.len(),
+            expected_stderr.len()
+        );
     }
 }
 

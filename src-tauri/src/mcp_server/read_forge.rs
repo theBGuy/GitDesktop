@@ -108,12 +108,22 @@ fn host_is_github(host: &str, glab_hosts: &[String]) -> bool {
     )
 }
 
-/// Guard for the GitHub-only discussion tools: resolve the bound repo's provider the
-/// same network-light way `generate::provider_tag` does (origin remote URL → host →
-/// tag) and error honestly on a non-GitHub remote. Every discussion tool calls this
-/// first (write tools AFTER their `--allow-remote-write` gate). Shared by both the
-/// read (`read_forge`) and write (`write_forge`) discussion tools.
+/// The refusal a GitHub-only tool family gives on another provider's remote.
+/// `feature` is the family's plural noun ("Discussions", "Projects").
+pub(super) fn github_only_message(feature: &str, provider: &str) -> String {
+    format!("{feature} are a GitHub feature — this repository's remote is {provider}.")
+}
+
+/// Guard for the GitHub-only discussion tools — see [`ensure_github_for`].
 pub(super) async fn ensure_github(repo: &str) -> Result<(), McpError> {
+    ensure_github_for(repo, "Discussions").await
+}
+
+/// Guard for a GitHub-only tool family: resolve the bound repo's provider the same
+/// network-light way `generate::provider_tag` does (origin remote URL → host → tag)
+/// and error honestly on a non-GitHub remote. Every such tool calls this first (write
+/// tools AFTER their `--allow-remote-write` gate).
+pub(super) async fn ensure_github_for(repo: &str, feature: &str) -> Result<(), McpError> {
     // No remote / unparseable URL / unrecognized host → treated as GitHub (the app's
     // resilient default), so the tool proceeds and the `gh` layer surfaces any real
     // mismatch. Only a POSITIVELY-identified GitLab/Bitbucket host is refused here.
@@ -130,9 +140,7 @@ pub(super) async fn ensure_github(repo: &str) -> Result<(), McpError> {
                 _ => "another provider",
             };
             return Err(McpError::invalid_request(
-                format!(
-                    "Discussions are a GitHub feature — this repository's remote is {provider}."
-                ),
+                github_only_message(feature, provider),
                 None,
             ));
         }
@@ -732,6 +740,20 @@ mod tests {
         // A host present in glab's known-hosts is a self-managed GitLab → refused.
         let glab_hosts = vec!["gitlab.acme.com".to_string()];
         assert!(!host_is_github("gitlab.acme.com", &glab_hosts));
+    }
+
+    /// The discussion refusal stays byte-identical through the shared builder, and the
+    /// Projects family gets the same sentence with its own noun.
+    #[test]
+    fn github_only_message_keeps_the_discussion_copy_and_names_projects() {
+        assert_eq!(
+            github_only_message("Discussions", "GitLab"),
+            "Discussions are a GitHub feature — this repository's remote is GitLab."
+        );
+        assert_eq!(
+            github_only_message("Projects", "Bitbucket"),
+            "Projects are a GitHub feature — this repository's remote is Bitbucket."
+        );
     }
 
     /// The empty-default prune: a populated comment keeps every field; an
