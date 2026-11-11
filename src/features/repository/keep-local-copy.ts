@@ -149,6 +149,6 @@ export const KEEP_LOCAL_HOOK_AFTER_WRITE: Record<
   "absent" | "installed",
   string
 > = {
-  absent: "This clone has no pre-push hook.",
+  absent: "This clone has no pre-push hook file.",
   installed: "The hook is still in this clone.",
 };

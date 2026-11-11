@@ -296,7 +296,7 @@ describe("a write that doesn't take while its open is shown", () => {
     await expectFocusOn("Cancel");
     await user.click(button("Install hook"));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Terminal push guard not installed. This clone has no pre-push hook.",
+      "Terminal push guard not installed. This clone has no pre-push hook file.",
     );
     expect(screen.getByText("Block terminal pushes too?")).toBeInTheDocument();
     expect(success).not.toHaveBeenCalled();

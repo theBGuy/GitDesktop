@@ -961,8 +961,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   pre-push hook so \`git push\` in a terminal stops as well. The hook lives in this clone
   only, and \`git push --no-verify\` skips it. Once it's installed the item reads
   **Terminal push guard (on)…** and opens a dialog with **Remove hook**. When the clone
-  already has a pre-push hook of its own, keeps its hooks in a custom folder, or uses a
-  hook manager, GitDesktop doesn't add one and shows the check to paste into your own hook
+  already has a pre-push hook file of its own, keeps its hooks in a custom folder, or uses
+  a hook manager, GitDesktop doesn't add one and shows the check to paste into your own hook
   instead; if a hook from an earlier install is still in the clone, that dialog offers
   **Remove hook** too.
 - **Clean up branches** opens from the switcher's menu or the command palette and gathers
@@ -4053,7 +4053,8 @@ the result posts as a comment on that pull request.`,
     body: `# Git hooks
 
 **Git hooks…** (in the repo ⋮ menu) manages the scripts in your repo's \`.git/hooks\` —
-the small programs Git runs at points like *before commit* or *before push*.
+the small programs Git runs at points like *before commit* or *before push*. When
+\`core.hooksPath\` points Git at another folder, the dialog works there and names it.
 
 - See every hook with its state (active / disabled / inactive) — the list is
   arrow-navigable — and **edit** it in a built-in editor.

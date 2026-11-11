@@ -160,7 +160,7 @@ test("a guard write that didn't take", () => {
     remove: "Terminal push guard not removed",
   });
   assert.deepEqual(copy.KEEP_LOCAL_HOOK_AFTER_WRITE, {
-    absent: "This clone has no pre-push hook.",
+    absent: "This clone has no pre-push hook file.",
     installed: "The hook is still in this clone.",
   });
 });

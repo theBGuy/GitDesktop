@@ -102,28 +102,33 @@ fn absolutize(repo_path: &str, raw: &str) -> PathBuf {
     }
 }
 
-/// Resolves the effective hooks directory, honoring `core.hooksPath`. Returns
-/// `(absolute_dir, is_custom)`.
+/// Resolves the effective hooks directory as git's own `rev-parse --git-path hooks`
+/// answer: a raw `core.hooksPath` needs git's pathname rules (`~`, the `:(optional)`
+/// prefix), which only git applies. Returns `(absolute_dir, is_custom)`.
 async fn resolve_hooks_dir(repo_path: &str) -> AppResult<(PathBuf, bool)> {
-    let cfg = run_git_raw(
-        Some(repo_path),
-        &["config", "--get", "core.hooksPath"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    if cfg.code == 0 {
-        let value = cfg.stdout_lossy().trim().to_string();
-        if !value.is_empty() {
-            return Ok((absolutize(repo_path, &value), true));
-        }
-    }
     let out = run_git(
         Some(repo_path),
         &["rev-parse", "--git-path", "hooks"],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok((absolutize(repo_path, out.stdout_lossy().trim()), false))
+    let printed = out.stdout_lossy();
+    let dir = absolutize(repo_path, crate::git::worktree::stdout_path(&printed));
+    let cfg = run_git_raw(
+        Some(repo_path),
+        &["config", "--get", "core.hooksPath"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let set = cfg.code == 0 && !cfg.stdout_lossy().trim().is_empty();
+    // A value git ignores (a missing optional dir) or that names the managed dir
+    // redirects nothing; an unresolvable managed dir keeps the value's own answer.
+    let custom = set
+        && match managed_hooks_dir(repo_path).await {
+            Ok(managed) => !same_hooks_dir(&dir, &managed),
+            Err(_) => true,
+        };
+    Ok((dir, custom))
 }
 
 /// Detects a hook manager that owns this repo's hooks (and its config path).
@@ -631,7 +636,9 @@ fn display_hooks_path(path: &Path) -> String {
 
 /// A custom hooks dir blocks first: git doesn't run `<common>/hooks` then, even if
 /// our file sits there. Past it, a marker-carrying managed file is what git runs, so
-/// it reads installed before a manager config in the tree can block.
+/// it reads installed before a manager config in the tree can block. Config-defined
+/// hooks (`hook.<name>.*`, git 2.54+) aren't detected: they run beside the hooks-folder
+/// file, whose non-zero exit still stops the push.
 async fn keep_local_hook_status_core(repo_path: &str) -> AppResult<KeepLocalHookStatus> {
     use KeepLocalHookBlock::{CustomHooksPath, ForeignHook, HookManager};
     use KeepLocalHookState::{Absent, Blocked, Installed};
@@ -1119,7 +1126,7 @@ mod tests {
             "nothing written in the custom dir"
         );
         assert!(!managed_file(&repo, "pre-push").exists());
-        // An empty hooksPath makes git use the worktree root, not the default dir.
+        // An empty hooksPath makes git look for `/<hook>`, never in the default dir.
         git_ok(&repo, &["config", "core.hooksPath", ""]).await;
         assert_status(&install(&repo).await, Blocked, Some(CustomHooksPath), None);
         assert!(!managed_file(&repo, "pre-push").exists());
@@ -1503,6 +1510,161 @@ mod tests {
         if cfg!(windows) {
             assert!(!st.hooks_path.contains('\\'), "{}", st.hooks_path);
         }
+    }
+
+    /// Sets `core.hooksPath` in `repo` (None unsets it) and resolves from `wt`.
+    async fn resolve_with(repo: &str, wt: &str, value: Option<&str>) -> (PathBuf, bool) {
+        match value {
+            Some(v) => {
+                git_ok(repo, &["config", "core.hooksPath", v]).await;
+            }
+            None => {
+                let _ = git(repo, &["config", "--unset", "core.hooksPath"]).await;
+            }
+        }
+        resolve_hooks_dir(wt).await.unwrap()
+    }
+
+    /// Whether a commit in `wt` runs a `pre-commit` placed in `dir`. The hook and its
+    /// marker are removed afterwards, so the next row starts clean.
+    async fn git_runs_hooks_from(wt: &str, dir: &Path, marker: &Path) -> bool {
+        std::fs::create_dir_all(dir).unwrap();
+        let hook = dir.join("pre-commit");
+        let script = format!("#!/bin/sh\necho ran > \"{}\"\n", slashed(marker));
+        std::fs::write(&hook, script).unwrap();
+        set_hook_executable(&hook).unwrap();
+        git_ok(wt, &["commit", "-q", "--allow-empty", "-m", "probe"]).await;
+        std::fs::remove_file(&hook).unwrap();
+        let ran = marker.exists();
+        let _ = std::fs::remove_file(marker);
+        ran
+    }
+
+    async fn add_linked_worktree(repo: &str, base: &Path) -> String {
+        let wt = slashed(&base.join("wt"));
+        git_ok(repo, &["worktree", "add", "-q", "-b", "wtb", &wt]).await;
+        wt
+    }
+
+    /// For every value shape git resolves alike on all versions, the resolver names the
+    /// folder a commit really runs hooks from, in the main and a linked worktree. An
+    /// empty value is git's `./` answer, but git looks up `/<hook>` then, so it isn't run.
+    #[tokio::test]
+    async fn hooks_dir_is_where_git_runs_hooks_for_every_plain_shape() {
+        let (_g, base, repo, _remote) = hook_repo("resolve-rows").await;
+        let linked = add_linked_worktree(&repo, &base).await;
+        let abs = slashed(&base.join("abs-hooks"));
+        let marker = base.join("ran.txt");
+        let managed = Path::new(&repo).join(".git").join("hooks");
+        let default_dir = slashed(&managed);
+        for wt in [repo.as_str(), linked.as_str()] {
+            let root = Path::new(wt);
+            // (value, expected dir, is_custom, git runs a hook placed there)
+            let rows: [(Option<&str>, PathBuf, bool, bool); 5] = [
+                (None, managed.clone(), false, true),
+                (Some(&default_dir), managed.clone(), false, true),
+                (Some("rel-hooks"), root.join("rel-hooks"), true, true),
+                (Some(&abs), PathBuf::from(&abs), true, true),
+                (Some(""), root.to_path_buf(), false, false),
+            ];
+            for (value, expected, custom, runs) in rows {
+                let row = format!("{wt} {value:?}");
+                let (dir, is_custom) = resolve_with(&repo, wt, value).await;
+                let leaked = git(&repo, &["config", "--get", "core.hooksPath"]).await;
+                if value.is_none() && leaked.code == 0 {
+                    eprintln!("skipping {row}: a global config sets core.hooksPath");
+                    continue;
+                }
+                assert!(dir.is_absolute(), "{row}: {dir:?}");
+                assert!(
+                    same_hooks_dir(&dir, &expected),
+                    "{row}: {dir:?} vs {expected:?}"
+                );
+                assert_eq!(is_custom, custom, "{row}");
+                if runs {
+                    assert!(
+                        git_runs_hooks_from(wt, &dir, &marker).await,
+                        "{row}: git ran no hook in {dir:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A `~` value resolves under the home folder git expands it to, never under the
+    /// repository. Nothing is created there.
+    #[tokio::test]
+    async fn hooks_dir_expands_a_tilde_value_like_git() {
+        let (_g, base, repo, _remote) = hook_repo("resolve-tilde").await;
+        let linked = add_linked_worktree(&repo, &base).await;
+        let name = format!(
+            "gd-tilde-hooks-{}",
+            base.file_name().unwrap().to_string_lossy()
+        );
+        let value = format!("~/{name}");
+        for wt in [repo.as_str(), linked.as_str()] {
+            let (dir, custom) = resolve_with(&repo, wt, Some(&value)).await;
+            assert!(dir.is_absolute(), "{wt}: {dir:?}");
+            assert!(
+                !dir.components().any(|c| c.as_os_str() == "~"),
+                "{wt}: {dir:?}"
+            );
+            assert!(
+                !slashed(&dir).starts_with(&slashed(&base)),
+                "{wt}: {dir:?} is under the repository"
+            );
+            assert_eq!(dir.file_name(), Some(std::ffi::OsStr::new(&name)), "{wt}");
+            assert!(!dir.exists(), "{wt}: nothing created in the home folder");
+            assert!(custom, "{wt}");
+            assert_status(&status(wt).await, Blocked, Some(CustomHooksPath), None);
+        }
+    }
+
+    /// `:(optional)` values follow the installed git: a prefix-stripping git (2.52+) uses
+    /// an existing dir and ignores a missing one, so the managed hook installs; an older
+    /// git prints the value as is, and the status reads custom.
+    #[tokio::test]
+    async fn hooks_dir_follows_git_on_optional_values() {
+        let (_g, base, repo, _remote) = hook_repo("resolve-optional").await;
+        let linked = add_linked_worktree(&repo, &base).await;
+        let present = base.join("opt-present");
+        std::fs::create_dir_all(&present).unwrap();
+        let present_value = format!(":(optional){}", slashed(&present));
+        let missing_value = format!(":(optional){}", slashed(&base.join("opt-missing")));
+        git_ok(&repo, &["config", "core.hooksPath", &present_value]).await;
+        let printed = git_ok(&repo, &["rev-parse", "--git-path", "hooks"]).await;
+        let strips = !printed.starts_with(":(optional)");
+        eprintln!("installed git strips :(optional): {strips}");
+        let managed = Path::new(&repo).join(".git").join("hooks");
+        std::fs::remove_dir(&managed).unwrap();
+        for wt in [repo.as_str(), linked.as_str()] {
+            let (dir, custom) = resolve_with(&repo, wt, Some(&present_value)).await;
+            if strips {
+                assert!(same_hooks_dir(&dir, &present), "{wt}: {dir:?}");
+            } else {
+                let printed = git_ok(wt, &["rev-parse", "--git-path", "hooks"]).await;
+                assert_eq!(dir, absolutize(wt, &printed), "{wt}");
+            }
+            assert!(custom, "{wt}: existing optional dir");
+            assert_status(&status(wt).await, Blocked, Some(CustomHooksPath), None);
+
+            let (dir, custom) = resolve_with(&repo, wt, Some(&missing_value)).await;
+            if strips {
+                assert!(same_hooks_dir(&dir, &managed), "{wt}: {dir:?}");
+                assert!(!custom, "{wt}: an ignored optional dir redirects nothing");
+                assert_status(&status(wt).await, Absent, None, None);
+            } else {
+                let printed = git_ok(wt, &["rev-parse", "--git-path", "hooks"]).await;
+                assert_eq!(dir, absolutize(wt, &printed), "{wt}");
+                assert!(custom, "{wt}: missing optional dir");
+                assert_status(&status(wt).await, Blocked, Some(CustomHooksPath), None);
+            }
+        }
+        if strips {
+            assert_status(&install(&repo).await, Installed, None, None);
+            assert!(managed_file(&repo, "pre-push").is_file());
+        }
+        assert!(!present.join("pre-push").exists(), "nothing written there");
     }
 
     /// The hook and the Rust guard agree on every flag shape: refuse = guard Ok(true)

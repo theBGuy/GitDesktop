@@ -19183,8 +19183,9 @@ detached
     }
 
     /// A resolve fixture pinned against a hostile global config, with the PR pair pushed
-    /// to `remote`'s bare repository BY PATH, so no `refs/remotes/<remote>/*` exists
-    /// until the resolve's own fetch makes one. Returns (temp guards, repo, bare, base).
+    /// to `remote`'s bare repository BY PATH. git 2.56+ updates a matching remote's
+    /// tracking refs on such a push, so they are removed: no `refs/remotes/<remote>/*`
+    /// exists until the resolve's own fetch. Returns (temp guards, repo, bare, base).
     async fn keep_local_resolve_fixture(
         marker: &str,
         remote: &str,
@@ -19217,6 +19218,14 @@ detached
         git(&repo, &["switch", &base]).await;
         commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
         git(&repo, &["push", &bare, &base, "feature"]).await;
+        for r in tracking_refs(&repo, remote).await.lines() {
+            git(&repo, &["update-ref", "-d", r]).await;
+        }
+        assert_eq!(
+            tracking_refs(&repo, remote).await,
+            "",
+            "keep_local_resolve_fixture: no tracking ref before the resolve"
+        );
         guards.push(dir);
         (guards, repo, bare, base)
     }
@@ -19360,8 +19369,11 @@ detached
             .unwrap();
         assert_eq!(resumed.status, "conflicts");
         assert_eq!(
-            resumed.worktree_path.map(|p| p.replace('\\', "/")),
-            Some(wt.replace('\\', "/"))
+            resumed
+                .worktree_path
+                .as_deref()
+                .map(crate::git::worktree::canonical_wt_path),
+            Some(crate::git::worktree::canonical_wt_path(&wt))
         );
         std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
         git(&wt, &["add", "a.txt"]).await;
