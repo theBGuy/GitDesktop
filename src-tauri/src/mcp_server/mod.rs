@@ -6,10 +6,11 @@
 //! Per-domain sibling modules each contribute a [`ToolRouter`] that `with_options`
 //! combines into one router:
 //!
-//! - [`read_git`] / [`read_forge`] / [`read_jira`] — always-available reads
+//! - [`read_git`] / [`read_forge`] / [`read_jira`] / [`read_projects`] — always-available reads
 //! - [`write_local`]  — local-PR AND local-issue writes (`--allow-write`)
 //! - [`write_forge`]  — forge remote writes             (`--allow-remote-write`)
 //! - [`write_jira`]   — linked-Jira writes              (`--allow-remote-write`)
+//! - [`write_projects`] — GitHub Projects board writes  (`--allow-remote-write`)
 //! - [`write_git`]    — local-git writes                (`--allow-git-write`)
 //! - [`generate`]     — AI-generation recipe tools
 //!
@@ -27,10 +28,12 @@ mod generate;
 mod read_forge;
 mod read_git;
 mod read_jira;
+mod read_projects;
 mod write_forge;
 mod write_git;
 mod write_jira;
 mod write_local;
+mod write_projects;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -241,9 +244,11 @@ impl GitDesktopMcp {
             tool_router: Self::read_git_router()
                 + Self::read_forge_router()
                 + Self::read_jira_router()
+                + Self::read_projects_router()
                 + Self::write_local_router()
                 + Self::write_forge_router()
                 + Self::write_jira_router()
+                + Self::write_projects_router()
                 + Self::write_git_router()
                 + Self::generate_router(),
             // The generation recipes are ALSO exposed as MCP prompts; only `generate`
@@ -443,6 +448,9 @@ impl ServerHandler for GitDesktopMcp {
              `glab` CLI, Bitbucket a stored API token). One exception: Bitbucket's native issue \
              tracker is deprecated, so the issue tools (list/get/create/comment/close/reopen) work \
              on GitHub and GitLab only and return an actionable error on a Bitbucket repo. \
+             The Projects tools are GitHub-only (like discussions) and return an actionable \
+             error on a GitLab or Bitbucket repo; they address only the projects linked to the \
+             repo plus its owner's projects. \
              Separately, the `jira_*` tools operate on a per-repo LINKED Jira project — a Jira \
              link is independent of the repo's git host, so those tools work on ANY repo that has \
              one configured in GitDesktop (GitHub, GitLab, or Bitbucket), and are the issue story \
@@ -450,7 +458,8 @@ impl ServerHandler for GitDesktopMcp {
              no site/project param, erroring with a link hint when the repo has none. \
              Capabilities are opt-in in an escalating ladder — each tier is a separate flag and \
              enabling one never grants another: (0) READ tools (status, log, diffs, blame, file \
-             history, PRs, issues, CI, releases, discussions, and linked-Jira issues) are always \
+             history, PRs, issues, CI, releases, discussions, GitHub Projects boards (the repo's \
+             catalog), and linked-Jira issues) are always \
              available and are the default. (1) --allow-write enables GitDesktop's own app-data \
              write tools: local PRs \
              AND local issues (create/comment/status and equivalents). These are review artifacts \
@@ -458,7 +467,10 @@ impl ServerHandler for GitDesktopMcp {
              (2) --allow-remote-write enables the full forge remote-write surface under the \
              authenticated forge identity: the PR lifecycle (create/merge/edit, plus GitHub PR \
              stack create/add/dissolve), reviewers, labels, assignees and approvals, review \
-             threads, CI actions, releases, GitHub discussions, issue writes \
+             threads, CI actions, releases, GitHub discussions, GitHub Projects board edits \
+             (add, set field, move, archive/unarchive, draft edits, status updates; there are \
+             no remove or delete tools, and the two value-overwriting edits return the previous \
+             value), issue writes \
              (create/comment/close/reopen), and the linked-Jira issue writes \
              (comment/transition/create/assign). These are REAL, publicly \
              visible writes to the repository's forge and are not freely reversible. (One \
@@ -1073,21 +1085,23 @@ mod tests {
     }
 
     /// The combined router's tool count must equal the sum of the per-module counts.
-    /// Each term derives from the module's own router, so only the `== 122` literal needs
-    /// touching — and only when a change intends to move the total.
+    /// Each term derives from the module's own router, so only the total's literal in the
+    /// final assert needs touching — and only when a change intends to move the total.
     #[test]
     fn combined_router_tool_count_is_sum_of_modules() {
         let handler = handler(false, false, false, false);
         let per_module = GitDesktopMcp::read_git_router().list_all().len()
             + GitDesktopMcp::read_forge_router().list_all().len()
             + GitDesktopMcp::read_jira_router().list_all().len()
+            + GitDesktopMcp::read_projects_router().list_all().len()
             + GitDesktopMcp::write_local_router().list_all().len()
             + GitDesktopMcp::write_forge_router().list_all().len()
             + GitDesktopMcp::write_jira_router().list_all().len()
+            + GitDesktopMcp::write_projects_router().list_all().len()
             + GitDesktopMcp::write_git_router().list_all().len()
             + GitDesktopMcp::generate_router().list_all().len();
         assert_eq!(handler.tool_router.list_all().len(), per_module);
-        assert_eq!(per_module, 122);
+        assert_eq!(per_module, 136);
     }
 
     /// The exact set of tools a connected agent is told may destroy state. Annotations are
@@ -1128,9 +1142,11 @@ mod tests {
                 "reset_to_commit",
                 "set_issue_assignees",
                 "set_issue_milestone",
+                "set_project_item_field",
                 "set_pull_request_assignees",
                 "set_review_notes",
                 "update_jira_issue",
+                "update_project_draft",
                 "update_release",
             ]
         );

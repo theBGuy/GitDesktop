@@ -292,7 +292,7 @@ const DRAFT_POINTER: &str = "/data/addProjectV2DraftIssue/projectItem";
 const ADD_ITEM_POINTER: &str = "/data/addProjectV2ItemById/item";
 const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item";
 const UPDATE_DRAFT_POINTER: &str = "/data/updateProjectV2DraftIssue/draftIssue";
-const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
+pub(crate) const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
 const UNARCHIVE_POINTER: &str = "/data/unarchiveProjectV2Item";
 const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
 const ORDER_POINTER: &str = "/data/updateProjectV2ItemPosition/items";
@@ -423,8 +423,46 @@ fn update_draft_input(
     } else {
         ("", "")
     };
-    let document = format!("mutation($draftIssueId:ID!,$title:String!,$body:String!{declaration}){{ updateProjectV2DraftIssue(input:{{draftIssueId:$draftIssueId,title:$title,body:$body{field}}}){{ draftIssue{{ __typename {DRAFT_CONTENT_SELECTION} }} }} }}");
+    let document = update_draft_document(
+        &format!(",$title:String!,$body:String!{declaration}"),
+        &format!(",title:$title,body:$body{field}"),
+    );
     graphql_input(&document, variables)
+}
+
+/// The draft-update mutation over the given variable declarations and input fields,
+/// each after the draft id's own.
+fn update_draft_document(declarations: &str, fields: &str) -> String {
+    format!("mutation($draftIssueId:ID!{declarations}){{ updateProjectV2DraftIssue(input:{{draftIssueId:$draftIssueId{fields}}}){{ draftIssue{{ __typename {DRAFT_CONTENT_SELECTION} }} }} }}")
+}
+
+/// A draft update naming only the fields the caller passed: an omitted title or body
+/// is left out of the request, never written back from a read that can lag a write.
+/// Naming neither is refused, so no request is built that edits nothing.
+fn update_draft_fields_input(
+    draft_id: &str,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> AppResult<String> {
+    if title.is_none() && body.is_none() {
+        return Err(AppError::InvalidArgument(
+            "A draft edit needs a title, a body, or both".into(),
+        ));
+    }
+    let mut variables = json!({"draftIssueId": draft_id});
+    let mut declarations = String::new();
+    let mut fields = String::new();
+    for (name, value) in [("title", title), ("body", body)] {
+        if let Some(value) = value {
+            variables[name] = json!(value);
+            declarations.push_str(&format!(",${name}:String!"));
+            fields.push_str(&format!(",{name}:${name}"));
+        }
+    }
+    Ok(graphql_input(
+        &update_draft_document(&declarations, &fields),
+        variables,
+    ))
 }
 
 fn assignee_lookup_input(logins: &[String]) -> AppResult<Option<String>> {
@@ -649,14 +687,17 @@ fn parse_updated_draft(value: &Value) -> AppResult<BoardItemContent> {
     ))
 }
 
+/// The detail `require_payload` reports for a missing payload; the MCP archive tool
+/// matches it to read GitHub's null answer for an already archived card.
+pub(crate) fn missing_payload_detail(pointer: &str) -> String {
+    format!("missing payload at {pointer}")
+}
+
 fn require_payload(value: &Value, pointer: &str, surface: &str) -> AppResult<()> {
     if value.pointer(pointer).is_some_and(Value::is_object) {
         Ok(())
     } else {
-        Err(gh_unreadable(
-            surface,
-            format!("missing payload at {pointer}"),
-        ))
+        Err(gh_unreadable(surface, missing_payload_detail(pointer)))
     }
 }
 
@@ -729,6 +770,21 @@ pub async fn gh_update_draft_item(
         None
     };
     let input = update_draft_input(&draft_id, &title, &body, assignee_ids.as_deref());
+    let value = request(&repo_path, &input, "the updated draft")
+        .await
+        .map_err(item_edits_scope_error)?;
+    parse_updated_draft(&value)
+}
+
+/// The MCP draft edit: sends only the named title and/or body and never touches
+/// assignees. A call naming neither is refused before the network.
+pub(crate) async fn update_draft_fields(
+    repo_path: String,
+    draft_id: String,
+    title: Option<String>,
+    body: Option<String>,
+) -> AppResult<BoardItemContent> {
+    let input = update_draft_fields_input(&draft_id, title.as_deref(), body.as_deref())?;
     let value = request(&repo_path, &input, "the updated draft")
         .await
         .map_err(item_edits_scope_error)?;
@@ -1116,6 +1172,88 @@ mod tests {
         .unwrap();
         assert_eq!(input["variables"]["assigneeIds"], json!([]));
         assert!(input["query"].as_str().unwrap().contains("assigneeIds:$assigneeIds"));
+    }
+
+    /// True when a draft-update input declares and sends exactly the draft id plus
+    /// `named`, and never assignees.
+    fn sends_only(input: &str, named: &[&str]) -> bool {
+        let payload: Value = serde_json::from_str(input).unwrap();
+        let document = payload["query"].as_str().unwrap();
+        let mut sent: Vec<&str> = payload["variables"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        sent.sort_unstable();
+        let mut expected: Vec<&str> = named.iter().copied().chain(["draftIssueId"]).collect();
+        expected.sort_unstable();
+        sent == expected
+            && ["title", "body", "assigneeIds"].iter().all(|name| {
+                document.contains(&format!("${name}:")) == named.contains(name)
+                    && document.contains(&format!("{name}:${name}")) == named.contains(name)
+            })
+    }
+
+    #[test]
+    fn draft_title_edit_sends_no_body() {
+        let input = update_draft_fields_input("DI_one", Some("New title"), None).unwrap();
+        assert!(sends_only(&input, &["title"]));
+        let payload: Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(
+            payload["variables"],
+            json!({"draftIssueId":"DI_one", "title":"New title"}),
+        );
+        let document = payload["query"].as_str().unwrap();
+        assert_eq!(
+            document,
+            format!("mutation($draftIssueId:ID!,$title:String!){{ updateProjectV2DraftIssue(input:{{draftIssueId:$draftIssueId,title:$title}}){{ draftIssue{{ __typename {DRAFT_CONTENT_SELECTION} }} }} }}"),
+        );
+        assert_pointer(document, UPDATE_DRAFT_POINTER);
+        // Negative control: the app's builder always sends both, so it fails the check.
+        assert!(!sends_only(
+            &update_draft_input("DI_one", "New title", "Read body", None),
+            &["title"],
+        ));
+    }
+
+    #[test]
+    fn draft_body_edit_sends_no_title() {
+        for body in ["New body", ""] {
+            let input = update_draft_fields_input("DI_one", None, Some(body)).unwrap();
+            assert!(sends_only(&input, &["body"]), "{body:?}");
+            let payload: Value = serde_json::from_str(&input).unwrap();
+            assert_eq!(
+                payload["variables"],
+                json!({"draftIssueId":"DI_one", "body":body}),
+            );
+        }
+        let both = update_draft_fields_input("DI_one", Some("T"), Some("B")).unwrap();
+        assert!(sends_only(&both, &["title", "body"]));
+        assert!(!sends_only(
+            &update_draft_input("DI_one", "Read title", "New body", None),
+            &["body"],
+        ));
+        let hostile = "@file\n\"a&b\"\\path";
+        let payload: Value = serde_json::from_str(
+            &update_draft_fields_input("DI_one", Some(hostile), Some(hostile)).unwrap(),
+        )
+        .unwrap();
+        assert!(!payload["query"].as_str().unwrap().contains(hostile));
+        assert_eq!(payload["variables"]["title"], json!(hostile));
+        assert_eq!(payload["variables"]["body"], json!(hostile));
+    }
+
+    #[tokio::test]
+    async fn draft_field_edits_naming_neither_are_refused_before_the_network() {
+        assert!(matches!(
+            update_draft_fields_input("DI_one", None, None),
+            Err(AppError::InvalidArgument(_))
+        ));
+        let result = update_draft_fields("missing-repo".into(), "DI_one".into(), None, None).await;
+        assert!(matches!(result, Err(AppError::InvalidArgument(_))));
+        // Negative control: an empty body is a named field, so it builds a request.
+        assert!(update_draft_fields_input("DI_one", None, Some("")).is_ok());
     }
 
     #[test]

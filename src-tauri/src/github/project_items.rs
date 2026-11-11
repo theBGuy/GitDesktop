@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
-use crate::github::gh_unreadable;
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::project_fields::{field_value_selection, parse_field_value, ProjectFieldValue};
 use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
 use crate::github::runner::{
-    map_scope_error, run_gh_input, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE,
+    map_scope_error, run_gh_input, run_gh_input_raw, GhOutput, GH_NETWORK_TIMEOUT,
+    PROJECT_READ_SCOPE,
 };
+use crate::github::{gh_failure_reason, gh_unreadable};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +91,10 @@ const ITEMS_SCOPE_HINT: &str =
     "GitHub project items need the read:project (or project) scope. Run:  gh auth refresh -s project";
 const ITEMS_POINTER: &str = "/data/node/items";
 const PAGE_CAP: usize = 5;
+/// Items one page request asks for when the caller's limit leaves room for a full page.
+pub(crate) const ITEMS_PAGE_SIZE: usize = 100;
+/// The most items one load returns: the page cap times a full page.
+pub(crate) const ITEMS_MAX: usize = PAGE_CAP * ITEMS_PAGE_SIZE;
 
 pub(crate) const DRAFT_CONTENT_SELECTION: &str = "id title body createdAt updatedAt assignees(first:20){ nodes{ login avatarUrl } }";
 
@@ -105,7 +111,13 @@ pub(crate) fn board_item_selection(rich: bool) -> String {
     )
 }
 
+#[cfg(test)]
 fn project_items_query(include_archived: bool, rich: bool) -> String {
+    project_items_query_sized(include_archived, rich, ITEMS_PAGE_SIZE)
+}
+
+/// `page_size` is a clamped count, never caller text, so the document stays a literal.
+fn project_items_query_sized(include_archived: bool, rich: bool, page_size: usize) -> String {
     let item = board_item_selection(rich);
     let archived_states = if include_archived {
         "archivedStates:[ARCHIVED, NOT_ARCHIVED], "
@@ -114,21 +126,40 @@ fn project_items_query(include_archived: bool, rich: bool) -> String {
     };
     format!(
         "query($id:ID!,$after:String,$q:String){{ node(id:$id){{ ... on ProjectV2 {{ \
-         items({archived_states}first:100, after:$after, orderBy:{{field:POSITION,direction:ASC}}, query:$q){{ \
+         items({archived_states}first:{page_size}, after:$after, orderBy:{{field:POSITION,direction:ASC}}, query:$q){{ \
          totalCount pageInfo{{ hasNextPage endCursor }} \
          nodes{{ {item} }} }} }} }} }}"
     )
 }
 
-/// The page request's stdin body: the board filter is user text of any length, so it
-/// rides `GRAPHQL_INPUT_ARGS` like the other project writes. An absent cursor or
-/// filter is omitted, never sent as null.
+#[cfg(test)]
 fn build_items_input(
     project_id: &str,
     after: Option<&str>,
     query: Option<&str>,
     include_archived: Option<bool>,
     rich: Option<bool>,
+) -> String {
+    build_items_input_sized(
+        project_id,
+        after,
+        query,
+        include_archived,
+        rich,
+        ITEMS_PAGE_SIZE,
+    )
+}
+
+/// The page request's stdin body: the board filter is user text of any length, so it
+/// rides `GRAPHQL_INPUT_ARGS` like the other project writes. An absent cursor or
+/// filter is omitted, never sent as null.
+fn build_items_input_sized(
+    project_id: &str,
+    after: Option<&str>,
+    query: Option<&str>,
+    include_archived: Option<bool>,
+    rich: Option<bool>,
+    page_size: usize,
 ) -> String {
     let mut variables = json!({"id": project_id});
     for (key, value) in [("after", after), ("q", query)] {
@@ -137,7 +168,11 @@ fn build_items_input(
         }
     }
     graphql_input(
-        &project_items_query(include_archived.unwrap_or(false), rich.unwrap_or(false)),
+        &project_items_query_sized(
+            include_archived.unwrap_or(false),
+            rich.unwrap_or(false),
+            page_size,
+        ),
         variables,
     )
 }
@@ -367,10 +402,38 @@ fn parse_page(output: &str) -> AppResult<BoardItems> {
 
 async fn load_items<F, Fut>(
     project_id: &str,
+    after: Option<String>,
+    query: Option<&str>,
+    include_archived: Option<bool>,
+    rich: Option<bool>,
+    fetch: F,
+) -> AppResult<BoardItems>
+where
+    F: FnMut(&'static [&'static str], String) -> Fut,
+    Fut: Future<Output = AppResult<String>>,
+{
+    load_items_limited(
+        project_id,
+        after,
+        query,
+        include_archived,
+        rich,
+        ITEMS_MAX,
+        fetch,
+    )
+    .await
+}
+
+/// Pages until `limit` items arrived, a page reports no more, or `PAGE_CAP` pages ran.
+/// Each page asks only for what the limit still allows, so the last page's cursor
+/// continues right after the last returned item.
+async fn load_items_limited<F, Fut>(
+    project_id: &str,
     mut after: Option<String>,
     query: Option<&str>,
     include_archived: Option<bool>,
     rich: Option<bool>,
+    limit: usize,
     mut fetch: F,
 ) -> AppResult<BoardItems>
 where
@@ -384,7 +447,15 @@ where
         end_cursor: None,
     };
     for _ in 0..PAGE_CAP {
-        let input = build_items_input(project_id, after.as_deref(), query, include_archived, rich);
+        let page_size = ITEMS_PAGE_SIZE.min(limit.saturating_sub(board.items.len()));
+        let input = build_items_input_sized(
+            project_id,
+            after.as_deref(),
+            query,
+            include_archived,
+            rich,
+            page_size,
+        );
         let output = fetch(&GRAPHQL_INPUT_ARGS, input)
             .await
             .map_err(|e| map_scope_error(e, PROJECT_READ_SCOPE, ITEMS_SCOPE_HINT))?;
@@ -393,7 +464,7 @@ where
         board.total_count = page.total_count;
         board.truncated = page.truncated;
         board.end_cursor = page.end_cursor;
-        if !board.truncated {
+        if !board.truncated || board.items.len() >= limit {
             break;
         }
         after.clone_from(&board.end_cursor);
@@ -423,6 +494,127 @@ pub async fn gh_project_items(
         },
     )
     .await
+}
+
+/// The board read for callers that want at most `limit` items (the MCP tools); not an
+/// IPC command. `limit` is clamped into `1..=ITEMS_MAX` here as well as by callers.
+pub async fn gh_project_items_limited(
+    repo_path: String,
+    project_id: String,
+    after: Option<String>,
+    query: Option<String>,
+    include_archived: Option<bool>,
+    rich: Option<bool>,
+    limit: usize,
+) -> AppResult<BoardItems> {
+    let repo_path = &repo_path;
+    load_items_limited(
+        &project_id,
+        after,
+        query.as_deref(),
+        include_archived,
+        rich,
+        limit.clamp(1, ITEMS_MAX),
+        |args, input| async move {
+            let out = run_gh_input(Some(repo_path), args, &input, GH_NETWORK_TIMEOUT).await?;
+            Ok(out.stdout_lossy())
+        },
+    )
+    .await
+}
+
+/// One project item read by its own node id, with the project it belongs to.
+pub struct ProjectItemNode {
+    pub project_id: String,
+    pub item: BoardItem,
+}
+
+fn item_node_query() -> String {
+    format!(
+        "query($id:ID!){{ node(id:$id){{ __typename ... on ProjectV2Item {{ project{{ id }} {} }} }} }}",
+        board_item_selection(true)
+    )
+}
+
+/// One item by its PVTI_ id, wherever it lives (the caller checks the project); not an
+/// IPC command. `None` when GitHub resolves no node, or a node that isn't a project item.
+pub async fn gh_project_item_node(
+    repo_path: String,
+    item_id: String,
+) -> AppResult<Option<ProjectItemNode>> {
+    let input = graphql_input(&item_node_query(), json!({"id": item_id}));
+    let result = run_gh_input_raw(
+        Some(&repo_path),
+        &GRAPHQL_INPUT_ARGS,
+        &input,
+        GH_NETWORK_TIMEOUT,
+    )
+    .await;
+    item_node_outcome(result)
+}
+
+/// gh exits 1 for an id GitHub can't resolve, with a body naming NOT_FOUND on the
+/// `node` path. That body decides before the stderr class does: gh's stderr echoes the
+/// caller's id, so an id ending in a transport word would otherwise read as Transport.
+fn item_node_outcome(result: AppResult<GhOutput>) -> AppResult<Option<ProjectItemNode>> {
+    let out = result?;
+    if out.code == 0 {
+        return parse_item_node(&out.stdout_lossy());
+    }
+    let failed = || {
+        Err(map_scope_error(
+            AppError::Gh(gh_failure_reason(&out)),
+            PROJECT_READ_SCOPE,
+            ITEMS_SCOPE_HINT,
+        ))
+    };
+    match classify_gh_failure(&out.stderr) {
+        GhFailure::RateLimited => failed(),
+        GhFailure::NotFound | GhFailure::Transport | GhFailure::Answered => {
+            if node_not_found(&out.stdout_lossy()) {
+                Ok(None)
+            } else {
+                failed()
+            }
+        }
+    }
+}
+
+/// A null `node` plus a NOT_FOUND error on exactly the `node` path.
+fn node_not_found(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    value.pointer("/data/node").is_some_and(Value::is_null)
+        && value["errors"].as_array().is_some_and(|errors| {
+            errors
+                .iter()
+                .any(|e| e["type"] == "NOT_FOUND" && e["path"] == json!(["node"]))
+        })
+}
+
+fn node_unreadable(detail: impl ToString) -> AppError {
+    gh_unreadable("the project item", detail.to_string())
+}
+
+/// An exit-0 body: a null node or another type is no item; a missing `data`/`node`
+/// key or project id is unreadable, never an absence.
+fn parse_item_node(output: &str) -> AppResult<Option<ProjectItemNode>> {
+    let mut value: Value = serde_json::from_str(output).map_err(node_unreadable)?;
+    let node = value
+        .pointer_mut("/data/node")
+        .ok_or_else(|| node_unreadable("missing project item node"))?
+        .take();
+    if node.is_null() || node["__typename"] != "ProjectV2Item" {
+        return Ok(None);
+    }
+    let project_id = node["project"]["id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| node_unreadable("missing the project item's project id"))?
+        .to_string();
+    let item = parse_board_item(node).map_err(node_unreadable)?;
+    Ok(Some(ProjectItemNode { project_id, item }))
 }
 
 #[cfg(test)]
@@ -1096,6 +1288,213 @@ mod tests {
             assert!(
                 message.starts_with("Couldn't read the project items from GitHub.\n"),
                 "{message}"
+            );
+        }
+    }
+
+    /// `count` redacted items named `{prefix}-{n}`, so a page's length is real.
+    fn items_of(prefix: &str, count: usize) -> Value {
+        Value::Array(
+            (0..count)
+                .map(|n| item(&format!("{prefix}-{n}"), "REDACTED", Value::Null))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn limit_one_sends_one_page_of_one_and_keeps_its_cursor() {
+        let mut requests = Vec::new();
+        let board = load_items_limited("project", None, None, None, None, 1, |_, input| {
+            requests.push(input_json(&input));
+            ready(Ok(page(items_of("a", 1), true, Some("after-one"))))
+        })
+        .await
+        .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]["query"],
+            project_items_query_sized(false, false, 1)
+        );
+        assert!(requests[0]["query"]
+            .as_str()
+            .unwrap()
+            .contains("items(first:1, after:$after"));
+        assert_eq!(board.items.len(), 1);
+        assert!(board.truncated);
+        assert_eq!(board.end_cursor.as_deref(), Some("after-one"));
+    }
+
+    #[tokio::test]
+    async fn limit_150_asks_for_a_full_page_then_the_remaining_50() {
+        let mut requests = Vec::new();
+        let board = load_items_limited("project", None, None, None, None, 150, |_, input| {
+            let request = input_json(&input);
+            let call = requests.len();
+            requests.push(request);
+            let output = if call == 0 {
+                page(items_of("first", 100), true, Some("c100"))
+            } else {
+                page(items_of("second", 50), true, Some("c150"))
+            };
+            ready(Ok(output))
+        })
+        .await
+        .unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]["query"],
+            project_items_query_sized(false, false, 100)
+        );
+        assert_eq!(
+            requests[1]["query"],
+            project_items_query_sized(false, false, 50)
+        );
+        assert_eq!(requests[1]["variables"]["after"], "c100");
+        // Negative control: the second page's document does not ask for a full page.
+        assert!(!requests[1]["query"].as_str().unwrap().contains("first:100"));
+        assert_eq!(board.items.len(), 150);
+        assert!(board.truncated);
+        assert_eq!(board.end_cursor.as_deref(), Some("c150"));
+    }
+
+    #[tokio::test]
+    async fn a_page_with_nothing_more_stops_before_the_limit() {
+        let mut calls = 0;
+        let board = load_items_limited("project", None, None, None, None, 500, |_, _| {
+            calls += 1;
+            ready(Ok(page(items_of("only", 3), false, Some("end"))))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(board.items.len(), 3);
+        assert!(!board.truncated);
+        assert!(board.end_cursor.is_none());
+    }
+
+    /// Pins `load_items` to `load_items_limited` at `ITEMS_MAX`. It compares the code with
+    /// itself, so the request's shape rests on the item-request pins above.
+    #[tokio::test]
+    async fn limit_500_sends_what_load_items_sends() {
+        let serve = |requests: &mut Vec<Value>, input: String| {
+            let call = requests.len();
+            requests.push(input_json(&input));
+            ready(Ok::<_, AppError>(page(
+                items_of(&call.to_string(), 100),
+                true,
+                Some(&format!("c{call}")),
+            )))
+        };
+        let mut limited = Vec::new();
+        let limited_board = load_items_limited(
+            "project",
+            None,
+            Some("is:open"),
+            None,
+            None,
+            500,
+            |_, input| serve(&mut limited, input),
+        )
+        .await
+        .unwrap();
+        let mut full = Vec::new();
+        let full_board = load_items("project", None, Some("is:open"), None, None, |_, input| {
+            serve(&mut full, input)
+        })
+        .await
+        .unwrap();
+        assert_eq!(limited.len(), PAGE_CAP);
+        assert_eq!(limited, full);
+        assert_eq!(limited_board.items.len(), ITEMS_MAX);
+        assert_eq!(
+            serde_json::to_value(limited_board).unwrap(),
+            serde_json::to_value(full_board).unwrap()
+        );
+    }
+
+    fn item_node(archived: bool, project: Value) -> String {
+        let mut node = item("PVTI_one", "DRAFT_ISSUE", content("DraftIssue"));
+        node["__typename"] = json!("ProjectV2Item");
+        node["isArchived"] = json!(archived);
+        node["project"] = project;
+        json!({"data": {"node": node}}).to_string()
+    }
+
+    #[test]
+    fn the_item_node_body_parses_or_reads_as_no_item() {
+        for archived in [false, true] {
+            let node = parse_item_node(&item_node(archived, json!({"id": "PVT_p"})))
+                .unwrap()
+                .expect("an item");
+            assert_eq!(node.project_id, "PVT_p");
+            assert_eq!(node.item.item_id, "PVTI_one");
+            assert_eq!(node.item.is_archived, archived);
+            assert!(matches!(node.item.content, BoardItemContent::Draft { .. }));
+        }
+        assert!(parse_item_node(r#"{"data":{"node":null}}"#)
+            .unwrap()
+            .is_none());
+        let issue = json!({"data": {"node": {"__typename": "Issue", "id": "I_1"}}}).to_string();
+        assert!(parse_item_node(&issue).unwrap().is_none());
+
+        for unreadable in [
+            item_node(false, json!({})),
+            item_node(false, json!({"id": "  "})),
+            item_node(false, Value::Null),
+            r#"{"errors":[]}"#.to_string(),
+            r#"{"data":{}}"#.to_string(),
+            "not json".to_string(),
+        ] {
+            assert!(parse_item_node(&unreadable).is_err(), "{unreadable}");
+        }
+    }
+
+    const NOT_FOUND_BODY: &str = r#"{"data":{"node":null},"errors":[{"type":"NOT_FOUND","path":["node"],"locations":[{"line":1,"column":12}],"message":"Could not resolve to a node with the global id of 'PVTI_x'."}]}"#;
+
+    fn not_found_stderr(id: &str) -> String {
+        format!("gh: Could not resolve to a node with the global id of '{id}'.")
+    }
+
+    fn outcome(code: i32, body: &str, stderr: &str) -> AppResult<Option<ProjectItemNode>> {
+        item_node_outcome(crate::github::test_support::gh_output(code, body, stderr))
+    }
+
+    #[test]
+    fn an_unresolvable_item_id_is_no_item_and_other_failures_are_errors() {
+        let stderr = not_found_stderr("PVTI_x");
+        assert!(outcome(1, NOT_FOUND_BODY, &stderr).unwrap().is_none());
+        assert!(outcome(0, r#"{"data":{"node":null}}"#, "")
+            .unwrap()
+            .is_none());
+
+        // Negative control: the measured body with another error type is a failure.
+        let forbidden = NOT_FOUND_BODY.replace("NOT_FOUND", "FORBIDDEN");
+        assert!(outcome(1, &forbidden, &stderr).is_err());
+        let other_path = NOT_FOUND_BODY.replace(r#""path":["node"]"#, r#""path":["viewer"]"#);
+        assert!(outcome(1, &other_path, &stderr).is_err());
+        let live_node = NOT_FOUND_BODY.replace(r#""node":null"#, r#""node":{"id":"x"}"#);
+        assert!(outcome(1, &live_node, &stderr).is_err());
+        assert!(outcome(1, "", &stderr).is_err());
+
+        // A rate limit is never an absence, whatever the body says.
+        let limited = outcome(
+            1,
+            NOT_FOUND_BODY,
+            crate::github::test_support::HELD_REST_STDERR,
+        );
+        assert!(limited.is_err());
+
+        // gh echoes the caller's id: one ending in a transport word classifies as
+        // Transport, and the body still decides.
+        for id in ["PVTI_x-timeout", "PVTI_x_eof", "PVTI_x-500"] {
+            let stderr = not_found_stderr(id);
+            assert!(
+                matches!(classify_gh_failure(&stderr), GhFailure::Transport),
+                "{id}"
+            );
+            assert!(
+                outcome(1, NOT_FOUND_BODY, &stderr).unwrap().is_none(),
+                "{id}"
             );
         }
     }
