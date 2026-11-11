@@ -3703,10 +3703,11 @@ either, **start**, **reply to**, and **resolve** review threads, add or remove
 **create, comment on, close/reopen**, and set the **milestone** of issues, and, on GitHub,
 edit **project boards** (**add** this repo's issues and PRs or new drafts as cards,
 **move**, **archive** or **restore** cards, set their **fields**, **edit drafts**, and post
-**status updates**) and **create, comment on, answer, and close/reopen discussions**. Board
-fields can be text, number, date, single-select or iteration fields, and setting **Status**
-moves a card between columns. One caveat: **creating** a pull request pushes its head branch first, so it
-additionally needs \`--allow-git-write\` (below). The same flag also unlocks the
+**status updates**) and **create, comment on, answer, and close/reopen discussions**. An agent
+can set text, number, date, single-select and iteration fields, and setting **Status**
+moves a card between columns on a board grouped by Status. One caveat: **creating** a
+pull request pushes its head branch first, so it additionally needs
+\`--allow-git-write\` (below). The same flag also unlocks the
 linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**,
 **assign**, and **update** (due date, priority, labels) its issues. Issue writes cover
 GitHub and GitLab (not Bitbucket); discussions and project boards are GitHub-only; PR

@@ -1,15 +1,16 @@
 //! GitHub Projects board WRITE tools (opt-in via `--allow-remote-write`).
 //!
-//! Reversible edits to boards in the bound repository's project catalog (see
+//! Edits to boards in the bound repository's project catalog (see
 //! [`super::read_projects`]): add a card, set or clear a field, move, archive and
 //! unarchive, edit a draft, post a status update. No tool removes or deletes anything.
 //! Projects and items are resolved and checked before any write: the cores receive the
 //! catalog's own project id, and a caller's item id must be a card on that project.
 //!
-//! `set_project_item_field` and `update_project_draft` are annotated destructive: each
-//! overwrites a stored value (a field's value; a draft's title and body), like the
-//! value-replacing forge writes, and returns the replaced value so the write can be undone.
-//! The others create, or flip a state the caller names and its twin flips back.
+//! Most edits to existing state can be put back: unarchive reverses archive; a field write and
+//! a draft edit (annotated destructive: each overwrites a stored value) return the value they
+//! replaced, when the read could see it; a move returns the order after it, so the caller
+//! reads the order first to restore it. Adding a card or a draft and posting a status update
+//! can't be undone from this surface.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
@@ -17,7 +18,9 @@ use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 use serde_json::{json, Value};
 
 use super::read_forge::ensure_github_for;
-use super::read_projects::{check_kind, quote_name, ProjectSelector};
+use super::read_projects::{
+    check_kind, content_id_error, no_such_content, quote_name, ProjectSelector,
+};
 use super::{app_err, json_result, json_result_untrusted, to_value, GitDesktopMcp};
 use crate::error::AppError;
 use crate::github::project::ProjectV2Ref;
@@ -25,7 +28,7 @@ use crate::github::project_fields::{
     FieldOptionDef, FieldValueUpdate, IterationDef, ProjectFieldDef, ProjectFieldDefs,
     ProjectFieldValue,
 };
-use crate::github::project_item_edits::{missing_payload_detail, BoardOrder, ARCHIVE_POINTER};
+use crate::github::project_item_edits::{ArchiveAnswer, BoardOrder};
 use crate::github::project_items::{BoardItem, BoardItemContent, ProjectItemNode};
 use crate::github::project_status_updates::ProjectStatusUpdate;
 
@@ -542,7 +545,8 @@ fn value_field_id(value: &ProjectFieldValue) -> Option<&str> {
     }
 }
 
-/// The item's value for one field as the read saw it; `None` means the read had none.
+/// The item's value for one field as the read saw it; `None` means the read had none
+/// or could not read it (an `Unknown` value carries no field id).
 fn previous_value<'a>(item: &'a BoardItem, field_id: &str) -> Option<&'a ProjectFieldValue> {
     item.field_values
         .iter()
@@ -777,33 +781,7 @@ fn check_calendar_date(param: &str, date: Option<&str>) -> Result<(), McpError> 
     }
 }
 
-/// An issue or pull request number GitHub can't resolve is the caller's error, with
-/// the other kind suggested; any other resolver failure stays an app error.
-fn content_id_error(kind: &str, number: u64, error: AppError) -> McpError {
-    let message = error.to_string();
-    // Both phrases, so a repository that doesn't resolve stays an app error.
-    if !(message.contains("Could not resolve to") && message.contains("with the number of")) {
-        return app_err(error);
-    }
-    no_such_content(kind, number)
-}
-
-fn no_such_content(kind: &str, number: u64) -> McpError {
-    let (noun, other, other_kind) = if kind == "pr" {
-        ("pull request", "an issue", "issue")
-    } else {
-        ("issue", "a pull request", "pr")
-    };
-    McpError::invalid_request(
-        format!(
-            "No {noun} #{number} in this repository. If #{number} is {other}, pass kind \
-             \"{other_kind}\"."
-        ),
-        None,
-    )
-}
-
-/// GitHub's issue resolver also answers a pull request's number (with its `PR_` id),
+/// `gh issue view`'s lookup also answers a pull request's number (with its `PR_` id),
 /// so a resolved id whose prefix names the other kind is refused before the add. An
 /// id with neither prefix (a legacy id) passes.
 fn check_content_kind(kind: &str, number: u64, content_id: &str) -> Result<(), McpError> {
@@ -815,19 +793,12 @@ fn check_content_kind(kind: &str, number: u64, content_id: &str) -> Result<(), M
     }
 }
 
-/// The archive mutation's answer as `previouslyArchived`. GitHub answers archiving an
-/// already archived card with a null payload, so that answer is a success; the
-/// mutation decides, never a read that can lag a write. Any other failure is an error.
-fn archive_outcome(outcome: Result<(), AppError>) -> Result<bool, McpError> {
+/// The archive mutation's answer as `previouslyArchived`: GitHub's answer for an
+/// already archived card is a success, so the mutation decides, never a read that can
+/// lag a write. Any failure, an unreadable answer included, is an error.
+fn archive_outcome(outcome: Result<ArchiveAnswer, AppError>) -> Result<bool, McpError> {
     match outcome {
-        Ok(()) => Ok(false),
-        Err(error)
-            if error
-                .to_string()
-                .contains(&missing_payload_detail(ARCHIVE_POINTER)) =>
-        {
-            Ok(true)
-        }
+        Ok(answer) => Ok(answer == ArchiveAnswer::AlreadyArchived),
         Err(error) => Err(app_err(error)),
     }
 }
@@ -981,8 +952,7 @@ impl GitDesktopMcp {
         let (repo, project_id, id) = (self.repo.clone(), project.id.clone(), item_id.to_string());
         let previously_archived = if archive {
             archive_outcome(
-                crate::github::project_item_edits::gh_archive_board_item(repo, project_id, id)
-                    .await,
+                crate::github::project_item_edits::archive_board_item(repo, project_id, id).await,
             )?
         } else {
             crate::github::project_item_edits::gh_unarchive_board_item(repo, project_id, id)
@@ -1065,15 +1035,18 @@ impl GitDesktopMcp {
         description = "Set or clear one field of a card on a catalog project (GitHub only). \
                        `item_id` is the card's PVTI_ id from list_project_items; `field` is a \
                        field id or exact name from list_project_fields. Pass `value` (text: a \
-                       string; number: a JSON number from -2147483647 to 2147483647; date: \
-                       \"YYYY-MM-DD\"; single-select: an option id or exact name; iteration: an \
-                       iteration id or exact title) or \
-                       `clear: true`. Status is a single-select field, so setting it moves the \
-                       card between columns. Organization issue fields, multi-select fields and \
-                       built-in fields (Title, Assignees, Labels and the like) are refused. \
-                       `previous` is the field's value read just before the write (null when \
-                       the read had none) and can lag a change made seconds earlier; use it to \
-                       undo. `project` is a node id (PVT_…) or a number from list_projects. \
+                       string; number: a JSON number from -2147483647 to 2147483647 (GitHub \
+                       also refuses some very small fractions); date: \"YYYY-MM-DD\"; \
+                       single-select: an option id or exact name; iteration: an iteration id or \
+                       exact title) or `clear: true`. Status is a single-select field, so on a \
+                       board whose columns are Status (a view's verticalGroupFieldIds) setting \
+                       it moves the card between columns. \
+                       Organization issue fields, multi-select fields and built-in fields \
+                       (Title, Assignees, Labels and the like) are refused. `previous` is the \
+                       field's value read just before the write (null when the read had none \
+                       or could not read it) and can lag a change made seconds earlier; a \
+                       non-null `previous` undoes the write. `project` is a node id (PVT_…) or \
+                       a number from list_projects. \
                        Returns JSON. The running \
                        GitDesktop app isn't told about this write: an open board picks it up on \
                        its next refresh, which happens when the app is refocused or the board is \
@@ -2502,29 +2475,34 @@ mod tests {
 
     #[test]
     fn the_archive_mutations_answer_decides_previously_archived() {
+        use crate::github::project_item_edits::archive_answer;
+        let answer = |body: Value| archive_outcome(archive_answer(&body));
         // A payload: GitHub archived a live card.
-        assert!(!archive_outcome(Ok(())).unwrap());
-        // The measured null-payload answer for an already archived card is a success.
-        // The core's own wording, from the one function its payload check reports with.
-        let missing = crate::github::gh_unreadable(
-            "the archived project item",
-            missing_payload_detail(ARCHIVE_POINTER),
-        );
-        assert!(archive_outcome(Err(missing)).unwrap());
-        // Negative control: any other failure, the unarchive twin included, stays an
-        // app error with the core's message.
-        for other in [
-            crate::github::gh_unreadable(
-                "the unarchived project item",
-                missing_payload_detail("/data/unarchiveProjectV2Item"),
-            ),
-            AppError::Gh("HTTP 502: Bad Gateway".into()),
+        let archived = json!({"data":{"archiveProjectV2Item":{"item":{"id":"PVTI_one"}}}});
+        assert!(!answer(archived).unwrap());
+        // The measured explicit-null answer for an already archived card is a success.
+        assert!(answer(json!({"data":{"archiveProjectV2Item":null}})).unwrap());
+        // Negative controls: an answer missing the key or `data`, a null `data`, a
+        // non-object payload, and the unarchive twin's null stay app errors.
+        for unreadable in [
+            json!({"data":{}}),
+            json!({"data":null}),
+            json!({}),
+            json!({"data":{"archiveProjectV2Item":"PVTI_one"}}),
+            json!({"data":{"unarchiveProjectV2Item":null}}),
         ] {
-            let message = other.to_string();
-            let err = archive_outcome(Err(other)).unwrap_err();
-            assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
-            assert_eq!(err.message, message);
+            let err = answer(unreadable.clone()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::INTERNAL_ERROR, "{unreadable}");
+            assert_eq!(
+                err.message,
+                "Couldn't read the archived project item from GitHub.\n\
+                 missing payload at /data/archiveProjectV2Item"
+            );
         }
+        let failure = archive_outcome(Err(AppError::Gh("HTTP 502: Bad Gateway".into())));
+        let err = failure.unwrap_err();
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(err.message, "HTTP 502: Bad Gateway");
     }
 
     /// The body of the item that `header` opens, up to the `end` that closes it.
@@ -2575,6 +2553,11 @@ mod tests {
                 body(write, "async fn add_project_item(", METHOD_END)
                     .contains("check_content_kind(&args.kind, args.number, &content_id)?;"),
             ),
+            (
+                "field values resolver",
+                body(read, "async fn get_project_item_fields(", METHOD_END)
+                    .contains("content_id_error(&args.kind, args.number, e)"),
+            ),
             ("date field", date_arm.contains("is_calendar_date(date)")),
             (
                 "archive",
@@ -2598,7 +2581,7 @@ mod tests {
         }
         // Mutation controls: reverting each call site fails exactly its own check. A
         // scope names the item whose text the replacement starts from.
-        let mutations: [(&str, bool, Option<&str>, &str, &str); 9] = [
+        let mutations: [(&str, bool, Option<&str>, &str, &str); 10] = [
             (
                 "draft",
                 true,
@@ -2640,6 +2623,13 @@ mod tests {
                 None,
                 "check_content_kind(&args.kind, args.number, &content_id)?;",
                 "",
+            ),
+            (
+                "field values resolver",
+                false,
+                Some("async fn get_project_item_fields("),
+                "content_id_error(&args.kind, args.number, e)",
+                "app_err(e)",
             ),
             (
                 "date field",
@@ -2715,7 +2705,7 @@ mod tests {
 
     #[test]
     fn a_resolved_id_of_the_other_kind_is_refused_before_the_add() {
-        // The issue resolver answers a pull request's number with its PR_ id.
+        // `gh issue view` answers a pull request's number with its PR_ id.
         let err = check_content_kind("issue", 7, "PR_kwDOAbc").unwrap_err();
         assert_eq!(err.code, ErrorCode::INVALID_REQUEST);
         assert_eq!(

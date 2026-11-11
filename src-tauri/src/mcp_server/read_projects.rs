@@ -155,6 +155,33 @@ pub(super) fn check_kind(kind: &str) -> Result<(), McpError> {
     }
 }
 
+/// An issue or pull request number GitHub can't resolve is the caller's error, with
+/// the other kind suggested, in the field-values read and the add alike; any other
+/// failure stays an app error.
+pub(super) fn content_id_error(kind: &str, number: u64, error: AppError) -> McpError {
+    let message = error.to_string();
+    // Both phrases, so a repository that doesn't resolve stays an app error.
+    if !(message.contains("Could not resolve to") && message.contains("with the number of")) {
+        return app_err(error);
+    }
+    no_such_content(kind, number)
+}
+
+pub(super) fn no_such_content(kind: &str, number: u64) -> McpError {
+    let (noun, other, other_kind) = if kind == "pr" {
+        ("pull request", "an issue", "issue")
+    } else {
+        ("issue", "a pull request", "pr")
+    };
+    McpError::invalid_request(
+        format!(
+            "No {noun} #{number} in this repository. If #{number} is {other}, pass kind \
+             \"{other_kind}\"."
+        ),
+        None,
+    )
+}
+
 /// Shape-validate a selector: a `PVT_` node id, or a project number given as a JSON
 /// number or a plain digit string. Nothing is trimmed.
 pub(super) fn classify_selector(sel: &ProjectSelector) -> Result<Selector, McpError> {
@@ -487,7 +514,7 @@ impl GitDesktopMcp {
             None,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(|e| content_id_error(&args.kind, args.number, e))?;
         item_fields_result(&args.kind, args.number, values, &catalog)
     }
 
@@ -726,6 +753,32 @@ mod tests {
         let start = mutated.find("async fn list_projects(").unwrap();
         let rest = &mutated[start..];
         assert!(rest[..rest.find("\n    }\n").unwrap()].contains("json_result"));
+    }
+
+    #[test]
+    fn an_unresolvable_number_in_the_field_values_read_names_the_other_kind() {
+        // The field-values read's failures, measured live for issue #84 (a pull request).
+        for (kind, miss, expected) in [
+            (
+                "issue",
+                "gh: Could not resolve to an Issue with the number of 84.",
+                "No issue #84 in this repository. If #84 is a pull request, pass kind \"pr\".",
+            ),
+            (
+                "pr",
+                "gh: Could not resolve to a PullRequest with the number of 84.",
+                "No pull request #84 in this repository. If #84 is an issue, pass kind \"issue\".",
+            ),
+        ] {
+            let err = content_id_error(kind, 84, AppError::Gh(miss.into()));
+            assert_eq!(err.code, ErrorCode::INVALID_REQUEST, "{kind}");
+            assert_eq!(err.message, expected);
+        }
+        // Negative control: an unresolved repository stays an app error.
+        let other = "gh: Could not resolve to a Repository with the name 'owner/gone'.";
+        let err = content_id_error("issue", 84, AppError::Gh(other.into()));
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(err.message, other);
     }
 
     #[test]

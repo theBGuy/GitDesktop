@@ -292,7 +292,8 @@ const DRAFT_POINTER: &str = "/data/addProjectV2DraftIssue/projectItem";
 const ADD_ITEM_POINTER: &str = "/data/addProjectV2ItemById/item";
 const CONVERT_POINTER: &str = "/data/convertProjectV2DraftIssueItemToIssue/item";
 const UPDATE_DRAFT_POINTER: &str = "/data/updateProjectV2DraftIssue/draftIssue";
-pub(crate) const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
+const ARCHIVE_POINTER: &str = "/data/archiveProjectV2Item";
+const ARCHIVE_SURFACE: &str = "the archived project item";
 const UNARCHIVE_POINTER: &str = "/data/unarchiveProjectV2Item";
 const REMOVE_POINTER: &str = "/data/deleteProjectV2Item";
 const ORDER_POINTER: &str = "/data/updateProjectV2ItemPosition/items";
@@ -687,18 +688,33 @@ fn parse_updated_draft(value: &Value) -> AppResult<BoardItemContent> {
     ))
 }
 
-/// The detail `require_payload` reports for a missing payload; the MCP archive tool
-/// matches it to read GitHub's null answer for an already archived card.
-pub(crate) fn missing_payload_detail(pointer: &str) -> String {
-    format!("missing payload at {pointer}")
-}
-
 fn require_payload(value: &Value, pointer: &str, surface: &str) -> AppResult<()> {
     if value.pointer(pointer).is_some_and(Value::is_object) {
         Ok(())
     } else {
-        Err(gh_unreadable(surface, missing_payload_detail(pointer)))
+        Err(gh_unreadable(
+            surface,
+            format!("missing payload at {pointer}"),
+        ))
     }
+}
+
+/// The archive mutation's answer as the MCP archive tool reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArchiveAnswer {
+    Archived,
+    /// GitHub's answer for a card already archived: the payload key present and null
+    /// (measured: `{"data":{"archiveProjectV2Item":null}}`).
+    AlreadyArchived,
+}
+
+/// Only that explicit null reads as already archived; a missing key, a null or missing
+/// `data`, or any other non-object payload stays `require_payload`'s error.
+pub(crate) fn archive_answer(value: &Value) -> AppResult<ArchiveAnswer> {
+    if value.pointer(ARCHIVE_POINTER).is_some_and(Value::is_null) {
+        return Ok(ArchiveAnswer::AlreadyArchived);
+    }
+    require_payload(value, ARCHIVE_POINTER, ARCHIVE_SURFACE).map(|()| ArchiveAnswer::Archived)
 }
 
 #[tauri::command]
@@ -822,14 +838,29 @@ pub async fn gh_archive_board_item(
     project_id: String,
     item_id: String,
 ) -> AppResult<()> {
+    let value = archive_request(&repo_path, &project_id, &item_id).await?;
+    require_payload(&value, ARCHIVE_POINTER, ARCHIVE_SURFACE)
+}
+
+/// The MCP archive: the same request, answered through `archive_answer` so an already
+/// archived card is an outcome, not an error. The app's command keeps its error.
+pub(crate) async fn archive_board_item(
+    repo_path: String,
+    project_id: String,
+    item_id: String,
+) -> AppResult<ArchiveAnswer> {
+    let value = archive_request(&repo_path, &project_id, &item_id).await?;
+    archive_answer(&value)
+}
+
+async fn archive_request(repo_path: &str, project_id: &str, item_id: &str) -> AppResult<Value> {
     let input = graphql_input(
         ARCHIVE_MUTATION,
         json!({"projectId": project_id, "itemId": item_id}),
     );
-    let value = request(&repo_path, &input, "the archived project item")
+    request(repo_path, &input, ARCHIVE_SURFACE)
         .await
-        .map_err(item_edits_scope_error)?;
-    require_payload(&value, ARCHIVE_POINTER, "the archived project item")
+        .map_err(item_edits_scope_error)
 }
 
 /// Duplicate ids execute as separate aliases and retain separate outcomes in input order.
@@ -1859,6 +1890,36 @@ mod tests {
         for pointer in [ARCHIVE_POINTER, UNARCHIVE_POINTER, REMOVE_POINTER] {
             assert!(require_payload(&value, pointer, "the project item").is_ok());
             assert!(require_payload(&Value::Null, pointer, "the project item").is_err());
+        }
+    }
+
+    #[test]
+    fn only_an_explicit_null_archive_payload_reads_as_already_archived() {
+        let archived = json!({"data":{"archiveProjectV2Item":{"item":{"id":"PVTI_one"}}}});
+        assert_eq!(archive_answer(&archived).unwrap(), ArchiveAnswer::Archived);
+        let null = json!({"data":{"archiveProjectV2Item":null}});
+        assert_eq!(
+            archive_answer(&null).unwrap(),
+            ArchiveAnswer::AlreadyArchived
+        );
+        // The app's command still refuses the null answer, with its own message.
+        let app = require_payload(&null, ARCHIVE_POINTER, ARCHIVE_SURFACE).unwrap_err();
+        assert_eq!(
+            app.to_string(),
+            "Couldn't read the archived project item from GitHub.\n\
+             missing payload at /data/archiveProjectV2Item"
+        );
+        // Unreadable answers stay that same error.
+        for unreadable in [
+            json!({"data":{}}),
+            json!({"data":null}),
+            json!({}),
+            json!({"data":{"archiveProjectV2Item":"PVTI_one"}}),
+            json!({"data":{"archiveProjectV2Item":[]}}),
+            json!({"data":{"unarchiveProjectV2Item":null}}),
+        ] {
+            let err = archive_answer(&unreadable).unwrap_err();
+            assert_eq!(err.to_string(), app.to_string(), "{unreadable}");
         }
     }
 

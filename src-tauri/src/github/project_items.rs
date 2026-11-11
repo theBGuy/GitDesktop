@@ -597,16 +597,21 @@ fn node_unreadable(detail: impl ToString) -> AppError {
     gh_unreadable("the project item", detail.to_string())
 }
 
-/// An exit-0 body: a null node or another type is no item; a missing `data`/`node`
-/// key or project id is unreadable, never an absence.
+/// An exit-0 body: a null node or a `__typename` naming another type is no item; a
+/// missing `data`/`node` key, `__typename` or project id is unreadable, never an absence.
 fn parse_item_node(output: &str) -> AppResult<Option<ProjectItemNode>> {
     let mut value: Value = serde_json::from_str(output).map_err(node_unreadable)?;
     let node = value
         .pointer_mut("/data/node")
         .ok_or_else(|| node_unreadable("missing project item node"))?
         .take();
-    if node.is_null() || node["__typename"] != "ProjectV2Item" {
+    if node.is_null() {
         return Ok(None);
+    }
+    match node["__typename"].as_str() {
+        Some("ProjectV2Item") => {}
+        Some(_) => return Ok(None),
+        None => return Err(node_unreadable("missing the node's type")),
     }
     let project_id = node["project"]["id"]
         .as_str()
@@ -1437,7 +1442,17 @@ mod tests {
         let issue = json!({"data": {"node": {"__typename": "Issue", "id": "I_1"}}}).to_string();
         assert!(parse_item_node(&issue).unwrap().is_none());
 
+        let mut untyped: Value =
+            serde_json::from_str(&item_node(false, json!({"id": "PVT_p"}))).unwrap();
+        untyped["data"]["node"]
+            .as_object_mut()
+            .unwrap()
+            .remove("__typename");
+        let mut null_typed = untyped.clone();
+        null_typed["data"]["node"]["__typename"] = Value::Null;
         for unreadable in [
+            untyped.to_string(),
+            null_typed.to_string(),
             item_node(false, json!({})),
             item_node(false, json!({"id": "  "})),
             item_node(false, Value::Null),

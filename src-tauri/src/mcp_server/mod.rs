@@ -469,8 +469,8 @@ impl ServerHandler for GitDesktopMcp {
              stack create/add/dissolve), reviewers, labels, assignees and approvals, review \
              threads, CI actions, releases, GitHub discussions, GitHub Projects board edits \
              (add, set field, move, archive/unarchive, draft edits, status updates; there are \
-             no remove or delete tools, and the two value-overwriting edits return the previous \
-             value), issue writes \
+             no remove or delete tools, and the two value-overwriting edits return the value \
+             they replaced when the read could see it), issue writes \
              (create/comment/close/reopen), and the linked-Jira issue writes \
              (comment/transition/create/assign). These are REAL, publicly \
              visible writes to the repository's forge and are not freely reversible. (One \
