@@ -194,7 +194,7 @@ const flush = () =>
     await new Promise((r) => setTimeout(r, 30));
   });
 
-describe("one attach gesture, one status line (U1)", () => {
+describe("one attach gesture, one status line", () => {
   it("keeps a too-big refusal while a later file of the same paste stages", async () => {
     const key = freshKey();
     render(wrap(<Host draftKey={key} />));
@@ -273,7 +273,7 @@ describe("one attach gesture, one status line (U1)", () => {
   });
 });
 
-describe("a batch stops when its draft moves on (U2)", () => {
+describe("a batch stops when its draft moves on", () => {
   async function pasteFour(key: string) {
     const release = holdNextStage();
     render(wrap(<Host draftKey={key} />));
@@ -325,7 +325,7 @@ describe("a batch stops when its draft moves on (U2)", () => {
   });
 });
 
-describe("chip Remove (U6, U7)", () => {
+describe("chip Remove", () => {
   it("removes a reference with a bracketed alt and a plain link to the name", async () => {
     const key = freshKey();
     render(wrap(<Host draftKey={key} />));
@@ -342,7 +342,7 @@ describe("chip Remove (U6, U7)", () => {
     expect(chips()).toBe(0);
   });
 
-  it("a reference alone on its line takes its separator with it, in one splice (S4)", async () => {
+  it("a reference alone on its line takes its separator with it, in one splice", async () => {
     installExecCommand();
     const key = freshKey();
     render(wrap(<Host draftKey={key} />));
@@ -375,7 +375,7 @@ describe("chip Remove (U6, U7)", () => {
   });
 });
 
-describe("a parked post's status line (U8)", () => {
+describe("a parked post's status line", () => {
   it("shows the host's hold while posting, not the uploading text", async () => {
     const key = freshKey();
     const queued = "Queued: posts when you're back online.";
@@ -393,7 +393,7 @@ describe("a parked post's status line (U8)", () => {
   });
 });
 
-describe("a held attach's reason lasts as long as its hold (S1)", () => {
+describe("a held attach's reason lasts as long as its hold", () => {
   const uploading = "Uploading 1 image and posting…";
   const pressAttach = () =>
     fireEvent.keyDown(screen.getByRole("button", { name: /Attach image/ }), {
@@ -474,7 +474,7 @@ describe("a held attach's reason lasts as long as its hold (S1)", () => {
   });
 });
 
-describe("the chip lightbox follows its draft (U10b)", () => {
+describe("the chip lightbox follows its draft", () => {
   it("never reopens when the draft it closed on returns", async () => {
     const a = freshKey();
     const b = freshKey();
@@ -494,7 +494,7 @@ describe("the chip lightbox follows its draft (U10b)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("never reopens when the draft's chips empty and refill (H3)", async () => {
+  it("never reopens when the draft's chips empty and refill", async () => {
     const key = freshKey();
     render(wrap(<Host draftKey={key} />));
     await act(async () => {
@@ -521,7 +521,7 @@ describe("the chip lightbox follows its draft (U10b)", () => {
   });
 });
 
-describe("staged images render through the render's own source (H2)", () => {
+describe("staged images render through the render's own source", () => {
   const typed = [
     "Inline `![x](image-1.png)` here.",
     "",
@@ -727,7 +727,7 @@ describe("staged images render through the render's own source (H2)", () => {
   });
 });
 
-describe("a staged image shows only where it will upload, and a mounted row follows the store (J1, J2)", () => {
+describe("a staged image shows only where it will upload, and a mounted row follows the store", () => {
   /** Two staged images and a post in flight for the given referenced names. */
   async function twoStaged(postBody: string) {
     const key = freshKey();

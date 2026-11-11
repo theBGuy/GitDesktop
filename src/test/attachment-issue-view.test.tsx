@@ -7,6 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
@@ -196,10 +197,16 @@ async function stageImages(count: number) {
   await waitFor(() => expect(box().value).toContain(`](image-${count}.png)`));
 }
 
+const ATTACHING = "Wait for the image to finish attaching.";
+
+/** Whether the editor's polite status region carries the held-submit note. */
+const statusSaysAttaching = () =>
+  screen.getAllByRole("status").some((s) => s.textContent === ATTACHING);
+
 const key = (number: number) =>
   draftKeyFor("issue-comment", `${REPO}#origin#${number}`);
 
-describe("RemoteIssueView comment attachments (T12)", () => {
+describe("RemoteIssueView comment attachments", () => {
   it("sends refs in first-occurrence order and lands a partial outcome on the issue it posted to", async () => {
     const { show } = mount(7);
     await shown(7);
@@ -244,7 +251,7 @@ describe("RemoteIssueView comment attachments (T12)", () => {
   });
 });
 
-describe("RemoteIssueView comment attachments (T13)", () => {
+describe("RemoteIssueView comment attachments", () => {
   it("restores the text and chips on a rejected post", async () => {
     mount(7);
     await shown(7);
@@ -307,33 +314,64 @@ describe("RemoteIssueView comment attachments (T13)", () => {
   });
 });
 
-describe("a stage in flight when its draft posts (behaviour check A)", () => {
-  it("inserts no reference and discards the file when the stage resolves during a post with no ticket", async () => {
+describe("a stage in flight holds the post of its draft", () => {
+  it("holds Comment with its reason, posts nothing, and frees it once the stage lands", async () => {
     mount(7);
     await shown(7);
-    vi.mocked(attachmentDiscard).mockClear();
     const stage = deferred<ReturnType<typeof staged>>();
     vi.mocked(attachmentStage).mockReturnValueOnce(stage.promise);
     paste(box(), 1);
     await waitFor(() => expect(attachmentStage).toHaveBeenCalledTimes(1));
     fireEvent.change(box(), { target: { value: "No image yet" } });
-    const post = deferred<{ failedAttachments: string[] }>();
-    vi.mocked(forgeIssueComment).mockReturnValue(post.promise);
-    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
-    await waitFor(() => expect(forgeIssueComment).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(forgeIssueComment).mock.calls[0][4]).toBeUndefined();
-    await act(async () => stage.resolve(staged(null, 1)));
+    const comment = screen.getByRole("button", { name: "Comment" });
     await waitFor(() =>
-      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, ["image-1.png"]),
+      expect(comment).toHaveAccessibleDescription(
+        "Wait for the image to finish attaching.",
+      ),
     );
-    expect(box().value).toBe("");
-    await act(async () => post.resolve({ failedAttachments: [] }));
-    expect(box().value).toBe("");
-    expect(draftEntry(key(7))).toBeUndefined();
+    fireEvent.click(comment);
+    expect(statusSaysAttaching()).toBe(false);
+    act(() => box().focus());
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(statusSaysAttaching()).toBe(true));
+    expect(forgeIssueComment).not.toHaveBeenCalled();
+    await act(async () => stage.resolve(staged(null, 1)));
+    expect(
+      await screen.findByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+    expect(box().value).toContain("](image-1.png)");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Comment" }),
+      ).not.toHaveAttribute("aria-disabled", "true"),
+    );
+  });
+
+  it("frees Comment when the stage is refused", async () => {
+    mount(7);
+    await shown(7);
+    const stage = deferred<ReturnType<typeof staged>>();
+    vi.mocked(attachmentStage).mockReturnValueOnce(stage.promise);
+    paste(box(), 1);
+    await waitFor(() => expect(attachmentStage).toHaveBeenCalledTimes(1));
+    fireEvent.change(box(), { target: { value: "Text" } });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Comment" })).toHaveAttribute(
+        "aria-disabled",
+        "true",
+      ),
+    );
+    await act(async () => stage.reject(new Error("refused")));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Comment" }),
+      ).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(forgeIssueComment).not.toHaveBeenCalled();
   });
 });
 
-describe("a just-posted row offers no Quote reply (J3)", () => {
+describe("a just-posted row offers no Quote reply", () => {
   it("withholds Quote on the row carrying a post token, keeps it on a hosted row", async () => {
     // The feed draws once the forge probe answers; it answers after the images
     // are staged and the post is in flight, so the attachment gate stays open.

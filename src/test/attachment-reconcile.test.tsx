@@ -185,7 +185,7 @@ const detailKey = ["repo", REPO, "issue", "origin", 7];
 const urlOf = (name: string) =>
   draftEntry(KEY)?.images.find((i) => i.name === name)?.url ?? "";
 
-describe("held copies through the comment reconcile (T20)", () => {
+describe("held copies through the comment reconcile", () => {
   it("keeps both posts' images until the thread settles without them", async () => {
     const { client, stage, post } = await setup();
     await stage();
@@ -235,7 +235,7 @@ describe("held copies through the comment reconcile (T20)", () => {
   });
 });
 
-describe("a partial post and its follow-up keep their own images (T21, U4)", () => {
+describe("a partial post and its follow-up keep their own images", () => {
   /** The image src each cached comment renders, in thread order. */
   async function renderedSrcs(client: QueryClient): Promise<string[][]> {
     const data = client.getQueryData<IssueDetails>(detailKey);
@@ -298,7 +298,7 @@ describe("a partial post and its follow-up keep their own images (T21, U4)", () 
   });
 });
 
-describe("Request changes' hold rule (T22, helper level)", () => {
+describe("Request changes' hold rule (helper level)", () => {
   it("holds only a draft that references a staged image", () => {
     const images = [{ name: "image-1.png" }];
     expect(referencesStaged("see ![x](image-1.png)", images)).toBe(true);

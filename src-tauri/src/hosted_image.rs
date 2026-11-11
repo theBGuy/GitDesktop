@@ -1495,6 +1495,12 @@ mod tests {
         "dbg!",
     ];
 
+    /// This file's text with LF line endings: a Windows checkout embeds it with CRLF, and
+    /// the scans below match on `\n`.
+    fn own_source() -> String {
+        include_str!("hosted_image.rs").replace("\r\n", "\n")
+    }
+
     /// The text before the test module, so this module's own needles are never scanned.
     fn production_half(source: &str) -> &str {
         let end = source
@@ -1657,7 +1663,8 @@ mod tests {
         }
 
         // No logging in the production half of this module.
-        let production = production_half(include_str!("hosted_image.rs"));
+        let source = own_source();
+        let production = production_half(&source);
         assert!(production.contains("fn fetch_planned"));
         assert_eq!(log_sites(production), Vec::<&str>::new());
         // Negative control: an injected log line is found.
@@ -1700,7 +1707,8 @@ mod tests {
 
     #[test]
     fn production_client_and_resolution_are_wired_through_their_guards() {
-        let production = production_half(include_str!("hosted_image.rs"));
+        let source = own_source();
+        let production = production_half(&source);
         assert!(client_wiring_holds(production));
         assert!(resolve_wiring_holds(production));
 

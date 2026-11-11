@@ -3,9 +3,11 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import {
   claimRepoOpen,
+  repoOpenWatermark,
   useOpenRecordedRepo,
 } from "@/features/repository/useOpenRepoByPath";
 import { validateRepo } from "@/lib/git/api";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 
@@ -29,10 +31,27 @@ export function useRepoDrop() {
       if (event.payload.type !== "drop") return;
       const path = event.payload.paths[0];
       if (!path) return;
-      // Before the claim: an image drop is no open request, so it must not
-      // retire one in flight.
+      // A checkout's name can end in an image extension, so such a path is
+      // asked about first. A watermark, not a claim: an image file is no open
+      // request and must not retire one in flight.
       if (IMAGE_PATH.test(path)) {
-        toast(IMAGE_DROP_HINT);
+        const noNewerOpen = repoOpenWatermark();
+        let info: Awaited<ReturnType<typeof validateRepo>>;
+        try {
+          info = await validateRepo(path);
+        } catch (e) {
+          // Only a path git calls no repository is the image file; any other
+          // refusal is git's reason about a checkout, shown as a drop shows it.
+          if (isAppError(e) && e.kind === "notARepo") toast(IMAGE_DROP_HINT);
+          else toastError(e);
+          return;
+        }
+        if (!noNewerOpen()) return;
+        try {
+          await openRecordedRef.current(info, claimRepoOpen());
+        } catch (e) {
+          toastError(e);
+        }
         return;
       }
       // Claimed before validating, as a Recents click is: the drop is the request,

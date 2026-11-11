@@ -1959,7 +1959,7 @@ pub async fn forge_pr_comment(
     Ok(Default::default())
 }
 
-/// Check step 0 for a comment with attachments: the cores' own empty-body refusal
+/// The first check for a comment with attachments: the cores' own empty-body refusal
 /// outranks every attachment check, as it does on a post without attachments. The
 /// GitHub arms then check the lens, the cores' next guard, the same way.
 fn refuse_empty_comment(body: &str) -> AppResult<()> {
@@ -1969,7 +1969,7 @@ fn refuse_empty_comment(body: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Check step 1 on Bitbucket, which refuses every attachment.
+/// The provider check on Bitbucket, which refuses every attachment.
 fn attachments_refused_on_bitbucket() -> AppError {
     use crate::attachments::{attach_gate_verdict, AttachForge, BITBUCKET_REFUSAL};
     attach_gate_verdict(AttachForge::Bitbucket, None, None, false)

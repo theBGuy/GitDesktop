@@ -84,7 +84,7 @@ const stage = (draftKey: string, owner: object) =>
   });
 
 describe("attachment store", () => {
-  it("chains stages so the second carries the first's session (T9)", async () => {
+  it("chains stages so the second carries the first's session", async () => {
     const k = key();
     const owner = {};
     await Promise.all([stage(k, owner), stage(k, owner)]);
@@ -95,7 +95,7 @@ describe("attachment store", () => {
     ]);
   });
 
-  it("replaces a record whose name a stage returns again, revoking its URL (T9)", async () => {
+  it("replaces a record whose name a stage returns again, revoking its URL", async () => {
     const k = key();
     const owner = {};
     vi.mocked(attachmentStage).mockImplementation(async () => ({
@@ -113,7 +113,7 @@ describe("attachment store", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith(first);
   });
 
-  it("discards a stage that resolves after Clear, and Clear's discard runs last (T8)", async () => {
+  it("discards a stage that resolves after Clear, and Clear's discard runs last", async () => {
     const k = key();
     const owner = {};
     await stage(k, owner);
@@ -172,7 +172,7 @@ describe("attachment store", () => {
     expect(calls.at(-1)).toBe(`discard:${SESSION}:image-2.png`);
   });
 
-  it("sweeps other owners' entries and held copies, never its own (T10)", async () => {
+  it("sweeps other owners' entries and held copies, never its own", async () => {
     const k = key();
     const a = {};
     await stage(k, a);
@@ -185,7 +185,7 @@ describe("attachment store", () => {
     await vi.waitFor(() => expect(calls.at(-1)).toBe(`discard:${SESSION}:all`));
   });
 
-  it("an Activity hide and re-show of the same owner releases nothing (T10)", async () => {
+  it("an Activity hide and re-show of the same owner releases nothing", async () => {
     const k = key();
     let owner: object = {};
     const effects: string[] = [];
@@ -218,7 +218,7 @@ describe("attachment store", () => {
     expect(calls).toEqual([]);
   });
 
-  it("holds a landed post's images until no row of the thread carries its token (S6)", async () => {
+  it("holds a landed post's images until no row of the thread carries its token", async () => {
     const k = key();
     const owner = {};
     await stage(k, owner);
@@ -263,7 +263,7 @@ describe("attachment store", () => {
     expect(stagedImageUrl(post, "image-1.png")).toBeNull();
   });
 
-  it("decides on a landing, never on the invalidate right after its subscribe (U5)", async () => {
+  it("decides on a landing, never on the invalidate right after its subscribe", async () => {
     const k = key();
     await stage(k, {});
     const url = draftEntry(k)?.images[0].url;
@@ -288,7 +288,7 @@ describe("attachment store", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith(url);
   });
 
-  it("a landing that beats the settle makes the settle revoke at once (U5)", async () => {
+  it("a landing that beats the settle makes the settle revoke at once", async () => {
     const k = key();
     await stage(k, {});
     const url = draftEntry(k)?.images[0].url;
@@ -309,7 +309,7 @@ describe("attachment store", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith(url);
   });
 
-  it("keeps the failed image staged and the posted one held on a partial post (S6)", async () => {
+  it("keeps the failed image staged and the posted one held on a partial post", async () => {
     const k = key();
     const owner = {};
     await stage(k, owner);
@@ -353,7 +353,7 @@ describe("attachment store", () => {
     expect(draftEntry(k)).toBeUndefined();
   });
 
-  it("a second mount of the surface releases the first's entry and held copies (T10)", async () => {
+  it("a second mount of the surface releases the first's entry and held copies", async () => {
     const k = key();
     let owner: object = {};
     function Probe() {
@@ -381,7 +381,7 @@ describe("attachment store", () => {
   });
 });
 
-describe("a posting entry a new owner displaces (U3)", () => {
+describe("a posting entry a new owner displaces", () => {
   async function displaced(count: number) {
     const k = key();
     const a = {};
@@ -437,7 +437,7 @@ describe("a posting entry a new owner displaces (U3)", () => {
   });
 });
 
-describe("Markdown resolves staged names only through its own source (T11)", () => {
+describe("Markdown resolves staged names only through its own source", () => {
   it("shows the source's image and never reads the repo for it; a name it lacks falls through", async () => {
     const k = key();
     const owner = {};

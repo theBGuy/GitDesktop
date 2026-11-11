@@ -79,7 +79,7 @@ import {
   LEADING_SEPARATOR,
   type MarkdownHostedImages,
   normalizeHref,
-  OPEN_IN_BROWSER,
+  OPEN_ON_GITHUB,
   ownsImageUrl,
   parseSrcset,
   REPO_IMAGE_ATTRS,
@@ -543,10 +543,12 @@ function unitRelativeUrls(unit: ImageUnit, owns: Owns): string[] {
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** The inline stand-in for an image that can't be shown: a glyph, then the
- *  image's name and the reason as plain text. Styled from the body's class list
+ *  `name` (the image's alt text, or `Image` for a hosted image without one) and
+ *  the reason as plain text. Styled from the body's class list
  *  (`[data-repo-image-caption]`); untitled, since its text is the whole message.
- *  A hosted image's caption ends with an Open in browser link to `webUrl`, the
- *  caption's one focusable node, which the body's click dispatch opens. */
+ *  With a `webUrl` (a hosted image outside any link, button or label) it ends
+ *  with an Open on GitHub link, the caption's one focusable node, which the
+ *  body's click dispatch opens. */
 function imageCaption(
   doc: Document,
   name: string,
@@ -568,7 +570,7 @@ function imageCaption(
   if (webUrl !== null) {
     const link = doc.createElement("a");
     link.setAttribute("href", webUrl);
-    link.textContent = OPEN_IN_BROWSER;
+    link.textContent = OPEN_ON_GITHUB;
     caption.append(doc.createTextNode(" "), link);
   }
   return caption;

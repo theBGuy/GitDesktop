@@ -33,8 +33,10 @@ import {
 // Staged images live here, keyed by DRAFT KEY (`<surface>|<identity>`), so a
 // settle lands by key with no component alive and the optimistic comment,
 // rendered outside the editor's tree, can resolve its images through its post
-// token. Entries end where the draft text ends, or at the owner sweep; never on
-// a repo switch, since the key already carries the repo.
+// token. Entries end where the draft text ends, or at the owner sweep (a comment
+// view's per surface, Create PR's per host, so a host that never mounts again
+// keeps its entry for the session); never on a repo switch, since the key
+// already carries the repo.
 
 export type AttachmentSurface = "issue-comment" | "pr-comment" | "pr-create";
 
@@ -84,6 +86,8 @@ interface HeldSet {
 // - `retired`: added only while its post is in flight; that post's settle
 //   removes it on every outcome.
 // - `chains`: each tail removes itself once it is the last.
+// - `staging`: each stage's own finally.
+// - `ownerHosts`: weak, gone with its owner.
 // - `listeners`: their unsubscribe.
 const entries = new Map<string, DraftEntry>();
 /** Posting entries a new owner displaced, by their post's gen: the post's settle
@@ -105,6 +109,31 @@ const endedSessions = new WeakMap<object, string>();
 const recordFiles = new WeakMap<StagedRecord, Blob>();
 /** Each comment post's seeds, by the gen its begin minted. */
 const postSeeds = new WeakMap<object, PostSeeds>();
+/** Stages in flight per draft key, from the call until its result is known. */
+const staging = new Map<string, number>();
+/** The host an owner was minted for; its sweep reaches only that host's owners. */
+const ownerHosts = new WeakMap<object, string>();
+
+/** A host instance's owner token. With `host`, the surface's sweep from this
+ *  owner ends only entries another owner of the same host left behind. */
+export function mintAttachmentOwner(host?: string): object {
+  const owner = {};
+  if (host !== undefined) ownerHosts.set(owner, host);
+  return owner;
+}
+
+/** How many stages for `draftKey` are still in flight: a post of that draft
+ *  holds until none is, so no image lands after the text it belongs to left. */
+export function stagesInFlight(draftKey: string): number {
+  return staging.get(draftKey) ?? 0;
+}
+
+function countStage(draftKey: string, delta: 1 | -1) {
+  const next = stagesInFlight(draftKey) + delta;
+  if (next > 0) staging.set(draftKey, next);
+  else staging.delete(draftKey);
+  notify();
+}
 
 function notify() {
   for (const listener of listeners) listener();
@@ -261,6 +290,22 @@ export async function stageAttachment({
     });
     return null;
   }
+  // Released before the caller's continuation inserts the reference, which
+  // runs in the same task, so no input event lands between the two.
+  countStage(draftKey, 1);
+  try {
+    return await stageCounted(draftKey, owner, file, hint);
+  } finally {
+    countStage(draftKey, -1);
+  }
+}
+
+async function stageCounted(
+  draftKey: string,
+  owner: object,
+  file: File,
+  hint: string | null,
+): Promise<StagedImage | null> {
   const started = ownEntry(draftKey, owner);
   notify();
   const { gen } = started;
@@ -506,22 +551,28 @@ export function attachmentStoreSizes() {
     held: held.size,
     retired: retired.size,
     chains: chains.size,
+    staging: staging.size,
   };
 }
 
 /**
  * Releases every entry and held copy of `surface` another owner tagged: the
- * mount of a comment view stands in for the previous instance's unmount, which
- * an effect cleanup can't tell from an `<Activity>` hide.
+ * mount of a host instance stands in for the previous instance's unmount, which
+ * an effect cleanup can't tell from an `<Activity>` hide. An owner minted for a
+ * host reaches only that host's owners, so two hosts of one surface mounted at
+ * once never end each other's drafts. An entry whose post is in flight ends at
+ * that post's settle.
  */
 export function sweepOtherOwners(surface: AttachmentSurface, owner: object) {
+  const host = ownerHosts.get(owner);
+  const swept = (other: object) =>
+    other !== owner && ownerHosts.get(other) === host;
   for (const [draftKey, entry] of [...entries]) {
-    if (surfaceOf(draftKey) === surface && entry.owner !== owner)
+    if (surfaceOf(draftKey) === surface && swept(entry.owner))
       endDraftAttachments(draftKey);
   }
   for (const [token, set] of [...held]) {
-    if (set.surface === surface && set.owner !== owner)
-      releaseHeldCopies(token);
+    if (set.surface === surface && swept(set.owner)) releaseHeldCopies(token);
   }
 }
 

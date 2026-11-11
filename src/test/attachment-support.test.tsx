@@ -67,7 +67,7 @@ function mount(ui: React.ReactNode) {
   return client;
 }
 
-describe("useAttachmentSupport (T19)", () => {
+describe("useAttachmentSupport", () => {
   it("issues no system_health call while disabled", () => {
     mount(<Gate enabled={false} />);
     expect(invoke).not.toHaveBeenCalled();

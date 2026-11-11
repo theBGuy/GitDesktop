@@ -86,7 +86,7 @@ function Feed({ onQuote }: { onQuote: (body: string) => void }) {
   );
 }
 
-describe("the PR feed offers no Quote reply on a just-posted row (J3)", () => {
+describe("the PR feed offers no Quote reply on a just-posted row", () => {
   it("withholds Quote on the row carrying a post token, keeps it on a hosted row", async () => {
     const onQuote = vi.fn();
     render(

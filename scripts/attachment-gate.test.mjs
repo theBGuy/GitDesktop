@@ -1,6 +1,6 @@
 // Pins the image-attachment gate (src/lib/attachments/support-gate.ts): the
-// order provider, host, CLI version, write access; every row of CONTRACT 2b's
-// version table (Rust pins the same rows); the printed `{version}` and `{host}`;
+// order provider, host, CLI version, write access; every row of the version
+// table (Rust pins the same rows); the printed `{version}` and `{host}`;
 // and that a pending or failed read never closes the gate. Stdlib only, under
 // Node's type stripping.
 import assert from "node:assert/strict";

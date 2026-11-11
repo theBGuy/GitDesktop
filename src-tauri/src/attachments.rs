@@ -4,8 +4,13 @@
 //!
 //! Every path here is rebuilt from a session id and a file name that passed their
 //! grammar at the same call site, so no frontend string ever becomes a path. File
-//! lifetime: a post that returns Err leaves every staged file on disk, and a post that
-//! returns Ok has deleted every posted one.
+//! lifetime: a post that returns Err leaves every staged file on disk; one that returns
+//! Ok releases, best-effort, every file it did not report failed, and a failed delete
+//! waits for the 24 h sweep. GitHub's failed list can over-report when its read-back
+//! fails, so an uploaded image is then kept and re-sent with the follow-up.
+//!
+//! Nothing here reads, writes or deletes through a session folder or staged file that is
+//! a symbolic link or junction: a planted link would aim those at its target.
 
 use std::collections::HashSet;
 use std::fs;
@@ -353,7 +358,7 @@ fn version_gate(
     }
 }
 
-/// Check steps 1-4 for a post that carries attachments: provider, host (GitHub only;
+/// The gate for a post that carries attachments: provider, host (GitHub only;
 /// `None` means gh's default chain and passes), CLI version, then the as-bot refusal.
 /// It reads no file and builds no path; a failed version probe arrives as `None`.
 pub(crate) fn attach_gate_verdict(
@@ -462,7 +467,23 @@ fn root_is_private(root: &Path) -> std::io::Result<bool> {
             return Ok(false);
         }
     }
-    Ok(meta.file_type().is_dir())
+    Ok(!is_link(&meta) && meta.file_type().is_dir())
+}
+
+/// The one link rule for the root, session entries and staged files, read from
+/// `symlink_metadata`: a symbolic link or a junction (std reports a junction as a
+/// symlink on Windows), never other reparse points such as cloud placeholders.
+fn is_link(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
+/// A session entry that is a link is not ours; an absent one is not a link, and one
+/// that can't be read counts as linked.
+fn session_is_linked(dir: &Path) -> bool {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => is_link(&meta),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Creates the root (and its parents) if missing; it must then pass [`root_is_private`],
@@ -521,6 +542,9 @@ pub(crate) fn stage_in(
     let _guard = fs_lock();
     prepare_root(root)?;
     let dir = root.join(&session);
+    if session_is_linked(&dir) {
+        return Err(not_private(&dir));
+    }
     if staged_count(&dir)? >= MAX_IMAGES {
         return Err(invalid(TOO_MANY_REFUSAL));
     }
@@ -595,6 +619,9 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
         return Ok(());
     }
     let dir = root.join(session);
+    if session_is_linked(&dir) {
+        return Err(not_private(&dir));
+    }
     let result = match names {
         None => fs::remove_dir_all(&dir),
         // Every name is tried; the first failure is reported after the rest.
@@ -620,8 +647,9 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
     }
 }
 
-/// Check step 5: grammar, unique, 1..=10, each file present, each referenced. `None`
-/// or no names gives `Ok(None)`, and the post proceeds exactly as without attachments.
+/// The structural checks: grammar, unique, 1..=10, each file present (a real file in a
+/// real session folder, never a link), each referenced. `None` or no names gives
+/// `Ok(None)`, and the post proceeds exactly as without attachments.
 pub(crate) fn post_checks(
     root: &Path,
     body: &str,
@@ -649,8 +677,15 @@ pub(crate) fn post_checks(
     let _guard = fs_lock();
     prepare_root(root)?;
     let dir = root.join(&session);
-    if let Some(gone) = names.iter().find(|n| !dir.join(n).is_file()) {
-        return Err(no_longer_attached(gone));
+    if session_is_linked(&dir) {
+        return Err(not_private(&dir));
+    }
+    for name in &names {
+        match fs::symlink_metadata(dir.join(name)) {
+            Ok(meta) if is_link(&meta) => return Err(not_private(&dir)),
+            Ok(meta) if meta.is_file() => {}
+            _ => return Err(no_longer_attached(name)),
+        }
     }
     if let Some(loose) = names.iter().find(|n| !references(body, n)) {
         return Err(AppError::InvalidArgument(format!(
@@ -674,9 +709,16 @@ pub(crate) async fn checked_refs(
 }
 
 /// Deletes every staged name not in `failed`, then the session folder once empty.
-/// Best-effort: errors are ignored.
+/// Best-effort: errors are ignored, and a folder (or root) turned into a link since the
+/// checks is left alone.
 fn release_in(dir: &Path, names: &[String], failed: &[String]) {
     let _guard = fs_lock();
+    let root_ok = dir
+        .parent()
+        .is_some_and(|root| root_is_private(root).unwrap_or(false));
+    if !root_ok || session_is_linked(dir) {
+        return;
+    }
     for name in names.iter().filter(|n| !failed.contains(n)) {
         let _ = fs::remove_file(dir.join(name));
     }
@@ -721,7 +763,8 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
 
 /// Removes 32-hex session folders directly under `root` idle longer than `max_age`.
 /// Best-effort; every other entry is left alone. A root failing [`root_is_private`]
-/// is never read: a planted link would aim the deletes at its target.
+/// is never read: a planted link would aim the deletes at its target. A stale
+/// session-named link is unlinked by its own mtime, never read or descended into.
 pub(crate) fn sweep_stale_in(root: &Path, now: SystemTime, max_age: Duration) {
     if !root_is_private(root).unwrap_or(false) {
         return;
@@ -731,15 +774,35 @@ pub(crate) fn sweep_stale_in(root: &Path, now: SystemTime, max_age: Duration) {
     };
     let _guard = fs_lock();
     for entry in entries.flatten() {
-        let is_session = entry.file_name().to_str().is_some_and(is_session_id);
-        if !is_session || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        if !entry.file_name().to_str().is_some_and(is_session_id) {
             continue;
         }
         let path = entry.path();
-        let Some(newest) = newest_mtime(&path) else {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
-        if now.duration_since(newest).is_ok_and(|age| age > max_age) {
+        let linked = is_link(&meta);
+        if !linked && !meta.is_dir() {
+            continue;
+        }
+        let newest = if linked {
+            meta.modified().ok()
+        } else {
+            newest_mtime(&path)
+        };
+        let Some(newest) = newest else {
+            continue;
+        };
+        if !now.duration_since(newest).is_ok_and(|age| age > max_age) {
+            continue;
+        }
+        if linked {
+            // A unix symlink unlinks as a file, a Windows junction as a directory; either
+            // way only the link goes, never its target.
+            if fs::remove_file(&path).is_err() {
+                let _ = fs::remove_dir(&path);
+            }
+        } else {
             let _ = fs::remove_dir_all(&path);
         }
     }
@@ -846,6 +909,19 @@ mod tests {
         })
     }
 
+    /// A temp root as `prepare_root` would leave it: on unix a plain temp dir is created
+    /// 0o755, which every staging check refuses as not private.
+    fn private_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(root_is_private(root.path()).unwrap());
+        root
+    }
+
     fn fill(dir: &Path, n: usize) {
         fs::create_dir_all(dir).unwrap();
         for i in 1..=n {
@@ -853,7 +929,6 @@ mod tests {
         }
     }
 
-    // T-W1, T-W3, T-W2, T-W5, T-W4
     #[test]
     fn wire_shapes_are_exact_camel_case() {
         let keys = |v: serde_json::Value| -> Vec<String> {
@@ -903,7 +978,7 @@ mod tests {
         assert_eq!(r.names, ["a.png", "b.gif"]);
     }
 
-    // T-H1: every row of the contract 2b name table.
+    // Twin: scripts/attachment-references.test.mjs; both sides pin the same rows.
     #[test]
     fn staged_name_grammar_pins_the_table() {
         let long_ok = format!("{}.png", "a".repeat(76));
@@ -948,7 +1023,6 @@ mod tests {
         }
     }
 
-    // T-H2
     #[test]
     fn session_id_grammar_pins_the_table() {
         assert!(is_session_id(SID));
@@ -964,19 +1038,19 @@ mod tests {
         }
     }
 
-    // T-H3: a hostile session at stage writes nothing into the root.
+    // A hostile session at stage writes nothing into the root.
     #[test]
     fn stage_refuses_a_hostile_session_before_any_path() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let r = stage_in(root.path(), Some("."), None, &b64(&png_fixture(1, 1)));
         assert_eq!(msg(r), "invalid attachment session");
         assert!(entries(root.path()).is_empty());
     }
 
-    // T-H4: a non-hex session that exists keeps its folder and file.
+    // A non-hex session that exists keeps its folder and file.
     #[test]
     fn discard_refuses_a_hostile_session() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         fs::create_dir(root.path().join("keep")).unwrap();
         fs::write(root.path().join("keep").join("image-1.png"), b"x").unwrap();
         assert_eq!(
@@ -986,10 +1060,9 @@ mod tests {
         assert!(root.path().join("keep").join("image-1.png").is_file());
     }
 
-    // T-H5
     #[test]
     fn discard_refuses_a_hostile_name() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         fs::create_dir(root.path().join(SID)).unwrap();
         fs::write(root.path().join("victim.png"), b"x").unwrap();
         let names = vec!["../victim.png".to_string()];
@@ -1000,10 +1073,9 @@ mod tests {
         assert!(root.path().join("victim.png").is_file());
     }
 
-    // T-H6
     #[test]
     fn post_checks_refuse_a_hostile_session() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         fs::write(root.path().join("image-1.png"), b"x").unwrap();
         let r = post_checks(
             root.path(),
@@ -1014,10 +1086,9 @@ mod tests {
         assert_eq!(entries(root.path()), ["image-1.png"]);
     }
 
-    // T-H7
     #[test]
     fn post_checks_refuse_a_hostile_name() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         fs::create_dir(root.path().join(SID)).unwrap();
         fs::write(root.path().join("victim.png"), b"x").unwrap();
         let r = post_checks(
@@ -1029,7 +1100,6 @@ mod tests {
         assert!(root.path().join("victim.png").is_file());
     }
 
-    // T-N1
     #[test]
     fn name_for_follows_the_hint_and_paste_rules() {
         let none = |_: &str| false;
@@ -1080,10 +1150,9 @@ mod tests {
         }
     }
 
-    // T-S1
     #[test]
     fn stage_writes_sniffed_bytes_with_the_forced_extension() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let cases: [(Vec<u8>, Option<&str>, &str, &str); 4] = [
             (png_fixture(4, 5), None, "image/png", "image-1.png"),
             (
@@ -1123,10 +1192,9 @@ mod tests {
         );
     }
 
-    // T-S2
     #[test]
     fn stage_refusals_follow_the_order() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         fill(&root.path().join(SID), 10);
         // 3495254 base64 groups with one `=` decode to exactly 10 MiB + 1.
         let over = format!("{}=", "A".repeat(3_495_254 * 4 - 1));
@@ -1169,7 +1237,7 @@ mod tests {
     // staged name only by case takes `-2`.
     #[test]
     fn stage_numbers_a_hint_colliding_by_case() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let png = b64(&png_fixture(1, 1));
         let first = stage_in(root.path(), Some(SID), Some("a.png"), &png).unwrap();
         assert_eq!(first.name, "a.png");
@@ -1178,17 +1246,16 @@ mod tests {
         assert_eq!(entries(&root.path().join(SID)), ["A-2.png", "a.png"]);
     }
 
-    // T-S3: exactly 10 MiB is accepted.
+    // Exactly 10 MiB is accepted.
     #[test]
     fn stage_accepts_exactly_the_cap() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let mut bytes = png_fixture(1, 1);
         bytes.resize(MAX_IMAGE_BYTES, 0);
         let staged = stage_in(root.path(), None, None, &b64(&bytes)).unwrap();
         assert_eq!(staged.size as usize, MAX_IMAGE_BYTES);
     }
 
-    // T-S4
     #[test]
     fn size_label_rounds_up_in_tenths() {
         assert_eq!(
@@ -1200,19 +1267,17 @@ mod tests {
         assert_eq!(size_label(10_485_760), "10.0 MB");
     }
 
-    // T-S5 (A1b)
     #[test]
     fn stage_recreates_a_missing_session_folder() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let staged = stage_in(root.path(), Some(SID), None, &b64(&png_fixture(1, 1))).unwrap();
         assert_eq!(staged.session, SID);
         assert_eq!(entries(&root.path().join(SID)), ["image-1.png"]);
     }
 
-    // T-D1
     #[test]
     fn discard_is_idempotent() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 2);
         let one = vec!["image-1.png".to_string()];
@@ -1244,7 +1309,7 @@ mod tests {
     // A name that can't be deleted doesn't stop the names after it.
     #[test]
     fn discard_tries_every_name_then_reports_the_failure() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 3);
         fs::remove_file(dir.join("image-1.png")).unwrap();
@@ -1254,10 +1319,9 @@ mod tests {
         assert_eq!(entries(&dir), ["image-1.png"]);
     }
 
-    // T-V1
     #[test]
     fn post_checks_validate_every_rule() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 11);
         let body = "![a](image-1.png) and ![b](image-2.png)";
@@ -1333,10 +1397,9 @@ mod tests {
         .is_some());
     }
 
-    // T-R1
     #[test]
     fn release_keeps_failed_names_and_the_nonempty_folder() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 3);
         let names: Vec<String> = (1..=3).map(|i| format!("image-{i}.png")).collect();
@@ -1346,10 +1409,9 @@ mod tests {
         assert!(!dir.exists());
     }
 
-    // T-R2
     #[tokio::test]
     async fn finish_attached_releases_only_after_an_ok_followup() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 3);
         let staged = StagedRefs {
@@ -1396,10 +1458,10 @@ mod tests {
     const OTHER_SID: &str = "fedcba9876543210fedcba9876543210";
     const LINK_SID: &str = "00112233445566778899aabbccddeeff";
 
-    // T-SW1: a 32-hex file and a 32-hex link survive, and so does the link's target.
+    // A 32-hex file survives; a stale 32-hex link is unlinked and its target survives.
     #[test]
     fn sweep_removes_only_stale_sessions() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let outside = tempfile::tempdir().unwrap();
         fill(&outside.path().join(SID), 1);
         fill(&root.path().join(SID), 1);
@@ -1418,16 +1480,16 @@ mod tests {
         sweep_stale_in(root.path(), later, STALE_AFTER);
         assert_eq!(
             entries(root.path()),
-            [LINK_SID, OTHER_SID, "loose.txt", "not-a-session"]
+            [OTHER_SID, "loose.txt", "not-a-session"]
         );
         assert_eq!(entries(outside.path()), [SID]);
         assert_eq!(entries(&outside.path().join(SID)), ["image-1.png"]);
     }
 
-    // T-SW1: `age > max_age`, so a session idle exactly the limit stays.
+    // `age > max_age`, so a session idle exactly the limit stays.
     #[test]
     fn sweep_keeps_a_session_idle_exactly_the_limit() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 1);
         let newest = newest_mtime(&dir).unwrap();
@@ -1512,7 +1574,61 @@ mod tests {
         sweep_stale_in(&base.path().join("absent"), later, STALE_AFTER);
     }
 
-    // T-G1
+    // A session folder that is a link is refused by stage, discard and the post checks,
+    // and a release through it deletes nothing in its target.
+    #[test]
+    fn a_linked_session_is_refused_and_never_followed() {
+        let root = private_root();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("victim.png"), png_fixture(1, 1)).unwrap();
+        let dir = root.path().join(SID);
+        dir_link(outside.path(), &dir);
+        let want = format!("the image staging folder isn't private: {}", dir.display());
+        let refused = |r: AppResult<()>| match r {
+            Err(AppError::Io(e)) => assert_eq!(e.to_string(), want),
+            other => panic!("expected the not-private refusal, got {other:?}"),
+        };
+
+        refused(stage_in(root.path(), Some(SID), None, &b64(&png_fixture(1, 1))).map(|_| ()));
+        let victim = vec!["victim.png".to_string()];
+        refused(discard_in(root.path(), SID, Some(&victim)));
+        refused(discard_in(root.path(), SID, None));
+        refused(
+            post_checks(root.path(), "![x](victim.png)", refs(SID, &["victim.png"])).map(|_| ()),
+        );
+        release_in(&dir, &victim, &[]);
+        assert_eq!(entries(outside.path()), ["victim.png"]);
+    }
+
+    // A staged name that is itself a link is refused, and its target is kept. A file
+    // symlink needs a privilege on Windows, so a junction is the link there.
+    #[test]
+    fn post_checks_refuse_a_linked_staged_file() {
+        let root = private_root();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = root.path().join(SID);
+        fs::create_dir(&dir).unwrap();
+        let victim = outside.path().join("victim.png");
+        fs::write(&victim, png_fixture(1, 1)).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, dir.join("image-1.png")).unwrap();
+        #[cfg(windows)]
+        dir_link(outside.path(), &dir.join("image-1.png"));
+
+        let err = post_checks(
+            root.path(),
+            "![x](image-1.png)",
+            refs(SID, &["image-1.png"]),
+        )
+        .unwrap_err();
+        let want = format!("the image staging folder isn't private: {}", dir.display());
+        assert!(
+            matches!(&err, AppError::Io(e) if e.to_string() == want),
+            "{err:?}"
+        );
+        assert!(victim.is_file());
+    }
+
     #[test]
     fn host_gate_reads_the_pinned_host() {
         assert_eq!(host_label("X.GHE.COM:443"), "x.ghe.com");
@@ -1547,7 +1663,7 @@ mod tests {
         }
     }
 
-    // T-G2: every gh row of the contract 2b version table.
+    // Twin: scripts/attachment-gate.test.mjs; both sides pin the same rows.
     #[test]
     fn gh_version_gate_pins_the_table() {
         let gate = |line: Option<&str>| {
@@ -1582,7 +1698,7 @@ mod tests {
         );
     }
 
-    // T-G3: every glab row of the contract 2b version table.
+    // Twin: scripts/attachment-gate.test.mjs; both sides pin the same rows.
     #[test]
     fn glab_version_gate_pins_the_table() {
         let gate = |line: Option<&str>| attach_gate_verdict(AttachForge::GitLab, None, line, false);
@@ -1612,7 +1728,6 @@ mod tests {
         );
     }
 
-    // T-G4
     #[test]
     fn gate_steps_run_in_order() {
         let ghes = Some("github.acme.com");

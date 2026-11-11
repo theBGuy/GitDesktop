@@ -1409,7 +1409,8 @@ export const ACTIONS = [
     id: "attach-image",
     label: "Attach image",
     category: "Navigation",
-    // Palette-only by default: it applies to three comment boxes alone, so it
+    // Palette-only by default: it applies only to the issue comment box, the
+    // pull request comment box and the Create pull request description, so it
     // ships without spending a chord. Users can bind a key.
     defaultBinding: null,
   },

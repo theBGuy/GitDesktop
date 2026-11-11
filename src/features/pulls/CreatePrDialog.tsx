@@ -44,6 +44,7 @@ import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
 import { partialCreateWarning } from "@/lib/attachments/comment-post";
 import {
+  ATTACHING_REASON,
   failedAttachmentsOf,
   uploadingReason,
 } from "@/lib/attachments/references";
@@ -202,6 +203,9 @@ export function duplicateOf(
   );
 }
 
+/** Which panel hosts a dialog instance; both can be mounted at once. */
+export type CreatePrHost = "compare" | "pull-requests";
+
 /** An opener's fixed target and base, applied on every open (a kept draft
  *  included, which keeps only its other fields). */
 export interface CreatePrPreset {
@@ -222,6 +226,7 @@ export function CreatePrDialog({
   preset,
   open,
   onOpenChange,
+  host,
 }: {
   repoPath: string;
   /** Seeds the base ("into") branch; defaults to the repo's default branch. */
@@ -231,6 +236,9 @@ export function CreatePrDialog({
   preset?: CreatePrPreset;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** A new mount ends the staged images an earlier instance of this same host
+   *  left behind (its draft text went with it), never the other host's. */
+  host: CreatePrHost;
 }) {
   const status = useRepoStatus(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
@@ -601,8 +609,8 @@ export function CreatePrDialog({
         }
         const { number, url } = createdRef;
         const failedImages = failedAttachmentsOf(createdRef);
-        // Failed images can't follow the PR: the toast names them and the
-        // whole session goes with the draft.
+        // Failed images can't follow the PR: the toast names the one image, or
+        // counts several, and the whole session goes with the draft.
         if (ticket)
           settleAttachmentPost(ticket, {
             posted: true,
@@ -942,7 +950,7 @@ export function CreatePrDialog({
   const notes = useSelector(form.store, (s) => s.values.notes);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const shownSubmitting = useRetained(isSubmitting, open);
-  const attachOwner = useAttachmentOwner("pr-create", false);
+  const attachOwner = useAttachmentOwner("pr-create", true, host);
   const createAccess = useRepoWriteAccess(repoPath, createLens, open);
   const attachGate = useAttachmentSupport({
     forge: forge.data,
@@ -1088,12 +1096,17 @@ export function CreatePrDialog({
     isSubmitting ||
     creatingElsewhere ||
     Boolean(existingPr) ||
-    !!offlineHold;
+    !!offlineHold ||
+    draftAttachments.attaching;
   const shownSubmitBlocked = useRetained(submitBlocked, open);
-  // The running draft, the running create, and offline carry a reason, ranked
-  // running-first, so a flip between them never drops focus. The lane hint, the
-  // duplicate notice, nothing-to-merge and the base-branch load stay plain
-  // disables: each explains itself in the dialog.
+  // Holds no reason sentence outranks: each explains itself in the dialog.
+  const plainHold =
+    nothingToMerge || baseLoading || creatingElsewhere || Boolean(existingPr);
+  // The running draft, the running create, an image still attaching, and
+  // offline carry a reason, ranked in that order, so a flip between them never
+  // drops focus. The attaching reason shows only while no plain disable (the
+  // lane hint, the duplicate notice, nothing-to-merge, the base-branch load) is
+  // on, so its settle never takes the reason from a still-held button.
   const offlineSubmit = useDisabledReason({
     disabled: shownSubmitBlocked,
     reason: (() => {
@@ -1102,6 +1115,8 @@ export function CreatePrDialog({
           return AI_DRAFT_PENDING_REASON;
         case shownSubmitting:
           return ACT_PENDING_REASON;
+        case draftAttachments.attaching && !plainHold:
+          return ATTACHING_REASON;
         default:
           return offlineHold;
       }
@@ -1281,6 +1296,7 @@ export function CreatePrDialog({
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
             if (open && !submitBlocked) form.handleSubmit();
+            else if (open) draftAttachments.noteSubmitHeld();
             return;
           }
           // The generate chord runs this dialog's own Generate while it's open.
@@ -1299,8 +1315,8 @@ export function CreatePrDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!open || submitBlocked) return;
-            form.handleSubmit();
+            if (open && !submitBlocked) form.handleSubmit();
+            else if (open) draftAttachments.noteSubmitHeld();
           }}
         >
           <DialogHeader>

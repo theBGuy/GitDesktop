@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { StagedImage } from "./api";
 import type { DraftStatus, StagedRecord } from "./draft-attachments";
 import {
+  ATTACHING_REASON,
   type AttachSource,
   appendReferenceText,
   type UploadAct,
@@ -9,10 +10,12 @@ import {
 import {
   type AttachmentSurface,
   draftEntry,
+  mintAttachmentOwner,
   noteAttachBlocked,
   noteDraftEdited,
   retireHeldNote,
   stageAttachment,
+  stagesInFlight,
   startAttachGesture,
   subscribeAttachments,
   sweepOtherOwners,
@@ -32,6 +35,12 @@ export interface DraftAttachmentsHandle {
   notice: { failed: string[] } | null;
   /** How many names ride this draft's in-flight post; 0 when none. */
   posting: number;
+  /** A stage for this draft is in flight: every control that posts the draft
+   *  holds with `ATTACHING_REASON` until it settles. */
+  attaching: boolean;
+  /** Puts `ATTACHING_REASON` on the status line for a held keyboard submit; it
+   *  retires once no stage is in flight. */
+  noteSubmitHeld(): void;
   stage(file: File, source: AttachSource): Promise<StagedImage | null>;
   /** Starts one attach gesture (clears the status line once); the result says
    *  whether the draft is still the one it started on. */
@@ -65,16 +74,17 @@ export function uploadActFor(draftKey: string): UploadAct {
 }
 
 /**
- * One host instance's owner token. A comment view (`sweep`) releases every
- * entry and held copy of its surface another owner left behind when it mounts;
- * an `<Activity>` re-show replays the sweep with the same owner, so it frees
- * nothing of its own.
+ * One host instance's owner token. With `sweep`, its mount releases every entry
+ * and held copy of its surface another owner left behind, or, given `host`,
+ * only those another instance of that same host left; an `<Activity>` re-show
+ * replays the sweep with the same owner, so it frees nothing of its own.
  */
 export function useAttachmentOwner(
   surface: AttachmentSurface,
   sweep: boolean,
+  host?: string,
 ): object {
-  const [owner] = useState(() => ({}));
+  const [owner] = useState(() => mintAttachmentOwner(host));
   useEffect(() => {
     if (sweep) sweepOtherOwners(surface, owner);
   }, [surface, owner, sweep]);
@@ -102,12 +112,17 @@ export function useDraftAttachments({
   const entry = useSyncExternalStore(subscribeAttachments, () =>
     draftEntry(draftKey),
   );
+  const attaching = useSyncExternalStore(
+    subscribeAttachments,
+    () => stagesInFlight(draftKey) > 0,
+  );
   const own = entry?.owner === owner ? entry : undefined;
   const make = (hold: string | null): DraftAttachmentsHandle => {
     const blocked = hold ?? gateReason;
+    const noted = blocked ?? (attaching ? ATTACHING_REASON : null);
     const stored = own?.status ?? null;
     // A held attach's reason lives only as long as the hold that gave it.
-    const heldNoteStale = stored?.held === true && stored.text !== blocked;
+    const heldNoteStale = stored?.held === true && stored.text !== noted;
     return {
       draftKey,
       owner,
@@ -116,9 +131,13 @@ export function useDraftAttachments({
       holdReason: hold,
       status: heldNoteStale ? null : stored,
       heldNoteStale,
-      retireHeldNote: () => retireHeldNote(draftKey, owner, blocked),
+      retireHeldNote: () => retireHeldNote(draftKey, owner, noted),
       notice: own?.notice ?? null,
       posting: own?.posting.length ?? 0,
+      attaching,
+      noteSubmitHeld: () => {
+        if (attaching) noteAttachBlocked(draftKey, owner, ATTACHING_REASON);
+      },
       stage: (file, source) =>
         stageAttachment({
           draftKey,

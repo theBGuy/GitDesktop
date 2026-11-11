@@ -115,7 +115,7 @@ const wrap = (ui: React.ReactNode) => (
 const textbox = () => screen.getByRole("textbox", { name: "Comment" });
 
 describe("MarkdownEditor without attachments", () => {
-  it("adds no input, button, list, paste handling or palette handler (T1)", () => {
+  it("adds no input, button, list, paste handling or palette handler", () => {
     const { container } = render(
       wrap(<MarkdownEditor aria-label="Comment" value="" onChange={vi.fn()} />),
     );
@@ -129,7 +129,7 @@ describe("MarkdownEditor without attachments", () => {
 });
 
 describe("MarkdownEditor with attachments", () => {
-  it("stages a files-only paste in order and inserts each reference (T2, T3, T9)", async () => {
+  it("stages a files-only paste in order and inserts each reference", async () => {
     const key = freshKey();
     render(wrap(<Host draftKey={key} initial={{ [key]: "hi" }} />));
     expect(hasLiveHandler("attach-image")).toBe(true);
@@ -156,7 +156,7 @@ describe("MarkdownEditor with attachments", () => {
     ).toHaveLength(2);
   });
 
-  it("leaves a paste carrying text/plain to the browser (T2)", async () => {
+  it("leaves a paste carrying text/plain to the browser", async () => {
     render(wrap(<Host draftKey={freshKey()} />));
     let notPrevented = false;
     await act(async () => {
@@ -166,7 +166,7 @@ describe("MarkdownEditor with attachments", () => {
     expect(attachmentStage).not.toHaveBeenCalled();
   });
 
-  it("inserts a picked file under its escaped stem (T3)", async () => {
+  it("inserts a picked file under its escaped stem", async () => {
     vi.mocked(attachmentStage).mockResolvedValueOnce({
       session: SESSION,
       name: "a-b-c-d.png",
@@ -192,7 +192,7 @@ describe("MarkdownEditor with attachments", () => {
     expect(input.value).toBe("");
   });
 
-  it("shows chips only for referenced images; Remove moves focus next, previous, textarea (T4)", async () => {
+  it("shows chips only for referenced images; Remove moves focus next, previous, textarea", async () => {
     const key = freshKey();
     render(wrap(<Host draftKey={key} />));
     await act(async () => {
@@ -224,7 +224,7 @@ describe("MarkdownEditor with attachments", () => {
     expect(removeOf(2)).toBeInTheDocument();
   });
 
-  it("explains a gate on press, key and paste; a gate leaves Remove live, a hold doesn't (T5)", async () => {
+  it("explains a gate on press, key and paste; a gate leaves Remove live, a hold doesn't", async () => {
     const user = userEvent.setup();
     const key = freshKey();
     const gate = "Image attachments aren't available on Bitbucket.";
@@ -264,7 +264,7 @@ describe("MarkdownEditor with attachments", () => {
     expect(dispatchAction("attach-image")).toBe(false);
   });
 
-  it("shows Rust's refusal verbatim and refuses an oversized file before reading it (T6)", async () => {
+  it("shows Rust's refusal verbatim and refuses an oversized file before reading it", async () => {
     const key = freshKey();
     render(wrap(<Host draftKey={key} />));
     const sentence =
@@ -293,7 +293,7 @@ describe("MarkdownEditor with attachments", () => {
     );
   });
 
-  it("lands a late stage in the draft it started for, not the shown one (T7)", async () => {
+  it("lands a late stage in the draft it started for, not the shown one", async () => {
     let resolve: (v: Awaited<ReturnType<typeof attachmentStage>>) => void =
       () => undefined;
     vi.mocked(attachmentStage).mockImplementationOnce(
@@ -329,7 +329,7 @@ describe("MarkdownEditor with attachments", () => {
     expect(textbox()).toHaveValue("second");
   });
 
-  it("closes the lightbox when the draft changes (AC-E10)", async () => {
+  it("closes the lightbox when the draft changes", async () => {
     const a = freshKey();
     const { rerender } = render(wrap(<Host draftKey={a} />));
     await act(async () => {
@@ -364,7 +364,7 @@ describe("MarkdownEditor with attachments", () => {
     expect(document.activeElement).toBe(previewTab);
   });
 
-  it("palette opens the picker of the editor focused last, and none while held, gated or in Preview (T18)", async () => {
+  it("palette opens the picker of the editor focused last, and none while held, gated or in Preview", async () => {
     const click = vi
       .spyOn(HTMLInputElement.prototype, "click")
       .mockImplementation(function (this: HTMLInputElement) {

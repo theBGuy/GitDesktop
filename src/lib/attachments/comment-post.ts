@@ -70,7 +70,7 @@ export function failCommentPost(ticket: PostTicket | null) {
     settleAttachmentPost(ticket, { posted: false, failed: [] });
 }
 
-/** D13: an empty box becomes the failed references; typed text keeps its place
+/** An empty box becomes the failed references; typed text keeps its place
  *  and gains them after a blank line. */
 export function withFailedReferences(prev: string, draft: string): string {
   return prev.trim() ? `${prev.trimEnd()}\n\n${draft}` : draft;

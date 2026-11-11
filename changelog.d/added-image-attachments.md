@@ -7,5 +7,7 @@
   and the image stays attached for a follow-up. Images need GitHub CLI 2.99
   or newer on GitHub.com or GitHub Enterprise Cloud with write access to the
   repository, or GitLab CLI 1.91 or newer; Bitbucket has no image
-  attachments. A read-only conversation now shows its reason on its own line
-  above the open comment box.
+  attachments. With some GitHub CLI sign-in types, attaching needs GitHub
+  CLI 2.103.2 or newer, and the app says so when you post. A read-only
+  conversation now shows its reason on its own line above the open
+  comment box.

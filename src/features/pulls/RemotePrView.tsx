@@ -105,6 +105,7 @@ import {
   withFailedReferences,
 } from "@/lib/attachments/comment-post";
 import {
+  ATTACHING_REASON,
   failedAttachmentsOf,
   uploadingReason,
 } from "@/lib/attachments/references";
@@ -2050,6 +2051,10 @@ export function RemotePrView({
   // Request changes posts the draft through a command that carries no images.
   const requestHeldForImages = (requested: boolean) =>
     !requested && referencesStaged(compose.value, attachments.images);
+  // Request changes sends the draft as it stands and then ends it, so it waits
+  // for a stage in flight whatever the text holds.
+  const requestHeldForAttaching = (requested: boolean) =>
+    !requested && attachments.attaching;
   const { archived, latchIfArchived } = useArchivedLatch(entityKey);
   // Read off the rendered PR's own details only: a placeholder is another PR's.
   // The provider only picks the hold's copy, so it names the shown one.
@@ -2244,7 +2249,8 @@ export function RemotePrView({
     // (its title says how to clear); a re-click must not fire the Premium-only
     // undo path. Bitbucket falls through to the revoke below.
     if (requested && !canUnrequestChanges) return;
-    if (requestHeldForImages(requested)) return;
+    if (requestHeldForImages(requested) || requestHeldForAttaching(requested))
+      return;
     // Same as toggleApproval: mirror usePrApprovals' literal "origin" lens segment.
     const key = [
       "repo",
@@ -2332,6 +2338,9 @@ export function RemotePrView({
   // comment the provider or a read-only conversation won't take.
   const draftRidesStateChange =
     canComment && conversationHold.composer === null && !!compose.value.trim();
+  // A riding draft waits for a stage in flight, like Comment does.
+  const rideHold =
+    draftRidesStateChange && attachments.attaching ? ATTACHING_REASON : null;
 
   /** Posts the riding draft ahead of a state change. False means the comment
    *  failed and the state change is abandoned: the draft stays put for a retry,
@@ -2370,7 +2379,7 @@ export function RemotePrView({
   async function doClose() {
     // Re-checked in the handler: the footer disables on the same hold, but a
     // click can land across a selection switch before the disable repaints.
-    if (busy || detailsStale || triageBlocked) return;
+    if (busy || detailsStale || triageBlocked || rideHold !== null) return;
     // Read at entry, before the confirm dialog takes focus: only a close fired
     // from inside the footer may move focus when the footer swaps.
     const ownsFocus = !!openFooterRef.current?.contains(document.activeElement);
@@ -2436,7 +2445,7 @@ export function RemotePrView({
   }
 
   async function doReopen() {
-    if (busy || detailsStale || triageBlocked) return;
+    if (busy || detailsStale || triageBlocked || rideHold !== null) return;
     const ownsFocus = !!reopenFooterRef.current?.contains(
       document.activeElement,
     );
@@ -4689,6 +4698,9 @@ export function RemotePrView({
                         approvals.isError ||
                         requestHeldForImages(
                           approval?.viewerRequestedChanges ?? false,
+                        ) ||
+                        requestHeldForAttaching(
+                          approval?.viewerRequestedChanges ?? false,
                         )
                       }
                       reason={(() => {
@@ -4703,6 +4715,10 @@ export function RemotePrView({
                             approval?.viewerRequestedChanges ?? false,
                           ):
                             return REQUEST_CHANGES_IMAGES_REASON;
+                          case requestHeldForAttaching(
+                            approval?.viewerRequestedChanges ?? false,
+                          ):
+                            return ATTACHING_REASON;
                           default:
                             return undefined;
                         }
@@ -4966,8 +4982,10 @@ export function RemotePrView({
               variant="outline"
               size="sm"
               ref={closeButtonRef}
-              disabled={busy || triageBlocked || !!offlineHold}
-              reason={triageReason ?? composerReason ?? offlineHold}
+              disabled={
+                busy || triageBlocked || !!offlineHold || rideHold !== null
+              }
+              reason={triageReason ?? composerReason ?? offlineHold ?? rideHold}
               onClick={doClose}
               title={
                 draftRidesStateChange
@@ -5060,8 +5078,8 @@ export function RemotePrView({
             variant="outline"
             size="sm"
             ref={reopenButtonRef}
-            disabled={busy || triageBlocked}
-            reason={triageReason ?? composerReason}
+            disabled={busy || triageBlocked || rideHold !== null}
+            reason={triageReason ?? composerReason ?? rideHold}
             onClick={doReopen}
             title={
               draftRidesStateChange

@@ -1026,7 +1026,7 @@ async fn gh_version_line() -> Option<String> {
     crate::attachments::version_line(&out.stdout_lossy(), &out.stderr)
 }
 
-/// Check steps 1-5 for a GitHub post. `None` (or no names) skips every check. The
+/// Every attachment check for a GitHub post. `None` (or no names) skips them all. The
 /// host is the one gh is pinned to for this repo, so an SSH alias gh serves on
 /// github.com passes; gh's own GHES refusal stays the backstop.
 pub(crate) async fn gh_attach_checks(
@@ -1077,6 +1077,9 @@ pub(crate) enum GhAttachRun {
 
 /// gh stops at the first failed upload but still posts, so a non-zero exit with the
 /// item's URL on stdout is a partial success, never a failure to report as one.
+/// gh uploads first, returns before printing when the write fails, and prints the URL
+/// only once the comment or PR exists (v2.99.0, v2.103.3: pkg/cmd/pr/shared/commentable.go
+/// `createComment`, pkg/cmd/pr/create/create.go `submitPR`).
 pub(crate) fn classify_gh_attach_run(code: i32, stdout: &str) -> GhAttachRun {
     if code == 0 {
         GhAttachRun::Posted
@@ -1087,9 +1090,10 @@ pub(crate) fn classify_gh_attach_run(code: i32, stdout: &str) -> GhAttachRun {
     }
 }
 
-/// `staged` None runs exactly today's `run_gh`. With attachments gh runs in the
-/// session folder (the body's relative names resolve there) and a posted-or-partial
-/// run returns Ok with stdout kept; only a run that posted nothing is an Err.
+/// `staged` None runs plain `run_gh`. With attachments gh runs in the session folder
+/// (the body's relative names resolve there); Ok means gh exited and either printed the
+/// item URL or exited 0, with stdout kept. An Err from a timeout or a failed process
+/// run can follow a post that landed.
 pub(crate) async fn run_gh_maybe_attached(
     repo_path: &str,
     slug: &str,
@@ -1214,8 +1218,9 @@ pub(crate) async fn attach_failed_after(
 }
 
 /// A failed attached run's error: gh's write-access, token-type and GHES refusals map
-/// to the app's sentences, anything else is today's gh error. The GHES one is reached
-/// only when the host gate had no host to read, so its sentence names no host.
+/// to the app's sentences; any other stderr gives `gh_output_ok`'s error, or "gh exited
+/// with code N" when that is empty. The GHES one is reached only when the host gate had
+/// no host to read, so its sentence names no host.
 pub(crate) fn gh_attach_failure(out: GhOutput, slug: &str) -> AppError {
     if out.stderr.contains("attaching files requires write access") {
         return AppError::Gh(crate::attachments::write_access_refusal(slug));
@@ -1269,7 +1274,6 @@ mod attach_tests {
         assert_eq!(m, "image-1.png is no longer attached. Attach it again.");
     }
 
-    // T-A1
     #[test]
     fn attach_tail_pairs_each_name_in_order() {
         assert!(attach_tail(&[]).is_empty());
@@ -1280,7 +1284,7 @@ mod attach_tests {
         );
     }
 
-    // T-O1: the measured gh 2.103.3 fixtures.
+    // The measured gh 2.103.3 fixtures.
     #[test]
     fn classify_reads_the_measured_runs() {
         let url = "https://github.com/o/r/issues/2#issuecomment-123";
@@ -1294,7 +1298,6 @@ mod attach_tests {
         assert_eq!(classify_gh_attach_run(0, ""), GhAttachRun::Posted);
     }
 
-    // T-O2
     #[test]
     fn stderr_names_the_first_failed_upload() {
         let ns = names();
@@ -1319,7 +1322,6 @@ mod attach_tests {
         assert_eq!(failed_from_stderr("something else broke", &ns), ns);
     }
 
-    // T-O3
     #[test]
     fn body_keeps_only_the_failed_reference() {
         let body = "![a](https://github.com/user-attachments/assets/x) ![bad alt](image-2.png)";
@@ -1327,7 +1329,6 @@ mod attach_tests {
         assert_eq!(failed_from_body(body, &ns), ["image-2.png"]);
     }
 
-    // T-O4
     #[test]
     fn readback_endpoints() {
         assert_eq!(
@@ -1355,7 +1356,6 @@ mod attach_tests {
         assert_eq!(readback_endpoint("o/r", Readback::Pull(0)), None);
     }
 
-    // T-O5
     #[test]
     fn attach_failures_map_to_the_app_sentences() {
         let e = gh_attach_failure(
@@ -1386,7 +1386,6 @@ mod attach_tests {
         assert!(matches!(e, AppError::Gh(ref m) if m == "gh exited with code 1"));
     }
 
-    // T-O6
     #[test]
     fn partial_failed_prefers_the_readback() {
         let ns = names();

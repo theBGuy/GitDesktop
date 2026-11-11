@@ -126,8 +126,9 @@ export const IMAGE_CAPTION_REASON: Record<ImageCaptionReason, string> = {
   webFailed: "Couldn't load from GitHub",
 };
 
-/** The text of the link a hosted image's caption ends with. */
-export const OPEN_IN_BROWSER = "Open in browser";
+/** The text of the link a hosted image's caption ends with: the link always
+ *  opens GitHub, so it names the provider. */
+export const OPEN_ON_GITHUB = "Open on GitHub";
 
 /** Why a relative image value didn't load: a caption reason, or the document's
  *  budget refusing it, which says nothing about the file and captions as too

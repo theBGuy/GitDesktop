@@ -3846,7 +3846,7 @@ async fn glab_version_line() -> Option<String> {
     crate::attachments::version_line(&out.stdout_lossy(), &out.stderr)
 }
 
-/// Check steps 1-5 for a GitLab post: the glab version gate (GitLab has no host gate),
+/// Every attachment check for a GitLab post: the glab version gate (GitLab has no host gate),
 /// the as-bot refusal, then the structural checks. `None` (or no names) skips them all.
 pub(crate) async fn glab_attach_checks(
     body: &str,
@@ -3977,7 +3977,8 @@ async fn upload_and_rewrite(
 
 /// Posts a note whose body references staged images: uploads them to this project,
 /// rewrites the references, then POSTs `projects/<enc>/<endpoint_tail>`. An Err keeps
-/// every staged file; the Ok path has deleted them all.
+/// every staged file; an Ok releases them best-effort (a failed delete waits for the
+/// 24 h sweep).
 pub async fn post_note_with_images(
     repo_path: &str,
     endpoint_tail: &str,
@@ -4017,7 +4018,6 @@ mod attach_tests {
         }
     }
 
-    // T-GL1
     #[test]
     fn rewrite_body_replaces_every_reference() {
         let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {

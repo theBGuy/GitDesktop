@@ -999,6 +999,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
           preset={prDialogProps.preset}
           open={prOpen}
           onOpenChange={setPrOpen}
+          host="compare"
         />
       )}
 

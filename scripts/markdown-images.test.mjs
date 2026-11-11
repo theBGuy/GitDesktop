@@ -24,7 +24,7 @@ import {
   isSvgDocument,
   keepsShownImage,
   normalizeHref,
-  OPEN_IN_BROWSER,
+  OPEN_ON_GITHUB,
   ownsImageUrl,
   parseSrcset,
   RELATIVE_URL_ATTRS,
@@ -230,7 +230,7 @@ test("captions name the image and give the owner-approved reason", () => {
     webSignedOut: "Sign in to GitHub CLI to load it",
     webFailed: "Couldn't load from GitHub",
   });
-  assert.equal(OPEN_IN_BROWSER, "Open in browser");
+  assert.equal(OPEN_ON_GITHUB, "Open on GitHub");
   assert.equal(repoDocBaseDir("README.md"), "");
   assert.equal(repoDocBaseDir("docs/guide/README.md"), "docs/guide");
   assert.equal(decodedByteLength(b64("abcd")), 4);

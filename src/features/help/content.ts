@@ -1724,24 +1724,25 @@ end of the formatting toolbar (the command palette's **Attach image** opens the 
 picker). PNG, JPEG, GIF and WebP work, up to 10 MB each and 10 per draft. Each image adds a
 Markdown reference at the cursor (\`![image](image-1.png)\` for a paste; a picked file's
 name, minus its extension, becomes the alt text), so you edit the alt text in the text
-itself. A chip under the
-editor shows each image's thumbnail, name and size: click the thumbnail for the full-size
-image, or the remove button to take the image and its reference out (deleting the reference
-removes the chip too). **Preview** shows the images in place, and nothing uploads until you
-post. Attached images stay with the draft when you fold the box or switch away and come
-back, and go when it's posted or cleared. If GitHub takes the comment but an image fails to
-upload, the comment posts and the failed images stay attached for a follow-up comment.
-Images need GitHub CLI 2.99 or newer on GitHub.com or GitHub Enterprise Cloud (not GitHub
-Enterprise Server) with write access to the repository, or GitLab CLI 1.91 or newer;
-Bitbucket has no image attachments. Where they aren't available, the button stays visible,
-disabled, and says why. An image file dropped on the window isn't attached; the app reminds
-you to paste it or use **Attach image**. An image posted to GitLab shows here as its alt
-text with a note that it can't load in this view; GitLab shows the picture itself.
-On GitHub.com and GitHub Enterprise Cloud, an attached image that GitHub hosts at a
-\`user-attachments\` link loads through your GitHub CLI sign-in, so it shows in a private
-repository too. That covers issue and pull request descriptions, comments, review
-threads, discussions and release notes. One the app can't load that way shows its name,
-a short reason, and an **Open in browser** link.
+itself. A chip under the editor shows each image's thumbnail, name and size: click the
+thumbnail for the full-size image, or the remove button to take the image and its reference
+out (deleting the reference removes the chip too). **Preview** shows the images in place,
+and nothing uploads until you post. Attached images stay with the draft when you fold the
+box or switch away and come back, and go when it's posted or cleared. If GitHub takes the
+comment but an image fails to upload, the comment posts and the failed images stay attached
+for a follow-up comment. Images need GitHub CLI 2.99 or newer on GitHub.com or GitHub
+Enterprise Cloud (not GitHub Enterprise Server) with write access to the repository, or
+GitLab CLI 1.91 or newer; Bitbucket has no image attachments. With some GitHub CLI sign-in
+types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so when you post.
+Where they aren't available, the button stays visible, disabled, and says why. An image
+file dropped on the window isn't attached; the app reminds you to paste it or use
+**Attach image**. An image posted to GitLab shows here as its alt text with a note that it
+can't load in this view; GitLab shows the picture itself. On GitHub.com and GitHub
+Enterprise Cloud, an attached image that GitHub hosts at a \`user-attachments\` link loads
+through your GitHub CLI sign-in, so it shows in a private repository too. That covers issue
+and pull request descriptions, comments, review threads, discussions and release notes. One
+the app can't load that way shows a short reason, with an **Open on GitHub** link unless
+the image is itself a link.
 
 Those references are links once a body is rendered. On **GitHub** and **GitLab**, a
 **#123** in a description, comment, review thread,{{ai}} AI review,{{/ai}} or release note opens that

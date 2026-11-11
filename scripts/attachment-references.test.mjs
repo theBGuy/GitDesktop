@@ -1,6 +1,6 @@
 // Pins the text rules of staged image attachments (src/lib/attachments/
-// references.ts): the name and session grammars of CONTRACT 2b (every fixture
-// row, which Rust's `is_staged_name` pins too), the `](NAME)` reference rule,
+// references.ts): the name grammar (every fixture row, which Rust's
+// `is_staged_name` pins too), the `](NAME)` reference rule,
 // the insert whitespace, chip removal, the too-big `{size}` and the uploading
 // copy. Stdlib only, importing the import-free module under Node's
 // type stripping.
@@ -14,7 +14,6 @@ import {
   imageReference,
   insertionFor,
   isStagedName,
-  isStagedSession,
   MAX_IMAGE_BYTES,
   referencedNames,
   referencesName,
@@ -24,8 +23,6 @@ import {
   tooBigRefusal,
   uploadingReason,
 } from "../src/lib/attachments/references.ts";
-
-const SESSION = "0123456789abcdef0123456789abcdef";
 
 const VALID_NAMES = [
   "image-1.png",
@@ -60,15 +57,6 @@ const INVALID_NAMES = [
   `${"a".repeat(77)}.png`,
 ];
 
-const INVALID_SESSIONS = [
-  "0".repeat(31),
-  "0".repeat(33),
-  "0123456789ABCDEF0123456789ABCDEF",
-  `${"0".repeat(31)}g`,
-  "..",
-  `${"0".repeat(15)}/${"0".repeat(16)}`,
-];
-
 test("every valid name row passes the grammar", () => {
   for (const name of VALID_NAMES) assert.equal(isStagedName(name), true, name);
   assert.equal(VALID_NAMES[5].length, 80);
@@ -78,12 +66,6 @@ test("every invalid name row fails the grammar", () => {
   for (const name of INVALID_NAMES)
     assert.equal(isStagedName(name), false, JSON.stringify(name));
   assert.equal(INVALID_NAMES.at(-1).length, 81);
-});
-
-test("every invalid session row fails the grammar", () => {
-  assert.equal(isStagedSession(SESSION), true);
-  for (const id of INVALID_SESSIONS)
-    assert.equal(isStagedSession(id), false, id);
 });
 
 test("{size} rounds up to a tenth in integers at the fold-time values", () => {
@@ -150,6 +132,28 @@ test("alts: a paste says image, a pick uses the escaped file stem", () => {
     imageReference("picker", "naïve.webp", "na-ve.webp"),
     "![naïve](na-ve.webp)",
   );
+});
+
+test("a picked name holding `](NAME)` adds no second reference", () => {
+  const ref = imageReference("picker", "x](image-1.png).png", "image-2.png");
+  assert.equal(ref.split("](").length - 1, 1);
+  assert.equal(referencesName(ref, "image-1.png"), false);
+  // Parentheses that follow no `]` stay as typed.
+  assert.equal(
+    imageReference("picker", "Screenshot (12).png", "image-1.png"),
+    "![Screenshot (12)](image-1.png)",
+  );
+  const text = `![a](image-1.png) ${ref}`;
+  assert.deepEqual(referencedNames(text, ["image-1.png", "image-2.png"]), [
+    "image-1.png",
+    "image-2.png",
+  ]);
+  const splice = removalSplice(text, "image-2.png");
+  assert.equal(
+    text.slice(0, splice.start) + text.slice(splice.end),
+    "![a](image-1.png) ",
+  );
+  assert.equal(removalSplice(text, "image-1.png").end, 17);
 });
 
 test("insert whitespace follows the narrow rule", () => {

@@ -218,12 +218,12 @@ describe("with the hosted source", () => {
     ["signedOut", "webSignedOut"],
     ["refused", "webFailed"],
   ] as const)(
-    "a %s verdict captions once, asked once, with Open in browser",
+    "a %s verdict captions once, asked once, with Open on GitHub",
     async (k, reason) => {
       vi.mocked(ghHostedImage).mockResolvedValue(kind(k));
       md(`![](${URL1})`, SRC);
       expect(await screen.findByText(caption("Image", reason))).toBeTruthy();
-      const link = screen.getByRole("link", { name: "Open in browser" });
+      const link = screen.getByRole("link", { name: "Open on GitHub" });
       expect(link.getAttribute("href")).toBe(URL1);
       fireEvent.click(link);
       expect(openUrl).toHaveBeenCalledWith(URL1);
@@ -238,7 +238,7 @@ describe("with the hosted source", () => {
     expect(ghHostedImage).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a minute's images cached, no longer", () => {
+  it("gives the hosted-image query a 60 s gcTime", () => {
     expect(hostedImageOptions(REPO, "github.com", URL1, () => "").gcTime).toBe(
       60_000,
     );
@@ -443,7 +443,7 @@ describe("with the hosted source", () => {
   it("a sign-in re-walks, and focus on the caption's link lands on the body", async () => {
     vi.mocked(ghHostedImage).mockResolvedValueOnce(kind("signedOut"));
     const { container } = md(`![a](${URL1})`, SRC);
-    const link = await screen.findByRole("link", { name: "Open in browser" });
+    const link = await screen.findByRole("link", { name: "Open on GitHub" });
     link.focus();
     expect(document.activeElement).toBe(link);
     vi.mocked(ghHostedImage).mockResolvedValueOnce(shown());

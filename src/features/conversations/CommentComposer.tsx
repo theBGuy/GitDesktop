@@ -12,6 +12,7 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { partialCommentNotice } from "@/lib/attachments/comment-post";
+import { ATTACHING_REASON } from "@/lib/attachments/references";
 import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useLatestRef } from "@/lib/use-latest-ref";
@@ -117,6 +118,9 @@ export function CommentComposer({
   // hasn't typed yet.
   const readOnly = readOnlyReason != null;
   const blockedReason = readOnlyReason ?? (busy ? (reason ?? null) : null);
+  // Submit alone waits for a stage in flight: typing, Clear and further
+  // attaches stay live.
+  const attachHold = attachments?.attaching ? ATTACHING_REASON : null;
   const showClear = !!onClear && hasDraft;
   const failedNotice = attachments?.notice
     ? partialCommentNotice(attachments.notice.failed)
@@ -364,7 +368,9 @@ export function CommentComposer({
               // fires inside editable targets, so a chord this handler declines to
               // submit would otherwise reach the global action.
               e.preventDefault();
-              if (hasDraft && !busy && !readOnly) onSubmit();
+              if (!hasDraft || busy || readOnly) return;
+              if (attachHold !== null) attachments?.noteSubmitHeld();
+              else onSubmit();
             }
           }}
           rows={2}
@@ -425,8 +431,8 @@ export function CommentComposer({
             ref={submitRef}
             variant="outline"
             size="sm"
-            disabled={!hasDraft || busy || readOnly}
-            reason={blockedReason}
+            disabled={!hasDraft || busy || readOnly || attachHold !== null}
+            reason={blockedReason ?? attachHold}
             onClick={onSubmit}
             title={SUBMIT_HINT}
           >

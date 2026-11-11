@@ -14,12 +14,11 @@ export interface AttachmentRefs {
   names: string[];
 }
 
-/** A staged name: the shared grammar of CONTRACT 2b, which Rust's
- *  `is_staged_name` pins against the same fixture rows. */
+/** A staged name: the grammar Rust's `is_staged_name` shares, both sides
+ *  pinned against the same fixture rows. */
 const NAME_CHARS = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const NAME_EXTENSIONS = new Set(["png", "jpg", "gif", "webp"]);
 const RESERVED_STEM = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-const SESSION_ID = /^[0-9a-f]{32}$/;
 
 export function isStagedName(name: string): boolean {
   if (name.length === 0 || name.length > 80 || !NAME_CHARS.test(name))
@@ -28,10 +27,6 @@ export function isStagedName(name: string): boolean {
   if (lastDot === -1 || !NAME_EXTENSIONS.has(name.slice(lastDot + 1)))
     return false;
   return !RESERVED_STEM.test(name.slice(0, name.indexOf(".")));
-}
-
-export function isStagedSession(id: string): boolean {
-  return SESSION_ID.test(id);
 }
 
 /** The one reference rule both sides share: the text holds `](NAME)`. */
@@ -49,12 +44,15 @@ export function referencedNames(text: string, names: readonly string[]) {
 }
 
 /** An alt with the characters that would end or escape it backslashed and its
- *  line breaks flattened, since a newline would split the reference. */
+ *  line breaks flattened, since a newline would split the reference. A `(`
+ *  right after a `]` is backslashed too, so the alt never holds a `](` the
+ *  reference rule counts; any other parenthesis stays as typed. */
 function escapeAlt(alt: string): string {
   return alt
     .split(/\r\n|\r|\n/)
     .join(" ")
-    .replace(/[\\[\]]/g, (c) => `\\${c}`);
+    .replace(/[\\[\]]/g, (c) => `\\${c}`)
+    .replaceAll("](", "]\\(");
 }
 
 /** A picked file's name without its extension. */
@@ -264,6 +262,9 @@ const UPLOADING: Record<
     many: (n) => `Uploading ${n} images and creating…`,
   },
 };
+
+/** Why a post holds while an image of its draft is still being staged. */
+export const ATTACHING_REASON = "Wait for the image to finish attaching.";
 
 export function uploadingReason(n: number, act: UploadAct): string {
   return n === 1 ? UPLOADING[act].one : UPLOADING[act].many(n);

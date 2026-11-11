@@ -68,7 +68,10 @@ import {
   landCommentPost,
   withFailedReferences,
 } from "@/lib/attachments/comment-post";
-import { uploadingReason } from "@/lib/attachments/references";
+import {
+  ATTACHING_REASON,
+  uploadingReason,
+} from "@/lib/attachments/references";
 import {
   beginAttachmentPost,
   draftKeyFor,
@@ -860,9 +863,15 @@ export function RemoteIssueView({
         return undefined;
     }
   })();
-  // Close's own hold: the shared terms, then offline.
-  const closeBlocked = busy || triageBlocked || !!offlineHold;
-  const closeReason = triageReason ?? composerReason ?? offlineHold;
+  // A riding draft waits for a stage in flight, like Comment does.
+  const draftRidesStateChange = canComment && !!compose.value.trim();
+  const rideHold =
+    draftRidesStateChange && attachments.attaching ? ATTACHING_REASON : null;
+  // Close's own hold: the shared terms, then offline, then the riding draft's.
+  const closeBlocked =
+    busy || triageBlocked || !!offlineHold || rideHold !== null;
+  const closeReason =
+    triageReason ?? composerReason ?? offlineHold ?? rideHold ?? undefined;
   const comments = issue.comments.filter((c) => hasVisibleBody(c.body));
 
   function submitComment() {
@@ -914,9 +923,8 @@ export function RemoteIssueView({
   };
 
   // A typed draft rides Close/Reopen rather than being discarded by them. Gated
-  // on `canComment` so the labels below never promise a comment the provider
-  // won't take.
-  const draftRidesStateChange = canComment && !!compose.value.trim();
+  // on `canComment` (above) so the labels below never promise a comment the
+  // provider won't take.
   const draftSuffix = draftRidesStateChange ? " — posts your draft" : "";
 
   /** Posts the riding draft ahead of a state change. False means the comment
@@ -956,7 +964,7 @@ export function RemoteIssueView({
     // The caret menu can sit open across a selection switch or a mutation, so
     // the hold has to be re-checked here — item clicks bypass the trigger's
     // disable.
-    if (busy || detailsStale || triageBlocked) return;
+    if (busy || detailsStale || triageBlocked || rideHold !== null) return;
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
@@ -1014,7 +1022,7 @@ export function RemoteIssueView({
   }
 
   async function doReopen() {
-    if (busy || detailsStale || triageBlocked) return;
+    if (busy || detailsStale || triageBlocked || rideHold !== null) return;
     const withComment = draftRidesStateChange;
     // The reopen builds from the live repo's options after the riding post's
     // await, so a switch during it refuses rather than reopens there.
@@ -1417,8 +1425,8 @@ export function RemoteIssueView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={busy || triageBlocked}
-            reason={triageReason ?? composerReason}
+            disabled={busy || triageBlocked || rideHold !== null}
+            reason={triageReason ?? composerReason ?? rideHold ?? undefined}
             onClick={doReopen}
             title={
               draftRidesStateChange
