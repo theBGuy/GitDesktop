@@ -139,6 +139,9 @@ async fn run_git_with_creds_rechecked(
 /// A `push -u` whose upstream write lost `.git/config.lock` still exits 0 (measured,
 /// git 2.51.1), so every same-name publish gets its upstream re-set here, once the
 /// network hold is released; the push itself is never re-run.
+///
+/// Outside this module, an argv that pushes a named local branch goes through
+/// [`run_git_mutating_with_creds_for_branch`] instead, so its refusal is re-read at spawn.
 pub(crate) async fn run_git_mutating_with_creds(
     state: &AppState,
     repo_path: &str,
@@ -147,6 +150,21 @@ pub(crate) async fn run_git_mutating_with_creds(
     timeout: Duration,
 ) -> AppResult<GitOutput> {
     run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, None).await
+}
+
+/// [`run_git_mutating_with_creds`] for an argv that pushes the local `branch`: its
+/// publishing refusal re-runs under the network lock before each spawn, the
+/// ambient-credential retry included.
+pub(crate) async fn run_git_mutating_with_creds_for_branch(
+    state: &AppState,
+    repo_path: &str,
+    cred: &[String],
+    sub: &[&str],
+    timeout: Duration,
+    branch: &str,
+) -> AppResult<GitOutput> {
+    let recheck = Some(SpawnRecheck::Named(branch));
+    run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, recheck).await
 }
 
 /// [`run_git_mutating_with_creds`], running `recheck` right before each spawn, so a
@@ -1060,6 +1078,18 @@ pub(crate) async fn refuse_publishing_branch(repo_path: &str, name: &str) -> App
         });
     }
     Ok(())
+}
+
+/// The typed refusals a branch push can raise before or at spawn: the remote-PR resolve
+/// passes them through and the GitLab publish discloses them under its created-project
+/// line, where any other push failure keeps its own handling.
+pub(crate) fn is_publishing_refusal(err: &AppError) -> bool {
+    matches!(
+        err,
+        AppError::BranchKeptLocal { .. }
+            | AppError::PushRemoteIsMirror { .. }
+            | AppError::BranchIsAgentSession { .. }
+    )
 }
 
 /// Refuses a push whose DESTINATION on a named remote is in gd/session/, whatever the
@@ -3584,33 +3614,8 @@ mod tests {
     #[tokio::test]
     async fn keep_local_ambient_retry_rechecks_the_mark() {
         let (_guard, work, origin) = keep_local_origin("keep-local-ambient").await;
-        let hooks = |name: &str, body: &str| {
-            let dir = std::path::Path::new(&work).with_file_name(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            let file = dir.join("pre-push");
-            std::fs::write(&file, body).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            vec![format!(
-                "core.hooksPath={}",
-                dir.to_string_lossy().replace('\\', "/")
-            )]
-        };
-        let reject = "echo 'fatal: Authentication failed for origin' >&2\nexit 1\n";
-        let marking = hooks(
-            "reject-and-mark",
-            &format!("#!/bin/sh\ngit config branch.feat/x.gitdesktopLocalOnly true\n{reject}"),
-        );
-        let rejecting = hooks("reject", &format!("#!/bin/sh\n{reject}"));
-        let tip = |repo: String| async move {
-            run(&repo, &["rev-parse", "refs/heads/feat/x"])
-                .await
-                .trim()
-                .to_string()
-        };
+        let (marking, rejecting) = auth_rejecting_hooks(&work);
+        let tip = |repo: String| async move { feat_x_tip(&repo).await };
         let published = tip(origin.clone()).await;
         let argv = ["push", "origin", "feat/x"];
         let recheck = Some(super::SpawnRecheck::Named("feat/x"));
@@ -3633,6 +3638,329 @@ mod tests {
                 .unwrap();
         assert_eq!(out.code, 0, "ambient retry: {}", out.full_failure_text());
         assert_eq!(tip(origin.clone()).await, tip(work.clone()).await);
+    }
+
+    /// `feat/x`'s tip in `repo`.
+    async fn feat_x_tip(repo: &str) -> String {
+        run(repo, &["rev-parse", "refs/heads/feat/x"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// Injected-credential configs whose pre-push hook fakes an auth rejection, so only
+    /// the ambient retry (which drops them) can push: (marking, rejecting), the first also
+    /// marking `feat/x` Keep local before it rejects. Each lives beside `work`.
+    fn auth_rejecting_hooks(work: &str) -> (Vec<String>, Vec<String>) {
+        let hooks = |name: &str, body: &str| {
+            let dir = std::path::Path::new(work).with_file_name(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("pre-push");
+            std::fs::write(&file, body).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            vec![format!(
+                "core.hooksPath={}",
+                dir.to_string_lossy().replace('\\', "/")
+            )]
+        };
+        let reject = "echo 'fatal: Authentication failed for origin' >&2\nexit 1\n";
+        let marking = hooks(
+            "reject-and-mark",
+            &format!("#!/bin/sh\ngit config branch.feat/x.gitdesktopLocalOnly true\n{reject}"),
+        );
+        let rejecting = hooks("reject", &format!("#!/bin/sh\n{reject}"));
+        (marking, rejecting)
+    }
+
+    /// The branch runner re-reads the mark at both spawns: a mark set during the
+    /// network-lock wait refuses the push, a mark set while the injected run is rejected
+    /// refuses the ambient retry, and nothing lands; the unmarked twins land.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_local_branch_runner_rechecks_the_mark_at_spawn() {
+        let (_guard, work, origin) = keep_local_origin("keep-local-branch-runner").await;
+        let state = AppState::default();
+        let argv = ["push", "origin", "feat/x"];
+        let clear = || crate::git::branches::set_branch_keep_local_core(&work, "feat/x", false);
+        for mark in [true, false] {
+            let row = format!("lock wait, mark={mark}");
+            run(&work, &["commit", "-q", "--allow-empty", "-m", &row]).await;
+            let published = feat_x_tip(&origin).await;
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+                let (fired, work) = (std::sync::Arc::clone(&fired), work.clone());
+                move || {
+                    fired.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if mark {
+                        let key = crate::git::branches::keep_local_key("feat/x");
+                        let set = std::process::Command::new("git")
+                            .current_dir(&work)
+                            .args(["config", &key, "true"])
+                            .status()
+                            .unwrap();
+                        assert!(set.success(), "the mark is set during the wait");
+                    }
+                }
+            });
+            let push = super::run_git_mutating_with_creds_for_branch(
+                &state,
+                &work,
+                &[],
+                &argv,
+                NETWORK_TIMEOUT,
+                "feat/x",
+            );
+            let result = NETWORK_LOCK_WAIT_HOOK.scope(hook, push).await;
+            assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{row}");
+            if mark {
+                assert_kept_local(result.map(|out| out.code), "feat/x", &row);
+                assert_eq!(feat_x_tip(&origin).await, published, "{row}");
+                clear().await.unwrap();
+            } else {
+                result.unwrap_or_else(|e| panic!("{row}: the unmarked twin lands: {e:?}"));
+                assert_eq!(feat_x_tip(&origin).await, feat_x_tip(&work).await, "{row}");
+            }
+        }
+
+        let (marking, rejecting) = auth_rejecting_hooks(&work);
+        run(&work, &["commit", "-q", "--allow-empty", "-m", "ambient"]).await;
+        let published = feat_x_tip(&origin).await;
+        let result = super::run_git_mutating_with_creds_for_branch(
+            &state,
+            &work,
+            &marking,
+            &argv,
+            NETWORK_TIMEOUT,
+            "feat/x",
+        )
+        .await;
+        assert_kept_local(
+            result.map(|out| out.code),
+            "feat/x",
+            "marked before the retry",
+        );
+        assert_eq!(feat_x_tip(&origin).await, published);
+        clear().await.unwrap();
+        super::run_git_mutating_with_creds_for_branch(
+            &state,
+            &work,
+            &rejecting,
+            &argv,
+            NETWORK_TIMEOUT,
+            "feat/x",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("the unmarked ambient retry lands: {e:?}"));
+        assert_eq!(feat_x_tip(&origin).await, feat_x_tip(&work).await);
+    }
+
+    /// The production text of a module: CRLF-normalized, cut before its `mod tests`.
+    fn production_text(source: &str) -> String {
+        let source = source.replace("\r\n", "\n");
+        match source.split_once("\n#[cfg(test)]\nmod tests {") {
+            Some((production, _)) => production.to_string(),
+            None => source,
+        }
+    }
+
+    /// Each column-0 fn in `text` (any visibility, async or not) with its body up to its
+    /// column-0 close, comment lines dropped as `wiring_body` drops them.
+    fn column0_fns(text: &str) -> Vec<(String, String)> {
+        let mut fns = Vec::new();
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            let start = offset;
+            offset += line.len();
+            if line.starts_with(char::is_whitespace) || line.starts_with("//") {
+                continue;
+            }
+            let Some(at) = line.find("fn ") else {
+                continue;
+            };
+            if at > 0 && !line[..at].ends_with(' ') {
+                continue;
+            }
+            let rest = &line[at + 3..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() || !rest[name.len()..].starts_with(['(', '<']) {
+                continue;
+            }
+            let body = text[start..]
+                .split("\n}")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            fns.push((name, body));
+        }
+        fns
+    }
+
+    /// The final argument of each branch-runner call in `body`.
+    fn branch_runner_finals(body: &str) -> Vec<String> {
+        const CALL: &str = "run_git_mutating_with_creds_for_branch(";
+        let mut finals = Vec::new();
+        for (at, _) in body.match_indices(CALL) {
+            let (mut depth, mut quoted, mut args, mut arg) = (0, false, Vec::new(), String::new());
+            for c in body[at + CALL.len()..].chars() {
+                match c {
+                    '"' => quoted = !quoted,
+                    '(' | '[' | '{' if !quoted => depth += 1,
+                    ')' | ']' | '}' if !quoted && depth == 0 => break,
+                    ')' | ']' | '}' if !quoted => depth -= 1,
+                    ',' if !quoted && depth == 0 => {
+                        args.push(std::mem::take(&mut arg));
+                        continue;
+                    }
+                    _ => {}
+                }
+                arg.push(c);
+            }
+            args.push(arg);
+            let last = args
+                .into_iter()
+                .map(|a| a.trim().to_string())
+                .rfind(|a| !a.is_empty());
+            finals.push(last.unwrap_or_default());
+        }
+        finals
+    }
+
+    /// R1 over one fn body: `count` branch-runner calls, each naming `branch` last, and
+    /// no plain credentialed runner.
+    fn roster_holds(body: &str, branch: &str, count: usize) -> bool {
+        let finals = branch_runner_finals(body);
+        finals.len() == count
+            && finals.iter().all(|last| last == branch)
+            && !body.contains("run_git_mutating_with_creds(")
+    }
+
+    /// R2's predicate: a body naming `"push"` that spawns through a runner which never
+    /// re-reads a branch's refusal.
+    fn pushes_unrechecked(body: &str) -> bool {
+        body.contains("\"push\"")
+            && (body.contains("run_git_mutating_with_creds(")
+                || body.contains("run_git_with_creds_once("))
+    }
+
+    fn unrechecked_pushes(text: &str) -> Vec<String> {
+        column0_fns(text)
+            .into_iter()
+            .filter(|(_, body)| pushes_unrechecked(body))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Every route that pushes a named branch spawns through the branch runner naming that
+    /// branch (R1), and every other fn pairing `"push"` with a plain credentialed runner is
+    /// one of the three ref pushes no branch refusal governs (R2), over the production text
+    /// of each file that calls one. Out of reach: a push in a file outside this list, an
+    /// argv built in a helper the scanned fn calls, and any indented fn (an impl-block
+    /// method, or one in an inline module such as gitlab.rs's and bitbucket.rs's
+    /// `mod my_work_tests`, which sits above `mod tests` and so inside the cut text).
+    #[test]
+    fn branch_pushes_rerun_the_publishing_refusal_at_spawn() {
+        use crate::github::repo_meta::tests::wiring_body;
+        const EXEMPT: [&str; 3] = [
+            "git_push_tag_core",
+            "git_delete_tag_core",
+            "git_delete_remote_branch_core",
+        ];
+        let ops = production_text(include_str!("ops.rs"));
+        let pr = production_text(include_str!("../github/pr.rs"));
+        let gitlab = production_text(include_str!("../forge/gitlab.rs"));
+        let bitbucket = production_text(include_str!("../forge/bitbucket.rs"));
+        let files = [
+            ("ops.rs", ops.clone()),
+            ("branches.rs", production_text(include_str!("branches.rs"))),
+            ("remote.rs", production_text(include_str!("remote.rs"))),
+            (
+                "autostash.rs",
+                production_text(include_str!("autostash.rs")),
+            ),
+            (
+                "pr_checkout.rs",
+                production_text(include_str!("pr_checkout.rs")),
+            ),
+            (
+                "pull_guard.rs",
+                production_text(include_str!("pull_guard.rs")),
+            ),
+            ("pr.rs", pr.clone()),
+            ("gitlab.rs", gitlab.clone()),
+            ("bitbucket.rs", bitbucket.clone()),
+        ];
+        let roster = [
+            (&ops, "push_pr_head", "head", 1),
+            (&pr, "gh_publish_push", "branch", 1),
+            (&pr, "gh_pr_create_core", "&head", 2),
+            (&gitlab, "publish_repo", "&branch", 1),
+            (&gitlab, "create_mr", "head", 1),
+            (&bitbucket, "create_pr", "head", 1),
+            (&bitbucket, "publish_repo", "&branch", 1),
+        ];
+        for (text, name, branch, count) in roster {
+            let body = wiring_body(text, name);
+            assert!(roster_holds(&body, branch, count), "{name}:\n{body}");
+        }
+        let mut flagged = Vec::new();
+        for (file, text) in &files {
+            assert!(!column0_fns(text).is_empty(), "{file}: no fn read");
+            flagged.extend(unrechecked_pushes(text));
+        }
+        flagged.sort();
+        let mut exempt = EXEMPT.map(str::to_string).to_vec();
+        exempt.sort();
+        assert_eq!(
+            flagged, exempt,
+            "only the exempt ref pushes take the plain runner"
+        );
+
+        // m1: the resolve push back on the plain runner reddens both scans.
+        let m1 = ops.replace(
+            "run_git_mutating_with_creds_for_branch(",
+            "run_git_mutating_with_creds(",
+        );
+        assert_ne!(m1, ops, "m1 changed nothing");
+        assert!(
+            !roster_holds(&wiring_body(&m1, "push_pr_head"), "head", 1),
+            "m1: R1"
+        );
+        assert!(
+            unrechecked_pushes(&m1).contains(&"push_pr_head".to_string()),
+            "m1: R2"
+        );
+        // m2: a PR create re-checking the base instead of the head.
+        let body = wiring_body(&pr, "gh_pr_create_core");
+        let m2 = body.replacen(
+            "NETWORK_TIMEOUT,\n        &head,",
+            "NETWORK_TIMEOUT,\n        &base,",
+            1,
+        );
+        assert_ne!(m2, body, "m2 changed nothing");
+        assert!(!roster_holds(&m2, "&head", 2), "m2: R1");
+        // m3: a new push on the plain runner.
+        let m3 =
+            "async fn x() { run_git_mutating_with_creds(s, r, &[], &[\"push\", \"o\", \"b\"], T).await }";
+        assert_eq!(unrechecked_pushes(m3), ["x"], "m3: R2");
+        // m4: an exempt body alone reads as exempt.
+        let m4 = format!("{}\n}}\n", wiring_body(&ops, "git_push_tag_core"));
+        let m4_flagged = unrechecked_pushes(&m4);
+        assert_eq!(m4_flagged, ["git_push_tag_core"], "m4");
+        assert!(
+            m4_flagged
+                .iter()
+                .all(|name| EXEMPT.contains(&name.as_str())),
+            "m4"
+        );
     }
 
     /// [`keep_local_origin`] plus a second bare remote, both pinned non-mirror, with

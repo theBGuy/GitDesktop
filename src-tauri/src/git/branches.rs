@@ -458,7 +458,9 @@ struct BranchFlags {
 
 /// The branches the user has archived (`branch.<name>.gitdesktopArchived true`) and
 /// marked Keep local ([`keep_local_key`]), in one config read. git keeps both in sync
-/// across renames and removes them on delete, so they never go stale.
+/// across renames and removes them on delete, so they never go stale. A failed read
+/// fails the list ([`branch_flags_answer`]): it must not show a marked branch unmarked
+/// while the push guard refuses it.
 async fn read_branch_flags(repo_path: &str) -> AppResult<BranchFlags> {
     let out = run_git_raw(
         Some(repo_path),
@@ -470,10 +472,20 @@ async fn read_branch_flags(repo_path: &str) -> AppResult<BranchFlags> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if out.code != 0 {
-        return Ok(BranchFlags::default());
+    branch_flags_answer(&out)
+}
+
+/// The verdict over one flag read: exit 1 is "no key matched" whatever stderr carries,
+/// since the regex is a constant; any exit other than 0 or 1 is an `Err`.
+fn branch_flags_answer(out: &GitOutput) -> AppResult<BranchFlags> {
+    match out.code {
+        0 => Ok(parse_branch_flags(&out.stdout_lossy())),
+        1 => Ok(BranchFlags::default()),
+        code => Err(AppError::Git {
+            code,
+            stderr: out.full_failure_text(),
+        }),
     }
-    Ok(parse_branch_flags(&out.stdout_lossy()))
 }
 
 /// Parses `--get-regexp` lines: `key value`, `key ` for an empty value, bare `key` for
@@ -10204,6 +10216,52 @@ mod tests {
                 (Ok(got), Some(want)) => assert_eq!(got, want, "{row}"),
                 (Err(AppError::Git { .. }), None) => {}
                 (got, _) => panic!("{row}: {got:?}"),
+            }
+        }
+    }
+
+    /// The branch list's flag read takes only exit 1 as "no flags" (trace lines on
+    /// stderr included); any other failed read fails the list instead of hiding a mark.
+    #[test]
+    fn branch_flags_answer_reads_only_exit_1_as_empty() {
+        let out = |code: i32, stdout: &str, stderr: &str| crate::git::runner::GitOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        };
+        let trace = "11:32:43.283829 git.c:502         trace: built-in: git config --get-regexp\n";
+        let marked = out(0, "branch.x.gitdesktoplocalonly true\n", "");
+        let flags = super::branch_flags_answer(&marked).unwrap();
+        assert_eq!(
+            flags.keep_local,
+            std::collections::HashSet::from(["x".to_string()])
+        );
+        assert!(flags.archived.is_empty());
+        for (row, given) in [
+            ("no match", out(1, "", "")),
+            ("no match under GIT_TRACE", out(1, "", trace)),
+        ] {
+            let flags =
+                super::branch_flags_answer(&given).unwrap_or_else(|e| panic!("{row}: {e:?}"));
+            assert!(
+                flags.keep_local.is_empty() && flags.archived.is_empty(),
+                "{row}"
+            );
+        }
+        for (row, given) in [
+            (
+                "error",
+                out(3, "", "error: could not lock config file .git/config\n"),
+            ),
+            (
+                "fatal",
+                out(128, "", "fatal: bad config line 1 in file .git/config\n"),
+            ),
+            ("invalid regex", out(6, "", "error: invalid pattern\n")),
+        ] {
+            match super::branch_flags_answer(&given) {
+                Err(AppError::Git { code, .. }) => assert_eq!(code, given.code, "{row}"),
+                got => panic!("{row}: {got:?}"),
             }
         }
     }

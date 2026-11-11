@@ -1743,6 +1743,15 @@ test("the GitLab and Bitbucket created-repository headlines lead the same way", 
     const p = presentError(appError(kind, `${headline}\n${NO_USERNAME}`));
     assert.equal(p.summary, headline, kind);
   }
+  const keptLocal =
+    "Publishing didn't finish, but the project WAS created at me/demo on GitLab and added as the origin remote.";
+  const p = presentError(
+    appError(
+      "glab",
+      `${keptLocal}\n"feat/x" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.`,
+    ),
+  );
+  assert.equal(p.summary, keptLocal);
 });
 
 test("a gh network or credential failure without the created headline keeps its summary", () => {

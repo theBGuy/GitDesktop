@@ -772,6 +772,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "keep-local-hook",
+    label: "Terminal push guard…",
+    category: "Branches & stash",
+    defaultBinding: null,
+  },
+  {
     id: "update-from-default",
     label: "Update from default branch",
     category: "Branches & stash",

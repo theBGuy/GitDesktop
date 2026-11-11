@@ -7135,6 +7135,22 @@ fn gl_created_project_unreadable(hint: &str, detail: String) -> AppError {
     ))
 }
 
+/// A publishing refusal at the push is the one push failure a retry can't get past, so it
+/// leads with the project left behind (origin is wired by then); every other push error
+/// passes through bare, since the Push button recovers it.
+fn gl_publish_push_error(path: &str, error: AppError) -> AppError {
+    if !crate::git::remote::is_publishing_refusal(&error) {
+        return error;
+    }
+    AppError::Glab(gl_error_message(
+        &format!(
+            "Publishing didn't finish, but the project WAS created at {path} on GitLab and \
+             added as the origin remote."
+        ),
+        error.to_string(),
+    ))
+}
+
 /// Publish a local repo to GitLab: create the project (in the user's namespace),
 /// add it as `origin`, and push the current branch with the one-shot glab
 /// credential helper. Returns the project's web URL. GitLab has no homepage
@@ -7187,9 +7203,10 @@ pub async fn publish_repo(
             args.push(topic);
         }
     }
+    let project_path = format!("{}/{name}", me.username);
     run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT)
         .await
-        .map_err(|e| gl_publish_create_error(&format!("{}/{name}", me.username), e))?;
+        .map_err(|e| gl_publish_create_error(&project_path, e))?;
 
     // The project now exists — from here on, any failure must SAY so, or a
     // retry (which re-creates) reads as an inexplicable "name already taken".
@@ -7197,7 +7214,7 @@ pub async fn publish_repo(
 
     // `glab repo create` does not wire a remote (validated live) — resolve the
     // created project's URLs and do it ourselves, then push the current branch.
-    let enc = encode_project(&format!("{}/{name}", me.username));
+    let enc = encode_project(&project_path);
     let out = match run_glab(
         Some(repo_path),
         &["api", &format!("projects/{enc}")],
@@ -7230,7 +7247,8 @@ pub async fn publish_repo(
     }
 
     // A push failure after this point self-recovers: origin exists, so the repo
-    // flips GitLab-ready and the normal Push button takes over.
+    // flips GitLab-ready and the normal Push button takes over. A publishing refusal
+    // is the exception, disclosed under the created project, since a retry can't pass it.
     // A plain-http instance can only get inert `credential.https://…` entries, so skip
     // the injection — and with it a hard `GlabNotFound` that would block the push for
     // nothing. The https path keeps `?`: glab got us this far, so its absence is real.
@@ -7250,14 +7268,16 @@ pub async fn publish_repo(
     // working-tree lock must stay free for staging and commits meanwhile. Empty
     // `cred` because `push_args` already carries the `-c` entries — that also keeps
     // the ambient-auth retry (gated on a non-empty slice) off.
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         repo_path,
         &[],
         &push_args,
         crate::git::runner::NETWORK_TIMEOUT,
+        &branch,
     )
-    .await?;
+    .await
+    .map_err(|e| gl_publish_push_error(&project_path, e))?;
 
     Ok(project.web_url)
 }
@@ -7398,12 +7418,13 @@ pub async fn create_mr(
     push_args.extend(["push", "-u", "origin", &spec]);
     // NETWORK domain (see `publish_repo`'s push): the `-c` entries ride `push_args`,
     // so the empty `cred` slice changes neither the command nor the ambient retry.
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         repo_path,
         &[],
         &push_args,
         crate::git::runner::NETWORK_TIMEOUT,
+        head,
     )
     .await?;
 
@@ -12001,7 +12022,7 @@ mod tests {
                 "current_user(",
                 "run_glab(",
                 "clone_credential_config(",
-                "run_git_mutating_with_creds(",
+                "run_git_mutating_with_creds_for_branch(",
             ]
             .iter()
             .filter_map(|marker| body.find(marker))
@@ -12057,6 +12078,102 @@ mod tests {
             assert_ne!(mutant, body, "{what}: the mutation changed nothing");
             assert!(!guards_precede(&mutant), "{what}");
         }
+    }
+
+    /// A publishing refusal at the publish push leads with the created project on line
+    /// one (kind glab), its own sentence on line two; any other push error passes bare.
+    #[test]
+    fn gl_publish_push_error_discloses_only_publishing_refusals() {
+        const LEAD: &str = "Publishing didn't finish, but the project WAS created at me/demo \
+                            on GitLab and added as the origin remote.";
+        for refusal in [
+            AppError::BranchKeptLocal {
+                branch: "feat/x".into(),
+            },
+            AppError::BranchIsAgentSession {
+                branch: "gd/session/x".into(),
+            },
+        ] {
+            let own = refusal.to_string();
+            let AppError::Glab(message) = gl_publish_push_error("me/demo", refusal) else {
+                panic!("{own}: a refusal after the create is disclosed as glab");
+            };
+            let lines: Vec<&str> = message.lines().collect();
+            assert_eq!(lines, [LEAD, own.as_str()], "{own}");
+            assert!(lines[0].contains("WAS created"));
+            for absent in ["push manually", "retry", "\u{2014}"] {
+                assert!(!lines[0].contains(absent), "{absent}: {message}");
+            }
+        }
+        for other in [
+            AppError::Git {
+                code: 128,
+                stderr: "fatal: unable to access origin".into(),
+            },
+            AppError::Timeout(5),
+        ] {
+            let own = other.to_string();
+            let passed = gl_publish_push_error("me/demo", other);
+            assert!(
+                matches!(
+                    passed,
+                    AppError::Git { code: 128, .. } | AppError::Timeout(5)
+                ),
+                "{own}: {passed:?}"
+            );
+            assert_eq!(passed.to_string(), own);
+        }
+    }
+
+    /// `publish_repo`'s push maps its error through the disclosure helper, and the helper
+    /// discloses only the shared publishing refusals; pinned by source (no test may run
+    /// the route), with the mutation controls on the carved text.
+    #[test]
+    fn gitlab_publish_discloses_a_refusal_at_the_push() {
+        use crate::github::repo_meta::tests::wiring_body;
+        const RUNNER: &str = "run_git_mutating_with_creds_for_branch(";
+        const MAP: &str = "gl_publish_push_error(&project_path, e)";
+        fn mapped_after_the_push(body: &str) -> bool {
+            let Some(push) = body.find(RUNNER) else {
+                return false;
+            };
+            let tail = &body[push..];
+            let ok = tail.find("Ok(").unwrap_or(tail.len());
+            tail[..ok].contains(MAP)
+        }
+        fn helper_discloses(body: &str) -> bool {
+            body.contains("is_publishing_refusal(&") && body.contains("added as the origin remote.")
+        }
+        let source = include_str!("gitlab.rs");
+        let body = wiring_body(source, "publish_repo");
+        let helper = wiring_body(source, "gl_publish_push_error");
+        assert!(mapped_after_the_push(&body), "{body}");
+        assert!(helper_discloses(&helper), "{helper}");
+
+        let map_line = body.lines().find(|line| line.contains(MAP)).unwrap();
+        let deleted: String = body
+            .lines()
+            .filter(|line| !line.contains(MAP))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut moved = Vec::new();
+        for line in body.lines().filter(|line| !line.contains(MAP)) {
+            if line.contains(RUNNER) {
+                moved.push(map_line);
+            }
+            moved.push(line);
+        }
+        let moved = moved.join("\n");
+        for (what, mutant) in [
+            ("map_err deleted", deleted),
+            ("map_err above the push", moved),
+        ] {
+            assert_ne!(mutant, body, "{what}: the mutation changed nothing");
+            assert!(!mapped_after_the_push(&mutant), "{what}");
+        }
+        let blind = helper.replace("is_publishing_refusal(&", "matches_nothing(&");
+        assert_ne!(blind, helper, "the helper mutation changed nothing");
+        assert!(!helper_discloses(&blind), "refusal check removed");
     }
 
     #[test]

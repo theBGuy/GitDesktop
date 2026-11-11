@@ -126,7 +126,7 @@ const EXCLUDED = {
   "test/branch-switcher-keep-local.test.tsx": {
     hooks: ["usePush"],
     reason:
-      "a Vitest harness whose push never reaches the backend; it starts pushes only to test the local delete's fire-time hold",
+      "a Vitest harness whose push never reaches the backend; it starts pushes only to test the local delete's and the branch update's fire-time holds",
   },
 };
 

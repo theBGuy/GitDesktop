@@ -3910,12 +3910,13 @@ pub async fn create_pr(
     // working-tree lock must stay free for staging and commits meanwhile. Empty
     // `cred` because the argv above already carries the entries — that also keeps the
     // ambient-auth retry (gated on a non-empty slice) off, as this funnel expects.
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         repo_path,
         &[],
         &push_refs,
         crate::git::runner::NETWORK_TIMEOUT,
+        head,
     )
     .await?;
 
@@ -5918,12 +5919,13 @@ pub async fn publish_repo(
     let spec = crate::git::remote::publish_refspec(&branch);
     // NETWORK domain (see `create_pr`'s push): the credentials ride the argv, so the
     // empty `cred` slice leaves both the command and the ambient retry unchanged.
-    if let Err(e) = crate::git::remote::run_git_mutating_with_creds(
+    if let Err(e) = crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         repo_path,
         &[],
         &["-c", "credential.interactive=false", "push", "-u", "origin", &spec],
         crate::git::runner::NETWORK_TIMEOUT,
+        &branch,
     )
     .await
     {
@@ -8974,7 +8976,7 @@ definitions:
                 "load_credentials(",
                 "bb_send_request",
                 "seed_git_credential(",
-                "run_git_mutating_with_creds(",
+                "run_git_mutating_with_creds_for_branch(",
             ]
             .iter()
             .filter_map(|marker| body.find(marker))

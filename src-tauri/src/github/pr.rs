@@ -603,7 +603,8 @@ fn gh_publish_create_args<'a>(
 }
 
 /// Pushes the published branch to the origin `gh repo create` just added, through the
-/// app's network-locked push under the long git bound.
+/// app's network-locked push under the long git bound. A publishing refusal at spawn
+/// lands after the create, so it reads under the WAS-created headline too.
 async fn gh_publish_push(
     state: &AppState,
     repo_path: &str,
@@ -613,12 +614,13 @@ async fn gh_publish_push(
     let pushed = async {
         let cred = crate::forge::credential_config_for_remote(repo_path, "origin").await?;
         let spec = crate::git::remote::publish_refspec(branch);
-        crate::git::remote::run_git_mutating_with_creds(
+        crate::git::remote::run_git_mutating_with_creds_for_branch(
             state,
             repo_path,
             &cred,
             &["push", "-u", "origin", &spec],
             NETWORK_TIMEOUT,
+            branch,
         )
         .await
     };
@@ -8120,12 +8122,13 @@ pub(crate) async fn gh_pr_create_core(
         // Push `head` to origin — origin IS the fork; the PR's head lives there.
         let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
         let spec = crate::git::remote::publish_refspec(&head);
-        crate::git::remote::run_git_mutating_with_creds(
+        crate::git::remote::run_git_mutating_with_creds_for_branch(
             state,
             &repo_path,
             &cred,
             &["push", "-u", "origin", &spec],
             NETWORK_TIMEOUT,
+            &head,
         )
         .await?;
 
@@ -8160,12 +8163,13 @@ pub(crate) async fn gh_pr_create_core(
     // gh can only open a PR for a branch that exists on the remote.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
     let spec = crate::git::remote::publish_refspec(&head);
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         &repo_path,
         &cred,
         &["push", "-u", "origin", &spec],
         NETWORK_TIMEOUT,
+        &head,
     )
     .await?;
 
@@ -9129,6 +9133,11 @@ mod tests {
         let push = wiring_body(source, "gh_publish_push");
         assert!(push.contains("publish_refspec(branch)"), "{push}");
         assert!(push.contains("NETWORK_TIMEOUT") && !push.contains("GH_NETWORK_TIMEOUT"));
+        assert!(
+            push.contains("run_git_mutating_with_creds_for_branch(")
+                && push.contains("NETWORK_TIMEOUT,\n            branch,\n        )"),
+            "the push re-checks the published branch at spawn: {push}"
+        );
     }
 
     /// The three blobs `gh pr merge` writes to stderr when it refuses, assembled from

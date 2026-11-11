@@ -149,7 +149,8 @@ const PINS = [
     anchor: "function refuseUpdateWhilePushing(",
     seq: [
       "if (refuseWhileRowPushes(target)) return true;",
-      "return target === currentName && pushAlreadyActive();",
+      "status.data === undefined || target === currentName",
+      "return mayBeInPlace && pushAlreadyActive();",
     ],
     mutate: ["if (refuseWhileRowPushes(target)) return true;"],
   },

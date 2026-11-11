@@ -957,14 +957,17 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   request's head branch is marked here, GitDesktop won't start or finish the resolve. Any
   local branch can be marked, the current and default branch included; marking one that's
   already on a remote stops further pushes, and unticking the item lifts the mark. A
-  kept-local branch's menu also offers **Block terminal pushes too…**, which installs a
-  pre-push hook so \`git push\` in a terminal stops as well. The hook lives in this clone
-  only, and \`git push --no-verify\` skips it. Once it's installed the item reads
-  **Terminal push guard (on)…** and opens a dialog with **Remove hook**. When the clone
-  already has a pre-push hook file of its own, keeps its hooks in a custom folder, or uses
-  a hook manager, GitDesktop doesn't add one and shows the check to paste into your own hook
-  instead; if a hook from an earlier install is still in the clone, that dialog offers
-  **Remove hook** too.
+  kept-local branch's menu also offers **Block terminal pushes too…**, which opens a dialog
+  that installs a pre-push hook so \`git push\` in a terminal stops as well; *Terminal push
+  guard…* in the command palette opens the same dialog, whether or not a branch is kept
+  local yet. The hook lives in this clone only, and \`git push --no-verify\` skips it. Once
+  it's installed the menu item reads **Terminal push guard (on)…** and the dialog offers
+  **Remove hook**.
+  When the clone already has a pre-push hook file of its own, keeps its hooks in a custom
+  folder, or uses a hook manager, GitDesktop doesn't add one and shows the check to paste
+  into your own hook instead (put it above anything else in the hook that reads the
+  pushed refs); if a hook from an earlier install is still in the clone, that dialog
+  offers **Remove hook** too.
 - **Clean up branches** opens from the switcher's menu or the command palette and gathers
   stale branches into one reviewed list. Three toggles choose what it lists, in any mix:
   **Merged** (into the default branch directly, or through a recent pull request where the
@@ -4102,11 +4105,12 @@ the small programs Git runs at points like *before commit* or *before push*. Whe
   commits not already on the destination remote as this clone last fetched it, and
   refuses a push whose commits it can't list.
 - The **terminal push guard** for branches marked **Keep local** is installed from a
-  kept-local branch's context menu (**Block terminal pushes too…**), not from here. It's a
-  pre-push hook that stops \`git push\` for a kept-local branch{{ai}}, in a terminal or in an
-  agent's own shell{{/ai}}. It covers this clone only, and \`git push --no-verify\` skips
-  it. Once installed it's listed here like any other pre-push hook, so editing, disabling
-  or deleting it here changes the guard too.
+  kept-local branch's context menu (**Block terminal pushes too…**) or the command
+  palette (*Terminal push guard…*), not from here. It's a pre-push hook that stops
+  \`git push\` for a kept-local branch{{ai}}, in a terminal or in an agent's own
+  shell{{/ai}}. It covers this clone only, and \`git push --no-verify\` skips it. Once
+  installed it's listed here like any other pre-push hook, so editing, disabling or
+  deleting it here changes the guard too.
 - If your repo uses a hook manager — **husky**, **pre-commit**, or **lefthook** —
   GitDesktop detects it, opens its config, and can run the right install/update command
   for you.`,

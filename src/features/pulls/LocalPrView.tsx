@@ -1009,10 +1009,13 @@ export function LocalPrView({
     }
     // An in-place update (head is the current branch) also queues on the
     // network lock behind any push of this checkout, as BranchSwitcher's does.
+    // An unread status may be on the head, so it holds too; a detached HEAD
+    // updates off that lock.
     const current = status.data?.branch?.name ?? null;
+    const mayBeInPlace = status.data === undefined || pr.head === current;
     if (
       refuseWhileBranchPushes(queryClient, repoPath, pr.head, current) ||
-      (pr.head === current && refuseWhilePushRuns(queryClient, repoPath))
+      (mayBeInPlace && refuseWhilePushRuns(queryClient, repoPath))
     ) {
       return;
     }

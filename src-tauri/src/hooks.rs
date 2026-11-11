@@ -361,12 +361,32 @@ const KEEP_LOCAL_HOOK_MARKER: &str = "# gitdesktop:keep-local-pre-push";
 /// since a checked-out file would gain CRLF on Windows. It reads Keep local with the
 /// same `git config --type=bool --get` as `branch_keep_local`, so the two agree. Exit
 /// codes are captured with `|| gd_rc=$?`, so a host hook under `set -e` keeps running.
+/// It reads the pushed refs once and hands them back on standard input, so
+/// later readers in a host hook still see them. The capture runs only when
+/// standard input is open: bash would otherwise reuse the closed descriptor for
+/// the capture's own pipe and wait on itself. In a host hook run by bash outside
+/// POSIX mode a failed hand-back doesn't stop the hook, so its later readers see
+/// no refs; the Keep local verdict has already been given by then. The hand-back's
+/// last two lines must stay unindented in a pasted copy.
 const KEEP_LOCAL_HOOK_SCRIPT: &str = concat!(
     "#!/bin/sh\n",
     "# gitdesktop:keep-local-pre-push\n",
     "# Managed by GitDesktop: stops a push of any branch marked Keep local.\n",
     "# Bypass once with: git push --no-verify. Remove it from GitDesktop, or delete this file.\n",
     "gd_blocked=0\n",
+    "gd_refs=\n",
+    "gd_rc=0\n",
+    "( exec 9<&0 ) 2>/dev/null || gd_rc=1\n",
+    "if [ \"$gd_rc\" = 0 ]; then\n",
+    "  gd_refs=$(cat) || gd_rc=$?\n",
+    "fi\n",
+    "case $gd_rc in\n",
+    "  0) ;;\n",
+    "  *)\n",
+    "    printf 'GitDesktop: could not read the pushed refs, so this push was stopped. Bypass once with: git push --no-verify\\n' >&2\n",
+    "    exit 1 ;;\n",
+    "esac\n",
+    "printf '%s\\n' \"$gd_refs\" | {\n",
     "while read -r gd_local gd_local_oid gd_remote gd_remote_oid; do\n",
     "  case \"$gd_local\" in\n",
     "    refs/heads/*) gd_branch=${gd_local#refs/heads/} ;;\n",
@@ -399,7 +419,14 @@ const KEEP_LOCAL_HOOK_SCRIPT: &str = concat!(
     "      gd_blocked=1 ;;\n",
     "  esac\n",
     "done\n",
-    "[ \"$gd_blocked\" = 0 ] || exit 1\n",
+    "[ \"$gd_blocked\" = 0 ]\n",
+    "} || exit 1\n",
+    "# Keep the two lines after \"exec\" unindented: the refs and GD_REFS must start their lines.\n",
+    "if [ -n \"$gd_refs\" ]; then\n",
+    "  exec <<GD_REFS\n",
+    "$gd_refs\n",
+    "GD_REFS\n",
+    "fi\n",
 );
 
 /// The managed script's body, for pasting into a user's own pre-push hook: no
@@ -927,7 +954,29 @@ mod tests {
         assert!(script.is_ascii());
         assert!(!script.contains('\r'));
         assert!(script.starts_with("#!/bin/sh\n"));
-        assert!(script.ends_with("[ \"$gd_blocked\" = 0 ] || exit 1\n"));
+        // The refs are read once, judged in a pipeline subshell, then handed back on
+        // stdin; the hand-back is the only here-document, so the verdict runs first.
+        let hand_back = "if [ -n \"$gd_refs\" ]; then\n  exec <<GD_REFS\n$gd_refs\nGD_REFS\nfi\n";
+        assert!(script.ends_with(hand_back));
+        // The paste note travels with the snippet, directly above the hand-back.
+        let note = "# Keep the two lines after \"exec\" unindented: the refs and GD_REFS must start their lines.\n";
+        assert!(script.ends_with(&format!("{note}{hand_back}")));
+        assert!(keep_local_hook_snippet().contains(note));
+        let verdict = script.find("[ \"$gd_blocked\" = 0 ]\n} || exit 1\n");
+        let exec = script.find("exec <<GD_REFS");
+        assert!(verdict.is_some() && verdict < exec, "verdict first");
+        let capture = script.find("gd_refs=$(cat) || gd_rc=$?\n");
+        let first_read = script.find("while read");
+        assert!(capture.is_some() && capture < first_read, "capture first");
+        // Stdin is tested open before the capture, and unreadable refs exit at once,
+        // before the verdict pipeline runs any more fd work on a closed stdin.
+        let open_check = script.find("( exec 9<&0 ) 2>/dev/null || gd_rc=1\n");
+        assert!(open_check.is_some() && open_check < capture, "open first");
+        let exit_arm =
+            "push --no-verify\\n' >&2\n    exit 1 ;;\nesac\nprintf '%s\\n' \"$gd_refs\" | {\n";
+        assert!(script.contains(exit_arm), "exit first");
+        assert_eq!(script.matches("<<").count(), 1);
+        assert!(!script.contains("<<-"));
         assert!(script.lines().any(|l| l == KEEP_LOCAL_HOOK_MARKER));
         // Only a detached HEAD (exit 1) passes; any other symbolic-ref failure stops.
         let head_read = "gd_branch=$(git symbolic-ref -q HEAD) || gd_rc=$?\n      case $gd_rc in\n";
@@ -938,6 +987,15 @@ mod tests {
         }
         assert!(script.contains("        1) continue ;;\n"));
         assert!(script.contains("could not read which branch HEAD is on"));
+        // The message set, verbatim: a failed read of the refs stops the push too.
+        for message in [
+            "printf 'GitDesktop: could not read the pushed refs, so this push was stopped. Bypass once with: git push --no-verify\\n' >&2\n",
+            "printf 'GitDesktop: could not read which branch HEAD is on, so this push was stopped. Bypass once with: git push --no-verify\\n' >&2\n",
+            "printf 'GitDesktop: \"%s\" is marked Keep local, so this push was stopped. Turn off Keep local in GitDesktop, or bypass once with: git push --no-verify\\n' \"$gd_branch\" >&2\n",
+            "printf 'GitDesktop: could not read whether \"%s\" is marked Keep local, so this push was stopped. Bypass once with: git push --no-verify\\n' \"$gd_branch\" >&2\n",
+        ] {
+            assert!(script.contains(message), "{message}");
+        }
         // The hook reads the same key the Rust guard and setter use.
         let key = crate::git::branches::keep_local_key("$gd_branch");
         assert!(script.contains(&format!("--get \"{key}\"")));
@@ -1917,5 +1975,138 @@ mod tests {
     #[tokio::test]
     async fn keep_local_hook_snippet_keeps_a_set_eu_host_hook_running() {
         assert_host_hook_continues("-eu", "host-eu").await;
+    }
+
+    /// A host check that reads the pushed refs: it echoes each line's remote ref and
+    /// local oid, refuses `host-refused` on its own, then reports how many it read.
+    const HOST_REF_READER: &str = concat!(
+        "h_n=0\n",
+        "while read -r h_local h_oid h_remote h_remote_oid; do\n",
+        "  h_n=$((h_n + 1))\n",
+        "  echo \"host saw $h_remote $h_oid\" >&2\n",
+        "  if [ \"$h_remote\" = refs/heads/host-refused ]; then echo 'host refused' >&2; exit 1; fi\n",
+        "done\n",
+        "echo \"host read $h_n refs\" >&2\n",
+    );
+
+    /// The snippet pasted ABOVE a host check that reads the pushed refs, under `flags`:
+    /// the check reads every ref line the push sends and keeps its own verdict. Each
+    /// row commits first, since git leaves an up-to-date ref out of the hook's input.
+    async fn assert_snippet_hands_the_host_its_refs(flags: &str, tag: &str) {
+        let (_g, _base, repo, remote) = hook_repo(tag).await;
+        let snippet = keep_local_hook_snippet();
+        let host = format!("#!/bin/sh\nset {flags}\n{snippet}{HOST_REF_READER}");
+        assert!(host.is_ascii() && !host.contains('\r'));
+        write_pre_push(&repo, &host);
+        let saw = |branch: &str, tip: &str| ["host saw refs/heads/", branch, " ", tip].concat();
+        git_ok(&repo, &["checkout", "-q", "-b", "feat/x"]).await;
+        let tip = commit(&repo, "one").await;
+        let out = git(&repo, &["push", "origin", "HEAD"]).await;
+        let row = format!("set {flags}, one ref");
+        assert_eq!(out.code, 0, "{row}: {}", out.full_failure_text());
+        for line in [saw("feat/x", &tip), "host read 1 refs".into()] {
+            assert!(out.stderr.contains(&line), "{row}: {}", out.stderr);
+        }
+        assert_eq!(remote_tip(&remote, "feat/x").await, Some(tip), "{row}");
+        git_ok(&repo, &["checkout", "-q", "main"]).await;
+        let main_tip = commit(&repo, "two main").await;
+        git_ok(&repo, &["checkout", "-q", "feat/x"]).await;
+        let tip = commit(&repo, "two").await;
+        let out = git(&repo, &["push", "origin", "main", "feat/x"]).await;
+        let row = format!("set {flags}, two refs");
+        assert_eq!(out.code, 0, "{row}: {}", out.full_failure_text());
+        let lines = [saw("main", &main_tip), saw("feat/x", &tip)];
+        for line in lines.into_iter().chain(["host read 2 refs".into()]) {
+            assert!(out.stderr.contains(&line), "{row}: {}", out.stderr);
+        }
+        assert_eq!(remote_tip(&remote, "main").await, Some(main_tip), "{row}");
+        let landed = remote_tip(&remote, "feat/x").await;
+        assert_eq!(landed, Some(tip.clone()), "{row}");
+        // A marked branch stops the push before the host check reads anything.
+        let key = crate::git::branches::keep_local_key("feat/x");
+        git_ok(&repo, &["config", &key, "true"]).await;
+        commit(&repo, "three").await;
+        let out = git(&repo, &["push", "origin", "HEAD"]).await;
+        let row = format!("set {flags}, marked");
+        assert_ne!(out.code, 0, "{row}");
+        assert!(
+            out.stderr.contains("\"feat/x\" is marked Keep local")
+                && !out.stderr.contains("host saw"),
+            "{row}: {}",
+            out.stderr
+        );
+        assert_eq!(remote_tip(&remote, "feat/x").await, Some(tip), "{row}");
+        // The host check's own refusal of an unmarked branch still stops the push.
+        git_ok(&repo, &["checkout", "-q", "-b", "host-refused"]).await;
+        let tip = commit(&repo, "four").await;
+        let out = git(&repo, &["push", "origin", "host-refused"]).await;
+        let row = format!("set {flags}, host refuses");
+        assert_ne!(out.code, 0, "{row}");
+        assert!(
+            out.stderr.contains(&saw("host-refused", &tip))
+                && out.stderr.contains("host refused")
+                && !out.stderr.contains("is marked Keep local"),
+            "{row}: {}",
+            out.stderr
+        );
+        assert_eq!(remote_tip(&remote, "host-refused").await, None, "{row}");
+    }
+
+    #[tokio::test]
+    async fn keep_local_hook_snippet_above_a_reader_hands_it_the_refs_under_set_e() {
+        assert_snippet_hands_the_host_its_refs("-e", "above-e").await;
+    }
+
+    #[tokio::test]
+    async fn keep_local_hook_snippet_above_a_reader_hands_it_the_refs_under_set_eu() {
+        assert_snippet_hands_the_host_its_refs("-eu", "above-eu").await;
+    }
+
+    /// The documented limit, pinned rather than wanted: below a host reader that drained
+    /// the pushed refs the snippet reads none, so a marked branch's push goes through.
+    /// The dialog and the guide say to paste the check above anything else that reads
+    /// the pushed refs for this reason.
+    #[tokio::test]
+    async fn keep_local_hook_snippet_below_a_draining_reader_sees_no_refs() {
+        const SENTINEL: &str = "host hook reached its last line";
+        let (_g, _base, repo, remote) = hook_repo("drained").await;
+        let snippet = keep_local_hook_snippet();
+        let host = format!("#!/bin/sh\ncat >/dev/null\n{snippet}echo '{SENTINEL}' >&2\n");
+        write_pre_push(&repo, &host);
+        git_ok(&repo, &["checkout", "-q", "-b", "feat/x"]).await;
+        let key = crate::git::branches::keep_local_key("feat/x");
+        git_ok(&repo, &["config", &key, "true"]).await;
+        let tip = commit(&repo, "marked").await;
+        let out = git(&repo, &["push", "origin", "HEAD"]).await;
+        assert_eq!(out.code, 0, "{}", out.full_failure_text());
+        assert!(
+            out.stderr.contains(SENTINEL) && !out.stderr.contains("is marked Keep local"),
+            "{}",
+            out.stderr
+        );
+        assert_eq!(remote_tip(&remote, "feat/x").await, Some(tip));
+    }
+
+    /// A host hook that closed standard input before the snippet: the refs can't be
+    /// read, so the snippet stops the push instead of passing it unchecked.
+    #[tokio::test]
+    async fn keep_local_hook_snippet_stops_when_it_cannot_read_the_refs() {
+        const SENTINEL: &str = "host hook reached its last line";
+        let (_g, _base, repo, remote) = hook_repo("closed").await;
+        let snippet = keep_local_hook_snippet();
+        let host = format!("#!/bin/sh\nexec <&-\n{snippet}echo '{SENTINEL}' >&2\n");
+        write_pre_push(&repo, &host);
+        git_ok(&repo, &["checkout", "-q", "-b", "feat/x"]).await;
+        commit(&repo, "unmarked").await;
+        let out = git(&repo, &["push", "origin", "HEAD"]).await;
+        assert_ne!(out.code, 0, "{}", out.stderr);
+        let stopped = "GitDesktop: could not read the pushed refs, so this push was stopped. \
+                       Bypass once with: git push --no-verify";
+        assert!(
+            out.stderr.contains(stopped) && !out.stderr.contains(SENTINEL),
+            "{}",
+            out.stderr
+        );
+        assert_eq!(remote_tip(&remote, "feat/x").await, None);
     }
 }

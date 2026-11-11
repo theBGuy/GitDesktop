@@ -768,9 +768,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   } | null>(null);
   const [rebaseOntoIn, setRebaseOntoIn] = useState<string | null>(null);
   // The terminal push guard dialog: the repo it opened for and its open-session
-  // token, minted by the menu item after the list's close settles. A close drops
-  // the token and keeps the repo, so the dialog stays mounted for its exit; a
-  // repo switch drops the whole state in the render that switches.
+  // token, minted by the menu item or the palette action after the list's close
+  // settles. A close drops the token and keeps the repo, so the dialog stays
+  // mounted for its exit; a repo switch drops the whole state in the render that
+  // switches.
   const [hookDialog, setHookDialog] = useState<{
     repo: string;
     session: object | null;
@@ -2391,11 +2392,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // An update moves `target`'s ref, which that branch's own push may be sending,
   // and one of the CURRENT branch merges in place, on the network lock a push
-  // holds. Any other branch updates in a throwaway worktree, off that lock. Read at
-  // fire time, for a menu or shortcut pressed from before the push started.
+  // holds; while the status is unread, any branch may be the current one. Any
+  // other branch updates in a throwaway worktree, off that lock. Read at fire
+  // time, for a menu or shortcut pressed from before the push started.
   function refuseUpdateWhilePushing(target: string): boolean {
     if (refuseWhileRowPushes(target)) return true;
-    return target === currentName && pushAlreadyActive();
+    const mayBeInPlace = status.data === undefined || target === currentName;
+    return mayBeInPlace && pushAlreadyActive();
   }
 
   // Pull `target`'s own upstream (e.g. `origin/master`) into it without checking
@@ -3344,6 +3347,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return;
     }
     void setKeepLocal(row.name, !row.keepLocal);
+  });
+  // Palette-only, with or without a kept-local branch: the hook reads the marks
+  // only when a push runs. A press while this repo's dialog is open leaves it,
+  // and any write it is running, alone.
+  useHotkeyAction("keep-local-hook", () => {
+    const shown = hookDialogRef.current;
+    if (shown?.repo === repoPath && shown.session !== null) return;
+    void openKeepLocalHook();
   });
   // The hotkeys a push holds stay live and refuse with the toast, so a press
   // never goes silent; their menu rows hold with a reason instead. The rename,

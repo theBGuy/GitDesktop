@@ -400,8 +400,9 @@ async function startPush(
 }
 
 describe("LocalPrView: Update branch while a push runs", () => {
-  async function offerUpdate(current: string) {
-    repoStatus = statusOn(current, false);
+  async function offerUpdate(current: string | RepoStatus) {
+    repoStatus =
+      typeof current === "string" ? statusOn(current, false) : current;
     vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
     vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
     const view = renderView();
@@ -428,6 +429,36 @@ describe("LocalPrView: Update branch while a push runs", () => {
 
   it("an unrelated push leaves a head that isn't checked out free", async () => {
     const view = await offerUpdate("main");
+    await startPush(view.client, "other");
+    await userEvent.click(stripButton("Update branch"));
+    await waitFor(() =>
+      expect(gitUpdateBranchFrom).toHaveBeenCalledWith(REPO, "feat", "main"),
+    );
+    expect(toast.info).not.toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+  });
+
+  it("an unread status holds the update while any push runs", async () => {
+    vi.mocked(gitStatus).mockImplementation((path) =>
+      path === WT
+        ? Promise.resolve(worktreeStatus)
+        : new Promise<RepoStatus>(() => undefined),
+    );
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(3));
+    const view = renderView();
+    await findStrip("This branch is 3 commits behind main.");
+    await settle();
+    await startPush(view.client, "other");
+    await userEvent.click(stripButton("Update branch"));
+    expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+    expect(gitUpdateBranchFrom).not.toHaveBeenCalled();
+  });
+
+  it("a detached HEAD leaves the update free while another branch pushes", async () => {
+    const view = await offerUpdate({
+      branch: { name: null, detached: true },
+      entries: [],
+    } as unknown as RepoStatus);
     await startPush(view.client, "other");
     await userEvent.click(stripButton("Update branch"));
     await waitFor(() =>

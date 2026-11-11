@@ -649,7 +649,7 @@ describe("the can't-install state", () => {
         new RegExp(`^${reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
       );
       expect(description).toHaveTextContent(
-        `${reason} Add this check to your pre-push hook to get the same guard:`,
+        `${reason} Add this check to your pre-push hook, above anything else that reads the pushed refs, to get the same guard:`,
       );
       expect(within(d).getByText("Terminal push guard")).toBeInTheDocument();
       const pre = d.querySelector("pre");

@@ -107,7 +107,7 @@ export const KEEP_LOCAL_HOOK_BLOCKED: Record<
 
 /** The can't-install state's lead-in to the check's code block. */
 export const KEEP_LOCAL_HOOK_SNIPPET_LEAD =
-  "Add this check to your pre-push hook to get the same guard:";
+  "Add this check to your pre-push hook, above anything else that reads the pushed refs, to get the same guard:";
 
 /** The can't-install state's line over Remove, while GitDesktop's own hook file
  *  is still in a hooks folder git no longer reads. */

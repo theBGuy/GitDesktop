@@ -39,6 +39,7 @@ import {
   gitSetBranchKeepLocal,
   gitStashCount,
   gitStatus,
+  gitUpdateBranchFrom,
   readRepoBranchRules,
 } from "@/lib/git/api";
 import { usePush } from "@/lib/git/queries";
@@ -81,6 +82,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitKeepLocalHookRemove: vi.fn(),
   gitCheckoutBranch: vi.fn(),
   gitDeleteBranch: vi.fn(),
+  gitUpdateBranchFrom: vi.fn(),
   gitPush: pushSpy,
 }));
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
@@ -587,6 +589,80 @@ describe("the toggle-keep-local palette action", () => {
   });
 });
 
+describe("the keep-local-hook palette action", () => {
+  const footerButton = (d: HTMLElement, name: string) => {
+    const footer = d.querySelector<HTMLElement>('[data-slot="dialog-footer"]');
+    if (!footer) throw new Error("no footer");
+    return within(footer).getByRole("button", { name });
+  };
+
+  it("opens the guard dialog with no kept-local branch, list never opened", async () => {
+    renderSwitcher();
+    await screen.findByRole("button", { name: /^main/ });
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    await settle();
+    // jsdom moves the dialog's initial focus only off <body>: with any element
+    // focused before the open, focus stays there, so this row opens from body.
+    act(() => {
+      dispatchAction("keep-local-hook");
+    });
+    const d = await screen.findByRole("dialog", {
+      name: "Block terminal pushes too?",
+    });
+    expect(gitKeepLocalHookStatus).toHaveBeenCalledWith(REPO);
+    await waitFor(() => expect(footerButton(d, "Cancel")).toHaveFocus());
+    expect(screen.queryByPlaceholderText("Filter branches")).toBe(null);
+    const user = userEvent.setup();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(guardDialog()).toBe(null));
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("from an open list, closes the list and opens the dialog", async () => {
+    const { user } = renderSwitcher();
+    await openList(user);
+    act(() => {
+      dispatchAction("keep-local-hook");
+    });
+    const d = await screen.findByRole("dialog", {
+      name: "Block terminal pushes too?",
+    });
+    expect(screen.queryByPlaceholderText("Filter branches")).toBe(null);
+    expect(footerButton(d, "Cancel")).toBeInTheDocument();
+  });
+
+  it("a second press while it is open leaves its install running", async () => {
+    let settleInstall: (s: KeepLocalHookStatus) => void = () => undefined;
+    vi.mocked(gitKeepLocalHookInstall).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settleInstall = resolve;
+        }),
+    );
+    const { user } = renderSwitcher();
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    await settle();
+    act(() => {
+      dispatchAction("keep-local-hook");
+    });
+    const d = await screen.findByRole("dialog", {
+      name: "Block terminal pushes too?",
+    });
+    await waitFor(() => expect(footerButton(d, "Cancel")).toHaveFocus());
+    await user.click(footerButton(d, "Install hook"));
+    expect(gitKeepLocalHookInstall).toHaveBeenCalledWith(REPO);
+    act(() => {
+      dispatchAction("keep-local-hook");
+    });
+    await settle();
+    await act(async () => settleInstall(hookStatus("installed")));
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Terminal push guard installed"),
+    );
+    await waitFor(() => expect(guardDialog()).toBe(null));
+  });
+});
+
 describe("Keep local toggle and publish holds", () => {
   it("the palette action waits for a list with no row for HEAD yet", async () => {
     reads.head = headOn("feat/new");
@@ -739,6 +815,65 @@ describe("deleting the checked-out branch while it pushes", () => {
       expect(info).toHaveBeenCalledTimes(1);
       expect(gitDeleteBranch).not.toHaveBeenCalled();
     });
+});
+
+describe("updating a branch while a push runs", () => {
+  /** The default branch behind its upstream, beside `feat`, whose push from
+   *  REPO starts and stays pending. */
+  async function pushFeatThenUpdate() {
+    vi.mocked(gitUpdateBranchFrom).mockReturnValue(
+      new Promise(() => undefined),
+    );
+    reads.branches = [
+      trackedRow("main", { upstreamBehind: 1, upstreamAhead: 0 }),
+      trackedRow("feat"),
+    ];
+    const { queryClient } = renderSwitcher();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PushHarness path={REPO} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(repoIdentityQueryOptions(REPO).queryKey),
+      ).toBeDefined(),
+    );
+    await waitFor(() => expect(gitDefaultBranch).toHaveBeenCalled());
+    await settle();
+    fireEvent.click(
+      screen.getByRole("button", { name: `start feat in ${REPO}` }),
+    );
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(1));
+    act(() => {
+      dispatchAction("update-default-from-upstream");
+    });
+    await settle();
+  }
+
+  it("an unread status holds the update while any push runs", async () => {
+    vi.mocked(gitStatus).mockImplementation(() => new Promise(() => undefined));
+    await pushFeatThenUpdate();
+    expect(info).toHaveBeenCalledWith(
+      "A push is already running — wait for it to finish.",
+    );
+    expect(gitUpdateBranchFrom).not.toHaveBeenCalled();
+  });
+
+  it("a detached HEAD leaves the update free while another branch pushes", async () => {
+    reads.head = headOn(null);
+    await pushFeatThenUpdate();
+    await waitFor(() =>
+      expect(gitUpdateBranchFrom).toHaveBeenCalledWith(
+        REPO,
+        "main",
+        "origin/main",
+      ),
+    );
+    expect(info).not.toHaveBeenCalledWith(
+      "A push is already running — wait for it to finish.",
+    );
+  });
 });
 
 describe("the push-to-origin action on a kept-local branch", () => {

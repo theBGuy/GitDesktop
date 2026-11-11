@@ -263,30 +263,13 @@ function switcherProblems(src) {
     out.push(
       "pushAlreadyActive: no publishDetectRef.current === mine exemption",
     );
-  // Keep local: both push-to-origin routes refuse before their fresh read, and
-  // the listed route re-checks the row that read returned.
-  const current = fnBody(src, "pushCurrentBranchToOrigin");
-  if (current === null) out.push("pushCurrentBranchToOrigin: not found");
-  else if (
-    !norm(current).includes(
-      "async function pushCurrentBranchToOrigin(listed: Branch) {if (refuseKeptLocalPush(listed)) return;",
-    )
-  )
-    out.push(
-      "pushCurrentBranchToOrigin: no Keep local refusal before its read",
-    );
+  // Keep local: the listed route re-checks the row its fresh read returned.
+  // Each route's refusal before that read is pinned by the Vitest rows in
+  // src/test/branch-switcher-keep-local.test.tsx.
   const listed = fnBody(src, "pushListedBranchToOrigin");
   if (listed === null) out.push("pushListedBranchToOrigin: not found");
   else {
     const flat = norm(listed);
-    if (
-      !flat.includes(
-        "async function pushListedBranchToOrigin(row: Branch) {if (refuseKeptLocalPush(row)) return;",
-      )
-    )
-      out.push(
-        "pushListedBranchToOrigin: no Keep local refusal before its read",
-      );
     if (
       !flat.includes(
         "if (refuseKeptLocalPush(freshRow)) return; pushBranchToOrigin(row, true);",
@@ -788,24 +771,11 @@ test("SyncControls: the busy-narrowing mutants are caught", () => {
   );
 });
 
-test("both push hotkeys refuse a kept-local branch before any read", () => {
+test("the sync push hotkey refuses a kept-local branch and the listed route re-checks its fresh row", () => {
   const real = realSources();
   failsWith(
     mutate(real, SYNC, "if (sync.pushKeptLocalReason) {", "if (false) {"),
     "SyncControls: the push hotkey skips the Keep local refusal",
-  );
-  failsWith(
-    mutate(
-      real,
-      SWITCHER,
-      "    if (refuseKeptLocalPush(listed)) return;\n",
-      "",
-    ),
-    "pushCurrentBranchToOrigin: no Keep local refusal before its read",
-  );
-  failsWith(
-    mutate(real, SWITCHER, "    if (refuseKeptLocalPush(row)) return;\n", ""),
-    "pushListedBranchToOrigin: no Keep local refusal before its read",
   );
   failsWith(
     mutate(

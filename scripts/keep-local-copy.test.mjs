@@ -113,7 +113,7 @@ test("the guard dialog's installed, blocked and unread states", () => {
   assert.equal(copy.KEEP_LOCAL_HOOK_BUTTONS.close, "Close");
   assert.equal(
     copy.KEEP_LOCAL_HOOK_SNIPPET_LEAD,
-    "Add this check to your pre-push hook to get the same guard:",
+    "Add this check to your pre-push hook, above anything else that reads the pushed refs, to get the same guard:",
   );
   assert.equal(copy.KEEP_LOCAL_HOOK_BUTTONS.copy, "Copy check");
   for (const manager of ["husky", "pre-commit", "lefthook"])

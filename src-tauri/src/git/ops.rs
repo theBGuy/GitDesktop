@@ -6198,22 +6198,12 @@ async fn resolve_pr_remote(repo_path: &str, lens: Option<&str>) -> AppResult<&'s
 /// The push refusals of a remote-PR resolve, on either lens: the resolve has no fork
 /// fact, so every head pushed to `remote` takes the full helper, then the mirror check
 /// on `remote`. Read-only; runs at the resolve start and the finish start, so nothing is
-/// fetched or committed for a refused head, and in [`push_pr_head`] as the backstop.
+/// fetched or committed for a refused head. [`push_pr_head`] runs it again before the
+/// credential read, and its push re-runs the branch's refusal at spawn.
 async fn refuse_pr_head_push(repo_path: &str, remote: &str, head: &str) -> AppResult<()> {
     crate::git::remote::refuse_publishing_branch(repo_path, head).await?;
     crate::git::status::refuse_mirror_push(repo_path, crate::git::status::PushRemote::Named(remote))
         .await
-}
-
-/// The typed push refusals [`refuse_pr_head_push`] can raise, which the resolve callers
-/// pass through instead of wrapping them in "the head moved" copy.
-fn is_publishing_refusal(err: &AppError) -> bool {
-    matches!(
-        err,
-        AppError::BranchKeptLocal { .. }
-            | AppError::PushRemoteIsMirror { .. }
-            | AppError::BranchIsAgentSession { .. }
-    )
 }
 
 /// Pushes `sha` onto `remote`'s `head` branch, fully qualified and NEVER forced
@@ -6230,12 +6220,13 @@ async fn push_pr_head(
     refuse_pr_head_push(repo_path, remote, head).await?;
     let cred = crate::forge::credential_config_for_remote(repo_path, remote).await?;
     let refspec = format!("{sha}:refs/heads/{head}");
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         repo_path,
         &cred,
         &["push", remote, &refspec],
         NETWORK_TIMEOUT,
+        head,
     )
     .await?;
     Ok(())
@@ -6445,7 +6436,7 @@ pub(crate) async fn merge_remote_pr(
                 // Nothing here is the user's work — the merge was automatic, so
                 // tearing the worktree down costs only a cheap retry.
                 remove_resolve_worktree(state, repo_path, &worktree_path).await;
-                if is_publishing_refusal(&err) {
+                if crate::git::remote::is_publishing_refusal(&err) {
                     return Err(err);
                 }
                 return Err(AppError::Command(format!(
@@ -6643,7 +6634,7 @@ pub(crate) async fn finish_remote_pr_resolve(
     if let Err(err) = push_pr_head(state, repo_path, remote, &new_sha, head).await {
         // KEEP the worktree: it holds the user's conflict resolutions, and `find`
         // rediscovers it so a retry resumes rather than starting over.
-        if is_publishing_refusal(&err) {
+        if crate::git::remote::is_publishing_refusal(&err) {
             return Err(err);
         }
         return Err(AppError::Command(format!(
@@ -19436,6 +19427,64 @@ detached
             Some(rev(&bare, "refs/heads/feature").await),
             done.pushed_sha
         );
+    }
+
+    /// The resolve's push re-reads the head's mark at spawn: a mark set while it waits on
+    /// the network lock (after `push_pr_head`'s own early check passed) refuses with the
+    /// typed error and nothing lands; with the mark cleared the same sha lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_local_push_pr_head_rechecks_the_mark_at_spawn() {
+        let (_guards, repo, bare, base) =
+            keep_local_resolve_fixture("rpr-keep-local-spawn", "origin", false).await;
+        git(&repo, &["switch", "feature"]).await;
+        commit_file(
+            &repo,
+            Path::new(&repo),
+            "spawn.txt",
+            "spawn\n",
+            "spawn edit",
+        )
+        .await;
+        let sha = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+        assert_ne!(head_before, sha, "the push would move the head");
+        let state = AppState::default();
+
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let (fired, repo) = (std::sync::Arc::clone(&fired), repo.clone());
+            move || {
+                fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let key = crate::git::branches::keep_local_key("feature");
+                let set = std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(["config", &key, "true"])
+                    .status()
+                    .unwrap();
+                assert!(set.success(), "the mark is set during the wait");
+            }
+        });
+        let push = super::push_pr_head(&state, &repo, "origin", &sha, "feature");
+        let err = crate::git::remote::NETWORK_LOCK_WAIT_HOOK
+            .scope(hook, push)
+            .await
+            .expect_err("a head marked during the wait must not be pushed");
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            matches!(&err, AppError::BranchKeptLocal { branch } if branch == "feature"),
+            "{err:?}"
+        );
+        assert!(crate::git::remote::is_publishing_refusal(&err));
+        assert_eq!(rev(&bare, "refs/heads/feature").await, head_before);
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feature", false)
+            .await
+            .unwrap();
+        super::push_pr_head(&state, &repo, "origin", &sha, "feature")
+            .await
+            .expect("the unmarked head lands");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, sha);
     }
 
     /// On either lens, a mirror lens remote refuses the resolve at the start, before the
