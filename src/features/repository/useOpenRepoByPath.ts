@@ -72,6 +72,10 @@ export const repoOpenWatermark = openClaims.watermark;
  *  claimed, whatever navigation happens meanwhile. */
 export const claimRepoOpenOrder = openClaims.claimOrder;
 
+/** Takes an open's place at its REQUEST without claiming it; calling the result
+ *  claims that place, or returns null once a newer open or any navigation came. */
+export const reserveRepoOpen = openClaims.reserve;
+
 // The store's cross-repo landings hold on this (src/lib can't import it). Below
 // `openClaims`, which it closes over; the module-level client is the app's.
 registerRepoShellWarmup((root) => {

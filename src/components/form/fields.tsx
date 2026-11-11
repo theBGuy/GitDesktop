@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
+import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { useFieldContext } from "@/lib/form-context";
 
@@ -125,6 +126,7 @@ export function MarkdownField({
   textareaClassName,
   actions,
   mentions,
+  attachments,
 }: {
   label?: ReactNode;
   placeholder?: string;
@@ -135,6 +137,8 @@ export function MarkdownField({
   /** Opt in to `@`/`#`/`!` autocomplete — only forms whose forge autolinks the
    *  completed reference pass one. */
   mentions?: MentionSource;
+  /** Opt in to image attachments; see `MarkdownEditor`. */
+  attachments?: DraftAttachmentsHandle;
 }) {
   const field = useFieldContext<string>();
   const id = useId();
@@ -149,6 +153,7 @@ export function MarkdownField({
         textareaClassName={textareaClassName}
         actions={actions}
         mentions={mentions}
+        attachments={attachments}
         value={field.state.value}
         onChange={field.handleChange}
       />

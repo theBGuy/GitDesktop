@@ -7,7 +7,7 @@ import { useCallback } from "react";
 import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
-import type { RemoteLens } from "../types";
+import type { AttachmentRefs, RemoteLens } from "../types";
 import { repoKeys } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { prChecksRecheck } from "./pr-actions";
@@ -183,6 +183,8 @@ export function useCreatePr(repo: string) {
        *  its parent ("upstream" — GitHub fork only; the backend composes
        *  `owner:head` and rejects reviewers/labels/assignees on that path). */
       lens?: RemoteLens;
+      /** Staged images the body references, in first-occurrence order. */
+      attachments?: AttachmentRefs;
     }) =>
       api.forgePrCreate(
         repo,
@@ -195,6 +197,7 @@ export function useCreatePr(repo: string) {
         args.labels,
         args.assignees,
         args.lens ?? "origin",
+        args.attachments,
       ),
     {
       // Pinned: the call and its invalidation close over `repo`, and the dialog

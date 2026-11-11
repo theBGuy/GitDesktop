@@ -116,6 +116,18 @@ export interface GitLabMrMergeState {
 export interface PrRef {
   number: number;
   url: string;
+  /** Staged images a create posted the PR without; only `forge_pr_create`
+   *  sends it, so read it through `failedAttachmentsOf`. */
+  failedAttachments?: string[];
+}
+
+// Defined beside the import-free reference rules so their node tests share it.
+export type { AttachmentRefs } from "@/lib/attachments/references";
+
+/** A comment post's outcome: the staged images it posted without. Read
+ *  through `failedAttachmentsOf`, since older backends and mocks answer null. */
+export interface CommentOutcome {
+  failedAttachments: string[];
 }
 
 /** One team the viewer belongs to. `slug` is org-qualified ("org/slug") — the form

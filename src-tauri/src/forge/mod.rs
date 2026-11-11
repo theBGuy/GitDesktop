@@ -1918,14 +1918,64 @@ pub async fn forge_pr_comment(
     body: String,
     as_bot: Option<bool>,
     lens: Option<String>,
-) -> AppResult<()> {
-    match detect_non_github(&repo_path).await {
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::CommentOutcome> {
+    let detected = detect_non_github(&repo_path).await;
+    let attachments = crate::attachments::normalize(attachments);
+    // Every attachment check runs here, before any arm posts: `attach_gate_verdict`,
+    // then `post_checks` on the staged files.
+    if attachments.is_some() {
+        match detected {
+            Some((Provider::Bitbucket, _)) => return Err(attachments_refused_on_bitbucket()),
+            Some((Provider::GitLab, _)) => {
+                refuse_empty_comment(&body)?;
+                let staged =
+                    gitlab::glab_attach_checks(&body, attachments, as_bot == Some(true)).await?;
+                if let Some(s) = staged {
+                    let tail = format!("merge_requests/{number}/notes");
+                    return gitlab::post_note_with_images(&repo_path, &tail, &body, &s).await;
+                }
+            }
+            _ => {
+                refuse_empty_comment(&body)?;
+                crate::github::lens_remote(lens.as_deref())?;
+                let staged = crate::github::pr::gh_attach_checks(
+                    &repo_path,
+                    &body,
+                    attachments,
+                    as_bot == Some(true),
+                )
+                .await?;
+                return github::comment_pr(&repo_path, number, &body, lens, staged).await;
+            }
+        }
+    }
+    match detected {
         Some((Provider::GitLab, _)) => {
             gitlab::comment_mr(&repo_path, number, &body, as_bot.unwrap_or(false)).await
         }
         Some((Provider::Bitbucket, _)) => bitbucket::comment_pr(&repo_path, number, &body).await,
-        _ => github::comment_pr(&repo_path, number, &body, lens).await,
+        _ => return github::comment_pr(&repo_path, number, &body, lens, None).await,
+    }?;
+    Ok(Default::default())
+}
+
+/// The cores' own empty-body refusal outranks every attachment check after the provider
+/// gate, as it does on a post without attachments. The GitHub arms then check the lens,
+/// the cores' next guard, the same way.
+fn refuse_empty_comment(body: &str) -> AppResult<()> {
+    if body.trim().is_empty() {
+        return Err(AppError::InvalidArgument("a comment is required".into()));
     }
+    Ok(())
+}
+
+/// The provider check on Bitbucket, which refuses every attachment.
+fn attachments_refused_on_bitbucket() -> AppError {
+    use crate::attachments::{attach_gate_verdict, AttachForge, BITBUCKET_REFUSAL};
+    attach_gate_verdict(AttachForge::Bitbucket, None, None, false)
+        .err()
+        .unwrap_or_else(|| AppError::InvalidArgument(BITBUCKET_REFUSAL.into()))
 }
 
 /// The configured GitLab review-bot login, if any (`Some(bot_login)` when a token is
@@ -2892,14 +2942,42 @@ pub async fn forge_issue_comment(
     number: u64,
     body: String,
     lens: Option<String>,
-) -> AppResult<()> {
-    match detect_non_github(&repo_path).await {
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::CommentOutcome> {
+    let detected = detect_non_github(&repo_path).await;
+    let attachments = crate::attachments::normalize(attachments);
+    // Every attachment check runs here, before any arm posts: `attach_gate_verdict`,
+    // then `post_checks` on the staged files.
+    // Bitbucket keeps its issues refusal first, so its arm below answers either way.
+    if attachments.is_some() {
+        match detected {
+            Some((Provider::Bitbucket, _)) => {}
+            Some((Provider::GitLab, _)) => {
+                refuse_empty_comment(&body)?;
+                let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
+                if let Some(s) = staged {
+                    let tail = format!("issues/{number}/notes");
+                    return gitlab::post_note_with_images(&repo_path, &tail, &body, &s).await;
+                }
+            }
+            _ => {
+                refuse_empty_comment(&body)?;
+                crate::github::lens_remote(lens.as_deref())?;
+                let staged =
+                    crate::github::pr::gh_attach_checks(&repo_path, &body, attachments, false)
+                        .await?;
+                return github::comment_issue(&repo_path, number, &body, lens, staged).await;
+            }
+        }
+    }
+    match detected {
         Some((Provider::GitLab, _)) => gitlab::comment_issue(&repo_path, number, &body).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::comment_issue(&repo_path, number, &body, lens).await,
-    }
+        _ => return github::comment_issue(&repo_path, number, &body, lens, None).await,
+    }?;
+    Ok(Default::default())
 }
 
 /// Edit an issue conversation comment's body, behind the abstraction. GitHub edits
@@ -4664,7 +4742,8 @@ pub(crate) async fn forge_publish_repo_core(
 /// GitLab arm injects glab's own one-shot helper (`clone_credential_config`).
 /// GitHub then delegates to `gh pr create`; GitLab POSTs the MR with draft mapped to
 /// the `Draft:` title prefix; Bitbucket POSTs after a duplicate-PR pre-guard (a
-/// duplicate create silently overwrites there). Returns the new number + URL.
+/// duplicate create silently overwrites there). Returns `{number, url,
+/// failedAttachments}`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn forge_pr_create(
@@ -4679,19 +4758,30 @@ pub async fn forge_pr_create(
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
     lens: Option<String>,
-) -> AppResult<crate::github::pr::PrRef> {
-    // Deref the managed `State` and delegate to the core, so non-Tauri callers (the
-    // MCP server) can create a PR with an `AppState` they own.
-    forge_pr_create_core(
-        &state, repo_path, base, head, title, body, draft, reviewers, labels, assignees, lens,
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::PrCreateOutcome> {
+    // Deref the managed `State` and delegate to the dispatch core, which takes a plain
+    // `&AppState` so the MCP server can reach it through `forge_pr_create_core`.
+    forge_pr_create_with_attachments(
+        &state,
+        repo_path,
+        base,
+        head,
+        title,
+        body,
+        draft,
+        reviewers,
+        labels,
+        assignees,
+        lens,
+        attachments,
     )
     .await
 }
 
-/// The provider-dispatch core of [`forge_pr_create`], taking a plain `&AppState`
-/// (not a Tauri-managed `State`) so it is callable off the Tauri runtime — the MCP
-/// server's `create_pull_request` tool routes through it. The `#[tauri::command]`
-/// wrapper above delegates here after dereffing its `State`.
+/// The attachment-free entry to [`forge_pr_create_with_attachments`] for the MCP
+/// server's `create_pull_request` tool, callable off the Tauri runtime. It never
+/// carries attachments, so its `PrRef` return stays the MCP caller's shape.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forge_pr_create_core(
     state: &crate::state::AppState,
@@ -4706,6 +4796,31 @@ pub(crate) async fn forge_pr_create_core(
     assignees: Option<Vec<String>>,
     lens: Option<String>,
 ) -> AppResult<crate::github::pr::PrRef> {
+    forge_pr_create_with_attachments(
+        state, repo_path, base, head, title, body, draft, reviewers, labels, assignees, lens, None,
+    )
+    .await
+    .map(|o| o.pr)
+}
+
+/// The provider-dispatch core of [`forge_pr_create`], taking a plain `&AppState` (not
+/// a Tauri-managed `State`). It runs the provider gate; the GitHub and GitLab cores run
+/// the rest of `attach_gate_verdict` and `post_checks` before their push.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forge_pr_create_with_attachments(
+    state: &crate::state::AppState,
+    repo_path: String,
+    base: String,
+    head: String,
+    title: String,
+    body: String,
+    draft: bool,
+    reviewers: Option<Vec<String>>,
+    labels: Option<Vec<String>>,
+    assignees: Option<Vec<String>>,
+    lens: Option<String>,
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::PrCreateOutcome> {
     // Every arm pushes `head` to origin, so it is refused before any network call. A head
     // failing validation skips the guard and gets its provider's own wording.
     if crate::git::branches::validate_ref_name(&head).is_ok() {
@@ -4745,10 +4860,23 @@ pub(crate) async fn forge_pr_create_core(
             "Labels and assignees aren't supported for Bitbucket pull requests.".into(),
         ));
     }
-    match detected {
+    let attachments = crate::attachments::normalize(attachments);
+    if attachments.is_some() && matches!(detected, Some((Provider::Bitbucket, _))) {
+        return Err(attachments_refused_on_bitbucket());
+    }
+    let pr = match detected {
         Some((Provider::GitLab, _)) => {
             gitlab::create_mr(
-                state, &repo_path, &base, &head, &title, &body, draft, &labels, &assignees,
+                state,
+                &repo_path,
+                &base,
+                &head,
+                &title,
+                &body,
+                draft,
+                &labels,
+                &assignees,
+                attachments,
             )
             .await
         }
@@ -4766,12 +4894,26 @@ pub(crate) async fn forge_pr_create_core(
             .await
         }
         _ => {
-            crate::github::pr::gh_pr_create_core(
-                state, repo_path, base, head, title, body, draft, labels, assignees, lens,
+            return crate::github::pr::gh_pr_create_core(
+                state,
+                repo_path,
+                base,
+                head,
+                title,
+                body,
+                draft,
+                labels,
+                assignees,
+                lens,
+                attachments,
             )
-            .await
+            .await;
         }
-    }
+    }?;
+    Ok(crate::attachments::PrCreateOutcome {
+        pr,
+        failed_attachments: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -4843,6 +4985,79 @@ mod tests {
         let (out, asked) = walk_canned(&[100, 100, 100], Some(2), 10).await;
         assert!(out.is_err(), "a mid-walk failure returns no partial list");
         assert_eq!(asked, [1, 2], "page 3 is never requested");
+    }
+
+    /// An empty comment carrying attachments keeps the cores' own refusal, ahead of
+    /// every attachment check (which would report the missing staged file instead).
+    #[tokio::test]
+    async fn an_empty_comment_with_attachments_is_refused_before_its_checks() {
+        use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+        let refs = || {
+            Some(crate::attachments::AttachmentRefs {
+                session: "0123456789abcdef0123456789abcdef".into(),
+                names: vec!["image-1.png".into()],
+            })
+        };
+        fn required(r: &AppResult<crate::attachments::CommentOutcome>) -> bool {
+            matches!(r, Err(AppError::InvalidArgument(m)) if m == "a comment is required")
+        }
+        for origin in ["https://github.com/o/r.git", "https://gitlab.com/o/r.git"] {
+            let dir = tempfile::Builder::new()
+                .prefix("gd-attach-empty-")
+                .tempdir()
+                .expect("create temp dir");
+            let repo = dir.path().to_string_lossy().into_owned();
+            run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            run_git(
+                Some(&repo),
+                &["remote", "add", "origin", origin],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            let pr = forge_pr_comment(repo.clone(), 1, " \n".into(), None, None, refs()).await;
+            assert!(required(&pr), "{origin} PR comment: {pr:?}");
+            let issue = forge_issue_comment(repo, 1, String::new(), None, refs()).await;
+            assert!(required(&issue), "{origin} issue comment: {issue:?}");
+        }
+    }
+
+    /// An unknown lens keeps its own refusal ahead of every attachment check on GitHub.
+    #[tokio::test]
+    async fn an_unknown_lens_with_attachments_is_refused_before_its_checks() {
+        use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+        let refs = || {
+            Some(crate::attachments::AttachmentRefs {
+                session: "0123456789abcdef0123456789abcdef".into(),
+                names: vec!["image-1.png".into()],
+            })
+        };
+        fn unknown(r: &AppResult<crate::attachments::CommentOutcome>) -> bool {
+            matches!(r, Err(AppError::InvalidArgument(m)) if m == "unknown remote lens: bogus")
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("gd-attach-lens-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &["remote", "add", "origin", "https://github.com/o/r.git"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let body = "![x](image-1.png)".to_string();
+        let lens = || Some("bogus".to_string());
+        let pr = forge_pr_comment(repo.clone(), 1, body.clone(), None, lens(), refs()).await;
+        assert!(unknown(&pr), "PR comment: {pr:?}");
+        let issue = forge_issue_comment(repo, 1, body, lens(), refs()).await;
+        assert!(unknown(&issue), "issue comment: {issue:?}");
     }
 
     /// Runs the walker over full pages on a fake clock that each fetch moves `step`

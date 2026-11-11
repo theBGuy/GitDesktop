@@ -324,8 +324,16 @@ pub async fn comment_pr(
     number: u64,
     body: &str,
     lens: Option<String>,
-) -> AppResult<()> {
-    crate::github::pr::gh_pr_comment(repo_path.to_string(), number, body.to_string(), lens).await
+    staged: Option<crate::attachments::StagedRefs>,
+) -> AppResult<crate::attachments::CommentOutcome> {
+    crate::github::pr::gh_pr_comment(
+        repo_path.to_string(),
+        number,
+        body.to_string(),
+        lens,
+        staged,
+    )
+    .await
 }
 
 /// Edit a conversation comment's body. GitHub's `updateIssueComment` mutation
@@ -555,9 +563,16 @@ pub async fn comment_issue(
     number: u64,
     body: &str,
     lens: Option<String>,
-) -> AppResult<()> {
-    crate::github::issue::gh_issue_comment(repo_path.to_string(), number, body.to_string(), lens)
-        .await
+    staged: Option<crate::attachments::StagedRefs>,
+) -> AppResult<crate::attachments::CommentOutcome> {
+    crate::github::issue::gh_issue_comment(
+        repo_path.to_string(),
+        number,
+        body.to_string(),
+        lens,
+        staged,
+    )
+    .await
 }
 
 pub async fn close_issue(

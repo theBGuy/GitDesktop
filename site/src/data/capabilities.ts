@@ -752,6 +752,11 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
+      "Images in comments — paste a screenshot or attach a file on GitHub & GitLab issue and pull request comments and new pull request descriptions",
+  },
+  {
+    group: "Keyboard & Markdown",
+    label:
       "Reference autolinks — #123, @user, and GitLab's !123 open the issue, pull request, or profile they name",
   },
   {

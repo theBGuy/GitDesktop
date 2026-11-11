@@ -2554,6 +2554,12 @@ export const GH_EXIT_ABSENCE_ALLOWLIST = [
     rationale:
       "None is a shape failure the caller reads as unknown; hop 1 already proved membership",
   },
+  {
+    file: "github/pr.rs",
+    fn: "gh_version_line",
+    rationale:
+      "fail-safe by contract: None reads as an unreadable version, which closes the attachment gate with its reason",
+  },
 ];
 
 /** Values a failed read must not answer with: no star, no rows, a default. */

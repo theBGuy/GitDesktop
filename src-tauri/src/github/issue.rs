@@ -785,19 +785,30 @@ pub async fn gh_issue_comment(
     number: u64,
     body: String,
     lens: Option<String>,
-) -> AppResult<()> {
+    staged: Option<crate::attachments::StagedRefs>,
+) -> AppResult<crate::attachments::CommentOutcome> {
+    use crate::github::pr::{
+        attach_failed_after, attach_tail, last_url_line, run_gh_maybe_attached, Readback,
+    };
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
-        Some(&repo_path),
-        &["issue", "comment", &n, "--repo", &slug, "--body", &body],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
-    Ok(())
+    let mut args = vec!["issue", "comment", &n, "--repo", &slug, "--body", &body];
+    if let Some(s) = &staged {
+        args.extend(attach_tail(&s.names));
+    }
+    let out = run_gh_maybe_attached(&repo_path, &slug, &args, staged.as_ref()).await?;
+    let Some(s) = &staged else {
+        return Ok(Default::default());
+    };
+    let url = last_url_line(&out.stdout_lossy()).to_string();
+    let failed = attach_failed_after(&repo_path, &slug, &out, s, Readback::Comment(&url)).await;
+    crate::attachments::release_posted(s, &failed).await;
+    Ok(crate::attachments::CommentOutcome {
+        failed_attachments: failed,
+    })
 }
 
 /// Closes an issue. `reason` is "completed" or "not_planned" (GitHub's two

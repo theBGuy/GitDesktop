@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -311,7 +312,22 @@ export function Thread({
             (renderBody ? (
               renderBody(thread.body)
             ) : (
-              <Markdown refs={mentions?.refs}>{thread.body}</Markdown>
+              <Markdown
+                refs={mentions?.refs}
+                hostedImages={hostedImagesFor(
+                  mentions?.refs?.repoPath,
+                  mentions?.ghHost,
+                )}
+                // Only the optimistic row of a post carries its token, so no
+                // other body can reach the user's local images.
+                stagedImages={
+                  thread.postToken === undefined
+                    ? undefined
+                    : { postToken: thread.postToken }
+                }
+              >
+                {thread.body}
+              </Markdown>
             ))}
         </>
       )}

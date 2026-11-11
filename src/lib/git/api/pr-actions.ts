@@ -1,6 +1,8 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
   ApprovalState,
+  AttachmentRefs,
+  CommentOutcome,
   ForgeUserList,
   GitLabMrMergeState,
   PrTask,
@@ -28,13 +30,15 @@ export const forgePrComment = (
   body: string,
   asBot: boolean | undefined,
   lens: RemoteLens,
+  attachments?: AttachmentRefs,
 ) =>
-  invoke<void>("forge_pr_comment", {
+  invoke<CommentOutcome>("forge_pr_comment", {
     repoPath,
     number,
     body,
     asBot: asBot ?? null,
     lens,
+    attachments: attachments ?? null,
   });
 
 // MR approve/unapprove and request-changes are GitLab + Bitbucket controls (GitHub

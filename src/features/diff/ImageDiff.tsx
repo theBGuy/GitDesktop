@@ -1,10 +1,7 @@
 import { type ReactNode, useState } from "react";
+import { ImageLightbox, type LightboxImage } from "@/components/image-lightbox";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
-import {
-  ImageLightbox,
-  type LightboxImage,
-} from "@/components/ui/image-lightbox";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { formatBytes } from "@/lib/format-bytes";
 import type { FileBytes } from "@/lib/git/api";

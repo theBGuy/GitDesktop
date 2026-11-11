@@ -1,4 +1,9 @@
-import { CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
+import {
+  CaretDownIcon,
+  CaretRightIcon,
+  LockIcon,
+  WarningIcon,
+} from "@phosphor-icons/react";
 import type { ReactNode, Ref } from "react";
 import { useId, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -6,6 +11,9 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
+import { partialCommentNotice } from "@/lib/attachments/comment-post";
+import { ATTACHING_REASON } from "@/lib/attachments/references";
+import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
@@ -60,6 +68,7 @@ export function CommentComposer({
   toastClearance,
   readOnlyReason,
   holdKey,
+  attachments,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). Both methods expand a collapsed box first. */
@@ -99,6 +108,9 @@ export function CommentComposer({
   /** The entity `readOnlyReason` is read for. The hold hands focus from the
    *  editor to the held submit only when it engages on the same entity. */
   holdKey?: string;
+  /** Opt in to image attachments. Forwarded only while expanded, under this
+   *  box's own hold, so a collapsed or held box offers no attach route. */
+  attachments?: DraftAttachmentsHandle;
 }) {
   const hasDraft = value.trim().length > 0;
   // Only the `busy` and read-only holds get words: an empty draft explains
@@ -106,7 +118,13 @@ export function CommentComposer({
   // hasn't typed yet.
   const readOnly = readOnlyReason != null;
   const blockedReason = readOnlyReason ?? (busy ? (reason ?? null) : null);
+  // Submit alone waits for a stage in flight: typing, Clear and further
+  // attaches stay live.
+  const attachHold = attachments?.attaching ? ATTACHING_REASON : null;
   const showClear = !!onClear && hasDraft;
+  const failedNotice = attachments?.notice
+    ? partialCommentNotice(attachments.notice.failed)
+    : null;
   const editorId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<MarkdownEditorHandle>(null);
@@ -312,6 +330,32 @@ export function CommentComposer({
           editorOwnsFocusRef.current = false;
         }}
       >
+        {/* Not a live region: the held submit already announces this reason. */}
+        {readOnlyReason != null && !collapsed && (
+          <p className="mb-2 flex items-start gap-1.5 text-muted-foreground text-xs">
+            <LockIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+            <span>
+              <span className="font-medium text-foreground">
+                {readOnlyReason}
+              </span>
+              {showClear && " Your draft is kept; Clear discards it."}
+            </span>
+          </p>
+        )}
+        {/* The strip's words reach assistive tech through the always-mounted
+            region below: a live region inserted with its text is often not
+            announced. */}
+        {failedNotice && (
+          <p aria-hidden className="mb-2 flex items-start gap-1.5 text-xs">
+            <WarningIcon className="mt-px size-3.5 shrink-0 text-warning" />
+            <span>{failedNotice}</span>
+          </p>
+        )}
+        {attachments && (
+          <span aria-live="polite" className="sr-only">
+            {failedNotice}
+          </span>
+        )}
         <MarkdownEditor
           ref={editorRef}
           aria-label={ariaLabel}
@@ -324,12 +368,17 @@ export function CommentComposer({
               // fires inside editable targets, so a chord this handler declines to
               // submit would otherwise reach the global action.
               e.preventDefault();
-              if (hasDraft && !busy && !readOnly) onSubmit();
+              if (!hasDraft || busy || readOnly) return;
+              if (attachHold !== null) attachments?.noteSubmitHeld();
+              else onSubmit();
             }
           }}
           rows={2}
           disabled={disabled || readOnly}
           mentions={mentions}
+          attachments={
+            collapsed ? undefined : attachments?.withHold(blockedReason)
+          }
           textareaClassName="max-h-32 min-h-12 resize-y"
         />
       </div>
@@ -382,8 +431,8 @@ export function CommentComposer({
             ref={submitRef}
             variant="outline"
             size="sm"
-            disabled={!hasDraft || busy || readOnly}
-            reason={blockedReason}
+            disabled={!hasDraft || busy || readOnly || attachHold !== null}
+            reason={blockedReason ?? attachHold}
             onClick={onSubmit}
             title={SUBMIT_HINT}
           >

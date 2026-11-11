@@ -43,6 +43,23 @@ import { keptLocalPrReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
+import { partialCreateWarning } from "@/lib/attachments/comment-post";
+import {
+  ATTACHING_REASON,
+  failedAttachmentsOf,
+  uploadingReason,
+} from "@/lib/attachments/references";
+import {
+  beginAttachmentPost,
+  draftKeyFor,
+  endDraftAttachments,
+  settleAttachmentPost,
+} from "@/lib/attachments/store";
+import { useAttachmentSupport } from "@/lib/attachments/use-attachment-support";
+import {
+  useAttachmentOwner,
+  useDraftAttachments,
+} from "@/lib/attachments/use-draft-attachments";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
@@ -57,6 +74,7 @@ import {
   useRemotes,
   useRepoLabels,
   useRepoStatus,
+  useRepoWriteAccess,
 } from "@/lib/git/queries";
 import {
   type ForgeUserRef,
@@ -186,6 +204,9 @@ export function duplicateOf(
   );
 }
 
+/** Which panel hosts a dialog instance; both can be mounted at once. */
+export type CreatePrHost = "compare" | "pull-requests";
+
 /** An opener's fixed target and base, applied on every open (a kept draft
  *  included, which keeps only its other fields). */
 export interface CreatePrPreset {
@@ -206,6 +227,7 @@ export function CreatePrDialog({
   preset,
   open,
   onOpenChange,
+  host,
 }: {
   repoPath: string;
   /** Seeds the base ("into") branch; defaults to the repo's default branch. */
@@ -215,6 +237,9 @@ export function CreatePrDialog({
   preset?: CreatePrPreset;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** A new mount ends the staged images an earlier instance of this same host
+   *  left behind (its draft text went with it), never the other host's. */
+  host: CreatePrHost;
 }) {
   const status = useRepoStatus(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
@@ -324,6 +349,8 @@ export function CreatePrDialog({
   const reviewersGroupId = useId();
   const assigneesGroupId = useId();
   const titleId = useId();
+  // Per instance: two hosts mount this dialog, each holding its own form.
+  const attachDraftKey = draftKeyFor("pr-create", useId());
   // Labels come from whichever repo the PR targets (parent's own labels when
   // creating upstream). The picker is hidden on the parent path anyway, but the
   // AI-description prompt still reads this list, so keep it lens-correct.
@@ -360,6 +387,9 @@ export function CreatePrDialog({
   // Counts drafts, not opens: bumped only where the seed actually resets the
   // form, so a reopen that skips the seed keeps the number its submit captured.
   const seedGenRef = useRef(0);
+  // Mirrors the failed-create latch this mount set for its own draft: set with
+  // it, cleared wherever this mount spends it. A reopen keeps that draft.
+  const createFailedRef = useRef(false);
 
   const currentName = status.data?.branch?.name ?? null;
   // Branch options with per-branch worktree chips; drops the app-internal
@@ -534,38 +564,60 @@ export function CreatePrDialog({
           canJiraMention && jiraChips.length > 0
             ? composeBodyWithJiraRefs(value.body, jiraChips)
             : composeBodyWithRefs(value.body, linkedIssues);
-        const { number, url } = await createPr.mutateAsync({
-          base: value.base,
-          // Head stays a bare LOCAL branch name either way: the backend pushes it
-          // to origin and composes the `owner:branch` head ref itself on the
-          // upstream path. Org-owned forks aren't supported by `gh pr create`
-          // ("Using an organization as the <user> is currently not supported",
-          // cli/cli#10093) — we don't pre-gate; gh's own error surfaces via
-          // toastError below.
-          head: value.head,
-          title: value.title.trim(),
-          body: finalBody,
-          draft: value.draft,
-          // Targets the fork ("origin") or its parent ("upstream"); the parent path
-          // rejects reviewers/labels/assignees backend-side, so those keys are
-          // omitted there.
-          lens: createLens,
-          // Bitbucket-only; omit the key otherwise (GitHub/GitLab byte-identical).
-          // An empty selection also omits it, preserving server-side default reviewers.
-          ...(canPickReviewers && reviewers.length > 0
-            ? { reviewers: reviewers.map((r) => r.id) }
-            : {}),
-          // GitHub/GitLab only; omit the key (and for empty selections) so the
-          // backend leaves create behavior untouched. The displayed chips, not
-          // the raw selection: a name the target doesn't carry fails the
-          // forge's whole post-create label edit.
-          ...(canPickLabels && selectedChips.length > 0
-            ? { labels: selectedChips.map((l) => l.name) }
-            : {}),
-          ...(canPickAssignees && assignees.length > 0
-            ? { assignees: assignees.map((a) => a.id) }
-            : {}),
-        });
+        // Begun after every early return, so a refusal leaves the chips as they were.
+        const ticket = beginAttachmentPost(attachDraftKey, finalBody, false);
+        let createdRef: Awaited<ReturnType<typeof createPr.mutateAsync>>;
+        try {
+          createdRef = await createPr.mutateAsync({
+            base: value.base,
+            // Head stays a bare LOCAL branch name either way: the backend pushes it
+            // to origin and composes the `owner:branch` head ref itself on the
+            // upstream path. Org-owned forks aren't supported by `gh pr create`
+            // ("Using an organization as the <user> is currently not supported",
+            // cli/cli#10093) — we don't pre-gate; gh's own error surfaces via
+            // toastError below.
+            head: value.head,
+            title: value.title.trim(),
+            body: finalBody,
+            draft: value.draft,
+            // Targets the fork ("origin") or its parent ("upstream"); the parent path
+            // rejects reviewers/labels/assignees backend-side, so those keys are
+            // omitted there.
+            lens: createLens,
+            // Bitbucket-only; omit the key otherwise (GitHub/GitLab byte-identical).
+            // An empty selection also omits it, preserving server-side default reviewers.
+            ...(canPickReviewers && reviewers.length > 0
+              ? { reviewers: reviewers.map((r) => r.id) }
+              : {}),
+            // GitHub/GitLab only; omit the key (and for empty selections) so the
+            // backend leaves create behavior untouched. The displayed chips, not
+            // the raw selection: a name the target doesn't carry fails the
+            // forge's whole post-create label edit.
+            ...(canPickLabels && selectedChips.length > 0
+              ? { labels: selectedChips.map((l) => l.name) }
+              : {}),
+            ...(canPickAssignees && assignees.length > 0
+              ? { assignees: assignees.map((a) => a.id) }
+              : {}),
+            ...(ticket ? { attachments: ticket.refs } : {}),
+          });
+        } catch (e) {
+          // Rust keeps every staged file on any Err, so the chips still hold.
+          if (ticket)
+            settleAttachmentPost(ticket, { posted: false, failed: [] });
+          throw e;
+        }
+        const { number, url } = createdRef;
+        const failedImages = failedAttachmentsOf(createdRef);
+        // Failed images can't follow the PR: the toast names the one image, or
+        // counts several, and the whole session goes with the draft.
+        if (ticket)
+          settleAttachmentPost(ticket, {
+            posted: true,
+            failed: failedImages,
+            discardFailed: true,
+          });
+        else endDraftAttachments(attachDraftKey);
         outcome = "success";
         created = { number, url };
         // Flip here, arm in the `finally`: the lane outlives the forge's answer,
@@ -641,10 +693,13 @@ export function CreatePrDialog({
         const where = targetSlug
           ? ` in ${targetSlug}`
           : landedIn(repoPath).away;
-        toast.success(`Opened ${prNoun} #${number}${where}`, {
+        const createdToast = {
           description: url,
           action: { label: "View", onClick: () => openUrl(url) },
-        });
+        };
+        if (failedImages.length > 0)
+          toast.warning(partialCreateWarning(failedImages), createdToast);
+        else toast.success(`Opened ${prNoun} #${number}${where}`, createdToast);
         // Close only: under <Activity>, setRepoTab/selectPr here would defer the close and
         // unmount until the panel is next shown (hoist navigation to RepositoryView, like
         // CreateLocalPrDialog). `open` is one host state across repos, so stillHere() and
@@ -715,6 +770,7 @@ export function CreatePrDialog({
           const draftAlive =
             draftRepoRef.current === repoPath &&
             form.state.values.head === value.head;
+          if (draftAlive) createFailedRef.current = true;
           settlePrCreate(
             repoPath,
             value.head,
@@ -766,6 +822,10 @@ export function CreatePrDialog({
     // What the form is holding, which is what the retire below is keyed on. On
     // a fresh mount the form holds its defaults, so this is just `h`.
     const retained = form.state.values.head || h;
+    const spendFailedLatch = (repo: string) => {
+      createFailedRef.current = false;
+      return consumeLastFailed(repo, retained);
+    };
     // A generation still streaming — or one that settled while the dialog was
     // closed — and a create still RUNNING in the background, or one that failed
     // while closed, all leave everything the user typed in form state, and this
@@ -786,7 +846,7 @@ export function CreatePrDialog({
         surface.shouldSkipSeed(generating) ||
         (draftRepoRef.current === repoPath &&
           (prCreatePhase(repoPath, retained) === "creating" ||
-            consumeLastFailed(repoPath, retained)))
+            spendFailedLatch(repoPath)))
       ) {
         // A kept draft still takes the opener's target and base, which its
         // label promised, as a fresh open seeds them; everything else stays the
@@ -813,7 +873,7 @@ export function CreatePrDialog({
     // Compare tab's mount keeps its own waiting latch, which holds while its
     // head differs from this one; on a shared head the two are one key and this
     // spends it, as they always have.
-    consumeLastFailed(draftRepoRef.current ?? repoPath, retained);
+    spendFailedLatch(draftRepoRef.current ?? repoPath);
     seededRef.current = true;
     draftRepoRef.current = repoPath;
     seedGenRef.current += 1;
@@ -838,6 +898,7 @@ export function CreatePrDialog({
       defaultBranch.data && defaultBranch.data !== h
         ? defaultBranch.data
         : (names.find((n) => n !== h) ?? "");
+    endDraftAttachments(attachDraftKey);
     form.reset(
       {
         head: h,
@@ -862,6 +923,25 @@ export function CreatePrDialog({
   });
   useSeedOnOpen(open, seedOnOpen);
 
+  // A close whose draft the next open's seed will reset ends its staged images
+  // now. Each draft that seed keeps holds them: a generation running (it latches
+  // when it settles), a create in flight, or this mount's failed create. Edge
+  // only, so an `<Activity>` re-show's replay ends nothing.
+  const wasOpenRef = useRef(open);
+  const endDiscardedAttachments = useEffectEvent(() => {
+    if (generating || form.state.isSubmitting || createFailedRef.current)
+      return;
+    const head = form.state.values.head;
+    const repo = draftRepoRef.current ?? repoPath;
+    if (head !== "" && prCreatePhase(repo, head) === "creating") return;
+    endDraftAttachments(attachDraftKey);
+  });
+  useEffect(() => {
+    const closed = wasOpenRef.current && !open;
+    wasOpenRef.current = open;
+    if (closed) endDiscardedAttachments();
+  }, [open]);
+
   // Live head/base drive the "N commits" hint, AI generation, and submit gate.
   const head = useSelector(form.store, (s) => s.values.head);
   const base = useSelector(form.store, (s) => s.values.base);
@@ -870,6 +950,37 @@ export function CreatePrDialog({
   const notes = useSelector(form.store, (s) => s.values.notes);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const shownSubmitting = useRetained(isSubmitting, open);
+  const attachOwner = useAttachmentOwner("pr-create", true, host);
+  const createAccess = useRepoWriteAccess(repoPath, createLens, open);
+  const attachGate = useAttachmentSupport({
+    forge: forge.data,
+    access: createAccess.data,
+    enabled: open,
+  });
+  const draftAttachments = useDraftAttachments({
+    draftKey: attachDraftKey,
+    owner: attachOwner,
+    gateReason: attachGate,
+    holdReason: null,
+    writeDraft: (_key, update) =>
+      form.setFieldValue("body", (prev) => update(prev)),
+  });
+  // Generate rewrites the body and a running create already sent it, so both
+  // hold Attach and chip Remove.
+  const descAttachments = draftAttachments.withHold(
+    (() => {
+      switch (true) {
+        case generating:
+          return AI_DRAFT_PENDING_REASON;
+        case shownSubmitting:
+          return draftAttachments.posting > 0
+            ? uploadingReason(draftAttachments.posting, "creating")
+            : ACT_PENDING_REASON;
+        default:
+          return null;
+      }
+    })(),
+  );
   // Released with the retained flag: a successful create closes the dialog
   // before form-core clears isSubmitting, and the fade keeps the submitted pair.
   if (!shownSubmitting && submittedGate !== null) setSubmittedGate(null);
@@ -989,12 +1100,17 @@ export function CreatePrDialog({
     isSubmitting ||
     creatingElsewhere ||
     Boolean(existingPr) ||
-    !!offlineHold;
+    !!offlineHold ||
+    draftAttachments.attaching;
   const shownSubmitBlocked = useRetained(submitBlocked, open);
-  // The running draft, the running create, and offline carry a reason, ranked
-  // running-first, so a flip between them never drops focus. The lane hint, the
-  // duplicate notice, nothing-to-merge and the base-branch load stay plain
-  // disables: each explains itself in the dialog.
+  // Holds no reason sentence outranks: each explains itself in the dialog.
+  const plainHold =
+    nothingToMerge || baseLoading || creatingElsewhere || Boolean(existingPr);
+  // The running draft, the running create, an image still attaching, and
+  // offline carry a reason, ranked in that order, so a flip between them never
+  // drops focus. The attaching reason shows only while no plain disable (the
+  // lane hint, the duplicate notice, nothing-to-merge, the base-branch load) is
+  // on, so its settle never takes the reason from a still-held button.
   const offlineSubmit = useDisabledReason({
     disabled: shownSubmitBlocked,
     reason: (() => {
@@ -1005,6 +1121,8 @@ export function CreatePrDialog({
           return AI_DRAFT_PENDING_REASON;
         case shownSubmitting:
           return ACT_PENDING_REASON;
+        case draftAttachments.attaching && !plainHold:
+          return ATTACHING_REASON;
         default:
           return offlineHold;
       }
@@ -1184,6 +1302,7 @@ export function CreatePrDialog({
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
             if (open && !submitBlocked) form.handleSubmit();
+            else if (open) draftAttachments.noteSubmitHeld();
             return;
           }
           // The generate chord runs this dialog's own Generate while it's open.
@@ -1202,8 +1321,8 @@ export function CreatePrDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!open || submitBlocked) return;
-            form.handleSubmit();
+            if (open && !submitBlocked) form.handleSubmit();
+            else if (open) draftAttachments.noteSubmitHeld();
           }}
         >
           <DialogHeader>
@@ -1515,6 +1634,7 @@ export function CreatePrDialog({
                 <field.MarkdownField
                   label="Description"
                   placeholder="Describe what changed and why"
+                  attachments={descAttachments}
                   rows={7}
                   textareaClassName="ph-no-capture max-h-72 min-h-24 resize-y font-mono"
                   actions={

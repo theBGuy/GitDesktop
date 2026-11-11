@@ -242,7 +242,7 @@ fn validate_url(url: &Url) -> AppResult<FetchTarget> {
 /// DNS-rebinding TOCTOU between this check and that connection remains open. Tolerable
 /// for a hover preview in a desktop app, where the attacker already needs the user to
 /// hover a link they control.
-async fn guard_hop(url: &Url) -> AppResult<()> {
+pub(crate) async fn guard_hop(url: &Url) -> AppResult<()> {
     let (host, port) = match validate_url(url)? {
         FetchTarget::Literal => return Ok(()),
         FetchTarget::Resolve { host, port } => (host, port),
@@ -276,7 +276,7 @@ async fn guard_hop(url: &Url) -> AppResult<()> {
 /// for a terminal status, `Ok(Some(next))` for the hop to take, `Err` past the cap or
 /// on an unusable `Location`. Pure, so hop counting and `Location` resolution are
 /// testable without a server.
-fn next_hop(
+pub(crate) fn next_hop(
     current: &Url,
     status: u16,
     location: Option<&str>,
@@ -340,7 +340,7 @@ impl CappedBody {
 
 /// Read at most `cap` bytes of the body, chunk by chunk — `.text()` on an
 /// attacker-chosen response would be unbounded.
-async fn read_body_capped(mut resp: Response, cap: usize) -> AppResult<(Vec<u8>, bool)> {
+pub(crate) async fn read_body_capped(mut resp: Response, cap: usize) -> AppResult<(Vec<u8>, bool)> {
     let mut body = CappedBody::new(cap);
     while let Some(chunk) = resp
         .chunk()

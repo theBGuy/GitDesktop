@@ -92,3 +92,109 @@ test("an order claim ignores the epoch, retires older claims and falls to newer 
   claims.claim();
   assert.equal(p(), false);
 });
+
+test("of two reservations the later one wins, whichever claims first", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const a = claims.reserve();
+  const b = claims.reserve();
+  const aCheck = a();
+  assert.equal(aCheck(), true);
+  const bCheck = b();
+  assert.equal(bCheck(), true);
+  assert.equal(aCheck(), false);
+
+  const c = claims.reserve();
+  const d = claims.reserve();
+  const dCheck = d();
+  assert.equal(dCheck(), true);
+  assert.equal(c(), null);
+  assert.equal(dCheck(), true);
+});
+
+test("a reservation never claimed leaves an earlier claim standing", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const a = claims.claim();
+  claims.reserve();
+  assert.equal(a(), true);
+  // Nor does it fail a watermark taken before it.
+  const w = claims.watermark();
+  claims.reserve();
+  assert.equal(w(), true);
+});
+
+test("a claim made after a reservation beats it", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const r = claims.reserve();
+  const b = claims.claim();
+  assert.equal(r(), null);
+  assert.equal(b(), true);
+});
+
+test("a reservation made after a claim beats it once it claims", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const a = claims.claim();
+  const r = claims.reserve();
+  assert.equal(a(), true);
+  const rCheck = r();
+  assert.equal(rCheck(), true);
+  assert.equal(a(), false);
+});
+
+test("an epoch move since a reservation fails it", () => {
+  let epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const r = claims.reserve();
+  epoch++;
+  assert.equal(r(), null);
+
+  const s = claims.reserve();
+  const sCheck = s();
+  assert.equal(sCheck(), true);
+  epoch++;
+  assert.equal(sCheck(), false);
+});
+
+test("a reservation claiming after a watermark fails the watermark", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const r = claims.reserve();
+  const w = claims.watermark();
+  assert.equal(w(), true);
+  r();
+  assert.equal(w(), false);
+});
+
+test("an order claim made after a reservation beats it", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const r = claims.reserve();
+  const o = claims.claimOrder();
+  assert.equal(r(), null);
+  assert.equal(o(), true);
+});
+
+test("a reservation made after an order claim beats it once it claims", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const o = claims.claimOrder();
+  const r = claims.reserve();
+  assert.equal(o(), true);
+  r();
+  assert.equal(o(), false);
+});
+
+test("claiming one reservation twice keeps both checks and retires nothing more", () => {
+  const epoch = 0;
+  const claims = createOpenClaims(() => epoch);
+  const r = claims.reserve();
+  const first = r();
+  const w = claims.watermark();
+  const second = r();
+  assert.equal(first(), true);
+  assert.equal(second(), true);
+  assert.equal(w(), true);
+});

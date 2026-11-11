@@ -443,7 +443,8 @@ in one click.
   and hands over to the real row once the list catches up. A locked
   conversation shows a **locked** badge, and when GitHub or GitLab refuses a
   comment, the comment box, reactions, and AI-review posting turn read-only
-  and say why (on an archived GitHub pull request, your draft is kept).
+  and say why, with the reason on its own line above the open comment box
+  (on an archived GitHub pull request, your draft is kept).
 - **Check out to review**: Checkout switches to the request's branch, and
   **Check out in a worktree…** opens it in its own folder without touching
   your branch or uncommitted files (see [Worktree manager](#branches)).
@@ -1291,6 +1292,18 @@ review via its subscription login. The full list is under
   pick from recent issues and pull requests, open and closed, each marked
   with its state; arrow keys and Enter accept. GitLab adds `!` for merge
   requests; each forge offers only the references it links.
+- **Images in comments**: on GitHub and GitLab, paste a screenshot or use
+  **Attach image** in an issue or pull request comment box or a new pull
+  request's description. PNG, JPEG, GIF and WebP (10 MB and 40 megapixels
+  each, 10 per draft) show as chips with a thumbnail and render in Preview;
+  nothing uploads until you post. Needs GitHub CLI 2.99+ on GitHub.com or
+  Enterprise Cloud with write access, or GitLab CLI 1.91+; without those,
+  and on Bitbucket, the button stays disabled and says why. With some GitHub
+  CLI sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the
+  app says so when you post. On GitHub.com and Enterprise Cloud, attached
+  images that GitHub hosts at its `user-attachments` links load in
+  descriptions, comments, review threads, discussions and release notes
+  through your GitHub CLI sign-in, so they show in private repositories too.
 - **References are links**: `#123` and `@user` in a rendered description,
   comment, review thread, AI review, or release note open what they name. On
   GitHub, `#123` opens that issue or pull request in the app, whichever it

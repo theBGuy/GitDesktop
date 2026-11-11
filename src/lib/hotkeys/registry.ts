@@ -1417,6 +1417,15 @@ export const ACTIONS = [
     category: "Repository",
     defaultBinding: null,
   },
+  {
+    id: "attach-image",
+    label: "Attach image",
+    category: "Navigation",
+    // Palette-only by default: it applies only to the issue comment box, the
+    // pull request comment box and the Create pull request description, so it
+    // ships without spending a chord. Users can bind a key.
+    defaultBinding: null,
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];

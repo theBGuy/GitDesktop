@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::attachments::{
+    attach_timeout, AttachForge, AttachmentRefs, CommentOutcome, PrCreateOutcome, StagedRefs,
+};
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
 use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
@@ -18,7 +21,8 @@ use crate::github::repo_meta::{
     invalidate_all_repo_meta_after, invalidate_repo_meta_after, write_was_attempted,
 };
 use crate::github::runner::{
-    gh_auth_epoch_counter, run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+    gh_auth_epoch_counter, gh_output_ok, run_gh, run_gh_input, run_gh_raw, run_gh_raw_in_dir,
+    GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 use crate::github::{gh_failure_reason, gh_unreadable};
 use crate::state::AppState;
@@ -1022,20 +1026,29 @@ pub async fn gh_pr_comment(
     number: u64,
     body: String,
     lens: Option<String>,
-) -> AppResult<()> {
+    staged: Option<StagedRefs>,
+) -> AppResult<CommentOutcome> {
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
-        Some(&repo_path),
-        &["pr", "comment", &n, "--body", &body, "--repo", &slug],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await
-    .map_err(classify_gh_comment_refusal)?;
-    Ok(())
+    let mut args = vec!["pr", "comment", &n, "--body", &body, "--repo", &slug];
+    if let Some(s) = &staged {
+        args.extend(attach_tail(&s.names));
+    }
+    let out = run_gh_maybe_attached(&repo_path, &slug, &args, staged.as_ref())
+        .await
+        .map_err(classify_gh_comment_refusal)?;
+    let Some(s) = &staged else {
+        return Ok(CommentOutcome::default());
+    };
+    let url = last_url_line(&out.stdout_lossy()).to_string();
+    let failed = attach_failed_after(&repo_path, &slug, &out, s, Readback::Comment(&url)).await;
+    crate::attachments::release_posted(s, &failed).await;
+    Ok(CommentOutcome {
+        failed_attachments: failed,
+    })
 }
 
 /// The app's copy for GitHub refusing a comment on an ARCHIVED pull request. The
@@ -1054,6 +1067,431 @@ fn classify_gh_comment_refusal(e: AppError) -> AppError {
             AppError::Gh(GH_PR_ARCHIVED_READONLY.to_string())
         }
         other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Image attachments (`gh --attach`), shared by issue comments, PR comments and create
+// ---------------------------------------------------------------------------
+
+/// `gh --version` read as the health probe reads it, or `None` when the probe fails
+/// for any reason.
+async fn gh_version_line() -> Option<String> {
+    let out = run_gh_raw(None, &["--version"], GH_TIMEOUT).await.ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    crate::attachments::version_line(&out.stdout_lossy(), &out.stderr)
+}
+
+/// Every attachment check for a GitHub post. `None` (or no names) skips them all. The
+/// host is the one gh is pinned to for this repo, so an SSH alias gh serves on
+/// github.com passes; gh's own GHES refusal stays the backstop.
+pub(crate) async fn gh_attach_checks(
+    repo_path: &str,
+    body: &str,
+    refs: Option<AttachmentRefs>,
+    as_bot: bool,
+) -> AppResult<Option<StagedRefs>> {
+    let Some(refs) = crate::attachments::normalize(refs) else {
+        return Ok(None);
+    };
+    let host = crate::github::runner::gh_host_for_repo(repo_path).await;
+    let version = gh_version_line().await;
+    crate::attachments::attach_gate_verdict(
+        AttachForge::GitHub,
+        host.as_deref(),
+        version.as_deref(),
+        as_bot,
+    )?;
+    crate::attachments::checked_refs(body, refs).await
+}
+
+/// `--attach NAME` pairs, in `names` order.
+pub(crate) fn attach_tail(names: &[String]) -> Vec<&str> {
+    names
+        .iter()
+        .flat_map(|n| ["--attach", n.as_str()])
+        .collect()
+}
+
+/// The last stdout line that starts with `http` (gh prints the created item's URL
+/// last), or "".
+pub(crate) fn last_url_line(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with("http"))
+        .unwrap_or_default()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GhAttachRun {
+    Posted,
+    Partial,
+    Failed,
+}
+
+/// gh stops at the first failed upload but still posts, so a non-zero exit with the
+/// item's URL on stdout is a partial success, never a failure to report as one.
+/// gh uploads first, returns before printing when the write fails, and prints the URL
+/// only once the comment or PR exists (v2.99.0, v2.103.3: pkg/cmd/pr/shared/commentable.go
+/// `createComment`, pkg/cmd/pr/create/create.go `submitPR`).
+pub(crate) fn classify_gh_attach_run(code: i32, stdout: &str) -> GhAttachRun {
+    if code == 0 {
+        GhAttachRun::Posted
+    } else if !last_url_line(stdout).is_empty() {
+        GhAttachRun::Partial
+    } else {
+        GhAttachRun::Failed
+    }
+}
+
+/// `staged` None runs plain `run_gh`. With attachments gh runs in the session folder
+/// (the body's relative names resolve there); Ok means gh exited and either printed the
+/// item URL or exited 0, with stdout kept. An Err from a timeout or a failed process
+/// run can follow a post that landed.
+pub(crate) async fn run_gh_maybe_attached(
+    repo_path: &str,
+    slug: &str,
+    args: &[&str],
+    staged: Option<&StagedRefs>,
+) -> AppResult<GhOutput> {
+    let Some(s) = staged else {
+        return run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT).await;
+    };
+    if !s.dir.is_dir() {
+        return Err(crate::attachments::no_longer_attached(&s.names[0]));
+    }
+    let out = match run_gh_raw_in_dir(repo_path, &s.dir, args, attach_timeout(s.names.len())).await
+    {
+        // A session folder removed after that check fails the spawn: unix reports it as
+        // a missing gh (NotFound), Windows as an Io error (ERROR_DIRECTORY). A Timeout is
+        // never relabelled, since gh may already have posted.
+        Err(AppError::GhNotFound | AppError::Io(_)) if !s.dir.is_dir() => {
+            return Err(crate::attachments::no_longer_attached(&s.names[0]));
+        }
+        other => other?,
+    };
+    match classify_gh_attach_run(out.code, &out.stdout_lossy()) {
+        GhAttachRun::Failed => Err(gh_attach_failure(out, slug)),
+        GhAttachRun::Posted | GhAttachRun::Partial => Ok(out),
+    }
+}
+
+/// Where a partial post's body is read back from.
+pub(crate) enum Readback<'a> {
+    /// A conversation comment, by the URL gh printed.
+    Comment(&'a str),
+    /// A pull request, by number.
+    Pull(u64),
+}
+
+/// The digits after `#issuecomment-` to the end of the URL.
+pub(crate) fn comment_id_from_url(url: &str) -> Option<&str> {
+    let (_, id) = url.split_once("#issuecomment-")?;
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+}
+
+/// `None` for an empty slug, one gh would expand as a `{}` placeholder, an unreadable
+/// comment URL, or PR number 0.
+pub(crate) fn readback_endpoint(slug: &str, readback: Readback) -> Option<String> {
+    if slug.is_empty() || slug.contains(['{', '}']) {
+        return None;
+    }
+    match readback {
+        Readback::Comment(url) => {
+            comment_id_from_url(url).map(|id| format!("repos/{slug}/issues/comments/{id}"))
+        }
+        Readback::Pull(0) => None,
+        Readback::Pull(number) => Some(format!("repos/{slug}/pulls/{number}")),
+    }
+}
+
+/// The names whose reference is still in the posted body, in order.
+fn failed_from_body(body: &str, names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| crate::attachments::references(body, n))
+        .cloned()
+        .collect()
+}
+
+/// gh stops at the first failed upload, so the name its stderr reports and every
+/// later one failed. The path sits after the first `upload ` up to the first `: `; no
+/// marker, or no passed name there, counts every name as failed.
+fn failed_from_stderr(stderr: &str, names: &[String]) -> Vec<String> {
+    let Some(at) = stderr.find("upload ") else {
+        return names.to_vec();
+    };
+    let rest = &stderr[at + "upload ".len()..];
+    let path = rest.split_once(": ").map_or(rest, |(p, _)| p);
+    let last = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match names.iter().position(|n| n == last) {
+        Some(i) => names[i..].to_vec(),
+        None => names.to_vec(),
+    }
+}
+
+/// The posted body when the read-back answered, else gh's stderr.
+pub(crate) fn partial_failed(
+    readback_body: Option<&str>,
+    stderr: &str,
+    names: &[String],
+) -> Vec<String> {
+    match readback_body {
+        Some(body) => failed_from_body(body, names),
+        None => failed_from_stderr(stderr, names),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReadbackBody {
+    body: Option<String>,
+}
+
+/// The failed names of an attached run that returned Ok: none on exit 0, else read
+/// back from the forge. An empty list comes only from exit 0 or a read-back that
+/// answered; a failed read-back falls back to stderr, never to "all posted".
+pub(crate) async fn attach_failed_after(
+    repo_path: &str,
+    slug: &str,
+    out: &GhOutput,
+    staged: &StagedRefs,
+    readback: Readback<'_>,
+) -> Vec<String> {
+    if out.code == 0 {
+        return Vec::new();
+    }
+    let mut body = None;
+    if let Some(endpoint) = readback_endpoint(slug, readback) {
+        if let Ok(read) = run_gh(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await {
+            body = serde_json::from_slice::<ReadbackBody>(&read.stdout)
+                .ok()
+                .and_then(|b| b.body);
+        }
+    }
+    partial_failed(body.as_deref(), &out.stderr, &staged.names)
+}
+
+/// A failed attached run's error: gh's write-access, token-type and GHES refusals map
+/// to the app's sentences; any other stderr gives `gh_output_ok`'s error, or "gh exited
+/// with code N" when that is empty. The GHES one is reached only when the host gate had
+/// no host to read, so its sentence names no host.
+pub(crate) fn gh_attach_failure(out: GhOutput, slug: &str) -> AppError {
+    if out.stderr.contains("attaching files requires write access") {
+        return AppError::Gh(crate::attachments::write_access_refusal(slug));
+    }
+    if out.stderr.contains("unsupported authentication type") {
+        return AppError::Gh(crate::attachments::GH_AUTH_TYPE_REFUSAL.to_string());
+    }
+    if out
+        .stderr
+        .contains("not supported on GitHub Enterprise Server")
+    {
+        return AppError::Gh(crate::attachments::GHES_UNKNOWN_HOST_REFUSAL.to_string());
+    }
+    let code = out.code;
+    gh_output_ok(out)
+        .err()
+        .unwrap_or_else(|| AppError::Gh(format!("gh exited with code {code}")))
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+
+    fn names() -> Vec<String> {
+        (1..=3).map(|i| format!("image-{i}.png")).collect()
+    }
+
+    fn out(code: i32, stdout: &str, stderr: &str) -> GhOutput {
+        GhOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+            code,
+        }
+    }
+
+    // A session folder gone before the spawn gives the attach sentence, not an OS error.
+    #[tokio::test]
+    async fn a_missing_session_folder_refuses_before_gh_runs() {
+        let base = tempfile::tempdir().unwrap();
+        let staged = StagedRefs {
+            names: names(),
+            dir: base.path().join("gone"),
+        };
+        let repo = base.path().to_string_lossy().into_owned();
+        let r = run_gh_maybe_attached(&repo, "o/r", &["--version"], Some(&staged)).await;
+        let m = match r {
+            Err(AppError::InvalidArgument(m)) => m,
+            Err(e) => panic!("expected the attach sentence, got {e:?}"),
+            Ok(_) => panic!("gh ran in a missing folder"),
+        };
+        assert_eq!(m, "image-1.png is no longer attached. Attach it again.");
+    }
+
+    #[test]
+    fn attach_tail_pairs_each_name_in_order() {
+        assert!(attach_tail(&[]).is_empty());
+        let ns = vec!["image-1.png".to_string(), "image-2.png".to_string()];
+        assert_eq!(
+            attach_tail(&ns),
+            ["--attach", "image-1.png", "--attach", "image-2.png"]
+        );
+    }
+
+    // The measured gh 2.103.3 fixtures.
+    #[test]
+    fn classify_reads_the_measured_runs() {
+        let url = "https://github.com/o/r/issues/2#issuecomment-123";
+        let stdout = format!("{url}\n");
+        assert_eq!(last_url_line(&stdout), url);
+        assert_eq!(classify_gh_attach_run(0, &stdout), GhAttachRun::Posted);
+        // stderr for this run: `failed to upload image-2.png: open image-2.png: ...`
+        assert_eq!(classify_gh_attach_run(1, &stdout), GhAttachRun::Partial);
+        // stderr for this run ends `no comment was posted`.
+        assert_eq!(classify_gh_attach_run(1, ""), GhAttachRun::Failed);
+        assert_eq!(classify_gh_attach_run(0, ""), GhAttachRun::Posted);
+    }
+
+    #[test]
+    fn stderr_names_the_first_failed_upload() {
+        let ns = names();
+        assert_eq!(
+            failed_from_stderr(
+                "failed to upload image-2.png: open image-2.png: The system cannot find the file specified.",
+                &ns
+            ),
+            ["image-2.png", "image-3.png"]
+        );
+        assert_eq!(
+            failed_from_stderr(
+                "could not upload C:\\t\\image-2.png: open C:\\t\\image-2.png: x",
+                &ns
+            ),
+            ["image-2.png", "image-3.png"]
+        );
+        assert_eq!(
+            failed_from_stderr("failed to upload other.png: nope", &ns),
+            ns
+        );
+        assert_eq!(failed_from_stderr("something else broke", &ns), ns);
+    }
+
+    #[test]
+    fn body_keeps_only_the_failed_reference() {
+        let body = "![a](https://github.com/user-attachments/assets/x) ![bad alt](image-2.png)";
+        let ns = vec!["image-1.png".to_string(), "image-2.png".to_string()];
+        assert_eq!(failed_from_body(body, &ns), ["image-2.png"]);
+    }
+
+    #[test]
+    fn readback_endpoints() {
+        assert_eq!(
+            comment_id_from_url("https://github.com/o/r/issues/2#issuecomment-123"),
+            Some("123")
+        );
+        assert_eq!(
+            comment_id_from_url("https://github.com/o/r/pull/5#issuecomment-77"),
+            Some("77")
+        );
+        assert_eq!(comment_id_from_url("https://github.com/o/r/issues/2"), None);
+        assert_eq!(
+            readback_endpoint(
+                "o/r",
+                Readback::Comment("https://x/o/r/pull/5#issuecomment-77")
+            ),
+            Some("repos/o/r/issues/comments/77".to_string())
+        );
+        assert_eq!(
+            readback_endpoint("o/r", Readback::Pull(87)),
+            Some("repos/o/r/pulls/87".to_string())
+        );
+        assert_eq!(readback_endpoint("{owner}/x", Readback::Pull(87)), None);
+        assert_eq!(readback_endpoint("", Readback::Pull(87)), None);
+        assert_eq!(readback_endpoint("o/r", Readback::Pull(0)), None);
+    }
+
+    #[test]
+    fn attach_failures_map_to_the_app_sentences() {
+        let e = gh_attach_failure(
+            out(
+                1,
+                "",
+                "attaching files requires write access to the repository",
+            ),
+            "parent/repo",
+        );
+        assert!(matches!(e, AppError::Gh(ref m)
+            if m == "GitHub CLI only attaches images where you have write access, and you don't on parent/repo."));
+        let e = gh_attach_failure(out(1, "", "unsupported authentication type"), "o/r");
+        assert!(matches!(e, AppError::Gh(ref m) if m == crate::attachments::GH_AUTH_TYPE_REFUSAL));
+        let e = gh_attach_failure(
+            out(
+                1,
+                "",
+                "attaching files is not supported on GitHub Enterprise Server\n",
+            ),
+            "o/r",
+        );
+        assert!(matches!(e, AppError::Gh(ref m)
+            if m == "Image attachments need GitHub.com or GitHub Enterprise Cloud."));
+        let e = gh_attach_failure(out(1, "", "  some other error \n"), "o/r");
+        assert!(matches!(e, AppError::Gh(ref m) if m == "some other error"));
+        let e = gh_attach_failure(out(1, "", ""), "o/r");
+        assert!(matches!(e, AppError::Gh(ref m) if m == "gh exited with code 1"));
+    }
+
+    #[test]
+    fn partial_failed_prefers_the_readback() {
+        let ns = names();
+        assert_eq!(
+            partial_failed(
+                Some("![x](image-3.png)"),
+                "failed to upload image-1.png: x",
+                &ns
+            ),
+            ["image-3.png"]
+        );
+        assert_eq!(
+            partial_failed(
+                None,
+                "failed to upload image-2.png: open image-2.png: x",
+                &ns
+            ),
+            ["image-2.png", "image-3.png"]
+        );
+        assert_eq!(
+            partial_failed(None, "failed to upload C:/elsewhere/unknown.png: x", &ns),
+            ns
+        );
+    }
+
+    #[test]
+    fn followup_failure_text_names_the_images_that_did_not_upload() {
+        let lead = "The pull request was created, but applying its labels/assignees failed: \
+                    boom. Add them from the PR.";
+        let at = " (https://github.com/o/r/pull/7)";
+        let lead_at = "The pull request was created (https://github.com/o/r/pull/7), but \
+                       applying its labels/assignees failed: boom. Add them from the PR.";
+        let one = vec!["a.png".to_string()];
+        let two = vec!["a.png".to_string(), "b.png".to_string()];
+        let one_tail = " This image didn't upload: a.png. Add it in a comment on the pull request.";
+        let two_tail = " These images didn't upload: a.png, b.png. Add them in a comment on the \
+                        pull request.";
+        let cases: [(&str, &[String], String); 6] = [
+            ("", &[], lead.to_string()),
+            (at, &[], lead_at.to_string()),
+            ("", &one, format!("{lead}{one_tail}")),
+            (at, &one, format!("{lead_at}{one_tail}")),
+            ("", &two, format!("{lead}{two_tail}")),
+            (at, &two, format!("{lead_at}{two_tail}")),
+        ];
+        for (at, failed, want) in cases {
+            assert_eq!(followup_failure_text(at, "boom", failed), want);
+        }
     }
 }
 
@@ -8093,7 +8531,8 @@ pub(crate) async fn gh_pr_create_core(
     labels: Vec<String>,
     assignees: Vec<String>,
     lens: Option<String>,
-) -> AppResult<PrRef> {
+    attachments: Option<AttachmentRefs>,
+) -> AppResult<PrCreateOutcome> {
     // Pre-mutation guards: every local precondition is checked BEFORE the push, so
     // no remote mutation happens on an input we'd have rejected.
     validate_branch(&base)?;
@@ -8110,6 +8549,7 @@ pub(crate) async fn gh_pr_create_core(
             lens.as_deref().unwrap_or_default()
         )));
     }
+    let staged = gh_attach_checks(&repo_path, &body, attachments, false).await?;
 
     if upstream {
         // v1: the cross-repo create is minimal — no post-create edit — so reject
@@ -8150,11 +8590,26 @@ pub(crate) async fn gh_pr_create_core(
         if draft {
             args.push("--draft");
         }
-        let result = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await;
+        if let Some(s) = &staged {
+            args.extend(attach_tail(&s.names));
+        }
+        let result = run_gh_maybe_attached(&repo_path, &parent_slug, &args, staged.as_ref()).await;
         invalidate_repo_meta_after(&parent_slug, &result);
         let out = result?;
         let (number, url) = scrape_pr_ref(&out.stdout_lossy());
-        return Ok(PrRef { number, url });
+        let failed = match &staged {
+            Some(s) => {
+                attach_failed_after(&repo_path, &parent_slug, &out, s, Readback::Pull(number)).await
+            }
+            None => Vec::new(),
+        };
+        if let Some(s) = &staged {
+            crate::attachments::release_posted(s, &failed).await;
+        }
+        return Ok(PrCreateOutcome {
+            pr: PrRef { number, url },
+            failed_attachments: failed,
+        });
     }
 
     // Origin lens (default): pin origin so this is a same-repo PR on the fork.
@@ -8190,15 +8645,25 @@ pub(crate) async fn gh_pr_create_core(
     if draft {
         args.push("--draft");
     }
+    if let Some(s) = &staged {
+        args.extend(attach_tail(&s.names));
+    }
     // Labels/assignees are applied AFTER create, NOT via `gh pr create
     // --label/--assignee`: gh 2.94 records each value TWICE on the activity timeline
     // when passed at create time (create mutation + follow-up re-apply), so the feed
     // shows doubled "added the X label" rows. `gh pr edit --add-*` applies once.
-    let result = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await;
+    let result = run_gh_maybe_attached(&repo_path, &origin_slug, &args, staged.as_ref()).await;
     invalidate_repo_meta_after(&origin_slug, &result);
     let out = result?;
 
     let (number, url) = scrape_pr_ref(&out.stdout_lossy());
+    let failed = match &staged {
+        Some(s) => {
+            attach_failed_after(&repo_path, &origin_slug, &out, s, Readback::Pull(number)).await
+        }
+        None => Vec::new(),
+    };
+    let mut followup = Ok(());
 
     // Address the PR by NUMBER when the URL scrape yielded one (unambiguous, and the
     // only form `gh pr edit` accepts for a cross-fork `OWNER:BRANCH` head), else by
@@ -8226,16 +8691,37 @@ pub(crate) async fn gh_pr_create_core(
         } else {
             format!(" ({url})")
         };
-        run_gh(Some(&repo_path), &edit_args, GH_NETWORK_TIMEOUT)
+        followup = run_gh(Some(&repo_path), &edit_args, GH_NETWORK_TIMEOUT)
             .await
-            .map_err(move |e| {
-                AppError::Gh(format!(
-                    "The pull request was created{at}, but applying its labels/assignees failed: {e}. Add them from the PR."
-                ))
-            })?;
+            .map(drop)
+            .map_err(|e| AppError::Gh(followup_failure_text(&at, &e.to_string(), &failed)));
     }
+    // The follow-up's Err keeps every staged file; only its Ok releases the posted ones.
+    let failed = crate::attachments::finish_attached(followup, staged.as_ref(), failed).await?;
 
-    Ok(PrRef { number, url })
+    Ok(PrCreateOutcome {
+        pr: PrRef { number, url },
+        failed_attachments: failed,
+    })
+}
+
+/// The labels/assignees follow-up's error. It also names the images that didn't upload,
+/// since the Err replaces the outcome that would have listed them.
+fn followup_failure_text(at: &str, cause: &str, failed: &[String]) -> String {
+    let mut text = format!(
+        "The pull request was created{at}, but applying its labels/assignees failed: {cause}. Add them from the PR."
+    );
+    match failed {
+        [] => {}
+        [one] => text.push_str(&format!(
+            " This image didn't upload: {one}. Add it in a comment on the pull request."
+        )),
+        many => text.push_str(&format!(
+            " These images didn't upload: {}. Add them in a comment on the pull request.",
+            many.join(", ")
+        )),
+    }
+    text
 }
 
 /// Pre-mutation guard for the upstream-lens PR create: the v1 cross-repo flow has no
