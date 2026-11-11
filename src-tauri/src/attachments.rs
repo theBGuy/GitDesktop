@@ -565,6 +565,11 @@ pub(crate) fn stage_in(
     let (mime, width, height) =
         crate::image_sniff::sniff_image(&bytes).ok_or_else(|| not_an_image(label))?;
     let ext = ext_for_mime(mime).ok_or_else(|| not_an_image(label))?;
+    // A declared zero axis is not an image the chip can render, and its zero area would
+    // pass the pixel check, so it takes the not-an-image refusal here.
+    if width == 0 || height == 0 {
+        return Err(not_an_image(label));
+    }
     // Area only: the webview decodes a staged image at once, but a tall screenshot over
     // the loader's per-axis cap still attaches.
     if !crate::image_sniff::pixels_within_cap(width, height) {
@@ -872,7 +877,7 @@ pub async fn attachment_discard(session: String, names: Option<Vec<String>>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_sniff::{gif_fixture, jpeg_fixture, png_fixture};
+    use crate::image_sniff::{gif_fixture, jpeg_fixture, png_fixture, webp_lossy_fixture};
     use base64::Engine;
 
     fn b64(bytes: &[u8]) -> String {
@@ -1301,6 +1306,49 @@ mod tests {
         msg(stage_in(root.path(), Some(SID), None, &over));
         assert_eq!(entries(&dir), before);
         stage_in(root.path(), Some(SID), None, &b64(&png_fixture(1, 1))).unwrap();
+        assert_eq!(staged_count(&dir).unwrap(), MAX_IMAGES);
+    }
+
+    #[test]
+    fn stage_refuses_a_zero_axis_as_not_an_image_without_writing() {
+        let root = private_root();
+        let zero_axis = [
+            png_fixture(0, 1),
+            png_fixture(1, 0),
+            gif_fixture(b"GIF89a", 0, 1),
+            jpeg_fixture(0xc0, &[], 1, 0),
+            webp_lossy_fixture(0, 1),
+        ];
+        for bytes in &zero_axis {
+            // The sniff reads the zero axis, so only the staging check refuses it.
+            let (_, width, height) = crate::image_sniff::sniff_image(bytes).unwrap();
+            assert!(width == 0 || height == 0, "{width} x {height}");
+            let data = b64(bytes);
+            assert_eq!(
+                msg(stage_in(root.path(), Some(SID), Some("blank.png"), &data)),
+                "blank.png isn't an image. Attach a PNG, JPEG, GIF or WebP."
+            );
+            assert_eq!(
+                msg(stage_in(root.path(), None, None, &data)),
+                "The pasted file isn't an image. Attach a PNG, JPEG, GIF or WebP."
+            );
+        }
+        assert!(!root.path().join(SID).exists());
+        assert!(entries(root.path()).is_empty());
+
+        // An existing session is left as it was, and the refusal takes no slot.
+        let dir = root.path().join(SID);
+        fill(&dir, MAX_IMAGES - 1);
+        let before = entries(&dir);
+        for bytes in &zero_axis {
+            assert_eq!(
+                msg(stage_in(root.path(), Some(SID), None, &b64(bytes))),
+                "The pasted file isn't an image. Attach a PNG, JPEG, GIF or WebP."
+            );
+        }
+        assert_eq!(entries(&dir), before);
+        let staged = stage_in(root.path(), Some(SID), None, &b64(&png_fixture(1, 1))).unwrap();
+        assert_eq!((staged.width, staged.height), (1, 1));
         assert_eq!(staged_count(&dir).unwrap(), MAX_IMAGES);
     }
 

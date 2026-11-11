@@ -412,7 +412,7 @@ fn webp_fixture(fourcc: &[u8], payload: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
+pub(crate) fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
     let mut payload = vec![0x00, 0x00, 0x00, 0x9d, 0x01, 0x2a];
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
