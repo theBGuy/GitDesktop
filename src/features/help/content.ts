@@ -2936,6 +2936,9 @@ change the board, an archived row, another change still being written, or the ro
 still refreshing after one) the keys say why instead. A date that is an organization's
 issue field moves only on an issue whose fields you can set, and a bar moves whole or not
 at all: if any date it would write can't change on that row, none of them move.
+On a roadmap row {{key:alt+left}} and {{key:alt+right}} always belong to the dates, so a
+Go back ({{kbd:go-back}}) or Go forward ({{kbd:go-forward}}) bound to one of them does
+nothing there; the mouse's side buttons and the command palette still work.
 
 Sections, selection, the row menu and the bulk bar work as they do in the table, and so
 do {{key:alt+up}} and {{key:alt+down}} for the project order.
@@ -2953,6 +2956,14 @@ board.
 Open an issue or pull request from its card and it lands on its own tab. One from another
 repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
 your browser instead.
+
+From an item you opened here, {{kbd:go-back}} or your mouse's back button returns to the
+board on the same project and view with that card focused (its row, in a table or
+roadmap), and {{kbd:go-forward}} goes forward again. That holds after a visit to Settings
+or another screen too: the board comes back on its view as saved, so a layout, grouping, date
+fields or zoom you picked there start over, and **Show archived cards** is put back as you
+had it, so an archived card is found again. If the card has left the board, GitDesktop
+says so and lands on the first card instead (the first row, in a table or roadmap).
 
 {{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
 with the title, what the card is, and its dates — when it was opened, when it joined this
@@ -3178,7 +3189,9 @@ the next column at the same height, **Home / End** jump to a column's first or l
 Linux, {{key:shift+f10}} opens its menu. Hold {{key:alt}} with **↑ / ↓** or **Home / End**
 and the card moves instead of the cursor (above); hold {{key:shift}} with the same keys
 and the selection extends instead (above), with {{key:escape}} to drop it. Collapsing the
-sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
+sidebar ({{kbd:toggle-sidebar}}) hands the board its width. {{kbd:go-back}} and
+{{kbd:go-forward}} work from a card and from any row in a table layout, section
+headers included.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
@@ -4232,6 +4245,12 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - {{kbd:show-repositories}} repositories · {{kbd:show-branches}} branches ·
   {{kbd:back-to-repositories}} back to repositories · {{kbd:focus-filter}} focus the
   filter.
+- {{kbd:go-back}} back · {{kbd:go-forward}} forward through the tabs and items you visited
+  in this repository: a tab switch, a \`#123\` link, a linked pull request, a card opened
+  from a board. The mouse's back and forward buttons do the same. Moving through a list
+  adds nothing to go back through, and the trail starts again when you open another
+  repository or switch between **Fork** and **Upstream**. While a dialog is open, those
+  keys and buttons do nothing.
 
 ## Doing things
 

@@ -747,7 +747,9 @@ note was written and when it last changed, and an item you can't see says so
 rather than thinning the board silently. Open an issue or pull request
 straight from its card, or press **Space** for a **details peek**: its title,
 what it is, and when it was opened, joined this board, and last changed,
-without leaving the columns. Page through a large board with **Load more**,
+without leaving the columns. **Go back** (`Alt`+`←`, `⌘`+`[` on macOS, or the
+mouse's back button) returns you to the board on the same project, view and
+card. Page through a large board with **Load more**,
 and move around the whole thing from the keyboard. **Add item** puts work on
 the board without a trip to the browser: search this repository's issues and
 pull requests and add several in a row, or write a **draft** — a Markdown
@@ -1343,7 +1345,9 @@ review via its subscription login. The full list is under
 - **Keyboard-first**: rebindable shortcuts (single keys included) with
   GitHub-Desktop-compatible defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`),
   a command palette (`Ctrl`/`⌘`+`K`), a filterable shortcut list in Settings
-  (by name, category, or key), and arrow-key navigation everywhere.
+  (by name, category, or key), **Back** and **Forward** through the tabs and
+  items you visited in a repository (`Alt`+`←` / `→`, `⌘`+`[` / `]` on macOS,
+  or the mouse's side buttons), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.

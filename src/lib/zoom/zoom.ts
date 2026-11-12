@@ -19,12 +19,13 @@ import {
   isTypeaheadKey,
   isTypeaheadTarget,
 } from "@/lib/hotkeys/binding";
+import { effectiveBindings } from "@/lib/hotkeys/default-binding";
 import {
   type HandlerEntry,
   registerHandler,
   unregisterHandler,
 } from "@/lib/hotkeys/handler-registry";
-import { ACTIONS, type ActionId } from "@/lib/hotkeys/registry";
+import type { ActionId } from "@/lib/hotkeys/registry";
 import { queryClient } from "@/lib/query-client";
 import {
   type AppSettings,
@@ -857,16 +858,6 @@ function onWheel(e: WheelEvent): void {
   stepZoom(direction, "wheel");
 }
 
-/** The binding each action answers to now: the user's override, else the default. */
-function effectiveBinding(
-  id: ActionId,
-  hotkeys: AppSettings["hotkeys"] | undefined,
-) {
-  const override = hotkeys?.[id];
-  const action = ACTIONS.find((a) => a.id === id);
-  return override === undefined ? (action?.defaultBinding ?? null) : override;
-}
-
 function onAliasKeyDown(e: KeyboardEvent): void {
   if (e.defaultPrevented || e.repeat) return;
   const binding = eventToBinding(e);
@@ -884,8 +875,9 @@ function onAliasKeyDown(e: KeyboardEvent): void {
   )?.hotkeys;
   // Aliases ride zoom-in's default chord only, and yield to any action bound to
   // the alias itself.
-  if (effectiveBinding("app-zoom-in", hotkeys) !== "mod+=") return;
-  if (ACTIONS.some((a) => effectiveBinding(a.id, hotkeys) === binding)) return;
+  const bindings = effectiveBindings(hotkeys);
+  if (bindings.get("app-zoom-in") !== "mod+=") return;
+  for (const bound of bindings.values()) if (bound === binding) return;
   e.preventDefault();
   stepZoom(1, "action");
 }

@@ -12,10 +12,15 @@ import {
   hasModifier,
   isTypeaheadKey,
 } from "@/lib/hotkeys/binding";
+import {
+  defaultBindingOf,
+  effectiveBindings,
+} from "@/lib/hotkeys/default-binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACTIONS,
   type ActionDef,
+  type ActionId,
   CATEGORY_ORDER,
 } from "@/lib/hotkeys/registry";
 import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
@@ -109,11 +114,11 @@ export const KeyboardSection = withForm({
     // so this is the only live "focus-filter" handler while Keyboard is open.
     useHotkeyAction("focus-filter", () => filterRef.current?.focus(), true);
 
-    const effective = (id: string): string | null => {
-      const override = overrides[id];
-      if (override !== undefined) return override;
-      return ACTIONS.find((a) => a.id === id)?.defaultBinding ?? null;
-    };
+    // Built once per render over the DRAFT, so the rows, the filter and the
+    // steal loop all read the same resolution the listener applies once saved.
+    const effectiveMap = effectiveBindings(overrides);
+    const effective = (id: string): string | null =>
+      effectiveMap.get(id as ActionId) ?? null;
 
     /** Assigns or clears a binding. Reports whether it posted the steal message
      *  — that note outranks any softer one the caller would add — along with the
@@ -130,13 +135,14 @@ export const KeyboardSection = withForm({
         // whichever action held it before.
         for (const action of ACTIONS) {
           if (action.id !== id && effective(action.id) === binding) {
-            if (action.defaultBinding === null) delete next[action.id];
+            if (defaultBindingOf(action) === null) delete next[action.id];
             else next[action.id] = null;
             stolenFrom = action.label;
           }
         }
       }
-      const def = ACTIONS.find((a) => a.id === id)?.defaultBinding ?? null;
+      const target = ACTIONS.find((a) => a.id === id);
+      const def = target ? defaultBindingOf(target) : null;
       if (binding === def) delete next[id];
       else next[id] = binding;
       form.setFieldValue("hotkeys", next);

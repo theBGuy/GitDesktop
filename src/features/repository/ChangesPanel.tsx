@@ -1089,14 +1089,15 @@ export function ChangesPanel({
    *  live here rather than in the shared hook, which resolves from the cursor: a
    *  bare Tab leaves that behind, and those keys would fold the old selection's
    *  parent, or nothing at all with no file selected. Up/Down stay the hook's and
-   *  keep anchoring at the cursor — master's Tab behaviour, unchanged. A focused
-   *  tree region swallows both keys whether or not they moved anything, so the
-   *  list never scrolls sideways under them. */
+   *  keep anchoring at the cursor. A focused tree region swallows both keys
+   *  whether or not they moved anything, so the list never scrolls sideways
+   *  under them, except a chorded arrow, which belongs to the app's shortcut
+   *  listener. */
   function handleListKeyDown(e: KeyboardEvent) {
     let horizontal: typeof arrowLeft;
     if (e.key === "ArrowLeft") horizontal = arrowLeft;
     else if (e.key === "ArrowRight") horizontal = arrowRight;
-    if (horizontal) {
+    if (horizontal && !hasChordModifier(e)) {
       const hit = focusedNavRow();
       if (hit) {
         e.preventDefault();

@@ -339,6 +339,8 @@ export function ProjectsTableView({
   useEffect(() => {
     if (scrollEl === null) return;
     const onPress = (e: PointerEvent) => {
+      // A side button is Back or Forward, which changes no grid state.
+      if (e.button === 3 || e.button === 4) return;
       const inside = e.target instanceof Node && scrollEl.contains(e.target);
       pressInGridRef.current = inside;
       if (!inside) ownsFocusRef.current = false;

@@ -17,6 +17,7 @@ export function BranchJiraBadge({ repoPath }: { repoPath: string }) {
   const branch = status.data?.branch.name ?? null;
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
 
   const keys = link ? extractJiraKeys(branch, link.projectKey) : [];
   if (keys.length === 0) return null;
@@ -38,6 +39,7 @@ export function BranchJiraBadge({ repoPath }: { repoPath: string }) {
           : `${first} — referenced in the branch name, view in Issues`
       }
       onClick={() => {
+        markLinkHop();
         selectIssue({ kind: "jira", id: first });
         setRepoTab("issues");
       }}

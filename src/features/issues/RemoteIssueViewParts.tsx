@@ -912,6 +912,7 @@ function IssueLinksSection({
   const linkIssue = useLinkIssue(repoPath);
   const unlinkIssue = useUnlinkIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
   const [adding, setAdding] = useState(false);
   // From the cache, so a link still pending survives this section's remount.
   const pendingWrites = usePendingIssueWrites(repoPath);
@@ -935,6 +936,7 @@ function IssueLinksSection({
   const exclude = new Set<number>([number, ...data.map((l) => l.number)]);
 
   function open(n: number) {
+    markLinkHop();
     selectIssue({ kind: "remote", id: String(n) });
   }
 
