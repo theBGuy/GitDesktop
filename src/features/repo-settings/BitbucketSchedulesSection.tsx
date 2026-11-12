@@ -25,6 +25,7 @@ import {
   useBbSetScheduleEnabled,
   useBranches,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { BitbucketPipelineSchedule } from "@/lib/git/types";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
@@ -149,7 +150,7 @@ export function BitbucketSchedulesSection({
           repoPath={repoPath}
           branches={(branches.data ?? [])
             .map((b) => b.name)
-            .filter((n) => !n.startsWith("gd/session/"))}
+            .filter((n) => !isSessionBranchName(n))}
           onPatch={patchRow}
           onReconcile={reconcileAfterCreate}
           swapFocusRef={swapFocus(NEW_FORM_SWAP_KEY)}

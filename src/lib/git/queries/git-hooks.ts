@@ -1,6 +1,7 @@
 import {
   type MutationCache,
   type Query,
+  type QueryClient,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -32,6 +33,7 @@ export function useHookContent(repo: string, name: string | null) {
 }
 
 export function useWriteHook(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { name: string; content: string }) =>
@@ -39,11 +41,13 @@ export function useWriteHook(repo: string) {
     {
       // Local hook write — never park it offline.
       networkMode: "always",
+      onSuccess: () => refreshSiblingHooks(queryClient, repo),
     },
   );
 }
 
 export function useSetHookEnabled(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { name: string; enabled: boolean }) =>
@@ -51,28 +55,35 @@ export function useSetHookEnabled(repo: string) {
     {
       // Local hook write — never park it offline.
       networkMode: "always",
+      onSuccess: () => refreshSiblingHooks(queryClient, repo),
     },
   );
 }
 
 export function useDeleteHook(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (name: string) => api.gitHookDelete(repo, name),
     {
       // Local hook write — never park it offline.
       networkMode: "always",
+      onSuccess: () => refreshSiblingHooks(queryClient, repo),
     },
   );
 }
 
+/** A manager's install rewrites the shared hooks folder too, and can displace
+ *  the Keep local guard. */
 export function useInstallHookManager(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (manager: string) => api.gitInstallHookManager(repo, manager),
     {
       // Local hook write — never park it offline.
       networkMode: "always",
+      onSuccess: () => refreshSiblingHooks(queryClient, repo),
     },
   );
 }
@@ -117,6 +128,15 @@ function siblingHookReadsOf(repo: string) {
   };
 }
 
+/** Every write to the hooks folder runs this on success: the other checkouts of
+ *  the repository share that folder, so their hook list and guard status
+ *  re-read (unobserved entries are cleared, observed ones refetch in place). */
+function refreshSiblingHooks(queryClient: QueryClient, repo: string) {
+  const siblings = siblingHookReadsOf(repo);
+  void queryClient.resetQueries({ predicate: siblings, type: "inactive" });
+  void queryClient.invalidateQueries({ predicate: siblings, type: "active" });
+}
+
 export function useInstallKeepLocalHook(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -128,15 +148,7 @@ export function useInstallKeepLocalHook(repo: string) {
       identity: ["keep-local-hook", "install", repo],
       onSuccess: (status, args) => {
         queryClient.setQueryData(keepLocalHookKey(args.repo), status);
-        const siblings = siblingHookReadsOf(args.repo);
-        void queryClient.resetQueries({
-          predicate: siblings,
-          type: "inactive",
-        });
-        void queryClient.invalidateQueries({
-          predicate: siblings,
-          type: "active",
-        });
+        refreshSiblingHooks(queryClient, args.repo);
       },
     },
   );
@@ -153,15 +165,7 @@ export function useRemoveKeepLocalHook(repo: string) {
       identity: ["keep-local-hook", "remove", repo],
       onSuccess: (status, args) => {
         queryClient.setQueryData(keepLocalHookKey(args.repo), status);
-        const siblings = siblingHookReadsOf(args.repo);
-        void queryClient.resetQueries({
-          predicate: siblings,
-          type: "inactive",
-        });
-        void queryClient.invalidateQueries({
-          predicate: siblings,
-          type: "active",
-        });
+        refreshSiblingHooks(queryClient, args.repo);
       },
     },
   );

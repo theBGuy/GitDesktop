@@ -65,6 +65,9 @@ pub struct HookEntry {
     pub state: HookState,
     /// Whether git's stock `<name>.sample` is present (a starting point).
     pub has_sample: bool,
+    /// The active `pre-push` is GitDesktop's own Keep local guard, exactly when the
+    /// guard status for this repository reads installed; false on any failed read.
+    pub managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,7 +161,7 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
     let manager_config = detected
         .as_ref()
         .map(|(_, p)| p.to_string_lossy().into_owned());
-    let entries = KNOWN_HOOKS
+    let mut entries: Vec<HookEntry> = KNOWN_HOOKS
         .iter()
         .map(|(name, desc)| {
             let active = hooks_dir.join(name).is_file();
@@ -176,9 +179,16 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
                 description: (*desc).to_string(),
                 state,
                 has_sample,
+                managed: false,
             }
         })
         .collect();
+    if let Some(pre_push) = entries
+        .iter_mut()
+        .find(|e| e.name == "pre-push" && matches!(e.state, HookState::Active))
+    {
+        pre_push.managed = listed_pre_push_is_managed(&repo_path, &hooks_dir).await;
+    }
     Ok(HooksInfo {
         hooks_path: hooks_dir.to_string_lossy().into_owned(),
         custom_hooks_path: custom,
@@ -186,6 +196,17 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
         manager_config,
         entries,
     })
+}
+
+/// The three reads that make the Keep local guard status `installed`, so the Hooks
+/// list never labels a file the guard dialog calls blocked; any failed read is false.
+async fn listed_pre_push_is_managed(repo_path: &str, listed_dir: &Path) -> bool {
+    let Ok(managed) = managed_hooks_dir(repo_path).await else {
+        return false;
+    };
+    same_hooks_dir(listed_dir, &managed)
+        && matches!(hooks_dir_redirected(&managed), Ok(false))
+        && matches!(hook_file(&managed.join("pre-push")), Ok(HookFile::Ours))
 }
 
 /// Runs a hook manager's CLI in the repo and returns its combined output.
@@ -1817,6 +1838,75 @@ mod tests {
         let pushed = git(&wt, &["push", "--no-verify", "origin", "HEAD"]).await;
         assert_eq!(pushed.code, 0, "{}", pushed.full_failure_text());
         assert!(remote_tip(&remote, "wtb").await.is_some());
+    }
+
+    /// Lists from `from` and asserts the `pre-push` label agrees with the guard status
+    /// read from the same path, equals `expected`, and that no other entry is labelled.
+    async fn assert_managed_row(row: &str, from: &str, expected: bool) {
+        let info = git_hooks_list(from.to_string()).await.unwrap();
+        let st = status(from).await;
+        for entry in info.entries.iter().filter(|e| e.name != "pre-push") {
+            assert!(!entry.managed, "{row}: {entry:?}");
+        }
+        let pre_push = info.entries.iter().find(|e| e.name == "pre-push").unwrap();
+        let guard = (st.state, st.blocked);
+        assert_eq!(
+            pre_push.managed,
+            st.state == Installed,
+            "{row}: {pre_push:?} {guard:?}"
+        );
+        assert_eq!(pre_push.managed, expected, "{row}: {pre_push:?} {guard:?}");
+    }
+
+    #[tokio::test]
+    async fn hooks_list_managed_matches_the_guard_status() {
+        let (_g, base, repo, _remote) = hook_repo("managed-list").await;
+        let file = managed_file(&repo, "pre-push");
+        assert_managed_row("fresh repo", &repo, false).await;
+        install(&repo).await;
+        assert_managed_row("installed", &repo, true).await;
+        let edited = "#!/bin/sh\r\n# gitdesktop:keep-local-pre-push  \r\necho extra\r\n";
+        std::fs::write(&file, edited).unwrap();
+        assert_managed_row("user-edited marker file", &repo, true).await;
+        std::fs::write(&file, "#!/bin/sh\necho mine\n").unwrap();
+        assert_managed_row("foreign pre-push", &repo, false).await;
+        std::fs::remove_file(&file).unwrap();
+        let twin_file = managed_file(&repo, "pre-push.disabled");
+        std::fs::write(&twin_file, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        let info = git_hooks_list(repo.clone()).await.unwrap();
+        let twin = info.entries.iter().find(|e| e.name == "pre-push").unwrap();
+        assert!(matches!(twin.state, HookState::Disabled), "{twin:?}");
+        assert_managed_row("marker-carrying disabled twin only", &repo, false).await;
+        std::fs::remove_file(&twin_file).unwrap();
+
+        install(&repo).await;
+        let wt = slashed(&base.join("wt"));
+        git_ok(&repo, &["worktree", "add", "-q", "-b", "wtb", &wt]).await;
+        assert_managed_row("listed from a linked worktree", &wt, true).await;
+
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("pre-push"), KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        git_ok(&repo, &["config", "core.hooksPath", &slashed(&elsewhere)]).await;
+        assert!(file.is_file(), "managed file kept");
+        assert_managed_row("repointed hooksPath holding a copy", &repo, false).await;
+    }
+
+    #[test]
+    fn hook_entry_serializes_managed_to_the_pinned_wire_shape() {
+        let entry = HookEntry {
+            name: "pre-push".into(),
+            description: "D".into(),
+            state: HookState::Active,
+            has_sample: false,
+            managed: true,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"pre-push","description":"D","state":"active","hasSample":false,"managed":true}"#
+        );
+        assert!(!json.contains("has_sample"));
     }
 
     #[tokio::test]

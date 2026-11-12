@@ -112,6 +112,12 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
+    fn: "branch_full_ref",
+    rationale:
+      "validates with validate_ref_name at fn entry; the full ref is a rev-parse tip probe and update-ref's compare-and-delete target, never a refspec",
+  },
+  {
+    file: "git/branches.rs",
     fn: "branch_tip_sha",
     rationale:
       "read-only rev-parse tip probe (never a refspec); validates with validate_branch_name at fn entry",

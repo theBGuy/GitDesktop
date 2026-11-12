@@ -7,8 +7,8 @@
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6) — that pairing is itself under test: stripping ERASES types
 // rather than compiling them and resolves no bundler aliases, so
-// `branch-prefixes.ts` must stay free of runtime and aliased imports. Adding one
-// there fails this file.
+// `branch-prefixes.ts` may import only relative `.ts` paths to import-free
+// modules (today `../git/ref-name.ts`). An aliased import there fails this file.
 //
 // Node's stdlib test runner and node: imports only, no dev dependency, so the
 // CI `guards` job runs `node --test "scripts/*.test.mjs"` with no install step.
@@ -190,6 +190,20 @@ test("agent-session branches are ignored before counting", () => {
     "fix/my-change",
   );
   assert.equal(branchNamePlaceholder(["gd/session/a"]), "feature/my-change");
+});
+
+// A case-insensitive filesystem can land `GD/Session/x` inside the namespace, so
+// the drop matches the prefix in any case; a near miss stays a user branch.
+test("agent-session branches are ignored in any case", () => {
+  assert.equal(
+    branchNamePlaceholder(["GD/Session/a", "fix/x"]),
+    "fix/my-change",
+  );
+  assert.equal(branchNamePlaceholder(["GD/Session/a"]), "feature/my-change");
+  assert.equal(
+    branchNamePlaceholder(["gd/sessions/a", "gd/sessions/b", "fix/x"]),
+    "gd/my-change",
+  );
 });
 
 // Inherits branchPrefixCounts' code-point tie-break.

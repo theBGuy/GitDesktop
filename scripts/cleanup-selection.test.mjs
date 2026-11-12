@@ -504,7 +504,7 @@ function wiringProblems(text) {
   const batch = text.indexOf("async function runBatch()");
   const prune = text.indexOf(BATCH_PRUNE, batch);
   const arm = text.indexOf(
-    "if (processed < names.length || fails.size > 0) {",
+    "if (processed < names.length || fails.size > 0 || moved.size > 0) {",
     prune,
   );
   const mark = text.indexOf("afterBatch: selectionContext,", arm);
@@ -566,8 +566,12 @@ test("a dialog that re-seeds after a batch, skips the prune or drops the repo is
     live.replace(`    ${BATCH_PRUNE}\n`, ""),
     live.replace("        afterBatch: selectionContext,\n", ""),
     live.replace(
-      "if (processed < names.length || fails.size > 0) {",
-      "if (processed < names.length) {",
+      "if (processed < names.length || fails.size > 0 || moved.size > 0) {",
+      "if (processed < names.length || moved.size > 0) {",
+    ),
+    live.replace(
+      "|| fails.size > 0 || moved.size > 0) {",
+      "|| fails.size > 0) {",
     ),
     live.replace(CONTEXT, CONTEXT.replace("}`;", "}\\n${autoSelectKey}`;")),
     live.replace(

@@ -1,12 +1,14 @@
 // The branch-name prompt's convention evidence: plain names in, a rendered
 // frequency table out. It lives apart from `prompt.ts` so `scripts/*.test.mjs`
-// can import this file under Node's type stripping — every import here must stay
-// type-only and every path relative (stripping erases types but resolves no
-// bundler aliases), and today there are none at all.
+// can import this file under Node's type stripping — every import here must use
+// a relative `.ts` path to an import-free module (stripping erases types but
+// resolves no bundler aliases); the one runtime import is `../git/ref-name.ts`.
 //
 // KEEP IN SYNC: `branch_prefix_counts` / `branch_prefix_section`
 // (src-tauri/src/mcp_server/generate.rs) render the same shape for the MCP
 // recipe tools.
+
+import { isSessionBranchName } from "../git/ref-name.ts";
 
 /** How many prefix rows the branch-name evidence carries. Rows descend by count,
  *  so nothing past the cap is used more often than the last row shown — but a tie
@@ -63,10 +65,9 @@ export const TRUNK_BRANCH_NAMES: readonly string[] = [
 
 /** A branch-name placeholder in the repository's dominant prefix convention:
  *  `<prefix><sample>`, the bare sample when unprefixed names lead, or
- *  `feature/<sample>` with nothing to count. Agent-session branches are dropped
- *  first, as the MCP caller does before counting, and trunk names after them,
- *  since neither says how the user names work branches. GUI-only: no Rust
- *  mirror. */
+ *  `feature/<sample>` with nothing to count. Agent-session branches (in any
+ *  case) are dropped first and trunk names after them, since neither says how
+ *  the user names work branches. GUI-only: no Rust mirror. */
 export function branchNamePlaceholder(
   names: string[],
   opts: { sample?: string } = {},
@@ -74,7 +75,7 @@ export function branchNamePlaceholder(
   const sample = opts.sample ?? "my-change";
   const top = branchPrefixCounts(
     names.filter(
-      (n) => !n.startsWith("gd/session/") && !TRUNK_BRANCH_NAMES.includes(n),
+      (n) => !isSessionBranchName(n) && !TRUNK_BRANCH_NAMES.includes(n),
     ),
   )[0];
   if (!top) return `feature/${sample}`;

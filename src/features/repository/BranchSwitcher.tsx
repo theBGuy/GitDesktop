@@ -62,6 +62,20 @@ import {
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
+import {
+  DELETE_CONFIRM_RESTORABLE,
+  DELETE_TIP_MOVED,
+  deletedBranchTitle,
+} from "@/lib/deleted-branches/copy";
+import {
+  deletedBranchFacts,
+  deletedToastOptions,
+  readBranchRowsFresh,
+} from "@/lib/deleted-branches/restore";
+import {
+  mintDeletedBranch,
+  recordDeletedBranches,
+} from "@/lib/deleted-branches/store";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import { applyFrozenOrder } from "@/lib/frozen-order";
 import {
@@ -854,8 +868,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Memoized by hand: every downstream memo lists `allBranches` as a dep, so
   // its identity holds per `branches.data` whatever the compiler decides.
   const allBranches = useMemo(
-    () =>
-      (branches.data ?? []).filter((b) => !b.name.startsWith("gd/session/")),
+    () => (branches.data ?? []).filter((b) => !isSessionBranchName(b.name)),
     [branches.data],
   );
   // Archived branches are hidden from the list and the merge picker.
@@ -1941,8 +1954,58 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           )
             return;
         }
-        await deleteBranch.mutateAsync(deleteTarget);
-        toast.success(`Deleted ${deleteTarget}`);
+        // Read before the delete, which removes the branch's whole config
+        // section: what Restore re-applies.
+        const facts = deletedBranchFacts(
+          await readBranchRowsFresh(queryClient, deleteIn),
+          deleteTarget,
+        );
+        if (
+          refuseIfSwitched(
+            deleteIn,
+            `${deleteTarget} was kept`,
+            "before the delete started",
+          )
+        )
+          return;
+        // A push that started during the read.
+        if (refuseWhileRowPushes(deleteTarget)) return;
+        const outcome = await deleteBranch.mutateAsync(deleteTarget);
+        switch (outcome.status) {
+          case "deleted": {
+            // Closed before the record write, so a second press can't re-enter.
+            clearTarget();
+            const entry = mintDeletedBranch({
+              name: deleteTarget,
+              tip: outcome.tip,
+              ...facts,
+            });
+            const recorded = await recordDeletedBranches(deleteIn, [entry]);
+            toast.success(
+              deletedBranchTitle(
+                deleteTarget,
+                outcome.tip,
+                landedIn(deleteIn).away,
+              ),
+              deletedToastOptions(
+                queryClient,
+                deleteIn,
+                [entry],
+                recorded ? 0 : 1,
+                true,
+              ),
+            );
+            break;
+          }
+          // Only a call pinned to an expected tip answers this; kept exhaustive.
+          case "tipMoved":
+            toast.info(DELETE_TIP_MOVED(deleteTarget));
+            break;
+          default: {
+            const unhandled: never = outcome;
+            return unhandled;
+          }
+        }
       } catch (e) {
         onError(e);
       }
@@ -2576,6 +2639,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    if (refuseWhileSiblingPush(branch.name)) return;
     if (willPublish({ ...branch, setUpstream: retrack }))
       void beginPublishBranch(branch, remote, retrack);
     else
@@ -2604,6 +2668,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return true;
     }
     return refuseWhilePushRuns(queryClient, repoPath);
+  }
+
+  // A push of `branch` refuses while a sibling worktree of the repository pushes
+  // it; this checkout's own pushes are pushAlreadyActive's. Never the row hold
+  // below: its fork-PR arm would refuse the publish that owns the detection.
+  function refuseWhileSiblingPush(branch: string): boolean {
+    return refuseWhileBranchPushes(
+      queryClient,
+      repoPath,
+      branch,
+      currentNameRef.current,
+    );
   }
 
   // Fire-time hold for routes that move or remove `branch`'s ref: this switcher's
@@ -2729,6 +2805,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       releaseMark();
       return;
     }
+    if (refuseWhileSiblingPush(branch.name)) {
+      releaseMark();
+      return;
+    }
     const presence = presenceUnderUrls(
       remoteHasBranch(list, destination, branch.name),
       fetchUrl,
@@ -2806,6 +2886,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
       if (pushAlreadyActive() || refuseWhilePublishing(queryClient, repoPath))
         return;
+      if (refuseWhileSiblingPush(branch.name)) return;
       if (match) {
         withdrawPublishConfirm(publishAsk);
         openGuard(match);
@@ -2837,6 +2918,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    if (refuseWhileSiblingPush(branch.name)) return;
     const copyRemote = remote ?? "origin";
     const pushedIn = repoPath;
     try {
@@ -5167,6 +5249,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             only on it.
             {shownDeleteTarget === currentName &&
               " You'll be switched to another branch first."}
+            {DELETE_CONFIRM_RESTORABLE}
           </>
         }
         confirmLabel="Delete"

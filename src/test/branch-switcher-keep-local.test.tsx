@@ -25,6 +25,7 @@ import {
 } from "vitest";
 import { BranchSwitcher } from "@/features/repository/BranchSwitcher";
 import {
+  forgeDetectForkPrForBranch,
   forgeStatus,
   getSecret,
   gitBranchDivergence,
@@ -35,20 +36,29 @@ import {
   gitKeepLocalHookInstall,
   gitKeepLocalHookStatus,
   gitRemoteBranches,
+  gitRemotePushUrl,
   gitRemotes,
+  gitRemoteUrl,
   gitSetBranchKeepLocal,
   gitStashCount,
   gitStatus,
   gitUpdateBranchFrom,
   readRepoBranchRules,
 } from "@/lib/git/api";
-import { usePush } from "@/lib/git/queries";
+import { BRANCH_PUSH_ELSEWHERE_MESSAGE, usePush } from "@/lib/git/queries";
 import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
-import type { Branch, BranchHead, KeepLocalHookStatus } from "@/lib/git/types";
+import type {
+  Branch,
+  BranchHead,
+  ForkPrMatch,
+  KeepLocalHookStatus,
+  RemoteBranch,
+} from "@/lib/git/types";
 import { listUserWorktrees } from "@/lib/git/worktree";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
 
@@ -76,6 +86,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeStatus: vi.fn(),
   getSecret: vi.fn(),
   gitKeepLocalHookStatus: vi.fn(),
+  // Reads a row's publish makes before its prompt.
+  gitRemoteUrl: vi.fn(),
+  gitRemotePushUrl: vi.fn(),
+  forgeDetectForkPrForBranch: vi.fn(),
   // Writes.
   gitSetBranchKeepLocal: vi.fn(),
   gitKeepLocalHookInstall: vi.fn(),
@@ -782,7 +796,10 @@ describe("deleting the checked-out branch while it pushes", () => {
             landCheckout = resolve;
           }),
       );
-      vi.mocked(gitDeleteBranch).mockResolvedValue(undefined);
+      vi.mocked(gitDeleteBranch).mockResolvedValue({
+        status: "deleted",
+        tip: "a".repeat(40),
+      });
       const { user, queryClient } = renderSwitcher();
       render(
         <QueryClientProvider client={queryClient}>
@@ -1108,3 +1125,178 @@ describe("the terminal push guard dialog across a repo switch", () => {
     ).toBeUndefined();
   });
 });
+
+describe("agent-session rows", () => {
+  it("never lists one, whatever the prefix's case", async () => {
+    reads.branches.push(
+      branchRow({ name: "GD/Session/x" }),
+      branchRow({ name: "gd/session/y" }),
+      branchRow({ name: "feat/a" }),
+    );
+    const { user } = renderSwitcher();
+    await openList(user);
+    await rowButton("feat/a");
+    expect(document.querySelector('[data-row="GD/Session/x"]')).toBe(null);
+    expect(document.querySelector('[data-row="gd/session/y"]')).toBe(null);
+  });
+});
+
+describe("a row push while a sibling worktree pushes the branch", () => {
+  const URL_ = "https://example.test/keep.git";
+  beforeEach(() => {
+    vi.mocked(gitRemoteUrl).mockResolvedValue(URL_);
+    vi.mocked(gitRemotePushUrl).mockResolvedValue(URL_);
+    vi.mocked(forgeDetectForkPrForBranch).mockResolvedValue(null);
+  });
+  afterEach(() => {
+    if (useConfirm.getState().request)
+      act(() => useConfirm.getState().answer(false));
+  });
+
+  /** Mounts the switcher beside a push harness for `path`; `start` begins that
+   *  checkout's push of `feat` and waits until it runs. */
+  async function withPushFrom(path: string) {
+    const { user, queryClient } = renderSwitcher();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <PushHarness path={path} />
+      </QueryClientProvider>,
+    );
+    // The identity must land first: a push filed without it is path-keyed.
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryData(repoIdentityQueryOptions(path).queryKey),
+      ).toBeDefined(),
+    );
+    const start = async () => {
+      const before = pushSpy.mock.calls.length;
+      // Not user-event: an open list or prompt hides the page behind it.
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: `start feat in ${path}`,
+          hidden: true,
+        }),
+      );
+      await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(before + 1));
+    };
+    return { user, start };
+  }
+
+  it("Push to the upstream toasts the elsewhere message and starts nothing", async () => {
+    reads.branches.push(trackedRow("feat", { upstreamAhead: 1 }));
+    const { user, start } = await withPushFrom(SIBLING);
+    await start();
+    await openList(user);
+    await openRowMenu(user, "feat");
+    await user.click(menuItem("Push to origin/feat"));
+    await settle();
+    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("another repository pushing the same name holds nothing", async () => {
+    reads.branches.push(trackedRow("feat", { upstreamAhead: 1 }));
+    const { user, start } = await withPushFrom(OTHER_REPO);
+    await start();
+    await openList(user);
+    await openRowMenu(user, "feat");
+    await user.click(menuItem("Push to origin/feat"));
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledTimes(2));
+    expect(info).not.toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
+  });
+
+  it("Publish branch refuses before its fork-PR check", async () => {
+    reads.branches.push(branchRow({ name: "feat" }));
+    const { user, start } = await withPushFrom(SIBLING);
+    await start();
+    await openList(user);
+    await openRowMenu(user, "feat");
+    await user.click(menuItem("Publish branch"));
+    await settle();
+    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
+    expect(forgeDetectForkPrForBranch).not.toHaveBeenCalled();
+    expect(useConfirm.getState().request).toBeNull();
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a sibling push starting during the publish's reads refuses before its prompt", async () => {
+    reads.branches.push(branchRow({ name: "feat" }));
+    const { user, start } = await withPushFrom(SIBLING);
+    await openList(user);
+    await openRowMenu(user, "feat");
+    let landUrl: (url: string) => void = () => undefined;
+    vi.mocked(gitRemoteUrl).mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          landUrl = resolve;
+        }),
+    );
+    await user.click(menuItem("Publish branch"));
+    await waitFor(() => expect(forgeDetectForkPrForBranch).toHaveBeenCalled());
+    await start();
+    await act(async () => landUrl(URL_));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE),
+    );
+    expect(useConfirm.getState().request).toBeNull();
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a sibling push starting under the publish prompt refuses after it", async () => {
+    reads.branches.push(branchRow({ name: "feat" }));
+    const { user, start } = await withPushFrom(SIBLING);
+    await openList(user);
+    await openRowMenu(user, "feat");
+    await user.click(menuItem("Publish branch"));
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    await start();
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE),
+    );
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a fork-PR match landing while a sibling pushes refuses instead of opening the guard", async () => {
+    reads.branches.push(branchRow({ name: "feat" }));
+    // The remote has feat: no prompt, so the check decides before the push.
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      { remote: "origin", name: "feat" } as unknown as RemoteBranch,
+    ]);
+    let landMatch: (m: ForkPrMatch | null) => void = () => undefined;
+    vi.mocked(forgeDetectForkPrForBranch).mockImplementation(
+      () =>
+        new Promise<ForkPrMatch | null>((resolve) => {
+          landMatch = resolve;
+        }),
+    );
+    const { user, start } = await withPushFrom(SIBLING);
+    await openList(user);
+    await openRowMenu(user, "feat");
+    await user.click(menuItem("Publish branch"));
+    await waitFor(() => expect(forgeDetectForkPrForBranch).toHaveBeenCalled());
+    // Past the pre-check refusals, waiting on the check alone.
+    await settle();
+    await start();
+    await act(async () => landMatch(FORK_MATCH));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE),
+    );
+    await settle();
+    expect(screen.queryByText(FORK_GUARD_TITLE)).not.toBeInTheDocument();
+    expect(useConfirm.getState().request).toBeNull();
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+const FORK_GUARD_TITLE = "This branch belongs to a pull request from a fork";
+const FORK_MATCH: ForkPrMatch = {
+  number: 7,
+  title: "Fork work",
+  url: "https://example.test/pull/7",
+  headRefName: "feat",
+  headRepoOwner: "someone",
+  headRepoName: "keep",
+  maintainerCanModify: true,
+  aheadCount: 1,
+};

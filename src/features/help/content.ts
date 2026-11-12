@@ -947,6 +947,12 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   Renaming changes only the local name: a branch already on a remote keeps its name there
   (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
   for agent sessions.
+  Deleting asks first, and the notice that follows names the commit the branch pointed
+  at (**Deleted _name_ (was _abc1234_)**) with a **Restore** button for about 15 seconds.
+  Restore re-creates the branch at that commit without checking it out, marks it **Keep
+  local** again if it was, and doesn't restore its upstream link; if a branch of that name
+  exists again, nothing is overwritten. Once the notice is gone, restore it from **Recover
+  lost work** (see *Stash*).
 - **Keep a branch local.** Tick **Keep local** in a branch's context menu, or toggle the
   current branch with *Turn Keep local on or off for the current branch* in the command
   palette, and GitDesktop{{ai}} and its MCP server{{/ai}} won't push or publish it. Push,
@@ -1004,7 +1010,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   branches checked out in the main workspace, and agent session branches are never included
   (when the default branch can't be read, the list stays empty and says why), and deleting
   skips protected branches. A branch that couldn't be archived or deleted stays in the list
-  with the reason under its name, ready to retry.
+  with the reason under its name, ready to retry. Deleting removes each branch only at the
+  commit the list showed: a branch that changed since the list loaded is kept, stays
+  listed and is checked again. The result notice offers **Restore all**, which re-creates
+  the deleted branches at their commits, and **Recover lost work** lists each one too. A
+  worktree removed along the way isn't restored, only its branch.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -1146,8 +1156,16 @@ unresolved, or while a merge, rebase, cherry-pick or revert is in progress — f
 it first, so a resolution you've already staged can't be swept out of the operation.
 
 **Recover lost work** (in the branch ⋮ menu, or the command palette) opens the
-**Recoverable** tab in the stashes dialog. It scans your repository (with \`git fsck\`) for
-*orphaned* stashes — uncommitted work a stash once saved that has since fallen out of
+**Recoverable** tab in the stashes dialog, whose title reads **Recover lost work** there
+and **Stashes** on the other tab. Its **Deleted branches** list shows each branch you
+deleted in GitDesktop with its short commit id, when it was deleted, and a **Keep local**
+tag if it was kept local; arrow keys walk it, and **Restore branch** re-creates the
+selected one at that commit without checking it out. A row whose commit Git has removed
+says it can't be restored and offers **Remove from list**. The list keeps the newest 50
+deletes per repository, and only deletes made in the GitDesktop window: a branch deleted
+in a terminal{{ai}} or by an MCP client{{/ai}} isn't listed.
+
+Under **Lost stashes**, it scans your repository (with \`git fsck\`) for *orphaned* stashes — uncommitted work a stash once saved that has since fallen out of
 **View stashes** (dropped, or abandoned by an interrupted operation) — and lists each one
 with a file-by-file diff preview. **Restore to working tree** re-applies the one you pick;
 it's non-destructive (it applies the stash, never dropping or committing anything), so you
@@ -1351,7 +1369,8 @@ right on the **Push** and **Pull** buttons.
   **Pull** menu first. Setups that route pushes elsewhere keep a plain **Push**.
 - On a branch marked **Keep local** (see *Branches & compare*), **Push**, **Publish
   branch** and force push are held with the reason, and so are the Push menu's items;
-  {{kbd:push}} says why instead of pushing.
+  {{kbd:push}} says why instead of pushing.{{ai}} A checked-out agent-session branch is
+  never pushed or published by GitDesktop: its push buttons are held the same way.{{/ai}}
 - A push to a **mirror remote** (one set up with \`remote.<name>.mirror\`), including a tag
   push and deleting a branch or tag there, is refused with the reason before Git runs,
   since a mirror push can remove branches on that remote. So is a push of a branch into
@@ -1378,9 +1397,10 @@ Before creating anything, publishing checks that the repository has no \`origin\
 a branch is checked out, and that it has a first commit, and stops with the reason if not.
 When the current branch is marked **Keep local**, the dialog's publish button is held with
 the reason instead. The repository is created first and the current branch pushed to it
-after, so a large first push has as long as any other push. On GitHub, if only the push
-fails, the message says the repository was created and \`origin\` points at it; publish the
-branch from the sync bar's **Publish branch** to finish.
+after, so a large first push has as long as any other push. If only the push fails, the
+repository exists and \`origin\` points at it; once the cause is fixed, push the branch
+from the sync bar to finish. On a branch marked **Keep local**, that push is refused
+until you remove the mark.
 
 Publishing pushes the current branch's full history, so it can take a few minutes.
 Closing the dialog doesn't stop it: a status line at the top of the repository shows it
@@ -1525,7 +1545,10 @@ markers, giving you the chance to clean them up first. The command palette offer
 these as **Mark conflict resolved**. Staging a conflicted file any other way (its row's
 **+** button, the right-click menu, **Stage all**, or the palette) asks the same question
 while markers remain, and always asks for a file it can't check: a binary or very large
-file, or one it can't read.
+file, or one it can't read. A file too large to show, or a binary one, offers **Mark
+resolved** in its pane once you've resolved it on disk: it stages the file exactly as it is
+on disk and always asks first, because GitDesktop can't check it for conflict markers.
+**Mark conflict resolved** in the command palette works there too.
 
 {{ai}}## Resolve conflicts with AI
 
@@ -4143,7 +4166,8 @@ the small programs Git runs at points like *before commit* or *before push*. Whe
   \`git push\` for a kept-local branch{{ai}}, in a terminal or in an agent's own
   shell{{/ai}}. It covers this clone only, and \`git push --no-verify\` skips it. Once
   installed it's listed here like any other pre-push hook, so editing, disabling or
-  deleting it here changes the guard too.
+  deleting it here changes the guard too. While it's active, its row reads **Managed by
+  GitDesktop**, and **Save**, **Disable** and **Delete** on it ask first.
 - If your repo uses a hook manager — **husky**, **pre-commit**, or **lefthook** —
   GitDesktop detects it, opens its config, and can run the right install/update command
   for you.`,

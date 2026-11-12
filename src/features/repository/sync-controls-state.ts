@@ -51,6 +51,24 @@ export const KEPT_LOCAL_PULL_REASON: Record<
     `Pull — ${branch} is kept local and its upstream ${upstream} was deleted on the remote, so there is nothing to pull`,
 };
 
+/** Why a push or publish of an agent-session HEAD is held: the backend refuses
+ *  every push of the namespace, so the bar never offers one. */
+export function sessionBranchPushReason(branch: string): string {
+  return `${branch} belongs to an agent session, so GitDesktop never pushes or publishes it.`;
+}
+
+/** Pull's reason on an agent-session HEAD with no live upstream: the usual ones
+ *  advise publishing, which the session hold forbids. */
+export const SESSION_PULL_REASON: Record<
+  "untracked" | "gone",
+  (branch: string, upstream: string) => string
+> = {
+  untracked: (branch) =>
+    `Pull — ${branch} belongs to an agent session and has no upstream branch to pull from`,
+  gone: (branch, upstream) =>
+    `Pull — ${branch} belongs to an agent session and its upstream ${upstream} was deleted on the remote, so there is nothing to pull`,
+};
+
 /** The branch the force-push confirm's Keep local hold names, or null for no
  *  hold. A null captured branch falls back to the live kept-local HEAD; a
  *  captured branch is held only while it is that HEAD. */
@@ -126,6 +144,9 @@ export interface SyncControlsInput {
   /** HEAD's branch-list row is marked Keep local; false while unknown (a stale or
    *  unloaded list leaves Push live, and Rust refuses the push). */
   keptLocal: boolean;
+  /** HEAD's branch is in the agent-session namespace (any case); false while the
+   *  status is unread. The caller decides it, so this module stays import-free. */
+  sessionHead: boolean;
 }
 
 export interface Hold {
@@ -414,6 +435,13 @@ export function deriveSyncControls(input: SyncControlsInput) {
           pushLabel === "Publish branch" ? "publish" : "push",
         )
       : undefined;
+  // The session twins rank ahead of Keep local's at every read: the backend
+  // refuses a session push whatever its mark says.
+  const sessionHeadName = input.sessionHead && head?.name ? head.name : null;
+  const pushSessionReason =
+    sessionHeadName !== null
+      ? sessionBranchPushReason(sessionHeadName)
+      : undefined;
 
   // One description per button feeds both its tooltip and its accessible name;
   // each starts with the visible label (WCAG 2.5.3) and, while disabled,
@@ -466,7 +494,13 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // reads as gone whether or not the remote branch exists; claim neither.
     if (unborn && head.upstreamGone)
       return `Pull — ${head.name} has no commits yet, so it can't be compared with ${upstream}`;
-    // Publish is held while kept local, so nothing here may advise it.
+    // Publish is held on a session or kept-local HEAD, so nothing here may
+    // advise it.
+    if (sessionHeadName !== null && !hasUpstream)
+      return SESSION_PULL_REASON[head.upstreamGone ? "gone" : "untracked"](
+        sessionHeadName,
+        upstream ?? "",
+      );
     if (keptHeadName !== null && !hasUpstream)
       return KEPT_LOCAL_PULL_REASON[head.upstreamGone ? "gone" : "untracked"](
         keptHeadName,
@@ -484,6 +518,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
     return behindLabel;
   })();
   const pushDescription = (() => {
+    if (pushSessionReason) return `${pushLabel} — ${pushSessionReason}`;
     if (pushKeptLocalReason) return `${pushLabel} — ${pushKeptLocalReason}`;
     if (detached)
       return `${pushLabel} — you're on a detached HEAD; check out a branch to push`;
@@ -537,14 +572,17 @@ export function deriveSyncControls(input: SyncControlsInput) {
   );
   // A mismatch menu with nothing to offer holds the trigger itself, as the Pull
   // caret holds an empty menu.
-  const push: Hold =
-    pushKeptLocalReason !== undefined
-      ? { disabled: true, reason: pushKeptLocalReason }
-      : hold(
-          unknownRead(true),
-          detached || unborn || mismatchAllHeld,
-          pushDescription,
-        );
+  const push: Hold = (() => {
+    if (pushSessionReason !== undefined)
+      return { disabled: true, reason: pushSessionReason };
+    if (pushKeptLocalReason !== undefined)
+      return { disabled: true, reason: pushKeptLocalReason };
+    return hold(
+      unknownRead(true),
+      detached || unborn || mismatchAllHeld,
+      pushDescription,
+    );
+  })();
   // The caret stays live offline: its items carry their own offline holds.
   const pullOptions = ((): Hold => {
     const pending = unknownRead(true);
@@ -556,8 +594,9 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // empty menu's reason would point at Publish, which Push holds until the
     // first commit; the caret repeats the Pull description instead.
     if (detached || unborn) return { disabled, reason: pullDescription };
-    // The empty menu's reason points at Publish, which Keep local holds.
-    if (empty && keptHeadName !== null)
+    // The empty menu's reason points at Publish, which a session or Keep local
+    // holds.
+    if (empty && (sessionHeadName !== null || keptHeadName !== null))
       return { disabled, reason: pullDescription };
     return {
       disabled,
@@ -584,6 +623,9 @@ export function deriveSyncControls(input: SyncControlsInput) {
     /** Set while HEAD is marked Keep local: the push hold's reason and the push
      *  hotkey's refusal toast. */
     pushKeptLocalReason,
+    /** Set while HEAD is an agent-session branch: outranks
+     *  {@link pushKeptLocalReason} on the hold and the push hotkey's toast. */
+    pushSessionReason,
     mismatch,
     mismatchMenu,
     /** Accessible names: the description, else the bare visible label — never
@@ -605,10 +647,12 @@ export function deriveSyncControls(input: SyncControlsInput) {
         hasUpstream &&
         !diverged &&
         !offlineHold,
-      // A kept-local HEAD keeps the key live so the press reaches its toast,
-      // except with no origin, where the bar shows only Publish repository.
+      // A session or kept-local HEAD keeps the key live so the press reaches its
+      // toast, except with no origin, where the bar shows only Publish repository.
       push:
-        (pushKeptLocalReason !== undefined && !noOrigin) ||
+        ((pushSessionReason !== undefined ||
+          pushKeptLocalReason !== undefined) &&
+          !noOrigin) ||
         (statusKnown &&
           hasOrigin &&
           !busy &&

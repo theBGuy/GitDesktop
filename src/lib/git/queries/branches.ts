@@ -525,7 +525,13 @@ interface ContentCheckOpen {
   heads: ReadonlyMap<string, string>;
   /** The head each branch's first attempt was created with (null: none), so a
    *  head arriving while it queues or runs never re-keys it. */
-  pinned: ReadonlyMap<string, string | null>;
+  pinned: ReadonlyMap<string, PinnedHead>;
+}
+
+interface PinnedHead {
+  head: string | null;
+  /** The listed tip the pin was made under; a pin under another one is absent. */
+  listedTip: string;
 }
 
 interface LatchedCheck {
@@ -533,6 +539,17 @@ interface LatchedCheck {
   answer: api.BranchContentMerged | null;
   /** The PR head the landed run sent (null: none). */
   prHeadUsed: string | null;
+  /** The listed tip the run was keyed under ("" without one). A record under
+   *  another tip is absent at every read, so a relisted branch is checked again. */
+  listedTip: string;
+}
+
+/** `record` when it was produced under `listedTip`, else undefined. */
+function underTip(
+  record: LatchedCheck | undefined,
+  listedTip: string,
+): LatchedCheck | undefined {
+  return record?.listedTip === listedTip ? record : undefined;
 }
 
 /** Whether one later PR head may still re-run `record`: it ran without a head and
@@ -571,7 +588,7 @@ const BASE_FAILED: LatchedBaseRead = { base: null, offReason: "baseFailed" };
 
 const NO_ANSWERS: ReadonlyMap<string, LatchedCheck> = new Map();
 const NO_HEADS: ReadonlyMap<string, string> = new Map();
-const NO_PINS: ReadonlyMap<string, string | null> = new Map();
+const NO_PINS: ReadonlyMap<string, PinnedHead> = new Map();
 
 const PR_HEAD = /^[0-9a-f]{7,64}$/;
 /** The one gate a PR head passes before it reaches the check: folded to
@@ -625,6 +642,11 @@ export interface BranchContentCheck {
  * data never lands in this one. The open is decided during render, so the
  * first commit after an enable edge or a repo switch already shows nothing
  * landed. Closing cancels queued checks and drops the open's cache entries.
+ *
+ * `listed` (from {@link useListedBranchTips}) keys each verdict on its branch's
+ * listed tip: a branch still waiting for its tip gets no check and reads
+ * pending, and a tip that changes (a relist) re-runs that branch's check once.
+ * A branch with no listed tip is checked under "". Omitted, nothing waits.
  */
 export function useBranchContentCheck(
   repoPath: string,
@@ -632,6 +654,7 @@ export function useBranchContentCheck(
   branches: readonly string[],
   enabled: boolean,
   prHeads?: ReadonlyMap<string, string>,
+  listed?: Pick<ListedBranchTips, "tips" | "waiting">,
 ): BranchContentCheck {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState<ContentCheckOpen | null>(null);
@@ -700,27 +723,38 @@ export function useBranchContentCheck(
   }
   const base = landedRead?.base ?? null;
 
-  // The head each branch's current attempt sends, which its key carries last.
-  // A first attempt keeps the head it was created with; an upgradable record
-  // takes the latched head for its one upgrade.
+  // The branches that get a check now (none still waiting for its listed tip),
+  // and the listed tip each one's run is keyed under.
+  const checked =
+    listed === undefined
+      ? branches
+      : branches.filter((b) => !listed.waiting.has(b));
+  const tipsUsed = checked.map((b) => listed?.tips.get(b) ?? "");
+
+  // The head each branch's current attempt sends, which its key carries next
+  // to last. A first attempt keeps the head it was created with; an upgradable
+  // record takes the latched head for its one upgrade.
   let sightings: Map<string, string> | null = null;
-  let pins: Map<string, string | null> | null = null;
+  let pins: Map<string, PinnedHead> | null = null;
   const headsUsed: (string | null)[] = [];
   if (live !== null) {
     for (const branch of branches) {
-      let head = live.heads.get(branch) ?? null;
-      if (head === null) {
-        head = validPrHead(prHeads?.get(branch));
-        if (head !== null) (sightings ??= new Map()).set(branch, head);
-      }
-      if (base === null) continue;
-      const record = live.answers.get(branch);
+      if (live.heads.has(branch)) continue;
+      const head = validPrHead(prHeads?.get(branch));
+      if (head !== null) (sightings ??= new Map()).set(branch, head);
+    }
+    for (let i = 0; base !== null && i < checked.length; i++) {
+      const branch = checked[i];
+      const listedTip = tipsUsed[i];
+      const head = live.heads.get(branch) ?? sightings?.get(branch) ?? null;
+      const record = underTip(live.answers.get(branch), listedTip);
+      const pin = live.pinned.get(branch);
       let used: string | null;
       if (record === undefined) {
-        if (live.pinned.has(branch)) used = live.pinned.get(branch) ?? null;
+        if (pin !== undefined && pin.listedTip === listedTip) used = pin.head;
         else {
           used = head;
-          (pins ??= new Map()).set(branch, head);
+          (pins ??= new Map()).set(branch, { head, listedTip });
         }
       } else if (upgradable(record) && head !== null) used = head;
       else used = record.prHeadUsed;
@@ -737,8 +771,9 @@ export function useBranchContentCheck(
       for (const [branch, head] of seen ?? [])
         if (!heads.has(branch)) heads.set(branch, head);
       const pinned = new Map(prev.pinned);
-      for (const [branch, head] of pinning ?? [])
-        if (!pinned.has(branch)) pinned.set(branch, head);
+      for (const [branch, pin] of pinning ?? [])
+        if (pinned.get(branch)?.listedTip !== pin.listedTip)
+          pinned.set(branch, pin);
       return { ...prev, heads, pinned };
     });
   }
@@ -746,8 +781,9 @@ export function useBranchContentCheck(
   const verdictQueries = useQueries({
     queries:
       live !== null && base !== null
-        ? branches.map((branch, i) => {
+        ? checked.map((branch, i) => {
             const headUsed = headsUsed[i];
+            const listedTip = tipsUsed[i];
             return {
               queryKey: [
                 "content-merged",
@@ -757,11 +793,13 @@ export function useBranchContentCheck(
                 base.sha,
                 branch,
                 headUsed ?? "",
+                listedTip,
               ] as const,
               queryFn: async ({ signal }: { signal: AbortSignal }) => {
                 // Only the run that landed the record answers from it, so an
-                // upgrade with a head that run never sent reaches git.
-                const landed = live.answers.get(branch);
+                // upgrade with a head that run never sent, or a relisted tip,
+                // reaches git.
+                const landed = underTip(live.answers.get(branch), listedTip);
                 if (landed !== undefined && landed.prHeadUsed === headUsed) {
                   if (landed.answer === null)
                     throw new Error("This branch's check already failed");
@@ -797,11 +835,12 @@ export function useBranchContentCheck(
   // back without git, so a filterless refetch never moves a verdict.
   let freshAnswers: Map<string, LatchedCheck> | null = null;
   if (live !== null && base !== null) {
-    for (let i = 0; i < branches.length; i++) {
-      const branch = branches[i];
+    for (let i = 0; i < checked.length; i++) {
+      const branch = checked[i];
       const query = verdictQueries[i];
       const headUsed = headsUsed[i];
-      const record = live.answers.get(branch);
+      const listedTip = tipsUsed[i];
+      const record = underTip(live.answers.get(branch), listedTip);
       if (
         query === undefined ||
         (record !== undefined && record.prHeadUsed === headUsed)
@@ -810,7 +849,7 @@ export function useBranchContentCheck(
       const answer = query.data ?? (query.isError ? null : undefined);
       if (answer === undefined) continue;
       freshAnswers ??= new Map();
-      freshAnswers.set(branch, { answer, prHeadUsed: headUsed });
+      freshAnswers.set(branch, { answer, prHeadUsed: headUsed, listedTip });
     }
   }
   if (live !== null && freshAnswers !== null) {
@@ -820,7 +859,8 @@ export function useBranchContentCheck(
       if (prev === null || prev.epoch !== epochNow) return prev;
       const answers = new Map(prev.answers);
       for (const [branch, landed] of landing) {
-        const prior = answers.get(branch);
+        const prior = underTip(answers.get(branch), landed.listedTip);
+        // A prior under another listed tip is replaced, never upgraded.
         if (prior === undefined) answers.set(branch, landed);
         // An upgrade replaces the prior answer only when it ranks higher (clean
         // > changes > unknown = failed); either way it spends the head.
@@ -829,7 +869,7 @@ export function useBranchContentCheck(
             branch,
             verdictRank(landed.answer) > verdictRank(prior.answer)
               ? landed
-              : { answer: prior.answer, prHeadUsed: landed.prHeadUsed },
+              : { ...prior, prHeadUsed: landed.prHeadUsed },
           );
       }
       return { ...prev, answers };
@@ -930,8 +970,11 @@ export function useBranchContentCheck(
   let pendingCount = 0;
   for (const branch of branches) {
     // A latched record serves while its upgrade runs, so a row never goes
-    // back to pending.
-    const record = live.answers.get(branch) ?? freshAnswers?.get(branch);
+    // back to pending, except under a new listed tip or while its tip waits.
+    const record = listed?.waiting.has(branch)
+      ? undefined
+      : (underTip(live.answers.get(branch), listed?.tips.get(branch) ?? "") ??
+        freshAnswers?.get(branch));
     const answer = record?.answer;
     if (answer === undefined) pendingCount++;
     else {
@@ -950,5 +993,169 @@ export function useBranchContentCheck(
     results,
     prHeadsUsed,
     pendingCount,
+  };
+}
+
+export interface ListedBranchTips {
+  /** Branch -> the tip this open FIRST read for it, plus relists. Latched per
+   *  NAME: a later read never moves an entry. */
+  tips: ReadonlyMap<string, string>;
+  /** Requested names with no answer yet, their read unsent or in flight. */
+  waiting: ReadonlySet<string>;
+  /** Requested names whose latest read failed and is not running again right now. */
+  failed: ReadonlySet<string>;
+  /** Re-run the failed read. No-op with nothing failed, and once the open ended. */
+  retry: () => void;
+  /** Replace one branch's listed tip with a tip the backend measured. No-op
+   *  once the open ended. */
+  relist: (name: string, tip: string) => void;
+}
+
+interface ListedTipsOpen {
+  epoch: number;
+  repoPath: string;
+  tips: ReadonlyMap<string, string>;
+  /** Names a successful read answered for, with or without a tip. */
+  asked: ReadonlySet<string>;
+}
+
+interface ListedTipsAnswer {
+  /** The names this read asked for: only they join `asked` when it lands. */
+  names: readonly string[];
+  tips: Record<string, string>;
+}
+
+const NO_TIPS: ReadonlyMap<string, string> = new Map();
+const NO_NAMES: ReadonlySet<string> = new Set();
+
+// Minted only inside a setState updater, as the content check's epoch is.
+let listedTipsEpoch = 0;
+function nextListedTipsEpoch() {
+  listedTipsEpoch += 1;
+  return listedTipsEpoch;
+}
+
+/**
+ * Each branch's tip as this open (`enabled` false->true) first read it, for a
+ * destructive batch that must act on the commit its list showed. Names are
+ * read as they appear, never fixed at the first render: one query runs over
+ * the names not yet answered, keyed on them sorted (a reorder never restarts
+ * it) and outside `["repo", repoPath]` with a per-open epoch, so no repo
+ * invalidation or refocus re-reads a tip mid-open.
+ *
+ * Only a successful answer for the CURRENT key latches, and only the names that
+ * key asked join `asked`: a name that appears while a read is in flight is read
+ * by the next query. A name the read answered without (git no longer lists it)
+ * is asked with no tip. A failed read latches nothing; its names are `failed`
+ * until a read of them runs again (`retry`, a new name changing the key, or an
+ * `<Activity>` re-show refetching the errored query), when they wait again.
+ */
+export function useListedBranchTips(
+  repoPath: string,
+  names: readonly string[],
+  enabled: boolean,
+): ListedBranchTips {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState<ListedTipsOpen | null>(null);
+  // Render-time adjust, as the content check's open: an `[open]` effect would
+  // replay on an <Activity> re-show.
+  if (enabled && (open === null || open.repoPath !== repoPath)) {
+    setOpen((prev) =>
+      prev !== null && prev.repoPath === repoPath
+        ? prev
+        : {
+            epoch: nextListedTipsEpoch(),
+            repoPath,
+            tips: NO_TIPS,
+            asked: NO_NAMES,
+          },
+    );
+  } else if (!enabled && open !== null) {
+    setOpen(null);
+  }
+  const live =
+    enabled && open !== null && open.repoPath === repoPath ? open : null;
+
+  const unread =
+    live === null
+      ? []
+      : [...new Set(names)].filter((n) => !live.asked.has(n)).sort();
+  const query = useQuery({
+    queryKey: [
+      "listed-tips",
+      live?.repoPath ?? repoPath,
+      live?.epoch ?? 0,
+      unread,
+    ] as const,
+    queryFn: async (): Promise<ListedTipsAnswer> => ({
+      names: unread,
+      tips: await api.gitBranchTips(repoPath, unread),
+    }),
+    enabled: live !== null && unread.length > 0,
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    networkMode: "always",
+  });
+
+  const answer =
+    live !== null && query.isSuccess && !query.isPlaceholderData
+      ? query.data
+      : undefined;
+  if (live !== null && answer !== undefined) {
+    const epochNow = live.epoch;
+    setOpen((prev) => {
+      if (prev === null || prev.epoch !== epochNow) return prev;
+      if (answer.names.every((n) => prev.asked.has(n))) return prev;
+      const tips = new Map(prev.tips);
+      const asked = new Set(prev.asked);
+      for (const name of answer.names) {
+        asked.add(name);
+        const tip = answer.tips[name];
+        if (typeof tip === "string" && !tips.has(name)) tips.set(name, tip);
+      }
+      return { ...prev, tips, asked };
+    });
+  }
+
+  // Ended in an effect BODY on the close or epoch-change commit, never in a
+  // cleanup: an <Activity> hide runs cleanups, and the open outlives a hide.
+  const openRepo = live?.repoPath;
+  const epoch = live?.epoch;
+  const ended = useRef<{ repo: string; epoch: number } | null>(null);
+  useEffect(() => {
+    const prev = ended.current;
+    ended.current =
+      openRepo === undefined || epoch === undefined
+        ? null
+        : { repo: openRepo, epoch };
+    if (prev === null || (prev.repo === openRepo && prev.epoch === epoch))
+      return;
+    queryClient.removeQueries({
+      queryKey: ["listed-tips", prev.repo, prev.epoch],
+    });
+  }, [queryClient, openRepo, epoch]);
+
+  const unanswered = live === null || answer !== undefined ? [] : unread;
+  const failedNow = query.isError && !query.isFetching;
+  const refetch = query.refetch;
+  return {
+    tips: live?.tips ?? NO_TIPS,
+    waiting: failedNow ? NO_NAMES : new Set(unanswered),
+    failed: failedNow ? new Set(unanswered) : NO_NAMES,
+    retry: () => {
+      if (live !== null && failedNow) void refetch();
+    },
+    relist: (name, tip) => {
+      if (live === null) return;
+      const epochNow = live.epoch;
+      setOpen((prev) => {
+        if (prev === null || prev.epoch !== epochNow) return prev;
+        const tips = new Map(prev.tips);
+        tips.set(name, tip);
+        const asked = new Set(prev.asked);
+        asked.add(name);
+        return { ...prev, tips, asked };
+      });
+    },
   };
 }

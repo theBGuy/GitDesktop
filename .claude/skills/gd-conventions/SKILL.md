@@ -1163,6 +1163,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   from the lock callback: a failed write restores the store when it can (from
   disk, else from its snapshot; when both fail, nothing is restored or saved)
   and rethrows the original error, which callers' error handlers match on.
+- **Per-repository records** follow `src/lib/deleted-branches/store.ts`: keyed
+  by `repoIdentityStrict`, written under `withAppStoreLock` with the tolerant
+  reload and `writeWithRollback`, registered in `repo-data-migration.ts` and in
+  `scripts/app-store-lock.test.mjs`'s ADOPTED roster — a record that skips one
+  strands across worktrees, races the MCP server or orphans on relocate.
 - **Settings writes seed the cache** — component-started settings writes go
   through the `src/lib/settings/queries.ts` hooks, and any new settings
   `useMutation` spreads `...settingsSeedCallbacks(queryClient,
@@ -1225,6 +1230,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `<branch>@{upstream}` stays bare — git looks that name up as a branch and
   refuses the `refs/heads/` spelling (measured, git 2.51.1)
   (guard: check-rust-invariants check G).
+- **Listed values latch per name** — a list that later acts on a value it
+  measured (Clean up's delete at each listed tip) latches it the way
+  `useListedBranchTips` (`queries/branches.ts`) does: the first successful read
+  wins, names that appear later are read when they appear, and the action holds
+  while a read is pending or failed, so it never acts on a value re-read since.
 
 ## Rust / Tauri conventions
 
@@ -1246,6 +1256,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   reflog miss AND patch-twins present — strong evidence, not proof; the
   failure direction stays inaction), and the destructive action targets the
   measured sha, never a re-resolved ref.
+- **Local branch deletes compare-and-delete:** a local branch ref is deleted
+  only through `git::branches::delete_branch_ref_at` (`update-ref -d` at a
+  measured tip, its guards run under the config-write mutex), never a new
+  `branch -D`: that deletes whatever the ref points at when git runs.
 - **Cached GitHub reads stay true:** gh REST GETs that adopt runner.rs's
   conditional layer (`run_gh_cached_get`/`run_gh_cached_get_raw`) key on
   (repo_path, host, argv) with the auth epoch in the value, detect a 304

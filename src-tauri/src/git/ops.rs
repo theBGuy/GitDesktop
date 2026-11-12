@@ -1061,8 +1061,8 @@ pub async fn git_reset(
 }
 
 /// The refusal a reset gets when HEAD is no longer the tip the user confirmed.
-/// KEEP IN STEP: one wording family with branches.rs's ref-move refusal and
-/// commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
+/// KEEP IN STEP: one wording family with branches.rs's ref-move refusals (reset and
+/// delete) and commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
 const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothing was reset.";
 
 /// The refusal a reset gets when HEAD sits on another branch (or none) than the one

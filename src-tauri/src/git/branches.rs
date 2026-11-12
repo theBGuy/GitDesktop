@@ -5,11 +5,11 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::ignored_guard::{self, ignored_files_in_the_way, name_paths};
 use crate::git::runner::{
-    acquire_repo_lock, acquire_repo_lock_unbounded, config_lock_busy, is_config_lock_contention,
-    run_git, run_git_config_write, run_git_config_write_held, run_git_mutating,
-    run_git_mutating_config_write, run_git_raw, run_git_worktree_admin, try_acquire_repo_lock,
-    ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT,
-    NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    acquire_repo_lock, acquire_repo_lock_unbounded, config_lock_busy, holder_label,
+    is_config_lock_contention, run_git, run_git_config_write, run_git_config_write_held,
+    run_git_mutating, run_git_mutating_config_write, run_git_raw, run_git_worktree_admin,
+    try_acquire_repo_lock, with_config_write_lock, ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
@@ -235,8 +235,12 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             && crate::git::remote::is_named_remote(remote)
             && upstream_remote_ref.is_some_and(|r| r.starts_with("refs/heads/"))
             && !upstream_full.is_empty()
-            && remote_heads.get(format!("refs/remotes/{remote}/HEAD").as_str())
-                == Some(&upstream_full);
+            && crate::git::remote::upstream_is_remote_default(
+                remote_heads
+                    .get(format!("refs/remotes/{remote}/HEAD").as_str())
+                    .copied(),
+                upstream_full,
+            ) == Some(true);
         branches.push(Branch {
             name: name.to_string(),
             is_current: head == Some("*"),
@@ -863,11 +867,11 @@ async fn rename_phase(phase: RenamePhase) {
 }
 
 /// If `name` is checked out in a LINKED worktree (one other than `repo_path`
-/// itself), returns that worktree's path. git refuses to delete a branch that's
-/// checked out anywhere, so a caller turns this into an actionable message.
-/// Best-effort: a `worktree list` failure yields `None` and lets git's own error
-/// speak. The `repo_path` checkout is excluded so deleting its *current* branch
-/// isn't misreported here (that path pre-switches, and git errors clearly if not).
+/// itself), returns that worktree's path, which a caller turns into an actionable
+/// message. Best-effort: a `worktree list` failure yields `None`, so in a branch delete
+/// this probe only steers the pre-hold sweep and its message; the delete's guard is the
+/// under-hold [`worktree_holding_branch_checked`]. The `repo_path` checkout is
+/// excluded so its *current* branch isn't misreported as held by a linked worktree.
 ///
 /// The self-exclusion compares CANONICALIZED spellings (`worktree::canonical_wt_path`, as
 /// `ops::is_listed_worktree` does): git's porcelain prints the resolved path, so a caller
@@ -914,8 +918,12 @@ async fn worktree_holding_branch_checked(repo_path: &str, name: &str) -> AppResu
 /// detached in `worktree list`, and `update-ref` moves the ref under it where
 /// `branch -f` refuses, so every admin dir under the common dir is read the way git's
 /// own checked-out test reads them. Fails closed: a marker that exists but can't be read
-/// is an `Err`.
-async fn branch_operation_refusal(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
+/// is an `Err`. `verb` ends the sentence ("before {verb} {branch}.").
+async fn branch_operation_refusal(
+    repo_path: &str,
+    branch: &str,
+    verb: &str,
+) -> AppResult<Option<String>> {
     use crate::git::ops::parse_worktree_paths;
     use crate::git::worktree::canonical_wt_path;
     let git_dir = |which: &'static str| async move {
@@ -1005,7 +1013,7 @@ async fn branch_operation_refusal(repo_path: &str, branch: &str) -> AppResult<Op
             (false, false) => ("is being bisected", "end that bisect (git bisect reset)"),
         };
         return Ok(Some(format!(
-            "{branch} {what} {place} — {remedy} before resetting {branch}."
+            "{branch} {what} {place} — {remedy} before {verb} {branch}."
         )));
     }
     Ok(None)
@@ -1072,65 +1080,258 @@ async fn update_holder_refusal(
     }
 }
 
+/// What a branch delete did. `TipMoved` is returned only to a caller that pinned the
+/// tip, and under it nothing was deleted. The TS mirror is `DeleteBranchOutcome` in
+/// `src/lib/git/api/branches.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum DeleteBranchOutcome {
+    /// `tip` is the commit the ref pointed at when it was deleted, the one Restore needs.
+    Deleted {
+        tip: String,
+    },
+    TipMoved {
+        expected: String,
+        actual: String,
+    },
+}
+
+/// A caller-supplied tip pin in the form the compare reads: a full object id (40 or 64
+/// hex), lowercased. `update-ref` resolves a short old value as a rev and an empty one
+/// skips its compare, so anything else is refused before git runs.
+pub(crate) fn full_object_id(id: &str) -> AppResult<String> {
+    if !matches!(id.len(), 40 | 64) || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AppError::InvalidArgument(
+            "expected tip must be a full commit id (40 or 64 hex characters)".into(),
+        ));
+    }
+    Ok(id.to_ascii_lowercase())
+}
+
 /// Force-deletes a local branch (the UI confirms first, GitHub Desktop style).
 #[tauri::command]
 pub async fn git_delete_branch(
     state: State<'_, AppState>,
     repo_path: String,
     name: String,
-) -> AppResult<()> {
-    git_delete_branch_core(&state, repo_path, name).await
+    expected_tip: Option<String>,
+) -> AppResult<DeleteBranchOutcome> {
+    git_delete_branch_core(&state, repo_path, name, expected_tip).await
+}
+
+/// The refusal for a branch checked out in a linked worktree; a test pins its wording.
+fn checked_out_elsewhere(name: &str, path: &str) -> AppError {
+    AppError::Command(format!(
+        "{name} is checked out in the worktree at {path} — remove that worktree \
+         (or switch it to another branch) before deleting {name}."
+    ))
 }
 
 pub(crate) async fn git_delete_branch_core(
     state: &AppState,
     repo_path: String,
     name: String,
-) -> AppResult<()> {
+    expected_tip: Option<String>,
+) -> AppResult<DeleteBranchOutcome> {
     validate_ref_name(&name)?;
+    let expected = expected_tip.as_deref().map(full_object_id).transpose()?;
     // Two halves of one window: the marker covers an update that has minted but not yet
     // registered its checkout (the `worktree add` is the long part), the porcelain arm
     // below covers it once registered. Heal-free — the healing lives in the claim arm.
     crate::git::update_marker::refuse_if_branch_updating_no_heal(state, &repo_path, &name).await?;
-    // Pre-mutation guard: git's own refusal for a branch checked out in a worktree
-    // is terse. Detect the holding worktree here — shared by every caller, not just
-    // the switcher's UI guard — and surface an actionable message.
+    // Best-effort pre-hold probe, so a dead update's hidden checkout is swept OUTSIDE the
+    // hold (its removal runs in the admin domain); the guards re-run under the hold.
     if let Some(path) = worktree_holding_branch(&repo_path, &name).await {
-        // An update's hidden checkout is nothing the user can act on by that path, so
-        // it takes its own arm: refused while live, swept and re-probed once dead.
-        let checked_out = |path: String| {
-            AppError::Command(format!(
-                "{name} is checked out in the worktree at {path} — remove that worktree \
-                 (or switch it to another branch) before deleting {name}."
-            ))
-        };
         if !clear_update_holder(state, &repo_path, &name, &path).await? {
-            return Err(checked_out(path));
+            return Err(checked_out_elsewhere(&name, &path));
         }
         // A holder found there after the sweep gets the update refusal when its marker
         // proves it live or dead; otherwise the caller's own message.
         if let Some(path) = worktree_holding_branch(&repo_path, &name).await {
             return Err(update_holder_refusal(state, &repo_path, &name, &path)
                 .await
-                .unwrap_or_else(|| checked_out(path)));
+                .unwrap_or_else(|| checked_out_elsewhere(&name, &path)));
         }
     }
+
+    // One hold across the tip read, the guards and the delete; every spawn under it is
+    // lock-free, since `run_git_mutating*` re-acquires this non-reentrant domain.
     let repo = repo_path.as_str();
-    let local = name.as_str();
-    run_git_mutating_config_write(
-        state,
-        repo,
-        &["branch", "-D", "--", &name],
-        DEFAULT_TIMEOUT,
-        |out, held| async move {
-            if out.code == 0 {
-                remove_deleted_branch_section(&held, repo, local).await;
-            }
-            Ok(out)
+    let domain = state.working_tree_lock(repo).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, holder_label("branch")).await?;
+    // git's own text for a missing branch.
+    let not_found = || AppError::Git {
+        code: 1,
+        stderr: format!("error: branch '{name}' not found"),
+    };
+    let Some(tip) = measured_branch_tip(repo, &name).await? else {
+        return Err(not_found());
+    };
+    if let Some(expected) = expected.as_ref().filter(|expected| **expected != tip) {
+        return Ok(DeleteBranchOutcome::TipMoved {
+            expected: expected.clone(),
+            actual: tip,
+        });
+    }
+    match delete_branch_ref_at(state, repo, &name, &tip).await? {
+        RefDeleteAt::Deleted => Ok(DeleteBranchOutcome::Deleted { tip }),
+        RefDeleteAt::Moved { actual: None } => Err(not_found()),
+        RefDeleteAt::Moved {
+            actual: Some(actual),
+        } => match expected {
+            Some(expected) => Ok(DeleteBranchOutcome::TipMoved { expected, actual }),
+            // KEEP IN STEP: the "… — nothing was <verb>." family of the reset's
+            // ref-move refusal below, ops.rs's `RESET_HEAD_MOVED` and commit.rs's
+            // `UNDO_HEAD_MOVED`.
+            None => Err(AppError::Git {
+                code: 1,
+                stderr: format!("{name} changed since you confirmed — nothing was deleted."),
+            }),
         },
+    }
+}
+
+/// The commit `refs/heads/<name>` points at, `None` only when git answered that there
+/// is no such ref (exit 1, or exit 0 naming nothing); any other failure is an `Err`,
+/// never a guess. A symbolic ref reads as its target's commit, and a dangling one as
+/// absent.
+async fn measured_branch_tip(repo_path: &str, name: &str) -> AppResult<Option<String>> {
+    let full_ref = branch_full_ref(name)?;
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "--quiet", &full_ref],
+        DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(())
+    let tip = out.stdout_lossy().trim().to_string();
+    match out.code {
+        0 if !tip.is_empty() => Ok(Some(tip)),
+        0 | 1 if tip.is_empty() => Ok(None),
+        code => Err(AppError::Git {
+            code,
+            stderr: out.full_failure_text(),
+        }),
+    }
+}
+
+/// `refs/heads/<name>` for the delete's tip read and its `update-ref` target, never a
+/// refspec; the name is validated here as well as at every entry point.
+fn branch_full_ref(name: &str) -> AppResult<String> {
+    validate_ref_name(name)?;
+    Ok(format!("refs/heads/{name}"))
+}
+
+/// What [`delete_branch_ref_at`] did with the ref.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RefDeleteAt {
+    Deleted,
+    /// The ref no longer pointed at the tip, so nothing was deleted; `None` = it is gone.
+    Moved {
+        actual: Option<String>,
+    },
+}
+
+/// Deletes `refs/heads/<name>` only while it still points at `tip`, under the caller's
+/// own domain hold, then drops its `branch.<name>` section. Ahead of the delete it
+/// refuses, deleting nothing, a branch an update marker claims, one a linked worktree
+/// holds, the current branch, and one a rebase or bisect is working on; `update-ref`
+/// itself refuses none of them.
+///
+/// Closed: a move of the ref by any writer up to the delete (git's compare-and-delete),
+/// and checkouts, rebases and bisects of the branch visible when the guards run, which
+/// is after the config-write mutex is held. Out of reach: (i) any writer outside the
+/// domain the caller holds: another process; this app's worktree add of the branch when
+/// the caller holds the working-tree domain (the branch delete); this app's checkout in
+/// the repository when the caller holds only the worktree-admin domain (the worktree
+/// removal). Such a writer checking the branch out or starting a rebase on it between
+/// the guards and the delete leaves that checkout on an unborn branch, recoverable from
+/// `tip`. (ii) A branch that is a symbolic ref to a missing ref reads as not found and
+/// is never deleted here.
+pub(crate) async fn delete_branch_ref_at(
+    state: &AppState,
+    repo_path: &str,
+    name: &str,
+    tip: &str,
+) -> AppResult<RefDeleteAt> {
+    #[cfg(test)]
+    delete_phase(DeletePhase::BeforeGuards).await;
+    // `--no-deref`: on a symbolic ref git would otherwise delete the TARGET branch and
+    // leave the alias dangling. The old-value compare still reads the resolved commit.
+    let full_ref = branch_full_ref(name)?;
+    // The guards run inside the mutex, whose wait is unbounded, so a checkout landing
+    // during that wait is still seen; each is a read that takes no lock of its own.
+    with_config_write_lock(repo_path, |held| async move {
+        crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, name)
+            .await?;
+        // Never swept here: a holder that registered or died since the caller's probe
+        // refuses, and a retry sweeps a dead one.
+        if let Some(path) = worktree_holding_branch_checked(repo_path, name).await? {
+            return Err(update_holder_refusal(state, repo_path, name, &path)
+                .await
+                .unwrap_or_else(|| checked_out_elsewhere(name, &path)));
+        }
+        if current_branch_name(repo_path).await?.as_deref() == Some(name) {
+            return Err(AppError::Command(format!(
+                "{name} is checked out here — switch to another branch before deleting {name}."
+            )));
+        }
+        if let Some(refusal) = branch_operation_refusal(repo_path, name, "deleting").await? {
+            return Err(AppError::Command(refusal));
+        }
+        #[cfg(test)]
+        delete_phase(DeletePhase::BeforeDelete).await;
+        let out = run_git_raw(
+            Some(repo_path),
+            &["update-ref", "--no-deref", "-d", &full_ref, tip],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if out.code == 0 {
+            // `update-ref -d` leaves `branch.<name>.*` behind, where `branch -D` drops it.
+            remove_deleted_branch_section(&held, repo_path, name).await;
+            return Ok(RefDeleteAt::Deleted);
+        }
+        // A failed delete reads as moved only when the ref really moved; a stale ref
+        // `.lock` keeps git's own error.
+        match measured_branch_tip(repo_path, name).await? {
+            Some(now) if now == tip => Err(AppError::Git {
+                code: out.code,
+                stderr: out.full_failure_text(),
+            }),
+            actual => Ok(RefDeleteAt::Moved { actual }),
+        }
+    })
+    .await
+}
+
+/// Where a branch delete can be held from a test: before the config-write mutex and
+/// the guards under it, and between those guards and the compare-and-delete.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeletePhase {
+    BeforeGuards,
+    BeforeDelete,
+}
+
+#[cfg(test)]
+pub(crate) type DeletePhaseHook = std::sync::Arc<
+    dyn Fn(DeletePhase) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited at each [`DeletePhase`] of the delete it is scoped to, so a test can act
+    /// on the repository at that point.
+    pub(crate) static DELETE_PHASE_HOOK: DeletePhaseHook;
+}
+
+#[cfg(test)]
+async fn delete_phase(phase: DeletePhase) {
+    if let Ok(wait) = DELETE_PHASE_HOOK.try_with(|hook| hook(phase)) {
+        wait.await;
+    }
 }
 
 /// git's text when `branch -m` moved the ref but lost `.git/config.lock`: exit 128,
@@ -1161,9 +1362,9 @@ async fn repair_branch_section(held: &ConfigWriteHeld, repo_path: &str, args: &[
     }
 }
 
-/// `branch -D` exits 0 when it loses `.git/config.lock` (measured, git 2.51.1): the
-/// ref is gone but `branch.<name>.*` survives, to resurface on the next branch of that
-/// name. Best-effort, since the delete itself succeeded.
+/// Drops `branch.<name>.*` after the ref itself was deleted, so it can't resurface on
+/// the next branch of that name: `update-ref -d` never touches it. Best-effort, since
+/// the delete itself succeeded.
 pub(crate) async fn remove_deleted_branch_section(
     held: &ConfigWriteHeld,
     repo_path: &str,
@@ -2207,8 +2408,8 @@ async fn branch_reset_to_upstream_within(
         )));
     }
 
-    // KEEP IN STEP: one wording family with ops.rs's `RESET_HEAD_MOVED` and commit.rs's
-    // `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
+    // KEEP IN STEP: one wording family with ops.rs's `RESET_HEAD_MOVED`, commit.rs's
+    // `UNDO_HEAD_MOVED` and `git_delete_branch_core`'s moved ref ("… — nothing was <verb>.").
     let moved = || AppError::Git {
         code: 1,
         stderr: format!("{branch} changed since you confirmed — nothing was reset."),
@@ -2259,7 +2460,7 @@ async fn branch_reset_to_upstream_within(
              sync controls, which moves your working tree with it."
         )));
     }
-    if let Some(refusal) = branch_operation_refusal(repo_path, branch).await? {
+    if let Some(refusal) = branch_operation_refusal(repo_path, branch, "resetting").await? {
         return Err(AppError::Command(refusal));
     }
     if branch_tip_sha(repo_path, branch).await?.as_deref() != Some(expected_local_tip) {
@@ -3414,13 +3615,14 @@ mod tests {
         is_unknown_format_atom, push_destination, read_refs_with_fallback,
         read_refs_with_push_destination,
     };
+    use super::{DeleteBranchOutcome, DeletePhase, DeletePhaseHook, DELETE_PHASE_HOOK};
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
     use super::{UnpushedBasis, UnpushedCount};
     use crate::error::AppError;
     use crate::git::runner::LOCK_WAIT_TIMEOUT;
     use crate::git::runner::{
         acquire_repo_lock, hold_config_lock, release_config_lock_before_attempt, run_git,
-        run_git_raw, CONFIG_WRITE_ATTEMPT_HOOK, DEFAULT_TIMEOUT,
+        run_git_raw, CONFIG_WRITE_ATTEMPT_HOOK, CONFIG_WRITE_LOCK_EVENTS, DEFAULT_TIMEOUT,
     };
     use crate::state::AppState;
     use std::collections::HashSet;
@@ -8659,7 +8861,7 @@ mod tests {
 
         let state = AppState::default();
         let expected = marker::branch_update_refusal(branch).to_string();
-        let deleted = git_delete_branch_core(&state, repo_s.clone(), branch.into())
+        let deleted = git_delete_branch_core(&state, repo_s.clone(), branch.into(), None)
             .await
             .expect_err("a delete during the pre-add window is refused");
         assert_eq!(deleted.to_string(), expected);
@@ -8831,7 +9033,7 @@ mod tests {
         let bare = root.join("gd-update-premarker");
         let bare_s = bare.to_string_lossy().into_owned();
         run(&repo_s, &["worktree", "add", "--quiet", &bare_s, branch]).await;
-        let err = git_delete_branch_core(&state, repo_s.clone(), branch.into())
+        let err = git_delete_branch_core(&state, repo_s.clone(), branch.into(), None)
             .await
             .expect_err("a markerless holder still blocks the delete");
         assert!(
@@ -8854,7 +9056,7 @@ mod tests {
         run(&repo_s, &["worktree", "add", "--quiet", &dead_s, branch]).await;
         marker::write_released_marker(&root, "gd-update-crashed", branch);
 
-        git_delete_branch_core(&state, repo_s.clone(), branch.into())
+        git_delete_branch_core(&state, repo_s.clone(), branch.into(), None)
             .await
             .expect("a released holder is cleared and the delete proceeds");
         assert!(!dead.exists(), "the orphaned checkout was removed");
@@ -9053,9 +9255,11 @@ mod tests {
             .is_empty()
     }
 
-    /// The premise every repair below rests on (git 2.51.1): each command finishes
-    /// its ref change BEFORE losing `.git/config.lock`, so re-running it is never the
-    /// fix. `branch -D` even exits 0. A git that changes any shape fails here first.
+    /// The premise the rename and tracking repairs rest on (git 2.51.1): each command
+    /// finishes its ref change BEFORE losing `.git/config.lock`, so re-running it is
+    /// never the fix. The `branch -D` row (it even exits 0) is a git-behaviour canary
+    /// only: no production path runs `branch -D`. A git that changes any shape fails
+    /// here first.
     #[tokio::test]
     async fn git_lands_the_ref_change_before_losing_the_config_lock() {
         let (_base, repo, repo_s) =
@@ -9140,10 +9344,10 @@ mod tests {
         std::fs::remove_file(&lock).unwrap();
     }
 
-    /// The exit-0 loss is repaired: the ref AND its `branch.<name>` section are gone,
-    /// with the repair's one retry riding out a lock still held on its first attempt.
+    /// The ref delete leaves `.git/config` alone, and the `branch.<name>` section drop
+    /// rides out a held config lock through the repair's retry: both are gone.
     #[tokio::test]
-    async fn a_delete_that_loses_the_config_lock_still_drops_the_branch_settings() {
+    async fn a_delete_under_a_held_config_lock_still_drops_the_branch_settings() {
         let branch = "cfg-lock-delete";
         let (_base, repo, repo_s) =
             repo_with_branch_settings("cfg-lock-delete", branch, "unused").await;
@@ -9154,7 +9358,7 @@ mod tests {
         CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
                 hook,
-                git_delete_branch_core(&state, repo_s.clone(), branch.into()),
+                git_delete_branch_core(&state, repo_s.clone(), branch.into(), None),
             )
             .await
             .expect("the delete succeeds");
@@ -9165,6 +9369,500 @@ mod tests {
             "no stale section"
         );
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A repo on its default branch with `feat` at the seed commit carrying an upstream
+    /// and the Keep local mark, and `main_tip` one commit past it on the checked-out
+    /// branch. Reflogs are pinned on, so a global `core.logAllRefUpdates` can't hide one.
+    /// Returns (guard, repo, feat's tip, the checked-out branch's tip).
+    async fn delete_fixture(tag: &str) -> (tempfile::TempDir, String, String, String) {
+        let (guard, base) = temp_base(tag);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["config", "core.logAllRefUpdates", "true"]).await;
+        run(&repo_s, &["branch", "feat"]).await;
+        for (key, value) in [
+            ("remote", "origin"),
+            ("merge", "refs/heads/feat"),
+            ("gitdesktopLocalOnly", "true"),
+        ] {
+            run(&repo_s, &["config", &format!("branch.feat.{key}"), value]).await;
+        }
+        std::fs::write(repo.join("a.txt"), "next\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "next"]).await;
+        let feat = full_ref_tip(&repo_s, "refs/heads/feat").await.unwrap();
+        let head = full_ref_tip(&repo_s, "HEAD").await.unwrap();
+        (guard, repo_s, feat, head)
+    }
+
+    async fn full_ref_tip(repo: &str, rev: &str) -> Option<String> {
+        let out = run_git_raw(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", rev],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        (out.code == 0).then(|| out.stdout_lossy().trim().to_string())
+    }
+
+    async fn reflog_exists(repo: &str, full_ref: &str) -> bool {
+        run_git_raw(Some(repo), &["reflog", "exists", full_ref], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .code
+            == 0
+    }
+
+    async fn delete(
+        state: &AppState,
+        repo: &str,
+        name: &str,
+        pin: Option<&str>,
+    ) -> Result<DeleteBranchOutcome, AppError> {
+        git_delete_branch_core(state, repo.into(), name.into(), pin.map(str::to_string)).await
+    }
+
+    /// A hook that runs `git <args>` in `repo` once, at `at`.
+    fn git_at_phase(at: DeletePhase, repo: &str, args: &[&str]) -> DeletePhaseHook {
+        let repo = repo.to_string();
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        Arc::new(move |phase| {
+            let (repo, args) = (repo.clone(), args.clone());
+            Box::pin(async move {
+                if phase == at {
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    run(&repo, &args).await;
+                }
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn delete_branch_returns_the_tip_and_drops_ref_reflog_and_settings() {
+        let (_g, repo, feat, _head) = delete_fixture("del-plain").await;
+        assert!(
+            reflog_exists(&repo, "refs/heads/feat").await,
+            "fixture sanity"
+        );
+        assert!(
+            !branch_section(&repo, "feat").await.is_empty(),
+            "fixture sanity"
+        );
+
+        let outcome = delete(&AppState::default(), &repo, "feat", None).await;
+        assert_eq!(outcome.unwrap(), DeleteBranchOutcome::Deleted { tip: feat });
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, None);
+        assert!(!reflog_exists(&repo, "refs/heads/feat").await);
+        assert_eq!(branch_section(&repo, "feat").await, "");
+    }
+
+    #[tokio::test]
+    async fn delete_branch_with_a_matching_pin_deletes_in_either_letter_case() {
+        let (_g, repo, feat, _head) = delete_fixture("del-pin-match").await;
+        run(&repo, &["branch", "feat-upper", "feat"]).await;
+        let state = AppState::default();
+
+        let outcome = delete(&state, &repo, "feat", Some(&feat)).await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::Deleted { tip: feat.clone() }
+        );
+        let outcome = delete(&state, &repo, "feat-upper", Some(&feat.to_uppercase())).await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::Deleted { tip: feat.clone() }
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, None);
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat-upper").await, None);
+    }
+
+    /// The branch is one commit past the pin: nothing is deleted, and the outcome names
+    /// both commits.
+    #[tokio::test]
+    async fn delete_branch_with_a_stale_pin_deletes_nothing() {
+        let (_g, repo, feat, head) = delete_fixture("del-pin-stale").await;
+        run(&repo, &["branch", "-f", "feat", &head]).await;
+
+        let outcome = delete(&AppState::default(), &repo, "feat", Some(&feat)).await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::TipMoved {
+                expected: feat,
+                actual: head.clone()
+            }
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(head));
+        assert!(reflog_exists(&repo, "refs/heads/feat").await);
+        assert!(!branch_section(&repo, "feat").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_branch_refuses_a_pin_that_is_not_a_full_id() {
+        let (_g, repo, feat, _head) = delete_fixture("del-pin-bad").await;
+        let state = AppState::default();
+        for pin in [&feat[..12], "", &"g".repeat(40)] {
+            let err = delete(&state, &repo, "feat", Some(pin)).await.unwrap_err();
+            assert!(
+                matches!(&err, AppError::InvalidArgument(m) if m.contains("full commit id")),
+                "{pin:?}: {err:?}"
+            );
+        }
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
+    }
+
+    #[tokio::test]
+    async fn delete_branch_of_a_missing_branch_is_git_not_found() {
+        let (_g, repo, _feat, _head) = delete_fixture("del-missing").await;
+        let err = delete(&AppState::default(), &repo, "nope", None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Git { code: 1, stderr } if stderr == "error: branch 'nope' not found"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_branch_compares_and_deletes_a_packed_ref() {
+        let (_g, repo, feat, head) = delete_fixture("del-packed").await;
+        run(&repo, &["pack-refs", "--all"]).await;
+        let state = AppState::default();
+
+        let outcome = delete(&state, &repo, "feat", Some(&head)).await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::TipMoved {
+                expected: head,
+                actual: feat.clone()
+            }
+        );
+        assert_eq!(
+            full_ref_tip(&repo, "refs/heads/feat").await,
+            Some(feat.clone())
+        );
+        let outcome = delete(&state, &repo, "feat", Some(&feat)).await;
+        assert_eq!(outcome.unwrap(), DeleteBranchOutcome::Deleted { tip: feat });
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, None);
+    }
+
+    /// A tag named like the branch, at another commit, neither answers the tip read nor
+    /// goes with the branch.
+    #[tokio::test]
+    async fn delete_branch_leaves_a_same_named_tag() {
+        let (_g, repo, feat, head) = delete_fixture("del-tag").await;
+        run(&repo, &["tag", "feat", &head]).await;
+
+        let outcome = delete(&AppState::default(), &repo, "feat", None).await;
+        assert_eq!(outcome.unwrap(), DeleteBranchOutcome::Deleted { tip: feat });
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, None);
+        assert_eq!(full_ref_tip(&repo, "refs/tags/feat").await, Some(head));
+    }
+
+    #[tokio::test]
+    async fn delete_branch_of_a_symbolic_ref_deletes_the_alias_only() {
+        let (_g, repo, feat, _head) = delete_fixture("del-symref").await;
+        run(
+            &repo,
+            &["symbolic-ref", "refs/heads/alias", "refs/heads/feat"],
+        )
+        .await;
+
+        let outcome = delete(&AppState::default(), &repo, "alias", None).await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::Deleted { tip: feat.clone() }
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/alias").await, None);
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
+    }
+
+    #[tokio::test]
+    async fn delete_branch_refuses_the_checked_out_branch() {
+        let (_g, repo, _feat, head) = delete_fixture("del-current").await;
+        let current = current_branch_name(&repo).await.unwrap().unwrap();
+
+        let err = delete(&AppState::default(), &repo, &current, None)
+            .await
+            .unwrap_err();
+        let expected = format!(
+            "{current} is checked out here — switch to another branch before deleting {current}."
+        );
+        assert!(
+            matches!(&err, AppError::Command(m) if *m == expected),
+            "{err:?}"
+        );
+        assert_eq!(local_tip(&repo, &current).await, head);
+    }
+
+    /// A linked worktree stopped mid-rebase of the branch reads as detached, so only the
+    /// app's own rebase guard stands between it and the delete. The reset's twin keeps
+    /// its own verb.
+    #[tokio::test]
+    async fn delete_branch_refuses_a_branch_being_rebased_in_a_worktree() {
+        let (_base, base) = temp_base("del-rebasing");
+        let (branch, up) = ("feature-del-rebasing", "up-del-rebasing");
+        let (repo_s, _fork, target) = diverged_local_upstream(&base, branch, up, 1).await;
+        let wt_s = base.join("wt").to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-q", &wt_s, branch]).await;
+        let rebase = run_git_raw(Some(&wt_s), &["rebase", up], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(rebase.code, 0, "fixture sanity: the rebase stops");
+        let local = local_tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = delete(&state, &repo_s, branch, None).await.unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m) if m.contains("is being rebased")
+                && m.ends_with(&format!("finish or abort that rebase before deleting {branch}."))),
+            "{err:?}"
+        );
+        assert_eq!(local_tip(&repo_s, branch).await, local, "the ref is intact");
+
+        let err = branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.ends_with(&format!("finish or abort that rebase before resetting {branch}."))),
+            "{err:?}"
+        );
+    }
+
+    /// A worktree that checks the branch out after the pre-hold probe is caught by the
+    /// probe under the hold.
+    #[tokio::test]
+    async fn delete_branch_refuses_a_checkout_made_after_the_first_probe() {
+        let (g, repo, feat, _head) = delete_fixture("del-late-checkout").await;
+        let wt = g.path().join("wt").to_string_lossy().into_owned();
+        let hook = git_at_phase(
+            DeletePhase::BeforeGuards,
+            &repo,
+            &["worktree", "add", "-q", &wt, "feat"],
+        );
+
+        let state = AppState::default();
+        let err = DELETE_PHASE_HOOK
+            .scope(hook, delete(&state, &repo, "feat", None))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with("feat is checked out in the worktree at")
+                    && m.ends_with("before deleting feat.")),
+            "{err:?}"
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
+    }
+
+    /// The ref moves between the guards and the delete: git's compare refuses, a pinned
+    /// caller gets where it is now, an unpinned one the moved-ref error, and a ref
+    /// deleted there reads as not found.
+    #[tokio::test]
+    async fn delete_branch_compare_and_delete_survives_a_ref_moved_under_the_hold() {
+        let (_g, repo, feat, head) = delete_fixture("del-moved").await;
+        let state = AppState::default();
+        let mover = || {
+            git_at_phase(
+                DeletePhase::BeforeDelete,
+                &repo,
+                &["update-ref", "refs/heads/feat", &head],
+            )
+        };
+
+        let outcome = DELETE_PHASE_HOOK
+            .scope(mover(), delete(&state, &repo, "feat", Some(&feat)))
+            .await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::TipMoved {
+                expected: feat.clone(),
+                actual: head.clone()
+            }
+        );
+        assert_eq!(
+            full_ref_tip(&repo, "refs/heads/feat").await,
+            Some(head.clone())
+        );
+        assert!(!branch_section(&repo, "feat").await.is_empty());
+
+        run(&repo, &["update-ref", "refs/heads/feat", &feat]).await;
+        let err = DELETE_PHASE_HOOK
+            .scope(mover(), delete(&state, &repo, "feat", None))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Git { code: 1, stderr }
+                if stderr == "feat changed since you confirmed — nothing was deleted."),
+            "{err:?}"
+        );
+        assert_eq!(
+            full_ref_tip(&repo, "refs/heads/feat").await,
+            Some(head.clone())
+        );
+
+        let remover = git_at_phase(
+            DeletePhase::BeforeDelete,
+            &repo,
+            &["update-ref", "-d", "refs/heads/feat"],
+        );
+        let err = DELETE_PHASE_HOOK
+            .scope(remover, delete(&state, &repo, "feat", Some(&head)))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Git { code: 1, stderr }
+                if stderr == "error: branch 'feat' not found"),
+            "{err:?}"
+        );
+    }
+
+    /// A move written into `packed-refs` under the hold: the mismatch git's own compare
+    /// sees is the packed value, and nothing is deleted.
+    #[tokio::test]
+    async fn delete_branch_compare_and_delete_reads_a_packed_ref_moved_under_the_hold() {
+        let (g, repo, feat, head) = delete_fixture("del-packed-moved").await;
+        run(&repo, &["pack-refs", "--all"]).await;
+        let mover: DeletePhaseHook = {
+            let (repo, head) = (repo.clone(), head.clone());
+            Arc::new(move |phase| {
+                let (repo, head) = (repo.clone(), head.clone());
+                Box::pin(async move {
+                    if phase == DeletePhase::BeforeDelete {
+                        run(&repo, &["update-ref", "refs/heads/feat", &head]).await;
+                        run(&repo, &["pack-refs", "--all"]).await;
+                    }
+                })
+            })
+        };
+
+        let outcome = DELETE_PHASE_HOOK
+            .scope(
+                mover,
+                delete(&AppState::default(), &repo, "feat", Some(&feat)),
+            )
+            .await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::TipMoved {
+                expected: feat,
+                actual: head.clone()
+            }
+        );
+        let loose = g.path().join("repo/.git/refs/heads/feat");
+        assert!(!loose.exists(), "fixture sanity: the moved ref is packed");
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(head));
+        assert!(!branch_section(&repo, "feat").await.is_empty());
+    }
+
+    /// A slash-named branch goes like a plain one: ref, reflog and settings, plus the
+    /// parent directories the files backend leaves empty.
+    #[tokio::test]
+    async fn delete_branch_of_a_slash_named_branch_drops_ref_reflog_and_empty_parents() {
+        let (g, repo, feat, _head) = delete_fixture("del-slash").await;
+        run(&repo, &["branch", "topic/x", "feat"]).await;
+        run(
+            &repo,
+            &["config", "branch.topic/x.gitdesktopLocalOnly", "true"],
+        )
+        .await;
+        let git_dir = g.path().join("repo/.git");
+        assert!(
+            git_dir.join("refs/heads/topic/x").is_file()
+                && reflog_exists(&repo, "refs/heads/topic/x").await,
+            "fixture sanity"
+        );
+
+        let outcome = delete(&AppState::default(), &repo, "topic/x", None).await;
+        assert_eq!(outcome.unwrap(), DeleteBranchOutcome::Deleted { tip: feat });
+        assert_eq!(full_ref_tip(&repo, "refs/heads/topic/x").await, None);
+        assert!(!reflog_exists(&repo, "refs/heads/topic/x").await);
+        assert_eq!(branch_section(&repo, "topic/x").await, "");
+        assert!(!git_dir.join("refs/heads/topic").exists(), "empty ref dir");
+        assert!(
+            !git_dir.join("logs/refs/heads/topic").exists(),
+            "empty log dir"
+        );
+    }
+
+    /// A checkout made while the delete waits on the config-write mutex is still seen:
+    /// the guards run once the mutex is held, so the delete refuses and the ref stays.
+    #[tokio::test]
+    async fn delete_branch_refuses_a_checkout_made_while_it_waits_on_the_config_mutex() {
+        let (g, repo, feat, _head) = delete_fixture("del-mutex-wait").await;
+        let wt = g.path().join("wt").to_string_lossy().into_owned();
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let repo = repo.clone();
+            async move {
+                crate::git::runner::with_config_write_lock(&repo, |_held| async move {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.await;
+                })
+                .await
+            }
+        });
+        held_rx.await.expect("the test holds the mutex");
+
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel::<()>();
+        let waiting_tx = std::sync::Mutex::new(Some(waiting_tx));
+        let events: Arc<dyn Fn(&'static str) + Send + Sync> = Arc::new(move |event| {
+            if event == "waiting" {
+                if let Some(tx) = waiting_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            }
+        });
+        let deleter = tokio::spawn({
+            let repo = repo.clone();
+            CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                delete(&AppState::default(), &repo, "feat", None).await
+            })
+        });
+        waiting_rx.await.expect("the delete reached the mutex");
+        run(&repo, &["worktree", "add", "-q", &wt, "feat"]).await;
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+
+        let err = tokio::time::timeout(Duration::from_secs(60), deleter)
+            .await
+            .expect("the delete finishes once released")
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with("feat is checked out in the worktree at")
+                    && m.ends_with("before deleting feat.")),
+            "{err:?}"
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
+    }
+
+    #[test]
+    fn delete_branch_outcome_wire_shape() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let deleted =
+            serde_json::to_string(&DeleteBranchOutcome::Deleted { tip: a.clone() }).unwrap();
+        assert_eq!(deleted, format!(r#"{{"status":"deleted","tip":"{a}"}}"#));
+        let moved = serde_json::to_string(&DeleteBranchOutcome::TipMoved {
+            expected: a.clone(),
+            actual: b.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            moved,
+            format!(r#"{{"status":"tipMoved","expected":"{a}","actual":"{b}"}}"#)
+        );
+        for wire in [&deleted, &moved] {
+            assert!(
+                !wire.contains("tip_moved") && !wire.contains("Deleted"),
+                "{wire}"
+            );
+        }
     }
 
     /// A rename that loses the config lock still carries the branch's settings to the

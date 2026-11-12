@@ -214,7 +214,15 @@ arrows, and a branch marked Keep local wears a `kept local` chip.
   out in another linked worktree can join the list; acting on one removes
   its clean worktree first, and the confirmation counts the worktrees and
   branches it touches. Each row shows every reason it's listed; the dialog
-  opens on Archive with every filter on and a 60-day window.
+  opens on Archive with every filter on and a 60-day window. Deleting
+  removes each branch only at the commit the list showed, keeping any that
+  changed since it loaded.
+- **Restore deleted branches**: deleting a branch, from the switcher or
+  Clean up branches, leaves a notice naming the commit it pointed at with
+  **Restore** (**Restore all** after a cleanup), and Recover lost work lists
+  the newest 50 deletes per repository to restore later. A restored branch
+  comes back at its commit without being checked out, and a Keep local mark
+  comes back with it.
 - **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
   memory before you commit (fast-forward, already up to date, clean, or
   exactly which files will conflict), with `--no-ff` and a clearly cautioned
@@ -338,7 +346,8 @@ apart.
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
   operation), and restores any of them non-destructively to the working
-  tree.
+  tree. It also lists the branches you deleted in GitDesktop, each one
+  restorable at its commit.
 - **Operation journal** ⭐: records the risky compound operations GitDesktop
   runs (local PR merges and local PR branch updates, cherry-picks, history
   edits, rebases). If one is interrupted by a crash or restart, a calm

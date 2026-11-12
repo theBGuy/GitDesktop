@@ -111,7 +111,7 @@ import {
   useRepoStatus,
   useRevertCommit,
 } from "@/lib/git/queries";
-import { sanitizeRefName } from "@/lib/git/ref-name";
+import { isSessionBranchName, sanitizeRefName } from "@/lib/git/ref-name";
 import type { CommitSummary } from "@/lib/git/types";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -258,7 +258,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // archived to get them out of the way); archiving a branch that was the
   // compare target auto-falls-back via the default effect below.
   const otherBranches = (branches.data ?? []).filter(
-    (b) => !b.isCurrent && !b.name.startsWith("gd/session/") && !b.archived,
+    (b) => !b.isCurrent && !isSessionBranchName(b.name) && !b.archived,
   );
   // Read while the picker is open, while a remote pick is current (its pruned
   // check needs a live list), and while no local branch is offered (the empty

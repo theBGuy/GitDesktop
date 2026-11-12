@@ -67,8 +67,27 @@ export const gitRenameBranch = (
     newName,
   });
 
-export const gitDeleteBranch = (repoPath: string, name: string) =>
-  invoke<void>("git_delete_branch", { repoPath, name });
+/** What a local branch delete did. `tip` is the commit the branch pointed at
+ *  when it was deleted (a lowercase full id). `tipMoved` comes back only when an
+ *  `expectedTip` was sent and the branch pointed elsewhere: nothing was deleted. */
+export type DeleteBranchOutcome =
+  | { status: "deleted"; tip: string }
+  | { status: "tipMoved"; expected: string; actual: string };
+
+/** Deletes a local branch. With `expectedTip` (a full object id) the delete
+ *  happens only while the branch still points there. The delete also removes
+ *  the branch's whole `branch.<name>` config section (Keep local, upstream), so
+ *  a caller that restores those reads them before this call. */
+export const gitDeleteBranch = (
+  repoPath: string,
+  name: string,
+  expectedTip?: string,
+) =>
+  invoke<DeleteBranchOutcome>("git_delete_branch", {
+    repoPath,
+    name,
+    expectedTip: expectedTip ?? null,
+  });
 
 /** Deletes `name` on `remote` (`git push <remote> --delete`). Idempotent when
  *  the remote ref is already gone. */

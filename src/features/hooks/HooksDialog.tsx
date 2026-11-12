@@ -40,6 +40,7 @@ import {
   useWriteHook,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -53,6 +54,44 @@ const CodeEditor = lazy(() =>
 );
 
 const DEFAULT_HOOK = "#!/bin/sh\n\n";
+
+const MANAGED_GUARD_LEAD =
+  "This pre-push hook is the terminal push guard GitDesktop installed to stop git push for branches marked Keep local.";
+
+/** What Save, Disable and Delete ask first on the managed guard. The app's own
+ *  push refusal doesn't read the hook, so it holds whatever these write. */
+const MANAGED_CONFIRM: Record<
+  "save" | "disable" | "delete",
+  {
+    title: string;
+    body: string;
+    confirmLabel: string;
+    confirmVariant: "default" | "destructive";
+  }
+> = {
+  save: {
+    title: "Save your edit to the terminal push guard?",
+    body: `${MANAGED_GUARD_LEAD} Saving replaces its script with your edit, so terminal pushes of those branches are stopped only if your edit keeps the guard's check.`,
+    confirmLabel: "Save",
+    confirmVariant: "default",
+  },
+  disable: {
+    title: "Disable the terminal push guard?",
+    body: `${MANAGED_GUARD_LEAD} While it is disabled, git push in a terminal can publish those branches. GitDesktop still refuses to push them itself.`,
+    confirmLabel: "Disable",
+    confirmVariant: "destructive",
+  },
+  delete: {
+    title: "Delete the terminal push guard?",
+    body: `${MANAGED_GUARD_LEAD} Deleting it moves the file to the recycle bin, and git push in a terminal can then publish those branches. GitDesktop still refuses to push them itself, and you can install the guard again from a kept-local branch's menu.`,
+    confirmLabel: "Delete",
+    confirmVariant: "destructive",
+  },
+};
+
+/** How long a delete's row landing waits out a confirm still closing over it:
+ *  a time bound, since a frame count shrinks with the display's refresh rate. */
+const CONFIRM_CLOSE_WAIT_MS = 500;
 
 export function HooksDialog({
   repoPath,
@@ -84,6 +123,10 @@ export function HooksDialog({
   // deleted hook stays listed (inactive), so its row takes focus at that commit.
   // Every selection change spends the pending row, landed or not, and it lands
   // only on unclaimed focus: a Tab away during the write keeps its target.
+  // A managed delete asks the shared confirm first, which can still be closing
+  // (focus inside it, returned to the unmounted Delete… afterwards) when the
+  // delete lands: the landing then waits, up to a deadline, until focus leaves
+  // that dialog.
   const selectedRef = useRef(selected);
   const pendingFocusRow = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -91,11 +134,35 @@ export function HooksDialog({
     const name = pendingFocusRow.current;
     pendingFocusRow.current = null;
     if (selected !== null || name === null) return;
-    const active = document.activeElement;
-    if (active !== null && active !== document.body) return;
-    listRef.current
-      ?.querySelector<HTMLElement>(`[data-hook="${CSS.escape(name)}"]`)
-      ?.focus();
+    const row = () =>
+      listRef.current?.querySelector<HTMLElement>(
+        `[data-hook="${CSS.escape(name)}"]`,
+      );
+    // Unclaimed: nothing focused, or this dialog's popup itself.
+    const unclaimed = (active: Element | null) =>
+      active === null ||
+      active === document.body ||
+      active === listRef.current?.closest('[role="dialog"]');
+    const outside = (active: Element | null) =>
+      active !== null &&
+      !unclaimed(active) &&
+      listRef.current?.closest('[role="dialog"]')?.contains(active) === false;
+    if (unclaimed(document.activeElement)) {
+      row()?.focus();
+      return;
+    }
+    if (!outside(document.activeElement)) return;
+    const deadline = performance.now() + CONFIRM_CLOSE_WAIT_MS;
+    let frame = 0;
+    const wait = () => {
+      if (selectedRef.current !== null) return;
+      const active = document.activeElement;
+      if (unclaimed(active)) row()?.focus();
+      else if (outside(active) && performance.now() < deadline)
+        frame = requestAnimationFrame(wait);
+    };
+    frame = requestAnimationFrame(wait);
+    return () => cancelAnimationFrame(frame);
   }, [selected]);
   const [managerOutput, setManagerOutput] = useState<string | null>(null);
   const content = useHookContent(repoPath, selected);
@@ -132,11 +199,18 @@ export function HooksDialog({
   const canSave =
     entry !== null && !isBlank && (dirty || entry.state === "inactive");
 
+  // The managed guard's writes ask first. Each handler captures what it writes
+  // before the ask, so a list re-read under the open prompt can't change it.
+  const confirmManaged = (action: keyof typeof MANAGED_CONFIRM) =>
+    useConfirm.getState().ask(MANAGED_CONFIRM[action]);
+
   async function save() {
     if (!entry) return;
     const name = entry.name;
+    const script = draft;
+    if (entry.managed && !(await confirmManaged("save"))) return;
     try {
-      await writeHook.mutateAsync({ name, content: draft });
+      await writeHook.mutateAsync({ name, content: script });
     } catch (e) {
       toastError(e);
       return;
@@ -147,6 +221,7 @@ export function HooksDialog({
   async function toggle(enabled: boolean) {
     if (!entry) return;
     const name = entry.name;
+    if (!enabled && entry.managed && !(await confirmManaged("disable"))) return;
     try {
       await setEnabled.mutateAsync({ name, enabled });
     } catch (e) {
@@ -161,9 +236,15 @@ export function HooksDialog({
   const stillIn = (firedIn: string) =>
     useUiStore.getState().repoPath === firedIn;
 
-  async function doDelete() {
+  // One confirm, never the inline swap as well.
+  async function deleteManaged() {
     if (!entry) return;
     const name = entry.name;
+    if (!(await confirmManaged("delete"))) return;
+    await doDelete(name);
+  }
+
+  async function doDelete(name: string) {
     const firedIn = repoPath;
     try {
       await deleteHook.mutateAsync(name);
@@ -325,7 +406,14 @@ export function HooksDialog({
                         : "hover:bg-muted/60",
                     )}
                   >
-                    <span className="truncate font-mono">{e.name}</span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate font-mono">{e.name}</span>
+                      {e.managed && (
+                        <span className="text-[10px] text-muted-foreground">
+                          Managed by GitDesktop
+                        </span>
+                      )}
+                    </span>
                     {e.state === "active" && (
                       <span className="shrink-0 text-[10px] text-success">
                         Active
@@ -439,14 +527,18 @@ export function HooksDialog({
                           pending={deleteHook.isPending}
                           swapFocusRef={swapFocus()}
                           onCancel={() => setConfirmDelete(false)}
-                          onAct={() => void doDelete()}
+                          onAct={() => void doDelete(entry.name)}
                         />
                       ) : (
                         <Button
                           ref={swapFocus()}
                           variant="ghost"
                           size="sm"
-                          onClick={() => setConfirmDelete(true)}
+                          onClick={() =>
+                            entry.managed
+                              ? void deleteManaged()
+                              : setConfirmDelete(true)
+                          }
                         >
                           Delete…
                         </Button>

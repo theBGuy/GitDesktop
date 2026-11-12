@@ -26,6 +26,7 @@ import {
   usePages,
   useUpdatePages,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { PagesInfo } from "@/lib/git/types";
 import {
   NO_CHANGES_REASON,
@@ -114,7 +115,7 @@ function PagesDisabled({ repoPath }: { repoPath: string }) {
   // is configured yet here (the branch state starts empty), so nothing to keep.
   const branchNames = (branches.data ?? [])
     .map((b) => b.name)
-    .filter((n) => !n.startsWith("gd/session/"));
+    .filter((n) => !isSessionBranchName(n));
   const canEnable = (mode === "workflow" || !!branch) && !enable.isPending;
   const offlineReason = online ? undefined : OFFLINE_WRITE_REASON;
 
@@ -276,7 +277,7 @@ function PagesEnabled({
   const branchNames = (() => {
     const filtered = (branches.data ?? [])
       .map((b) => b.name)
-      .filter((n) => !n.startsWith("gd/session/"));
+      .filter((n) => !isSessionBranchName(n));
     return pages.sourceBranch && !filtered.includes(pages.sourceBranch)
       ? [pages.sourceBranch, ...filtered]
       : filtered;

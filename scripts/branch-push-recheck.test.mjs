@@ -90,6 +90,8 @@ const PINS = [
       "refuseWhileRowPushes(",
       DERIVED,
       DERIVED_ELSEWHERE,
+      "await readBranchRowsFresh(queryClient, deleteIn)",
+      "if (refuseWhileRowPushes(deleteTarget)) return;",
       "await deleteBranch.mutateAsync(deleteTarget)",
     ],
     mutate: [
@@ -240,7 +242,8 @@ const PINS = [
       "await api.gitSetBranchArchived",
       "const ok = processed - fails.size - skipped.size;",
       "if (processed < names.length) {",
-      "} else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);",
+      "} else if (ok > 0)",
+      'resultToast("success", `${verb} ${pluralBranches(ok)}`);',
       "return;",
       "if (fails.size === 0) {",
       "onClose();",
