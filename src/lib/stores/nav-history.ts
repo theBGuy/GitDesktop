@@ -202,6 +202,34 @@ function departingEntry(
   };
 }
 
+/** The history with the current entry's anchor re-read as the same repo's view leaves
+ *  for an overlay. `next.navHistory` itself when the provider has nothing new, and,
+ *  unread, when the repo changed or closed, the history is empty or was rewritten. */
+function anchorOnLeave(
+  next: NavState,
+  prev: NavState,
+  anchorFor: AnchorReader,
+): NavHistory {
+  const history = next.navHistory;
+  if (
+    next.repoPath === null ||
+    next.repoPath !== prev.repoPath ||
+    history.index < 0 ||
+    history !== prev.navHistory
+  ) {
+    return history;
+  }
+  const current = history.entries[history.index];
+  const answer = anchorFor(current.tab);
+  if (answer === undefined || sameValue(answer, current.anchor)) return history;
+  const entries = [...history.entries];
+  entries[history.index] = { ...current, anchor: answer };
+  return normalize(
+    { entries, index: history.index, lens: history.lens },
+    next.navHiddenTabs,
+  );
+}
+
 /** The history after observing one committed store change; returns `next.navHistory`
  *  itself (same identity) when there is nothing to write. */
 export function recordNavigation(
@@ -211,8 +239,14 @@ export function recordNavigation(
   anchorFor: AnchorReader,
 ): NavHistory {
   const history = next.navHistory;
-  // N1: overlays neither push nor clear, and nothing written under one is recorded then.
-  if (next.view !== "repo" || next.repoPath === null) return history;
+  // N1: overlays neither push nor clear, and nothing written under one is recorded. The
+  // change that leaves the repo view only stores the current tab's anchor first, since
+  // the panel that answers for it unmounts under the overlay.
+  if (next.view !== "repo" || next.repoPath === null) {
+    return prev.view === "repo"
+      ? anchorOnLeave(next, prev, anchorFor)
+      : history;
+  }
   // N2: a repo switch or an empty history starts over at the landing.
   if (next.repoPath !== prev.repoPath || history.index === -1) {
     return seedHistory(next);

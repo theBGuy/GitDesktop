@@ -53,8 +53,9 @@ const SPOT = "[data-card-index], [data-table-cell]";
 
 /** Whether a claim, refocus or landing may move focus now. "take": focus is on body,
  *  the element focused at consume, the panel root, the body landing, or the card or
- *  row the hook last claimed. "user": a card or cell the hook never claimed, so the user moved
- *  there while the return waited. "refuse": anywhere else, a toolbar control included. */
+ *  row the hook last claimed. "user": any card or cell but the hook's last claim, so
+ *  the user moved there while the return waited. "refuse": anywhere else, a toolbar
+ *  control included. */
 function focusVerdict(
   held: HeldReturn,
   root: HTMLElement | null,
@@ -74,8 +75,8 @@ function focusVerdict(
 }
 
 /** Returns the Projects panel to a `boardReturn` anchor: consumed once while
- *  active, pinned to its epoch, repo and pick generation, and ended by every claim,
- *  refocus or landing in the run that performs it. */
+ *  active, pinned to its epoch, repo and pick generation, and ended by every refocus
+ *  or landing and every claim except one made under a refetch, held for one recheck. */
 export function useBoardReturn(input: BoardReturnInput): {
   heldAnchor: BoardAnchor | null;
 } {
@@ -184,7 +185,8 @@ export function useBoardReturn(input: BoardReturnInput): {
       case "claim": {
         const verdict = focusVerdict(h, input.root());
         input.claimCard(step.itemId, { focus: verdict === "take" });
-        // The user's own card or cell: the cursor follows, nothing else does.
+        // Focus on the user's own card or cell stays there; the cursor still moves
+        // to the returned card, and nothing else happens.
         if (verdict === "user") {
           setHeld(null);
           return;

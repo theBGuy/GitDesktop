@@ -510,18 +510,19 @@ describe("goBack / goForward", () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
-  it("sets nothing and reads no anchor while an overlay is up", () => {
+  it("reads the anchor once on the open, then sets nothing and reads none under the overlay", () => {
     enterRepo();
     st().setRepoTab("issues");
     st().goBack();
     const provider = vi.fn(() => anchor("p"));
     registerNavAnchorProvider("changes", provider);
     st().openHelp();
+    expect(provider).toHaveBeenCalledTimes(1);
     const before = st();
     st().goBack();
     st().goForward();
     expect(st()).toBe(before);
-    expect(provider).not.toHaveBeenCalled();
+    expect(provider).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -532,7 +533,7 @@ describe("overlays", () => {
     ["Explore", () => st().openExplore(), () => st().closeExplore()],
     ["My Work", () => st().openMyWork(), () => st().closeMyWork()],
   ] as const)(
-    "opening and closing %s leaves the history identical",
+    "opening and closing %s leaves the history identical when no provider has a new answer",
     (_n, open, close) => {
       enterRepo();
       st().setRepoTab("issues");
@@ -661,6 +662,27 @@ describe("board anchors", () => {
     expect(st().boardReturn).toBeNull();
   });
 
+  it("keeps the board's place across My Work and a landing on a pull request", () => {
+    enterRepo();
+    const unregister = registerNavAnchorProvider("projects", () => anchor("A"));
+    st().setRepoTab("projects");
+    st().openMyWork();
+    // The overlay unmounts the repository view, and the panel's provider with it.
+    unregister();
+    st().openPr({
+      kind: "remote",
+      repoPath: REPO,
+      repoName: "alpha",
+      ref: "7",
+      section: null,
+    });
+    expect(st().view).toBe("repo");
+    expect(st().repoTab).toBe("pulls");
+    st().goBack();
+    expect(st().repoTab).toBe("projects");
+    expect(st().boardReturn?.anchor).toEqual(anchor("A"));
+  });
+
   it("stores a null answer, and arms no return for a projects entry without one", () => {
     enterRepo();
     registerNavAnchorProvider("projects", () => null);
@@ -733,7 +755,7 @@ describe("in-store hop marks", () => {
     expect(tabs()).toEqual(["changes", "issues", "issues"]);
   });
 
-  it("openPr: a mark armed before a beforeSelect write still lands on the selection", () => {
+  it("openPr: a beforeSelect store write does not spend the navigator's link-hop mark", () => {
     enterRepo();
     st().setRepoTab("pulls");
     useUiStore.setState({ selectedPr: pr(1) });

@@ -425,6 +425,91 @@ describe("recordNavigation", () => {
     expect(session.history.index).toBe(1);
   });
 
+  it("stores the current tab's anchor as the view leaves for an overlay, and nothing else", () => {
+    const old = anchor("card-0");
+    const s = baseState({ repoTab: "projects", selectedIssue: issue(3) });
+    const prev = {
+      ...s,
+      navHistory: {
+        entries: [
+          entry("issues", { selectedIssue: issue(1) }),
+          entry("projects", {}, old),
+        ],
+        index: 1,
+        lens: "upstream" as const,
+      },
+    };
+    const next = { ...prev, view: "mywork" as const };
+    const a = anchor("card-1");
+    const provider = vi.fn((_tab: RepoTab) => a);
+    const out = recordNavigation(next, prev, false, provider);
+    expect(provider).toHaveBeenCalledWith("projects");
+    expect(out).not.toBe(prev.navHistory);
+    expect(out.entries).toHaveLength(2);
+    expect(out.index).toBe(1);
+    expect(out.lens).toBe("upstream");
+    expect(out.entries[0]).toBe(prev.navHistory.entries[0]);
+    expect(out.entries[1]).toEqual({
+      ...prev.navHistory.entries[1],
+      anchor: a,
+    });
+  });
+
+  it("returns the same history when the leaving read has nothing new", () => {
+    const s = baseState({ repoTab: "projects" });
+    const kept = anchor("card-0");
+    for (const stored of [null, kept]) {
+      const prev = {
+        ...s,
+        navHistory: {
+          entries: [entry("projects", {}, stored)],
+          index: 0,
+          lens: null,
+        },
+      };
+      const next = { ...prev, view: "settings" as const };
+      expect(recordNavigation(next, prev, false, () => undefined)).toBe(
+        prev.navHistory,
+      );
+      // Equal by value, a fresh object.
+      const same = stored === null ? null : { ...stored };
+      expect(recordNavigation(next, prev, false, () => same)).toBe(
+        prev.navHistory,
+      );
+    }
+  });
+
+  it("reads no anchor on a leave that switches repo, carries a new history, has none, or starts under an overlay", () => {
+    const s = baseState({ repoTab: "projects" });
+    const prev = { ...s, navHistory: seedHistory(s) };
+    const provider = vi.fn(() => anchor("card-1"));
+    const cases = [
+      [{ ...prev, view: "mywork" as const, repoPath: "C:/repos/beta" }, prev],
+      [
+        {
+          ...prev,
+          view: "mywork" as const,
+          navHistory: { ...prev.navHistory },
+        },
+        prev,
+      ],
+      [
+        { ...prev, view: "mywork" as const, navHistory: EMPTY_NAV_HISTORY },
+        { ...prev, navHistory: EMPTY_NAV_HISTORY },
+      ],
+      [
+        { ...prev, view: "help" as const },
+        { ...prev, view: "mywork" as const },
+      ],
+    ] as const;
+    for (const [next, before] of cases) {
+      expect(recordNavigation(next, before, false, provider)).toBe(
+        next.navHistory,
+      );
+    }
+    expect(provider).not.toHaveBeenCalled();
+  });
+
   it("never exceeds the cap and keeps index on the current location", () => {
     const session = new Session({ repoTab: "issues", selectedIssue: issue(0) });
     for (let n = 1; n <= NAV_HISTORY_CAP + 10; n++) {

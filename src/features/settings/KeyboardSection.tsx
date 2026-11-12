@@ -82,6 +82,25 @@ function refusalNote(binding: string): string {
     : `That key scrolls and navigates on its own, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`;
 }
 
+/** Why a reset left `action` unbound: another action's override in `overrides`
+ *  holds its default, which then yields. Null when the default is free or absent. */
+function yieldedNote(
+  action: ActionDef,
+  overrides: Record<string, string | null>,
+): string | null {
+  const def = defaultBindingOf(action);
+  if (
+    def === null ||
+    effectiveBindings(overrides).get(action.id as ActionId) !== null
+  )
+    return null;
+  const holder = ACTIONS.find(
+    (a) => a.id !== action.id && overrides[a.id] === def,
+  );
+  if (!holder) return null;
+  return `"${action.label}" stays unbound: ${formatBinding(def)} is bound to "${holder.label}".`;
+}
+
 export const KeyboardSection = withForm({
   ...settingsFormOpts,
   render: function KeyboardSectionRender({ form }) {
@@ -94,8 +113,8 @@ export const KeyboardSection = withForm({
     } | null>(null);
     /** Signature over the overrides draft a note was posted under. A mismatch
      *  retires the note outright, so a draft that later returns to that signature
-     *  can't resurrect a dismissed message. Steal and consequence notes describe
-     *  the draft, so any route changing it — including the footer's Discard, which
+     *  can't resurrect a dismissed message. Steal, consequence and reset notes
+     *  describe the draft, so any route changing it — including the footer's Discard, which
      *  form.reset()s while this section stays mounted — retires them without
      *  knowing to clear them; the refusal note is advisory (an attempted key, not
      *  the draft), and retiring it early is the safe direction. */
@@ -359,6 +378,8 @@ export const KeyboardSection = withForm({
                         const next = { ...overrides };
                         delete next[action.id];
                         form.setFieldValue("hotkeys", next);
+                        const text = yieldedNote(action, next);
+                        if (text) setNote({ text, sig: JSON.stringify(next) });
                       }}
                     >
                       <ArrowCounterClockwiseIcon />

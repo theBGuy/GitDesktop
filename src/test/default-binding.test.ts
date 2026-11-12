@@ -90,9 +90,12 @@ describe("resolveDefaultBinding", () => {
   });
 
   it("defaultBindingOf reads this platform's default", () => {
-    for (const a of ACTIONS) {
-      expect(defaultBindingOf(a), a.id).toBe(resolveDefaultBinding(a, isMac));
-    }
+    // jsdom is not macOS, so Back and Forward read their Alt arrows.
+    expect(isMac).toBe(false);
+    expect(defaultBindingOf(action("go-back"))).toBe("alt+left");
+    expect(defaultBindingOf(action("go-forward"))).toBe("alt+right");
+    // An action with no macOS row reads its registry row.
+    expect(defaultBindingOf(action("open-settings"))).toBe("mod+,");
   });
 });
 
@@ -104,6 +107,7 @@ describe("effectiveBindings", () => {
       const map = effectiveBindings(overrides);
       expect(map.size).toBe(ACTIONS.length);
       for (const a of ACTIONS) expect(map.get(a.id)).toBe(defaultBindingOf(a));
+      expect(map.get("go-back")).toBe("alt+left");
     }
   });
 
@@ -113,10 +117,6 @@ describe("effectiveBindings", () => {
     expect(map.get("show-branches")).toBe(backDefault);
     expect(map.get("go-back")).toBeNull();
     expect(map.get("go-forward")).toBe(defaultBindingOf(action("go-forward")));
-  });
-
-  it("gives the default back once the override is removed", () => {
-    expect(effectiveBindings({}).get("go-back")).toBe(backDefault);
   });
 
   it("leaves an action Unbound when it is reset while another override holds its default", () => {

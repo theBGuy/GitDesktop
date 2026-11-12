@@ -443,7 +443,7 @@ describe("vetoed side-button presses", () => {
     expect(st().repoTab).toBe("changes");
   });
 
-  it("a veto handed a primary-button press is ignored", async () => {
+  it("a primary-button press is not prevented and vetoes no side-button release", async () => {
     const { findByText } = renderHost();
     await findByText("alt+left");
     enterRepoWithBack();

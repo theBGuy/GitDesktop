@@ -3004,7 +3004,14 @@ test("chorded-arrow-handler allowlists the modal-only and self-guarded files", (
   const guarded = runCheck(
     check,
     files,
-    new Map(files.map((f) => [f, view("if (hasChordModifier(e)) return;")])),
+    new Map(
+      files.map((f) => [
+        f,
+        view(
+          'if (hasChordModifier(e)) return;\nif (e.key === "ArrowLeft") e.preventDefault();',
+        ),
+      ]),
+    ),
   );
   assert.deepEqual(guarded.violations, []);
   assert.deepEqual(guarded.stale, allowlisted);

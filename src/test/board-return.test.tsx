@@ -569,7 +569,7 @@ describe("the return never steals", () => {
     expect(panel.log).toEqual([]);
   });
 
-  it("a claim never takes focus from a toolbar control, and still announces a gone card", () => {
+  it("a claim never takes focus from a toolbar control the user moved to after the return was consumed, and still announces a gone card", () => {
     const panel = makePanel({ cards: ["I2"], seedPending: true });
     const { commit } = mount(panel);
     arm(anchorOf());

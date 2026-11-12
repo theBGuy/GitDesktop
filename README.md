@@ -749,22 +749,21 @@ straight from its card, or press **Space** for a **details peek**: its title,
 what it is, and when it was opened, joined this board, and last changed,
 without leaving the columns. **Go back** (`Alt`+`←`, `⌘`+`[` on macOS, or the
 mouse's back button) returns you to the board on the same project, view and
-card. Page through a large board with **Load more**,
-and move around the whole thing from the keyboard. **Add item** puts work on
-the board without a trip to the browser: search this repository's issues and
-pull requests and add several in a row, or write a **draft** — a Markdown
-note that lives on the board alone until it earns an issue. Either way the
-card is there as the write lands, drawn from GitHub's own answer to it.
-**Right-click a card** (Shift+F10 on Windows and Linux) for its menu: open an
-issue or pull request or **show its details**, **move the card to another
-column**, **edit a draft** (title, Markdown notes and assignees) or
-**convert it to a real issue**, **archive** the card, or **remove** it from
-the project. Archived cards come back on demand: turn on **Show archived
-cards** under **View options** and they sit in their columns, dimmed and
-badged **Archived**, with **Restore card** on each one putting it back.
-**Work on several cards at once**: `Ctrl`/`⌘`-click picks cards out
-individually and `Shift`-click (or `Shift` with the arrow keys) takes a
-range down a column, and a bar above the board then moves, archives,
+card. Page through a large board with **Load more**, and move around the whole
+thing from the keyboard. **Add item** puts work on the board without a trip to
+the browser: search this repository's issues and pull requests and add several
+in a row, or write a **draft** — a Markdown note that lives on the board alone
+until it earns an issue. Either way the card is there as the write lands,
+drawn from GitHub's own answer to it. **Right-click a card** (Shift+F10 on
+Windows and Linux) for its menu: open an issue or pull request or **show its
+details**, **move the card to another column**, **edit a draft** (title,
+Markdown notes and assignees) or **convert it to a real issue**, **archive**
+the card, or **remove** it from the project. Archived cards come back on
+demand: turn on **Show archived cards** under **View options** and they sit in
+their columns, dimmed and badged **Archived**, with **Restore card** on each
+one putting it back. **Work on several cards at once**: `Ctrl`/`⌘`-click picks
+cards out individually and `Shift`-click (or `Shift` with the arrow keys)
+takes a range down a column, and a bar above the board then moves, archives,
 restores or removes the cards each verb can reach — or **sets their
 fields**, from a list of the board's own fields where every row starts on
 **Leave as is**, so one **Apply** writes exactly the ones you drafted to

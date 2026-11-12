@@ -5,8 +5,9 @@
 export type ReadState = "ready" | "loading" | "dead";
 
 /** ready: data present and not a placeholder. dead: no usable data, and the read failed,
- *  is parked, or is enabled with no fetch in flight (a cancelled first load), which
- *  nothing will settle. loading: anything else, a fetch in flight or a disabled read. */
+ *  is parked, or is enabled with no fetch in flight (a cancelled first load): nothing in
+ *  flight will settle it, and a return that waited for a later refetch would take focus
+ *  long after the Back. loading: anything else, a fetch in flight or a disabled read. */
 export function readState(q: {
   data: unknown;
   isError: boolean;

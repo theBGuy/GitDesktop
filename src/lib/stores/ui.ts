@@ -428,15 +428,17 @@ export interface UiState {
    *  Lets a generation started before the rename recognise its own draft after it;
    *  a genuine branch switch or a repo switch clears the whole record. */
   draftKeyRemaps: Record<string, string>;
-  /** In-repo Back/Forward trail, written by the recorder at the bottom of this file
-   *  and by the history-aware actions (goBack, goForward, syncNavLens,
-   *  setNavHiddenTabs); rules live in nav-history.ts. */
+  /** In-repo Back/Forward trail, written by the recorder at the bottom of this file,
+   *  by the history-aware actions (goBack, goForward, syncNavLens, setNavHiddenTabs)
+   *  and by CROSS_REPO_RESET; rules live in nav-history.ts. */
   navHistory: NavHistory;
   /** Tabs whose panel does not render now (the Agent tab under Hide AI). Written only by
    *  setNavHiddenTabs; the history keeps no entry on one except the current entry. */
   navHiddenTabs: readonly RepoTab[];
   /** One-shot: the Projects panel should return to this anchor. Armed only by goBack and
-   *  goForward; consumed and cleared by the panel while it is the active tab. */
+   *  goForward; cleared by the panel's consume while it is the active tab, by a later
+   *  restore to an entry without an anchor, by a syncNavLens re-seed and by
+   *  CROSS_REPO_RESET. */
   boardReturn: BoardReturnRequest | null;
   /** Monotonic count of user navigation/selection actions; an async continuation
    *  snapshots it and strands when it moved. Bumped by every action a USER reaches that
@@ -710,8 +712,10 @@ export interface UiState {
   goBack: () => void;
   goForward: () => void;
   /** Marks the NEXT ui-store change as a link hop; call it on the line immediately
-   *  before the select it describes. The mark dies with its task. The navigators mark
-   *  their own landing, so a caller never marks before one. */
+   *  before the select it describes. The mark dies with its task. The selecting
+   *  navigators (openPr, openIssue, openRun, openCommit) mark their own landing, and a
+   *  tab-only one needs no mark since a tab change always pushes, so a caller never
+   *  marks before a navigator. */
   markLinkHop: () => void;
   /** Brings the history's lens stamp in step with the live lens of `repoPath`, re-seeding
    *  at the current location on a mismatch. Never bumps the epoch. */
@@ -1546,6 +1550,7 @@ export const useUiStore = create<UiState>()((set, get) => {
 // records nothing, since the history itself moved. The write re-runs every listener, so
 // each later one is called twice per recorded change (nested, then the outer pass): a
 // listener registered after it must react to a field change, never to the call itself.
+// The outer pass reads the live state, so `navHistory` itself reads as changed in both.
 useUiStore.subscribe((next, prev) => {
   const hop = takeLinkHop();
   const navHistory = recordNavigation(next, prev, hop, readNavAnchor);

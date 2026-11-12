@@ -5,7 +5,8 @@
  * guide always shows the right key for the platform (⌘ on macOS) and reflects
  * the user's rebindings:
  *   - \`{{kbd:action-id}}\` — a rebindable action from the hotkey registry; resolves
- *     to its current effective binding (or "unbound" if the user cleared it).
+ *     to its current effective binding (or "unbound" if the user cleared it, or if
+ *     another action's override holds its default).
  *   - \`{{key:mod+b}}\` — a fixed, non-rebindable combo (e.g. the Markdown editor's
  *     formatting keys); resolves to the platform-formatted form only.
  *
@@ -2960,10 +2961,12 @@ your browser instead.
 From an item you opened here, {{kbd:go-back}} or your mouse's back button returns to the
 board on the same project and view with that card focused (its row, in a table or
 roadmap), and {{kbd:go-forward}} goes forward again. That holds after a visit to Settings
-or another screen too: the board comes back on its view as saved, so a layout, grouping, date
-fields or zoom you picked there start over, and **Show archived cards** is put back as you
-had it, so an archived card is found again. If the card has left the board, GitDesktop
-says so and lands on the first card instead (the first row, in a table or roadmap).
+or another screen too: the board comes back on its view as saved, so any unsaved layout,
+grouping, date fields or zoom you had picked on the board starts over, and
+**Show archived cards** is put back as you had it, so an archived card is found again. If
+the card has left the board, focus goes to the first card instead (in a table or roadmap,
+to a row that is still there), and a screen reader is told the card is gone. Focus you
+have moved yourself while the board loaded is left where it is.
 
 {{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
 with the title, what the card is, and its dates — when it was opened, when it joined this
@@ -3191,7 +3194,7 @@ and the card moves instead of the cursor (above); hold {{key:shift}} with the sa
 and the selection extends instead (above), with {{key:escape}} to drop it. Collapsing the
 sidebar ({{kbd:toggle-sidebar}}) hands the board its width. {{kbd:go-back}} and
 {{kbd:go-forward}} work from a card and from any row in a table layout, section
-headers included.
+headers included, unless you rebind one to a key the board uses itself.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
@@ -4273,17 +4276,19 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
-combination, and if it clashes with another action the app moves it for you. A shortcut can
+combination, and if it clashes with another action the app moves it for you. Your own
+shortcut also outranks another action's built-in default on the same keys: that action
+shows as unbound for as long as yours holds them, even after a reset. A shortcut can
 be a single key: a bare character key stays quiet while you're typing or in a menu or
 picker, and fires everywhere else. {{key:space}} stays quiet as well on rows, cards
-and controls that use it themselves (a file in **Changes** stages, a board card
-peeks, a checkbox or switch toggles, a tab opens, a linked-issue chip flips its
-keyword), and when its shortcut has nothing to act on, {{key:space}} presses the
-focused button or scrolls as usual. The list there is filterable by action name,
-category, or key — {{kbd:focus-filter}} jumps to the filter while the section is
-open. Many actions (creating issues/releases, repository settings, stash
-views{{ai}}, most agent commands{{/ai}}) are palette-only until you bind a key.
-Defaults match GitHub Desktop where there's an equivalent.`,
+and controls that use it themselves (a file in **Changes** stages, a board card peeks,
+a checkbox or switch toggles, a tab opens, a linked-issue chip flips its keyword),
+and when its shortcut has nothing to act on, {{key:space}} presses the focused
+button or scrolls as usual. The list there is filterable by action name, category,
+or key — {{kbd:focus-filter}} jumps to the filter while the section is open. Many
+actions (creating issues/releases, repository settings, stash views{{ai}}, most agent
+commands{{/ai}}) are palette-only until you bind a key. Defaults match GitHub Desktop
+where there's an equivalent.`,
   },
   {
     id: "settings",

@@ -93,6 +93,38 @@ describe("Settings → Keyboard over an override that takes Go back's default", 
       `Shortcut for Show branches: ${ALT_LEFT}. Click to change.`,
     );
   });
+
+  const yieldNote = `"Go back" stays unbound: ${ALT_LEFT} is bound to "Show branches".`;
+
+  async function clearThenResetGoBack() {
+    const user = userEvent.setup();
+    render(<Host />);
+    await user.click(shortcut("Go back"));
+    await user.keyboard("{Backspace}");
+    await user.click(reset("Go back"));
+    return user;
+  }
+
+  it("a reset that leaves Go back yielding says which action holds its key", async () => {
+    await clearThenResetGoBack();
+    // Shown, and announced through the section's status region.
+    expect(screen.getAllByText(yieldNote)).toHaveLength(2);
+  });
+
+  it("a reset whose default is free posts no note", async () => {
+    const user = userEvent.setup();
+    render(<Host />);
+    await user.click(reset("Show branches"));
+    expect(hotkeys()).toEqual({});
+    expect(screen.queryByText(/stays unbound/)).toBeNull();
+  });
+
+  it("the reset's note goes away once the draft changes again", async () => {
+    const user = await clearThenResetGoBack();
+    expect(screen.getAllByText(yieldNote)).toHaveLength(2);
+    await user.click(reset("Show branches"));
+    expect(screen.queryByText(yieldNote)).toBeNull();
+  });
 });
 
 describe("the user guide's Go back token", () => {

@@ -94,7 +94,7 @@ describe("useNavLensSync", () => {
     });
   });
 
-  it("re-seeds in the commit that renders a flip made while mounted", () => {
+  it("re-seeds on a flip made while mounted", () => {
     trailIn(REPO);
     setLens("origin");
     const hook = mount();
@@ -144,11 +144,15 @@ describe("useNavLensSync", () => {
     expect(hist().index).toBe(index);
   });
 
-  it("writes nothing without an open repository", () => {
+  it("a null repo prop writes nothing", () => {
     trailIn(REPO);
     const before = hist();
+    // The store's own repo check would refuse too; the spy sees the hook's guard.
+    const syncNavLens = vi.fn(st().syncNavLens);
+    useUiStore.setState({ syncNavLens });
     setLens("upstream");
     mount(null);
+    expect(syncNavLens).not.toHaveBeenCalled();
     expect(hist()).toBe(before);
   });
 });
