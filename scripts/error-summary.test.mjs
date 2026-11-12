@@ -1729,7 +1729,7 @@ test("push protection outranks the created headline", () => {
   assert.equal(p.long, true);
 });
 
-test("the GitLab and Bitbucket created-repository headlines lead the same way", () => {
+test("the GitLab and Bitbucket created-repository headlines, and every provider's refusal headline, lead the same way", () => {
   for (const [kind, headline] of [
     [
       "glab",
@@ -1743,15 +1743,24 @@ test("the GitLab and Bitbucket created-repository headlines lead the same way", 
     const p = presentError(appError(kind, `${headline}\n${NO_USERNAME}`));
     assert.equal(p.summary, headline, kind);
   }
-  const keptLocal =
-    "Publishing didn't finish, but the project WAS created at me/demo on GitLab and added as the origin remote.";
-  const p = presentError(
-    appError(
+  const refusal = `"feat/x" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.`;
+  for (const [kind, lead] of [
+    [
       "glab",
-      `${keptLocal}\n"feat/x" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.`,
-    ),
-  );
-  assert.equal(p.summary, keptLocal);
+      "Publishing didn't finish, but the project WAS created at me/demo on GitLab and added as the origin remote.",
+    ],
+    [
+      "gh",
+      "Publishing didn't finish, but the GitHub repository alice/demo WAS created and origin points at it.",
+    ],
+    [
+      "bitbucket",
+      "Publishing didn't finish, but the repository WAS created at https://bitbucket.org/acme/demo and origin points at it.",
+    ],
+  ]) {
+    const p = presentError(appError(kind, `${lead}\n${refusal}`));
+    assert.equal(p.summary, lead, kind);
+  }
 });
 
 test("a gh network or credential failure without the created headline keeps its summary", () => {

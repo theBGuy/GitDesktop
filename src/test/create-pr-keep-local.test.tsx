@@ -66,6 +66,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitRemoteUrl: vi.fn(() => new Promise(() => undefined)),
   forgeRepoLabels: vi.fn(() => new Promise(() => undefined)),
 }));
+// The attachments gate reads the CLI health probe; these cases never attach.
+vi.mock("@/lib/attachments/use-attachment-support", () => ({
+  useAttachmentSupport: () => null,
+}));
 vi.mock("@/lib/ai/ignore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/ignore")>()),
   aiExcludePatterns: vi.fn(async () => []),
@@ -130,6 +134,7 @@ function renderDialog() {
         defaultBase="main"
         open
         onOpenChange={() => undefined}
+        host="compare"
       />
     </QueryClientProvider>,
   );

@@ -5818,7 +5818,14 @@ fn parse_created_repo(status: u16, body: &str, created_at_url: &str) -> AppResul
     })
 }
 
+/// Leads with the repository left behind; a publishing refusal carries no retry advice,
+/// since a retry is refused again.
 fn created_repo_push_error(url: &str, error: AppError) -> AppError {
+    if crate::git::remote::is_publishing_refusal(&error) {
+        return AppError::Bitbucket(format!(
+            "Publishing didn't finish, but the repository WAS created at {url} and origin points at it.\n{error}"
+        ));
+    }
     AppError::Bitbucket(format!(
         "The repository WAS created at {url} and origin points at it — retry the push.\n{error}"
     ))
@@ -8964,6 +8971,36 @@ definitions:
         assert!(headline.contains("WAS created"));
         assert!(!headline.contains("Could not resolve host"));
         assert_eq!(detail, stderr);
+    }
+
+    #[test]
+    fn created_repo_push_error_discloses_refusals_without_retry_advice() {
+        let url = "https://bitbucket.org/acme/demo";
+        let lead = format!(
+            "Publishing didn't finish, but the repository WAS created at {url} and origin points at it."
+        );
+        for refusal in [
+            AppError::BranchKeptLocal {
+                branch: "feat/x".into(),
+            },
+            AppError::BranchIsAgentSession {
+                branch: "gd/session/x".into(),
+            },
+            AppError::PushRemoteIsMirror {
+                remote: "origin".into(),
+            },
+        ] {
+            let own = refusal.to_string();
+            let AppError::Bitbucket(message) = created_repo_push_error(url, refusal) else {
+                panic!("{own}: a refusal after the create is disclosed as bitbucket");
+            };
+            let lines: Vec<&str> = message.lines().collect();
+            assert_eq!(lines, [lead.as_str(), own.as_str()], "{own}");
+            assert!(lines[0].contains("WAS created"));
+            for absent in ["push manually", "retry", "\u{2014}"] {
+                assert!(!lines[0].contains(absent), "{absent}: {message}");
+            }
+        }
     }
 
     /// `publish_repo`'s local guards precede its first network or keyring call, pinned

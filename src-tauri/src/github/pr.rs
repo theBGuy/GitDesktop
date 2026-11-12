@@ -567,8 +567,14 @@ fn gh_publish_url_error(name: &str, error: AppError) -> AppError {
 }
 
 // The push ran after the create, so every variant (Busy and Timeout included) must
-// lead with the repository left behind; the original error's Display follows.
+// lead with the repository left behind, with no retry advice on a publishing refusal
+// since a retry is refused again; the original error's Display follows.
 fn gh_publish_push_error(name: &str, error: AppError) -> AppError {
+    if crate::git::remote::is_publishing_refusal(&error) {
+        return AppError::Gh(format!(
+            "Publishing didn't finish, but the GitHub repository {name} WAS created and origin points at it.\n{error}"
+        ));
+    }
     AppError::Gh(format!(
         "The GitHub repository {name} WAS created and origin points at it — retry the push.\n{error}"
     ))
@@ -607,8 +613,8 @@ fn gh_publish_create_args<'a>(
 }
 
 /// Pushes the published branch to the origin `gh repo create` just added, through the
-/// app's network-locked push under the long git bound. A publishing refusal at spawn
-/// lands after the create, so it reads under the WAS-created headline too.
+/// app's network-locked push under the long git bound. A publishing refusal at spawn lands
+/// after the create, so it leads with the created repository and drops the retry advice.
 async fn gh_publish_push(
     state: &AppState,
     repo_path: &str,
@@ -9404,6 +9410,29 @@ mod tests {
             let (first, rest) = message.split_once('\n').unwrap();
             assert_eq!(first, head);
             assert_eq!(rest, detail);
+        }
+        let lead = "Publishing didn't finish, but the GitHub repository alice/demo WAS created and origin points at it.";
+        for refusal in [
+            AppError::BranchKeptLocal {
+                branch: "feat/x".into(),
+            },
+            AppError::BranchIsAgentSession {
+                branch: "gd/session/x".into(),
+            },
+            AppError::PushRemoteIsMirror {
+                remote: "origin".into(),
+            },
+        ] {
+            let own = refusal.to_string();
+            let AppError::Gh(message) = super::gh_publish_push_error("alice/demo", refusal) else {
+                panic!("{own}: a refusal after the create is disclosed as gh");
+            };
+            let lines: Vec<&str> = message.lines().collect();
+            assert_eq!(lines, [lead, own.as_str()], "{own}");
+            assert!(lines[0].contains("WAS created"));
+            for absent in ["push manually", "retry", "\u{2014}"] {
+                assert!(!lines[0].contains(absent), "{absent}: {message}");
+            }
         }
     }
 

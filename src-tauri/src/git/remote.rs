@@ -1080,9 +1080,9 @@ pub(crate) async fn refuse_publishing_branch(repo_path: &str, name: &str) -> App
     Ok(())
 }
 
-/// The typed refusals a branch push can raise before or at spawn: the remote-PR resolve
-/// passes them through and the GitLab publish discloses them under its created-project
-/// line, where any other push failure keeps its own handling.
+/// The refusals a resolve or forge-publish push can raise at or before spawn (Keep local,
+/// an agent-session branch and, on the resolve, a mirror remote): the remote-PR resolve
+/// passes them through and the three publish routes disclose them without retry advice.
 pub(crate) fn is_publishing_refusal(err: &AppError) -> bool {
     matches!(
         err,
