@@ -77,9 +77,10 @@ pub struct BranchHead {
     /// A branch-name mismatch on a BRANCH upstream that a bare `git push` would be
     /// refused for: live branch upstream whose name differs from the local one,
     /// push.default unset or `simple`, effective push remote == the upstream's
-    /// remote, and no `remote.<R>.push` refspec. Never set for a non-branch
-    /// upstream (`refs/pull/N/head`), which keeps a plain Push whose refusal shows
-    /// git's own message. When true, `upstream_remote` and `upstream_branch` are
+    /// remote, no `remote.<R>.push` refspec, and that remote no mirror (git
+    /// mirror-pushes there instead, and the app refuses the push). Never set for a
+    /// non-branch upstream (`refs/pull/N/head`), which keeps a plain Push whose
+    /// refusal shows git's own message. When true, `upstream_remote` and `upstream_branch` are
     /// always Some (the UI builds its labels from them).
     pub push_name_mismatch: bool,
     /// Whether `upstream_branch` is the upstream remote's default branch (its
@@ -88,10 +89,10 @@ pub struct BranchHead {
     /// The remote a BARE push of this branch lands on: `%(push…)` read with the push
     /// config where that changes the answer (matching, triangular `simple`), so a
     /// git without the atoms may still carry a config-derived destination. None when
-    /// unresolvable (a push remote with its own push refspecs or `remote.<r>.mirror`
-    /// set among them: git's bare push runs as configured) or there is no upstream (the
-    /// read only runs beside one). A destination that is the branch's own same-named
-    /// live upstream reads no config, so it stays Some even on a mirror remote.
+    /// unresolvable (a push remote with its own push refspecs, where git's bare push runs
+    /// as configured, or a mirror, where every app push is refused) or there is no
+    /// upstream (the read only runs beside one). A destination that is the branch's own
+    /// same-named live upstream reads no config, so it stays Some even on a mirror remote.
     pub push_remote: Option<String>,
     /// The branch a bare push creates or updates on `push_remote`. Both Some or both
     /// None.
@@ -132,6 +133,14 @@ pub struct Branch {
     /// `refs/heads/main`); None when untracked. Cross-name decisions read this,
     /// never the short `upstream` string (remote names may contain `/`).
     pub upstream_remote_ref: Option<String>,
+    /// Marked Keep local (the `keep_local_key` config key): true for any value git
+    /// does not read as false, a junk one included; the last entry wins. One exception:
+    /// a junk entry before a final false lists unmarked while the push guard refuses.
+    pub keep_local: bool,
+    /// The live upstream on a named remote is that remote's default branch: its
+    /// `refs/remotes/<remote>/HEAD` symref targets `%(upstream)`. False whenever that is
+    /// unknown (no or a dangling HEAD symref), gone, local `.`, or not a branch.
+    pub upstream_is_remote_default: bool,
 }
 
 /// A branch that exists on a remote but not (yet) as a local branch — offered in

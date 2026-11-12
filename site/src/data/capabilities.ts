@@ -155,6 +155,11 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
+      "Keep a branch local — Push, Publish, force push and Create PR are held with the reason, plus an optional pre-push hook that stops terminal pushes in that clone",
+  },
+  {
+    group: "Branches & history",
+    label:
       "Clean up branches in bulk — archive or delete stale ones in one sweep, filtered by merged, closed pull request, or idle",
     highlight: true,
   },
@@ -618,7 +623,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Push menu for a branch tracking a differently named branch — push to it, or publish under its own name",
+      "Publish a branch under its own name when it tracks a differently named one, from the sync bar or the branch's menu; a push into the tracked branch is left out when that's the remote's default branch",
   },
   {
     group: "Repository & workspace",

@@ -36,7 +36,11 @@ import {
   gitUnpushedMessages,
   type UnpushedCount,
 } from "@/lib/git/api";
-import { repoKeys } from "@/lib/git/queries";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  repoKeys,
+  usePush,
+} from "@/lib/git/queries";
 import type { BranchHead, CommitSummary, RepoOpState } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { loadSettings } from "@/lib/settings/api";
@@ -59,6 +63,18 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitUndoCommit: vi.fn(),
   gitUnpushedCount: vi.fn(),
   gitUnpushedMessages: vi.fn(),
+  // A push started by PushHarness stays pending for the whole test.
+  gitPush: vi.fn(() => new Promise(() => undefined)),
+}));
+// usePush keys on the repository identity; it answers without a backend.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+  peekRepoIdentity: (path: string) =>
+    path === "/repo" ? "/repo/.git" : undefined,
+  repoIdentityStrict: (path: string) =>
+    path === "/repo"
+      ? Promise.resolve("/repo/.git")
+      : new Promise<string>(() => undefined),
 }));
 vi.mock("sonner", async (importOriginal) => ({
   ...(await importOriginal<typeof import("sonner")>()),
@@ -214,6 +230,100 @@ async function renderPanel(op: Partial<RepoOpState>) {
   );
   return container;
 }
+
+/** One usePush binding per file: the usePush scan reads a second `const push`
+ *  as a use of the first. */
+function PushHarness() {
+  const push = usePush(REPO);
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        void push.mutateAsync({ setUpstream: false, branch: "main" })
+      }
+    >
+      start main
+    </button>
+  );
+}
+
+describe("Undo while a push runs", () => {
+  it("a running push of the current branch holds the undo before any read", async () => {
+    await renderPanel({});
+    render(
+      <QueryClientProvider client={client}>
+        <PushHarness />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "start main" }));
+    await waitFor(() =>
+      expect(
+        client.getMutationCache().findAll({ status: "pending" }),
+      ).toHaveLength(1),
+    );
+    dispatchAction("undo-commit");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE),
+    );
+    expect(gitCommitDetails).not.toHaveBeenCalled();
+    expect(gitUndoCommit).not.toHaveBeenCalled();
+  });
+
+  it("a push started during the message read holds the undo after it", async () => {
+    await renderPanel({});
+    render(
+      <QueryClientProvider client={client}>
+        <PushHarness />
+      </QueryClientProvider>,
+    );
+    let answer: (() => void) | undefined;
+    vi.mocked(gitCommitDetails).mockImplementation(
+      (_repo, hash) =>
+        new Promise((resolve) => {
+          answer = () =>
+            resolve({
+              hash,
+              subject: "Add the parser",
+              body: "",
+              author: "Ada",
+              authorEmail: "",
+              date: "2026-11-01T10:00:00Z",
+              committerDate: "2026-11-01T10:00:00Z",
+            });
+        }),
+    );
+    dispatchAction("undo-commit");
+    await waitFor(() =>
+      expect(gitCommitDetails).toHaveBeenCalledWith(REPO, HASH_HEAD),
+    );
+    expect(toast.info).not.toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+    await userEvent.click(screen.getByRole("button", { name: "start main" }));
+    await waitFor(() =>
+      expect(
+        client.getMutationCache().findAll({ status: "pending" }),
+      ).toHaveLength(1),
+    );
+    answer?.();
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE),
+    );
+    expect(gitUndoCommit).not.toHaveBeenCalled();
+  });
+
+  it("a detached HEAD is never held", async () => {
+    setBranch({ name: null, detached: true } as Partial<BranchHead>);
+    await renderPanel({});
+    render(
+      <QueryClientProvider client={client}>
+        <PushHarness />
+      </QueryClientProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "start main" }));
+    dispatchAction("undo-commit");
+    await waitFor(() => expect(gitUndoCommit).toHaveBeenCalled());
+    expect(toast.info).not.toHaveBeenCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
+  });
+});
 
 describe("Undo during a stopped operation", () => {
   it.each([

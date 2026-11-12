@@ -8,24 +8,28 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import * as api from "../api";
-import { repoKeys } from "./core";
+import { peekRepoIdentity } from "../repo-identity";
+import { repoKeys, useRepoIdentity } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { prChecksRecheck } from "./pr-actions";
 import { pendingMutationEntries } from "./pr-writes";
 import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
   BRANCH_PUSH_KEY,
   type BranchPushState,
   branchPushKey,
   type PushVars,
   pendingBranchPushesFor,
+  pushesBranch,
   recheckRunsAfterPush,
 } from "./push-writes";
 
 export {
   BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
   type BranchPushState,
-  branchPublishLabel,
+  branchPreparingLabel,
   branchPushHoldItemReason,
   branchPushHoldReason,
   branchPushLabel,
@@ -292,11 +296,14 @@ export function useSetSubmoduleBranch(repo: string) {
 }
 
 /** Keyed per repo with the branch in the variables: {@link usePendingBranchPushes}
- *  reads every push in flight, whichever mount fired it. The client-only vars
- *  (`source`, `startedOn`) stay on the client; the backend gets exactly the
- *  push's own arguments. */
+ *  reads every push in flight, whichever mount fired it. The key also carries the
+ *  repository identity once resolved, so a sibling worktree's
+ *  {@link refuseWhileBranchPushes} sees the push. The client-only vars (`source`,
+ *  `startedOn`) stay on the client; the backend gets exactly the push's own
+ *  arguments. */
 export function usePush(repo: string) {
   const queryClient = useQueryClient();
+  const identity = useRepoIdentity(repo).data;
   return useRepoMutation(
     repo,
     (args: PushVars) =>
@@ -309,7 +316,7 @@ export function usePush(repo: string) {
         args.remoteBranch,
       ),
     {
-      identity: branchPushKey(repo),
+      identity: branchPushKey(repo, identity),
       // The whole-repo default: a push moves the pushed branch's PR head, checks,
       // mergeability and runs, and only active observers refetch. The push names
       // no PR or lens, so the recheck re-reads every PR's details in both lenses:
@@ -359,10 +366,7 @@ export function usePendingBranchPushIds(): number[] {
 
 /** Fire-time twin of {@link usePendingBranchPushes}: whether `repo` has a push in
  *  flight right now, for a handler a stale render could otherwise let through. */
-export function isBranchPushActive(
-  queryClient: QueryClient,
-  repo: string,
-): boolean {
+function isBranchPushActive(queryClient: QueryClient, repo: string): boolean {
   return (
     queryClient
       .getMutationCache()
@@ -380,6 +384,60 @@ export function refuseWhilePushRuns(
   if (!isBranchPushActive(queryClient, repo)) return false;
   toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
   return true;
+}
+
+/** The fire-time refusal for a route that moves or removes `branch`'s ref: true
+ *  (and says why) while a push in this checkout, or in another worktree of the
+ *  same repository, is sending it. `currentName` is this checkout's HEAD branch
+ *  (null when unknown). Synchronous: the identity is peeked, never resolved, so an
+ *  unresolved one matches this checkout's own pushes only. `alsoHeld` adds a hold
+ *  the caller tracks itself; `message` overrides the toast, and
+ *  `elsewhereMessage` overrides it when only another worktree's push holds. */
+export function refuseWhileBranchPushes(
+  queryClient: QueryClient,
+  repo: string,
+  branch: string,
+  currentName: string | null,
+  opts: {
+    message?: string;
+    elsewhereMessage?: string;
+    alsoHeld?: boolean;
+  } = {},
+): boolean {
+  const pushes = pendingBranchPushesFor(
+    pendingMutationEntries(
+      queryClient
+        .getMutationCache()
+        .findAll({ mutationKey: BRANCH_PUSH_KEY, status: "pending" }),
+    ),
+    repo,
+    peekRepoIdentity(repo),
+  );
+  const holding = pushes.filter((p) => pushesBranch([p], branch, currentName));
+  if (opts.alsoHeld !== true && holding.length === 0) return false;
+  const onlyElsewhere =
+    opts.alsoHeld !== true && holding.every((p) => p.foreign);
+  toast.info(
+    onlyElsewhere
+      ? (opts.elsewhereMessage ?? opts.message ?? BRANCH_PUSH_ELSEWHERE_MESSAGE)
+      : (opts.message ?? BRANCH_PUSH_ACTIVE_MESSAGE),
+  );
+  return true;
+}
+
+/** {@link refuseWhileBranchPushes} for a route that moves the current branch
+ *  under a `headBranchPin`: `"HEAD"` (detached) moves no branch ref and is never
+ *  held; `null` (name unknown) holds on this checkout's HEAD pushes only, since
+ *  git refuses a branch named `HEAD` and so no named push can match it. */
+export function refuseWhilePinnedBranchPushes(
+  queryClient: QueryClient,
+  repo: string,
+  pin: string | null,
+): boolean {
+  if (pin === "HEAD") return false;
+  if (pin === null)
+    return refuseWhileBranchPushes(queryClient, repo, "HEAD", null);
+  return refuseWhileBranchPushes(queryClient, repo, pin, pin);
 }
 
 export function useUndoCommit(repo: string) {

@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { toast } from "sonner";
@@ -25,6 +31,12 @@ import {
   gitFinishLocalPrUpdate,
   gitStatus,
 } from "@/lib/git/api";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  BRANCH_PUSH_ELSEWHERE_MESSAGE,
+  usePush,
+} from "@/lib/git/queries";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import type { RepoStatus } from "@/lib/git/types";
 import { type LocalPr, updateLocalPr } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
@@ -59,7 +71,27 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitDiscardLocalPrUpdate: vi.fn(),
   gitFinishLocalPrMerge: vi.fn(),
   gitAbortLocalPrMerge: vi.fn(),
+  // A push started by PushHarness stays pending for the whole test.
+  gitPush: vi.fn(() => new Promise(() => undefined)),
 }));
+// usePush keys on the repository identity; C:/repo-wt is another worktree of
+// the same repository. Any other path never resolves.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => {
+  const ids = new Map([
+    ["C:/repo", "C:/repo/.git"],
+    ["C:/repo-wt", "C:/repo/.git"],
+  ]);
+  return {
+    ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+    peekRepoIdentity: (path: string) => ids.get(path),
+    repoIdentityStrict: (path: string) => {
+      const id = ids.get(path);
+      return id === undefined
+        ? new Promise<string>(() => undefined)
+        : Promise.resolve(id);
+    },
+  };
+});
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
   updateLocalPr: vi.fn(),
@@ -610,5 +642,121 @@ describe("ResolveConflictsView, merge mode (parity)", () => {
     await waitFor(() => expect(gitStatus).toHaveBeenCalled());
     await act(async () => new Promise((r) => setTimeout(r, 30)));
     expect(screen.queryByText(UNREADABLE)).toBeNull();
+  });
+});
+
+/** One usePush binding per file: the usePush scan reads a second `const push`
+ *  as a use of the first. */
+function PushHarness({
+  branch,
+  path,
+}: {
+  branch: "feat" | "main" | "dev";
+  path: string;
+}) {
+  const push = usePush(path);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (branch === "feat")
+          void push.mutateAsync({ setUpstream: false, branch: "feat" });
+        else if (branch === "main")
+          void push.mutateAsync({ setUpstream: false, branch: "main" });
+        else void push.mutateAsync({ setUpstream: false, branch: "dev" });
+      }}
+    >
+      start {branch} in {path}
+    </button>
+  );
+}
+
+describe("ResolveConflictsView's Finish while the moved branch pushes", () => {
+  const MERGE = {
+    base: "main",
+    head: "feat",
+    strategy: "merge" as const,
+    message: "m",
+    worktreePath: WT,
+    worktreeId: "0123456789ab",
+    opId: "op-m",
+    startedAt: "2026-01-01T00:00:00Z",
+  };
+  const MODES = {
+    update: {
+      pr: makePr(),
+      moved: "feat",
+      finish: gitFinishLocalPrUpdate,
+      done: "All conflicts resolved. Finish update to apply the merge to feat.",
+    },
+    merge: {
+      pr: makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+      moved: "main",
+      finish: gitFinishLocalPrMerge,
+      done: "All conflicts resolved — Finish to complete the merge.",
+    },
+  } as const;
+
+  /** The editor in `mode`, with a push of `branch` from `path` left pending in
+   *  its cache, once Finish is live. */
+  async function renderWithPush(
+    mode: "update" | "merge",
+    branch: "feat" | "main" | "dev",
+    path: string,
+  ) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <PushHarness branch={branch} path={path} />
+        <ResolveConflictsView repoPath={REPO} pr={MODES[mode].pr} mode={mode} />
+      </QueryClientProvider>,
+    );
+    // The identity must land first: a push filed without it is path-keyed.
+    await waitFor(() =>
+      expect(
+        client.getQueryData(repoIdentityQueryOptions(path).queryKey),
+      ).toBeDefined(),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: `start ${branch} in ${path}` }),
+    );
+    await waitFor(() =>
+      expect(
+        client.getMutationCache().findAll({ status: "pending" }),
+      ).toHaveLength(1),
+    );
+    await waitFor(() =>
+      expect(finishButton()).not.toHaveAttribute("aria-disabled"),
+    );
+  }
+
+  for (const mode of ["update", "merge"] as const)
+    for (const [where, path, message] of [
+      ["this checkout", REPO, BRANCH_PUSH_ACTIVE_MESSAGE],
+      ["another worktree", "C:/repo-wt", BRANCH_PUSH_ELSEWHERE_MESSAGE],
+    ] as const)
+      it(`${mode} mode: a push of the moved branch in ${where} refuses and keeps the editor`, async () => {
+        const { moved, finish, done } = MODES[mode];
+        await renderWithPush(mode, moved, path);
+        await userEvent.click(finishButton());
+        expect(toast.info).toHaveBeenCalledWith(message);
+        expect(finish).not.toHaveBeenCalled();
+        expect(updateLocalPr).not.toHaveBeenCalled();
+        expect(finishButton()).not.toHaveAttribute("aria-disabled");
+        expect(
+          screen.getAllByText((_t, el) => el?.textContent === done),
+        ).not.toHaveLength(0);
+      });
+
+  it("a push of another branch lets Finish run", async () => {
+    vi.mocked(gitFinishLocalPrUpdate).mockReturnValue(
+      new Promise(() => undefined),
+    );
+    await renderWithPush("update", "dev", "C:/repo-wt");
+    await userEvent.click(finishButton());
+    await waitFor(() => expect(gitFinishLocalPrUpdate).toHaveBeenCalled());
+    expect(toast.info).not.toHaveBeenCalled();
   });
 });

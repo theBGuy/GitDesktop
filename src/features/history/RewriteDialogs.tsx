@@ -1,4 +1,5 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -25,10 +26,15 @@ import {
   gitBranchDiff,
   gitOpState,
   gitRecentCommits,
+  headBranchPin,
   readRepoInstructions,
 } from "@/lib/git/api";
-import { useRewriteCommits } from "@/lib/git/queries";
-import type { RewriteStep } from "@/lib/git/types";
+import {
+  refuseWhilePinnedBranchPushes,
+  repoStatusOptions,
+  useRewriteCommits,
+} from "@/lib/git/queries";
+import type { RepoStatus, RewriteStep } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { loadSettings } from "@/lib/settings/api";
 import { useAiEnabled } from "@/lib/settings/queries";
@@ -215,6 +221,7 @@ export function SquashDialog({
   onDone: () => void;
 }) {
   const rewrite = useRewriteCommits(repoPath);
+  const queryClient = useQueryClient();
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const aiEnabled = useAiEnabled();
   const ai = useGenerateSquashMessage(repoPath, (message) =>
@@ -243,6 +250,18 @@ export function SquashDialog({
         toast.info(PROMOTION_BLOCKS_CHECKOUT);
         return;
       }
+      // The form stays open with its message.
+      const shownHead = queryClient.getQueryData<RepoStatus>(
+        repoStatusOptions(repoPath).queryKey,
+      )?.branch;
+      if (
+        refuseWhilePinnedBranchPushes(
+          queryClient,
+          repoPath,
+          shownHead != null ? headBranchPin(shownHead) : null,
+        )
+      )
+        return;
       const startedFor = steps;
       try {
         await rewrite.mutateAsync({

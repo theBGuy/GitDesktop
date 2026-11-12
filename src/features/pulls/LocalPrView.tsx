@@ -83,6 +83,8 @@ import {
   type MergeRefusal,
   pendingWriteMatching,
   pendingWriteOfKind,
+  refuseWhileBranchPushes,
+  refuseWhilePushRuns,
   repoKeys,
   useAbortLocalPrMerge,
   useBranchDiffFiles,
@@ -935,6 +937,11 @@ export function LocalPrView({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // The merge advances base without the network lock, so only a push of
+    // base itself holds it.
+    const current = status.data?.branch?.name ?? null;
+    if (refuseWhileBranchPushes(queryClient, repoPath, pr.base, current))
+      return;
     const message = pr.body.trim() ? `${pr.title}\n\n${pr.body}` : pr.title;
     try {
       const outcome = await merge.mutateAsync({
@@ -1000,12 +1007,31 @@ export function LocalPrView({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // An in-place update (head is the current branch) also queues on the
+    // network lock behind any push of this checkout, as BranchSwitcher's does.
+    // An unread status may be on the head, so it holds too; a detached HEAD
+    // updates off that lock.
+    const current = status.data?.branch?.name ?? null;
+    const mayBeInPlace = status.data === undefined || pr.head === current;
+    if (
+      refuseWhileBranchPushes(queryClient, repoPath, pr.head, current) ||
+      (mayBeInPlace && refuseWhilePushRuns(queryClient, repoPath))
+    ) {
+      return;
+    }
     const mine = { repo: repoPath, id: pr.id };
     const moved = { repo: repoPath, base: pr.base, head: pr.head };
     setUpdateSettlingFor(mine);
     try {
-      await updateBranchFrom.mutateAsync({ branch: pr.head, base: pr.base });
-      toast.success(`Updated ${pr.head} from ${pr.base}`);
+      const outcome = await updateBranchFrom.mutateAsync({
+        branch: pr.head,
+        base: pr.base,
+      });
+      toast.success(
+        outcome.outcome === "up-to-date"
+          ? `${pr.head} is already up to date with ${pr.base}`
+          : `Updated ${pr.head} from ${pr.base}`,
+      );
       await refetchStripReads(moved);
     } catch (e) {
       // Only an in-place update (head IS the current branch) can be refused

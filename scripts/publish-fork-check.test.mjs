@@ -263,6 +263,20 @@ function switcherProblems(src) {
     out.push(
       "pushAlreadyActive: no publishDetectRef.current === mine exemption",
     );
+  // Keep local: the listed route re-checks the row its fresh read returned.
+  // Each route's refusal before that read is pinned by the Vitest rows in
+  // src/test/branch-switcher-keep-local.test.tsx.
+  const listed = fnBody(src, "pushListedBranchToOrigin");
+  if (listed === null) out.push("pushListedBranchToOrigin: not found");
+  else {
+    const flat = norm(listed);
+    if (
+      !flat.includes(
+        "if (refuseKeptLocalPush(freshRow)) return; pushBranchToOrigin(row, true);",
+      )
+    )
+      out.push("pushListedBranchToOrigin: the fresh row is not re-checked");
+  }
   const raw = fnBody(src, "beginPublishBranch");
   if (raw === null) return [...out, "beginPublishBranch: not found"];
   const body = norm(raw);
@@ -312,6 +326,28 @@ function syncProblems(src) {
     out.push("SyncControls: a Push render site skips the overlay");
   if (!flat.includes("hotkeys.push && !publishPending && !detecting)"))
     out.push("SyncControls: the push hotkey ignores the check");
+  if (
+    !flat.includes(
+      'useHotkeyAction("push", () => {if (sync.pushKeptLocalReason) {toast.info(sync.pushKeptLocalReason); return;} if (!refuseWhilePushing()) pressPush();}, hotkeys.push && !publishPending && !detecting);',
+    )
+  )
+    out.push("SyncControls: the push hotkey skips the Keep local refusal");
+  // The force confirm's Keep local hold: the shared helper decides it, and the
+  // confirm button's disabled and reason both read it first.
+  if (
+    !flat.includes(
+      "const forceKeptBranch = forceConfirmKeptBranch(forceConfirm?.branch ?? null, keptHead);",
+    )
+  )
+    out.push("SyncControls: the force confirm's hold skips its helper");
+  if (!flat.includes("disabled={forceKeptBranch !== null ||"))
+    out.push("SyncControls: the force confirm's button isn't held first");
+  if (
+    !flat.includes(
+      'reason={(() => {switch (true) {case forceKeptBranch !== null: return keptLocalReason(forceKeptBranch, "push");',
+    )
+  )
+    out.push("SyncControls: the force confirm's reason isn't Keep local first");
   // The ref mirror: read only in handlers, written only by the shift helper.
   const shift = arrowBlock(flat, "const shiftDetections = (");
   const begin = fnBody(src, "beginPush");
@@ -732,5 +768,62 @@ test("SyncControls: the busy-narrowing mutants are caught", () => {
       "    const { [repo]: n0 = 0 } = detectionsRef.current;\n    const n = n0 + by;",
     ),
     "a computed-key destructure",
+  );
+});
+
+test("the sync push hotkey refuses a kept-local branch and the listed route re-checks its fresh row", () => {
+  const real = realSources();
+  failsWith(
+    mutate(real, SYNC, "if (sync.pushKeptLocalReason) {", "if (false) {"),
+    "SyncControls: the push hotkey skips the Keep local refusal",
+  );
+  failsWith(
+    mutate(
+      real,
+      SWITCHER,
+      "    if (refuseKeptLocalPush(freshRow)) return;\n",
+      "",
+    ),
+    "pushListedBranchToOrigin: the fresh row is not re-checked",
+  );
+  failsWith(
+    mutate(
+      real,
+      SWITCHER,
+      "async function pushListedBranchToOrigin(",
+      "async function renamedRoute(",
+    ),
+    "pushListedBranchToOrigin: not found",
+  );
+});
+
+test("the force confirm holds a kept-local branch through the shared helper", () => {
+  const real = realSources();
+  failsWith(
+    mutate(
+      real,
+      SYNC,
+      "const forceKeptBranch = forceConfirmKeptBranch(",
+      "const forceKeptBranch = ((_b, h) => h)(",
+    ),
+    "SyncControls: the force confirm's hold skips its helper",
+  );
+  failsWith(
+    mutate(
+      real,
+      SYNC,
+      /disabled=\{\s*forceKeptBranch !== null \|\|/,
+      () => "disabled={",
+    ),
+    "SyncControls: the force confirm's button isn't held first",
+  );
+  failsWith(
+    mutate(
+      real,
+      SYNC,
+      /case forceKeptBranch !== null:\s*return keptLocalReason\(forceKeptBranch, "push"\);/,
+      () => "",
+    ),
+    "SyncControls: the force confirm's reason isn't Keep local first",
   );
 });

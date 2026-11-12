@@ -566,10 +566,85 @@ fn gh_publish_url_error(name: &str, error: AppError) -> AppError {
     ))
 }
 
+// The push ran after the create, so every variant (Busy and Timeout included) must
+// lead with the repository left behind, with no retry advice on a publishing refusal
+// since a retry is refused again; the original error's Display follows.
+fn gh_publish_push_error(name: &str, error: AppError) -> AppError {
+    if crate::git::remote::is_publishing_refusal(&error) {
+        return AppError::Gh(format!(
+            "Publishing didn't finish, but the GitHub repository {name} WAS created and origin points at it.\n{error}"
+        ));
+    }
+    AppError::Gh(format!(
+        "The GitHub repository {name} WAS created and origin points at it — retry the push.\n{error}"
+    ))
+}
+
+/// The local preconditions of a GitHub publish, all checked before `gh repo create`:
+/// the branch the push will name (HEAD born, not detached, publishable), then no
+/// existing `origin`, which gh would only discover after creating the repository.
+async fn gh_publish_preflight(repo_path: &str) -> AppResult<String> {
+    let branch = crate::git::remote::publish_branch(repo_path).await?;
+    crate::git::remote::refuse_existing_origin(repo_path).await?;
+    Ok(branch)
+}
+
+/// `gh repo create` WITHOUT `--push`: the push runs separately under the git network
+/// bound, since a large first push outlasts gh's.
+fn gh_publish_create_args<'a>(
+    name: &'a str,
+    private: bool,
+    description: &'a str,
+    homepage: &'a str,
+) -> Vec<&'a str> {
+    let visibility = if private { "--private" } else { "--public" };
+    let mut args = vec![
+        "repo", "create", name, "--source", ".", "--remote", "origin", visibility,
+    ];
+    if !description.is_empty() {
+        args.push("--description");
+        args.push(description);
+    }
+    if !homepage.is_empty() {
+        args.push("--homepage");
+        args.push(homepage);
+    }
+    args
+}
+
+/// Pushes the published branch to the origin `gh repo create` just added, through the
+/// app's network-locked push under the long git bound. A publishing refusal at spawn lands
+/// after the create, so it leads with the created repository and drops the retry advice.
+async fn gh_publish_push(
+    state: &AppState,
+    repo_path: &str,
+    branch: &str,
+    name: &str,
+) -> AppResult<()> {
+    let pushed = async {
+        let cred = crate::forge::credential_config_for_remote(repo_path, "origin").await?;
+        let spec = crate::git::remote::publish_refspec(branch);
+        crate::git::remote::run_git_mutating_with_creds_for_branch(
+            state,
+            repo_path,
+            &cred,
+            &["push", "-u", "origin", &spec],
+            NETWORK_TIMEOUT,
+            branch,
+        )
+        .await
+    };
+    pushed
+        .await
+        .map(|_| ())
+        .map_err(|e| gh_publish_push_error(name, e))
+}
+
 /// Creates a GitHub repository from the local one, wires up `origin`, and
 /// pushes the current branch — GitHub Desktop's "Publish repository". `name`
 /// may be `repo` (under your account) or `owner/repo` (under an org).
 pub async fn gh_publish_repo(
+    state: &AppState,
     repo_path: String,
     name: String,
     private: bool,
@@ -583,23 +658,12 @@ pub async fn gh_publish_repo(
             "a repository name is required".into(),
         ));
     }
-    let visibility = if private { "--private" } else { "--public" };
-    let description = description.trim();
-    let homepage = homepage.trim();
-    let mut args: Vec<&str> = vec![
-        "repo", "create", name, "--source", ".", "--remote", "origin", "--push", visibility,
-    ];
-    if !description.is_empty() {
-        args.push("--description");
-        args.push(description);
-    }
-    if !homepage.is_empty() {
-        args.push("--homepage");
-        args.push(homepage);
-    }
+    let branch = gh_publish_preflight(&repo_path).await?;
+    let args = gh_publish_create_args(name, private, description.trim(), homepage.trim());
     run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
         .await
         .map_err(|e| gh_publish_create_error(name, e))?;
+    gh_publish_push(state, &repo_path, &branch, name).await?;
 
     // `gh repo create` can't set topics — apply them with a follow-up edit on origin.
     // Best-effort: the repo + push already landed, so a topic failure can't fail it.
@@ -8504,12 +8568,13 @@ pub(crate) async fn gh_pr_create_core(
         // Push `head` to origin — origin IS the fork; the PR's head lives there.
         let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
         let spec = crate::git::remote::publish_refspec(&head);
-        crate::git::remote::run_git_mutating_with_creds(
+        crate::git::remote::run_git_mutating_with_creds_for_branch(
             state,
             &repo_path,
             &cred,
             &["push", "-u", "origin", &spec],
             NETWORK_TIMEOUT,
+            &head,
         )
         .await?;
 
@@ -8559,12 +8624,13 @@ pub(crate) async fn gh_pr_create_core(
     // gh can only open a PR for a branch that exists on the remote.
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
     let spec = crate::git::remote::publish_refspec(&head);
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         &repo_path,
         &cred,
         &["push", "-u", "origin", &spec],
         NETWORK_TIMEOUT,
+        &head,
     )
     .await?;
 
@@ -9292,6 +9358,301 @@ mod tests {
         assert!(hedge.contains("alice/demo may have been created"), "{hedge}");
         assert!(hedge.contains("Check your repositories on GitHub before retrying"));
         assert!(!message.contains("was created"), "{message}");
+    }
+
+    #[test]
+    fn publish_create_args_leave_the_push_out() {
+        let args = super::gh_publish_create_args("alice/demo", true, "", "");
+        assert_eq!(
+            args,
+            [
+                "repo",
+                "create",
+                "alice/demo",
+                "--source",
+                ".",
+                "--remote",
+                "origin",
+                "--private"
+            ]
+        );
+        let args = super::gh_publish_create_args("demo", false, "d e", "https://x.test");
+        assert_eq!(
+            args[7..],
+            [
+                "--public",
+                "--description",
+                "d e",
+                "--homepage",
+                "https://x.test"
+            ]
+        );
+        assert!(!args.contains(&"--push"));
+    }
+
+    #[test]
+    fn publish_push_failure_leads_with_the_created_repository() {
+        let head = "The GitHub repository alice/demo WAS created and origin points at it — retry the push.";
+        for error in [
+            AppError::Git {
+                code: 128,
+                stderr: "fatal: unable to access".into(),
+            },
+            AppError::Busy {
+                holder: "fetch".into(),
+            },
+            AppError::Timeout(600),
+        ] {
+            let detail = error.to_string();
+            let wrapped = super::gh_publish_push_error("alice/demo", error);
+            assert!(matches!(wrapped, AppError::Gh(_)), "{wrapped:?}");
+            let message = wrapped.to_string();
+            let (first, rest) = message.split_once('\n').unwrap();
+            assert_eq!(first, head);
+            assert_eq!(rest, detail);
+        }
+        let lead = "Publishing didn't finish, but the GitHub repository alice/demo WAS created and origin points at it.";
+        for refusal in [
+            AppError::BranchKeptLocal {
+                branch: "feat/x".into(),
+            },
+            AppError::BranchIsAgentSession {
+                branch: "gd/session/x".into(),
+            },
+            AppError::PushRemoteIsMirror {
+                remote: "origin".into(),
+            },
+        ] {
+            let own = refusal.to_string();
+            let AppError::Gh(message) = super::gh_publish_push_error("alice/demo", refusal) else {
+                panic!("{own}: a refusal after the create is disclosed as gh");
+            };
+            let lines: Vec<&str> = message.lines().collect();
+            assert_eq!(lines, [lead, own.as_str()], "{own}");
+            assert!(lines[0].contains("WAS created"));
+            for absent in ["push manually", "retry", "\u{2014}"] {
+                assert!(!lines[0].contains(absent), "{absent}: {message}");
+            }
+        }
+    }
+
+    fn publish_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repository on `feat/x` beside `gd/session/x` whose `origin` is a local bare
+    /// repository behind a three-slash `file:///` URL pinned non-mirror. Nothing here
+    /// runs gh: the tests below call only the preflight and the push half.
+    fn publish_fixture() -> (tempfile::TempDir, String, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-gh-publish-")
+            .tempdir()
+            .unwrap();
+        let work = dir.path().join("work");
+        let bare = dir.path().join("origin.git");
+        std::fs::create_dir_all(&work).unwrap();
+        publish_git(dir.path(), &["init", "-q", "--bare", "origin.git"]);
+        publish_git(&work, &["init", "-q", "-b", "main"]);
+        publish_git(&work, &["config", "user.name", "t"]);
+        publish_git(&work, &["config", "user.email", "t@example.com"]);
+        publish_git(&work, &["config", "commit.gpgsign", "false"]);
+        publish_git(&work, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+        publish_git(&work, &["checkout", "-q", "-b", "feat/x"]);
+        publish_git(&work, &["branch", "gd/session/x"]);
+        let path = bare.to_string_lossy().replace('\\', "/");
+        let url = format!("file:///{}", path.trim_start_matches('/'));
+        publish_git(&work, &["config", "remote.origin.url", &url]);
+        publish_git(&work, &["config", "remote.origin.mirror", "false"]);
+        let work_s = work.to_string_lossy().into_owned();
+        (dir, work_s, bare)
+    }
+
+    /// HEAD switched to a session or Keep local branch after the dispatch read is refused
+    /// by the preflight's own guard, ahead of the existing-origin refusal.
+    #[tokio::test]
+    async fn head_switch_github_preflight_refuses_before_the_origin_copy() {
+        let (_dir, work, _bare) = publish_fixture();
+        let path = std::path::Path::new(&work);
+        let origin_copy = "this repository already has an origin remote — push to it instead";
+        match super::gh_publish_preflight(&work).await {
+            Err(AppError::InvalidArgument(m)) => assert_eq!(m, origin_copy, "plain branch"),
+            other => panic!("plain branch: expected the origin copy, got {other:?}"),
+        }
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        match super::gh_publish_preflight(&work).await {
+            Err(AppError::BranchKeptLocal { branch }) => assert_eq!(branch, "feat/x"),
+            other => panic!("Keep local: expected BranchKeptLocal, got {other:?}"),
+        }
+        publish_git(path, &["checkout", "-q", "gd/session/x"]);
+        match super::gh_publish_preflight(&work).await {
+            Err(AppError::BranchIsAgentSession { branch }) => assert_eq!(branch, "gd/session/x"),
+            other => panic!("session: expected the session refusal, got {other:?}"),
+        }
+        publish_git(path, &["checkout", "-q", "--detach"]);
+        match super::gh_publish_preflight(&work).await {
+            Err(AppError::InvalidArgument(m)) => {
+                assert_eq!(m, "check out a branch before publishing (detached HEAD)")
+            }
+            other => panic!("detached: expected the detached refusal, got {other:?}"),
+        }
+    }
+
+    /// The push half sends the branch by name with `-u` to the origin gh added, so the
+    /// branch tracks it; the remote holds exactly the local tip.
+    #[tokio::test]
+    async fn publish_push_sends_the_branch_and_sets_its_upstream() {
+        let (_dir, work, bare) = publish_fixture();
+        let path = std::path::Path::new(&work);
+        super::gh_publish_push(&crate::state::AppState::default(), &work, "feat/x", "demo")
+            .await
+            .unwrap();
+        assert_eq!(
+            publish_git(&bare, &["rev-parse", "refs/heads/feat/x"]),
+            publish_git(path, &["rev-parse", "refs/heads/feat/x"])
+        );
+        assert_eq!(
+            publish_git(path, &["config", "branch.feat/x.remote"]),
+            "origin"
+        );
+        assert_eq!(
+            publish_git(path, &["config", "branch.feat/x.merge"]),
+            "refs/heads/feat/x"
+        );
+        let heads = publish_git(&bare, &["for-each-ref", "--format=%(refname)"]);
+        assert_eq!(heads, "refs/heads/feat/x");
+    }
+
+    /// A push that fails after the create leads with the repository left behind, git's
+    /// own failure below it. The origin is a missing local bare repository: no gh runs.
+    #[tokio::test]
+    async fn publish_push_failure_discloses_the_created_repository() {
+        let (dir, work, _bare) = publish_fixture();
+        let path = std::path::Path::new(&work);
+        let missing = dir.path().join("missing.git");
+        let missing = missing.to_string_lossy().replace('\\', "/");
+        let url = format!("file:///{}", missing.trim_start_matches('/'));
+        publish_git(path, &["config", "remote.origin.url", &url]);
+        let err =
+            super::gh_publish_push(&crate::state::AppState::default(), &work, "feat/x", "demo")
+                .await
+                .expect_err("a missing origin can't take the push");
+        let AppError::Gh(message) = err else {
+            panic!("expected AppError::Gh, got {err:?}");
+        };
+        let mut lines = message.lines();
+        assert_eq!(
+            lines.next(),
+            Some(
+                "The GitHub repository demo WAS created and origin points at it — retry the push."
+            )
+        );
+        let git_line = lines.next().unwrap_or_default();
+        assert!(
+            git_line.contains("missing.git") || git_line.contains("does not appear"),
+            "git's own failure follows: {message}"
+        );
+    }
+
+    /// Order in `gh_publish_repo`, pinned by source: the name check, then the local
+    /// preflight, then the first gh call; the preflight runs both guards with `?`. The
+    /// mutation controls run on the carved text, never against gh.
+    #[test]
+    fn github_publish_guards_precede_the_network_existing_origin() {
+        use crate::github::repo_meta::tests::wiring_body;
+        fn guards_precede(body: &str) -> bool {
+            let (Some(name), Some(preflight), Some(network)) = (
+                body.find("name.is_empty()"),
+                body.find("gh_publish_preflight(&repo_path).await?"),
+                body.find("run_gh("),
+            ) else {
+                return false;
+            };
+            // The preflight is the very next statement after the name check's block, so
+            // no gh-reaching helper can slip in ahead of it.
+            let Some(close) = body[name..].find("\n    }\n").map(|i| name + i + 7) else {
+                return false;
+            };
+            let adjacent = body[close..]
+                .trim_start()
+                .starts_with("let branch = gh_publish_preflight(&repo_path).await?;");
+            adjacent && name < preflight && preflight < network && !body.contains("\"--push\"")
+        }
+        fn inserted_before(body: &str, needle: &str, line: &str) -> String {
+            let mut out = Vec::new();
+            for l in body.lines() {
+                if l.contains(needle) {
+                    out.push(line);
+                }
+                out.push(l);
+            }
+            out.join("\n")
+        }
+        fn without(body: &str, needle: &str) -> String {
+            body.lines()
+                .filter(|line| !line.contains(needle))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn moved_after(body: &str, needle: &str, anchor: &str) -> String {
+            let moved = body.lines().find(|line| line.contains(needle)).unwrap();
+            let mut out = Vec::new();
+            for line in body.lines().filter(|line| !line.contains(needle)) {
+                out.push(line);
+                if line.contains(anchor) {
+                    out.push(moved);
+                }
+            }
+            out.join("\n")
+        }
+        let source = include_str!("pr.rs");
+        let body = wiring_body(source, "gh_publish_repo");
+        assert!(guards_precede(&body), "{body}");
+        let mutants = [
+            ("preflight deleted", without(&body, "gh_publish_preflight(")),
+            (
+                "preflight after the create",
+                moved_after(&body, "gh_publish_preflight(", "&args, GH_NETWORK_TIMEOUT"),
+            ),
+            ("name check deleted", without(&body, "name.is_empty()")),
+            (
+                "a statement before the preflight",
+                inserted_before(
+                    &body,
+                    "gh_publish_preflight(",
+                    "    gh_wrapper(&repo_path).await?;",
+                ),
+            ),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}: the mutation changed nothing");
+            assert!(!guards_precede(&mutant), "{what}");
+        }
+        let preflight = wiring_body(source, "gh_publish_preflight");
+        let branch = preflight.find("publish_branch(repo_path).await?").unwrap();
+        let origin = preflight
+            .find("refuse_existing_origin(repo_path).await?")
+            .unwrap();
+        assert!(branch < origin, "{preflight}");
+        let push = wiring_body(source, "gh_publish_push");
+        assert!(push.contains("publish_refspec(branch)"), "{push}");
+        assert!(push.contains("NETWORK_TIMEOUT") && !push.contains("GH_NETWORK_TIMEOUT"));
+        assert!(
+            push.contains("run_git_mutating_with_creds_for_branch(")
+                && push.contains("NETWORK_TIMEOUT,\n            branch,\n        )"),
+            "the push re-checks the published branch at spawn: {push}"
+        );
     }
 
     /// The three blobs `gh pr merge` writes to stderr when it refuses, assembled from

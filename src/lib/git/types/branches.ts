@@ -21,7 +21,8 @@ export interface BranchHead {
   /** A bare `git push` would be refused because the branch upstream has a
    *  different name (push.default unset/simple, pushed to the upstream's own
    *  remote, no push refspec). When true, `upstreamRemote` and `upstreamBranch`
-   *  are both set. */
+   *  are both set. False on a mirror push remote, where Rust refuses every push
+   *  (`pushRemoteIsMirror`) before git runs. */
   pushNameMismatch: boolean;
   /** Whether `upstreamBranch` is its remote's default branch; probed only while
    *  `pushNameMismatch`, null = unknown. */
@@ -29,8 +30,8 @@ export interface BranchHead {
   /** The remote a BARE push lands on: `%(push…)` read with the push config
    *  where that changes the answer (matching, triangular `simple`), so a git
    *  without the atoms may still carry a config-derived destination. null when
-   *  unresolvable (a push remote with its own push refspecs or
-   *  `remote.<r>.mirror` set among them: git's bare push runs as configured) or
+   *  unresolvable (a push remote with its own push refspecs, where git's bare
+   *  push runs as configured, or a mirror, where every app push is refused) or
    *  there is no upstream. A destination that is the branch's own same-named
    *  live upstream reads no config, so it stays set even on a mirror remote.
    *  Set together with `pushBranch`. */
@@ -66,6 +67,12 @@ export interface Branch {
    *  `refs/heads/main`); null when untracked. Cross-name decisions read this,
    *  never the short `upstream` string (remote names may contain `/`). */
   upstreamRemoteRef: string | null;
+  /** Marked Keep local (`branch.<name>.gitdesktopLocalOnly`, as the Rust push
+   *  guard reads it): GitDesktop and its MCP server refuse to push or publish it. */
+  keepLocal: boolean;
+  /** The live upstream is its remote's default branch; false for no, unknown,
+   *  gone, a local `.` upstream, or none. */
+  upstreamIsRemoteDefault: boolean;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so

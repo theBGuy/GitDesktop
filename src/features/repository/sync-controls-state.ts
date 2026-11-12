@@ -27,6 +27,40 @@ export const REMOTES_PENDING_REASON = "Checking remotes…";
  *  not-ready panel. */
 export const REMOTES_FAILED_REASON = "Couldn't read the remotes";
 
+/** The hold suffix on a menu item that would push a branch marked Keep local.
+ *  Its one spelling in src/: the branch menu imports it from here. */
+export const KEPT_LOCAL_SUFFIX = " (kept local)";
+
+/** Why a push or publish of `branch` is held while it is marked Keep local. */
+export function keptLocalReason(
+  branch: string,
+  verb: "push" | "publish",
+): string {
+  return `${branch} is kept local. Turn off Keep local in the branch menu to ${verb} it.`;
+}
+
+/** Pull's reason on a kept-local HEAD with no live upstream: the usual ones
+ *  advise publishing, which Keep local holds. */
+export const KEPT_LOCAL_PULL_REASON: Record<
+  "untracked" | "gone",
+  (branch: string, upstream: string) => string
+> = {
+  untracked: (branch) =>
+    `Pull — ${branch} is kept local and has no upstream branch to pull from`,
+  gone: (branch, upstream) =>
+    `Pull — ${branch} is kept local and its upstream ${upstream} was deleted on the remote, so there is nothing to pull`,
+};
+
+/** The branch the force-push confirm's Keep local hold names, or null for no
+ *  hold. A null captured branch falls back to the live kept-local HEAD; a
+ *  captured branch is held only while it is that HEAD. */
+export function forceConfirmKeptBranch(
+  captured: string | null,
+  keptHead: string | null,
+): string | null {
+  return captured === null || captured === keptHead ? keptHead : null;
+}
+
 /** Which read a held action is waiting on. Remotes outrank status: they decide
  *  whether this cluster is the right control at all. */
 type UnknownRead = "remotesFailed" | "remotes" | "statusFailed" | "status";
@@ -89,6 +123,9 @@ export interface SyncControlsInput {
   /** Whether refs/remotes/<R>/<new> already exists locally (last-fetch state), from
    *  the remote-branches read; false while unknown — the label upgrade is cosmetic. */
   remoteNewExists: boolean;
+  /** HEAD's branch-list row is marked Keep local; false while unknown (a stale or
+   *  unloaded list leaves Push live, and Rust refuses the push). */
+  keptLocal: boolean;
 }
 
 export interface Hold {
@@ -142,6 +179,175 @@ function plural(n: number): string {
   return n === 1 ? "" : "s";
 }
 
+/** The name-mismatch Push menu for a branch tracking a differently named one.
+ *  The sync bar (HEAD) and the branch menu (any row) both build it here, so one
+ *  branch gets one answer on both surfaces. */
+export function deriveMismatchMenu(i: {
+  branch: string;
+  remote: string;
+  remoteBranch: string;
+  ahead: number;
+  behind: number;
+  /** true only when MEASURED: BranchHead's `=== true`, or the row's boolean. */
+  upstreamIsRemoteDefault: boolean;
+  remoteNewExists: boolean;
+  keptLocal: boolean;
+}): MismatchMenu {
+  const { branch, remote, remoteBranch, ahead, behind, keptLocal } = i;
+  const tracked = `Push to ${remote}/${remoteBranch}`;
+  const pushToTracked = ((): MismatchMenuItem | null => {
+    if (i.upstreamIsRemoteDefault) return null;
+    if (keptLocal)
+      return { label: `${tracked}${KEPT_LOCAL_SUFFIX}`, disabled: true };
+    if (ahead === 0)
+      return { label: `${tracked} (nothing to push)`, disabled: true };
+    if (behind > 0)
+      return {
+        label: `${tracked} (diverged — use the Pull menu first)`,
+        disabled: true,
+      };
+    return { label: tracked, disabled: false };
+  })();
+  const publishBase = i.remoteNewExists
+    ? `Push to ${remote}/${branch} and track it`
+    : `Publish as ${remote}/${branch}`;
+  // The re-track starts the new upstream at the local tip, so commits only on
+  // the old one drop out of the Pull count. On the remote's default branch they
+  // are that branch's commits, not this one's, so nothing is held for them.
+  // Keep local is structural, so it outranks that transient hold.
+  const publish = ((): MismatchMenuItem => {
+    switch (true) {
+      case keptLocal:
+        return { label: `${publishBase}${KEPT_LOCAL_SUFFIX}`, disabled: true };
+      case behind > 0 && !i.upstreamIsRemoteDefault:
+        return { label: `${publishBase} (pull first)`, disabled: true };
+      default:
+        return { label: publishBase, disabled: false };
+    }
+  })();
+  return {
+    branch,
+    remote,
+    remoteBranch,
+    groupLabel: `${branch} tracks ${remote}/${remoteBranch}`,
+    pushToTracked,
+    publish,
+  };
+}
+
+/** A branch-list row's upstream facts, as the row indicator and menu read them. */
+export interface RowUpstreamFacts {
+  name: string;
+  upstream: string | null;
+  upstreamGone: boolean;
+  upstreamRemote: string | null;
+  /** The upstream's branch name on its remote; null for a non-branch ref. */
+  upstreamBranch: string | null;
+  upstreamAhead: number;
+  upstreamBehind: number;
+  upstreamIsRemoteDefault: boolean;
+  keepLocal: boolean;
+}
+
+/** Non-null only for a live upstream on a CONFIGURED remote whose branch name
+ *  differs from the row's. A local (`.`) or removed remote is not configured. */
+export function rowNameMismatch(
+  row: RowUpstreamFacts,
+  remoteNames: readonly string[],
+): { remote: string; remoteBranch: string; isRemoteDefault: boolean } | null {
+  const remote = row.upstreamRemote;
+  if (!row.upstream || row.upstreamGone) return null;
+  if (remote === null || !remoteNames.includes(remote)) return null;
+  if (row.upstreamBranch === null || row.upstreamBranch === row.name)
+    return null;
+  return {
+    remote,
+    remoteBranch: row.upstreamBranch,
+    isRemoteDefault: row.upstreamIsRemoteDefault,
+  };
+}
+
+export type RowSyncIndicator =
+  | { kind: "none" }
+  | { kind: "removedRemote"; label: string }
+  | {
+      kind: "arrows";
+      label: string;
+      ahead: number;
+      behind: number;
+      /** Set when the upstream has another name: the row names it inline. */
+      upstreamName: string | null;
+    }
+  | { kind: "startPoint"; label: string }
+  | { kind: "gone"; label: string }
+  | { kind: "neverPublished"; label: string };
+
+/** The row's own-upstream marker. No marker on a kept-local row advises
+ *  publishing it: the chip already says it stays local. `secondaryClick` is the
+ *  sentence-initial secondary-click word. `ownNameOnRemote` (the last fetch
+ *  lists the row's own name on its upstream's remote) points a start-point row
+ *  at tracking that branch instead of publishing. */
+export function rowSyncIndicator(
+  row: RowUpstreamFacts,
+  remoteNames: readonly string[],
+  secondaryClick: string,
+  ownNameOnRemote: boolean,
+): RowSyncIndicator {
+  const remote = row.upstreamRemote;
+  // Tracking a removed remote offers neither Push nor Publish, so arrows would
+  // imply an action the menu can't honor. A local (`.`) upstream is not one.
+  if (
+    row.upstream &&
+    !row.upstreamGone &&
+    remote !== null &&
+    remote !== "." &&
+    !remoteNames.includes(remote)
+  )
+    return {
+      kind: "removedRemote",
+      label: `Tracks ${row.upstream}, but that remote is no longer configured.`,
+    };
+  if (row.upstream && !row.upstreamGone) {
+    const mismatch = rowNameMismatch(row, remoteNames);
+    // Created from the remote's default branch: nothing of it is published.
+    if (mismatch?.isRemoteDefault) {
+      if (row.keepLocal) return { kind: "none" };
+      return {
+        kind: "startPoint",
+        label: ownNameOnRemote
+          ? `Tracks ${row.upstream}, where it started. ${mismatch.remote}/${row.name} exists. ${secondaryClick} to track it.`
+          : `Not published. Tracks ${row.upstream}, where it started. ${secondaryClick} to publish.`,
+      };
+    }
+    const ahead = row.upstreamAhead;
+    const behind = row.upstreamBehind;
+    // In sync with the upstream: silence means synced.
+    if (ahead === 0 && behind === 0) return { kind: "none" };
+    const parts: string[] = [];
+    if (ahead > 0) parts.push(`${ahead} to push`);
+    if (behind > 0) parts.push(`${behind} to pull`);
+    return {
+      kind: "arrows",
+      label: `${parts.join(", ")} — vs ${row.upstream}`,
+      ahead,
+      behind,
+      upstreamName: mismatch ? row.upstream : null,
+    };
+  }
+  if (row.upstreamGone)
+    return {
+      kind: "gone",
+      label: row.keepLocal
+        ? `Upstream ${row.upstream} was deleted on the remote — likely merged.`
+        : `Upstream ${row.upstream} was deleted on the remote — likely merged. ${secondaryClick} to publish again or delete.`,
+    };
+  if (row.keepLocal) return { kind: "none" };
+  return {
+    kind: "neverPublished",
+    label: `Local only — never published. ${secondaryClick} to publish.`,
+  };
+}
+
 export function deriveSyncControls(input: SyncControlsInput) {
   const { head, remotes, busy, offlineHold } = input;
   const busyReason = input.busyReason ?? SYNC_BUSY_REASON;
@@ -171,47 +377,21 @@ export function deriveSyncControls(input: SyncControlsInput) {
       head.upstreamRemote &&
       head.upstreamBranch,
   );
-  const mismatchMenu = ((): MismatchMenu | null => {
-    if (
-      !mismatch ||
-      !head?.name ||
-      !head.upstreamRemote ||
-      !head.upstreamBranch
-    )
-      return null;
-    const branch = head.name;
-    const remote = head.upstreamRemote;
-    const remoteBranch = head.upstreamBranch;
-    const tracked = `Push to ${remote}/${remoteBranch}`;
-    const pushToTracked = ((): MismatchMenuItem | null => {
-      if (head.upstreamIsRemoteDefault === true) return null;
-      if (aheadCount === 0)
-        return { label: `${tracked} (nothing to push)`, disabled: true };
-      if (diverged)
-        return {
-          label: `${tracked} (diverged — use the Pull menu first)`,
-          disabled: true,
-        };
-      return { label: tracked, disabled: false };
-    })();
-    // The re-track starts the new upstream at the local tip, so commits only on
-    // the old one would silently drop out of the Pull count.
-    const publishBase = input.remoteNewExists
-      ? `Push to ${remote}/${branch} and track it`
-      : `Publish as ${remote}/${branch}`;
-    const publish =
-      behindCount > 0
-        ? { label: `${publishBase} (pull first)`, disabled: true }
-        : { label: publishBase, disabled: false };
-    return {
-      branch,
-      remote,
-      remoteBranch,
-      groupLabel: `${branch} tracks ${remote}/${remoteBranch}`,
-      pushToTracked,
-      publish,
-    };
-  })();
+  // Unknown (null) is not the default: the tracked item stays and the publish
+  // item keeps its pull-first hold.
+  const mismatchMenu =
+    mismatch && head?.name && head.upstreamRemote && head.upstreamBranch
+      ? deriveMismatchMenu({
+          branch: head.name,
+          remote: head.upstreamRemote,
+          remoteBranch: head.upstreamBranch,
+          ahead: aheadCount,
+          behind: behindCount,
+          upstreamIsRemoteDefault: head.upstreamIsRemoteDefault === true,
+          remoteNewExists: input.remoteNewExists,
+          keptLocal: input.keptLocal,
+        })
+      : null;
   const mismatchAllHeld =
     mismatchMenu !== null &&
     (mismatchMenu.pushToTracked?.disabled ?? true) &&
@@ -224,6 +404,16 @@ export function deriveSyncControls(input: SyncControlsInput) {
     if (statusKnown && !hasUpstream) return "Publish branch";
     return "Push";
   })();
+  const keptHeadName = input.keptLocal && head?.name ? head.name : null;
+  // Ranks first in every push hold: no other reason matters for a push that
+  // can't happen at all.
+  const pushKeptLocalReason =
+    input.keptLocal && head?.name
+      ? keptLocalReason(
+          head.name,
+          pushLabel === "Publish branch" ? "publish" : "push",
+        )
+      : undefined;
 
   // One description per button feeds both its tooltip and its accessible name;
   // each starts with the visible label (WCAG 2.5.3) and, while disabled,
@@ -276,6 +466,12 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // reads as gone whether or not the remote branch exists; claim neither.
     if (unborn && head.upstreamGone)
       return `Pull — ${head.name} has no commits yet, so it can't be compared with ${upstream}`;
+    // Publish is held while kept local, so nothing here may advise it.
+    if (keptHeadName !== null && !hasUpstream)
+      return KEPT_LOCAL_PULL_REASON[head.upstreamGone ? "gone" : "untracked"](
+        keptHeadName,
+        upstream ?? "",
+      );
     // Publish is held until the first commit, so the advice names that first.
     if (unborn && !upstream)
       return `Pull — ${head.name} has no commits yet; make your first commit, then publish the branch`;
@@ -288,6 +484,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
     return behindLabel;
   })();
   const pushDescription = (() => {
+    if (pushKeptLocalReason) return `${pushLabel} — ${pushKeptLocalReason}`;
     if (detached)
       return `${pushLabel} — you're on a detached HEAD; check out a branch to push`;
     if (unborn)
@@ -296,7 +493,8 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // push can't do here.
     if (mismatchMenu) {
       // A menu with every item held can't open, so the trigger names the remedy
-      // instead; the publish item holds only while behind, so pulling always is.
+      // instead. That needs an upstream other than the remote's default, whose
+      // publish item holds only while behind, so pulling always is.
       const remedy = !mismatchAllHeld
         ? "choose where from the menu"
         : diverged
@@ -339,11 +537,14 @@ export function deriveSyncControls(input: SyncControlsInput) {
   );
   // A mismatch menu with nothing to offer holds the trigger itself, as the Pull
   // caret holds an empty menu.
-  const push = hold(
-    unknownRead(true),
-    detached || unborn || mismatchAllHeld,
-    pushDescription,
-  );
+  const push: Hold =
+    pushKeptLocalReason !== undefined
+      ? { disabled: true, reason: pushKeptLocalReason }
+      : hold(
+          unknownRead(true),
+          detached || unborn || mismatchAllHeld,
+          pushDescription,
+        );
   // The caret stays live offline: its items carry their own offline holds.
   const pullOptions = ((): Hold => {
     const pending = unknownRead(true);
@@ -355,6 +556,9 @@ export function deriveSyncControls(input: SyncControlsInput) {
     // empty menu's reason would point at Publish, which Push holds until the
     // first commit; the caret repeats the Pull description instead.
     if (detached || unborn) return { disabled, reason: pullDescription };
+    // The empty menu's reason points at Publish, which Keep local holds.
+    if (empty && keptHeadName !== null)
+      return { disabled, reason: pullDescription };
     return {
       disabled,
       reason: empty ? PULL_OPTIONS_UNPUBLISHED_REASON : undefined,
@@ -377,6 +581,9 @@ export function deriveSyncControls(input: SyncControlsInput) {
     pushLabel,
     pullDescription,
     pushDescription,
+    /** Set while HEAD is marked Keep local: the push hold's reason and the push
+     *  hotkey's refusal toast. */
+    pushKeptLocalReason,
     mismatch,
     mismatchMenu,
     /** Accessible names: the description, else the bare visible label — never
@@ -398,14 +605,17 @@ export function deriveSyncControls(input: SyncControlsInput) {
         hasUpstream &&
         !diverged &&
         !offlineHold,
+      // A kept-local HEAD keeps the key live so the press reaches its toast,
+      // except with no origin, where the bar shows only Publish repository.
       push:
-        statusKnown &&
-        hasOrigin &&
-        !busy &&
-        !detached &&
-        !unborn &&
-        !mismatchAllHeld &&
-        !offlineHold,
+        (pushKeptLocalReason !== undefined && !noOrigin) ||
+        (statusKnown &&
+          hasOrigin &&
+          !busy &&
+          !detached &&
+          !unborn &&
+          !mismatchAllHeld &&
+          !offlineHold),
       updateFromUpstream:
         statusKnown && canUpdateUpstream && !busy && !offlineHold,
     },

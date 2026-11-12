@@ -35,6 +35,8 @@ import {
   pendingWriteMatching,
   RELEASE_WRITES_FAMILY,
   type ReleaseWriteKind,
+  refuseWhileBranchPushes,
+  refuseWhilePinnedBranchPushes,
   releaseWriteTag,
   repoStatusOptions,
   useCherryPick,
@@ -240,6 +242,10 @@ export function ResetCommitDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (
+      refuseWhilePinnedBranchPushes(queryClient, repoPath, pin.expectedBranch)
+    )
+      return;
     const startedFor = hash;
     const startedIn = repoPath;
     const closeIfStillOpen = () => {
@@ -427,6 +433,7 @@ export function CherryPickOntoDialog({
   onDone: () => void;
 }) {
   const cherryPickOnto = useCherryPickOnto(repoPath);
+  const queryClient = useQueryClient();
   const destId = useId();
   const shownHashes = useRetained(hashes);
   const shownIsMerge = useRetained(isMerge, hashes !== null);
@@ -454,6 +461,12 @@ export function CherryPickOntoDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // Only the destination moves; the checkout onto it is a plain switch.
+    const currentName =
+      queryClient.getQueryData<RepoStatus>(repoStatusOptions(repoPath).queryKey)
+        ?.branch?.name ?? null;
+    if (refuseWhileBranchPushes(queryClient, repoPath, branch, currentName))
+      return;
     // Compared by value: the host hands a fresh array on every open.
     const startedFor = hashes.join();
     const startedIn = repoPath;

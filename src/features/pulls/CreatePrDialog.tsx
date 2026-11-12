@@ -39,6 +39,7 @@ import {
   useFinishAndSurface,
 } from "@/features/conversations/useAiStream";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
+import { keptLocalPrReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
@@ -395,12 +396,11 @@ export function CreatePrDialog({
   // `gd/session/*` branches (submitting one would even PUSH it) and archived
   // branches, the same rules as BranchSwitcher. `keep` retains the seeded
   // defaults even if archived, so the head/base defaults stay selectable.
-  const { names, items, annotations } = useBranchPickerOptions(repoPath, open, [
-    currentName,
-    defaultHead,
-    defaultBase,
-    defaultBranch.data,
-  ]);
+  const { names, items, annotations, keptLocal } = useBranchPickerOptions(
+    repoPath,
+    open,
+    [currentName, defaultHead, defaultBase, defaultBranch.data],
+  );
 
   // Base options for the parent target: fetch `upstream` (like
   // useUpdateFromUpstream), then read the local upstream refs and the parent's
@@ -1089,7 +1089,11 @@ export function CreatePrDialog({
   // first result never holds submit, and the handler re-checks the head once
   // before claiming the lane when freshness has lapsed. The gate itself stays
   // zero-latency.
+  // Creating the PR pushes its head, which Keep local refuses; a local pull
+  // request (no push) stays the way out, so the head stays pickable.
+  const headKeptLocal = keptLocal.has(head);
   const submitBlocked =
+    headKeptLocal ||
     generating ||
     nothingToMerge ||
     baseLoading ||
@@ -1111,6 +1115,8 @@ export function CreatePrDialog({
     disabled: shownSubmitBlocked,
     reason: (() => {
       switch (true) {
+        case headKeptLocal:
+          return keptLocalPrReason(head);
         case generating:
           return AI_DRAFT_PENDING_REASON;
         case shownSubmitting:
@@ -1424,6 +1430,14 @@ export function CreatePrDialog({
                 </form.AppField>
               </div>
             </div>
+            {/* The select field has no warning slot, so the reason renders here
+                and is the submit's description; the footer's sr-only copy then
+                stays out, so the sentence is announced once. */}
+            {headKeptLocal && (
+              <p id={offlineSubmit.reasonId} className="text-xs text-warning">
+                {keptLocalPrReason(head)}
+              </p>
+            )}
             <div className="space-y-0.5">
               <p className="font-mono text-xs wrap-break-word text-foreground/80">
                 {head || "…"} <span className="text-muted-foreground">→</span>{" "}
@@ -1752,7 +1766,7 @@ export function CreatePrDialog({
                     >
                       {draft ? "Create draft" : `Create ${prNoun}`}
                     </form.SubmitButton>
-                    {offlineSubmit.blockedReason ? (
+                    {offlineSubmit.blockedReason && !headKeptLocal ? (
                       <span id={offlineSubmit.reasonId} className="sr-only">
                         {offlineSubmit.blockedReason}
                       </span>

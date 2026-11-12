@@ -43,6 +43,12 @@ export const gitSetBranchArchived = (
   archived: boolean,
 ) => invoke<void>("git_set_branch_archived", { repoPath, name, archived });
 
+export const gitSetBranchKeepLocal = (
+  repoPath: string,
+  name: string,
+  keepLocal: boolean,
+) => invoke<void>("git_set_branch_keep_local", { repoPath, name, keepLocal });
+
 /** What a completed rename reports beyond success. */
 export interface RenameBranchOutcome {
   /** Set when the branch was renamed but its local pull requests couldn't all be

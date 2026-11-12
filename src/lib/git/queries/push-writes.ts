@@ -19,9 +19,14 @@ import type { PendingMutationEntry } from "./pr-writes";
 /** Filter prefix for every branch push ({@link branchPushKey}). */
 export const BRANCH_PUSH_KEY = ["branch-push"] as const;
 
-/** A branch push's mutation key; the branch rides the variables. */
-export const branchPushKey = (repo: string) =>
-  [...BRANCH_PUSH_KEY, repo] as const;
+/** A branch push's mutation key; the branch rides the variables. The path stays
+ *  element 1, so a path-prefix read still finds its own pushes only, and the
+ *  repository identity (when resolved) is element 2, where a sibling worktree's
+ *  fire-time check matches it. */
+export const branchPushKey = (repo: string, identity?: string) =>
+  identity === undefined
+    ? ([...BRANCH_PUSH_KEY, repo] as const)
+    : ([...BRANCH_PUSH_KEY, repo, identity] as const);
 
 /** The variables every push mutation carries (usePush's args type). */
 export interface PushVars {
@@ -41,6 +46,10 @@ export interface PushVars {
    *  checkout. Null or absent on a detached HEAD. usePush's mutationFn never
    *  forwards it. */
   startedOn?: string | null;
+  /** Client-only: the starter's pre-push check found the branch absent on the
+   *  remote, so this push creates it there (the row reads "Publishing"). usePush's
+   *  mutationFn never forwards it. */
+  creates?: boolean;
 }
 
 /** One push in flight. `branch` null is a HEAD push (no branch in the vars):
@@ -55,15 +64,25 @@ export interface BranchPushState {
   setUpstream: boolean;
   paused: boolean;
   fromHeader: boolean;
+  /** Filed by another checkout of the same repository (matched by identity). */
+  foreign: boolean;
+  /** The starter recorded that this push creates the branch on the remote. */
+  creates: boolean;
 }
 
 /** The refusal for two kinds of route started while a push is in flight: one
  *  that would queue behind it on the repo's network lock for up to a minute
- *  (another push, a fetch, pull, merge, in-place update or remote delete), and a
- *  rename, delete, rebase or update of the branch being pushed, which would move
- *  or remove the ref it is sending. */
+ *  (another push, a fetch, pull, merge, in-place update or remote delete), and
+ *  one that moves or removes the ref the push is sending (a rename, delete,
+ *  archive, reset, rebase or update of that branch, or a history edit of it such
+ *  as undo, reset to commit or amend). */
 export const BRANCH_PUSH_ACTIVE_MESSAGE =
   "A push is already running — wait for it to finish.";
+
+/** The ref-moving refusal when only another worktree's push holds the branch:
+ *  this checkout shows no push of its own to wait for. */
+export const BRANCH_PUSH_ELSEWHERE_MESSAGE =
+  "Another worktree is pushing this branch. Wait for that push to finish.";
 
 /** Why a control that isn't the push is held by one. A push parked offline is
  *  waiting for the connection; the held control itself sends nothing, so the
@@ -77,7 +96,9 @@ export const branchPushHoldItemReason = (paused: boolean): string =>
   paused ? "a push is waiting for the connection" : "a push is running";
 
 /** The pushes among `entries` filed against `repo`, one per invocation in cache
- *  order. Every field is `typeof`-guarded: the cache holds `Mutation<any>`, so the
+ *  order, plus (when `identity` is given) those another checkout filed under the
+ *  same identity, marked `foreign`; an absent identity never matches an absent
+ *  one. Every field is `typeof`-guarded: the cache holds `Mutation<any>`, so the
  *  variables are read through PushVars' own keys (a renamed field fails to
  *  compile here) but never trusted. Non-object variables are no push this hook
  *  sent, and are dropped. An array, not a branch-keyed record, so a branch named
@@ -85,14 +106,25 @@ export const branchPushHoldItemReason = (paused: boolean): string =>
 export function pendingBranchPushesFor(
   entries: readonly PendingMutationEntry[],
   repo: string,
+  identity?: string,
 ): BranchPushState[] {
   const out: BranchPushState[] = [];
   for (const e of entries) {
-    const [prefix, keyRepo] = e.key ?? [];
-    if (prefix !== BRANCH_PUSH_KEY[0] || keyRepo !== repo) continue;
+    const [prefix, keyRepo, keyIdentity] = e.key ?? [];
+    if (prefix !== BRANCH_PUSH_KEY[0]) continue;
+    const foreign = keyRepo !== repo;
+    if (foreign && (identity === undefined || keyIdentity !== identity))
+      continue;
     if (typeof e.vars !== "object" || e.vars === null) continue;
-    const { setUpstream, branch, remote, remoteBranch, source, startedOn } =
-      e.vars as Partial<Record<keyof PushVars, unknown>>;
+    const {
+      setUpstream,
+      branch,
+      remote,
+      remoteBranch,
+      source,
+      startedOn,
+      creates,
+    } = e.vars as Partial<Record<keyof PushVars, unknown>>;
     out.push({
       mutationId: typeof e.mutationId === "number" ? e.mutationId : null,
       branch: typeof branch === "string" ? branch : null,
@@ -102,9 +134,39 @@ export function pendingBranchPushesFor(
       setUpstream: setUpstream === true,
       paused: e.paused === true,
       fromHeader: source === "header",
+      foreign,
+      creates: creates === true,
     });
   }
   return out;
+}
+
+/** Whether one of `pushes` is sending `branch`. A HEAD push names no branch
+ *  (`branch` null) and counts as both the branch it recorded starting on
+ *  (`startedOn`) and the current branch, or ANY branch while the current name is
+ *  unknown, failing toward refusal: the hold costs one toast, a miss moves the ref
+ *  mid-send. The current branch holds because the backend pins (`-u`) the HEAD it
+ *  reads when the IPC call lands, which a checkout outside the app can move before
+ *  the app's status re-read. It holds for a bare push too, which resolves HEAD only
+ *  at spawn, after the network-lock wait. A `foreign` HEAD push (another worktree's)
+ *  holds only its recorded start: `currentName` describes THIS checkout's HEAD.
+ *  Limit: two checkouts during one push waiting on that lock (A to B to C) leave
+ *  the branch git sends (B) unheld. */
+export function pushesBranch(
+  pushes: readonly {
+    branch: string | null;
+    startedOn?: string | null;
+    foreign?: boolean;
+  }[],
+  branch: string,
+  currentName: string | null,
+): boolean {
+  return pushes.some((p) => {
+    if (p.branch !== null) return p.branch === branch;
+    if ((p.startedOn ?? null) === branch) return true;
+    if (p.foreign === true) return false;
+    return currentName === null || currentName === branch;
+  });
 }
 
 /** A label names a destination only when the push itself fixes one: a push that
@@ -113,20 +175,27 @@ export function pendingBranchPushesFor(
 export const branchPublishLabel = (remote: string | null): string =>
   remote === null ? "Publishing branch" : `Publishing to ${remote}`;
 
+/** The row spinner's label while the pre-push check runs, before it has decided
+ *  whether the push creates the branch; null = the check named no remote. */
+export const branchPreparingLabel = (remote: string | null): string =>
+  remote === null ? "Preparing to push" : `Preparing to push to ${remote}`;
+
 /** The row spinner's label, arms in precedence order: a cross-name push names
- *  its exact destination, a push that sets or (re)creates tracking publishes, a
- *  named push of a tracked branch targets its upstream, and a HEAD push (a bare
- *  `git push`) names none. */
+ *  its exact destination, only a push its starter recorded as creating the
+ *  branch publishes, a HEAD push (a bare `git push`) names none, a push that
+ *  keeps a live upstream targets it, and otherwise the push's own remote. */
 export function branchPushLabel(
   push: BranchPushState,
   row: { upstream: string | null; upstreamGone: boolean },
 ): string {
   if (push.remote !== null && push.remoteBranch !== null)
     return `Pushing to ${push.remote}/${push.remoteBranch}`;
-  if (push.setUpstream || row.upstream === null || row.upstreamGone)
-    return branchPublishLabel(push.remote);
+  if (push.creates) return branchPublishLabel(push.remote);
   if (push.branch === null) return "Pushing";
-  return `Pushing to ${row.upstream}`;
+  if (row.upstream !== null && !row.upstreamGone && !push.setUpstream)
+    return `Pushing to ${row.upstream}`;
+  if (push.remote !== null) return `Pushing to ${push.remote}`;
+  return "Pushing";
 }
 
 /** The HEAD-push latch after a render's reads: `pending` is this repo's pushes,

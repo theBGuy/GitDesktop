@@ -1665,6 +1665,122 @@ test("a bare Bitbucket transport failure still reads as unreachable", () => {
   );
 });
 
+/** `gh_publish_push_error` (github/pr.rs) line one, with `{name}` filled in;
+ *  the original error's Display follows it on the next line. */
+const GH_CREATED_HEADLINE =
+  "The GitHub repository alice/demo WAS created and origin points at it — retry the push.";
+const NO_HOST =
+  "fatal: unable to access 'https://github.com/alice/demo.git/': Could not resolve host: github.com";
+const NO_USERNAME =
+  "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+const CREDENTIAL_SUMMARY =
+  "No credentials are stored for this remote, and GitDesktop never lets Git prompt for them. Add them to your Git credential helper, then try again.";
+/** A rejection reason the push-rejection family maps, so it would otherwise
+ *  win the summary. */
+const STALE_REJECTION = [
+  "To https://github.com/alice/demo.git",
+  " ! [rejected]        main -> main (stale info)",
+  "error: failed to push some refs to 'https://github.com/alice/demo.git'",
+].join("\n");
+const PUBLISH_PUSH_TAILS = {
+  "an unresolvable host": NO_HOST,
+  "no stored credentials": NO_USERNAME,
+  "a rejected push": STALE_REJECTION,
+  // error.rs busy_message and the Timeout Display.
+  "a busy repository": "Fetch is still running — try again when it finishes.",
+  "a timeout": "git operation timed out after 600s",
+};
+
+test("a publish whose push failed after the create headlines the created repository", () => {
+  for (const [name, tail] of Object.entries(PUBLISH_PUSH_TAILS)) {
+    const message = `${GH_CREATED_HEADLINE}\n${tail}`;
+    const p = presentError(appError("gh", message));
+    assert.equal(p.summary, GH_CREATED_HEADLINE, name);
+    // The original error stays reachable through Details.
+    assert.equal(p.fullText, message, name);
+    assert.ok(p.fullText.includes(tail), name);
+    assert.equal(p.long, true, name);
+  }
+});
+
+// A plain retry fails again on a secret, so the advice to remove it leads; the
+// created sentence stays in Details. Only GitHub prints this block, so the
+// GitLab and Bitbucket publishes can't carry it.
+test("push protection outranks the created headline", () => {
+  const block = [
+    "remote: error: GH013: Repository rule violations found for refs/heads/main.        ",
+    "remote: ",
+    "remote: - GITHUB PUSH PROTECTION        ",
+    "remote:     Resolve the following violations before pushing again        ",
+    "remote: ",
+    "remote:     - Push cannot contain secrets        ",
+    "remote: ",
+    "To https://github.com/alice/demo.git",
+    " ! [remote rejected] main -> main (push declined due to repository rule violations)",
+    "error: failed to push some refs to 'https://github.com/alice/demo.git'",
+  ].join("\n");
+  const message = `${GH_CREATED_HEADLINE}\n${block}`;
+  const p = presentError(appError("gh", message));
+  assert.match(
+    p.summary,
+    /^GitHub blocked this push because it detected a likely secret/,
+  );
+  assert.ok(p.fullText.includes(GH_CREATED_HEADLINE));
+  assert.equal(p.long, true);
+});
+
+test("the GitLab and Bitbucket created-repository headlines, and every provider's refusal headline, lead the same way", () => {
+  for (const [kind, headline] of [
+    [
+      "glab",
+      "Publishing didn't finish, but the project WAS created at alice/demo on GitLab — add it as a remote and push manually, or delete it there and retry.",
+    ],
+    [
+      "bitbucket",
+      "The repository WAS created at https://bitbucket.org/ws/repo and origin points at it — retry the push.",
+    ],
+  ]) {
+    const p = presentError(appError(kind, `${headline}\n${NO_USERNAME}`));
+    assert.equal(p.summary, headline, kind);
+  }
+  const refusal = `"feat/x" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.`;
+  for (const [kind, lead] of [
+    [
+      "glab",
+      "Publishing didn't finish, but the project WAS created at me/demo on GitLab and added as the origin remote.",
+    ],
+    [
+      "gh",
+      "Publishing didn't finish, but the GitHub repository alice/demo WAS created and origin points at it.",
+    ],
+    [
+      "bitbucket",
+      "Publishing didn't finish, but the repository WAS created at https://bitbucket.org/acme/demo and origin points at it.",
+    ],
+  ]) {
+    const p = presentError(appError(kind, `${lead}\n${refusal}`));
+    assert.equal(p.summary, lead, kind);
+  }
+});
+
+test("a gh network or credential failure without the created headline keeps its summary", () => {
+  assert.equal(presentError(appError("gh", NO_HOST)).summary, reach("GitHub"));
+  assert.equal(
+    presentError(appError("gh", NO_USERNAME)).summary,
+    CREDENTIAL_SUMMARY,
+  );
+  // The marker counts on line one only, and only for the publishing kinds.
+  assert.equal(
+    presentError(appError("gh", `${NO_USERNAME}\n${GH_CREATED_HEADLINE}`))
+      .summary,
+    CREDENTIAL_SUMMARY,
+  );
+  assert.equal(
+    presentError(gitError(`${GH_CREATED_HEADLINE}\n${NO_USERNAME}`)).summary,
+    CREDENTIAL_SUMMARY,
+  );
+});
+
 // Measured: `gh pr checkout --worktree` onto a branch another worktree holds.
 const WORKTREE_IN_USE = [
   "Preparing worktree (checking out 'tw-resolve-head')",
@@ -1715,4 +1831,22 @@ test("a one-line failure and a lone progress line keep their headline", () => {
     presentError(gitError("Preparing worktree (new branch 'x')")).summary,
     "Preparing worktree (new branch 'x')",
   );
+});
+
+// The push refusals Rust types: each wire payload, exactly as serialized, takes
+// the kind label "Push blocked" (shown in Details) with its message as the summary.
+test("the Keep local, mirror, local-upstream and agent-session push refusals label as Push blocked", () => {
+  const payloads = [
+    `{"kind":"branchKeptLocal","message":"\\"feat/x\\" is marked Keep local, so GitDesktop won't push or publish it. Turn off Keep local in the branch menu to push it.","branch":"feat/x"}`,
+    `{"kind":"pushRemoteIsMirror","message":"\\"origin\\" is a mirror remote, so GitDesktop won't push to it. Push from a terminal instead.","remote":"origin"}`,
+    '{"kind":"pushUpstreamIsLocal","message":"Push blocked — feat tracks a local branch (main), not a remote.","branch":"feat","upstream":"main"}',
+    `{"kind":"branchIsAgentSession","message":"\\"gd/session/x\\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.","branch":"gd/session/x"}`,
+    `{"kind":"pushDestinationIsAgentSession","message":"\\"topic\\" would push to origin/gd/session/x, which is in gd/session/ — reserved for agent sessions, so GitDesktop won't push to it.","branch":"topic","remote":"origin","dest":"gd/session/x"}`,
+  ];
+  for (const wire of payloads) {
+    const e = JSON.parse(wire);
+    const p = presentError(e);
+    assert.equal(p.label, "Push blocked", e.kind);
+    assert.equal(p.summary, e.message, e.kind);
+  }
 });

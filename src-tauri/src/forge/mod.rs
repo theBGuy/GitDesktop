@@ -4651,10 +4651,11 @@ pub async fn forge_publish_targets(repo_path: String) -> AppResult<PublishTarget
 }
 
 /// Publish a local repo, behind the abstraction. The PROVIDER IS EXPLICIT — a
-/// not-yet-published repo has no remote to detect one from. GitHub creates +
-/// pushes via `gh repo create --push`; GitLab creates via `glab repo create`,
-/// wires `origin`, and pushes with the one-shot credential helper. GitLab has no
-/// homepage field (the dialog hides it) and drops it here.
+/// not-yet-published repo has no remote to detect one from. GitHub creates via
+/// `gh repo create` (which wires `origin`), then pushes through the app's own network
+/// push; GitLab creates via `glab repo create`, wires `origin`, and pushes with the
+/// one-shot credential helper. GitLab has no homepage field (the dialog hides it) and
+/// drops it here.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // mirrors gh_publish_repo's field set + provider
 pub async fn forge_publish_repo(
@@ -4669,15 +4670,48 @@ pub async fn forge_publish_repo(
     // Optional — GitHub/GitLab arms ignore it; a missing arg deserializes to None.
     workspace: Option<String>,
 ) -> AppResult<String> {
+    forge_publish_repo_core(
+        &state,
+        provider,
+        repo_path,
+        name,
+        private,
+        description,
+        homepage,
+        topics,
+        workspace,
+    )
+    .await
+}
+
+/// The provider-dispatch core of [`forge_publish_repo`], taking a plain `&AppState` so
+/// the publishing refusal is testable off the Tauri runtime.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forge_publish_repo_core(
+    state: &crate::state::AppState,
+    provider: Provider,
+    repo_path: String,
+    name: String,
+    private: bool,
+    description: String,
+    homepage: String,
+    topics: Vec<String>,
+    workspace: Option<String>,
+) -> AppResult<String> {
+    // Every provider pushes HEAD's branch, so it is refused before the remote repository
+    // is created; a detached HEAD leaves each provider's own refusal.
+    if let Some(b) = crate::git::branches::current_branch_name(&repo_path).await? {
+        crate::git::remote::refuse_publishing_branch(&repo_path, &b).await?;
+    }
     match provider {
         Provider::GitLab => {
-            gitlab::publish_repo(&state, &repo_path, &name, private, &description, &topics).await
+            gitlab::publish_repo(state, &repo_path, &name, private, &description, &topics).await
         }
         // Bitbucket: homepage maps to `website`; topics are dropped (no topics on
         // Bitbucket); `workspace` names the target (required).
         Provider::Bitbucket => {
             bitbucket::publish_repo(
-                &state,
+                state,
                 &repo_path,
                 &name,
                 private,
@@ -4688,8 +4722,16 @@ pub async fn forge_publish_repo(
             .await
         }
         Provider::GitHub => {
-            github::publish_repo(&repo_path, &name, private, &description, &homepage, topics)
-                .await
+            github::publish_repo(
+                state,
+                &repo_path,
+                &name,
+                private,
+                &description,
+                &homepage,
+                topics,
+            )
+            .await
         }
     }
 }
@@ -4779,6 +4821,16 @@ pub(crate) async fn forge_pr_create_with_attachments(
     lens: Option<String>,
     attachments: Option<crate::attachments::AttachmentRefs>,
 ) -> AppResult<crate::attachments::PrCreateOutcome> {
+    // Every arm pushes `head` to origin, so it is refused before any network call. A head
+    // failing validation skips the guard and gets its provider's own wording.
+    if crate::git::branches::validate_ref_name(&head).is_ok() {
+        crate::git::remote::refuse_publishing_branch(&repo_path, &head).await?;
+    }
+    crate::git::status::refuse_mirror_push(
+        &repo_path,
+        crate::git::status::PushRemote::Named("origin"),
+    )
+    .await?;
     let detected = detect_non_github(&repo_path).await;
     // The upstream lens (a fork contribution to the PARENT) is GitHub-only. Reject it
     // for GitLab/Bitbucket BEFORE any dispatch or remote work (`None`/`Some("origin")`
@@ -6170,5 +6222,165 @@ mod tests {
             ),
             "a/old.txt \"b/\\\"q\\\".txt\"",
         );
+    }
+
+    fn keep_local_git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repository on `feat/x` whose only `origin` is a local three-slash `file:///` URL
+    /// pinned non-mirror, so a global `remote.origin.*` can't define a hostless origin.
+    /// NETWORK BAN: that URL has an empty authority, so `detect_non_github` answers None
+    /// before any host read, and every call below carries an input the GitHub arm
+    /// refuses locally (an empty publish `name`, an empty PR `title`), so a removed guard
+    /// ends in that local refusal, never a network call. Nothing here pushes.
+    fn keep_local_hostless_origin_repo() -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-forge-keep-local-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path();
+        let nowhere = p.join("nowhere.git").to_string_lossy().replace('\\', "/");
+        let url = format!("file:///{}", nowhere.trim_start_matches('/'));
+        keep_local_git(p, &["init", "-q", "-b", "main"]);
+        keep_local_git(p, &["config", "user.name", "t"]);
+        keep_local_git(p, &["config", "user.email", "t@example.com"]);
+        keep_local_git(p, &["config", "remote.origin.url", &url]);
+        keep_local_git(p, &["config", "remote.origin.mirror", "false"]);
+        keep_local_git(p, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+        keep_local_git(p, &["checkout", "-q", "-b", "feat/x"]);
+        keep_local_git(p, &["branch", "gd/session/x"]);
+        let repo = p.to_string_lossy().into_owned();
+        (dir, repo)
+    }
+
+    /// GitHub with an EMPTY name: `gh_publish_repo` refuses it as its first statement.
+    async fn publish_with_empty_name(repo: &str) -> AppResult<String> {
+        forge_publish_repo_core(
+            &crate::state::AppState::default(),
+            Provider::GitHub,
+            repo.to_string(),
+            String::new(),
+            true,
+            String::new(),
+            String::new(),
+            Vec::new(),
+            None,
+        )
+        .await
+    }
+
+    /// An EMPTY title on a hostless-origin fixture: the GitHub arm refuses it locally.
+    async fn pr_create_with_empty_title(repo: &str, head: &str) -> AppResult<()> {
+        forge_pr_create_core(
+            &crate::state::AppState::default(),
+            repo.to_string(),
+            "main".into(),
+            head.into(),
+            String::new(),
+            String::new(),
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    fn is_local_refusal<T: std::fmt::Debug>(result: AppResult<T>, expected: &str, row: &str) {
+        match result {
+            Err(AppError::InvalidArgument(m)) if m == expected => {}
+            other => panic!("{row}: expected the provider's local refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn keep_local_refuses_publish_repository_before_the_provider() {
+        let (_dir, repo) = keep_local_hostless_origin_repo();
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", true)
+            .await
+            .unwrap();
+        match publish_with_empty_name(&repo).await {
+            Err(AppError::BranchKeptLocal { branch }) => assert_eq!(branch, "feat/x"),
+            other => panic!("expected the Keep local refusal, got {other:?}"),
+        }
+        keep_local_git(std::path::Path::new(&repo), &["checkout", "-q", "gd/session/x"]);
+        match publish_with_empty_name(&repo).await {
+            Err(AppError::BranchIsAgentSession { branch }) => assert_eq!(branch, "gd/session/x"),
+            other => panic!("expected the session refusal, got {other:?}"),
+        }
+        // A detached HEAD skips the branch check.
+        keep_local_git(std::path::Path::new(&repo), &["checkout", "-q", "--detach", "feat/x"]);
+        let required = "a repository name is required";
+        is_local_refusal(publish_with_empty_name(&repo).await, required, "detached");
+        keep_local_git(std::path::Path::new(&repo), &["checkout", "-q", "feat/x"]);
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", false)
+            .await
+            .unwrap();
+        is_local_refusal(publish_with_empty_name(&repo).await, required, "unmarked twin");
+    }
+
+    #[tokio::test]
+    async fn keep_local_refuses_pr_create_before_any_network_call() {
+        let (_dir, repo) = keep_local_hostless_origin_repo();
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", true)
+            .await
+            .unwrap();
+        match pr_create_with_empty_title(&repo, "feat/x").await {
+            Err(AppError::BranchKeptLocal { branch }) => assert_eq!(branch, "feat/x"),
+            other => panic!("expected the Keep local refusal, got {other:?}"),
+        }
+        match pr_create_with_empty_title(&repo, "gd/session/x").await {
+            Err(AppError::BranchIsAgentSession { branch }) => assert_eq!(branch, "gd/session/x"),
+            other => panic!("expected the session refusal, got {other:?}"),
+        }
+        let required = "a PR title is required";
+        is_local_refusal(pr_create_with_empty_title(&repo, "Feat/X").await, required, "case");
+        // An invalid head skips the guard and gets the provider's own wording.
+        is_local_refusal(
+            pr_create_with_empty_title(&repo, "feat x").await,
+            "invalid branch: feat x",
+            "invalid head",
+        );
+        crate::git::branches::set_branch_keep_local_core(&repo, "feat/x", false)
+            .await
+            .unwrap();
+        is_local_refusal(
+            pr_create_with_empty_title(&repo, "feat/x").await,
+            required,
+            "unmarked twin",
+        );
+    }
+
+    /// A mirror `origin` refuses Create PR before any network call, whatever the head;
+    /// with the mirror off the same call ends in the provider's local refusal.
+    #[tokio::test]
+    async fn mirror_refusal_refuses_pr_create_before_any_network_call() {
+        let (_dir, repo) = keep_local_hostless_origin_repo();
+        let url = crate::git::remote::git_remote_url(repo.clone(), "origin".into())
+            .await
+            .unwrap();
+        assert_eq!(remote_host(&url), None, "the fixture origin has no host: {url}");
+        keep_local_git(std::path::Path::new(&repo), &["config", "remote.origin.mirror", "true"]);
+        for head in ["feat/x", "main"] {
+            match pr_create_with_empty_title(&repo, head).await {
+                Err(AppError::PushRemoteIsMirror { remote }) => assert_eq!(remote, "origin"),
+                other => panic!("{head}: expected the mirror refusal, got {other:?}"),
+            }
+        }
+        keep_local_git(std::path::Path::new(&repo), &["config", "remote.origin.mirror", "false"]);
+        let required = "a PR title is required";
+        is_local_refusal(pr_create_with_empty_title(&repo, "feat/x").await, required, "twin");
     }
 }

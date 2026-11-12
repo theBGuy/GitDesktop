@@ -46,13 +46,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
+import { headBranchPin } from "@/lib/git/api";
 import {
+  refuseWhilePinnedBranchPushes,
+  repoStatusOptions,
   useCommitDetails,
   useRebaseEdit,
   useRewriteCommits,
   useUnpushedMessages,
 } from "@/lib/git/queries";
-import type { CommitDate, CommitSummary } from "@/lib/git/types";
+import type { CommitDate, CommitSummary, RepoStatus } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
   eventToBinding,
@@ -1454,6 +1457,19 @@ export function EditHistoryDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // A running push of the current branch refuses before the prompt, and
+    // again after it.
+    const shownHead = queryClient.getQueryData<RepoStatus>(
+      repoStatusOptions(repoPath).queryKey,
+    )?.branch;
+    if (
+      refuseWhilePinnedBranchPushes(
+        queryClient,
+        repoPath,
+        shownHead != null ? headBranchPin(shownHead) : null,
+      )
+    )
+      return;
     if (parentFlags.length > 0) {
       // One confirm for the whole plan. A commit set that changed under
       // the prompt drops the run, and a promote that started under it refuses.
@@ -1472,6 +1488,17 @@ export function EditHistoryDialog({
         toast.info(PROMOTION_BLOCKS_CHECKOUT);
         return;
       }
+      const headAfterAsk = queryClient.getQueryData<RepoStatus>(
+        repoStatusOptions(repoPath).queryKey,
+      )?.branch;
+      if (
+        refuseWhilePinnedBranchPushes(
+          queryClient,
+          repoPath,
+          headAfterAsk != null ? headBranchPin(headAfterAsk) : null,
+        )
+      )
+        return;
     }
     if (plan.hasEdit) {
       // Resumable path: starts a real rebase that pauses at the first Edit —

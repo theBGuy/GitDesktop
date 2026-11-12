@@ -1,6 +1,7 @@
 import { ArchiveIcon, TreeStructureIcon } from "@phosphor-icons/react";
 import { type ReactNode, useMemo } from "react";
 import { rowCheckoutCopy } from "@/features/repository/checkout-copy";
+import { KeptLocalChip } from "@/features/repository/KeptLocalChip";
 import { normPath } from "@/lib/git/path";
 import { useBranches, useUserWorktrees } from "@/lib/git/queries";
 
@@ -13,6 +14,9 @@ export interface BranchPickerOptions {
   items: Record<string, string>;
   /** value → trailing status chips; only branches with a chip appear here. */
   annotations: Record<string, ReactNode>;
+  /** Names in `names` marked Keep local: listed and chipped, since a local pull
+   *  request can still use them, but never pushed. */
+  keptLocal: ReadonlySet<string>;
 }
 
 /**
@@ -65,9 +69,11 @@ export function useBranchPickerOptions(
     const names = list.map((b) => b.name);
     const items = Object.fromEntries(names.map((n) => [n, n]));
     const annotations: Record<string, ReactNode> = {};
+    const keptLocal = new Set<string>();
     for (const b of list) {
+      if (b.keepLocal) keptLocal.add(b.name);
       const wt = worktreeByBranch.get(b.name);
-      if (!wt && !b.archived) continue;
+      if (!wt && !b.archived && !b.keepLocal) continue;
       // Muted meta chips named through the shared branch-row copy, so a main
       // workspace reads as one; text (not color) carries the meaning, so it
       // survives WCAG AA / color-blindness.
@@ -89,9 +95,10 @@ export function useBranchPickerOptions(
               archived
             </span>
           )}
+          {b.keepLocal && <KeptLocalChip />}
         </>
       );
     }
-    return { names, items, annotations };
+    return { names, items, annotations, keptLocal };
   }, [branches.data, worktreeByBranch, keepKey]);
 }

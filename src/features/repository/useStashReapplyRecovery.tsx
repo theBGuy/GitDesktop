@@ -8,9 +8,7 @@ import type {
   PullMode,
 } from "@/lib/git/api";
 import {
-  BRANCH_PUSH_ACTIVE_MESSAGE,
-  isBranchPushActive,
-  pendingMutationEntries,
+  refuseWhileBranchPushes,
   refuseWhilePushRuns,
   repoKeys,
   useMergeAutostash,
@@ -19,10 +17,6 @@ import {
   useRebaseAutostash,
   useRebaseOntoAutostash,
 } from "@/lib/git/queries";
-import {
-  branchPushKey,
-  pendingBranchPushesFor,
-} from "@/lib/git/queries/push-writes";
 import type { Branch } from "@/lib/git/types";
 import { refuseWhileOffline } from "@/lib/offline-writes";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
@@ -30,7 +24,6 @@ import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
-import { pushesBranch } from "./branch-sync-state";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   StashReapplyDialog,
@@ -181,7 +174,7 @@ export interface StashReapplyRequest {
 
 /** Refuses (and says why) while a push holds what `run` touches: pull and merge
  *  queue on the network lock behind ANY push; the rebases rewrite one branch,
- *  so only its push holds them (any push while the current name is unknown). */
+ *  so only its push holds them (any own push while no branch is known). */
 function refuseWhileRunPushes(
   queryClient: QueryClient,
   repoPath: string,
@@ -194,25 +187,8 @@ function refuseWhileRunPushes(
       .getQueryData<Branch[]>(repoKeys.branches(repoPath))
       ?.find((b) => b.isCurrent)?.name ?? null;
   const branch = run.op === "pullRebaseDecided" ? run.branch : currentName;
-  const held =
-    branch === null
-      ? isBranchPushActive(queryClient, repoPath)
-      : pushesBranch(
-          pendingBranchPushesFor(
-            pendingMutationEntries(
-              queryClient.getMutationCache().findAll({
-                mutationKey: branchPushKey(repoPath),
-                status: "pending",
-              }),
-            ),
-            repoPath,
-          ),
-          branch,
-          currentName,
-        );
-  if (!held) return false;
-  toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-  return true;
+  if (branch === null) return refuseWhilePushRuns(queryClient, repoPath);
+  return refuseWhileBranchPushes(queryClient, repoPath, branch, currentName);
 }
 
 /** One mounted recovery, as another hook on the same surface consumes it — the

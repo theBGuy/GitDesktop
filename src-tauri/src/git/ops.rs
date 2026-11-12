@@ -6195,6 +6195,17 @@ async fn resolve_pr_remote(repo_path: &str, lens: Option<&str>) -> AppResult<&'s
     Ok(remote)
 }
 
+/// The push refusals of a remote-PR resolve, on either lens: the resolve has no fork
+/// fact, so every head pushed to `remote` takes the full helper, then the mirror check
+/// on `remote`. Read-only; runs at the resolve start and the finish start, so nothing is
+/// fetched or committed for a refused head. [`push_pr_head`] runs it again before the
+/// credential read, and its push re-runs the branch's refusal at spawn.
+async fn refuse_pr_head_push(repo_path: &str, remote: &str, head: &str) -> AppResult<()> {
+    crate::git::remote::refuse_publishing_branch(repo_path, head).await?;
+    crate::git::status::refuse_mirror_push(repo_path, crate::git::status::PushRemote::Named(remote))
+        .await
+}
+
 /// Pushes `sha` onto `remote`'s `head` branch, fully qualified and NEVER forced
 /// (no `--force`, no lease): the merge carries `<remote>/<head>` as a parent, so
 /// the server sees a fast-forward — a refusal means the head moved, which has to
@@ -6206,14 +6217,16 @@ async fn push_pr_head(
     sha: &str,
     head: &str,
 ) -> AppResult<()> {
+    refuse_pr_head_push(repo_path, remote, head).await?;
     let cred = crate::forge::credential_config_for_remote(repo_path, remote).await?;
     let refspec = format!("{sha}:refs/heads/{head}");
-    crate::git::remote::run_git_mutating_with_creds(
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
         state,
         repo_path,
         &cred,
         &["push", remote, &refspec],
         NETWORK_TIMEOUT,
+        head,
     )
     .await?;
     Ok(())
@@ -6301,6 +6314,9 @@ pub(crate) async fn merge_remote_pr(
     crate::git::branches::validate_branch_name(base)?;
     crate::git::branches::validate_branch_name(head)?;
     let remote = resolve_pr_remote(repo_path, lens).await?;
+    // Ahead of the resume lookup: a resolve whose head was marked since returns the
+    // refusal, and its worktree stays as it was until the mark is lifted.
+    refuse_pr_head_push(repo_path, remote, head).await?;
     let worktrees_base = root.parent().ok_or_else(|| {
         AppError::InvalidArgument(format!("not a worktree root: {}", root.display()))
     })?;
@@ -6420,6 +6436,9 @@ pub(crate) async fn merge_remote_pr(
                 // Nothing here is the user's work — the merge was automatic, so
                 // tearing the worktree down costs only a cheap retry.
                 remove_resolve_worktree(state, repo_path, &worktree_path).await;
+                if crate::git::remote::is_publishing_refusal(&err) {
+                    return Err(err);
+                }
                 return Err(AppError::Command(format!(
                     "Could not push the merge to the pull request branch. The pull request head may have moved — try again.\n{}",
                     error_detail(&err)
@@ -6503,6 +6522,8 @@ pub(crate) async fn finish_remote_pr_resolve(
 ) -> AppResult<RemotePrResolveOutcome> {
     crate::git::branches::validate_branch_name(head)?;
     let remote = resolve_pr_remote(repo_path, lens).await?;
+    // Before the merge commit below: a refusal at push time would land only after it.
+    refuse_pr_head_push(repo_path, remote, head).await?;
     if check_pr_resolve_worktree(repo_path, base, worktree_path).await? != PrResolvePath::Registered
     {
         return Err(not_a_pr_resolve(worktree_path));
@@ -6613,6 +6634,9 @@ pub(crate) async fn finish_remote_pr_resolve(
     if let Err(err) = push_pr_head(state, repo_path, remote, &new_sha, head).await {
         // KEEP the worktree: it holds the user's conflict resolutions, and `find`
         // rediscovers it so a retry resumes rather than starting over.
+        if crate::git::remote::is_publishing_refusal(&err) {
+            return Err(err);
+        }
         return Err(AppError::Command(format!(
             "The pull request head moved while you were resolving — abort and start again, or retry.\n{}",
             error_detail(&err)
@@ -8687,6 +8711,11 @@ pub(crate) async fn git_push_tag_core(
     name: String,
 ) -> AppResult<()> {
     validate_tag_name(&name)?;
+    crate::git::status::refuse_mirror_push(
+        &repo_path,
+        crate::git::status::PushRemote::Named("origin"),
+    )
+    .await?;
     let spec = format!("refs/tags/{name}");
     let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
     crate::git::remote::run_git_mutating_with_creds(
@@ -8718,6 +8747,14 @@ pub(crate) async fn git_delete_tag_core(
     on_remote: bool,
 ) -> AppResult<()> {
     validate_tag_name(&name)?;
+    // Before the local delete, so a refused remote delete leaves the tag in place.
+    if on_remote {
+        crate::git::status::refuse_mirror_push(
+            &repo_path,
+            crate::git::status::PushRemote::Named("origin"),
+        )
+        .await?;
+    }
     run_git_mutating(
         state,
         &repo_path,
@@ -19134,6 +19171,409 @@ detached
         commit_file(repo, dir, "a.txt", "base-side\n", "base edit").await;
         git(repo, &["push", remote, &base, "feature"]).await;
         base
+    }
+
+    /// A resolve fixture pinned against a hostile global config, with the PR pair pushed
+    /// to `remote`'s bare repository BY PATH. git 2.56+ updates a matching remote's
+    /// tracking refs on such a push, so they are removed: no `refs/remotes/<remote>/*`
+    /// exists until the resolve's own fetch. Returns (temp guards, repo, bare, base).
+    async fn keep_local_resolve_fixture(
+        marker: &str,
+        remote: &str,
+        conflicting: bool,
+    ) -> (Vec<tempfile::TempDir>, String, String, String) {
+        let (dir, origin_dir, repo, origin) = setup_repo_with_origin(marker).await;
+        let mut guards = vec![origin_dir];
+        let bare = if remote == "origin" {
+            origin
+        } else {
+            let (up_dir, up) = add_bare_remote(&repo, marker, remote).await;
+            guards.push(up_dir);
+            up
+        };
+        git(&repo, &["config", "push.default", "simple"]).await;
+        for r in ["origin", remote] {
+            git(&repo, &["config", &format!("remote.{r}.mirror"), "false"]).await;
+        }
+        let base = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&repo, &["switch", "-c", "feature"]).await;
+        let (file, side) = if conflicting {
+            ("a.txt", "feature-side\n")
+        } else {
+            ("feat.txt", "feature\n")
+        };
+        commit_file(&repo, dir.path(), file, side, "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        git(&repo, &["push", &bare, &base, "feature"]).await;
+        for r in tracking_refs(&repo, remote).await.lines() {
+            git(&repo, &["update-ref", "-d", r]).await;
+        }
+        assert_eq!(
+            tracking_refs(&repo, remote).await,
+            "",
+            "keep_local_resolve_fixture: no tracking ref before the resolve"
+        );
+        guards.push(dir);
+        (guards, repo, bare, base)
+    }
+
+    async fn tracking_refs(repo: &str, remote: &str) -> String {
+        git(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/remotes/{remote}/"),
+            ],
+        )
+        .await
+        .trim()
+        .to_string()
+    }
+
+    /// On either lens, a head that is a marked local branch or a gd/session/ name is
+    /// refused before the fetch and before any resolve worktree; with the mark off, and a
+    /// differently named branch marked, the same resolve pushes to the lens remote.
+    #[tokio::test]
+    async fn keep_local_refuses_a_remote_pr_resolve_at_the_start_on_either_lens() {
+        for (lens, remote) in [
+            (None, "origin"),
+            (Some("origin"), "origin"),
+            (Some("upstream"), "upstream"),
+        ] {
+            let marker = format!("rpr-keep-local-{remote}-{}", lens.is_some());
+            let (_guards, repo, bare, base) =
+                keep_local_resolve_fixture(&marker, remote, false).await;
+            let head_before = rev(&bare, "refs/heads/feature").await;
+            let root_holder = tempfile::tempdir().expect("create temp dir");
+            let (_, root) = resolve_roots(&root_holder, &repo);
+            let state = AppState::default();
+            crate::git::branches::set_branch_keep_local_core(&repo, "feature", true)
+                .await
+                .unwrap();
+
+            let err = merge_remote_pr(&state, &repo, 5, &base, "feature", None, lens, &root)
+                .await
+                .expect_err("a marked head must not be resolved");
+            assert!(
+                matches!(&err, AppError::BranchKeptLocal { branch } if branch == "feature"),
+                "{lens:?}: {err:?}"
+            );
+            // Checked before the session row: the push-time backstop also answers
+            // BranchKeptLocal, but only after the fetch and the worktree.
+            assert_eq!(
+                tracking_refs(&repo, remote).await,
+                "",
+                "{lens:?}: marked row, nothing fetched"
+            );
+            assert!(
+                pr_resolves_listed(&repo).await.is_empty(),
+                "{lens:?}: marked row"
+            );
+            assert!(!root.exists(), "{lens:?}: marked row, no resolve worktree");
+            let err = merge_remote_pr(&state, &repo, 6, &base, "gd/session/x", None, lens, &root)
+                .await
+                .expect_err("a session head must not be resolved");
+            assert!(
+                matches!(
+                    &err,
+                    AppError::BranchIsAgentSession { branch } if branch == "gd/session/x"
+                ),
+                "{lens:?}: {err:?}"
+            );
+            assert_eq!(
+                tracking_refs(&repo, remote).await,
+                "",
+                "{lens:?}: nothing fetched"
+            );
+            assert!(pr_resolves_listed(&repo).await.is_empty(), "{lens:?}");
+            assert!(!root.exists(), "{lens:?}: no resolve worktree minted");
+            assert_eq!(
+                rev(&bare, "refs/heads/feature").await,
+                head_before,
+                "{lens:?}"
+            );
+
+            crate::git::branches::set_branch_keep_local_core(&repo, "feature", false)
+                .await
+                .unwrap();
+            crate::git::branches::set_branch_keep_local_core(&repo, &base, true)
+                .await
+                .unwrap();
+            let outcome = merge_remote_pr(&state, &repo, 5, &base, "feature", None, lens, &root)
+                .await
+                .expect("an unmarked head resolves");
+            assert_eq!(outcome.status, "pushed", "{lens:?}");
+            assert_eq!(
+                Some(rev(&bare, "refs/heads/feature").await),
+                outcome.pushed_sha,
+                "{lens:?}: the merge landed on {remote}"
+            );
+        }
+    }
+
+    /// A resolve left with conflicts whose head is marked afterwards is refused on resume,
+    /// its worktree untouched; clearing the mark resumes the same resolve, which finishes.
+    #[tokio::test]
+    async fn keep_local_refuses_resuming_a_marked_resolve_until_the_mark_is_cleared() {
+        let (_guards, repo, bare, base) =
+            keep_local_resolve_fixture("rpr-keep-local-resume", "origin", true).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let state = AppState::default();
+        let started = merge_remote_pr(&state, &repo, 8, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(started.status, "conflicts");
+        let wt = started.worktree_path.clone().expect("worktree kept");
+        let wt_id = started.worktree_id.clone().expect("worktree id");
+        let wt_head = rev(&wt, "HEAD").await;
+        let conflicted = std::fs::read(Path::new(&wt).join("a.txt")).unwrap();
+        let head_before = rev(&bare, "refs/heads/feature").await;
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feature", true)
+            .await
+            .unwrap();
+        let err = merge_remote_pr(&state, &repo, 8, &base, "feature", None, None, &root)
+            .await
+            .expect_err("a marked resolve must not be resumed");
+        assert!(
+            matches!(&err, AppError::BranchKeptLocal { branch } if branch == "feature"),
+            "{err:?}"
+        );
+        assert_eq!(rev(&wt, "HEAD").await, wt_head);
+        assert_eq!(
+            std::fs::read(Path::new(&wt).join("a.txt")).unwrap(),
+            conflicted
+        );
+        assert_eq!(pr_resolves_listed(&repo).await.len(), 1);
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feature", false)
+            .await
+            .unwrap();
+        let resumed = merge_remote_pr(&state, &repo, 8, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(resumed.status, "conflicts");
+        assert_eq!(
+            resumed
+                .worktree_path
+                .as_deref()
+                .map(crate::git::worktree::canonical_wt_path),
+            Some(crate::git::worktree::canonical_wt_path(&wt))
+        );
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        let done =
+            finish_remote_pr_resolve(&state, &repo, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .unwrap();
+        assert_eq!(done.status, "pushed");
+        assert_ne!(rev(&bare, "refs/heads/feature").await, head_before);
+    }
+
+    /// A resolve whose conflicts are resolved and staged, then marked, is refused at the
+    /// finish start with the typed error, and nothing is committed or pushed; with the
+    /// mark off the same resolve finishes.
+    #[tokio::test]
+    async fn keep_local_refuses_finishing_a_marked_resolve_before_the_commit() {
+        let (_guards, repo, bare, base) =
+            keep_local_resolve_fixture("rpr-keep-local-finish", "origin", true).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let state = AppState::default();
+        let started = merge_remote_pr(&state, &repo, 9, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        let wt = started.worktree_path.clone().expect("worktree kept");
+        let wt_id = started.worktree_id.clone().expect("worktree id");
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        let wt_head = rev(&wt, "HEAD").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feature", true)
+            .await
+            .unwrap();
+        let err =
+            finish_remote_pr_resolve(&state, &repo, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .expect_err("a marked resolve must not finish");
+        assert!(
+            matches!(&err, AppError::BranchKeptLocal { branch } if branch == "feature"),
+            "{err:?}"
+        );
+        assert_eq!(rev(&wt, "HEAD").await, wt_head, "nothing committed");
+        assert!(
+            git_path_exists(&wt, "MERGE_HEAD").await,
+            "the merge is still pending"
+        );
+        assert!(Path::new(&wt).exists(), "worktree kept");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, head_before);
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feature", false)
+            .await
+            .unwrap();
+        let done =
+            finish_remote_pr_resolve(&state, &repo, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .unwrap();
+        assert_eq!(done.status, "pushed");
+        assert_eq!(
+            Some(rev(&bare, "refs/heads/feature").await),
+            done.pushed_sha
+        );
+    }
+
+    /// The resolve's push re-reads the head's mark at spawn: a mark set while it waits on
+    /// the network lock (after `push_pr_head`'s own early check passed) refuses with the
+    /// typed error and nothing lands; with the mark cleared the same sha lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_local_push_pr_head_rechecks_the_mark_at_spawn() {
+        let (_guards, repo, bare, base) =
+            keep_local_resolve_fixture("rpr-keep-local-spawn", "origin", false).await;
+        git(&repo, &["switch", "feature"]).await;
+        commit_file(
+            &repo,
+            Path::new(&repo),
+            "spawn.txt",
+            "spawn\n",
+            "spawn edit",
+        )
+        .await;
+        let sha = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", &base]).await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+        assert_ne!(head_before, sha, "the push would move the head");
+        let state = AppState::default();
+
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
+            let (fired, repo) = (std::sync::Arc::clone(&fired), repo.clone());
+            move || {
+                fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let key = crate::git::branches::keep_local_key("feature");
+                let set = std::process::Command::new("git")
+                    .current_dir(&repo)
+                    .args(["config", &key, "true"])
+                    .status()
+                    .unwrap();
+                assert!(set.success(), "the mark is set during the wait");
+            }
+        });
+        let push = super::push_pr_head(&state, &repo, "origin", &sha, "feature");
+        let err = crate::git::remote::NETWORK_LOCK_WAIT_HOOK
+            .scope(hook, push)
+            .await
+            .expect_err("a head marked during the wait must not be pushed");
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            matches!(&err, AppError::BranchKeptLocal { branch } if branch == "feature"),
+            "{err:?}"
+        );
+        assert!(crate::git::remote::is_publishing_refusal(&err));
+        assert_eq!(rev(&bare, "refs/heads/feature").await, head_before);
+
+        crate::git::branches::set_branch_keep_local_core(&repo, "feature", false)
+            .await
+            .unwrap();
+        super::push_pr_head(&state, &repo, "origin", &sha, "feature")
+            .await
+            .expect("the unmarked head lands");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, sha);
+    }
+
+    /// On either lens, a mirror lens remote refuses the resolve at the start, before the
+    /// fetch and before any resolve worktree; with the mirror off it pushes.
+    #[tokio::test]
+    async fn mirror_refusal_refuses_a_remote_pr_resolve_at_the_start_on_either_lens() {
+        for (lens, remote) in [(None, "origin"), (Some("upstream"), "upstream")] {
+            let marker = format!("rpr-mirror-{remote}");
+            let (_guards, repo, bare, base) =
+                keep_local_resolve_fixture(&marker, remote, false).await;
+            let head_before = rev(&bare, "refs/heads/feature").await;
+            let root_holder = tempfile::tempdir().expect("create temp dir");
+            let (_, root) = resolve_roots(&root_holder, &repo);
+            let state = AppState::default();
+            let mirror = format!("remote.{remote}.mirror");
+            git(&repo, &["config", &mirror, "true"]).await;
+
+            let err = merge_remote_pr(&state, &repo, 5, &base, "feature", None, lens, &root)
+                .await
+                .expect_err("a mirror lens remote must not be resolved onto");
+            assert!(
+                matches!(&err, AppError::PushRemoteIsMirror { remote: r } if r == remote),
+                "{lens:?}: {err:?}"
+            );
+            assert_eq!(tracking_refs(&repo, remote).await, "", "{lens:?}");
+            assert!(pr_resolves_listed(&repo).await.is_empty(), "{lens:?}");
+            assert!(!root.exists(), "{lens:?}: no resolve worktree minted");
+            assert_eq!(rev(&bare, "refs/heads/feature").await, head_before);
+
+            git(&repo, &["config", &mirror, "false"]).await;
+            let outcome = merge_remote_pr(&state, &repo, 5, &base, "feature", None, lens, &root)
+                .await
+                .expect("a plain lens remote resolves");
+            assert_eq!(outcome.status, "pushed", "{lens:?}");
+            assert_eq!(
+                Some(rev(&bare, "refs/heads/feature").await),
+                outcome.pushed_sha,
+                "{lens:?}"
+            );
+        }
+    }
+
+    /// A resolve with its conflicts resolved and staged, whose lens remote then becomes a
+    /// mirror, is refused at the finish start with nothing committed or pushed; with the
+    /// mirror off the same resolve finishes.
+    #[tokio::test]
+    async fn mirror_refusal_refuses_finishing_a_resolve_before_the_commit() {
+        let (_guards, repo, bare, base) =
+            keep_local_resolve_fixture("rpr-mirror-finish", "origin", true).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let (wt_base, root) = resolve_roots(&root_holder, &repo);
+        let state = AppState::default();
+        let started = merge_remote_pr(&state, &repo, 9, &base, "feature", None, None, &root)
+            .await
+            .unwrap();
+        let wt = started.worktree_path.clone().expect("worktree kept");
+        let wt_id = started.worktree_id.clone().expect("worktree id");
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        let wt_head = rev(&wt, "HEAD").await;
+        let head_before = rev(&bare, "refs/heads/feature").await;
+
+        git(&repo, &["config", "remote.origin.mirror", "true"]).await;
+        let err =
+            finish_remote_pr_resolve(&state, &repo, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .expect_err("a mirror lens remote must not be finished onto");
+        assert!(
+            matches!(&err, AppError::PushRemoteIsMirror { remote } if remote == "origin"),
+            "{err:?}"
+        );
+        assert_eq!(rev(&wt, "HEAD").await, wt_head, "nothing committed");
+        assert!(
+            git_path_exists(&wt, "MERGE_HEAD").await,
+            "the merge is still pending"
+        );
+        assert!(Path::new(&wt).exists(), "worktree kept");
+        assert_eq!(rev(&bare, "refs/heads/feature").await, head_before);
+
+        git(&repo, &["config", "remote.origin.mirror", "false"]).await;
+        let done =
+            finish_remote_pr_resolve(&state, &repo, "feature", &wt, &wt_id, None, None, &wt_base)
+                .await
+                .unwrap();
+        assert_eq!(done.status, "pushed");
+        assert_eq!(
+            Some(rev(&bare, "refs/heads/feature").await),
+            done.pushed_sha
+        );
     }
 
     /// The whole conflict ladder: the merge lands in an isolated worktree, the

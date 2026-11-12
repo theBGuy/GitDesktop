@@ -43,11 +43,14 @@ export function remoteHasBranch(
 
 // The create decision is out of reach by design for: narrow or remapped fetch
 // refspecs and a git without the %(push) atoms (no destination git resolves), a
-// push remote with its own push refspecs or a mirror one (git's bare push runs
-// as configured, and git refuses an explicit refspec to a mirror), several
-// pushurls (the first is named; the push goes to all), force pushes (their own
-// confirm), and presence, which is remote-tracking refs as of the last fetch. It
-// claims a create only from facts git reports, with no network read.
+// push remote with its own push refspecs (git's bare push runs as configured),
+// several pushurls (the first is named; the push goes to all), force pushes (their
+// own confirm), and presence, which is remote-tracking refs as of the last fetch.
+// Measured on the owner's 109 repos: push refspecs 0, several pushurls 0, narrow
+// fetch 1 (a fixture); stale presence can't be measured without a network read.
+// A mirror push remote is not on this list: Rust refuses every push to one
+// (pushRemoteIsMirror) before git runs. It claims a create only from facts git
+// reports, with no network read.
 
 /** The bare-push create decision. A resolved destination that the remote is
  *  not known to have → true (ask); known present → false; an UNRESOLVED
@@ -389,26 +392,4 @@ export function publishConfirmBody(o: {
  *  action ("Didn't publish <branch> …"). */
 export function publishConfirmTitle(branch: string): string {
   return `Publish ${branch}?`;
-}
-
-/** Whether one of `pushes` is sending `branch`. A HEAD push names no branch
- *  (push-writes.ts BranchPushState.branch null) and counts as both the branch it
- *  recorded starting on (`startedOn`) and the current branch, or ANY branch
- *  while the current name is unknown, failing toward refusal: the hold costs one
- *  toast, a miss moves the ref mid-send. The current branch holds because the
- *  backend pins (`-u`) the HEAD it reads when the IPC call lands, which a
- *  checkout outside the app can move before the app's status re-read. It holds
- *  for a bare push too, which resolves HEAD only at spawn, after the
- *  network-lock wait. Limit: two checkouts during one push waiting on that lock
- *  (A to B to C) leave the branch git sends (B) unheld. */
-export function pushesBranch(
-  pushes: readonly { branch: string | null; startedOn?: string | null }[],
-  branch: string,
-  currentName: string | null,
-): boolean {
-  return pushes.some((p) => {
-    if (p.branch !== null) return p.branch === branch;
-    if ((p.startedOn ?? null) === branch) return true;
-    return currentName === null || currentName === branch;
-  });
 }

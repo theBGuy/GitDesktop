@@ -10,7 +10,12 @@ import {
 } from "@/lib/branch-rules/queries";
 import { headBranchPin } from "@/lib/git/api";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
-import { repoKeys, useCommit, useRepoStatus } from "@/lib/git/queries";
+import {
+  refuseWhilePinnedBranchPushes,
+  repoKeys,
+  useCommit,
+  useRepoStatus,
+} from "@/lib/git/queries";
 import type { AmendRace, ChangeKind, FileEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
@@ -229,6 +234,17 @@ export function useCommitSubmit(
     const expectedHead = amendingHash;
     const expectedBranch = amendingBranch;
     const fileCount = stagedCount;
+    // An amend rewrites the branch's tip, so it waits for a push of that branch;
+    // refused, the draft and amend mode stay. A plain commit only adds one.
+    if (
+      wasAmending &&
+      refuseWhilePinnedBranchPushes(
+        queryClient,
+        repoPath,
+        amendingBranch ?? (shownHead != null ? headBranchPin(shownHead) : null),
+      )
+    )
+      return;
     // Clear optimistically so the fields empty the instant you commit (GitHub
     // Desktop feel) instead of snapping empty once the commit resolves. Also
     // flips canCommit false, which blocks an accidental double-submit.

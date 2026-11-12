@@ -19,3 +19,21 @@ export interface HooksInfo {
   managerConfig: string | null;
   entries: HookEntry[];
 }
+
+/** Where the managed Keep local pre-push hook stands in a clone. */
+export interface KeepLocalHookStatus {
+  state: "installed" | "absent" | "blocked";
+  /** Non-null exactly when `state` is "blocked". */
+  blocked: "hookManager" | "customHooksPath" | "foreignHook" | null;
+  /** Non-null exactly when `blocked` is "hookManager". */
+  manager: "husky" | "pre-commit" | "lefthook" | null;
+  /** GitDesktop's own marked pre-push file is in the clone's own hooks folder:
+   *  always true when installed, false when absent, either when blocked. */
+  managedHookPresent: boolean;
+  /** <common>/hooks is a link, junction or other non-directory: nothing is written or deleted through it. */
+  hooksDirRedirected: boolean;
+  /** The effective hooks directory, absolute. */
+  hooksPath: string;
+  /** sh lines to paste into the user's own pre-push hook. */
+  snippet: string;
+}

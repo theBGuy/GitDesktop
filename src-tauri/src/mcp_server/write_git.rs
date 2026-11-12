@@ -48,18 +48,40 @@ fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
         .map_err(|e| McpError::invalid_params(e.to_string(), None))
 }
 
-/// Maps the shared publishing refusal to an MCP invalid-params error.
-pub(super) fn ensure_not_publishing_session_branch(name: &str) -> Result<(), McpError> {
-    crate::git::remote::refuse_publishing_session_branch(name)
-        .map_err(|e| McpError::invalid_params(e.to_string(), None))
+/// Runs the shared publishing refusal on a caller-named branch before the core. A name
+/// failing `validate_ref_name` skips it: the core's own validation refuses that name.
+pub(super) async fn ensure_not_publishing_branch(repo: &str, name: &str) -> Result<(), McpError> {
+    if crate::git::branches::validate_ref_name(name).is_err() {
+        return Ok(());
+    }
+    crate::git::remote::refuse_publishing_branch(repo, name)
+        .await
+        .map_err(push_refusal_err)
 }
 
-/// Refuses session HEADs and unreadable HEADs before an MCP push reaches the core.
-async fn ensure_head_not_session_branch(repo: &str) -> Result<(), McpError> {
+/// [`ensure_not_publishing_branch`] on HEAD's branch; an unreadable HEAD refuses.
+async fn ensure_head_not_publishing_branch(repo: &str) -> Result<(), McpError> {
     match crate::git::branches::current_branch_name(repo).await {
-        Ok(Some(b)) => ensure_not_publishing_session_branch(&b),
+        Ok(Some(b)) => crate::git::remote::refuse_publishing_branch(repo, &b)
+            .await
+            .map_err(push_refusal_err),
         Ok(None) => Ok(()),
         Err(e) => Err(app_err(e)),
+    }
+}
+
+/// One refusal, one error code: the typed push refusals read INVALID_PARAMS whether a
+/// pre-check or the core (its spawn-time recheck included) raised them.
+pub(super) fn push_refusal_err(e: AppError) -> McpError {
+    match e {
+        AppError::BranchKeptLocal { .. }
+        | AppError::PushRemoteIsMirror { .. }
+        | AppError::PushUpstreamIsLocal { .. }
+        | AppError::BranchIsAgentSession { .. }
+        | AppError::PushDestinationIsAgentSession { .. } => {
+            McpError::invalid_params(e.to_string(), None)
+        }
+        other => app_err(other),
     }
 }
 
@@ -917,9 +939,12 @@ impl GitDesktopMcp {
                        set_upstream: true publishes it under its own \
                        name instead. Uses git's native credential flow. Never force-pushes — use \
                        force_push (destructive) for that. Refuses a GitDesktop agent-session branch \
-                       (gd/session/*, in any letter case), whether named in `branch` or checked out \
-                       when `branch` is omitted, and refuses when the checked-out branch can't be \
-                       read. Requires --allow-git-write.",
+                       (gd/session/*, in any letter case) or a branch marked Keep local in \
+                       GitDesktop, whether named in `branch` or checked out when `branch` is \
+                       omitted, and refuses when the checked-out branch can't be read. Refuses to \
+                       push a branch into the local branch it tracks (upstream remote `.`), and \
+                       refuses a push that resolves to a gd/session/* branch on the remote or \
+                       goes to a remote configured as a mirror. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -929,14 +954,13 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         if let Some(b) = &args.branch {
             ensure_not_flag(b, "branch name")?;
-            // Pushing a gd/session/* branch would publish a branch every UI surface hides.
-            ensure_not_session_branch(b)?;
         }
         if let Some(r) = &args.remote {
             ensure_not_flag(r, "remote")?;
         }
-        if args.branch.is_none() {
-            ensure_head_not_session_branch(&self.repo).await?;
+        match &args.branch {
+            Some(b) => ensure_not_publishing_branch(&self.repo, b).await?,
+            None => ensure_head_not_publishing_branch(&self.repo).await?,
         }
         if let Err(e) = crate::git::remote::git_push_same_name_core(
             &self.state,
@@ -947,7 +971,7 @@ impl GitDesktopMcp {
         )
         .await
         {
-            return Err(app_err(
+            return Err(push_refusal_err(
                 with_mcp_remedy(&self.repo, e, args.remote.as_deref(), push_remedy).await,
             ));
         }
@@ -1245,7 +1269,8 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Push a tag to origin in the bound repository. Requires --allow-git-write.",
+        description = "Push a tag to origin in the bound repository. Refuses when origin is \
+                       configured as a mirror. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push_tag(
@@ -1256,7 +1281,7 @@ impl GitDesktopMcp {
         ensure_not_flag(&args.name, "tag name")?;
         crate::git::ops::git_push_tag_core(&self.state, self.repo.clone(), args.name.clone())
             .await
-            .map_err(app_err)?;
+            .map_err(push_refusal_err)?;
         ok_text(format!("tag pushed: {}", args.name))
     }
 
@@ -1396,13 +1421,15 @@ impl GitDesktopMcp {
                        2.30, or a branch with no reflog for the check to read, the push falls back \
                        to the lease alone). Rewrites the remote branch. Refuses when the checked-out \
                        branch is a GitDesktop agent-session branch (gd/session/*, in any letter case) \
-                       or can't be read. Requires --allow-git-write \
-                       AND --allow-destructive.",
+                       or a branch marked Keep local in GitDesktop, or can't be read. Refuses to \
+                       push the checked-out branch into the local branch it tracks, and refuses \
+                       when its push resolves to a gd/session/* branch or would go to a remote \
+                       configured as a mirror. Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn force_push(&self) -> Result<CallToolResult, McpError> {
         self.ensure_destructive()?;
-        ensure_head_not_session_branch(&self.repo).await?;
+        ensure_head_not_publishing_branch(&self.repo).await?;
         let guard = match crate::git::remote::git_force_push_head_core(
             &self.state,
             self.repo.clone(),
@@ -1411,7 +1438,7 @@ impl GitDesktopMcp {
         {
             Ok(guard) => guard,
             Err(e) => {
-                return Err(app_err(
+                return Err(push_refusal_err(
                     with_mcp_remedy(&self.repo, e, None, force_push_remedy).await,
                 ));
             }
@@ -1433,7 +1460,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Delete a branch on a remote (git push <remote> --delete) in the bound \
                        repository. The remote branch is removed. Refuses a GitDesktop \
-                       agent-session branch (gd/session/*, in any letter case). \
+                       agent-session branch (gd/session/*, in any letter case), and refuses \
+                       when the remote is configured as a mirror. \
                        Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
@@ -1452,7 +1480,7 @@ impl GitDesktopMcp {
             args.name.clone(),
         )
         .await
-        .map_err(app_err)?;
+        .map_err(push_refusal_err)?;
         ok_text(format!(
             "remote branch deleted: {}/{}",
             args.remote, args.name
@@ -1513,7 +1541,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Delete a tag in the bound repository (local, and with `remote` also on \
-                       origin). The tag is removed. Requires --allow-git-write AND \
+                       origin). The tag is removed. With `remote`, refuses when origin is \
+                       configured as a mirror. Requires --allow-git-write AND \
                        --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
@@ -1530,7 +1559,7 @@ impl GitDesktopMcp {
             args.remote,
         )
         .await
-        .map_err(app_err)?;
+        .map_err(push_refusal_err)?;
         ok_text(format!("tag deleted: {}", args.name))
     }
 }
@@ -2792,6 +2821,7 @@ mod tests {
         configure(&work).await;
         git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
         git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
         git(&work, &["push", "-q", "-u", "origin", "main"]).await;
         git(&work, &["checkout", "-q", "-b", "x", "origin/main"]).await;
         git(&work, &["commit", "-qm", "on x", "--allow-empty"]).await;
@@ -2859,6 +2889,7 @@ mod tests {
         configure(&work).await;
         git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
         git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
         git(&work, &["push", "-q", "-u", "origin", "main"]).await;
         git(
             &work,
@@ -2880,13 +2911,199 @@ mod tests {
             };
             let error = result.expect_err("session worktree must not publish");
             assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-            assert!(error.message.contains("reserved for agent sessions"));
-            assert!(error.message.contains("won't push or publish it"));
+            assert_eq!(
+                error.message,
+                "\"gd/session/abc\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it."
+            );
             assert!(!git(&sess, &["ls-remote", "origin"])
                 .await
                 .to_ascii_lowercase()
                 .contains("gd/session/"));
         }
+    }
+
+    /// MCP push (named and HEAD) and force_push refuse a marked branch as INVALID_PARAMS
+    /// with the Keep local sentence, landing nothing; with the mark off the named push lands.
+    #[tokio::test]
+    async fn keep_local_refuses_mcp_push_and_force_push() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-keep-local-")
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let origin = dir.path().join("origin.git").to_string_lossy().into_owned();
+        let work = dir.path().join("work").to_string_lossy().into_owned();
+        configure(&work).await;
+        git(&work, &["config", "push.default", "simple"]).await;
+        git(&work, &["config", "branch.autoSetupMerge", "false"]).await;
+        git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
+        git(&work, &["config", "remote.pushDefault", "origin"]).await;
+        git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
+        git(&work, &["push", "-q", "-u", "origin", "main"]).await;
+        git(&work, &["switch", "-q", "-c", "feat/x"]).await;
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", true)
+            .await
+            .unwrap();
+        let h = GitDesktopMcp::with_options(work.clone(), false, false, true, true);
+        let push = |branch: Option<&str>| PushArgs {
+            branch: branch.map(Into::into),
+            remote: None,
+            set_upstream: true,
+        };
+        let refusals = [
+            ("named", h.push(Parameters(push(Some("feat/x")))).await),
+            ("HEAD", h.push(Parameters(push(None))).await),
+            ("force_push", h.force_push().await),
+        ];
+        for (row, result) in refusals {
+            let error = result.expect_err(row);
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{row}");
+            assert!(
+                error.message.contains("\"feat/x\" is marked Keep local"),
+                "{row}: {error:?}"
+            );
+        }
+        assert!(!git(&work, &["ls-remote", "origin"])
+            .await
+            .contains("feat/x"));
+
+        crate::git::branches::set_branch_keep_local_core(&work, "feat/x", false)
+            .await
+            .unwrap();
+        h.push(Parameters(push(Some("feat/x"))))
+            .await
+            .expect("the unmarked twin publishes");
+        assert!(git(&work, &["ls-remote", "origin"])
+            .await
+            .contains("refs/heads/feat/x"));
+    }
+
+    /// A typed refusal the core raises (its spawn-time recheck) reads INVALID_PARAMS too.
+    #[test]
+    fn keep_local_core_refusals_map_to_invalid_params() {
+        for e in [
+            AppError::BranchKeptLocal {
+                branch: "feat/x".into(),
+            },
+            AppError::PushRemoteIsMirror {
+                remote: "origin".into(),
+            },
+        ] {
+            let message = e.to_string();
+            let mapped = push_refusal_err(e);
+            assert_eq!(mapped.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(mapped.message, message);
+        }
+        let other = push_refusal_err(AppError::Command("boom".into()));
+        assert_ne!(other.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    /// push_tag, delete_remote_branch and delete_tag (on the remote) read a mirror origin
+    /// as INVALID_PARAMS, like push, and leave the remote and the local tag untouched.
+    #[tokio::test]
+    async fn mirror_refusal_reads_invalid_params_from_the_tag_and_remote_delete_tools() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-mirror-")
+            .tempdir()
+            .expect("create temp dir");
+        let root = dir.path().to_string_lossy().into_owned();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&root, &["init", "-q", "-b", "main", "work"]).await;
+        let origin = dir.path().join("origin.git").to_string_lossy().into_owned();
+        let work = dir.path().join("work").to_string_lossy().into_owned();
+        configure(&work).await;
+        git(&work, &["config", "commit.gpgsign", "false"]).await;
+        git(&work, &["config", "tag.gpgSign", "false"]).await;
+        git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
+        git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
+        git(&work, &["tag", "v1"]).await;
+        git(
+            &work,
+            &["push", "-q", "origin", "refs/heads/main", "refs/tags/v1"],
+        )
+        .await;
+        git(&work, &["tag", "v2"]).await;
+        git(&work, &["config", "remote.origin.mirror", "true"]).await;
+        let remote_before = git(&work, &["ls-remote", "origin"]).await;
+        assert!(remote_before.contains("refs/tags/v1"), "{remote_before}");
+        let h = GitDesktopMcp::with_options(work.clone(), false, false, true, true);
+        let tag = |name: &str| TagNameArgs { name: name.into() };
+        let refusals = [
+            ("push_tag", h.push_tag(Parameters(tag("v2"))).await),
+            (
+                "delete_remote_branch",
+                h.delete_remote_branch(Parameters(DeleteRemoteBranchArgs {
+                    remote: "origin".into(),
+                    name: "main".into(),
+                }))
+                .await,
+            ),
+            (
+                "delete_tag",
+                h.delete_tag(Parameters(DeleteTagArgs {
+                    name: "v1".into(),
+                    remote: true,
+                }))
+                .await,
+            ),
+        ];
+        let message = AppError::PushRemoteIsMirror {
+            remote: "origin".into(),
+        }
+        .to_string();
+        for (row, result) in refusals {
+            let error = result.expect_err(row);
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{row}");
+            assert_eq!(error.message, message, "{row}");
+        }
+        assert_eq!(git(&work, &["ls-remote", "origin"]).await, remote_before);
+        assert_eq!(git(&work, &["tag", "--list", "v1"]).await.trim(), "v1");
+        // A local-only tag delete never reads the remote, so it still succeeds.
+        h.delete_tag(Parameters(DeleteTagArgs {
+            name: "v1".into(),
+            remote: false,
+        }))
+        .await
+        .expect("a local tag delete is not a push");
+        assert_eq!(git(&work, &["tag", "--list", "v1"]).await.trim(), "");
+    }
+
+    /// The core's local-upstream and both session refusals are the caller's input, while
+    /// an untyped `InvalidArgument` (the session-name refusal) keeps the code `app_err` gives it.
+    #[test]
+    fn mcp_maps_push_upstream_is_local_to_invalid_params() {
+        let mapped = push_refusal_err(AppError::PushUpstreamIsLocal {
+            branch: "feat".into(),
+            upstream: "main".into(),
+        });
+        assert_eq!(mapped.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(
+            mapped.message,
+            "Push blocked — feat tracks a local branch (main), not a remote."
+        );
+        for e in [
+            AppError::BranchIsAgentSession {
+                branch: "gd/session/x".into(),
+            },
+            AppError::PushDestinationIsAgentSession {
+                branch: "topic".into(),
+                remote: "origin".into(),
+                dest: "gd/session/x".into(),
+            },
+        ] {
+            let message = e.to_string();
+            let mapped = push_refusal_err(e);
+            assert_eq!(mapped.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(mapped.message, message);
+        }
+        let name = crate::git::branches::refuse_session_branch_name("gd/session/x").unwrap_err();
+        assert!(matches!(name, AppError::InvalidArgument(_)), "{name:?}");
+        let mapped = push_refusal_err(name);
+        assert_eq!(mapped.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
     }
 
     #[tokio::test]
@@ -2904,6 +3121,7 @@ mod tests {
         configure(&work).await;
         git(&work, &["commit", "-qm", "seed", "--allow-empty"]).await;
         git(&work, &["remote", "add", "origin", &origin]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
         git(&work, &["push", "-q", "-u", "origin", "main"]).await;
         git(
             &work,
@@ -2929,7 +3147,7 @@ mod tests {
         git(&work, &["checkout", "-q", "--detach"]).await;
         // The push itself may fail for a non-guard reason (no branch to publish), so the
         // guard's own verdict is asserted directly.
-        assert!(ensure_head_not_session_branch(&work).await.is_ok());
+        assert!(ensure_head_not_publishing_branch(&work).await.is_ok());
         if let Err(error) = h
             .push(Parameters(PushArgs {
                 branch: None,
@@ -2973,6 +3191,8 @@ mod tests {
         git(&work, &["add", "-A"]).await;
         git(&work, &["commit", "-qm", "base"]).await;
         git(&work, &["remote", "add", "origin", &url]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
+        git(&work, &["config", "remote.pushDefault", "origin"]).await;
         git(&work, &["push", "-q", "-u", "origin", "main"]).await;
 
         git(
@@ -2983,6 +3203,8 @@ mod tests {
         let clone_dir = dir.path().join("clone");
         let clone = clone_dir.to_string_lossy().into_owned();
         configure(&clone).await;
+        git(&clone, &["config", "remote.origin.mirror", "false"]).await;
+        git(&clone, &["config", "remote.pushDefault", "origin"]).await;
 
         // The user commits and PUSHES V.
         std::fs::write(clone_dir.join("v.txt"), "v\n").unwrap();
@@ -3026,6 +3248,8 @@ mod tests {
         git(&work, &["add", "-A"]).await;
         git(&work, &["commit", "-qm", "base"]).await;
         git(&work, &["remote", "add", "origin", &url]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
+        git(&work, &["config", "remote.pushDefault", "origin"]).await;
         git(&work, &["push", "-q", "-u", "origin", "main"]).await;
 
         git(

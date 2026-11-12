@@ -14,10 +14,10 @@ import {
   usePublishTargets,
   useRepoIdentity,
 } from "@/lib/git/queries";
-import { useOfflineHold } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { PublishDialog } from "./PublishDialog";
 import {
+  PUBLISH_IDENTITY_PENDING,
   PUBLISH_PROVIDER_LABELS,
   publishingHold,
 } from "./PublishPendingBanner";
@@ -127,11 +127,10 @@ export function PublishRepoControl({
   // Fails closed while the repo identity resolves: the publish's key carries it,
   // so sibling worktrees see the publish. An identity error is settled (the
   // path-only key), never a hold.
-  const offlineHold = useOfflineHold();
   const identity = useRepoIdentity(repoPath);
   const identityHold =
     identity.data === undefined && !identity.isError
-      ? publishPendingReason(offlineHold)
+      ? PUBLISH_IDENTITY_PENDING
       : undefined;
   const lead = busyReason ? (
     <Spinner data-icon="inline-start" aria-hidden />

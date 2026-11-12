@@ -60,6 +60,27 @@ export type AppError =
       remote: string;
       remoteBranch: string;
     }
+  /** A push or publish refused because `branch` is marked Keep local. */
+  | { kind: "branchKeptLocal"; message: string; branch: string }
+  /** A push refused because `remote` is a mirror remote. */
+  | { kind: "pushRemoteIsMirror"; message: string; remote: string }
+  /** A push refused because `branch` tracks the local branch `upstream`. */
+  | {
+      kind: "pushUpstreamIsLocal";
+      message: string;
+      branch: string;
+      upstream: string;
+    }
+  /** A push or publish refused because `branch` is in gd/session/. */
+  | { kind: "branchIsAgentSession"; message: string; branch: string }
+  /** A push refused because it would land on `remote`/`dest` in gd/session/. */
+  | {
+      kind: "pushDestinationIsAgentSession";
+      message: string;
+      branch: string;
+      remote: string;
+      dest: string;
+    }
   /** `open_with_default` refused a file whose default action would run it;
    *  `name` is its file name. */
   | { kind: "defaultOpenRefused"; message: string; name: string }

@@ -39,6 +39,7 @@ import * as api from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import {
   type ContentCheckOffReason,
+  refuseWhileBranchPushes,
   refuseWhilePushRuns,
   repoKeys,
   repoStatusOptions,
@@ -1572,8 +1573,15 @@ export function CleanupBranchesDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    // The batch can include the pushing branch, so any push holds it.
-    if (refuseWhilePushRuns(queryClient, repoPath)) return;
+    // The batch can include the pushing branch, so any push here holds it; a
+    // sibling worktree's push holds it only when it sends a branch in the batch.
+    if (
+      refuseWhilePushRuns(queryClient, repoPath) ||
+      names.some((n) =>
+        refuseWhileBranchPushes(queryClient, repoPath, n, currentBranch),
+      )
+    )
+      return;
     const fails = new Map<string, string>();
     // Removed worktrees whose branch stayed: failures that leave the selection.
     const kept = new Set<string>();
@@ -1632,7 +1640,10 @@ export function CleanupBranchesDialog({
     for (let i = 0; i < names.length; i++) {
       // A push can start mid-batch: stop before the next branch, keeping the
       // dialog and the unprocessed selection.
-      if (refuseWhilePushRuns(queryClient, repoPath)) {
+      if (
+        refuseWhilePushRuns(queryClient, repoPath) ||
+        refuseWhileBranchPushes(queryClient, repoPath, names[i], currentBranch)
+      ) {
         processed = i;
         break;
       }
