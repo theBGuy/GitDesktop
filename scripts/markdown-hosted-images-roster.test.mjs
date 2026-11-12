@@ -29,6 +29,9 @@ const GETS = [
   { file: "src/features/pulls/ReviewThreads.tsx", snippet: "{seg.text}" },
   { file: "src/features/discussions/DiscussionView.tsx", snippet: "{d.body}" },
   { file: "src/features/tags/TagDetailView.tsx", snippet: "{rel.body}" },
+  // The composer Preview: a draft's hosted URLs load when its editor site
+  // passes a source (EDITOR_SITES below).
+  { file: "src/components/markdown-editor.tsx", snippet: "stagedImages=" },
 ];
 
 /** Every other body, with why it doesn't load hosted images. */
@@ -130,11 +133,6 @@ const EXCLUDED = [
     file: "src/features/explore/ExploreDetail.tsx",
     snippet: "{content}",
     reason: "another repo's README",
-  },
-  {
-    file: "src/components/markdown-editor.tsx",
-    snippet: "stagedImages=",
-    reason: "the composer Preview: the user's own draft",
   },
   {
     file: "src/features/diff/MarkdownPreview.tsx",
@@ -261,6 +259,216 @@ export function audit(files) {
   return problems;
 }
 
+/** The editor elements whose Preview renders a draft, and the forwarders that
+ *  carry `hostedImages` down to MarkdownEditor's Preview. */
+const EDITOR_TAGS = [
+  "MarkdownEditor",
+  "field.MarkdownField",
+  "CommentComposer",
+  "CommentEditor",
+  "EditTitleBodyDialog",
+];
+
+const FORWARDER = "a forwarder: carries its own prop down";
+const OUTSIDE = "outside the attachment routes' scope; behaves as before";
+
+/** Every editor site: whether its Preview loads hosted images, else why not. */
+const EDITOR_SITES = [
+  {
+    file: "src/components/form/fields.tsx",
+    tag: "MarkdownEditor",
+    why: FORWARDER,
+  },
+  {
+    file: "src/features/conversations/CommentComposer.tsx",
+    tag: "MarkdownEditor",
+    why: FORWARDER,
+  },
+  {
+    file: "src/features/conversations/CommentEditor.tsx",
+    tag: "MarkdownEditor",
+    why: FORWARDER,
+  },
+  {
+    file: "src/features/conversations/EditTitleBodyDialog.tsx",
+    tag: "field.MarkdownField",
+    why: FORWARDER,
+  },
+  { file: "src/features/issues/RemoteIssueView.tsx", tag: "CommentComposer" },
+  {
+    file: "src/features/issues/RemoteIssueView.tsx",
+    tag: "EditTitleBodyDialog",
+  },
+  {
+    file: "src/features/pulls/RemotePrView.tsx",
+    tag: "CommentComposer",
+    count: 2,
+  },
+  { file: "src/features/pulls/RemotePrView.tsx", tag: "EditTitleBodyDialog" },
+  { file: "src/features/conversations/Thread.tsx", tag: "CommentEditor" },
+  {
+    file: "src/features/issues/CreateIssueDialog.tsx",
+    tag: "field.MarkdownField",
+  },
+  { file: "src/features/pulls/CreatePrDialog.tsx", tag: "field.MarkdownField" },
+  { file: "src/features/pulls/ReviewThreads.tsx", tag: "MarkdownEditor" },
+  { file: "src/features/pulls/ReviewComposer.tsx", tag: "MarkdownEditor" },
+  { file: "src/features/pulls/SubmitReviewDialog.tsx", tag: "MarkdownEditor" },
+  {
+    file: "src/features/issues/LocalIssueView.tsx",
+    tag: "CommentComposer",
+    without: "a local item",
+  },
+  {
+    file: "src/features/issues/LocalIssueView.tsx",
+    tag: "EditTitleBodyDialog",
+    without: "a local item",
+  },
+  {
+    file: "src/features/pulls/LocalPrView.tsx",
+    tag: "CommentComposer",
+    without: "a local item",
+  },
+  {
+    file: "src/features/pulls/LocalPrView.tsx",
+    tag: "EditTitleBodyDialog",
+    without: "a local item",
+  },
+  {
+    file: "src/features/conversations/LocalComment.tsx",
+    tag: "CommentEditor",
+    without: "a local item",
+  },
+  {
+    file: "src/features/issues/CreateLocalIssueDialog.tsx",
+    tag: "field.MarkdownField",
+    without: "a local item",
+  },
+  {
+    file: "src/features/pulls/CreateLocalPrDialog.tsx",
+    tag: "field.MarkdownField",
+    without: "a local item",
+  },
+  {
+    file: "src/features/issues/JiraIssueView.tsx",
+    tag: "CommentEditor",
+    without: "Jira",
+  },
+  {
+    file: "src/features/issues/JiraIssueView.tsx",
+    tag: "CommentComposer",
+    without: "Jira",
+  },
+  {
+    file: "src/features/issues/CreateJiraIssueDialog.tsx",
+    tag: "field.MarkdownField",
+    without: "Jira",
+  },
+  {
+    file: "src/features/pulls/PendingReviewBar.tsx",
+    tag: "CommentEditor",
+    without: "the app's local draft store",
+  },
+  {
+    file: "src/features/pulls/ReviewerNotesField.tsx",
+    tag: "field.MarkdownField",
+    without: "the app's own note store",
+  },
+  {
+    file: "src/features/pulls/CommitComments.tsx",
+    tag: "CommentComposer",
+    without: "its hook takes refs only",
+  },
+  {
+    file: "src/features/pulls/CommitComments.tsx",
+    tag: "MarkdownEditor",
+    without: "its hook takes refs only",
+  },
+  {
+    file: "src/features/projects/BoardAddDialogs.tsx",
+    tag: "field.MarkdownField",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/projects/BoardDraftEditDialog.tsx",
+    tag: "field.MarkdownField",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/projects/ProjectStatusStrip.tsx",
+    tag: "field.MarkdownField",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/discussions/CreateDiscussionDialog.tsx",
+    tag: "field.MarkdownField",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/discussions/DiscussionView.tsx",
+    tag: "MarkdownEditor",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/discussions/DiscussionView.tsx",
+    tag: "CommentComposer",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/tags/CreateReleaseDialog.tsx",
+    tag: "MarkdownEditor",
+    without: OUTSIDE,
+  },
+  {
+    file: "src/features/tags/TagDetailView.tsx",
+    tag: "MarkdownEditor",
+    without: OUTSIDE,
+  },
+];
+
+/** Every problem the editor sites show; empty when EDITOR_SITES holds. */
+export function auditEditors(files) {
+  if (files.size === 0) throw new ScanError("empty corpus");
+  const problems = [];
+  const entries = EDITOR_SITES.map((e) => ({
+    ...e,
+    count: e.count ?? 1,
+    hits: 0,
+  }));
+  let sites = 0;
+  for (const [rel, text] of files) {
+    if (!rel.endsWith(".tsx")) continue;
+    const masked = maskNonCode(text, true);
+    for (const tag of EDITOR_TAGS) {
+      for (const [start, end] of elementRanges(rel, text, masked, tag)) {
+        sites++;
+        const where = `${rel}:${lineOf(text, start)}`;
+        const entry = entries.find((e) => e.file === rel && e.tag === tag);
+        if (entry === undefined) {
+          problems.push(
+            `${where}: <${tag} is not in EDITOR_SITES (add it as gets or without)`,
+          );
+          continue;
+        }
+        entry.hits++;
+        const [, tagClose] = openingTags(rel, text, masked, start, end)[0];
+        const passes = masked.slice(start, tagClose).includes("hostedImages=");
+        if (entry.without === undefined && !passes)
+          problems.push(`${where}: <${tag} without hostedImages=`);
+        if (entry.without !== undefined && passes)
+          problems.push(`${where}: a "without" <${tag} passes hostedImages=`);
+      }
+    }
+  }
+  if (sites === 0) throw new ScanError("no editor sites found");
+  for (const e of entries)
+    if (e.hits !== e.count)
+      problems.push(
+        `${e.file} <${e.tag}: ${e.hits} sites, roster says ${e.count} (stale entry?)`,
+      );
+  return problems;
+}
+
 const corpus = () => loadCorpus(srcEntries(ROOT, scanned));
 
 test("every forge body loads hosted images and every other body is excluded", () => {
@@ -349,7 +557,64 @@ test("an excluded body that starts passing hostedImages= fails", () => {
   assert.match(audit(next).join("\n"), /HelpScreen.*excluded body passes/);
 });
 
+test("every editor site passes the hosted source or is listed without it", () => {
+  assert.deepEqual(auditEditors(corpus()), []);
+});
+
+test("an editor site that drops hostedImages= fails", () => {
+  const next = edited(
+    corpus(),
+    "src/features/issues/CreateIssueDialog.tsx",
+    "hostedImages={descHostedImages}",
+    "data-x={descHostedImages}",
+  );
+  assert.match(
+    auditEditors(next).join("\n"),
+    /CreateIssueDialog.*field\.MarkdownField without hostedImages=/,
+  );
+});
+
+test("a new editor element fails until EDITOR_SITES names it", () => {
+  const next = new Map(corpus());
+  next.set(
+    "src/features/new/NewEditor.tsx",
+    "export const E = (p) => <CommentEditor {...p} />;\n",
+  );
+  assert.match(
+    auditEditors(next).join("\n"),
+    /NewEditor.*CommentEditor is not in EDITOR_SITES/,
+  );
+});
+
+test("a 'without' editor site that starts passing hostedImages= fails", () => {
+  const files = corpus();
+  const file = "src/features/issues/LocalIssueView.tsx";
+  const text = files.get(file);
+  const at = text.indexOf("<EditTitleBodyDialog");
+  const next = new Map(files);
+  next.set(
+    file,
+    `${text.slice(0, at)}<EditTitleBodyDialog hostedImages={h}${text.slice(at + "<EditTitleBodyDialog".length)}`,
+  );
+  assert.match(
+    auditEditors(next).join("\n"),
+    /LocalIssueView.*"without" <EditTitleBodyDialog passes hostedImages=/,
+  );
+});
+
+test("a stale editor entry fails", () => {
+  const next = new Map(corpus());
+  next.delete("src/features/pulls/SubmitReviewDialog.tsx");
+  assert.match(auditEditors(next).join("\n"), /SubmitReviewDialog.*0 sites/);
+});
+
 test("an empty corpus, a file with no sites, or an unreadable file fails closed", () => {
+  assert.throws(() => auditEditors(new Map()), ScanError);
+  assert.throws(
+    () =>
+      auditEditors(new Map([["src/features/a.tsx", "export const a = 1;\n"]])),
+    ScanError,
+  );
   assert.throws(() => audit(new Map()), ScanError);
   assert.throws(
     () => audit(new Map([["src/features/a.tsx", "export const a = 1;\n"]])),

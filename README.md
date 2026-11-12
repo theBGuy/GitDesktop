@@ -1292,15 +1292,18 @@ review via its subscription login. The full list is under
   pick from recent issues and pull requests, open and closed, each marked
   with its state; arrow keys and Enter accept. GitLab adds `!` for merge
   requests; each forge offers only the references it links.
-- **Images in comments**: on GitHub and GitLab, paste a screenshot or use
-  **Attach image** in an issue or pull request comment box or a new pull
-  request's description. PNG, JPEG, GIF and WebP (10 MB and 40 megapixels
-  each, 10 per draft) show as chips with a thumbnail and render in Preview;
-  nothing uploads until you post. Needs GitHub CLI 2.99+ on GitHub.com or
-  Enterprise Cloud with write access, or GitLab CLI 1.91+; without those,
-  and on Bitbucket, the button stays disabled and says why. With some GitHub
-  CLI sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the
-  app says so when you post. On GitHub.com and Enterprise Cloud, attached
+- **Images in comments and descriptions**: on GitHub and GitLab, paste a
+  screenshot or use **Attach image** in an issue or pull request comment
+  box, a new issue's or pull request's description, or the **Edit** dialog
+  for an issue's or pull request's title and description. PNG, JPEG, GIF
+  and WebP (10 MB and 40 megapixels each, 10 per draft) show as chips with
+  a thumbnail and render in Preview; nothing uploads until you post, and an
+  image that fails to upload during an edit stays attached so **Save**
+  again adds it. Needs GitHub CLI 2.99+ on GitHub.com or Enterprise Cloud
+  with write access, or GitLab CLI 1.91+; without those, and on Bitbucket,
+  the button stays disabled and says why. With some GitHub CLI sign-in
+  types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so
+  when you post. On GitHub.com and Enterprise Cloud, attached
   images that GitHub hosts at its `user-attachments` links load in
   descriptions, comments, review threads, discussions and release notes
   through your GitHub CLI sign-in, so they show in private repositories too.

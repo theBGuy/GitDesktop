@@ -6,19 +6,24 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LinkedIssuesField } from "@/features/pulls/LinkedIssuesField";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import {
   forgePrApprovals,
   forgePrComment,
+  forgePrEdit,
   forgePrRequestChanges,
   forgePrView,
   forgeStatus,
+  gitBranches,
 } from "@/lib/git/api";
-import type { ForgeStatus, PrDetails } from "@/lib/git/types";
+import type { Branch, ForgeStatus, PrDetails } from "@/lib/git/types";
+import { dispatchAction } from "@/lib/hotkeys/handler-registry";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -35,6 +40,19 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrApprovals: vi.fn(),
   forgePrComment: vi.fn(),
   forgePrRequestChanges: vi.fn(async () => undefined),
+  forgePrEdit: vi.fn(),
+  gitBranches: vi.fn(),
+}));
+// The generator is observed at its hook; a test drives its draft callback.
+const generateFromDiff = vi.hoisted(() => vi.fn());
+vi.mock("@/features/pulls/useGeneratePrDescription", () => ({
+  useGeneratePrDescription: () => ({
+    generate: vi.fn(),
+    generateFromDiff,
+    cancel: vi.fn(),
+    generating: false,
+    pickingLabels: false,
+  }),
 }));
 // The close is observed at its hook: the state write itself is named only by
 // the hook that re-files its row (scripts/remote-row-state-wiring.test.mjs).
@@ -158,6 +176,19 @@ beforeEach(() => {
   vi.mocked(forgePrRequestChanges).mockClear();
   vi.mocked(attachmentStage).mockReset();
   vi.mocked(attachmentDiscard).mockClear();
+  vi.mocked(forgePrEdit).mockReset();
+  vi.mocked(gitBranches).mockResolvedValue(
+    ["main", "next", "old"].map(
+      (name) =>
+        ({
+          name,
+          isCurrent: false,
+          archived: false,
+          keepLocal: false,
+        }) as Branch,
+    ),
+  );
+  generateFromDiff.mockReset();
   useConfirm.setState({ request: null, requestHold: null });
   useUiStore.setState({ repoPath: REPO });
   URL.createObjectURL = vi.fn(() => "blob:pr-1");
@@ -185,6 +216,279 @@ const button = (name: string | RegExp) => screen.getByRole("button", { name });
 
 const statusSaysAttaching = () =>
   screen.getAllByRole("status").some((s) => s.textContent === ATTACHING);
+
+const editBox = () =>
+  screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+const reasonOf = (el: Element) =>
+  (el.getAttribute("aria-describedby")?.split(" ") ?? [])
+    .map((id) => document.getElementById(id)?.textContent)
+    .join(" ");
+
+/** Mounts PR 7 and opens its Edit dialog. */
+async function openPrEdit(extra: Record<string, boolean> = {}) {
+  const implemented = (GITLAB as unknown as { implemented: object })
+    .implemented;
+  vi.mocked(forgeStatus).mockResolvedValue({
+    ...GITLAB,
+    implemented: { ...implemented, mrEdit: true, ...extra },
+  } as unknown as ForgeStatus);
+  mount();
+  await screen.findByText("Merge request seven", undefined, { timeout: 3000 });
+  fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+  await waitFor(() => expect(editBox()).toBeInTheDocument());
+}
+
+describe("RemotePrView edit attachments", () => {
+  it("holds Generate only while a save carrying images is pending (AC30)", async () => {
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit();
+    // Control: before any save Generate is live.
+    expect(button("Generate")).not.toHaveAttribute("aria-disabled", "true");
+    // A save with no image leaves it live (the recorded owner decision).
+    const plain = deferred<{ failedAttachments: string[] }>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(plain.promise);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(forgePrEdit).mock.calls[0][6]).toBeUndefined();
+    expect(button("Generate")).not.toHaveAttribute("aria-disabled", "true");
+    await act(async () => plain.reject(new Error("refused")));
+    await waitFor(() => expect(button("Save")).not.toBeDisabled());
+
+    fireEvent.paste(editBox(), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+        ],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+    const save = deferred<{ failedAttachments: string[] }>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(save.promise);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(forgePrEdit).mock.calls[1][6]).toEqual({
+      session: SESSION,
+      names: ["image-1.png"],
+    });
+    await waitFor(() =>
+      expect(button("Generate")).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(reasonOf(button("Generate"))).toBe("Applying this change…");
+    await act(async () => save.resolve({ failedAttachments: [] }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  const BODY_DROPPED =
+    "The description wasn't saved because image-1.png didn't upload. Your other changes were saved. Save again to retry.";
+  const PARTIAL_LINE =
+    "Saved, but image-1.png didn't upload. It's still attached here. Save again to add it.";
+  const titleBox = () => screen.getByRole("textbox", { name: "Title" });
+  const baseArg = (call: number) => vi.mocked(forgePrEdit).mock.calls[call][5];
+  const politeLine = () =>
+    screen.getByRole("dialog").querySelector("form > span[aria-live='polite']")
+      ?.textContent ?? null;
+
+  async function pasteImage() {
+    fireEvent.paste(editBox(), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+        ],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+  }
+
+  async function pickBase(
+    user: ReturnType<typeof userEvent.setup>,
+    name: string,
+  ) {
+    await user.click(screen.getByRole("combobox", { name: "Base branch" }));
+    await user.click(
+      await screen.findByRole("option", { name: new RegExp(`^${name}`) }),
+    );
+  }
+
+  /** The generate binding, pressed with focus on the Title. */
+  async function generateChord() {
+    act(() => titleBox().focus());
+    await userEvent.keyboard("{Control>}g{/Control}");
+    await act(async () => undefined);
+  }
+
+  it("sends a base a partial save applied only after a new pick (AC21)", async () => {
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    const user = userEvent.setup();
+    await openPrEdit();
+    await pickBase(user, "next");
+    await pasteImage();
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: ["image-1.png"],
+      body: "x ![image](image-1.png)",
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(baseArg(0)).toBe("next");
+    await waitFor(() => expect(politeLine()).toBe(PARTIAL_LINE));
+    vi.mocked(forgePrEdit).mockRejectedValueOnce(new Error("refused"));
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(baseArg(1)).toBeUndefined();
+    await waitFor(() => expect(button("Save")).not.toBeDisabled());
+    await pickBase(user, "old");
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(3));
+    expect(baseArg(2)).toBe("old");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("sends no base after an Err that says the other changes were saved (AC21)", async () => {
+    const user = userEvent.setup();
+    await openPrEdit();
+    await pickBase(user, "next");
+    vi.mocked(forgePrEdit).mockRejectedValueOnce({
+      kind: "gh",
+      message: BODY_DROPPED,
+    });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(baseArg(0)).toBe("next");
+    await waitFor(() => expect(button("Save")).not.toBeDisabled());
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(baseArg(1)).toBeUndefined();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("re-seeds a partial save's read-back through the issue chips (AC14)", async () => {
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit({ issues: true });
+    await pasteImage();
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: ["image-1.png"],
+      body: "x ![](image-1.png)\n\nCloses #3",
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(editBox().value).toBe("x ![](image-1.png)"));
+    expect(editBox().value).not.toContain("Closes #3");
+    expect(
+      within(screen.getByRole("dialog")).getAllByText(/#3\b/).length,
+    ).toBeGreaterThan(0);
+    // The Edit dialog composes the chips on Save, and says so.
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        "Added to the description when you save.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("dialog")).queryByText(
+        "Added to the description on create.",
+      ),
+    ).toBeNull();
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("starts a generation from the chord unless a save carrying images is pending (AC30)", async () => {
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit();
+    // Before any save.
+    await generateChord();
+    expect(generateFromDiff).toHaveBeenCalledTimes(1);
+    // During a save without images.
+    const plain = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(plain.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    await generateChord();
+    expect(generateFromDiff).toHaveBeenCalledTimes(2);
+    await act(async () => plain.reject(new Error("refused")));
+    await waitFor(() => expect(button("Save")).not.toBeDisabled());
+    // During a save carrying an image.
+    await pasteImage();
+    const save = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(save.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(button("Generate")).toHaveAttribute("aria-disabled", "true"),
+    );
+    await generateChord();
+    expect(generateFromDiff).toHaveBeenCalledTimes(2);
+    await act(async () => save.resolve({ failedAttachments: [] }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("lets a generation's write retire the partial-save line", async () => {
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit();
+    await pasteImage();
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: ["image-1.png"],
+      body: "x ![image](image-1.png)",
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(politeLine()).toBe(PARTIAL_LINE));
+    await generateChord();
+    expect(generateFromDiff).toHaveBeenCalledTimes(1);
+    const onUpdate = generateFromDiff.mock.calls[0][4] as (d: object) => void;
+    act(() =>
+      onUpdate({
+        title: "Generated",
+        body: "Generated body",
+        closes: [],
+        relates: [],
+        jiraMentions: [],
+      }),
+    );
+    await waitFor(() => expect(politeLine()).toBe(""));
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("opens the edit dialog's picker from the palette over a composer focused last (AC27)", async () => {
+    const implemented = (GITLAB as unknown as { implemented: object })
+      .implemented;
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      implemented: { ...implemented, mrEdit: true },
+    } as unknown as ForgeStatus);
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(box()).toBeInTheDocument());
+    act(() => box().focus());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    const clicked: HTMLInputElement[] = [];
+    const click = vi
+      .spyOn(HTMLInputElement.prototype, "click")
+      .mockImplementation(function (this: HTMLInputElement) {
+        clicked.push(this);
+      });
+    try {
+      expect(dispatchAction("attach-image")).toBe(true);
+      expect(clicked).toHaveLength(1);
+      expect(clicked[0].type).toBe("file");
+      expect(screen.getByRole("dialog").contains(clicked[0])).toBe(true);
+    } finally {
+      click.mockRestore();
+    }
+  });
+});
 
 /** Mounts PR 7 and leaves one pasted image's stage in flight. */
 async function stageInFlight() {
@@ -285,5 +589,66 @@ describe("a stage in flight holds every post of the pull request draft", () => {
         "true",
       ),
     );
+  });
+});
+
+describe("linked-issue hint", () => {
+  it("says the create wording when the caller names no save (the create dialogs)", () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <LinkedIssuesField
+          repoPath={REPO}
+          lens="origin"
+          chips={[
+            {
+              number: 3,
+              title: "Three",
+              state: "OPEN",
+              keyword: "closes",
+              source: "manual",
+              aiSuggestedClose: false,
+            },
+          ]}
+          onToggleKeyword={() => undefined}
+          onRemove={() => undefined}
+          onPick={() => undefined}
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByText("Added to the description on create."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Added to the description when you save."),
+    ).toBeNull();
+  });
+
+  it("says the save wording on the Jira field when asked for save", () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <LinkedIssuesField
+          variant="jira"
+          repoPath={REPO}
+          link={null}
+          jiraChips={[
+            {
+              key: "ABC-1",
+              summary: "One",
+              statusCategory: "new",
+              source: "manual",
+            },
+          ]}
+          onRemove={() => undefined}
+          onPick={() => undefined}
+          appliedOn="save"
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      screen.getByText("Added to the description when you save."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Added to the description on create."),
+    ).toBeNull();
   });
 });

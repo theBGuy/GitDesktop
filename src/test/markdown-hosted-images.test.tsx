@@ -179,7 +179,11 @@ describe("with the hosted source", () => {
     const el = img(container);
     expect(el.hasAttribute("src")).toBe(false);
     expect(el.dataset.repoSrc).toBe(URL1);
-    expect(ghHostedImage).toHaveBeenCalledWith(REPO, URL1);
+    expect(ghHostedImage).toHaveBeenCalledWith(
+      REPO,
+      URL1,
+      expect.any(AbortSignal),
+    );
     read.resolve(shown("iVBO"));
     await waitFor(() => expect(el.getAttribute("src")).toBe(dataUrl("iVBO")));
     expect(el.dataset.repoSrc).toBe(URL1);
@@ -191,7 +195,11 @@ describe("with the hosted source", () => {
     await waitFor(() =>
       expect(img(container).getAttribute("src")).toBe(dataUrl()),
     );
-    expect(ghHostedImage).toHaveBeenCalledWith(REPO, URL1);
+    expect(ghHostedImage).toHaveBeenCalledWith(
+      REPO,
+      URL1,
+      expect.any(AbortSignal),
+    );
   });
 
   it.each([
@@ -421,7 +429,7 @@ describe("with the hosted source", () => {
     expect(ghHostedImage).toHaveBeenCalledTimes(1);
   });
 
-  it("a read settling after unmount or a text change writes nothing and stays cached", async () => {
+  it("a read withdrawn by a text change or unmount writes nothing and caches nothing", async () => {
     const errors = vi.spyOn(console, "error");
     const one = deferred();
     vi.mocked(ghHostedImage).mockReturnValueOnce(one.promise);
@@ -433,10 +441,17 @@ describe("with the hosted source", () => {
     await flush();
     expect(stale.hasAttribute("src")).toBe(false);
     expect(errors).not.toHaveBeenCalled();
-    expect(client.getQueryData(["hosted-image", "github.com", URL1])).toEqual({
-      ...shown(),
-      askedUnder: expect.any(String),
+    expect(
+      client.getQueryState(["hosted-image", "github.com", URL1]),
+    ).toMatchObject({
+      data: undefined,
+      error: null,
+      status: "pending",
+      fetchStatus: "idle",
     });
+    expect(
+      client.getQueryData(["hosted-image", "github.com", URL1]),
+    ).toBeUndefined();
     errors.mockRestore();
   });
 
@@ -743,7 +758,29 @@ describe("the viewer", () => {
     ).toBeNull();
   });
 
-  it("without the source, a hosted srcset candidate gives no web URL", async () => {
+  it("without the source, a shown repository candidate beside a hosted one has no Open in browser", async () => {
+    const { container } = repoBody(
+      `<img alt="s" srcset="${URL1} 1x, docs/shot.png 2x">`,
+    );
+    await waitFor(() =>
+      expect(img(container).getAttribute("srcset")).toBe(
+        `${URL1} 1x, ${dataUrl()} 2x`,
+      ),
+    );
+    // The browser's pick on a 2x screen: the loaded repository candidate.
+    Object.defineProperty(img(container), "currentSrc", {
+      value: dataUrl(),
+      configurable: true,
+    });
+    openViewer(img(container));
+    await screen.findByRole("dialog");
+    expect(
+      screen.queryByRole("button", { name: /Open in browser/ }),
+    ).toBeNull();
+    expect(ghHostedImage).not.toHaveBeenCalled();
+  });
+
+  it("without the source and no pick yet, the viewer opens the first candidate as a plain URL", async () => {
     const { container } = repoBody(
       `<img alt="s" srcset="${URL1} 1x, docs/shot.png 2x">`,
     );
@@ -753,10 +790,12 @@ describe("the viewer", () => {
       ),
     );
     openViewer(img(container));
-    await screen.findByRole("dialog");
-    expect(
-      screen.queryByRole("button", { name: /Open in browser/ }),
-    ).toBeNull();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.querySelector("img")?.getAttribute("src")).toBe(URL1);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Open in browser/ }),
+    );
+    await waitFor(() => expect(openUrl).toHaveBeenCalledWith(URL1));
     expect(ghHostedImage).not.toHaveBeenCalled();
   });
 
@@ -856,7 +895,9 @@ describe("one source key, two walks", () => {
     vi.useFakeTimers();
     const at = slowVerdict("failed", 10);
     const body = `![a](${URL1})`;
-    md(body, SRC).unmount();
+    const v = md(body, SRC);
+    await advance(50);
+    v.unmount();
     await advance(50);
     expect(at).toHaveLength(1);
     await advance(9000);

@@ -821,6 +821,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
             if (!o) setIssueDraft(undefined);
           }}
           initialDraft={issueDraft}
+          host="issues-panel"
         />
         <CreateLocalIssueDialog
           repoPath={repoPath}

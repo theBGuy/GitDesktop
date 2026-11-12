@@ -1908,6 +1908,7 @@ export function LocalPrView({
               onRemove={removeIssue}
               onPick={pickIssue}
               disabled={prGen.generating}
+              appliedOn="save"
             />
           ) : undefined
         }

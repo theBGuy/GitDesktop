@@ -41,7 +41,14 @@ export interface DraftAttachmentsHandle {
   /** Puts `ATTACHING_REASON` on the status line for a held keyboard submit; it
    *  retires once no stage is in flight. */
   noteSubmitHeld(): void;
-  stage(file: File, source: AttachSource): Promise<StagedImage | null>;
+  /** `text` reads the draft's text when the stage runs, or null when the
+   *  caller can't; only a readable text lets a full draft reclaim the images
+   *  it no longer references. */
+  stage(
+    file: File,
+    source: AttachSource,
+    text?: () => string | null,
+  ): Promise<StagedImage | null>;
   /** Starts one attach gesture (clears the status line once); the result says
    *  whether the draft is still the one it started on. */
   startAttach(): () => boolean;
@@ -65,6 +72,9 @@ const UPLOAD_ACT: Record<AttachmentSurface, UploadAct> = {
   "issue-comment": "posting",
   "pr-comment": "posting",
   "pr-create": "creating",
+  "issue-create": "creating",
+  "issue-edit": "saving",
+  "pr-edit": "saving",
 };
 
 /** What a draft's in-flight post is doing, named from its key's surface. */
@@ -138,13 +148,14 @@ export function useDraftAttachments({
       noteSubmitHeld: () => {
         if (attaching) noteAttachBlocked(draftKey, owner, ATTACHING_REASON);
       },
-      stage: (file, source) =>
+      stage: (file, source, text) =>
         stageAttachment({
           draftKey,
           owner,
           file,
           source,
           blockedReason: blocked,
+          text,
         }),
       startAttach: () => startAttachGesture(draftKey, owner),
       appendReference: (text) =>

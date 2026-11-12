@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::attachments::{
-    attach_timeout, AttachForge, AttachmentRefs, CommentOutcome, PrCreateOutcome, StagedRefs,
+    attach_timeout, AttachForge, AttachmentRefs, CommentOutcome, EditOutcome, PrCreateOutcome,
+    StagedRefs,
 };
 use crate::error::{AppError, AppResult};
 use crate::forge::gitlab::null_to_default;
@@ -1043,9 +1044,15 @@ pub async fn gh_pr_comment(
     if let Some(s) = &staged {
         args.extend(attach_tail(&s.names));
     }
-    let out = run_gh_maybe_attached(&repo_path, &slug, &args, staged.as_ref())
-        .await
-        .map_err(classify_gh_comment_refusal)?;
+    let out = run_gh_maybe_attached(
+        &repo_path,
+        &slug,
+        &args,
+        staged.as_ref(),
+        AttachedWrite::Post,
+    )
+    .await
+    .map_err(classify_gh_comment_refusal)?;
     let Some(s) = &staged else {
         return Ok(CommentOutcome::default());
     };
@@ -1139,11 +1146,14 @@ pub(crate) enum GhAttachRun {
     Failed,
 }
 
-/// gh stops at the first failed upload but still posts, so a non-zero exit with the
-/// item's URL on stdout is a partial success, never a failure to report as one.
+/// gh stops at the first failed upload but still posts, so for a comment or a create a
+/// non-zero exit with the item's URL on stdout is a partial success, never a failure.
 /// gh uploads first, returns before printing when the write fails, and prints the URL
 /// only once the comment or PR exists (v2.99.0, v2.103.3: pkg/cmd/pr/shared/commentable.go
-/// `createComment`, pkg/cmd/pr/create/create.go `submitPR`).
+/// `createComment`, pkg/cmd/pr/create/create.go `submitPR`). Issue create relies on it
+/// too, which holds only while no `--assignee` or `--type` rides `gh issue create`. An
+/// edit also prints the URL after dropping the body, so edits classify through
+/// [`classify_gh_edit_run`].
 pub(crate) fn classify_gh_attach_run(code: i32, stdout: &str) -> GhAttachRun {
     if code == 0 {
         GhAttachRun::Posted
@@ -1152,6 +1162,17 @@ pub(crate) fn classify_gh_attach_run(code: i32, stdout: &str) -> GhAttachRun {
     } else {
         GhAttachRun::Failed
     }
+}
+
+/// What an attached gh run writes, which picks the sentence for a run that left nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachedWrite {
+    /// An issue or pull request create.
+    Create,
+    /// A comment.
+    Post,
+    /// An edit keeps gh's own error: gh may already have saved the title or base.
+    Edit,
 }
 
 /// `staged` None runs plain `run_gh`. With attachments gh runs in the session folder
@@ -1163,6 +1184,7 @@ pub(crate) async fn run_gh_maybe_attached(
     slug: &str,
     args: &[&str],
     staged: Option<&StagedRefs>,
+    write: AttachedWrite,
 ) -> AppResult<GhOutput> {
     let Some(s) = staged else {
         return run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT).await;
@@ -1181,7 +1203,7 @@ pub(crate) async fn run_gh_maybe_attached(
         other => other?,
     };
     match classify_gh_attach_run(out.code, &out.stdout_lossy()) {
-        GhAttachRun::Failed => Err(gh_attach_failure(out, slug)),
+        GhAttachRun::Failed => Err(attached_run_failure(out, slug, &s.names, write)),
         GhAttachRun::Posted | GhAttachRun::Partial => Ok(out),
     }
 }
@@ -1192,6 +1214,8 @@ pub(crate) enum Readback<'a> {
     Comment(&'a str),
     /// A pull request, by number.
     Pull(u64),
+    /// An issue, by number.
+    Issue(u64),
 }
 
 /// The digits after `#issuecomment-` to the end of the URL.
@@ -1201,7 +1225,7 @@ pub(crate) fn comment_id_from_url(url: &str) -> Option<&str> {
 }
 
 /// `None` for an empty slug, one gh would expand as a `{}` placeholder, an unreadable
-/// comment URL, or PR number 0.
+/// comment URL, or item number 0.
 pub(crate) fn readback_endpoint(slug: &str, readback: Readback) -> Option<String> {
     if slug.is_empty() || slug.contains(['{', '}']) {
         return None;
@@ -1210,8 +1234,9 @@ pub(crate) fn readback_endpoint(slug: &str, readback: Readback) -> Option<String
         Readback::Comment(url) => {
             comment_id_from_url(url).map(|id| format!("repos/{slug}/issues/comments/{id}"))
         }
-        Readback::Pull(0) => None,
+        Readback::Pull(0) | Readback::Issue(0) => None,
         Readback::Pull(number) => Some(format!("repos/{slug}/pulls/{number}")),
+        Readback::Issue(number) => Some(format!("repos/{slug}/issues/{number}")),
     }
 }
 
@@ -1224,17 +1249,25 @@ fn failed_from_body(body: &str, names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// gh stops at the first failed upload, so the name its stderr reports and every
-/// later one failed. The path sits after the first `upload ` up to the first `: `; no
-/// marker, or no passed name there, counts every name as failed.
-fn failed_from_stderr(stderr: &str, names: &[String]) -> Vec<String> {
-    let Some(at) = stderr.find("upload ") else {
-        return names.to_vec();
-    };
-    let rest = &stderr[at + "upload ".len()..];
-    let path = rest.split_once(": ").map_or(rest, |(p, _)| p);
+/// The position of the attached name gh's stderr reports as the failed upload. The path
+/// sits after the first `upload ` up to the first `: ` or the end of that line (gh's
+/// bare `could not upload <path>` has no colon); its last path segment must equal a
+/// name exactly. `None` when there is no marker or no name matches.
+fn failed_upload_index(stderr: &str, names: &[String]) -> Option<usize> {
+    let at = stderr.find("upload ")?;
+    let line = stderr[at + "upload ".len()..]
+        .lines()
+        .next()
+        .unwrap_or_default();
+    let path = line.split_once(": ").map_or(line, |(p, _)| p).trim();
     let last = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    match names.iter().position(|n| n == last) {
+    names.iter().position(|n| n == last)
+}
+
+/// gh stops at the first failed upload, so the name its stderr reports and every
+/// later one failed; an unreadable report counts every name as failed.
+fn failed_from_stderr(stderr: &str, names: &[String]) -> Vec<String> {
+    match failed_upload_index(stderr, names) {
         Some(i) => names[i..].to_vec(),
         None => names.to_vec(),
     }
@@ -1270,15 +1303,32 @@ pub(crate) async fn attach_failed_after(
     if out.code == 0 {
         return Vec::new();
     }
-    let mut body = None;
-    if let Some(endpoint) = readback_endpoint(slug, readback) {
-        if let Ok(read) = run_gh(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await {
-            body = serde_json::from_slice::<ReadbackBody>(&read.stdout)
-                .ok()
-                .and_then(|b| b.body);
-        }
-    }
+    let body = read_back_body(repo_path, slug, readback).await;
     partial_failed(body.as_deref(), &out.stderr, &staged.names)
+}
+
+/// The item's stored body by a direct GET (a list can lag a fresh write), or `None`
+/// when there is no endpoint, the read fails, or the reply has no body.
+async fn read_back_body(repo_path: &str, slug: &str, readback: Readback<'_>) -> Option<String> {
+    let endpoint = readback_endpoint(slug, readback)?;
+    let read = run_gh(Some(repo_path), &["api", &endpoint], GH_TIMEOUT)
+        .await
+        .ok()?;
+    serde_json::from_slice::<ReadbackBody>(&read.stdout)
+        .ok()
+        .and_then(|b| b.body)
+}
+
+/// gh's refusals the app maps to its own sentences, by the stderr text gh prints.
+const GH_WRITE_ACCESS_MARKER: &str = "attaching files requires write access";
+const GH_AUTH_TYPE_MARKER: &str = "unsupported authentication type";
+const GH_GHES_MARKER: &str = "not supported on GitHub Enterprise Server";
+
+/// Whether stderr holds one of the refusals mapped above.
+fn gh_refused(stderr: &str) -> bool {
+    [GH_WRITE_ACCESS_MARKER, GH_AUTH_TYPE_MARKER, GH_GHES_MARKER]
+        .iter()
+        .any(|m| stderr.contains(m))
 }
 
 /// A failed attached run's error: gh's write-access, token-type and GHES refusals map
@@ -1286,22 +1336,151 @@ pub(crate) async fn attach_failed_after(
 /// with code N" when that is empty. The GHES one is reached only when the host gate had
 /// no host to read, so its sentence names no host.
 pub(crate) fn gh_attach_failure(out: GhOutput, slug: &str) -> AppError {
-    if out.stderr.contains("attaching files requires write access") {
+    if out.stderr.contains(GH_WRITE_ACCESS_MARKER) {
         return AppError::Gh(crate::attachments::write_access_refusal(slug));
     }
-    if out.stderr.contains("unsupported authentication type") {
+    if out.stderr.contains(GH_AUTH_TYPE_MARKER) {
         return AppError::Gh(crate::attachments::GH_AUTH_TYPE_REFUSAL.to_string());
     }
-    if out
-        .stderr
-        .contains("not supported on GitHub Enterprise Server")
-    {
+    if out.stderr.contains(GH_GHES_MARKER) {
         return AppError::Gh(crate::attachments::GHES_UNKNOWN_HOST_REFUSAL.to_string());
     }
     let code = out.code;
     gh_output_ok(out)
         .err()
         .unwrap_or_else(|| AppError::Gh(format!("gh exited with code {code}")))
+}
+
+/// How an attached `gh issue edit` / `gh pr edit` run ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GhEditRun {
+    Saved,
+    /// Nothing to read as saved: a mapped refusal, or no URL on stdout.
+    Failed,
+    /// The first upload failed (or the report is unreadable), so gh dropped the typed
+    /// body; the title and base may still have been saved. Holds the named file.
+    BodyDropped(Option<String>),
+    /// A later upload failed: these names, in order, are missing from the saved body.
+    Partial(Vec<String>),
+}
+
+/// An edit prints the URL even after dropping the body, so the URL alone proves nothing
+/// about the body: only stderr naming a file after the first one reads as partial.
+/// Every ambiguous report is `BodyDropped`, which keeps the user's form untouched.
+pub(crate) fn classify_gh_edit_run(
+    code: i32,
+    stdout: &str,
+    stderr: &str,
+    names: &[String],
+) -> GhEditRun {
+    if code == 0 {
+        return GhEditRun::Saved;
+    }
+    if gh_refused(stderr) || last_url_line(stdout).is_empty() {
+        return GhEditRun::Failed;
+    }
+    match failed_upload_index(stderr, names) {
+        Some(0) => GhEditRun::BodyDropped(Some(names[0].clone())),
+        Some(k) => GhEditRun::Partial(names[k..].to_vec()),
+        None => GhEditRun::BodyDropped(None),
+    }
+}
+
+/// The error for an edit whose body gh dropped. The frontend keys on the first line's
+/// "other changes were saved" clause, so that clause lives only here.
+pub(crate) fn edit_body_dropped_text(name: Option<&str>, stderr: &str) -> String {
+    let what = name.unwrap_or("an image");
+    let mut text = format!(
+        "The description wasn't saved because {what} didn't upload. Your other changes were saved. Save again to retry."
+    );
+    let detail = stderr.trim();
+    if !detail.is_empty() {
+        text.push('\n');
+        text.push_str(detail);
+    }
+    text
+}
+
+/// The app's sentence only when the FIRST upload failed, since gh stops before the write
+/// only then; any other run, and any edit, gets `gh_attach_failure`'s error. The frontend
+/// keys on "Nothing was created because " / "Nothing was posted because "; keep in step.
+fn attached_run_failure(
+    out: GhOutput,
+    slug: &str,
+    names: &[String],
+    write: AttachedWrite,
+) -> AppError {
+    let verb = match write {
+        AttachedWrite::Create => "created",
+        AttachedWrite::Post => "posted",
+        AttachedWrite::Edit => return gh_attach_failure(out, slug),
+    };
+    if gh_refused(&out.stderr) || failed_upload_index(&out.stderr, names) != Some(0) {
+        return gh_attach_failure(out, slug);
+    }
+    let mut text = format!(
+        "Nothing was {verb} because {} didn't upload. Try again.",
+        names[0]
+    );
+    let detail = out.stderr.trim();
+    if !detail.is_empty() {
+        text.push('\n');
+        text.push_str(detail);
+    }
+    AppError::Gh(text)
+}
+
+/// The read-back body of a partial edit, only when the names it still references are
+/// exactly `failed`: a stale or contradicting read-back seeded into the form would
+/// replace the user's text.
+pub(crate) fn edit_partial_body(
+    readback: Option<&str>,
+    names: &[String],
+    failed: &[String],
+) -> Option<String> {
+    readback
+        .filter(|body| failed_from_body(body, names) == failed)
+        .map(str::to_string)
+}
+
+/// An attached edit's outcome. Posted files are released only on an Ok; every Err
+/// keeps them all for the next save.
+pub(crate) async fn settle_attached_edit(
+    repo_path: &str,
+    slug: &str,
+    out: GhOutput,
+    staged: &StagedRefs,
+    readback: Readback<'_>,
+) -> AppResult<EditOutcome> {
+    let run = classify_gh_edit_run(out.code, &out.stdout_lossy(), &out.stderr, &staged.names);
+    let settled = match &run {
+        GhEditRun::Saved => Ok(EditOutcome::default()),
+        GhEditRun::Failed => Err(gh_attach_failure(out, slug)),
+        GhEditRun::BodyDropped(name) => Err(AppError::Gh(edit_body_dropped_text(
+            name.as_deref(),
+            &out.stderr,
+        ))),
+        GhEditRun::Partial(failed) => {
+            let read = read_back_body(repo_path, slug, readback).await;
+            let body = edit_partial_body(read.as_deref(), &staged.names, failed);
+            Ok(EditOutcome {
+                failed_attachments: failed.clone(),
+                body,
+            })
+        }
+    };
+    release_settled_edit(staged, &run).await;
+    settled
+}
+
+/// Releases what a classified edit posted: every file on `Saved`, all but the failed
+/// ones on `Partial`, and nothing on the arms that settle as an Err.
+async fn release_settled_edit(staged: &StagedRefs, run: &GhEditRun) {
+    match run {
+        GhEditRun::Saved => crate::attachments::release_posted(staged, &[]).await,
+        GhEditRun::Partial(failed) => crate::attachments::release_posted(staged, failed).await,
+        GhEditRun::Failed | GhEditRun::BodyDropped(_) => {}
+    }
 }
 
 #[cfg(test)]
@@ -1329,7 +1508,14 @@ mod attach_tests {
             dir: base.path().join("gone"),
         };
         let repo = base.path().to_string_lossy().into_owned();
-        let r = run_gh_maybe_attached(&repo, "o/r", &["--version"], Some(&staged)).await;
+        let r = run_gh_maybe_attached(
+            &repo,
+            "o/r",
+            &["--version"],
+            Some(&staged),
+            AttachedWrite::Post,
+        )
+        .await;
         let m = match r {
             Err(AppError::InvalidArgument(m)) => m,
             Err(e) => panic!("expected the attach sentence, got {e:?}"),
@@ -1450,6 +1636,151 @@ mod attach_tests {
         assert!(matches!(e, AppError::Gh(ref m) if m == "gh exited with code 1"));
     }
 
+    fn gh_message(e: AppError) -> String {
+        match e {
+            AppError::Gh(m) => m,
+            other => panic!("expected a Gh error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_named_failed_upload_on_a_create_leads_with_the_app_sentence() {
+        let stderr = format!("failed to upload image-1.png: {}\r\n", lock(1));
+        let m = gh_message(attached_run_failure(
+            out(1, "", &stderr),
+            "o/r",
+            &names(),
+            AttachedWrite::Create,
+        ));
+        assert_eq!(
+            m,
+            format!(
+                "Nothing was created because image-1.png didn't upload. Try again.\n{}",
+                stderr.trim()
+            )
+        );
+    }
+
+    #[test]
+    fn a_named_failed_upload_on_a_post_says_posted() {
+        let stderr = "could not upload image-1.png: boom\n";
+        let m = gh_message(attached_run_failure(
+            out(1, "", stderr),
+            "o/r",
+            &names(),
+            AttachedWrite::Post,
+        ));
+        assert_eq!(
+            m,
+            "Nothing was posted because image-1.png didn't upload. Try again.\ncould not upload image-1.png: boom"
+        );
+    }
+
+    #[test]
+    fn a_later_failed_upload_keeps_the_gh_attach_failure_error() {
+        let stderr = format!("failed to upload image-2.png: {}\n", lock(2));
+        for write in [AttachedWrite::Create, AttachedWrite::Post] {
+            let got = gh_message(attached_run_failure(
+                out(1, "", &stderr),
+                "o/r",
+                &names(),
+                write,
+            ));
+            let want = gh_message(gh_attach_failure(out(1, "", &stderr), "o/r"));
+            assert_eq!(got, want, "{write:?}");
+            assert!(!got.starts_with("Nothing was"), "{got}");
+        }
+    }
+
+    /// `name` passes `AttachedWrite::{kind}` exactly `count` times and no other write
+    /// kind, so a swapped variant goes red.
+    fn assert_write_kind(source: &str, name: &str, kind: &str, count: usize) {
+        let body = crate::github::repo_meta::tests::wiring_body(source, name);
+        let all = body.matches("AttachedWrite::").count();
+        let own = body.matches(&format!("AttachedWrite::{kind}")).count();
+        assert_eq!((own, all), (count, count), "{name}: {body}");
+    }
+
+    #[test]
+    fn pr_create_passes_the_create_kind_on_both_arms() {
+        assert_write_kind(include_str!("pr.rs"), "gh_pr_create_core", "Create", 2);
+    }
+
+    #[test]
+    fn pr_comment_passes_the_post_kind() {
+        assert_write_kind(include_str!("pr.rs"), "gh_pr_comment", "Post", 1);
+    }
+
+    #[test]
+    fn pr_edit_passes_the_edit_kind() {
+        assert_write_kind(include_str!("pr.rs"), "gh_pr_edit_attached", "Edit", 1);
+    }
+
+    #[test]
+    fn issue_create_passes_the_create_kind() {
+        let source = include_str!("issue.rs");
+        assert_write_kind(source, "gh_issue_create_attached", "Create", 1);
+    }
+
+    #[test]
+    fn issue_comment_passes_the_post_kind() {
+        assert_write_kind(include_str!("issue.rs"), "gh_issue_comment", "Post", 1);
+    }
+
+    #[test]
+    fn issue_edit_passes_the_edit_kind() {
+        let source = include_str!("issue.rs");
+        assert_write_kind(source, "gh_issue_edit_attached", "Edit", 1);
+    }
+
+    #[test]
+    fn unnamed_or_refused_runs_keep_the_gh_attach_failure_error() {
+        let refused =
+            "attaching files requires write access to the repository\nfailed to upload image-1.png: x\n";
+        let inputs = [
+            (refused, "parent/repo"),
+            ("  some other error \n", "o/r"),
+            ("", "o/r"),
+            ("failed to upload elsewhere.png: x\n", "o/r"),
+        ];
+        for write in [AttachedWrite::Create, AttachedWrite::Post] {
+            for (stderr, slug) in inputs {
+                let got = gh_message(attached_run_failure(
+                    out(1, "", stderr),
+                    slug,
+                    &names(),
+                    write,
+                ));
+                let want = gh_message(gh_attach_failure(out(1, "", stderr), slug));
+                assert_eq!(got, want, "{write:?} {stderr:?}");
+            }
+        }
+        let got = gh_message(attached_run_failure(
+            out(1, "", refused),
+            "parent/repo",
+            &names(),
+            AttachedWrite::Create,
+        ));
+        assert_eq!(
+            got,
+            "GitHub CLI only attaches images where you have write access, and you don't on parent/repo."
+        );
+    }
+
+    #[test]
+    fn an_edit_keeps_gh_attach_failure_even_for_a_named_upload() {
+        let stderr = format!("failed to upload image-1.png: {}\n", lock(1));
+        let got = gh_message(attached_run_failure(
+            out(1, "", &stderr),
+            "o/r",
+            &names(),
+            AttachedWrite::Edit,
+        ));
+        let want = gh_message(gh_attach_failure(out(1, "", &stderr), "o/r"));
+        assert_eq!(got, want);
+        assert!(!got.starts_with("Nothing was"), "{got}");
+    }
+
     #[test]
     fn partial_failed_prefers_the_readback() {
         let ns = names();
@@ -1475,29 +1806,376 @@ mod attach_tests {
         );
     }
 
+    /// The created PR's follow-up result reaches `created_outcome` as it came back: no
+    /// `?`, wrapper or early return, so a failed follow-up is Ok with its cause. Read with
+    /// whitespace removed; the bare `followup` (not `followup_error`) may appear only at
+    /// its binding, its one assignment and as `created_outcome`'s last argument.
+    fn followup_reaches_the_outcome(body: &str) -> bool {
+        let flat: String = body.split_whitespace().collect();
+        let Some(at) = flat.find("followup=run_gh(") else {
+            return false;
+        };
+        let call = &flat[at..];
+        let call = &call[..call.find(';').unwrap_or(call.len())];
+        let outcome = "crate::attachments::created_outcome(PrRef{number,url},staged.as_ref(),\
+                       failed,followup";
+        let passed = [",)", ")"]
+            .iter()
+            .any(|end| flat.contains(&format!("{outcome}{end}")));
+        call.ends_with(".map(drop)")
+            && flat.contains("letmutfollowup=Ok(());")
+            && passed
+            && flat.matches("followup").count() - flat.matches("followup_").count() == 3
+    }
+
     #[test]
-    fn followup_failure_text_names_the_images_that_did_not_upload() {
-        let lead = "The pull request was created, but applying its labels/assignees failed: \
-                    boom. Add them from the PR.";
-        let at = " (https://github.com/o/r/pull/7)";
-        let lead_at = "The pull request was created (https://github.com/o/r/pull/7), but \
-                       applying its labels/assignees failed: boom. Add them from the PR.";
-        let one = vec!["a.png".to_string()];
-        let two = vec!["a.png".to_string(), "b.png".to_string()];
-        let one_tail = " This image didn't upload: a.png. Add it in a comment on the pull request.";
-        let two_tail = " These images didn't upload: a.png, b.png. Add them in a comment on the \
-                        pull request.";
-        let cases: [(&str, &[String], String); 6] = [
-            ("", &[], lead.to_string()),
-            (at, &[], lead_at.to_string()),
-            ("", &one, format!("{lead}{one_tail}")),
-            (at, &one, format!("{lead_at}{one_tail}")),
-            ("", &two, format!("{lead}{two_tail}")),
-            (at, &two, format!("{lead_at}{two_tail}")),
-        ];
-        for (at, failed, want) in cases {
-            assert_eq!(followup_failure_text(at, "boom", failed), want);
+    fn pr_create_followup_failure_is_a_created_outcome() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_create_core",
+        );
+        assert!(followup_reaches_the_outcome(&body), "{body}");
+        let outcome = "    Ok(crate::attachments::created_outcome(";
+        for mutated in [
+            body.replacen(".map(drop);", ".map(drop)\n            .map_err(wrap);", 1),
+            body.replacen("        followup,\n    )", "        followup?,\n    )", 1),
+            body.replacen(
+                outcome,
+                &format!("    if followup.is_err() {{\n        return Err(e);\n    }}\n{outcome}"),
+                1,
+            ),
+        ] {
+            assert_ne!(mutated, body);
+            assert!(!followup_reaches_the_outcome(&mutated));
         }
+    }
+
+    // Clean releases every posted file, partial keeps only the failed ones, and either
+    // Err arm keeps them all for the next save.
+    #[tokio::test]
+    async fn settled_edits_release_exactly_the_posted_files() {
+        use crate::attachments::tests::{entries, fill, private_root, SID};
+        let all = ["image-1.png", "image-2.png", "image-3.png"];
+        let failed = names()[1..].to_vec();
+        let rows = [
+            ("saved", GhEditRun::Saved, &[][..]),
+            ("partial", GhEditRun::Partial(failed), &all[1..]),
+            ("refused", GhEditRun::Failed, &all[..]),
+            ("body dropped", GhEditRun::BodyDropped(None), &all[..]),
+        ];
+        for (label, run, kept) in rows {
+            let root = private_root();
+            let dir = root.path().join(SID);
+            fill(&dir, 3);
+            let staged = StagedRefs {
+                names: names(),
+                dir: dir.clone(),
+            };
+            release_settled_edit(&staged, &run).await;
+            assert_eq!(entries(&dir), kept, "{label}");
+        }
+    }
+
+    /// gh's file-lock stderr detail for `image-N.png`, as measured on Windows.
+    fn lock(n: u8) -> String {
+        format!(
+            "open image-{n}.png: The process cannot access the file because it is being used by another process."
+        )
+    }
+
+    // An edit prints the URL even after dropping the body: only stderr decides.
+    #[test]
+    fn edit_runs_classify_by_stderr_never_by_the_url() {
+        use GhEditRun::{BodyDropped, Failed, Partial, Saved};
+        let ns = names();
+        let from = |k: usize| Partial(ns[k..].to_vec());
+        let first = || BodyDropped(Some("image-1.png".to_string()));
+        let url = "https://github.com/o/r/issues/91\n";
+        let warned = format!("Warning: x\r\n{url}");
+        let row3 = format!("failed to upload image-1.png: {}\r\n", lock(1));
+        let row4 = format!("failed to upload image-2.png: {}\r\n", lock(2));
+        let rows = [
+            (1, 0, url, "", Saved),
+            (2, 0, "", "", Saved),
+            (3, 1, url, row3.as_str(), first()),
+            (4, 1, url, row4.as_str(), from(1)),
+            (5, 1, url, "failed to upload image-3.png: x", from(2)),
+            (
+                6,
+                1,
+                url,
+                "could not upload C:\\t\\image-2.png: open C:\\t\\image-2.png: x",
+                from(1),
+            ),
+            (
+                7,
+                1,
+                url,
+                "could not upload C:\\t\\image-1.png: rate limited; wait and try again",
+                first(),
+            ),
+            (8, 1, url, "could not upload image-2.png\n", from(1)),
+            (9, 1, url, "failed to upload /tmp/x/image-2.png: x", from(1)),
+            (10, 1, url, "failed to upload other.png: nope", BodyDropped(None)),
+            (11, 1, url, "failed to upload IMAGE-2.PNG: x", BodyDropped(None)),
+            (12, 1, url, "something else broke", BodyDropped(None)),
+            (13, 1, url, "", BodyDropped(None)),
+            (14, 1, warned.as_str(), row4.as_str(), from(1)),
+            (15, 1, "", row3.as_str(), Failed),
+            (
+                16,
+                1,
+                "",
+                "failed to update https://github.com/o/r/issues/91: HTTP 422",
+                Failed,
+            ),
+            (
+                17,
+                1,
+                url,
+                "could not upload image-2.png: attaching files requires write access to the repository",
+                Failed,
+            ),
+            (18, 1, url, "unsupported authentication type", Failed),
+            (
+                19,
+                1,
+                url,
+                "attaching files is not supported on GitHub Enterprise Server",
+                Failed,
+            ),
+            // gh's bare form ends at its line, CRLF or not, whatever follows it.
+            (20, 1, url, "could not upload image-2.png\r\nnext: line\r\n", from(1)),
+        ];
+        for (row, code, stdout, stderr, want) in rows {
+            assert_eq!(
+                classify_gh_edit_run(code, stdout, stderr, &ns),
+                want,
+                "T1 row {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_dropped_text_leads_with_the_contract_sentence() {
+        let row3 = format!("failed to upload image-1.png: {}", lock(1));
+        assert_eq!(
+            edit_body_dropped_text(Some("image-1.png"), &format!("{row3}\n")),
+            format!(
+                "The description wasn't saved because image-1.png didn't upload. Your other changes were saved. Save again to retry.\n{row3}"
+            )
+        );
+        let generic = "The description wasn't saved because an image didn't upload. Your other changes were saved. Save again to retry.";
+        assert_eq!(
+            edit_body_dropped_text(None, "something else broke\n"),
+            format!("{generic}\nsomething else broke")
+        );
+        for blank in ["", " \r\n "] {
+            assert_eq!(edit_body_dropped_text(None, blank), generic);
+        }
+    }
+
+    #[test]
+    fn partial_body_is_kept_only_when_it_agrees_with_stderr() {
+        let ns = names();
+        let failed = &ns[1..];
+        let agreeing =
+            "![a](https://github.com/user-attachments/assets/x) ![b](image-2.png) ![c](image-3.png)";
+        assert_eq!(edit_partial_body(None, &ns, failed), None);
+        assert_eq!(
+            edit_partial_body(Some(agreeing), &ns, failed),
+            Some(agreeing.to_string())
+        );
+        for disagreeing in [
+            "the old description",
+            "![a](image-1.png) ![b](image-2.png) ![c](image-3.png)",
+            "![a](https://github.com/user-attachments/assets/x) ![b](image-2.png)",
+        ] {
+            assert_eq!(
+                edit_partial_body(Some(disagreeing), &ns, failed),
+                None,
+                "{disagreeing}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_upload_index_reads_the_path_up_to_its_line_end() {
+        let ns = names();
+        let row3 = format!("failed to upload image-1.png: {}\r\n", lock(1));
+        let row4 = format!("failed to upload image-2.png: {}\r\n", lock(2));
+        assert_eq!(failed_upload_index(&row3, &ns), Some(0));
+        assert_eq!(failed_upload_index(&row4, &ns), Some(1));
+        assert_eq!(failed_upload_index("something else broke", &ns), None);
+        // The comment and PR-create fallback reads gh's bare form, which has no colon.
+        for bare in [
+            "could not upload image-2.png\n",
+            "could not upload image-2.png\r\nnext: line\r\n",
+        ] {
+            assert_eq!(
+                failed_from_stderr(bare, &ns),
+                ["image-2.png", "image-3.png"],
+                "{bare:?}"
+            );
+            assert_eq!(
+                partial_failed(None, bare, &ns),
+                ["image-2.png", "image-3.png"],
+                "{bare:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_readback_endpoints() {
+        assert_eq!(
+            readback_endpoint("o/r", Readback::Issue(91)),
+            Some("repos/o/r/issues/91".to_string())
+        );
+        assert_eq!(readback_endpoint("o/r", Readback::Issue(0)), None);
+        assert_eq!(readback_endpoint("{owner}/x", Readback::Issue(91)), None);
+    }
+
+    /// An issue create classifies like the other creates: a printed URL means it exists.
+    #[test]
+    fn issue_create_runs_classify_and_scrape_like_other_creates() {
+        let url = "https://github.com/o/r/issues/91\n";
+        assert_eq!(classify_gh_attach_run(0, url), GhAttachRun::Posted);
+        assert_eq!(classify_gh_attach_run(1, url), GhAttachRun::Partial);
+        assert_eq!(classify_gh_attach_run(1, ""), GhAttachRun::Failed);
+        assert_eq!(
+            scrape_pr_ref(url),
+            (91, "https://github.com/o/r/issues/91".to_string())
+        );
+    }
+
+    #[test]
+    fn pr_edit_attach_argv_sends_the_trimmed_title_and_base_only_when_given() {
+        let ns = vec!["image-1.png".to_string()];
+        let body = "![x](image-1.png)";
+        let tail = ["--attach", "image-1.png"];
+        let lead = |title| {
+            [
+                "pr", "edit", "5", "--repo", "o/r", "--title", title, "--body", body,
+            ]
+        };
+        let args = pr_edit_attach_args("5", "o/r", "  Title \n", body, None, &ns);
+        assert_eq!(args, [&lead("Title")[..], &tail[..]].concat());
+        let args = pr_edit_attach_args("5", "o/r", "Title", body, Some("main"), &ns);
+        assert_eq!(
+            args,
+            [&lead("Title")[..], &["--base", "main"][..], &tail[..]].concat()
+        );
+        for flag in ["--assignee", "--milestone", "--type", "--add-label"] {
+            assert!(!args.contains(&flag), "{flag}");
+        }
+    }
+
+    /// The stack memo is evicted after the attempt and before its error propagates.
+    fn evicts_after_the_attempt(body: &str) -> bool {
+        let marker = "invalidate_stack_memo_after(&slug, &result);";
+        body.contains("let result = run_gh_maybe_attached(")
+            && body.find(marker).is_some_and(|at| {
+                body[..at].trim_end().ends_with(".await;")
+                    && body[at..].contains("let out = result?;")
+            })
+    }
+
+    #[test]
+    fn pr_edit_attached_evicts_the_stack_memo_after_the_attempt() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_edit_attached",
+        );
+        assert!(evicts_after_the_attempt(&body), "{body}");
+        let mutated = body.replacen("    invalidate_stack_memo_after(&slug, &result);\n", "", 1);
+        assert_ne!(mutated, body);
+        assert!(!evicts_after_the_attempt(&mutated));
+    }
+
+    /// The edit routes never reach the create-side read-back-first heuristics, which
+    /// would read a dropped body's old description as "everything posted".
+    fn avoids_create_heuristics(body: &str) -> bool {
+        !body.contains("attach_failed_after(") && !body.contains("partial_failed(")
+    }
+
+    #[test]
+    fn attached_pr_edits_settle_through_the_edit_classifier() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("pr.rs");
+        let settle = wiring_body(source, "settle_attached_edit");
+        assert!(settle.contains("classify_gh_edit_run("), "{settle}");
+        let edit = wiring_body(source, "gh_pr_edit_attached");
+        assert!(edit.contains("settle_attached_edit("), "{edit}");
+        for body in [settle, edit] {
+            assert!(avoids_create_heuristics(&body), "{body}");
+            let mutated = format!("{body}\n    attach_failed_after(x);");
+            assert!(!avoids_create_heuristics(&mutated));
+        }
+    }
+
+    const DROPPED_MARKER: &str = "Your other changes were saved";
+
+    /// Every `.rs` file under `dir`, as (path with `/` separators, text).
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                out.push((path.to_string_lossy().replace('\\', "/"), text));
+            }
+        }
+    }
+
+    /// The files holding the body-dropped marker anywhere but its one builder and this
+    /// test module; the frontend reads the marker as "the title and base were saved".
+    fn stray_marker_files(files: &[(String, String)]) -> Vec<String> {
+        use crate::github::repo_meta::tests::wiring_body;
+        let stray = |path: &str, text: &str| {
+            let text = text.replace("\r\n", "\n");
+            if !path.ends_with("github/pr.rs") {
+                return text.contains(DROPPED_MARKER);
+            }
+            let start = text.find("mod attach_tests {").unwrap_or(text.len());
+            let end = text[start..]
+                .find("\n}\n")
+                .map_or(text.len(), |e| start + e);
+            let outside = text[..start].matches(DROPPED_MARKER).count()
+                + text[end..].matches(DROPPED_MARKER).count();
+            let builder = wiring_body(&text, "edit_body_dropped_text");
+            outside != 1 || builder.matches(DROPPED_MARKER).count() != 1
+        };
+        files
+            .iter()
+            .filter(|(path, text)| stray(path, text))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_body_dropped_marker_lives_only_in_its_builder() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&root, &mut files);
+        assert!(files.iter().any(|(p, _)| p.ends_with("github/pr.rs")));
+        assert!(files.iter().any(|(p, _)| p.ends_with("forge/mod.rs")));
+        assert!(
+            stray_marker_files(&files).is_empty(),
+            "{:?}",
+            stray_marker_files(&files)
+        );
+        let copy = format!("const T: &str = \"{DROPPED_MARKER}\";\n");
+        let mut elsewhere = files.clone();
+        elsewhere.push(("src/x.rs".to_string(), copy.clone()));
+        assert_eq!(stray_marker_files(&elsewhere), ["src/x.rs"]);
+        let mut twice = files.clone();
+        let pr = twice
+            .iter_mut()
+            .find(|(p, _)| p.ends_with("github/pr.rs"))
+            .unwrap();
+        pr.1 = format!("{copy}{}", pr.1);
+        assert_eq!(stray_marker_files(&twice).len(), 1);
     }
 }
 
@@ -4358,10 +5036,11 @@ fn drop_superseded_relics(checks: Vec<RawCheck>, runs: &[CheckRunEvent]) -> Vec<
         .collect()
 }
 
-// NOTE: `gh pr edit` is unusable on older gh versions (its GraphQL query
-// still selects the sunset Projects-classic `projectCards` field, which the
-// API now rejects outright), so PR edits go through `gh api` instead: REST
-// for title/body, GraphQL mutations for labels.
+// NOTE: an edit without images goes through `gh api` (REST for title/body/base,
+// GraphQL mutations for labels): `gh pr edit` on older gh selects the sunset
+// Projects-classic `projectCards` field, which the API rejects. The image route,
+// `gh pr edit --attach` (`gh_pr_edit_attached`), runs only behind the gh >= 2.99.0
+// attach gate (`GH_ATTACH_FLOOR`).
 
 /// The PATCH argv for a PR edit. `base` is appended ONLY when retargeting: an
 /// absent field leaves the PR's base branch untouched.
@@ -4460,6 +5139,69 @@ pub async fn gh_pr_edit(
     invalidate_stack_memo_after(&slug, &result);
     result?;
     Ok(())
+}
+
+/// `gh pr edit` argv for an edit carrying images. The title is sent trimmed, as the
+/// REST route sends it; `--base` only when retargeting.
+pub(crate) fn pr_edit_attach_args<'a>(
+    n: &'a str,
+    slug: &'a str,
+    title: &'a str,
+    body: &'a str,
+    base: Option<&'a str>,
+    names: &'a [String],
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "pr",
+        "edit",
+        n,
+        "--repo",
+        slug,
+        "--title",
+        title.trim(),
+        "--body",
+        body,
+    ];
+    if let Some(base) = base {
+        args.extend(["--base", base]);
+    }
+    args.extend(attach_tail(names));
+    args
+}
+
+/// Updates a PR's title, body and (when given) base with `gh pr edit --attach`, run in
+/// the staging folder. gh drops the typed body when the first upload fails while still
+/// saving the title and base, so the outcome comes from [`settle_attached_edit`].
+pub async fn gh_pr_edit_attached(
+    repo_path: String,
+    number: u64,
+    title: String,
+    body: String,
+    lens: Option<String>,
+    base: Option<String>,
+    staged: StagedRefs,
+) -> AppResult<EditOutcome> {
+    if title.trim().is_empty() {
+        return Err(AppError::InvalidArgument("a PR title is required".into()));
+    }
+    // The base reaches argv on this route, where REST sends it as a field.
+    if let Some(base) = &base {
+        validate_branch(base)?;
+    }
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let n = number.to_string();
+    let args = pr_edit_attach_args(&n, &slug, &title, &body, base.as_deref(), &staged.names);
+    let result = run_gh_maybe_attached(
+        &repo_path,
+        &slug,
+        &args,
+        Some(&staged),
+        AttachedWrite::Edit,
+    )
+    .await;
+    invalidate_stack_memo_after(&slug, &result);
+    let out = result?;
+    settle_attached_edit(&repo_path, &slug, out, &staged, Readback::Pull(number)).await
 }
 
 #[derive(Serialize, Deserialize)]
@@ -8599,7 +9341,14 @@ pub(crate) async fn gh_pr_create_core(
         if let Some(s) = &staged {
             args.extend(attach_tail(&s.names));
         }
-        let result = run_gh_maybe_attached(&repo_path, &parent_slug, &args, staged.as_ref()).await;
+        let result = run_gh_maybe_attached(
+            &repo_path,
+            &parent_slug,
+            &args,
+            staged.as_ref(),
+            AttachedWrite::Create,
+        )
+        .await;
         invalidate_repo_meta_after(&parent_slug, &result);
         let out = result?;
         let (number, url) = scrape_pr_ref(&out.stdout_lossy());
@@ -8615,6 +9364,7 @@ pub(crate) async fn gh_pr_create_core(
         return Ok(PrCreateOutcome {
             pr: PrRef { number, url },
             failed_attachments: failed,
+            followup_error: None,
         });
     }
 
@@ -8658,7 +9408,14 @@ pub(crate) async fn gh_pr_create_core(
     // --label/--assignee`: gh 2.94 records each value TWICE on the activity timeline
     // when passed at create time (create mutation + follow-up re-apply), so the feed
     // shows doubled "added the X label" rows. `gh pr edit --add-*` applies once.
-    let result = run_gh_maybe_attached(&repo_path, &origin_slug, &args, staged.as_ref()).await;
+    let result = run_gh_maybe_attached(
+        &repo_path,
+        &origin_slug,
+        &args,
+        staged.as_ref(),
+        AttachedWrite::Create,
+    )
+    .await;
     invalidate_repo_meta_after(&origin_slug, &result);
     let out = result?;
 
@@ -8674,7 +9431,7 @@ pub(crate) async fn gh_pr_create_core(
     // Address the PR by NUMBER when the URL scrape yielded one (unambiguous, and the
     // only form `gh pr edit` accepts for a cross-fork `OWNER:BRANCH` head), else by
     // head BRANCH — so this never depends on the scrape succeeding. An unknown value
-    // fails this edit AFTER the PR exists (surfaced below, not silent).
+    // fails this edit AFTER the PR exists; the outcome's `followup_error` reports it.
     if !labels.is_empty() || !assignees.is_empty() {
         let pr_id = if number != 0 {
             number.to_string()
@@ -8690,44 +9447,18 @@ pub(crate) async fn gh_pr_create_core(
             edit_args.push("--add-assignee");
             edit_args.push(assignee);
         }
-        // The PR already exists — disclose the partial state (with its location when
-        // known) so the caller doesn't read this as "create failed".
-        let at = if url.is_empty() {
-            String::new()
-        } else {
-            format!(" ({url})")
-        };
         followup = run_gh(Some(&repo_path), &edit_args, GH_NETWORK_TIMEOUT)
             .await
-            .map(drop)
-            .map_err(|e| AppError::Gh(followup_failure_text(&at, &e.to_string(), &failed)));
+            .map(drop);
     }
-    // The follow-up's Err keeps every staged file; only its Ok releases the posted ones.
-    let failed = crate::attachments::finish_attached(followup, staged.as_ref(), failed).await?;
-
-    Ok(PrCreateOutcome {
-        pr: PrRef { number, url },
-        failed_attachments: failed,
-    })
-}
-
-/// The labels/assignees follow-up's error. It also names the images that didn't upload,
-/// since the Err replaces the outcome that would have listed them.
-fn followup_failure_text(at: &str, cause: &str, failed: &[String]) -> String {
-    let mut text = format!(
-        "The pull request was created{at}, but applying its labels/assignees failed: {cause}. Add them from the PR."
-    );
-    match failed {
-        [] => {}
-        [one] => text.push_str(&format!(
-            " This image didn't upload: {one}. Add it in a comment on the pull request."
-        )),
-        many => text.push_str(&format!(
-            " These images didn't upload: {}. Add them in a comment on the pull request.",
-            many.join(", ")
-        )),
-    }
-    text
+    // The PR exists, so a failed follow-up is the outcome's cause text, never an Err.
+    Ok(crate::attachments::created_outcome(
+        PrRef { number, url },
+        staged.as_ref(),
+        failed,
+        followup,
+    )
+    .await)
 }
 
 /// Pre-mutation guard for the upstream-lens PR create: the v1 cross-repo flow has no
@@ -8743,9 +9474,9 @@ fn reject_upstream_create_metadata(labels: &[String], assignees: &[String]) -> A
     Ok(())
 }
 
-/// Scrape the new PR's number + URL from `gh pr create` stdout (gh prints the URL
-/// as its last line). Shared by the origin and upstream create paths.
-fn scrape_pr_ref(stdout: &str) -> (u64, String) {
+/// Scrape the new item's number + URL from `gh pr create` / `gh issue create` stdout
+/// (gh prints the URL as its last line); `(0, url)` when the number can't be read.
+pub(crate) fn scrape_pr_ref(stdout: &str) -> (u64, String) {
     let url = stdout
         .lines()
         .rev()

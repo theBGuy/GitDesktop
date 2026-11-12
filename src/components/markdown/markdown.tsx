@@ -37,6 +37,7 @@ import type {
   HostedImageUnavailable,
 } from "@/lib/hosted-images/api";
 import {
+  holdHostedRead,
   hostedImageOptions,
   reconnectStore,
 } from "@/lib/hosted-images/queries";
@@ -296,11 +297,12 @@ function lightboxImagesIn(root: Element): HTMLImageElement[] {
  *  cascade layer and at a higher specificity than its `[&_img]:` block. */
 function markLightboxImage(img: HTMLImageElement, owns: Owns) {
   if (!isLightboxImage(img)) return;
-  // The viewer's own caption fallback, so the two name an image identically.
-  // It carries its own http(s) guard, so a data: URI resolves to "" here; a
-  // repository image is named from the relative URL it was loaded for.
+  // The viewer's own caption fallback over the same shown candidate, so the two
+  // name an image identically. It carries its own http(s) guard, so a data: URI
+  // resolves to "" here; a repository image is named from the value it loaded.
+  const shown = shownCandidate(img);
   const name =
-    img.alt || fileNameFromSrc(img.src) || repoImageFileName(img, owns);
+    img.alt || fileNameFromSrc(shown.url) || shownFileName(shown, owns);
   img.tabIndex = 0;
   img.setAttribute("role", "button");
   img.setAttribute("aria-label", name ? `View image: ${name}` : "View image");
@@ -357,39 +359,84 @@ function rescueFocus(home: HTMLElement) {
   else home.removeAttribute("tabindex");
 }
 
-/** The file name a repository-loaded image shows, or null for any other: the
- *  relative candidate a fallback image took from its picture's source, else the
- *  relative src it was loaded for; a staged image (a blob: URL) by its staged
- *  name. An image showing an absolute src names itself. */
-function repoImageFileName(img: HTMLImageElement, owns: Owns): string | null {
-  // A hosted image is named by its alt or "Image", never its asset uuid.
-  if (imageWebUrl(img, owns) !== null) return null;
-  const src = img.getAttribute("src");
-  const raw = img.getAttribute(SHOWN_SRC_ATTR) ?? img.dataset.repoSrc;
-  if (src?.startsWith("blob:") && raw !== undefined) return raw;
-  if (!src?.startsWith("data:")) return null;
-  return raw === undefined ? null : captionName("", raw);
+/** The candidate an image shows, and the owned value it was loaded for: null
+ *  for an absolute candidate, which names itself. */
+interface ShownCandidate {
+  url: string;
+  raw: string | null;
 }
 
-/** A hosted image's web URL (hostedWebUrl), read off the attributes the loader
- *  keeps on it, among the values the render `owns`. */
-function imageWebUrl(img: HTMLImageElement, owns: Owns): string | null {
-  return hostedWebUrl(
-    img.getAttribute(SHOWN_SRC_ATTR),
-    img.dataset.repoSrc,
-    img.dataset.repoSrcset,
-    owns,
-  );
+/** Each srcset the loader wrote, as the owned value behind every candidate in
+ *  order (null where the candidate was kept as written). */
+const writtenRaws = new WeakMap<Element, (string | null)[]>();
+
+/**
+ * The candidate `img` shows: the browser's pick (`currentSrc`), or while that
+ * is "" its src, then its own first srcset candidate. The owned value comes from
+ * the src it matches, else from the matching candidate of its own srcset or its
+ * picture's sources, as the loader recorded it. currentSrc is serialized, so a
+ * candidate also matches by its resolved href.
+ */
+function shownCandidate(img: HTMLImageElement): ShownCandidate {
+  const ownSrcset = img.getAttribute("srcset");
+  const url =
+    img.currentSrc ||
+    img.src ||
+    (ownSrcset === null ? "" : (parseSrcset(ownSrcset)[0]?.url ?? ""));
+  const matches = (candidate: string) => {
+    if (candidate === url) return true;
+    try {
+      return new URL(candidate, img.baseURI).href === url;
+    } catch {
+      return false;
+    }
+  };
+  const src = img.getAttribute("src");
+  if (src !== null && matches(src)) {
+    const fallback = img.getAttribute(SHOWN_SRC_ATTR);
+    if (fallback !== null) return { url, raw: fallback };
+    // The value names the src only once it loaded as it; an http(s) src is an
+    // absolute candidate the loader fell back to.
+    const loaded = src.startsWith("data:") || src.startsWith("blob:");
+    return { url, raw: loaded ? (img.dataset.repoSrc ?? null) : null };
+  }
+  const sets = [
+    img,
+    ...(img.closest("picture")?.querySelectorAll("source") ?? []),
+  ];
+  for (const el of sets) {
+    const srcset = el.getAttribute("srcset");
+    if (srcset === null) continue;
+    const at = parseSrcset(srcset).findIndex((c) => matches(c.url));
+    if (at !== -1) return { url, raw: writtenRaws.get(el)?.[at] ?? null };
+  }
+  return { url, raw: null };
+}
+
+/** The file name a shown repository or staged candidate goes by, or null: a
+ *  repository value behind its data: URL by its last segment, a staged one
+ *  behind its blob: URL by its staged name. A hosted value is named by alt or
+ *  "Image", never its asset uuid, and an absolute candidate names itself. */
+function shownFileName(shown: ShownCandidate, owns: Owns): string | null {
+  const { url, raw } = shown;
+  if (raw === null || hostedWebUrl(raw, undefined, undefined, owns) !== null)
+    return null;
+  if (url.startsWith("blob:")) return raw;
+  return url.startsWith("data:") ? captionName("", raw) : null;
 }
 
 function toLightboxImage(img: HTMLImageElement, owns: Owns): LightboxImage {
+  const shown = shownCandidate(img);
   // `label` stays unset so the viewer falls back to alt, then the filename,
-  // except for a repository image, whose data: URL names no file.
-  const label = img.alt ? null : repoImageFileName(img, owns);
+  // except for a repository or staged image, whose URL names no file.
+  const label = img.alt ? null : shownFileName(shown, owns);
   // A hosted image shows as a data: URL, so the viewer opens its web URL.
-  const webUrl = imageWebUrl(img, owns);
+  const webUrl =
+    shown.raw === null
+      ? null
+      : hostedWebUrl(shown.raw, undefined, undefined, owns);
   return {
-    src: img.src,
+    src: shown.url,
     alt: img.alt,
     ...(label === null ? {} : { label }),
     ...(webUrl === null ? {} : { webUrl }),
@@ -576,10 +623,24 @@ function imageCaption(
   return caption;
 }
 
-/** `value` as the element's srcset, or none at all when every candidate went. */
-function writeSrcset(el: Element, value: string) {
-  if (value === "") el.removeAttribute("srcset");
-  else el.setAttribute("srcset", value);
+/** A srcset to write, with the owned value behind each candidate (writtenRaws). */
+interface KeptSrcset {
+  srcset: string;
+  raws: (string | null)[];
+}
+
+const NOTHING_KEPT: KeptSrcset = { srcset: "", raws: [] };
+
+/** `kept` as the element's srcset, or none at all when every candidate went;
+ *  the record of its owned values goes and comes with it. */
+function writeSrcset(el: Element, kept: KeptSrcset) {
+  if (kept.srcset === "") {
+    el.removeAttribute("srcset");
+    writtenRaws.delete(el);
+  } else {
+    el.setAttribute("srcset", kept.srcset);
+    writtenRaws.set(el, kept.raws);
+  }
 }
 
 /**
@@ -613,18 +674,23 @@ function applyImageUnit(
     unit.root.setAttribute(RUN_ATTR, runKey);
     return;
   }
-  const keep = (raw: string | undefined) => {
+  const keep = (raw: string | undefined): KeptSrcset | null => {
     if (raw === undefined) return null;
     const kept: SrcsetCandidate[] = [];
+    const raws: (string | null)[] = [];
     for (const c of parseSrcset(raw)) {
-      if (!owns(c.url)) kept.push(c);
-      else {
+      if (!owns(c.url)) {
+        kept.push(c);
+        raws.push(null);
+      } else {
         const outcome = outcomeOf(c.url);
-        if (outcome && "url" in outcome)
+        if (outcome && "url" in outcome) {
           kept.push({ url: outcome.url, descriptor: c.descriptor });
+          raws.push(c.url);
+        }
       }
     }
-    return serializeSrcset(kept);
+    return { srcset: serializeSrcset(kept), raws };
   };
   // The root goes back in place of a caption only once it is fully written;
   // focus on the caption's link lands on the body, never `<body>`.
@@ -638,7 +704,7 @@ function applyImageUnit(
     unit.root.setAttribute(RUN_ATTR, runKey);
   };
   for (const source of unit.sources)
-    writeSrcset(source, keep(source.dataset.repoSrcset) ?? "");
+    writeSrcset(source, keep(source.dataset.repoSrcset) ?? NOTHING_KEPT);
   const { img } = unit;
   if (!img) {
     place();
@@ -1169,6 +1235,9 @@ export function Markdown({
       source === null || stagedText === null
         ? null
         : { source, text: stagedText };
+    // Every hosted read this run started and has not settled: the cleanup lets
+    // them go, which withdraws any read no other walk still holds.
+    const holds = new Set<() => void>();
     const hosted =
       hostedRepo === undefined || hostedHost === undefined
         ? null
@@ -1181,23 +1250,37 @@ export function Markdown({
                 url,
                 sourceAt,
               );
-              // Bytes stand (assets are immutable), and so does a verdict asked
-              // under this walk's own source key, joined or cached; one asked
-              // under another (an older sign-in, another repo, before a
-              // reconnect) is asked once more, fresh.
-              const result = await queryClient.fetchQuery(options);
-              if (
-                cancelled ||
-                result.bytes !== null ||
-                result.askedUnder === webSource
-              )
-                return result;
-              return queryClient.fetchQuery({ ...options, staleTime: 0 });
+              // Held from before the first fetch through the re-ask, so another
+              // walk letting the key go never cancels a read this one awaits.
+              const release = holdHostedRead(queryClient, hostedHost, url);
+              holds.add(release);
+              try {
+                // Bytes stand (assets are immutable), and so does a verdict
+                // asked under this walk's own source key, joined or cached; one
+                // asked under another (an older sign-in, another repo, before a
+                // reconnect) is asked once more, fresh.
+                const result = await queryClient.fetchQuery(options);
+                if (
+                  cancelled ||
+                  result.bytes !== null ||
+                  result.askedUnder === webSource
+                )
+                  return result;
+                return await queryClient.fetchQuery({
+                  ...options,
+                  staleTime: 0,
+                });
+              } finally {
+                holds.delete(release);
+                release();
+              }
             },
           };
     loadRepoImages(root, repo, runKey, budget, () => cancelled, staged, hosted);
     return () => {
       cancelled = true;
+      for (const release of holds) release();
+      holds.clear();
     };
   }, [
     htmlProp,

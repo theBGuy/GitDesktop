@@ -1779,21 +1779,33 @@ surface's own actions stay on the strip and a saved draft shows its first line t
 the choice is remembered across every conversation surface and across restarts, and the
 command palette's **Collapse or expand the comment box** toggles it too.
 
-The comment box of a **GitHub** or **GitLab** pull request or merge request takes images.
-Paste one from the clipboard, or pick files with **Attach image**, the image button at the
-end of the formatting toolbar (the command palette's **Attach image** opens the same
-picker). PNG, JPEG, GIF and WebP work, up to 10 MB and 40 megapixels each, 10 per draft.
+On **GitHub** and **GitLab**, images go in the comment box of a pull request, merge
+request or issue, in the description of a new pull request or issue (a sub-issue created
+from an issue's relations included), and in the **Edit** dialog for an issue's, pull
+request's or merge request's title and description. Paste one from the clipboard, or pick
+files with **Attach image**, the image button at the end of the formatting toolbar (the
+command palette's **Attach image** opens the same picker). PNG, JPEG, GIF and WebP work,
+up to 10 MB and 40 megapixels each, 10 per draft; only images the text still references
+count toward the 10, so ones whose reference you deleted make room when you attach more.
 Each image adds a Markdown reference at the cursor (\`![image](image-1.png)\` for a paste;
 a picked file's name, minus its extension, becomes the alt text), so you edit the alt text
 in the text itself. A chip under the editor shows each image's thumbnail, name and size:
 click the thumbnail for the full-size image, or the remove button to take the image and its
 reference out (deleting the reference removes the chip too). **Preview** shows the images
-in place, and nothing uploads until you post. Attached images stay with the draft when you
-fold the box or switch away and come back, and go when it's posted or cleared. If GitHub
-takes the comment but an image fails to upload, the comment posts and the failed images
-stay attached for a follow-up comment. Images need GitHub CLI 2.99 or newer on GitHub.com
-or GitHub Enterprise Cloud (not GitHub Enterprise Server) with write access to the
-repository, or GitLab CLI 1.91 or newer; Bitbucket has no image attachments. With some
+in place, along with GitHub-hosted images already in the text (private repositories
+included), and nothing uploads until you post, create or save. Attached images stay with
+the draft when you fold the box or switch away and come back, and go when it's posted or
+cleared. If GitHub takes the comment but an image fails to upload, the comment posts and
+the failed images stay attached for a follow-up comment. A new issue or pull request is
+still created when a later image fails, and a warning says to edit the description to add
+it again; if the first image fails, nothing is created and the dialog keeps your text and
+images. In the **Edit** dialog, the description saves with the images that uploaded and the
+dialog stays open with the failed ones still attached, so pressing **Save** again adds
+them; if the first image fails, the description isn't saved (your other changes, such as
+the title, are) and an error says so. On GitLab an upload is all or nothing: if an image
+isn't accepted, nothing is posted or saved. Images need GitHub CLI 2.99 or newer on
+GitHub.com or GitHub Enterprise Cloud (not GitHub Enterprise Server) with write access to
+the repository, or GitLab CLI 1.91 or newer; Bitbucket has no image attachments. With some
 GitHub CLI sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so
 when you post. Where they aren't available, the button stays visible, disabled, and says
 why. An image file dropped on the window isn't attached; the app reminds you to paste it or
@@ -2129,7 +2141,8 @@ the list. Reopening the dialog while it runs keeps everything you had
 typed, and a second create for the same branch is refused while the first is still in
 flight.
 Press {{key:mod+enter}} from any field to submit either the
-**Create** or the **Edit** dialog. The **Edit** dialog also carries a **base branch**
+**Create** or the **Edit** dialog. On GitHub and GitLab, both dialogs' descriptions take
+images the same way the comment box does. The **Edit** dialog also carries a **base branch**
 select, so you can **retarget** a pull request at a different branch without recreating it —
 on GitHub, GitLab, and Bitbucket alike. On a **stacked GitHub** pull request that select is
 disabled, since the stack decides what each member targets: dissolve the stack first (see
@@ -2457,7 +2470,8 @@ past the side rail, and the command palette's **Focus the comment box** jumps st
 to it — no default shortcut, so give it one in **Settings → Keyboard**. It folds to a
 one-line strip and completes **@** mentions and **#** references the same way it does on
 the Pull Requests tab. On a GitHub or GitLab issue it also takes pasted or attached
-images, just as a pull request's comment box does. On a long thread (local and Jira
+images, just as a pull request's comment box does, and so do the description fields of
+the **New issue** and **Edit** dialogs. On a long thread (local and Jira
 issues included), the arrow buttons by the scrollbar jump to its top or bottom, and the
 command palette's **Jump to the top of the thread** and **Jump to the bottom of the
 thread** do the same.

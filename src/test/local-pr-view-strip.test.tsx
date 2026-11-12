@@ -9,6 +9,7 @@ import {
 } from "@/lib/branch-rules/store";
 import { EMPTY_BRANCH_RULES } from "@/lib/branch-rules/types";
 import {
+  forgeStatus,
   gitCompareBranches,
   gitConflictPreview,
   gitDefaultBranch,
@@ -25,6 +26,7 @@ import {
 import type {
   BranchComparison,
   CommitSummary,
+  ForgeStatus,
   MergePreview,
   RepoStatus,
 } from "@/lib/git/types";
@@ -71,6 +73,9 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitBranches: vi.fn(() => new Promise(() => undefined)),
   // The forge probe never answers: a local PR needs none of it.
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
+  // The Edit dialog's issue chips read these once a tracker is ready; never answered.
+  forgeIssueList: vi.fn(() => new Promise(() => undefined)),
+  forgeIssueView: vi.fn(() => new Promise(() => undefined)),
 }));
 // Plugin-store reads bypass the rejecting transport, so each is mocked here.
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
@@ -868,5 +873,39 @@ describe("LocalPrView merge strip", () => {
     expect(strip()?.textContent ?? "").not.toMatch(/will conflict|clash.ts/);
     await findStrip("No conflicts with main.");
     expect(strip()).not.toHaveTextContent("clash.ts");
+  });
+});
+
+describe("LocalPrView Edit dialog", () => {
+  it("says the linked-issue lines are added when you save", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue({
+      provider: "github",
+      installed: true,
+      authenticated: true,
+      repo: "owner/repo",
+      host: "github.com",
+      login: "me",
+      capabilities: {},
+      implemented: { issues: true },
+    } as unknown as ForgeStatus);
+    try {
+      records = [makePr({ body: "Fix it\n\nCloses #3" })];
+      const user = userEvent.setup();
+      renderView();
+      await screen.findByRole("heading", { name: /PR A/ });
+      await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+      await settle();
+      await user.click(screen.getByRole("button", { name: "Edit" }));
+      const dialog = await screen.findByRole("dialog");
+      expect(
+        await within(dialog).findByText(
+          "Added to the description when you save.",
+        ),
+      ).toBeInTheDocument();
+    } finally {
+      vi.mocked(forgeStatus).mockImplementation(
+        () => new Promise(() => undefined),
+      );
+    }
   });
 });

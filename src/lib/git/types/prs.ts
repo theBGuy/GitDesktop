@@ -116,9 +116,25 @@ export interface GitLabMrMergeState {
 export interface PrRef {
   number: number;
   url: string;
-  /** Staged images a create posted the PR without; only `forge_pr_create`
-   *  sends it, so read it through `failedAttachmentsOf`. */
+  /** Staged images a create posted the item without; only the issue and PR
+   *  creates send it, so read it through `failedAttachmentsOf`. */
   failedAttachments?: string[];
+}
+
+/** A create's outcome (`forge_issue_create`, `forge_pr_create`). `number` is 0
+ *  when the item exists but its number couldn't be read. `followupError` is the
+ *  forge's reason when the item exists but its metadata step failed; read it
+ *  through `followupErrorOf`, since older backends and mocks omit it. */
+export interface CreatedRef extends PrRef {
+  followupError?: string | null;
+}
+
+/** An edit's outcome (`forge_issue_edit`, `forge_pr_edit`; older backends
+ *  answer nothing). `body` is the saved description, set only on a partial
+ *  save; read both through `failedAttachmentsOf` / `savedBodyOf`. */
+export interface EditOutcome {
+  failedAttachments?: string[];
+  body?: string | null;
 }
 
 // Defined beside the import-free reference rules so their node tests share it.

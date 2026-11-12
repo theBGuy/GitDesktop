@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { createdNumberOf } from "@/lib/attachments/references";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
 import {
   filterPlaceholderRows,
@@ -17,6 +18,7 @@ import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
 import type {
+  AttachmentRefs,
   ForgeUserList,
   ForgeUserRef,
   GitLabTimeStats,
@@ -352,6 +354,7 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
       assignees: string[];
       milestone: number | null;
       type: string | null;
+      attachments?: AttachmentRefs;
     }) =>
       api.forgeIssueCreate(
         repo,
@@ -362,6 +365,7 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
         args.milestone,
         args.type,
         lens,
+        args.attachments,
       ),
     {
       // Both the create call and the insert below close over `repo`/`lens`, and the
@@ -372,10 +376,14 @@ export function useCreateIssue(repo: string, lens: RemoteLens) {
       // Runs before the invalidation fires, so the insert is what paints and the
       // refetch reconciles it. `author` stays null rather than guessing a login —
       // the row type allows it and every list consumer reads it optionally.
+      // A number that couldn't be read names no row: the invalidation still
+      // brings the created issue in.
       onSuccess: (ref, args) => {
+        const number = createdNumberOf(ref);
+        if (number === null) return;
         const now = new Date().toISOString();
         insertCreatedIssue(queryClient, repo, lens, {
-          number: ref.number,
+          number,
           url: ref.url,
           title: args.title,
           state: "OPEN",
@@ -1109,8 +1117,20 @@ export function useEditIssue(repo: string, lens: RemoteLens) {
   return useIssueLifecycleMutation(
     repo,
     lens,
-    (args: { number: number; title: string; body: string }) =>
-      api.forgeIssueEdit(repo, args.number, args.title, args.body, lens),
+    (args: {
+      number: number;
+      title: string;
+      body: string;
+      attachments?: AttachmentRefs;
+    }) =>
+      api.forgeIssueEdit(
+        repo,
+        args.number,
+        args.title,
+        args.body,
+        lens,
+        args.attachments,
+      ),
     (args) => args.number,
     // The title is the card.
     true,

@@ -72,14 +72,27 @@ pub struct CommentOutcome {
     pub failed_attachments: Vec<String>,
 }
 
-/// `forge_pr_create`'s wire shape: `{number, url, failedAttachments}`. `PrRef` stays
-/// unchanged because the issue and discussion creates serialize it too.
+/// The wire shape `forge_pr_create` and `forge_issue_create` return: `{number, url,
+/// failedAttachments, followupError}`, every key always present. `followupError` is the
+/// cause text when the item exists but its follow-up metadata step failed. `PrRef` stays unchanged because the discussion
+/// create serializes it too.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCreateOutcome {
     #[serde(flatten)]
     pub pr: PrRef,
     pub failed_attachments: Vec<String>,
+    pub followup_error: Option<String>,
+}
+
+/// `forge_issue_edit` / `forge_pr_edit`'s wire shape: `{failedAttachments, body}`, both
+/// keys always present. `body` is the stored description, set only on a partial save
+/// whose read-back agrees with gh's stderr about which images failed.
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EditOutcome {
+    pub failed_attachments: Vec<String>,
+    pub body: Option<String>,
 }
 
 /// Attachments that passed every structural check; only [`post_checks`] builds one,
@@ -750,18 +763,22 @@ pub(crate) async fn release_posted(staged: &StagedRefs, failed: &[String]) {
     let _ = tauri::async_runtime::spawn_blocking(move || release_in(&dir, &names, &failed)).await;
 }
 
-/// The origin-lens PR create's only release: after the labels/assignees follow-up, so
-/// that follow-up's Err keeps every staged file.
-pub(crate) async fn finish_attached(
-    followup: AppResult<()>,
+/// A created item's outcome. Releases the posted files whatever the follow-up did: the
+/// item exists, so a failed follow-up is reported in `followup_error`, never as an Err.
+pub(crate) async fn created_outcome(
+    pr: PrRef,
     staged: Option<&StagedRefs>,
     failed: Vec<String>,
-) -> AppResult<Vec<String>> {
-    followup?;
+    followup: AppResult<()>,
+) -> PrCreateOutcome {
     if let Some(staged) = staged {
         release_posted(staged, &failed).await;
     }
-    Ok(failed)
+    PrCreateOutcome {
+        pr,
+        failed_attachments: failed,
+        followup_error: followup.err().map(|e| e.to_string()),
+    }
 }
 
 /// The newest mtime among a folder and its direct entries: an NTFS directory mtime
@@ -875,7 +892,7 @@ pub async fn attachment_discard(session: String, names: Option<Vec<String>>) -> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::image_sniff::{gif_fixture, jpeg_fixture, png_fixture, webp_lossy_fixture};
     use base64::Engine;
@@ -905,9 +922,9 @@ mod tests {
         }
     }
 
-    const SID: &str = "0123456789abcdef0123456789abcdef";
+    pub(crate) const SID: &str = "0123456789abcdef0123456789abcdef";
 
-    fn entries(dir: &Path) -> Vec<String> {
+    pub(crate) fn entries(dir: &Path) -> Vec<String> {
         let mut v: Vec<String> = fs::read_dir(dir)
             .map(|es| {
                 es.flatten()
@@ -928,7 +945,7 @@ mod tests {
 
     /// A temp root as `prepare_root` would leave it: on unix a plain temp dir is created
     /// 0o755, which every staging check refuses as not private.
-    fn private_root() -> tempfile::TempDir {
+    pub(crate) fn private_root() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
@@ -939,11 +956,31 @@ mod tests {
         root
     }
 
-    fn fill(dir: &Path, n: usize) {
+    pub(crate) fn fill(dir: &Path, n: usize) {
         fs::create_dir_all(dir).unwrap();
         for i in 1..=n {
             fs::write(dir.join(format!("image-{i}.png")), b"x").unwrap();
         }
+    }
+
+    #[test]
+    fn edit_outcome_wire_shape_is_exact_camel_case() {
+        let e = serde_json::to_value(EditOutcome::default()).unwrap();
+        assert!(e.get("failed_attachments").is_none());
+        let mut keys: Vec<&String> = e.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["body", "failedAttachments"]);
+        assert_eq!(e["failedAttachments"], serde_json::json!([]));
+        assert_eq!(e["body"], serde_json::Value::Null);
+        let partial = serde_json::to_value(EditOutcome {
+            failed_attachments: vec!["image-2.png".into()],
+            body: Some("text".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            partial,
+            serde_json::json!({"failedAttachments": ["image-2.png"], "body": "text"})
+        );
     }
 
     #[test]
@@ -977,10 +1014,26 @@ mod tests {
                 url: "u".into(),
             },
             failed_attachments: vec!["a.png".into()],
+            followup_error: None,
         })
         .unwrap();
         assert!(p.get("pr").is_none() && p.get("failed_attachments").is_none());
-        assert_eq!(keys(p), ["failedAttachments", "number", "url"]);
+        assert!(p.get("followup_error").is_none());
+        assert_eq!(p["followupError"], serde_json::Value::Null);
+        assert_eq!(
+            keys(p),
+            ["failedAttachments", "followupError", "number", "url"]
+        );
+        let f = serde_json::to_value(PrCreateOutcome {
+            pr: PrRef {
+                number: 7,
+                url: "u".into(),
+            },
+            failed_attachments: Vec::new(),
+            followup_error: Some("cause".into()),
+        })
+        .unwrap();
+        assert_eq!(f["followupError"], "cause");
 
         let bare = serde_json::to_value(PrRef {
             number: 7,
@@ -1506,7 +1559,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_attached_releases_only_after_an_ok_followup() {
+    async fn created_outcome_releases_posted_files_even_when_the_followup_failed() {
         let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 3);
@@ -1514,21 +1567,35 @@ mod tests {
             names: (1..=3).map(|i| format!("image-{i}.png")).collect(),
             dir: dir.clone(),
         };
-        let failed = vec!["image-2.png".to_string()];
-        let err = finish_attached(
-            Err(AppError::Gh("labels failed".into())),
+        let pr = PrRef {
+            number: 91,
+            url: "https://github.com/o/r/pull/91".into(),
+        };
+        let out = created_outcome(
+            pr,
             Some(&staged),
-            failed.clone(),
+            vec!["image-2.png".to_string()],
+            Err(AppError::Gh("labels failed".into())),
         )
         .await;
-        assert!(matches!(err, Err(AppError::Gh(ref m)) if m == "labels failed"));
-        assert_eq!(entries(&dir), ["image-1.png", "image-2.png", "image-3.png"]);
-
-        let ok = finish_attached(Ok(()), Some(&staged), failed)
-            .await
-            .unwrap();
-        assert_eq!(ok, ["image-2.png"]);
+        assert_eq!(out.followup_error.as_deref(), Some("labels failed"));
+        assert_eq!(out.failed_attachments, ["image-2.png"]);
+        assert_eq!(out.pr.number, 91);
+        assert_eq!(out.pr.url, "https://github.com/o/r/pull/91");
         assert_eq!(entries(&dir), ["image-2.png"]);
+
+        let clean = created_outcome(
+            PrRef {
+                number: 0,
+                url: String::new(),
+            },
+            None,
+            Vec::new(),
+            Ok(()),
+        )
+        .await;
+        assert_eq!(clean.followup_error, None);
+        assert!(clean.failed_attachments.is_empty());
     }
 
     /// A directory link at `link`: a junction on Windows (mklink /J needs no privilege).

@@ -292,6 +292,7 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<crate::github::pr::PrPol
 // Thin delegates to the gh-backed PR mutations. Merge has no delegate here —
 // `forge_pr_merge` dispatches straight to `gh_pr_merge`.
 
+/// Without images the REST edit runs unchanged; with them, `gh pr edit --attach`.
 pub async fn edit_pr(
     repo_path: &str,
     number: u64,
@@ -299,14 +300,28 @@ pub async fn edit_pr(
     body: &str,
     lens: Option<String>,
     base: Option<&str>,
-) -> AppResult<()> {
-    crate::github::pr::gh_pr_edit(
+    staged: Option<crate::attachments::StagedRefs>,
+) -> AppResult<crate::attachments::EditOutcome> {
+    let Some(staged) = staged else {
+        crate::github::pr::gh_pr_edit(
+            repo_path.to_string(),
+            number,
+            title.to_string(),
+            body.to_string(),
+            lens,
+            base.map(str::to_string),
+        )
+        .await?;
+        return Ok(Default::default());
+    };
+    crate::github::pr::gh_pr_edit_attached(
         repo_path.to_string(),
         number,
         title.to_string(),
         body.to_string(),
         lens,
         base.map(str::to_string),
+        staged,
     )
     .await
 }
@@ -589,19 +604,33 @@ pub async fn reopen_issue(repo_path: &str, number: u64, lens: Option<String>) ->
     crate::github::issue::gh_issue_reopen(repo_path.to_string(), number, lens).await
 }
 
+/// Without images the REST edit runs unchanged; with them, `gh issue edit --attach`.
 pub async fn edit_issue(
     repo_path: &str,
     number: u64,
     title: &str,
     body: &str,
     lens: Option<String>,
-) -> AppResult<()> {
-    crate::github::issue::gh_issue_edit(
+    staged: Option<crate::attachments::StagedRefs>,
+) -> AppResult<crate::attachments::EditOutcome> {
+    let Some(staged) = staged else {
+        crate::github::issue::gh_issue_edit(
+            repo_path.to_string(),
+            number,
+            title.to_string(),
+            body.to_string(),
+            lens,
+        )
+        .await?;
+        return Ok(Default::default());
+    };
+    crate::github::issue::gh_issue_edit_attached(
         repo_path.to_string(),
         number,
         title.to_string(),
         body.to_string(),
         lens,
+        staged,
     )
     .await
 }
@@ -826,10 +855,13 @@ pub async fn set_issue_assignees(
         .await
 }
 
-/// Create an issue — delegates to the gh-backed REST create with the full GitHub
-/// field set (labels/assignees/milestone/org issue type). (PR create has no delegate
-/// here: `forge_pr_create`'s GitHub arm calls `gh_pr_create_core` directly, since the
-/// push needs an `AppState`, like `forge_pr_merge`.)
+/// Create an issue. Without images the REST create runs unchanged with the full GitHub
+/// field set; with them, `gh issue create --attach`, then up to two follow-up calls for
+/// assignees, milestone, type, and the labels when one contains a comma, quote or line
+/// break.
+/// (PR create has no delegate here:
+/// `forge_pr_create`'s GitHub arm calls `gh_pr_create_core`, since the push needs an
+/// `AppState`.)
 #[allow(clippy::too_many_arguments)]
 pub async fn create_issue(
     repo_path: &str,
@@ -840,8 +872,23 @@ pub async fn create_issue(
     milestone: Option<u64>,
     issue_type: Option<String>,
     lens: Option<String>,
-) -> AppResult<crate::github::pr::PrRef> {
-    crate::github::issue::gh_issue_create(
+    staged: Option<crate::attachments::StagedRefs>,
+) -> AppResult<crate::attachments::PrCreateOutcome> {
+    let Some(staged) = staged else {
+        let pr = crate::github::issue::gh_issue_create(
+            repo_path.to_string(),
+            title.to_string(),
+            body.to_string(),
+            labels,
+            assignees,
+            milestone,
+            issue_type,
+            lens,
+        )
+        .await?;
+        return Ok(crate::attachments::created_outcome(pr, None, Vec::new(), Ok(())).await);
+    };
+    crate::github::issue::gh_issue_create_attached(
         repo_path.to_string(),
         title.to_string(),
         body.to_string(),
@@ -850,6 +897,7 @@ pub async fn create_issue(
         milestone,
         issue_type,
         lens,
+        staged,
     )
     .await
 }

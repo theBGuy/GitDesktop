@@ -10,14 +10,15 @@
 //! bytes off to S3) carry no credential and are re-validated like link previews' hops.
 //! Bytes ship only after the byte cap, the magic-byte sniff and the dimension caps.
 
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use base64::Engine;
 use tauri_plugin_http::reqwest::header::{HeaderValue, AUTHORIZATION, LOCATION};
 use tauri_plugin_http::reqwest::{redirect, Client, ClientBuilder, RequestBuilder, Response, Url};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::attachments::{host_attaches, host_label, MAX_IMAGE_BYTES};
 use crate::error::{AppError, AppResult};
@@ -435,6 +436,7 @@ fn outcome(result: Result<FileBytes, HopFailure>) -> HostedImage {
 /// tests can count reads. Order is the security contract: grammar, provider and pinned
 /// host first (any miss is `refused`), then the client, then a fetch slot, then the
 /// token, then the hops; `read_token` is never called before the slot.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_planned<F, Fut>(
     url: &str,
     is_github: bool,
@@ -442,6 +444,7 @@ async fn fetch_planned<F, Fut>(
     client: Option<&Client>,
     read_token: F,
     permit: HopPermit,
+    slots: &Semaphore,
     deadline: Duration,
 ) -> HostedImage
 where
@@ -467,25 +470,29 @@ where
         pinned.unwrap_or(DEFAULT_HOST),
         read_token,
         permit,
+        slots,
         deadline,
     )
     .await
 }
 
-/// Takes a fetch slot and holds it across the token read and every hop.
+/// Takes one of `slots` and holds it across the token read and every hop. The wait for
+/// the slot has no deadline of its own: each holder is bounded by the token read's
+/// timeout plus `deadline`, and a withdrawn read stops waiting.
 async fn fetch_slotted<F, Fut>(
     client: &Client,
     start: Url,
     host: &str,
     read_token: F,
     permit: HopPermit,
+    slots: &Semaphore,
     deadline: Duration,
 ) -> HostedImage
 where
     F: FnOnce(&str) -> Fut,
     Fut: Future<Output = TokenRead>,
 {
-    let Ok(_slot) = FETCH_SLOTS.acquire().await else {
+    let Ok(_slot) = slots.acquire().await else {
         return HostedImage::unavailable(HostedImageUnavailable::Failed);
     };
     let credential = match read_token(host).await {
@@ -525,26 +532,185 @@ async fn resolve_repo_facts(repo_path: &str) -> (bool, Option<String>) {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Withdrawable reads
+// ---------------------------------------------------------------------------
+
+/// Most unadopted tombstones kept at once; one more drops the oldest. A body starts at
+/// most four reads, so a view switch off a long thread fits under it.
+const MAX_TOMBSTONES: usize = 256;
+/// How long a cancel-created tombstone waits for its read to register before the sweep
+/// reclaims it.
+const TOMBSTONE_SWEEP_DELAY: Duration = Duration::from_secs(60);
+
+/// The reads in flight, by the frontend's per-invocation request id.
+static HOSTED_READS: LazyLock<ReadRegistry> = LazyLock::new(|| ReadRegistry::new(MAX_TOMBSTONES));
+
+/// Request id -> the `Notify` its cancel fires. A cancel that lands before its read
+/// registers leaves a tombstone holding a `notify_one` permit, which the registration
+/// adopts; only unadopted tombstones count toward `cap` or are ever dropped.
+struct ReadRegistry {
+    cap: usize,
+    state: Mutex<RegistryState>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    entries: HashMap<String, Arc<Notify>>,
+    /// Exactly the ids whose entry is an unadopted tombstone, oldest first.
+    tombstones: VecDeque<String>,
+}
+
+impl RegistryState {
+    fn forget_tombstone(&mut self, id: &str) -> bool {
+        let Some(at) = self.tombstones.iter().position(|t| t == id) else {
+            return false;
+        };
+        self.tombstones.remove(at);
+        true
+    }
+}
+
+impl ReadRegistry {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            state: Mutex::new(RegistryState::default()),
+        }
+    }
+
+    /// No critical section panics, so a poisoned lock still holds consistent state.
+    fn state(&self) -> MutexGuard<'_, RegistryState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Entry-or-insert, never a blind insert: replacing a tombstone would drop the permit
+    /// of a cancel that landed first.
+    fn register(&self, id: &str) -> ReadGuard<'_> {
+        let mut state = self.state();
+        let notify = state
+            .entries
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone();
+        state.forget_tombstone(id);
+        ReadGuard {
+            registry: self,
+            id: id.to_string(),
+            notify,
+        }
+    }
+
+    /// Fires `id`'s cancel, leaving a tombstone when nothing is registered under it, and
+    /// reports whether this call created one. `notify_one`, never `notify_waiters`: the
+    /// stored permit reaches a read that has not polled its cancel yet.
+    fn cancel(&self, id: &str) -> bool {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        let created = !state.entries.contains_key(id);
+        if created && state.tombstones.len() >= self.cap {
+            if let Some(oldest) = state.tombstones.pop_front() {
+                state.entries.remove(&oldest);
+            }
+        }
+        let notify = state
+            .entries
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone();
+        if created {
+            state.tombstones.push_back(id.to_string());
+        }
+        drop(guard);
+        notify.notify_one();
+        created
+    }
+
+    /// Removes `id` only while it is still an unadopted tombstone; an adopted entry
+    /// belongs to its read's guard.
+    fn sweep(&self, id: &str) {
+        let mut state = self.state();
+        if state.forget_tombstone(id) {
+            state.entries.remove(id);
+        }
+    }
+}
+
+/// Removes its id on drop, so every exit after registration clears the entry. Request
+/// ids are unique per invocation, so removing by id never removes a later registration.
+struct ReadGuard<'a> {
+    registry: &'a ReadRegistry,
+    id: String,
+    notify: Arc<Notify>,
+}
+
+impl Drop for ReadGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.state().entries.remove(&self.id);
+    }
+}
+
+/// Runs `work` until it answers or `guard`'s cancel fires. A withdrawn read is `Failed`
+/// (the frontend already discarded it), and dropping `work` releases whatever it holds.
+async fn race_withdrawable<Fut>(guard: ReadGuard<'_>, work: Fut) -> HostedImage
+where
+    Fut: Future<Output = HostedImage>,
+{
+    // Cancel arm first, so an adopted tombstone's permit wins before `work` is polled.
+    tokio::select! {
+        biased;
+        () = guard.notify.notified() => HostedImage::unavailable(HostedImageUnavailable::Failed),
+        image = work => image,
+    }
+}
+
 /// Load one GitHub-hosted image for a body rendered from `repo_path`. Always `Ok`: every
-/// refusal and failure is a typed [`HostedImageUnavailable`].
+/// refusal and failure is a typed [`HostedImageUnavailable`], and a read withdrawn by
+/// [`github_hosted_image_cancel`] answers `Failed`.
 #[tauri::command]
-pub async fn github_hosted_image(repo_path: String, url: String) -> AppResult<HostedImage> {
-    // Grammar first, so a refused URL spawns no git or gh at all.
-    if !is_hosted_asset_url(&url) {
+pub async fn github_hosted_image(
+    repo_path: String,
+    url: String,
+    request_id: String,
+) -> AppResult<HostedImage> {
+    // Both grammars first, so a refused read spawns no git or gh and registers nothing.
+    if !is_lowercase_uuid(&request_id) || !is_hosted_asset_url(&url) {
         return Ok(HostedImage::unavailable(HostedImageUnavailable::Refused));
     }
-    let (is_github, pinned) = resolve_repo(&repo_path).await;
+    // Before the first await, so a cancel that lands during resolution is seen.
+    let guard = HOSTED_READS.register(&request_id);
     // Boxed: the invoke handler builds a command's future on the UI-thread stack.
-    Ok(Box::pin(fetch_planned(
-        &url,
-        is_github,
-        pinned.as_deref(),
-        client(),
-        |host: &str| read_gh_token(host.to_string()),
-        HopPermit::Public,
-        HOSTED_IMAGE_DEADLINE,
-    ))
-    .await)
+    let work = Box::pin(async {
+        let (is_github, pinned) = resolve_repo(&repo_path).await;
+        fetch_planned(
+            &url,
+            is_github,
+            pinned.as_deref(),
+            client(),
+            |host: &str| read_gh_token(host.to_string()),
+            HopPermit::Public,
+            &FETCH_SLOTS,
+            HOSTED_IMAGE_DEADLINE,
+        )
+        .await
+    });
+    Ok(race_withdrawable(guard, work).await)
+}
+
+/// Withdraws the read registered under `request_id`, or leaves a tombstone its later
+/// registration adopts. A malformed id touches no registry state.
+#[tauri::command]
+pub async fn github_hosted_image_cancel(request_id: String) -> AppResult<()> {
+    if !is_lowercase_uuid(&request_id) {
+        return Err(AppError::InvalidArgument("invalid request id".into()));
+    }
+    if HOSTED_READS.cancel(&request_id) {
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(TOMBSTONE_SWEEP_DELAY).await;
+            HOSTED_READS.sweep(&request_id);
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -552,7 +718,7 @@ mod tests {
     use super::*;
     use crate::image_sniff::{gif_fixture, png_fixture};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const T: &str = "c162f463-c831-4173-8a80-4197acc4a8ac";
@@ -896,6 +1062,7 @@ mod tests {
             client,
             counting_reader(reads.clone(), hosts.clone()),
             HopPermit::Public,
+            &FETCH_SLOTS,
             SLOW,
         )
         .await;
@@ -959,6 +1126,7 @@ mod tests {
             Some(&test_client()),
             |_: &str| std::future::ready(TokenRead::Failed),
             HopPermit::Public,
+            &FETCH_SLOTS,
             SLOW,
         )
         .await;
@@ -1036,6 +1204,7 @@ mod tests {
                         TokenRead::SignedOut
                     },
                     HopPermit::Public,
+                    &FETCH_SLOTS,
                     SLOW,
                 )
                 .await
@@ -1073,6 +1242,269 @@ mod tests {
         let peak = peak.load(Ordering::SeqCst);
         assert!(peak <= MAX_RESOLVING, "peak {peak}");
         assert!(peak >= 2, "resolutions were serialized: peak {peak}");
+    }
+
+    // -- withdrawable reads (local registries and slots; never the command) ------
+
+    const R1: &str = "00000000-0000-4000-8000-000000000001";
+    const R2: &str = "00000000-0000-4000-8000-000000000002";
+    const R3: &str = "00000000-0000-4000-8000-000000000003";
+    const R4: &str = "00000000-0000-4000-8000-000000000004";
+    /// Bounds a read the cancel should end, so a missing cancel fails instead of hanging.
+    const FAIL_SAFE: Duration = Duration::from_secs(10);
+
+    impl ReadRegistry {
+        fn contains(&self, id: &str) -> bool {
+            self.state().entries.contains_key(id)
+        }
+
+        fn tombstones(&self) -> Vec<String> {
+            self.state().tombstones.iter().cloned().collect()
+        }
+    }
+
+    fn present<const N: usize>(registry: &ReadRegistry, ids: [&str; N]) -> [bool; N] {
+        ids.map(|id| registry.contains(id))
+    }
+
+    /// An admitted plan against `slots` whose reader counts calls and answers signed-out.
+    async fn counted_read(slots: &Semaphore, reads: Arc<AtomicUsize>) -> HostedImage {
+        fetch_planned(
+            &asset("github.com"),
+            true,
+            None,
+            Some(&test_client()),
+            counting_reader(reads, Arc::default()),
+            HopPermit::Public,
+            slots,
+            SLOW,
+        )
+        .await
+    }
+
+    async fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
+        std::future::poll_fn(|cx| Poll::Ready(std::pin::Pin::new(&mut *fut).poll(cx))).await
+    }
+
+    fn withdrawn() -> serde_json::Value {
+        unavailable(HostedImageUnavailable::Failed)
+    }
+
+    #[tokio::test]
+    async fn a_cancel_before_registration_withdraws_the_read() {
+        let registry = ReadRegistry::new(MAX_TOMBSTONES);
+        let slots = Semaphore::new(1);
+        let reads = Arc::new(AtomicUsize::new(0));
+        assert!(registry.cancel(R1));
+        let image =
+            race_withdrawable(registry.register(R1), counted_read(&slots, reads.clone())).await;
+        assert_eq!(wire(&image), withdrawn());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(!registry.contains(R1));
+        assert!(registry.tombstones().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_while_waiting_for_a_slot_withdraws_the_read() {
+        let registry = ReadRegistry::new(MAX_TOMBSTONES);
+        let slots = Semaphore::new(0);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut race = std::pin::pin!(race_withdrawable(
+            registry.register(R2),
+            counted_read(&slots, reads.clone())
+        ));
+        assert!(poll_once(&mut race).await.is_pending());
+        assert!(registry.contains(R2));
+        // A registered read adopts the cancel: no tombstone is created.
+        assert!(!registry.cancel(R2));
+        let image = tokio::time::timeout(FAIL_SAFE, race)
+            .await
+            .expect("a withdrawn read must stop waiting for its slot");
+        assert_eq!(wire(&image), withdrawn());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(!registry.contains(R2));
+    }
+
+    #[tokio::test]
+    async fn a_cancel_mid_fetch_withdraws_the_read_and_frees_its_slot() {
+        let registry = ReadRegistry::new(MAX_TOMBSTONES);
+        let slots = Semaphore::new(1);
+        let (started, token_read) = tokio::sync::oneshot::channel();
+        let url = asset("github.com");
+        let client = test_client();
+        let work = fetch_planned(
+            &url,
+            true,
+            None,
+            Some(&client),
+            move |_: &str| {
+                let _ = started.send(());
+                std::future::pending::<TokenRead>()
+            },
+            HopPermit::Public,
+            &slots,
+            SLOW,
+        );
+        let race = race_withdrawable(registry.register(R3), work);
+        let cancel = async {
+            token_read.await.expect("the token read started");
+            assert_eq!(slots.available_permits(), 0, "the slot is held mid-fetch");
+            registry.cancel(R3)
+        };
+        let (image, created) =
+            tokio::time::timeout(FAIL_SAFE, async { tokio::join!(race, cancel) })
+                .await
+                .expect("a withdrawn read must stop mid-fetch");
+        assert_eq!(wire(&image), withdrawn());
+        assert!(!created);
+        assert_eq!(slots.available_permits(), 1);
+        assert!(!registry.contains(R3));
+    }
+
+    #[tokio::test]
+    async fn the_guard_unregisters_on_completion_and_on_a_refusal() {
+        let registry = ReadRegistry::new(MAX_TOMBSTONES);
+        let slots = Semaphore::new(1);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let image =
+            race_withdrawable(registry.register(R1), counted_read(&slots, reads.clone())).await;
+        assert_eq!(wire(&image), unavailable(HostedImageUnavailable::SignedOut));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert!(!registry.contains(R1));
+
+        let (url, client) = (asset("github.com"), test_client());
+        let refusal = fetch_planned(
+            &url,
+            false,
+            None,
+            Some(&client),
+            counting_reader(reads.clone(), Arc::default()),
+            HopPermit::Public,
+            &slots,
+            SLOW,
+        );
+        let image = race_withdrawable(registry.register(R2), refusal).await;
+        assert_eq!(wire(&image), refused());
+        assert!(!registry.contains(R2));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // A cancel after the read finished finds nothing: it leaves a tombstone to sweep.
+        assert!(registry.cancel(R1));
+        assert_eq!(registry.tombstones(), [R1]);
+    }
+
+    #[test]
+    fn the_sweep_reclaims_only_unadopted_tombstones() {
+        let registry = ReadRegistry::new(MAX_TOMBSTONES);
+        assert!(registry.cancel(R1));
+        registry.sweep(R1);
+        assert!(!registry.contains(R1));
+
+        assert!(registry.cancel(R2));
+        let adopted = registry.register(R2);
+        registry.sweep(R2);
+        assert!(registry.contains(R2));
+        drop(adopted);
+        assert!(!registry.contains(R2));
+
+        let live = registry.register(R3);
+        assert!(!registry.cancel(R3));
+        registry.sweep(R3);
+        assert!(registry.contains(R3));
+        drop(live);
+        assert!(!registry.contains(R3));
+        assert!(registry.tombstones().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_request_id_is_refused_by_both_commands() {
+        // Never a real path: the grammar refusal must come before any git or gh spawn.
+        let missing = std::env::temp_dir().join("gd-hosted-image-test-does-not-exist-9f2c");
+        let upper = R4.replace('0', "A");
+        let spaced = format!("{R4} ");
+        for bad in ["", "not-a-uuid", &upper, &spaced, &R4[1..]] {
+            let image = github_hosted_image(
+                missing.to_string_lossy().into_owned(),
+                asset("github.com"),
+                bad.to_string(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(wire(&image), refused(), "{bad:?}");
+            assert!(matches!(
+                github_hosted_image_cancel(bad.to_string()).await,
+                Err(AppError::InvalidArgument(_))
+            ));
+            assert!(!HOSTED_READS.contains(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn tombstones_past_the_cap_drop_oldest_first() {
+        let registry = ReadRegistry::new(2);
+        for id in ["a", "b", "c"] {
+            assert!(registry.cancel(id));
+        }
+        assert_eq!(present(&registry, ["a", "b", "c"]), [false, true, true]);
+
+        let d = registry.register("d");
+        assert!(!registry.cancel("d"));
+        for id in ["e", "f"] {
+            assert!(registry.cancel(id));
+        }
+        assert_eq!(
+            present(&registry, ["b", "c", "d", "e", "f"]),
+            [false, false, true, true, true]
+        );
+        drop(d);
+        assert!(!registry.contains("d"));
+        assert_eq!(registry.tombstones(), ["e", "f"]);
+    }
+
+    #[test]
+    fn adopted_entries_neither_count_toward_the_cap_nor_leave_early() {
+        let registry = ReadRegistry::new(2);
+        let live = registry.register("live");
+        assert!(registry.cancel("g"));
+        let adopted = registry.register("g");
+        for id in ["h", "i"] {
+            assert!(registry.cancel(id));
+        }
+        assert_eq!(
+            present(&registry, ["live", "g", "h", "i"]),
+            [true, true, true, true]
+        );
+        assert!(registry.cancel("j"));
+        assert_eq!(
+            present(&registry, ["live", "g", "h", "i", "j"]),
+            [true, true, false, true, true]
+        );
+        drop((live, adopted));
+        assert_eq!(present(&registry, ["live", "g"]), [false, false]);
+    }
+
+    #[test]
+    fn a_swept_double_cancel_leaves_no_trace_in_the_cap() {
+        let seen = ReadRegistry::new(2);
+        assert!(seen.cancel("x"));
+        assert!(!seen.cancel("x"));
+        seen.sweep("x");
+        let fresh = ReadRegistry::new(2);
+        for id in ["p", "q", "r"] {
+            assert!(seen.cancel(id));
+            assert!(fresh.cancel(id));
+            assert_eq!(seen.tombstones(), fresh.tombstones(), "after {id}");
+        }
+        assert_eq!(seen.tombstones(), ["q", "r"]);
+        assert!(!seen.contains("x"));
+    }
+
+    #[test]
+    fn the_production_registry_and_deadlines_keep_their_bounds() {
+        assert_eq!(MAX_TOMBSTONES, 256);
+        assert_eq!(HOSTED_READS.cap, MAX_TOMBSTONES);
+        assert_eq!(HOSTED_IMAGE_DEADLINE, Duration::from_secs(30));
+        assert_eq!(TOKEN_READ_TIMEOUT, Duration::from_secs(5));
     }
 
     // -- loopback server -------------------------------------------------------
@@ -1348,6 +1780,7 @@ mod tests {
                     DEFAULT_HOST,
                     |_: &str| std::future::ready(TokenRead::Token(cred())),
                     HopPermit::Loopback,
+                    &FETCH_SLOTS,
                     SLOW,
                 )
                 .await
@@ -1734,6 +2167,102 @@ mod tests {
         assert!(!resolve_wiring_holds(&swap(
             "resolve_repo(&repo_path).await",
             "resolve_repo_facts(&repo_path).await"
+        )));
+    }
+
+    /// The tests drive `race_withdrawable` on local registries and slots, so only this pins
+    /// the command: both grammars, then the production registration, then repo resolution
+    /// and the shared-slot fetch inside the raced future; the fetch deadline wraps the hops
+    /// alone, never the slot wait.
+    fn command_wiring_holds(production: &str) -> bool {
+        let masked = mask_comments(production);
+        let Some(body) = fn_body(&masked, "pub async fn github_hosted_image(") else {
+            return false;
+        };
+        let order = [
+            "is_lowercase_uuid(&request_id)",
+            "is_hosted_asset_url(&url)",
+            "HOSTED_READS.register(&request_id)",
+            "Box::pin(async",
+            "resolve_repo(&repo_path).await",
+            "fetch_planned(",
+            "race_withdrawable(guard, work)",
+        ]
+        .map(|needle| body.find(needle));
+        let untimed =
+            |signature: &str| fn_body(&masked, signature).is_some_and(|b| !b.contains("timeout("));
+        order.iter().all(Option::is_some)
+            && order.windows(2).all(|pair| pair[0] < pair[1])
+            && body.matches("fetch_planned(").count() == 1
+            && body.contains("&FETCH_SLOTS,")
+            && body.contains("HOSTED_IMAGE_DEADLINE,")
+            && !body.contains("Semaphore")
+            && !body.contains("ReadRegistry")
+            && untimed("pub async fn github_hosted_image(")
+            && untimed("async fn fetch_planned<")
+            && untimed("async fn fetch_slotted<")
+            && fn_body(&masked, "async fn fetch_slotted<")
+                .is_some_and(|b| b.contains("let Ok(_slot) = slots.acquire().await else"))
+            && fn_body(&masked, "async fn fetch_within(")
+                .is_some_and(|b| b.contains("tokio::time::timeout(deadline, fetch_hops("))
+    }
+
+    #[test]
+    fn the_command_registers_first_and_races_resolution_and_fetch() {
+        let source = own_source();
+        let production = production_half(&source);
+        assert!(command_wiring_holds(production));
+
+        // In-memory controls: each rewiring is caught.
+        let swap = |text: &str, find: &str, repl: &str| {
+            assert_eq!(text.matches(find).count(), 1, "anchor {find}");
+            text.replacen(find, repl, 1)
+        };
+        let register = "    let guard = HOSTED_READS.register(&request_id);\n";
+        let resolve = "        let (is_github, pinned) = resolve_repo(&repo_path).await;\n";
+        let refusal = "return Ok(HostedImage::unavailable(HostedImageUnavailable::Refused));";
+        // Registration moved after the resolve.
+        let moved = swap(production, register, "");
+        assert!(!command_wiring_holds(&swap(
+            &moved,
+            resolve,
+            &format!("{resolve}    {register}")
+        )));
+        // The id grammar checked after registration.
+        let late_id = swap(production, "!is_lowercase_uuid(&request_id) || ", "");
+        assert!(!command_wiring_holds(&swap(
+            &late_id,
+            register,
+            &format!("{register}    if !is_lowercase_uuid(&request_id) {{ {refusal} }}\n")
+        )));
+        // Resolution awaited outside the cancellable future.
+        let outside = swap(production, resolve, "");
+        assert!(!command_wiring_holds(&swap(
+            &outside,
+            "    let work = Box::pin(async {\n",
+            &format!("{}    let work = Box::pin(async {{\n", &resolve[4..])
+        )));
+        // A local registry or semaphore in the command.
+        assert!(!command_wiring_holds(&swap(
+            production,
+            "HOSTED_READS.register(&request_id)",
+            "ReadRegistry::new(MAX_TOMBSTONES).register(&request_id)"
+        )));
+        assert!(!command_wiring_holds(&swap(
+            production,
+            "&FETCH_SLOTS,",
+            "&Semaphore::new(MAX_IN_FLIGHT),"
+        )));
+        // Another deadline, or a timeout around the slot wait.
+        assert!(!command_wiring_holds(&swap(
+            production,
+            "HOSTED_IMAGE_DEADLINE,\n        )\n        .await\n    });",
+            "SLOW_DEADLINE,\n        )\n        .await\n    });"
+        )));
+        assert!(!command_wiring_holds(&swap(
+            production,
+            "let Ok(_slot) = slots.acquire().await else",
+            "let Ok(Ok(_slot)) = tokio::time::timeout(deadline, slots.acquire()).await else"
         )));
     }
 }

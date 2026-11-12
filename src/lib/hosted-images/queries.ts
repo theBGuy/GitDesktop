@@ -1,4 +1,5 @@
 import {
+  hashKey,
   onlineManager,
   type QueryClient,
   queryOptions,
@@ -58,21 +59,74 @@ export const reconnectStore = {
   getSnapshot: () => reconnects,
 };
 
-const pause = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Waits `ms`, or less once `signal` aborts. */
+const pause = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+    if (signal.aborted) done();
+  });
 
 async function fetchHostedImage(
   repoPath: string,
   url: string,
+  signal: AbortSignal,
 ): Promise<HostedImage> {
-  let result = await ghHostedImage(repoPath, url);
+  let result = await ghHostedImage(repoPath, url, signal);
   for (const ms of HOSTED_IMAGE_RETRY_DELAYS_MS) {
     if (result.unavailable === null || !RETRIED.has(result.unavailable))
       return result;
-    await pause(ms);
-    result = await ghHostedImage(repoPath, url);
+    await pause(ms, signal);
+    // A cancelled fetch's answer is discarded, so it asks nothing more.
+    if (signal.aborted) return result;
+    result = await ghHostedImage(repoPath, url, signal);
   }
   return result;
+}
+
+/** How many walks hold each hosted key, per client (tests build one each). */
+const holders = new WeakMap<QueryClient, Map<string, number>>();
+
+/**
+ * Marks a walk as wanting `url`'s read until the returned release (idempotent)
+ * runs. When a key's last holder releases, its in-flight or parked fetch is
+ * cancelled with revert, so a read nobody waits for caches nothing and is
+ * withdrawn on the backend. The check runs a microtask later, so a re-walk in
+ * the same commit (StrictMode, a re-parse) that holds the key again keeps it.
+ */
+export function holdHostedRead(
+  client: QueryClient,
+  host: string,
+  url: string,
+): () => void {
+  const queryKey = hostedImageKey(host, url);
+  const hash = hashKey(queryKey);
+  let counts = holders.get(client);
+  if (counts === undefined) {
+    counts = new Map();
+    holders.set(client, counts);
+  }
+  const held = counts;
+  held.set(hash, (held.get(hash) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (held.get(hash) ?? 1) - 1;
+    if (left > 0) held.set(hash, left);
+    else held.delete(hash);
+    queueMicrotask(() => {
+      if (held.has(hash)) return;
+      const status = client.getQueryState(queryKey)?.fetchStatus;
+      if (status === undefined || status === "idle") return;
+      void client.cancelQueries({ queryKey, exact: true }, { revert: true });
+    });
+  };
 }
 
 /**
@@ -101,9 +155,9 @@ export function hostedImageOptions(
 ) {
   return queryOptions({
     queryKey: hostedImageKey(host, url),
-    queryFn: async (): Promise<HostedImageRead> => {
+    queryFn: async ({ signal }): Promise<HostedImageRead> => {
       const askedUnder = sourceAt(syncReconnects());
-      return { ...(await fetchHostedImage(repoPath, url)), askedUnder };
+      return { ...(await fetchHostedImage(repoPath, url, signal)), askedUnder };
     },
     staleTime: (query) =>
       query.state.data?.bytes ? Infinity : HOSTED_VERDICT_FRESH_MS,

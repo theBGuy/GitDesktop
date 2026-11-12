@@ -31,7 +31,10 @@ import {
 import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ImageLightbox } from "@/components/image-lightbox";
-import { Markdown } from "@/components/markdown/markdown";
+import {
+  Markdown,
+  type MarkdownHostedImages,
+} from "@/components/markdown/markdown";
 import { useMentionAutocomplete } from "@/components/mention-autocomplete";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -391,6 +394,7 @@ export function MarkdownEditor({
   actions,
   mentions,
   attachments,
+  hostedImages,
   "aria-label": ariaLabel,
 }: {
   ref?: Ref<MarkdownEditorHandle>;
@@ -419,6 +423,9 @@ export function MarkdownEditor({
    *  action). Omitted, the editor adds no listener, node, subscription or
    *  hotkey handler for them. */
   attachments?: DraftAttachmentsHandle;
+  /** Where Preview loads the draft's GitHub-hosted images from
+   *  (hostedImagesFor). Omitted, Preview never calls the hosted loader. */
+  hostedImages?: MarkdownHostedImages;
   "aria-label"?: string;
 }) {
   const [mode, setMode] = useState<"write" | "preview">("write");
@@ -443,6 +450,7 @@ export function MarkdownEditor({
     attachments,
     mode,
     onChange,
+    value,
     mounted: false,
   });
   // Set while the editor inserts its own reference: that input event is no
@@ -458,6 +466,7 @@ export function MarkdownEditor({
     liveRef.current.attachments = attachments;
     liveRef.current.mode = mode;
     liveRef.current.onChange = onChange;
+    liveRef.current.value = value;
   });
   // An `<Activity>` hide runs this cleanup too: a hidden editor takes no insert.
   useEffect(() => {
@@ -647,6 +656,14 @@ export function MarkdownEditor({
     }
   }
 
+  // The draft's text for a stage's cap reclaim, read when the stage runs: only
+  // while this editor is mounted and still shows that draft, else null.
+  function draftText(draftKey: string): string | null {
+    const live = liveRef.current;
+    if (!live.mounted || live.draftKey !== draftKey) return null;
+    return textareaRef.current?.value ?? live.value;
+  }
+
   // One pick or paste is one gesture. Each file re-reads the started draft's
   // live handle, so a hold or gate engaging mid-batch stops it, and a draft
   // that moved on (Clear, a post, a reseed) takes no later file. A file's own
@@ -664,7 +681,9 @@ export function MarkdownEditor({
         return;
       }
       stillLive ??= handle.startAttach();
-      const staged = await handle.stage(file, source);
+      const staged = await handle.stage(file, source, () =>
+        draftText(handle.draftKey),
+      );
       if (!staged) continue;
       insertReference(
         handle,
@@ -947,6 +966,7 @@ export function MarkdownEditor({
             // Staged names resolve to this draft's own local copies, never the
             // repository; the text renders exactly as typed.
             <Markdown
+              hostedImages={hostedImages}
               stagedImages={
                 attachments
                   ? {

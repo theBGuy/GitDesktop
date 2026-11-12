@@ -34,6 +34,12 @@ export interface DraftEntry {
   status: DraftStatus | null;
   /** An end asked for mid-post, run at the post's settle. */
   releaseDeferred: boolean;
+  /** Names staged since the current attach gesture began: their references
+   *  may not have reached the text yet, so a cap reclaim never takes them. */
+  fresh: string[];
+  /** Names a cap reclaim discarded. A post whose text still references one
+   *  sends it, so Rust refuses it as no longer attached. */
+  reclaimed: string[];
 }
 
 export function newEntry(owner: object): DraftEntry {
@@ -46,11 +52,14 @@ export function newEntry(owner: object): DraftEntry {
     notice: null,
     status: null,
     releaseDeferred: false,
+    fresh: [],
+    reclaimed: [],
   };
 }
 
 /** A stage's record joins the entry; one already holding its name is replaced
- *  (a swept session numbers from `image-1` again), and its URL revoked. */
+ *  (a swept session numbers from `image-1` again), and its URL revoked. The
+ *  name is fresh for the gesture and, once reclaimed, is a live record again. */
 export function withStaged(
   entry: DraftEntry,
   session: string,
@@ -64,9 +73,64 @@ export function withStaged(
       ...entry,
       session,
       images: [...entry.images.filter((i) => i.name !== record.name), record],
+      fresh: [...entry.fresh.filter((n) => n !== record.name), record.name],
+      reclaimed: entry.reclaimed.filter((n) => n !== record.name),
     },
     revoke,
   };
+}
+
+/** A new attach gesture's boundary: the fresh set clears only when no stage is
+ *  in flight, so an overlapping gesture never exposes another's fresh names. */
+export function startGesture(
+  entry: DraftEntry,
+  stagesInFlight: number,
+): DraftEntry {
+  return {
+    ...entry,
+    status: null,
+    fresh: stagesInFlight === 0 ? [] : entry.fresh,
+  };
+}
+
+/** The staged names a cap reclaim may discard: neither referenced by the text
+ *  nor fresh. None while a post is in flight. */
+export function reclaimable(
+  entry: DraftEntry,
+  referenced: readonly string[],
+): string[] {
+  if (entry.posting.length > 0) return [];
+  return entry.images
+    .map((i) => i.name)
+    .filter((n) => !referenced.includes(n) && !entry.fresh.includes(n));
+}
+
+/** Drops discarded records from the entry and remembers their names. Every
+ *  set here compares names exactly: a case variant is another file, and a
+ *  folded match would drop a reference Rust must refuse. */
+export function withoutRecords(
+  entry: DraftEntry,
+  names: readonly string[],
+): { entry: DraftEntry; revoke: string[] } {
+  const gone = entry.images.filter((i) => names.includes(i.name));
+  const remembered = gone
+    .map((i) => i.name)
+    .filter((n) => !entry.reclaimed.includes(n));
+  return {
+    entry: {
+      ...entry,
+      images: entry.images.filter((i) => !names.includes(i.name)),
+      reclaimed: [...entry.reclaimed, ...remembered],
+    },
+    revoke: gone.map((i) => i.url),
+  };
+}
+
+/** The names a post may send: the live records', then each reclaimed name no
+ *  live record holds. */
+export function postCandidates(entry: DraftEntry): string[] {
+  const live = entry.images.map((i) => i.name);
+  return [...live, ...entry.reclaimed.filter((r) => !live.includes(r))];
 }
 
 /** What ending a draft does, or the deferral a post in flight forces. */

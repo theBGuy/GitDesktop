@@ -2,6 +2,8 @@ import { invoke } from "@/lib/tauri/invoke";
 import type {
   AttachmentRefs,
   CommentOutcome,
+  CreatedRef,
+  EditOutcome,
   ForgeTimelineEvent,
   ForgeUserList,
   GitLabLinkedIssue,
@@ -13,7 +15,6 @@ import type {
   IssueRelations,
   IssueType,
   Milestone,
-  PrRef,
   RemoteLens,
   RemoteListFilter,
 } from "../types";
@@ -72,8 +73,9 @@ export const forgeIssueCreate = (
   milestone: number | null,
   issueType: string | null,
   lens: RemoteLens,
+  attachments?: AttachmentRefs,
 ) =>
-  invoke<PrRef>("forge_issue_create", {
+  invoke<CreatedRef>("forge_issue_create", {
     repoPath,
     title,
     body,
@@ -82,6 +84,7 @@ export const forgeIssueCreate = (
     milestone,
     issueType,
     lens,
+    attachments: attachments ?? null,
   });
 
 export const forgeAssignableUsers = (repoPath: string, lens: RemoteLens) =>
@@ -235,7 +238,16 @@ export const forgeIssueEdit = (
   title: string,
   body: string,
   lens: RemoteLens,
-) => invoke<void>("forge_issue_edit", { repoPath, number, title, body, lens });
+  attachments?: AttachmentRefs,
+) =>
+  invoke<EditOutcome>("forge_issue_edit", {
+    repoPath,
+    number,
+    title,
+    body,
+    lens,
+    attachments: attachments ?? null,
+  });
 
 /** Transfers (GitHub) / moves (GitLab) an issue to `destination` — "owner/repo"
  *  on GitHub, a full "group/name" project path on GitLab; returns the new URL. */

@@ -699,6 +699,49 @@ function createdDisclosure(
   return CREATED_DISCLOSURE.test(headline) ? headline : null;
 }
 
+/** An edit whose description was dropped says on line one that its other
+ *  changes were saved (github/pr.rs, github/issue.rs; keep the marker in
+ *  step). That fact decides the retry, so it outranks the network rewrite. */
+const SAVED_DISCLOSURE_KINDS: ReadonlySet<AppError["kind"]> = new Set([
+  "gh",
+  "glab",
+]);
+const SAVED_DISCLOSURE = "Your other changes were saved";
+
+function savedDisclosure(
+  kind: AppError["kind"],
+  message: string,
+): string | null {
+  if (!SAVED_DISCLOSURE_KINDS.has(kind)) return null;
+  const headline = firstMeaningfulLine(message);
+  return headline.includes(SAVED_DISCLOSURE) ? headline : null;
+}
+
+/** A create or post refused before anything existed because an image didn't
+ *  upload says so on line one (github/pr.rs; keep the marker in step). That
+ *  fact decides the retry, so it outranks the network rewrite of gh's stderr. */
+export const NOTHING_EXISTS_DISCLOSURES = [
+  "Nothing was created because ",
+  "Nothing was posted because ",
+] as const;
+
+function nothingExistsDisclosure(
+  kind: AppError["kind"],
+  message: string,
+): string | null {
+  if (kind !== "gh") return null;
+  const headline = firstMeaningfulLine(message);
+  return NOTHING_EXISTS_DISCLOSURES.some((lead) => headline.startsWith(lead))
+    ? headline
+    : null;
+}
+
+/** Whether a failed edit still saved its title and base: the one reader of the
+ *  saved-changes marker outside the summary. */
+export function otherChangesSaved(e: unknown): boolean {
+  return isAppError(e) && savedDisclosure(e.kind, e.message ?? "") !== null;
+}
+
 /** The `git` kind is the only one carrying a stderr blob distinct from its
  *  message; every other kind folds its detail into `message` itself. */
 function gitStderr(e: AppError): string {
@@ -950,6 +993,8 @@ export function presentError(e: unknown): ErrorPresentation {
     const summary =
       pushProtectionSummary(combined) ??
       createdDisclosure(e.kind, message) ??
+      savedDisclosure(e.kind, message) ??
+      nothingExistsDisclosure(e.kind, message) ??
       longPathSummary(combined) ??
       (isConflict
         ? conflictSummary(combined)

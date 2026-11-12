@@ -3871,9 +3871,27 @@ const UPLOAD_TOO_LARGE: &str = "it is larger than this project allows";
 /// The reason when an upload exited 0 without a usable `url`.
 const UPLOAD_UNREADABLE: &str = "GitLab's reply couldn't be read";
 
-fn upload_refusal(name: &str, reason: &str) -> AppError {
+/// What the upload refusal says did not happen: a comment or create is not posted, an
+/// edit is not saved.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum UploadVerb {
+    Posted,
+    Saved,
+}
+
+impl UploadVerb {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Posted => "posted",
+            Self::Saved => "saved",
+        }
+    }
+}
+
+fn upload_refusal(verb: UploadVerb, name: &str, reason: &str) -> AppError {
     AppError::Glab(format!(
-        "Nothing was posted. GitLab didn't accept {name}: {reason}."
+        "Nothing was {}. GitLab didn't accept {name}: {reason}.",
+        verb.word()
     ))
 }
 
@@ -3914,9 +3932,10 @@ struct UploadReply {
 }
 
 /// One upload call's result: the `url` of an exit-0 reply, else the upload refusal.
-fn upload_outcome(name: &str, out: &GlabOutput) -> AppResult<String> {
+fn upload_outcome(verb: UploadVerb, name: &str, out: &GlabOutput) -> AppResult<String> {
     if out.code != 0 {
         return Err(upload_refusal(
+            verb,
             name,
             &upload_failure_reason(out.code, &out.stderr),
         ));
@@ -3925,7 +3944,7 @@ fn upload_outcome(name: &str, out: &GlabOutput) -> AppResult<String> {
         .ok()
         .and_then(|r| r.url)
         .filter(|url| upload_url_ok(url))
-        .ok_or_else(|| upload_refusal(name, UPLOAD_UNREADABLE))
+        .ok_or_else(|| upload_refusal(verb, name, UPLOAD_UNREADABLE))
 }
 
 /// Uploads one staged file to the project `enc` and returns its `/uploads/...` URL.
@@ -3934,6 +3953,7 @@ async fn glab_upload(
     enc: &str,
     path: &std::path::Path,
     name: &str,
+    verb: UploadVerb,
 ) -> AppResult<String> {
     let endpoint = format!("projects/{enc}/uploads");
     let file_arg = format!("file=@{}", path.display());
@@ -3943,8 +3963,8 @@ async fn glab_upload(
         GLAB_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(|e| upload_refusal(name, &e.to_string()))?;
-    upload_outcome(name, &out)
+    .map_err(|e| upload_refusal(verb, name, &e.to_string()))?;
+    upload_outcome(verb, name, &out)
 }
 
 /// Replaces every `](NAME)` with `](URL)`, the reference rule the checks used.
@@ -3962,6 +3982,7 @@ async fn upload_and_rewrite(
     enc: &str,
     body: &str,
     staged: &crate::attachments::StagedRefs,
+    verb: UploadVerb,
 ) -> AppResult<String> {
     let mut uploaded = Vec::with_capacity(staged.names.len());
     for name in &staged.names {
@@ -3969,10 +3990,22 @@ async fn upload_and_rewrite(
         if !path.is_file() {
             return Err(crate::attachments::no_longer_attached(name));
         }
-        let url = glab_upload(repo_path, enc, &path, name).await?;
+        let url = glab_upload(repo_path, enc, &path, name, verb).await?;
         uploaded.push((name.clone(), url));
     }
     Ok(rewrite_body(body, &uploaded))
+}
+
+/// [`upload_and_rewrite`] into the origin project: the body to send in place of
+/// `body`. An Err keeps every staged file and nothing has been sent.
+pub(crate) async fn body_with_uploads(
+    repo_path: &str,
+    body: &str,
+    staged: &crate::attachments::StagedRefs,
+    verb: UploadVerb,
+) -> AppResult<String> {
+    let enc = encode_project(&project_path(repo_path).await?);
+    upload_and_rewrite(repo_path, &enc, body, staged, verb).await
 }
 
 /// Posts a note whose body references staged images: uploads them to this project,
@@ -3986,7 +4019,7 @@ pub async fn post_note_with_images(
     staged: &crate::attachments::StagedRefs,
 ) -> AppResult<crate::attachments::CommentOutcome> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let body = upload_and_rewrite(repo_path, &enc, body, staged).await?;
+    let body = upload_and_rewrite(repo_path, &enc, body, staged, UploadVerb::Posted).await?;
     let endpoint = format!("projects/{enc}/{endpoint_tail}");
     let body_arg = format!("body={body}");
     run_glab(
@@ -4061,7 +4094,7 @@ mod attach_tests {
     fn upload_reply_needs_a_project_upload_url() {
         let ok = r#"{"id":1,"alt":"image-1","url":"/uploads/0123abcd/image-1.png","full_path":"/-/project/1/uploads/0123abcd/image-1.png","markdown":"![image-1](/uploads/0123abcd/image-1.png)"}"#;
         assert_eq!(
-            upload_outcome("image-1.png", &out(0, ok, "")).unwrap(),
+            upload_outcome(UploadVerb::Posted, "image-1.png", &out(0, ok, "")).unwrap(),
             "/uploads/0123abcd/image-1.png"
         );
         for url in [
@@ -4099,7 +4132,11 @@ mod attach_tests {
             r#"{"url":"/uploads/%2E/x"}"#,
         ] {
             assert_eq!(
-                glab_msg(upload_outcome("image-1.png", &out(0, reply, ""))),
+                glab_msg(upload_outcome(
+                    UploadVerb::Posted,
+                    "image-1.png",
+                    &out(0, reply, "")
+                )),
                 unreadable,
                 "{reply}"
             );
@@ -4108,7 +4145,13 @@ mod attach_tests {
 
     #[test]
     fn upload_refusals_name_the_file_and_reason() {
-        let refused = |stderr: &str| glab_msg(upload_outcome("image-1.png", &out(1, "", stderr)));
+        let refused = |stderr: &str| {
+            glab_msg(upload_outcome(
+                UploadVerb::Posted,
+                "image-1.png",
+                &out(1, "", stderr),
+            ))
+        };
         let too_large =
             "Nothing was posted. GitLab didn't accept image-1.png: it is larger than this project allows.";
         assert_eq!(
@@ -4129,10 +4172,39 @@ mod attach_tests {
             "Nothing was posted. GitLab didn't accept image-1.png: glab exited with code 1."
         );
         assert!(matches!(
-            upload_refusal("image-2.png", &AppError::GlabNotFound.to_string()),
+            upload_refusal(
+                UploadVerb::Posted,
+                "image-2.png",
+                &AppError::GlabNotFound.to_string()
+            ),
             AppError::Glab(ref m)
                 if m == "Nothing was posted. GitLab didn't accept image-2.png: GitLab CLI (glab) not found."
         ));
+    }
+
+    // One builder, two verbs: a comment or create says "posted", an edit says "saved".
+    #[test]
+    fn upload_refusals_say_posted_or_saved_by_verb() {
+        let refusal = |verb| match upload_refusal(verb, "image-1.png", UPLOAD_UNREADABLE) {
+            AppError::Glab(m) => m,
+            other => panic!("expected AppError::Glab, got {other:?}"),
+        };
+        assert_eq!(
+            refusal(UploadVerb::Posted),
+            "Nothing was posted. GitLab didn't accept image-1.png: GitLab's reply couldn't be read."
+        );
+        assert_eq!(
+            refusal(UploadVerb::Saved),
+            "Nothing was saved. GitLab didn't accept image-1.png: GitLab's reply couldn't be read."
+        );
+        assert_eq!(
+            glab_msg(upload_outcome(
+                UploadVerb::Saved,
+                "image-1.png",
+                &out(1, "", "glab: HTTP 413\n")
+            )),
+            "Nothing was saved. GitLab didn't accept image-1.png: it is larger than this project allows."
+        );
     }
 }
 
@@ -7707,7 +7779,7 @@ pub async fn create_mr(
     let body = match &staged {
         Some(s) => {
             let enc = encode_project(&project_path(repo_path).await?);
-            upload_and_rewrite(repo_path, &enc, body, s).await?
+            upload_and_rewrite(repo_path, &enc, body, s, UploadVerb::Posted).await?
         }
         None => body.to_string(),
     };

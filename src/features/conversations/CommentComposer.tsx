@@ -7,6 +7,7 @@ import {
 import type { ReactNode, Ref } from "react";
 import { useId, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import type { MarkdownHostedImages } from "@/components/markdown/markdown";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -69,6 +70,7 @@ export function CommentComposer({
   readOnlyReason,
   holdKey,
   attachments,
+  hostedImages,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). Both methods expand a collapsed box first. */
@@ -111,6 +113,8 @@ export function CommentComposer({
   /** Opt in to image attachments. Forwarded only while expanded, under this
    *  box's own hold, so a collapsed or held box offers no attach route. */
   attachments?: DraftAttachmentsHandle;
+  /** Preview's hosted-image source; see `MarkdownEditor`. */
+  hostedImages?: MarkdownHostedImages;
 }) {
   const hasDraft = value.trim().length > 0;
   // Only the `busy` and read-only holds get words: an empty draft explains
@@ -379,6 +383,7 @@ export function CommentComposer({
           attachments={
             collapsed ? undefined : attachments?.withHold(blockedReason)
           }
+          hostedImages={hostedImages}
           textareaClassName="max-h-32 min-h-12 resize-y"
         />
       </div>

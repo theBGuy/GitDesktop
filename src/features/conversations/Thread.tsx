@@ -288,6 +288,10 @@ export function Thread({
           onCancel={() => setEditing(false)}
           textareaClassName="max-h-48 min-h-16 resize-y font-mono"
           mentions={mentions}
+          hostedImages={hostedImagesFor(
+            mentions?.refs?.repoPath,
+            mentions?.ghHost,
+          )}
         />
       ) : minimized && !expanded ? (
         <button

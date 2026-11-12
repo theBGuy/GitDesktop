@@ -13,7 +13,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import { draftEntry, draftKeyFor } from "@/lib/attachments/store";
-import { forgeIssueComment, forgeIssueView, forgeStatus } from "@/lib/git/api";
+import {
+  forgeIssueComment,
+  forgeIssueEdit,
+  forgeIssueView,
+  forgeStatus,
+} from "@/lib/git/api";
 import type { ForgeStatus, IssueDetails } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -31,6 +36,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
   forgeIssueView: vi.fn(),
   forgeIssueComment: vi.fn(),
+  forgeIssueEdit: vi.fn(),
 }));
 // The close is observed at its hook: the state write itself is named only by
 // the hook that re-files its row (scripts/remote-row-state-wiring.test.mjs).
@@ -205,6 +211,81 @@ const statusSaysAttaching = () =>
 
 const key = (number: number) =>
   draftKeyFor("issue-comment", `${REPO}#origin#${number}`);
+
+const editKey = (number: number) =>
+  draftKeyFor("issue-edit", `${REPO}#origin#${number}`);
+const editBox = () =>
+  screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+
+/** Opens the shown issue's Edit dialog. */
+async function openEdit() {
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  await waitFor(() => expect(editBox()).toBeInTheDocument());
+}
+
+describe("RemoteIssueView edit attachments", () => {
+  it("sends the edit's refs as the sixth argument and closes a clean save (AC12)", async () => {
+    mount(7);
+    await shown(7);
+    await openEdit();
+    paste(editBox(), 1);
+    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+    vi.mocked(forgeIssueEdit).mockResolvedValue({
+      failedAttachments: [],
+      body: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(forgeIssueEdit).mock.calls[0][5]).toEqual({
+      session: SESSION,
+      names: ["image-1.png"],
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(toast.success).toHaveBeenCalledWith("Issue updated");
+    expect(draftEntry(editKey(7))).toBeUndefined();
+  });
+
+  it("ends issue 7's edit images on a switch and never shows them on issue 8 (AC18)", async () => {
+    const { show } = mount(7);
+    await shown(7);
+    await openEdit();
+    paste(editBox(), 1);
+    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+    vi.mocked(attachmentDiscard).mockClear();
+    show(8);
+    await shown(8);
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+    expect(draftEntry(editKey(7))).toBeUndefined();
+    await openEdit();
+    expect(
+      screen.queryAllByRole("button", { name: /^Remove image-/ }),
+    ).toHaveLength(0);
+    vi.mocked(forgeIssueEdit).mockReset();
+    vi.mocked(forgeIssueEdit).mockResolvedValue({});
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(forgeIssueEdit).mock.calls[0][1]).toBe(8);
+    expect(vi.mocked(forgeIssueEdit).mock.calls[0][5]).toBeUndefined();
+  });
+
+  it("re-reads the issue after a rejected edit (AC20)", async () => {
+    mount(7);
+    await shown(7);
+    await openEdit();
+    const reads = vi.mocked(forgeIssueView).mock.calls.length;
+    vi.mocked(forgeIssueEdit).mockRejectedValue(new Error("edit refused"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(vi.mocked(forgeIssueView).mock.calls.length).toBeGreaterThan(
+        reads,
+      ),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+  });
+});
 
 describe("RemoteIssueView comment attachments", () => {
   it("sends refs in first-occurrence order and lands a partial outcome on the issue it posted to", async () => {

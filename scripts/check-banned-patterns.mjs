@@ -5697,7 +5697,9 @@ export const CHECKS = [
       // The shared title+description EDIT dialog: an edit re-saves the same
       // entity rather than creating a second one, so by owner decision its
       // Generate (in each host's `bodyActions`, mirrored by the chord through
-      // `generateDisabled`) stays live during the save.
+      // `generateDisabled`) stays live during the save. A host holds it only
+      // while that save is uploading images, whose partial outcome re-seeds
+      // the description.
       "src/features/conversations/EditTitleBodyDialog.tsx",
     ],
     message:

@@ -1,13 +1,22 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
 import { gitBranchAhead, gitBranches } from "@/lib/git/api";
 import type { Branch, CommitSummary } from "@/lib/git/types";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { createLocalPr } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
+import { useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
@@ -111,6 +120,13 @@ function expectHeld(reason: string) {
   expect(button.parentElement).toHaveAttribute("title", reason);
 }
 
+/** Create is usable: a held Create is aria-disabled, so enabled alone isn't. */
+function expectLive() {
+  const button = createButton();
+  expect(button).toBeEnabled();
+  expect(button).not.toHaveAttribute("aria-disabled", "true");
+}
+
 /** Every submit path: the mod+Enter chord, Enter in a field, and the button. */
 async function tryEverySubmit(
   user: ReturnType<typeof userEvent.setup>,
@@ -159,8 +175,7 @@ describe("Create local PR: nothing to merge", () => {
     expect(
       await screen.findByText("Couldn't count the commits to merge."),
     ).toBeInTheDocument();
-    expect(createButton()).not.toHaveAttribute("aria-disabled");
-    expect(createButton()).toBeEnabled();
+    expectLive();
     await user.click(createButton());
     await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
   });
@@ -180,7 +195,7 @@ describe("Create local PR: nothing to merge", () => {
     expect(
       screen.queryByText("Couldn't count the commits to merge."),
     ).toBeNull();
-    expect(createButton()).toBeEnabled();
+    expectLive();
     await user.click(createButton());
     await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
   });
@@ -207,7 +222,7 @@ describe("Create local PR: nothing to merge", () => {
     renderDialog();
     await fillTitle(user);
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
-    expect(createButton()).toBeEnabled();
+    expectLive();
     await user.click(createButton());
     await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
   });
@@ -230,8 +245,7 @@ describe("Create local PR: nothing to merge", () => {
     await fillTitle(user);
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
     await waitFor(() => expect(gitBranches).toHaveBeenCalled());
-    expect(createButton()).toBeEnabled();
-    expect(createButton()).not.toHaveAttribute("aria-disabled");
+    expectLive();
     await user.click(createButton());
     await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
   });
@@ -281,12 +295,253 @@ describe("Create local PR: nothing to merge", () => {
     renderDialog();
     await fillTitle(user);
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
-    expect(createButton()).toBeEnabled();
+    expectLive();
     await user.click(screen.getByRole("combobox", { name: "Base" }));
     await user.click(await screen.findByRole("option", { name: /dev/ }));
     expect(
       await screen.findByText("Counting commits to merge…", { selector: "p" }),
     ).toBeInTheDocument();
     expectHeld("Counting commits to merge…");
+  });
+});
+
+describe("Create local PR: a running create", () => {
+  it("lets no further mod+Enter or field Enter start a second create", async () => {
+    vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
+    let settle: () => void = () => undefined;
+    vi.mocked(createLocalPr).mockImplementation(
+      (_repo, input) =>
+        new Promise((resolve) => {
+          settle = () =>
+            resolve({
+              id: "pr-1",
+              ...input,
+              status: "open",
+              approved: false,
+              labels: [],
+              comments: [],
+              createdAt: new Date().toISOString(),
+            });
+        }),
+    );
+    const user = userEvent.setup();
+    renderDialog();
+    const title = await fillTitle(user);
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    title.focus();
+    const chord = () => user.keyboard("{Control>}{Enter}{/Control}");
+    await chord();
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
+    await waitFor(() => expectHeld(ACT_PENDING_REASON));
+    await chord();
+    await chord();
+    // Enter in a field reaches the same refusal through the native submit.
+    fireEvent.submit(title.closest("form") as HTMLFormElement);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(createLocalPr).toHaveBeenCalledTimes(1);
+    settle();
+  });
+
+  it("re-arms the shortcut after a failed create", async () => {
+    vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
+    vi.mocked(createLocalPr).mockRejectedValueOnce(new Error("refused"));
+    const user = userEvent.setup();
+    renderDialog();
+    const title = await fillTitle(user);
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    title.focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
+    await waitFor(expectLive);
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(2));
+  });
+
+  it("starts one create from a held mod+Enter", async () => {
+    vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
+    // user-event awaits advanceTimers before each repeat: once the first Enter
+    // is down, hold the repeats until its create settled and Create is live, so
+    // only the repeat arm can refuse them.
+    let enterDown = false;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter") enterDown = true;
+    };
+    document.addEventListener("keydown", onKey, true);
+    const user = userEvent.setup({
+      advanceTimers: async () => {
+        if (!enterDown) return;
+        await waitFor(() => {
+          expect(createLocalPr).toHaveBeenCalledTimes(1);
+          expectLive();
+        });
+      },
+    });
+    try {
+      renderDialog();
+      const title = await fillTitle(user);
+      expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+      title.focus();
+      await user.keyboard("{Control>}{Enter>3}{/Enter}{/Control}");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(createLocalPr).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", onKey, true);
+    }
+  });
+});
+
+describe("Create local PR: a reopen during a create", () => {
+  type Seeds = { defaultHead?: string; defaultBase?: string };
+  const control = {
+    setOpen: (_open: boolean) => undefined as void,
+    setSeeds: (_seeds: Seeds) => undefined as void,
+    setRepo: (_repo: string) => undefined as void,
+  };
+
+  function Host() {
+    const [repo, setRepo] = useState(REPO);
+    control.setRepo = setRepo;
+    const [open, setOpen] = useState(true);
+    const [seeds, setSeeds] = useState<Seeds>({
+      defaultHead: "feat",
+      defaultBase: "main",
+    });
+    control.setOpen = setOpen;
+    control.setSeeds = setSeeds;
+    return (
+      <CreateLocalPrDialog
+        repoPath={repo}
+        defaultHead={seeds.defaultHead}
+        defaultBase={seeds.defaultBase}
+        open={open}
+        onOpenChange={setOpen}
+      />
+    );
+  }
+
+  /** Closes, then reopens the way the host does: seeds and open in one update. */
+  const reopen = (seeds: Seeds = {}) =>
+    act(() => {
+      control.setSeeds(seeds);
+      control.setOpen(true);
+    });
+
+  beforeEach(() => {
+    useUiStore.setState({ repoPath: REPO });
+    vi.mocked(gitBranches).mockResolvedValue(
+      ["main", "feat", "dev"].map(
+        (name) =>
+          ({ name, isCurrent: name === "feat", archived: false }) as Branch,
+      ),
+    );
+    vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
+  });
+
+  async function createThenClose() {
+    const pending: {
+      resolve: (v: Awaited<ReturnType<typeof createLocalPr>>) => void;
+      reject: (e: unknown) => void;
+    } = { resolve: () => undefined, reject: () => undefined };
+    vi.mocked(createLocalPr).mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          pending.resolve = resolve;
+          pending.reject = reject;
+        }),
+    );
+    const user = userEvent.setup();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <Host />
+      </QueryClientProvider>,
+    );
+    const title = await fillTitle(user);
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    title.focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
+    act(() => control.setOpen(false));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    return { user, pending };
+  }
+
+  const created = {
+    id: "pr-1",
+    title: "A title",
+    body: "",
+    base: "main",
+    head: "feat",
+    status: "open",
+    approved: false,
+    labels: [],
+    comments: [],
+    createdAt: new Date().toISOString(),
+  } as unknown as Awaited<ReturnType<typeof createLocalPr>>;
+
+  it("keeps the draft with Create held, and the settle closes it", async () => {
+    const { user, pending } = await createThenClose();
+    reopen();
+    expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+    expectHeld(ACT_PENDING_REASON);
+    screen.getByLabelText("Title").focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(createLocalPr).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve(created));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(createLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the dialog and the draft when that create fails, and re-arms the shortcut", async () => {
+    const { user, pending } = await createThenClose();
+    reopen();
+    expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+    await act(async () => pending.reject(new Error("refused")));
+    await waitFor(expectLive);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByLabelText("Title")).toHaveValue("A title");
+    screen.getByLabelText("Title").focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(2));
+  });
+
+  it("still shows an explicitly requested head and base over a running create", async () => {
+    const { pending } = await createThenClose();
+    reopen({ defaultHead: "dev", defaultBase: "main" });
+    expect(await screen.findByLabelText("Title")).toHaveValue("");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "Merge" })).toHaveTextContent(
+        "dev",
+      ),
+    );
+    expect(screen.getByRole("combobox", { name: "Base" })).toHaveTextContent(
+      "main",
+    );
+    await act(async () => pending.resolve(created));
+    // The first create's settle closes only its own draft, never the requested one.
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Merge" })).toHaveTextContent(
+      "dev",
+    );
+    expect(screen.getByRole("combobox", { name: "Base" })).toHaveTextContent(
+      "main",
+    );
+  });
+
+  it("resets for another repository opened during a create", async () => {
+    const { pending } = await createThenClose();
+    const other = "C:/other";
+    act(() => {
+      useUiStore.setState({ repoPath: other });
+      control.setRepo(other);
+    });
+    reopen({});
+    expect(await screen.findByLabelText("Title")).toHaveValue("");
+    expect(createButton()).not.toHaveAccessibleDescription(ACT_PENDING_REASON);
+    await act(async () => pending.resolve(created));
   });
 });

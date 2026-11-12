@@ -573,6 +573,170 @@ pub async fn gh_issue_create(
     })
 }
 
+/// The follow-up cause when a created issue's number can't be read: nothing is sent,
+/// since the follow-up addresses the issue by number.
+const ISSUE_NUMBER_UNREAD: &str =
+    "The new issue's number couldn't be read from gh's output, so its remaining details weren't sent.";
+
+/// Splits the chosen labels into (those for `--label`, those for the follow-up PATCH);
+/// one side is always empty. gh splits a `--label` value on commas and parses quotes,
+/// so a list holding such a label (or a line break) goes whole to the PATCH.
+fn issue_label_routes(labels: &[String]) -> (&[String], &[String]) {
+    if labels.iter().any(|l| l.contains([',', '"', '\n', '\r'])) {
+        (&[], labels)
+    } else {
+        (labels, &[])
+    }
+}
+
+/// `gh issue create` argv for a create carrying images: the trimmed title, the body,
+/// the create-route labels and the attach tail. Assignees, milestone and type never
+/// ride it; the follow-up applies them, so empty stdout keeps meaning nothing was
+/// created and a failed follow-up has a known issue number.
+fn issue_create_attach_args<'a>(
+    slug: &'a str,
+    title: &'a str,
+    body: &'a str,
+    labels: &'a [String],
+    names: &'a [String],
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "issue",
+        "create",
+        "--repo",
+        slug,
+        "--title",
+        title.trim(),
+        "--body",
+        body,
+    ];
+    for label in issue_label_routes(labels).0 {
+        args.push("--label");
+        args.push(label);
+    }
+    args.extend(crate::github::pr::attach_tail(names));
+    args
+}
+
+/// The follow-up PATCH body: only the keys that are set, never `type` (the type goes
+/// through `gh issue edit --type`). `None` when nothing is set.
+fn issue_followup_payload(
+    patch_labels: &[String],
+    assignees: &[String],
+    milestone: Option<u64>,
+) -> Option<serde_json::Value> {
+    let mut payload = serde_json::Map::new();
+    if !patch_labels.is_empty() {
+        payload.insert("labels".into(), serde_json::json!(patch_labels));
+    }
+    if !assignees.is_empty() {
+        payload.insert("assignees".into(), serde_json::json!(assignees));
+    }
+    if let Some(m) = milestone {
+        payload.insert("milestone".into(), serde_json::json!(m));
+    }
+    (!payload.is_empty()).then_some(serde_json::Value::Object(payload))
+}
+
+/// One result for the two follow-up calls: both causes, the PATCH's first, one per line.
+fn fold_followup(patch: AppResult<()>, set_type: AppResult<()>) -> AppResult<()> {
+    match (patch, set_type) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(p), Err(t)) => Err(AppError::Gh(format!("{p}\n{t}"))),
+    }
+}
+
+/// The created issue's follow-up: one PATCH for the PATCH-route labels, assignees and
+/// milestone, then the type by `gh issue edit --type`, each sent whatever the other
+/// returned. With number 0 nothing is sent, and only a planned follow-up reports it.
+async fn issue_create_followup(
+    repo_path: &str,
+    slug: &str,
+    number: u64,
+    payload: Option<serde_json::Value>,
+    issue_type: Option<&str>,
+) -> AppResult<()> {
+    let issue_type = issue_type.filter(|t| !t.trim().is_empty());
+    if payload.is_none() && issue_type.is_none() {
+        return Ok(());
+    }
+    if number == 0 {
+        return Err(AppError::Gh(ISSUE_NUMBER_UNREAD.into()));
+    }
+    let n = number.to_string();
+    let patch = match payload {
+        Some(payload) => {
+            let endpoint = format!("repos/{slug}/issues/{n}");
+            run_gh_input(
+                Some(repo_path),
+                &["api", "--method", "PATCH", &endpoint, "--input", "-"],
+                &payload.to_string(),
+                GH_NETWORK_TIMEOUT,
+            )
+            .await
+            .map(drop)
+        }
+        None => Ok(()),
+    };
+    let set_type = match issue_type {
+        Some(t) => run_gh(
+            Some(repo_path),
+            &issue_set_type_args(slug, &n, Some(t)),
+            GH_NETWORK_TIMEOUT,
+        )
+        .await
+        .map(drop),
+        None => Ok(()),
+    };
+    fold_followup(patch, set_type)
+}
+
+/// Creates an issue with `gh issue create --attach`, run in the staging folder. Empty
+/// stdout means nothing was created; once the URL is printed the issue exists, so the
+/// failed images and a failed follow-up ride the Ok outcome.
+#[allow(clippy::too_many_arguments)]
+pub async fn gh_issue_create_attached(
+    repo_path: String,
+    title: String,
+    body: String,
+    labels: Vec<String>,
+    assignees: Vec<String>,
+    milestone: Option<u64>,
+    issue_type: Option<String>,
+    lens: Option<String>,
+    staged: crate::attachments::StagedRefs,
+) -> AppResult<crate::attachments::PrCreateOutcome> {
+    use crate::github::pr::{
+        attach_failed_after, run_gh_maybe_attached, scrape_pr_ref, AttachedWrite, Readback,
+    };
+    if title.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "an issue title is required".into(),
+        ));
+    }
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let args = issue_create_attach_args(&slug, &title, &body, &labels, &staged.names);
+    let result = run_gh_maybe_attached(
+        &repo_path,
+        &slug,
+        &args,
+        Some(&staged),
+        AttachedWrite::Create,
+    )
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    let out = result.map_err(map_issues_disabled)?;
+    let (number, url) = scrape_pr_ref(&out.stdout_lossy());
+    let failed =
+        attach_failed_after(&repo_path, &slug, &out, &staged, Readback::Issue(number)).await;
+    let payload = issue_followup_payload(issue_label_routes(&labels).1, &assignees, milestone);
+    let followup =
+        issue_create_followup(&repo_path, &slug, number, payload, issue_type.as_deref()).await;
+    let pr = PrRef { number, url };
+    Ok(crate::attachments::created_outcome(pr, Some(&staged), failed, followup).await)
+}
+
 /// Logins that can be assigned to issues/PRs in this repo (collaborators), walked up to
 /// `USER_LIST_CEILING`, with the walk's "stopped at the bound" flag.
 pub async fn gh_assignable_users(
@@ -788,7 +952,8 @@ pub async fn gh_issue_comment(
     staged: Option<crate::attachments::StagedRefs>,
 ) -> AppResult<crate::attachments::CommentOutcome> {
     use crate::github::pr::{
-        attach_failed_after, attach_tail, last_url_line, run_gh_maybe_attached, Readback,
+        attach_failed_after, attach_tail, last_url_line, run_gh_maybe_attached, AttachedWrite,
+        Readback,
     };
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
@@ -799,7 +964,14 @@ pub async fn gh_issue_comment(
     if let Some(s) = &staged {
         args.extend(attach_tail(&s.names));
     }
-    let out = run_gh_maybe_attached(&repo_path, &slug, &args, staged.as_ref()).await?;
+    let out = run_gh_maybe_attached(
+        &repo_path,
+        &slug,
+        &args,
+        staged.as_ref(),
+        AttachedWrite::Post,
+    )
+    .await?;
     let Some(s) = &staged else {
         return Ok(Default::default());
     };
@@ -856,8 +1028,10 @@ pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String
     Ok(())
 }
 
-// `gh issue edit` selects the sunset Projects-classic field on older gh (same
-// bug as `gh pr edit`), so title/body edits go through the REST API instead.
+// An edit without images goes through the REST API: `gh issue edit` on older gh
+// selects the sunset Projects-classic field (same bug as `gh pr edit`). The image
+// route, `gh issue edit --attach` (`gh_issue_edit_attached`), runs only behind the
+// gh >= 2.99.0 attach gate (`GH_ATTACH_FLOOR`).
 
 /// Updates an issue's title and body via the REST API.
 pub async fn gh_issue_edit(
@@ -891,6 +1065,55 @@ pub async fn gh_issue_edit(
     )
     .await?;
     Ok(())
+}
+
+/// `gh issue edit` argv for an edit carrying images. The title is sent trimmed, as the
+/// REST route sends it.
+fn issue_edit_attach_args<'a>(
+    n: &'a str,
+    slug: &'a str,
+    title: &'a str,
+    body: &'a str,
+    names: &'a [String],
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "issue",
+        "edit",
+        n,
+        "--repo",
+        slug,
+        "--title",
+        title.trim(),
+        "--body",
+        body,
+    ];
+    args.extend(crate::github::pr::attach_tail(names));
+    args
+}
+
+/// Updates an issue's title and body with `gh issue edit --attach`, run in the staging
+/// folder. gh drops the typed body when the first upload fails while still saving the
+/// title, so the outcome comes from `settle_attached_edit`.
+pub async fn gh_issue_edit_attached(
+    repo_path: String,
+    number: u64,
+    title: String,
+    body: String,
+    lens: Option<String>,
+    staged: crate::attachments::StagedRefs,
+) -> AppResult<crate::attachments::EditOutcome> {
+    use crate::github::pr::{run_gh_maybe_attached, settle_attached_edit, AttachedWrite, Readback};
+    if title.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "an issue title is required".into(),
+        ));
+    }
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let n = number.to_string();
+    let args = issue_edit_attach_args(&n, &slug, &title, &body, &staged.names);
+    let out =
+        run_gh_maybe_attached(&repo_path, &slug, &args, Some(&staged), AttachedWrite::Edit).await?;
+    settle_attached_edit(&repo_path, &slug, out, &staged, Readback::Issue(number)).await
 }
 
 /// Pins an issue (GitHub allows at most 3 pinned issues; gh surfaces the error).
@@ -1674,6 +1897,204 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::github::test_support::{gh_output, HELD_REST_STDERR};
+
+    #[test]
+    fn issue_edit_attach_argv_sends_the_trimmed_title_and_no_metadata() {
+        let names = vec!["image-1.png".to_string(), "image-2.png".to_string()];
+        let body = "![a](image-1.png) ![b](image-2.png)";
+        let args = super::issue_edit_attach_args("91", "o/r", "  Title \n", body, &names);
+        assert_eq!(
+            args,
+            [
+                "issue",
+                "edit",
+                "91",
+                "--repo",
+                "o/r",
+                "--title",
+                "Title",
+                "--body",
+                body,
+                "--attach",
+                "image-1.png",
+                "--attach",
+                "image-2.png",
+            ]
+        );
+        for flag in ["--assignee", "--milestone", "--type", "--add-label"] {
+            assert!(!args.contains(&flag), "{flag}");
+        }
+    }
+
+    /// The attached issue edit settles through the edit classifier, never through the
+    /// create-side read-back-first heuristics.
+    #[test]
+    fn issue_edit_attached_settles_through_the_edit_classifier() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("issue.rs"),
+            "gh_issue_edit_attached",
+        );
+        let settles = |b: &str| {
+            b.contains(
+                "settle_attached_edit(&repo_path, &slug, out, &staged, Readback::Issue(number))",
+            ) && !b.contains("attach_failed_after(")
+                && !b.contains("partial_failed(")
+        };
+        assert!(settles(&body), "{body}");
+        let mutated = body.replacen("settle_attached_edit(", "attach_failed_after(", 1);
+        assert_ne!(mutated, body);
+        assert!(!settles(&mutated));
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn issue_create_attach_argv_sends_the_trimmed_title_and_no_metadata() {
+        let names = strings(&["image-1.png", "image-2.png"]);
+        let labels = strings(&["bug", "ui"]);
+        let body = "![a](image-1.png) ![b](image-2.png)";
+        let args = super::issue_create_attach_args("o/r", "  Title \n", body, &labels, &names);
+        assert_eq!(
+            args,
+            [
+                "issue",
+                "create",
+                "--repo",
+                "o/r",
+                "--title",
+                "Title",
+                "--body",
+                body,
+                "--label",
+                "bug",
+                "--label",
+                "ui",
+                "--attach",
+                "image-1.png",
+                "--attach",
+                "image-2.png",
+            ]
+        );
+        for flag in ["--assignee", "--milestone", "--type", "--add-label"] {
+            assert!(!args.contains(&flag), "{flag}");
+        }
+    }
+
+    /// A label gh's `--label` would split or mis-parse sends the WHOLE list to the PATCH.
+    #[test]
+    fn issue_label_routes_send_a_list_with_an_unsafe_label_whole_to_the_patch() {
+        let names = strings(&["image-1.png"]);
+        let label_flags = |labels: &[String]| -> Vec<String> {
+            let args = super::issue_create_attach_args("o/r", "T", "b", labels, &names);
+            args.windows(2)
+                .filter(|w| w[0] == "--label")
+                .map(|w| w[1].to_string())
+                .collect()
+        };
+        let rides: [&[&str]; 3] = [&[], &["bug", "ui"], &["plain label", "a.b-c_d", " lead"]];
+        for labels in rides {
+            let labels = strings(labels);
+            let (create, patch) = super::issue_label_routes(&labels);
+            assert_eq!(create, &labels[..], "{labels:?}");
+            assert!(patch.is_empty(), "{labels:?}");
+            assert_eq!(label_flags(&labels), labels, "{labels:?}");
+        }
+        let patched: [&[&str]; 4] = [
+            &["bug", "needs, triage", "ui"],
+            &["say \"hi\""],
+            &["two\nlines"],
+            &["cr\rhere"],
+        ];
+        for labels in patched {
+            let labels = strings(labels);
+            let (create, patch) = super::issue_label_routes(&labels);
+            assert!(create.is_empty(), "{labels:?}");
+            assert_eq!(patch, &labels[..], "{labels:?}");
+            assert!(label_flags(&labels).is_empty(), "{labels:?}");
+        }
+    }
+
+    #[test]
+    fn issue_followup_payload_holds_only_the_set_keys() {
+        use serde_json::json;
+        let payload = super::issue_followup_payload;
+        assert_eq!(payload(&[], &[], None), None);
+        assert_eq!(
+            payload(&[], &strings(&["a", "b"]), None),
+            Some(json!({ "assignees": ["a", "b"] }))
+        );
+        assert_eq!(payload(&[], &[], Some(3)), Some(json!({ "milestone": 3 })));
+        assert_eq!(
+            payload(&strings(&["needs, triage", "ui"]), &[], None),
+            Some(json!({ "labels": ["needs, triage", "ui"] }))
+        );
+        assert_eq!(
+            payload(&strings(&["x"]), &strings(&["a"]), Some(3)),
+            Some(json!({ "labels": ["x"], "assignees": ["a"], "milestone": 3 }))
+        );
+    }
+
+    #[test]
+    fn fold_followup_keeps_both_causes_patch_first() {
+        let gh = |m: &str| Err(AppError::Gh(m.into()));
+        assert!(super::fold_followup(Ok(()), Ok(())).is_ok());
+        let text = |r: crate::error::AppResult<()>| r.unwrap_err().to_string();
+        assert_eq!(text(super::fold_followup(gh("a"), Ok(()))), "a");
+        assert_eq!(text(super::fold_followup(Ok(()), gh("b"))), "b");
+        assert_eq!(text(super::fold_followup(gh("a"), gh("b"))), "a\nb");
+    }
+
+    /// With the number unread nothing is sent: a planned follow-up reports the fixed
+    /// cause, an unplanned one stays Ok. Neither arm reaches gh.
+    #[tokio::test]
+    async fn issue_create_followup_without_a_number_sends_nothing() {
+        let unread = "The new issue's number couldn't be read from gh's output, so its remaining details weren't sent.";
+        let followup = |payload, issue_type| {
+            super::issue_create_followup("/no/such/repo", "o/r", 0, payload, issue_type)
+        };
+        let planned = [
+            (Some(serde_json::json!({ "assignees": ["a"] })), None),
+            (None, Some("Bug")),
+        ];
+        for (payload, issue_type) in planned {
+            let r = followup(payload, issue_type).await;
+            assert!(matches!(&r, Err(AppError::Gh(m)) if m == unread), "{r:?}");
+        }
+        for issue_type in [None, Some(""), Some("  ")] {
+            let r = followup(None, issue_type).await;
+            assert!(r.is_ok(), "{issue_type:?}: {r:?}");
+        }
+    }
+
+    /// The attached create evicts repo metadata right after the attempt, then applies the
+    /// disabled-issues remap, then hands its follow-up to the created outcome unwrapped.
+    fn create_attached_wiring_holds(body: &str) -> bool {
+        let marker = "invalidate_repo_meta_after(&slug, &result);";
+        body.contains("let result = run_gh_maybe_attached(")
+            && body.find(marker).is_some_and(|at| {
+                body[..at].trim_end().ends_with(".await;")
+                    && body[at..].contains("let out = result.map_err(map_issues_disabled)?;")
+            })
+            && body.contains("Readback::Issue(number)")
+            && !body.contains("followup?")
+    }
+
+    #[test]
+    fn issue_create_attached_evicts_repo_meta_after_the_attempt() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("issue.rs"),
+            "gh_issue_create_attached",
+        );
+        assert!(create_attached_wiring_holds(&body), "{body}");
+        let dropped = body.replacen("invalidate_repo_meta_after(&slug, &result);", "", 1);
+        assert_ne!(dropped, body);
+        assert!(!create_attached_wiring_holds(&dropped));
+        let unmapped = body.replacen(".map_err(map_issues_disabled)", "", 1);
+        assert_ne!(unmapped, body);
+        assert!(!create_attached_wiring_holds(&unmapped));
+    }
 
     #[test]
     fn forge_user_list_assignees_endpoint_carries_page_size_and_page() {

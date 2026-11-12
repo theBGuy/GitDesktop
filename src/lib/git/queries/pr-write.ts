@@ -30,6 +30,7 @@ export function useEditPr(repo: string, lens: RemoteLens) {
        *  a no-op retarget is still a forge write, and GitHub rejects one on a
        *  stacked PR. */
       base?: string;
+      attachments?: AttachmentRefs;
     }) =>
       api.forgePrEdit(
         repo,
@@ -38,6 +39,7 @@ export function useEditPr(repo: string, lens: RemoteLens) {
         args.body,
         lens,
         args.base,
+        args.attachments,
       ),
   );
 }
