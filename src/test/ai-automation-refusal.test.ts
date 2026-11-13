@@ -4,6 +4,7 @@ import type { AiSettings } from "@/lib/ai/types";
 import { useAutomationResults } from "@/lib/automations/results";
 import { triggerAutomations } from "@/lib/automations/runner";
 import { saveReview } from "@/lib/pulls/reviews-history";
+import { type Part, streamResult, text } from "./ai-stream-parts";
 
 const streamTextMock = vi.hoisted(() => vi.fn());
 const ai = { provider: "openai", model: "m" } as AiSettings;
@@ -96,18 +97,8 @@ vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
   repoIdentity: async (p: string) => p,
 }));
 
-type Part = Record<string, unknown>;
 const streamOf = (parts: Part[]) =>
-  streamTextMock.mockReturnValue({
-    fullStream: (async function* () {
-      for (const p of parts) yield p;
-    })(),
-  });
-const text = (t: string): Part[] => [
-  { type: "text-start", id: "1" },
-  { type: "text-delta", id: "1", text: t },
-  { type: "text-end", id: "1" },
-];
+  streamTextMock.mockReturnValue(streamResult(parts));
 
 const event = {
   kind: "commit" as const,

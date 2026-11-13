@@ -6,6 +6,7 @@ import {
 } from "@/lib/ai/client";
 import { streamAi } from "@/lib/ai/stream";
 import type { AiSettings } from "@/lib/ai/types";
+import { type Part, streamResult, text } from "./ai-stream-parts";
 
 const streamTextMock = vi.hoisted(() => vi.fn());
 
@@ -26,14 +27,8 @@ const REFUSED =
 
 const settings = { provider: "openai", model: "m" } as AiSettings;
 
-type Part = Record<string, unknown>;
-
 function streamOf(parts: Part[]) {
-  streamTextMock.mockReturnValue({
-    fullStream: (async function* () {
-      for (const p of parts) yield p;
-    })(),
-  });
+  streamTextMock.mockReturnValue(streamResult(parts));
 }
 
 function run(abortSignal = new AbortController().signal) {
@@ -49,12 +44,6 @@ function run(abortSignal = new AbortController().signal) {
   });
   return { promise, texts };
 }
-
-const text = (t: string): Part[] => [
-  { type: "text-start", id: "1" },
-  { type: "text-delta", id: "1", text: t },
-  { type: "text-end", id: "1" },
-];
 
 describe("runAgenticStream refusal guard", () => {
   beforeEach(() => streamTextMock.mockReset());

@@ -10,6 +10,7 @@ import {
   startReview,
   useReviewRun,
 } from "@/lib/stores/reviews";
+import { type Part, streamResult, text } from "./ai-stream-parts";
 
 const streamTextMock = vi.hoisted(() => vi.fn());
 
@@ -53,12 +54,13 @@ vi.mock("@/lib/ai/notes-context", () => ({
 vi.mock("@/lib/ai/docs-context", () => ({
   resolveDocSurfacesContext: async () => ({}),
 }));
-vi.mock("@/lib/ai/context-budget", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/ai/context-budget")>()),
-  resolveBudgetProfile: async () =>
-    (await importOriginal<typeof import("@/lib/ai/context-budget")>())
-      .DEFAULT_BUDGET_PROFILE,
-}));
+vi.mock("@/lib/ai/context-budget", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/ai/context-budget")>();
+  return {
+    ...real,
+    resolveBudgetProfile: async () => real.DEFAULT_BUDGET_PROFILE,
+  };
+});
 vi.mock("@/lib/pulls/reviews-history", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/reviews-history")>()),
   saveReview: vi.fn(async () => undefined),
@@ -90,18 +92,8 @@ const context: ReviewContext = {
   }),
 };
 
-type Part = Record<string, unknown>;
 const streamOf = (parts: Part[]) =>
-  streamTextMock.mockReturnValue({
-    fullStream: (async function* () {
-      for (const p of parts) yield p;
-    })(),
-  });
-const text = (t: string): Part[] => [
-  { type: "text-start", id: "1" },
-  { type: "text-delta", id: "1", text: t },
-  { type: "text-end", id: "1" },
-];
+  streamTextMock.mockReturnValue(streamResult(parts));
 
 const key = reviewKey(target);
 const state = () => renderHook(() => useReviewRun(target)).result.current;
