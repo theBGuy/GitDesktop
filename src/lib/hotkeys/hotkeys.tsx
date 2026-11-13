@@ -15,6 +15,7 @@ import {
   isTypeaheadKey,
   isTypeaheadTarget,
 } from "./binding";
+import { effectiveBindings } from "./default-binding";
 import {
   dispatchAction,
   getAvailableSnapshot,
@@ -24,7 +25,7 @@ import {
   subscribe,
   unregisterHandler,
 } from "./handler-registry";
-import { ACTIONS, type ActionId } from "./registry";
+import type { ActionId } from "./registry";
 
 export { dispatchAction };
 
@@ -45,24 +46,11 @@ export function useHotkeyAction(id: ActionId, run: () => void, enabled = true) {
   }, [id, enabled]);
 }
 
-/**
- * Effective binding per action: the user's override when present (null =
- * explicitly unbound), else the registry default.
- */
+/** Effective binding per action under the saved overrides ({@link effectiveBindings}). */
 export function useEffectiveBindings(): Map<ActionId, string | null> {
   const settings = useSettings();
   const overrides = settings.data?.hotkeys;
-  return useMemo(() => {
-    const map = new Map<ActionId, string | null>();
-    for (const action of ACTIONS) {
-      const override = overrides?.[action.id];
-      map.set(
-        action.id,
-        override === undefined ? action.defaultBinding : override,
-      );
-    }
-    return map;
-  }, [overrides]);
+  return useMemo(() => effectiveBindings(overrides), [overrides]);
 }
 
 /** Actions that currently have an enabled live handler (for the palette). */

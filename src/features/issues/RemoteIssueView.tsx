@@ -372,6 +372,7 @@ export function RemoteIssueView({
   // Either direction would be a guess while the lock state is unknown.
   const lockUnknownSuffix = lockSuffix || " — couldn't check lock state";
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
   const openPr = useUiStore((s) => s.openPr);
   const repoName = useUiStore((s) => s.repoName);
   const liveRepoPath = useUiStore((s) => s.repoPath);
@@ -1167,6 +1168,7 @@ export function RemoteIssueView({
       });
       return;
     }
+    markLinkHop();
     selectIssue({ kind: "remote", id: String(refNumber) });
   }
 

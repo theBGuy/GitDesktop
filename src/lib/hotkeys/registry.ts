@@ -216,6 +216,18 @@ export const ACTIONS = [
     defaultBinding: "mod+w",
   },
   {
+    id: "go-back",
+    label: "Go back",
+    category: "Navigation",
+    defaultBinding: "alt+left",
+  },
+  {
+    id: "go-forward",
+    label: "Go forward",
+    category: "Navigation",
+    defaultBinding: "alt+right",
+  },
+  {
     id: "focus-filter",
     label: "Focus the filter",
     category: "Navigation",
@@ -1430,6 +1442,27 @@ export const ACTIONS = [
 
 export type ActionId = (typeof ACTIONS)[number]["id"];
 
+/** Actions whose default differs on macOS. Read only through `defaultBindingOf`
+ *  (default-binding.ts); `scripts/zoom-steps.test.mjs` reads this literal, so
+ *  each entry stays one plain `"id": "binding",` pair. */
+export const MAC_DEFAULT_BINDINGS: Partial<Record<ActionId, string>> = {
+  "go-back": "mod+[",
+  "go-forward": "mod+]",
+};
+
+/** The default `action` ships with on a platform. The table is read by own key
+ *  only, so an id spelled like an `Object.prototype` member keeps its row's
+ *  value. */
+export function resolveDefaultBinding(
+  action: { id: string; defaultBinding: string | null },
+  mac: boolean,
+): string | null {
+  if (mac && Object.hasOwn(MAC_DEFAULT_BINDINGS, action.id)) {
+    return MAC_DEFAULT_BINDINGS[action.id as ActionId] ?? null;
+  }
+  return action.defaultBinding;
+}
+
 export const CATEGORY_ORDER: ActionCategory[] = [
   "Application",
   "Navigation",
@@ -1460,6 +1493,10 @@ export const BUILT_IN_KEYS: {
   { keys: "Enter", what: "Open or select the highlighted item" },
   { keys: "Space", what: "Stage or unstage the focused file in Changes" },
   { keys: "Esc", what: "Close dialogs, menus, and settings" },
+  {
+    keys: "Mouse back / forward",
+    what: "Go back or forward through the tabs and items you visited in a repository",
+  },
   {
     keys: "Ctrl+Enter",
     what: "Submit a comment from its text box, or a PR or issue create/edit dialog from any field",

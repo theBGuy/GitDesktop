@@ -32,6 +32,7 @@ import {
 import { type AgentKind, isAgentKind } from "@/lib/ai/agent";
 import { modelPickerEmptyText, useAgentModels } from "@/lib/ai/models";
 import { EFFORT_LEVEL_LABELS, EFFORT_LEVELS } from "@/lib/ai/review-effort";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import type { McpServer } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
@@ -217,6 +218,8 @@ function Segmented<T extends string>({
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    // A chorded arrow belongs to the app's shortcut listener.
+    if (hasChordModifier(e)) return;
     if (e.key === "ArrowRight" || e.key === "ArrowDown") {
       e.preventDefault();
       move(1);

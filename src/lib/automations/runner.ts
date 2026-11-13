@@ -1880,6 +1880,7 @@ async function generateReviewText(
     // CLI providers are routed above (the `isCliProvider` branch); carry repoPath
     // here regardless so every stream call is uniform (ignored by HTTP providers).
     repoPath: event.repoPath,
+    rejectRefusal: true,
   })) {
     buffer += chunk;
   }

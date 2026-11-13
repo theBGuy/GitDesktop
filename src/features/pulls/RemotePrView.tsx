@@ -1105,6 +1105,7 @@ export function RemotePrView({
   // A stack member can sit on the list tab that isn't showing, so hops arm the
   // tab align (plain `selectPr` clears it).
   const selectPrWithAlign = useUiStore((s) => s.selectPrWithAlign);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
   // Merge-queue record for THIS pull request. The forge reports the queue once,
   // in the merge outcome, and nothing fetchable carries it afterwards, so the
   // store is the only source and the PR leaving OPEN is the only retraction.
@@ -1421,9 +1422,12 @@ export function RemotePrView({
   }
   // An in-view hop: the hold's inert frame takes focus off the stack row the user
   // moved to, so the member it named gets its row back once that PR is shown.
+  // Only a clicked member is a link hop; the arrow keys and the two stepping
+  // actions browse the stack like a list.
   const stackHopRef = useRef<number | null>(null);
-  function hopToStackMember(member: number) {
+  function hopToStackMember(member: number, followed = false) {
     stackHopRef.current = member;
+    if (followed) markLinkHop();
     selectPrWithAlign({ kind: "remote", id: String(member) });
   }
   function goToStackNeighbor(delta: 1 | -1) {
