@@ -268,7 +268,9 @@ arrows, and a branch marked Keep local wears a `kept local` chip.
   too. Turn the mark off the same way. An optional **terminal push guard**
   from the same menu or the command palette installs a pre-push hook so
   `git push` stops as well; it covers this clone only, and running
-  `git push --no-verify` skips it.
+  `git push --no-verify` skips it. The Git hooks dialog labels that
+  hook **Managed by GitDesktop** and asks before you save over, disable
+  or delete it.
 - **Start a branch from any base**: the new-branch dialog's *Base it on*
   picker is a searchable list of local and remote branches. Basing on a
   remote branch (e.g. `origin/epic/big-feature`) starts from the remote tip

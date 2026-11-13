@@ -80,6 +80,7 @@ import {
   forgetDeletedBranch,
 } from "@/lib/deleted-branches/store";
 import { presentError } from "@/lib/error-summary";
+import { tipOf } from "@/lib/git/api";
 import {
   useBranches,
   useDropStashAtAnyDepth,
@@ -201,9 +202,9 @@ export function StashesDialog({
   // gate; the ref refuses the second, so one confirm fires one drop.
   const droppingRef = useRef(false);
   // Apply/pop confirm as a NESTED dialog, like the drop confirm below. The
-  // app-root confirm host is a SIBLING dialog, and Base UI only suppresses a
-  // parent's Escape for dialogs nested in its React tree — Esc over a sibling
-  // would close this dialog underneath it too.
+  // app-root confirm host is a SIBLING dialog: it handles its own Escape once
+  // it holds focus, but an Escape in the frame before that still reaches this
+  // dialog. Base UI suppresses a parent's Escape only for nested dialogs.
   const [confirmApply, setConfirmApply] = useState<PendingApply | null>(null);
   const shownApply = useRetained(confirmApply);
   const shownDrop = useRetained(confirmDrop);
@@ -640,7 +641,8 @@ function DeletedBranchesSection({
     if (tipStates.data?.get(entry.tip) === "pruned") return "pruned";
     if (branches.data?.some((b) => b.name === entry.name))
       return nameTips.isSuccess &&
-        nameTips.data[entry.name]?.toLowerCase() === entry.tip.toLowerCase()
+        tipOf(nameTips.data, entry.name)?.toLowerCase() ===
+          entry.tip.toLowerCase()
         ? "alreadyBack"
         : "nameExists";
     return "restorable";
@@ -669,7 +671,11 @@ function DeletedBranchesSection({
         if (!left) toast.error(removeFailedTitle(entry.name));
       }
       if (left) {
-        setSelectedId(next?.id ?? null);
+        // A pick made during the wait stands; only the pressed row or the
+        // unpicked fallback moves on.
+        setSelectedId((cur) =>
+          cur === null || cur === entry.id ? (next?.id ?? null) : cur,
+        );
         // Held until the list re-reads, so the row that left can't be pressed.
         await queryClient.invalidateQueries({ queryKey: DELETED_BRANCHES_KEY });
       }

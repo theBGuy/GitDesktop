@@ -203,6 +203,18 @@ export const gitUpdateBranchFrom = (
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
 
+/** A name's tip from a {@link gitBranchTips} answer, or undefined when the read
+ *  omitted it: the answer is a plain object, so an omitted name that matches an
+ *  `Object.prototype` key (`constructor`, `__proto__`) would index an inherited
+ *  member. */
+export const tipOf = (
+  tips: Readonly<Record<string, string>>,
+  name: string,
+): string | undefined => {
+  const tip: unknown = Object.hasOwn(tips, name) ? tips[name] : undefined;
+  return typeof tip === "string" ? tip : undefined;
+};
+
 /** "clean": every change on the branch reached the base, at its tip or in a
  *  first-parent commit of its history, or the branch is an older version of a
  *  merged pull request whose final head passes the same check.

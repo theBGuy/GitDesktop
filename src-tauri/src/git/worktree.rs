@@ -989,7 +989,8 @@ fn parse_worktree_porcelain(porcelain: &str) -> Vec<RawWorktree> {
     let mut out: Vec<RawWorktree> = Vec::new();
     let mut cur: Option<RawWorktree> = None;
     for line in porcelain.lines() {
-        let line = line.trim_end();
+        // Only a stray CR is stripped: a path or branch name may end in whitespace.
+        let line = line.trim_end_matches('\r');
         if let Some(p) = line.strip_prefix("worktree ") {
             if let Some(w) = cur.take() {
                 out.push(w);
@@ -2065,6 +2066,15 @@ prunable gitdir file points to non-existent location
         let porcelain = "worktree C:/wt\nHEAD abc\nbranch refs/heads/x\nlocked\n";
         let got = parse_worktree_porcelain(porcelain);
         assert_eq!(got[0].locked.as_deref(), Some(""));
+    }
+
+    /// A trailing U+00A0 stays part of both the path and the branch name.
+    #[test]
+    fn parse_porcelain_keeps_non_ascii_whitespace_in_path_and_branch() {
+        let porcelain = "worktree /x/wt\u{a0}\nHEAD abc\nbranch refs/heads/tr\u{a0}\n";
+        let got = parse_worktree_porcelain(porcelain);
+        assert_eq!(got[0].path, "/x/wt\u{a0}");
+        assert_eq!(got[0].branch, "tr\u{a0}");
     }
 
     #[test]

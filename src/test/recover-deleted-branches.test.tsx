@@ -507,6 +507,107 @@ describe("Recover lost work: deleted branches", () => {
     ).toBeTruthy();
   });
 
+  it.each(["constructor", "toString", "__proto__"])(
+    "holds a taken %s the tips read omitted without reading an inherited member",
+    async (name) => {
+      disk = [entry("1", name, TIP_A)];
+      vi.mocked(gitBranches).mockResolvedValue([branchRow(name)]);
+      const { client } = mount();
+      const key = ["repo", REPO, "deleted-name-tips", [name]];
+      await waitFor(() =>
+        expect(client.getQueryState(key)?.status).toBe("success"),
+      );
+      await waitFor(() =>
+        expect(
+          within(section()).getByText(
+            `A branch named ${name} exists again. Rename or delete it to restore this one.`,
+          ),
+        ).toBeTruthy(),
+      );
+      expect(held(footer())).toBe(true);
+    },
+  );
+
+  it("reads an own __proto__ tip at the recorded commit as already back", async () => {
+    disk = [entry("1", "__proto__", TIP_A)];
+    vi.mocked(gitBranches).mockResolvedValue([branchRow("__proto__")]);
+    // JSON.parse makes an own key; an object literal would set the prototype.
+    vi.mocked(gitBranchTips).mockResolvedValue(
+      JSON.parse(`{"__proto__":"${TIP_A}"}`),
+    );
+    mount();
+    await waitFor(() =>
+      expect(
+        within(section()).getByText(
+          "A branch named __proto__ is already at this commit.",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(held(footer())).toBe(false);
+  });
+
+  it("keeps a selection moved while a restore runs", async () => {
+    disk = [
+      entry("1", "feat/a", TIP_A),
+      entry("2", "feat/b", TIP_B),
+      entry("3", "feat/c", TIP_C),
+    ];
+    let finish: () => void = () => undefined;
+    vi.mocked(gitCreateBranch).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = () =>
+          resolve(
+            undefined as unknown as Awaited<ReturnType<typeof gitCreateBranch>>,
+          );
+      }),
+    );
+    const { user } = mount();
+    await waitFor(() => expect(row("feat/c")).toBeTruthy());
+    await user.click(footer());
+    await waitFor(() => expect(held(footer())).toBe(true));
+    await user.click(row("feat/b"));
+    await user.keyboard("{ArrowDown}");
+    expect(row("feat/c").getAttribute("aria-current")).toBe("true");
+    await act(async () => finish());
+    await waitFor(() =>
+      expect(within(section()).queryByText("feat/a")).toBeNull(),
+    );
+    expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "1");
+    expect(row("feat/c").getAttribute("aria-current")).toBe("true");
+    expect(document.activeElement).toBe(row("feat/c"));
+  });
+
+  it("keeps a selection moved while a removal runs", async () => {
+    disk = [
+      entry("1", "feat/gone", TIP_A),
+      entry("2", "feat/b", TIP_B),
+      entry("3", "feat/c", TIP_C),
+    ];
+    pruned.add(TIP_A);
+    let finish: () => void = () => undefined;
+    vi.mocked(forgetDeletedBranch).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = () => {
+          disk = disk.filter((e) => e.id !== "1");
+          resolve(true);
+        };
+      }),
+    );
+    const { user } = mount();
+    await waitFor(() => expect(footer().textContent).toBe("Remove from list"));
+    await user.click(footer());
+    await waitFor(() => expect(held(footer())).toBe(true));
+    await user.click(row("feat/b"));
+    await user.keyboard("{ArrowDown}");
+    expect(row("feat/c").getAttribute("aria-current")).toBe("true");
+    await act(async () => finish());
+    await waitFor(() =>
+      expect(within(section()).queryByText("feat/gone")).toBeNull(),
+    );
+    expect(row("feat/c").getAttribute("aria-current")).toBe("true");
+    expect(document.activeElement).toBe(row("feat/c"));
+  });
+
   it("walks held, already-back and restorable rows with the arrow keys on one footer", async () => {
     disk = [
       entry("1", "feat/a", TIP_A),

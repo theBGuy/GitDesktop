@@ -1126,7 +1126,7 @@ fn refuse_session_destination(branch: &str, remote: &str, dest: &str) -> AppResu
 }
 
 /// Where a bare push of `local` lands, off the first line of a HEAD tracking read
-/// ([`UPSTREAM_TRACKING_FORMAT`]'s four fields, then the push atoms): None/None when the
+/// ([`UPSTREAM_TRACKING_FORMAT`]'s fields, then the push atoms): None/None when the
 /// line is missing (an unborn HEAD), names another ref, or carries no atoms. Out of
 /// reach: an upstream remote with no fetch refspec leaves `%(upstream)` and `%(push)`
 /// empty while push.default=upstream still pushes to `branch.<b>.merge` (git 2.51.1).
@@ -1144,7 +1144,7 @@ fn bare_push_destination(
     }
     let upstream_remoteref = fields.get(1).copied().unwrap_or("");
     let upstream_remote = fields.get(2).copied().unwrap_or("");
-    let atoms = fields.get(4..).unwrap_or(&[]);
+    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
     crate::git::branches::push_destination_fields(local, atoms, upstream_remote, upstream_remoteref)
 }
 
@@ -1157,7 +1157,10 @@ fn bare_push_local_upstream(text: &str, refname: &str) -> Option<String> {
         return None;
     };
     let line = text.lines().next()?;
-    let push_remote = line.split('\0').nth(4).unwrap_or(&remotename);
+    let push_remote = line
+        .split('\0')
+        .nth(UPSTREAM_TRACKING_FIELDS)
+        .unwrap_or(&remotename);
     (push_remote == ".").then_some(up)
 }
 
@@ -1598,6 +1601,10 @@ fn without_force_if_includes<'a>(argv: &[&'a str]) -> Vec<&'a str> {
 /// of the remote's fetch-refspec layout, and covers a local (`.`) upstream.
 pub(crate) const UPSTREAM_TRACKING_FORMAT: &str =
     "--format=%(refname)%00%(upstream:remoteref)%00%(upstream:remotename)%00%(upstream:track)";
+
+/// How many fields [`UPSTREAM_TRACKING_FORMAT`] writes, so the push atoms a read appends
+/// start at this index.
+pub(crate) const UPSTREAM_TRACKING_FIELDS: usize = 4;
 
 /// What a local branch tracks, as [`build_push_args`] needs it.
 #[derive(Debug, Clone, PartialEq)]
@@ -7528,6 +7535,14 @@ and the repository exists.
         assert_eq!(resolve_push_target(None, "upstream", false), "upstream");
         assert_eq!(resolve_push_target(None, "", false), "origin");
         assert_eq!(resolve_push_target(None, "upstream", true), "origin");
+    }
+
+    #[test]
+    fn upstream_tracking_fields_counts_the_format_atoms() {
+        let atoms = UPSTREAM_TRACKING_FORMAT
+            .strip_prefix("--format=")
+            .expect("the format is a --format= argument");
+        assert_eq!(atoms.split("%00").count(), super::UPSTREAM_TRACKING_FIELDS);
     }
 
     #[test]

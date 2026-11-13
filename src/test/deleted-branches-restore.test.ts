@@ -207,6 +207,31 @@ describe("restoreDeletedBranch", () => {
     ).toBeLessThan(vi.mocked(forgetDeletedBranch).mock.invocationCallOrder[0]);
   });
 
+  it.each(["constructor", "toString", "__proto__"])(
+    "refuses a listed %s the tips read omitted, without reading an inherited member",
+    async (name) => {
+      vi.mocked(gitBranches).mockResolvedValue([localBranch(name)]);
+      vi.mocked(gitBranchTips).mockResolvedValue({});
+      await expect(
+        restoreDeletedBranch(REPO, entry({ name })),
+      ).resolves.toEqual({ status: "nameExists" });
+      expect(gitCreateBranch).not.toHaveBeenCalled();
+      expect(forgetDeletedBranch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reads an own __proto__ tip at the recorded commit as already back", async () => {
+    vi.mocked(gitBranches).mockResolvedValue([localBranch("__proto__")]);
+    // JSON.parse makes an own key; an object literal would set the prototype.
+    vi.mocked(gitBranchTips).mockResolvedValue(
+      JSON.parse(`{"__proto__":"${TIP}"}`),
+    );
+    await expect(
+      restoreDeletedBranch(REPO, entry({ name: "__proto__" })),
+    ).resolves.toEqual({ status: "restored", alreadyBack: true });
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+  });
+
   it("leaves an unmarked entry's name at the recorded tip unmarked", async () => {
     nameAt(TIP);
     await expect(restoreDeletedBranch(REPO, entry())).resolves.toEqual({

@@ -954,9 +954,12 @@ async fn branch_operation_refusal(
     )
     .await?;
     let listed = parse_worktree_paths(&listed.stdout_lossy());
+    // git reads the head-name, update-refs and BISECT_START markers back stripping only
+    // the line ending; a branch name may start or end in non-ASCII whitespace, which
+    // `trim` would drop.
     let read = |path: std::path::PathBuf| -> AppResult<Option<String>> {
         match std::fs::read_to_string(path) {
-            Ok(text) => Ok(Some(text.trim().to_string())),
+            Ok(text) => Ok(Some(text.trim_end_matches(['\r', '\n']).to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -992,7 +995,7 @@ async fn branch_operation_refusal(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
-    let on_branch = |line: &str| line.trim().strip_prefix("refs/heads/") == Some(branch);
+    let on_branch = |line: &str| line.strip_prefix("refs/heads/") == Some(branch);
     for (admin, checkout) in admins {
         let rebase_merge = admin.join("rebase-merge");
         let rebasing = read(rebase_merge.join("head-name"))?.is_some_and(|h| on_branch(&h))
@@ -4315,9 +4318,19 @@ mod tests {
             .unwrap();
         assert_eq!(parse_upstream_tracking(&text, &refname), tracked);
         let line = text.lines().next().unwrap();
-        // The base format's 4 fields plus the 4 atoms, whatever their values.
-        assert_eq!(line.split('\0').count(), 8, "{line:?}");
-        assert_eq!(line.split('\0').nth(4), Some("origin"), "{line:?}");
+        // The base format's fields plus the push atoms, whatever their values.
+        let base_fields = crate::git::remote::UPSTREAM_TRACKING_FIELDS;
+        let push_atoms = PUSH_DESTINATION_ATOMS.split("%00").count();
+        assert_eq!(
+            line.split('\0').count(),
+            base_fields + push_atoms,
+            "{line:?}"
+        );
+        assert_eq!(
+            line.split('\0').nth(base_fields),
+            Some("origin"),
+            "{line:?}"
+        );
         // Not a format refusal: no retry, an error.
         let missing = base.join("not-a-repo");
         std::fs::create_dir_all(&missing).unwrap();
@@ -9662,6 +9675,68 @@ mod tests {
                 if m.ends_with(&format!("finish or abort that rebase before resetting {branch}."))),
             "{err:?}"
         );
+    }
+
+    /// A marker keeps the name's own whitespace, so `tr\u{a0}` (or a bisect's leading
+    /// `\u{a0}lead`) matches only itself. The markers are hand-written, so no ref with
+    /// such a name is needed.
+    #[tokio::test]
+    async fn operation_refusal_keeps_non_ascii_whitespace_in_marker_names() {
+        let (_base, base) = temp_base("op-refusal-nbsp");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        let oid = full_ref_tip(&repo_s, "HEAD").await.unwrap();
+        let head_name = "refs/heads/tr\u{a0}\n".to_string();
+        let cases = [
+            (
+                "rebase-merge/head-name",
+                head_name.clone(),
+                "tr\u{a0}",
+                "tr",
+                "is being rebased",
+            ),
+            (
+                "rebase-apply/head-name",
+                head_name,
+                "tr\u{a0}",
+                "tr",
+                "is being rebased",
+            ),
+            (
+                "rebase-merge/update-refs",
+                format!("refs/heads/tr\u{a0}\n{oid}\n{oid}\n"),
+                "tr\u{a0}",
+                "tr",
+                "is part of a rebase",
+            ),
+            (
+                "BISECT_START",
+                "\u{a0}lead\n".to_string(),
+                "\u{a0}lead",
+                "lead",
+                "is being bisected",
+            ),
+        ];
+        for (marker, body, named, trimmed, what) in cases {
+            let path = repo.join(".git").join(marker);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            let hit = super::branch_operation_refusal(&repo_s, named, "deleting")
+                .await
+                .unwrap();
+            assert!(
+                hit.as_deref()
+                    .is_some_and(|m| m.starts_with(&format!("{named} {what} here"))),
+                "{marker}: {hit:?}"
+            );
+            let miss = super::branch_operation_refusal(&repo_s, trimmed, "deleting")
+                .await
+                .unwrap();
+            assert_eq!(miss, None, "{marker}");
+            std::fs::remove_file(&path).unwrap();
+        }
     }
 
     /// A worktree that checks the branch out after the pre-hold probe is caught by the

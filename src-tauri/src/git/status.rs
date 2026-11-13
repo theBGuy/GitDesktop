@@ -8,7 +8,7 @@ use crate::git::branches::{
 use crate::git::diff::git_config_bool;
 use crate::git::remote::{
     is_named_remote, parse_upstream_tracking, remote_head_target, upstream_is_remote_default,
-    Upstream, UPSTREAM_TRACKING_FORMAT,
+    Upstream, UPSTREAM_TRACKING_FIELDS, UPSTREAM_TRACKING_FORMAT,
 };
 use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
 use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus, SubmoduleChange};
@@ -137,7 +137,7 @@ fn tracking_line_upstream_ref(
     if fields.first() != Some(&refname) {
         return None;
     }
-    let atoms = fields.get(4..).unwrap_or(&[]);
+    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
     match atoms.get(UPSTREAM_ATOM_INDEX) {
         Some(full) => Some(full.to_string()).filter(|f| !f.is_empty()),
         None => Some(format!("refs/remotes/{remote}/{upstream}")),
@@ -405,7 +405,7 @@ fn configured_destination(
 }
 
 /// The push destination off the first line of a tracking read, its atoms after the
-/// shared format's four fields, plus the raw `%(push:remotename)`; None/None and empty
+/// shared format's fields, plus the raw `%(push:remotename)`; None/None and empty
 /// when the line is missing, names another ref, or the read fell back without the atoms.
 fn tracking_line_push_destination(
     text: &str,
@@ -422,7 +422,7 @@ fn tracking_line_push_destination(
     }
     let upstream_remoteref = fields.get(1).copied().unwrap_or("");
     let upstream_remote = fields.get(2).copied().unwrap_or("");
-    let atoms = fields.get(4..).unwrap_or(&[]);
+    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
     let dest = push_destination_fields(name, atoms, upstream_remote, upstream_remoteref);
     (dest, atoms.first().copied().unwrap_or("").to_string())
 }

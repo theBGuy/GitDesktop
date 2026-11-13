@@ -136,13 +136,16 @@ afterEach(() => useConfirm.getState().answer(false));
 
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
-function renderDialog(withHost = false) {
+function renderDialog(
+  withHost = false,
+  onOpenChange: (open: boolean) => void = () => undefined,
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   render(
     <QueryClientProvider client={client}>
-      <HooksDialog repoPath={REPO} open onOpenChange={() => undefined} />
+      <HooksDialog repoPath={REPO} open onOpenChange={onOpenChange} />
       {withHost && <ConfirmDialogHost />}
     </QueryClientProvider>,
   );
@@ -262,6 +265,41 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
     expect(request()).toBeNull();
   });
+
+  // The confirm's own Escape handling stops the key before the Hooks dialog's
+  // document listener, so one press closes only the prompt.
+  it.each([
+    ["save", "Save", gitHookWrite],
+    ["disable", "Disable", gitHookSetEnabled],
+    ["delete", "Delete…", gitHookDelete],
+  ] as const)(
+    "Escape on the managed %s confirm cancels it and keeps the Hooks dialog",
+    async (action, button, write) => {
+      const onOpenChange = vi.fn();
+      const { user } = renderDialog(true, onOpenChange);
+      await select(user, "pre-push");
+      const editor = screen.getByLabelText("Hook script");
+      await user.type(editor, "true");
+      const draft = (editor as HTMLTextAreaElement).value;
+      expect(draft).not.toBe(SCRIPT);
+      await user.click(screen.getByRole("button", { name: button }));
+      const confirm = await screen.findByRole("dialog", {
+        name: CONFIRMS[action].title,
+      });
+      await waitFor(() =>
+        expect(confirm.contains(document.activeElement)).toBe(true),
+      );
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(request()).toBeNull());
+      expect(write).not.toHaveBeenCalled();
+      // Base UI passes event details after the flag, so match the first argument.
+      expect(onOpenChange.mock.calls.map((c) => c[0])).not.toContain(false);
+      expect(
+        screen.getByRole("dialog", { name: "Git hooks" }),
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText("Hook script")).toHaveValue(draft);
+    },
+  );
 
   it("A2.4: a managed delete settling after the confirm closed lands on its row", async () => {
     let land: () => void = () => undefined;

@@ -7,6 +7,7 @@ import {
   gitFindCommitsByPrefix,
   gitObjectsPresent,
   gitSetBranchKeepLocal,
+  tipOf,
 } from "@/lib/git/api";
 import { FULL_OID_RE } from "@/lib/git/oid";
 import { normPath } from "@/lib/git/path";
@@ -107,7 +108,7 @@ async function nameState(
   if (!branches.some((b) => b.name === entry.name)) return "absent";
   let tip: string | undefined;
   try {
-    tip = (await gitBranchTips(repoPath, [entry.name]))[entry.name];
+    tip = tipOf(await gitBranchTips(repoPath, [entry.name]), entry.name);
   } catch {
     tip = undefined;
   }
