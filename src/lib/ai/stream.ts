@@ -7,7 +7,7 @@ import {
 } from "@/lib/git/api";
 import { toastError } from "@/lib/toast";
 import { cancelAgentReview, providerKind, runAgentReview } from "./agent";
-import { createAiClient, runAgenticStream } from "./client";
+import { createAiClient, ModelRefusalError, runAgenticStream } from "./client";
 import { isCliProvider } from "./providers";
 import { type CliSettleOutcome, createCliSettle } from "./stream-settle";
 import type { AiSettings } from "./types";
@@ -186,6 +186,10 @@ export interface StreamAiOpts {
    *  via a tool loop (no MCP, no worktree). HTTP agentic reviews only; CLI and non-review
    *  callers omit it. */
   reviewTools?: ToolSet;
+  /** HTTP single-pass only: review callers opt in so a refusal never becomes a review;
+   *  other streams show it. Agentic runs reject a refusal regardless; CLI providers
+   *  ignore it. */
+  rejectRefusal?: boolean;
   setText: (text: string) => void;
   setStatus: (status: string) => void;
   /** Called at most once, at successful settle, with the narration that streamed
@@ -223,6 +227,7 @@ export async function streamAi({
   timeoutConfigurable,
   effort,
   reviewTools,
+  rejectRefusal,
   setText,
   setStatus,
   onThoughts,
@@ -275,16 +280,23 @@ export async function streamAi({
   }
   const client = await createAiClient(ai);
   let buffer = "";
-  for await (const chunk of client.stream({
-    system,
-    prompt,
-    abortSignal: abort.signal,
-    // HTTP-only path (CLI returned early); repoPath is passed regardless so every stream
-    // call carries it and the invariant stays grep-clean.
-    repoPath,
-  })) {
-    buffer += chunk;
-    setText(buffer);
+  try {
+    for await (const chunk of client.stream({
+      system,
+      prompt,
+      abortSignal: abort.signal,
+      // HTTP-only path (CLI returned early); repoPath is passed regardless so every stream
+      // call carries it and the invariant stays grep-clean.
+      repoPath,
+      rejectRefusal,
+    })) {
+      buffer += chunk;
+      setText(buffer);
+    }
+  } catch (e) {
+    // The refusal text already streamed; clear it so a failed-run partial can't keep it.
+    if (e instanceof ModelRefusalError) setText("");
+    throw e;
   }
 }
 

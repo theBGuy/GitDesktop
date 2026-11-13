@@ -43,6 +43,10 @@ export interface AiStreamRequest {
   /** Repository the generation belongs to — required by the CLI agent providers
    *  (the subprocess's working directory); ignored by HTTP providers. */
   repoPath?: string;
+  /** Review consumers set this so a refusal (finishReason "content-filter") rejects
+   *  with `ModelRefusalError`. The refusal text still streams first, so an opted-in
+   *  caller must discard what it accumulated. CLI providers ignore it. */
+  rejectRefusal?: boolean;
 }
 
 export interface AiClient {
