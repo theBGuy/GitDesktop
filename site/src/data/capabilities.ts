@@ -732,6 +732,10 @@ export const capabilities: Capability[] = [
     highlight: true,
   },
   { group: "Keyboard & Markdown", label: "Arrow-key navigation on every list" },
+  {
+    group: "Keyboard & Markdown",
+    label: "Back & Forward — keys or mouse side buttons",
+  },
   { group: "Keyboard & Markdown", label: "Generated shortcut cheat sheet" },
   { group: "Keyboard & Markdown", label: "GitHub-Desktop-compatible defaults" },
   {

@@ -113,6 +113,7 @@ import { PublishPendingBanner } from "./PublishPendingBanner";
 import { RepoHeader } from "./RepoHeader";
 import { secondaryTabRows } from "./secondary-tabs";
 import { TabPanel } from "./TabPanel";
+import { useNavLensSync } from "./use-nav-lens-sync";
 import { usePrNotifications } from "./usePrNotifications";
 import { useRepoVisibilityProbe } from "./useRepoVisibilityProbe";
 import { WorktreeRemovalBanner } from "./WorktreeRemovalBanner";
@@ -629,6 +630,7 @@ export function RepositoryView() {
   // Absolute set-actions (idempotent), gated on the lens applying (GitHub fork).
   const lensGate = useLensGate(repoPath ?? "");
   const setRepoLens = useSetRepoLens(repoPath ?? "");
+  useNavLensSync(repoPath);
   useHotkeyAction("repo-lens-origin", () => setRepoLens("origin"), lensGate);
   useHotkeyAction(
     "repo-lens-upstream",

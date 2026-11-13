@@ -1,6 +1,7 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PunchCard as PunchCardData } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { cn } from "@/lib/utils";
 import { fmt, useCardTitle } from "./primitives";
 
@@ -83,6 +84,8 @@ export function PunchCard({ grid }: { grid: PunchCardData }) {
   }, [active]);
 
   function onKeyDown(e: KeyboardEvent) {
+    // A chorded arrow belongs to the app's shortcut listener.
+    if (hasChordModifier(e)) return;
     let [d, h] = active ?? [0, 0];
     switch (e.key) {
       case "ArrowRight":

@@ -17,6 +17,7 @@ import {
   useEffect,
   useEffectEvent,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -145,8 +146,13 @@ import {
   type ProjectViewSort,
   providerLabel,
 } from "@/lib/git/types";
-import { eventToBinding, formatBinding, isMac } from "@/lib/hotkeys/binding";
-import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  eventToBinding,
+  formatBinding,
+  hasChordModifier,
+  isMac,
+} from "@/lib/hotkeys/binding";
+import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   OFFLINE_ITEM_REASON,
   pendingItemReason,
@@ -157,6 +163,10 @@ import {
 import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import {
+  type BoardAnchor,
+  registerNavAnchorProvider,
+} from "@/lib/stores/nav-history";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
@@ -211,6 +221,7 @@ import {
   type ReorderDirection,
   type ReorderPlan,
 } from "./board-positioning";
+import { readState } from "./board-return";
 import {
   type BulkVerb,
   columnRange,
@@ -258,6 +269,7 @@ import {
   type Zoom,
 } from "./roadmap-model";
 import { cellEditHeld } from "./TableCell";
+import { useBoardReturn } from "./use-board-return";
 
 /** Where an issue or pull request on this board lands, per kind: the tab that
  *  owns it in-app, and the web path a CROSS-REPO card falls back to (GitHub's own
@@ -601,11 +613,11 @@ const REORDER_CHORDS: Partial<Record<string, ReorderDirection>> = {
 /** Every key the board, the table and the roadmap answer with Alt held. The
  *  chords that use them are matched first: {@link REORDER_CHORDS} everywhere, and
  *  {@link SHIFT_CHORDS} on any roadmap item row (shifting on its lane, saying why
- *  not on its title). Any other Alt press on these keys (Alt+Shift+↑ anywhere,
- *  Alt+← on a board card or a table cell) is swallowed rather than falling
+ *  not on its title). Next, on a board card or a table row, the user's Go back or
+ *  Go forward chord passes through to the window listener. Any other Alt press on
+ *  these keys, and every one on a roadmap row, is swallowed rather than falling
  *  through to the cursor-and-selection arm, which would answer one keystroke with
- *  two unrelated actions. Alt means "act on the item", so it never degrades to
- *  plain navigation. */
+ *  two unrelated actions. */
 const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
   "ArrowUp",
   "ArrowDown",
@@ -625,7 +637,8 @@ const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
 };
 /** Why the Position section is held when the menu's card has left the board (a
  *  refetch dropped it while the menu was open). One held row, not four "already
- *  first"/"already last" rows that would contradict each other. */
+ *  first"/"already last" rows that would contradict each other. Also what a Back
+ *  or Forward return announces when its card is gone. */
 const CARD_GONE_REASON: Record<Surface, string> = {
   board: "This card is no longer on the board",
   table: "This row is no longer in the table",
@@ -1962,6 +1975,17 @@ export function ProjectsBoardPanel({
     canRead && projectId !== null,
   );
 
+  // The user's Go back and Go forward chords, which a board card and a table row
+  // let through after their own chords (a null binding matches nothing).
+  const navBindings = useEffectiveBindings();
+  const isNavChord = (chord: string) =>
+    chord === navBindings.get("go-back") ||
+    chord === navBindings.get("go-forward");
+
+  // The card an in-app open left the tab from, so Back returns to it rather than
+  // to the cursor. Set only by an open whose tab change follows at once, spent by
+  // the anchor provider's read, and cleared on re-activation.
+  const openerRef = useRef<string | null>(null);
   const openItem = useCallback(
     (item: BoardItem) => {
       const content = item.content;
@@ -1973,6 +1997,7 @@ export function ProjectsBoardPanel({
       if (opensInApp(content, repoSlug)) {
         const id = String(content.number);
         if (content.kind === "issue") {
+          openerRef.current = item.itemId;
           selectIssue({ kind: "remote", id });
           setRepoTab(target.tab);
           return;
@@ -1987,6 +2012,11 @@ export function ProjectsBoardPanel({
           repoName: repoName ?? repoNameFromPath(repoPath),
           ref: id,
           section: null,
+          // The navigator can apply in a later task, or not at all, so the
+          // opener is set inside the landing, just before the set it records.
+          beforeSelect: () => {
+            openerRef.current = item.itemId;
+          },
         });
         return;
       }
@@ -2124,6 +2154,9 @@ export function ProjectsBoardPanel({
       return;
     }
     if (e.altKey && ALT_SWALLOWED_KEYS.has(e.key)) {
+      // A table row, group header included, owns no other Alt chord, so a nav
+      // chord passes; a roadmap row keeps the whole family for its dates.
+      if (roadmapView === null && chord !== null && isNavChord(chord)) return;
       e.preventDefault();
       return;
     }
@@ -2248,10 +2281,13 @@ export function ProjectsBoardPanel({
       reorderCard(from, direction);
       return;
     }
-    // Alt belongs to the REPOSITION chords, so any other Alt-modified key the board
-    // owns is swallowed rather than let through: Alt+Shift+Arrow would otherwise
-    // fall to the bare-key switch below and do BOTH things at once — move the
-    // cursor and extend the range — off a chord that means neither.
+    // The user's Go back or Go forward chord passes to the window listener, ahead
+    // of the swallow and of the switch below, which tests `e.key` alone and would
+    // take Ctrl or Cmd with an arrow as a plain move.
+    if (chord !== null && hasChordModifier(e) && isNavChord(chord)) return;
+    // Any other Alt-modified key the board owns is swallowed: Alt+Shift+Arrow
+    // would otherwise fall to the switch below and both move the cursor and extend
+    // the range, off a chord that means neither.
     if (e.altKey && ALT_SWALLOWED_KEYS.has(e.key)) {
       e.preventDefault();
       return;
@@ -3862,6 +3898,8 @@ export function ProjectsBoardPanel({
    *  pointerdown is the one gesture both routes share — recording anywhere else
    *  leaves a long press showing the previously right-clicked card's menu. */
   function handleCardPointerDown(e: PointerEvent) {
+    // A side button is Back or Forward: it changes no board state.
+    if (e.button === 3 || e.button === 4) return;
     // The card the cursor sat on BEFORE this press, recorded ahead of
     // `recordMenuTarget` because that moves the cursor onto whatever was pressed.
     // A Shift+click with no anchor yet seeds from it: mousedown runs in a later
@@ -5098,6 +5136,104 @@ export function ProjectsBoardPanel({
   // land.
   const loading =
     (canRead && projects.isPending) || fieldsPending || itemsPending;
+
+  // Back or Forward onto this tab: re-apply the anchor's project, view and Show
+  // archived, then claim its card (use-board-return.ts).
+  let returnGate: "open" | "pending" | "closed" = "closed";
+  if (canRead) returnGate = "open";
+  else if (gh.isPending && !gh.isPaused) returnGate = "pending";
+  // The first DRAWN item row: a collapsed section's items draw no row.
+  const firstRow = tableEntries.find((entry) => entry.kind === "item");
+  const firstRowItemId =
+    firstRow?.kind === "item" ? firstRow.item.itemId : null;
+  const { heldAnchor } = useBoardReturn({
+    active,
+    repoPath,
+    goneMessage: CARD_GONE_REASON[surface],
+    root: () => rootRef.current,
+    grid: () =>
+      rowView === null
+        ? null
+        : (rootRef.current?.querySelector<HTMLElement>('[role="grid"]') ??
+          null),
+    gate: returnGate,
+    catalog: readState(projects),
+    projectIds: listedProjects.map((p) => p.id),
+    projectId,
+    views: readState(views),
+    viewIds: viewList.map((v) => v.id),
+    activeViewId,
+    fields: readState(fields),
+    items: readState(items),
+    itemsFetching: items.isFetching,
+    archivedShown: showArchived,
+    seedPending:
+      (boardCursorSeed !== null && onBoard) || (tableFocusClaim && !onBoard),
+    layoutDrawn: canRead && !loading && !lensLoading,
+    rows: rowView !== null,
+    rowsDrawn: tableEntries.length > 0,
+    rowCursor: tablePos !== null,
+    firstRowKey: tableEntries[0]?.key ?? null,
+    hasCard: (itemId) => findCard(columns, itemId) !== null,
+    firstItemId: rowView === null ? firstItemId : firstRowItemId,
+    pickGeneration: () => pickGenerationRef.current,
+    switchProject,
+    pickView: (viewId) => (viewId === null ? clearView() : pickView(viewId)),
+    setArchived: setArchivedShown,
+    claimCard: (itemId, { focus }) => {
+      // Ends a pending move-chase, whose frame would re-claim the moved card.
+      setChase(null);
+      const pos = findCard(columns, itemId);
+      if (pos !== null) setCursor({ itemId, col: pos.col, idx: pos.idx });
+      setTableCursor((prev) => ({
+        rowKey: itemRowKey(itemId),
+        colIndex: prev?.colIndex ?? 0,
+      }));
+      if (!focus) return;
+      setFocusItemId(itemId);
+      setFocusNonce((n) => n + 1);
+    },
+    seedRowCursor: (rowKey) => setTableCursor({ rowKey, colIndex: 0 }),
+    refocus: () => {
+      setChase(null);
+      setFocusNonce((n) => n + 1);
+    },
+    focusLanding: () => focusBodyLanding(rootRef.current),
+    announce,
+  });
+  useEffect(() => {
+    if (active) openerRef.current = null;
+  }, [active]);
+  // Where the user was on this tab, for the history entry Back returns to. First
+  // match: an in-app open's card; a return armed but not yet consumed, or one in
+  // flight (the fallback board may be on screen); `undefined` while the catalog
+  // loads, so the entry keeps its anchor; otherwise the live board.
+  const readBoardAnchor = useEffectEvent((): BoardAnchor | null | undefined => {
+    const opener = openerRef.current;
+    openerRef.current = null;
+    if (opener === null) {
+      const armed = useUiStore.getState().boardReturn;
+      if (armed !== null) return armed.anchor;
+      if (heldAnchor !== null) return heldAnchor;
+      if (projectId === null && projects.data === undefined) return undefined;
+    }
+    if (projectId === null) return null;
+    const cursorItemId =
+      liveCursor === null
+        ? null
+        : (columns[liveCursor.col]?.items[liveCursor.idx]?.itemId ?? null);
+    return {
+      projectId,
+      viewId: activeViewId,
+      itemId: opener ?? cursorItemId,
+      showArchived,
+    };
+  });
+  // Registered the way useHotkeyAction registers, so a hidden panel has none.
+  useLayoutEffect(() => {
+    if (!active) return;
+    return registerNavAnchorProvider("projects", readBoardAnchor);
+  }, [active]);
   // An empty catalog is only an ABSENCE claim when the read was complete: a
   // capped catalog (or one whose owner arm was denied) can come back empty while
   // boards exist, and "there are none" would be a lie about a set we didn't

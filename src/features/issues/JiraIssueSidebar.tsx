@@ -76,6 +76,7 @@ export function JiraIssueSidebar({
 }) {
   const setDueDate = useJiraSetDueDate(repoPath, link);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
   // From the cache, not the observer: this rail remounts per issue, and a due
   // date still pending on the issue switched back to must still show.
   const pendingWrites = usePendingJiraWrites(repoPath);
@@ -230,15 +231,15 @@ export function JiraIssueSidebar({
           <p className="text-xs font-medium text-muted-foreground">Parent</p>
           <button
             type="button"
-            // Navigate to the parent in-app. This view already lives inside the
-            // Issues tab, so `selectIssue` alone re-targets it — no `setRepoTab`.
-            // The `issue.parent &&` guard is NOT dead: TS narrowing from the
-            // outer `{issue.parent && …}` doesn't extend into a callback
-            // (TS18047 without it) — it satisfies the compiler, not runtime.
-            onClick={() =>
-              issue.parent &&
-              selectIssue({ kind: "jira", id: issue.parent.key })
-            }
+            // A link hop to the parent: this view already lives inside the Issues
+            // tab, so `selectIssue` alone re-targets it, with no `setRepoTab`. The
+            // `issue.parent` check only satisfies the compiler: the outer guard's
+            // narrowing doesn't reach into a callback (TS18047).
+            onClick={() => {
+              if (!issue.parent) return;
+              markLinkHop();
+              selectIssue({ kind: "jira", id: issue.parent.key });
+            }}
             title={`${issue.parent.key} ${issue.parent.summary}`}
             aria-label={`Open parent issue ${issue.parent.key}`}
             className="flex w-full cursor-pointer items-center gap-1 border px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-accent"

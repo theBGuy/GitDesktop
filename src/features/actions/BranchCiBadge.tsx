@@ -30,6 +30,7 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   const latest = useLatestRun(repoPath, ciReady && onRemote, branch, mode);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const selectRun = useUiStore((s) => s.selectRun);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
 
   // Under a placeholder the data is another branch's run: it only decides
   // whether to reserve, never what renders. Runs are listed by branch name, so
@@ -58,6 +59,7 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
       className="flex shrink-20 items-center @4xl/repo-header:min-w-6.5 gap-1.5 rounded-none px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
       title={`${run.workflowName}: ${statusLabel(run.status, run.conclusion)} — view in Actions`}
       onClick={() => {
+        markLinkHop();
         selectRun(run.id);
         setRepoTab("actions");
       }}

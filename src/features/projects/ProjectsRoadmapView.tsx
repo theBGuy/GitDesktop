@@ -426,6 +426,9 @@ function AxisHeader({
             // A mouse focus would scroll this sticky button "into view" first,
             // nudging the lane before the jump; the jump is the only scroll.
             onMouseDown={(e) => {
+              // A side button is Back or Forward and moves no focus; the window
+              // listener has already prevented it.
+              if (e.button === 3 || e.button === 4) return;
               e.preventDefault();
               e.currentTarget.focus({ preventScroll: true });
             }}
@@ -906,6 +909,8 @@ export function ProjectsRoadmapView({
   useEffect(() => {
     if (scrollEl === null) return;
     const onPress = (e: PointerEvent) => {
+      // A side button is Back or Forward, which changes no grid state.
+      if (e.button === 3 || e.button === 4) return;
       const inside = e.target instanceof Node && scrollEl.contains(e.target);
       pressInGridRef.current = inside;
       if (!inside) ownsFocusRef.current = false;

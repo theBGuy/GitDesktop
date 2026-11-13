@@ -169,7 +169,9 @@ export function StackSection({
   /** The PR the detail view is showing — its row is highlighted and carries
    *  `aria-current`. It stays focusable so arrow-key nav can start from it. */
   currentNumber: number;
-  onSelect: (number: number) => void;
+  /** `followed` is true for a row click (a link hop) and false for the arrow
+   *  keys, which browse the stack like a list. */
+  onSelect: (number: number, followed: boolean) => void;
   /** Runs the caller's confirmed dissolve. Absent ⇒ no Dissolve affordance —
    *  the caller owns the eligibility (a native stack on an open PR whose
    *  provider can edit it); push permission holds it via `disabled` instead. */
@@ -192,7 +194,7 @@ export function StackSection({
   const onKeyDown = listKeyboardNav({
     items: rows,
     activeIndex: rows.findIndex((m) => m.number === currentNumber),
-    onActivate: (member) => onSelect(member.number),
+    onActivate: (member) => onSelect(member.number, false),
     rowKey: (member) => String(member.number),
   });
 
@@ -242,7 +244,7 @@ export function StackSection({
                 type="button"
                 data-row={String(member.number)}
                 aria-current={isCurrent ? "true" : undefined}
-                onClick={() => onSelect(member.number)}
+                onClick={() => onSelect(member.number, true)}
                 className={cn(
                   "flex w-full items-center gap-2 border-b px-3 py-1.5 text-left text-xs last:border-b-0",
                   isCurrent
