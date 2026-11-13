@@ -324,6 +324,18 @@ describe("the return lands on the anchor", () => {
     expect(result.current.heldAnchor).toBeNull();
   });
 
+  it("waits for the views read when the anchor's view is already active, then claims", () => {
+    const panel = makePanel({ views: "loading" });
+    const { commit } = mount(panel);
+    arm(anchorOf());
+    commit();
+    expect(panel.log).toEqual([]);
+    commit(() => {
+      panel.state.views = "ready";
+    });
+    expect(panel.log).toEqual(['claimCard("I1", {"focus":true})']);
+  });
+
   it("a read that fails ends the return at once; a later retry claims nothing", () => {
     const panel = makePanel({ items: "loading", layoutDrawn: false });
     const { commit, result } = mount(panel);

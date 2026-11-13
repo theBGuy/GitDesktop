@@ -1346,7 +1346,8 @@ review via its subscription login. The full list is under
   a command palette (`Ctrl`/`⌘`+`K`), a filterable shortcut list in Settings
   (by name, category, or key), **Back** and **Forward** through the tabs and
   items you visited in a repository (`Alt`+`←` / `→`, `⌘`+`[` / `]` on macOS,
-  or the mouse's side buttons), and arrow-key navigation everywhere.
+  or the mouse's side buttons; on a roadmap row `Alt`+`←` / `→` shift the
+  item's dates instead), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.

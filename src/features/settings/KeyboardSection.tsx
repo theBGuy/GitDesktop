@@ -114,10 +114,11 @@ export const KeyboardSection = withForm({
     /** Signature over the overrides draft a note was posted under. A mismatch
      *  retires the note outright, so a draft that later returns to that signature
      *  can't resurrect a dismissed message. Steal, consequence and reset notes
-     *  describe the draft, so any route changing it — including the footer's Discard, which
-     *  form.reset()s while this section stays mounted — retires them without
-     *  knowing to clear them; the refusal note is advisory (an attempted key, not
-     *  the draft), and retiring it early is the safe direction. */
+     *  describe the draft, so any route changing it — including the footer's
+     *  Discard, which form.reset()s while this section stays mounted — retires
+     *  them without knowing to clear them; the refusal note is advisory (an
+     *  attempted key, not the draft), and retiring it early is the safe
+     *  direction. */
     const draftSig = JSON.stringify(overrides);
     // Set during render of the component that owns the state: React's derived-state
     // reset, re-rendered before commit. An effect would commit — and announce — the

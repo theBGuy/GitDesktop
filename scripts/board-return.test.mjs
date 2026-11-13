@@ -199,6 +199,38 @@ const ARMS = [
   ],
   ["views dead", base({ activeViewId: "V2", views: "dead" }), END],
   ["views loading", base({ activeViewId: "V2", views: "loading" }), WAIT],
+  ["the anchor's view active, views loading", base({ views: "loading" }), WAIT],
+  ["the anchor's view active, views dead", base({ views: "dead" }), END],
+  [
+    "no saved view on either side waits for no views read",
+    base({ ...anchor({ viewId: null }), activeViewId: null, views: "loading" }),
+    claim("I1", false, false),
+  ],
+  [
+    "not home, a saved view active, views loading",
+    base({ projectId: "P2", projectIds: ["P2"], views: "loading" }),
+    WAIT,
+  ],
+  [
+    "not home, a saved view active, views dead",
+    base({ projectId: "P2", projectIds: ["P2"], views: "dead" }),
+    END,
+  ],
+  [
+    "not home, no saved view active, waits for no views read",
+    base({
+      projectId: "P2",
+      projectIds: ["P2"],
+      activeViewId: null,
+      views: "loading",
+    }),
+    claim("I9", false, false),
+  ],
+  [
+    "an anchor view with none active waits for the views read",
+    base({ activeViewId: null, views: "loading" }),
+    WAIT,
+  ],
   [
     "fields dead at the pick",
     base({ activeViewId: "V2", fields: "dead" }),
@@ -353,6 +385,11 @@ const ADJACENT = [
     claim("I9", false, false),
   ],
   [
+    "a project switch beats an active saved view's loading views read",
+    base({ projectId: "P2", views: "loading" }),
+    { kind: "switch-project", projectId: "P1" },
+  ],
+  [
     "a project switch beats a differing view",
     base({ projectId: "P2", activeViewId: "V2" }),
     { kind: "switch-project", projectId: "P1" },
@@ -360,6 +397,11 @@ const ADJACENT = [
   [
     "a differing view with the fields loading waits, not pick-view",
     base({ activeViewId: "V2", fields: "loading" }),
+    WAIT,
+  ],
+  [
+    "the anchor's view active with the views loading beats the archived toggle",
+    base({ ...anchor({ showArchived: true }), views: "loading" }),
     WAIT,
   ],
   [

@@ -118,6 +118,13 @@ export function boardReturnStep(i: BoardReturnStepInput): BoardReturnStep {
   if (!home && !i.applied.project && i.projectIds.includes(i.anchor.projectId))
     return { kind: "switch-project", projectId: i.anchor.projectId };
 
+  // An active saved view draws nothing of its own until the views read answers, so
+  // nothing below acts on the drawn board first.
+  if (i.activeViewId !== null) {
+    if (i.views === "dead") return END;
+    if (i.views === "loading") return WAIT;
+  }
+
   if (home) {
     if (i.anchor.viewId !== i.activeViewId && !i.applied.view) {
       if (i.views === "dead") return END;
