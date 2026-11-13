@@ -3,6 +3,18 @@ import { normPath } from "@/lib/git/path";
 import type { CommitAuthor, RemoteLens, RepoInfo } from "@/lib/git/types";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { retargetAmendPin } from "@/lib/stores/draft-pin";
+import {
+  armLinkHop,
+  type BoardReturnRequest,
+  EMPTY_NAV_HISTORY,
+  type NavHistory,
+  pruneHiddenTabs,
+  readNavAnchor,
+  recordNavigation,
+  restoreStep,
+  syncLens,
+  takeLinkHop,
+} from "@/lib/stores/nav-history";
 import { holdNavigation } from "@/lib/stores/navigator-hold";
 import { startViewTransition } from "@/lib/view-transition";
 
@@ -235,6 +247,8 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   amendingBranch: null,
   activeDraftKey: null,
   draftKeyRemaps: {},
+  navHistory: EMPTY_NAV_HISTORY,
+  boardReturn: null,
 };
 
 /** Key a queued merge by the SAME identity the PR view uses — repo + number +
@@ -279,7 +293,7 @@ function isEmptyDraft(d: CommitDraft): boolean {
   );
 }
 
-interface UiState {
+export interface UiState {
   view: AppView;
   /** Underlying view to return to when an overlay (settings, help, explore, my
    *  work) closes. */
@@ -414,6 +428,18 @@ interface UiState {
    *  Lets a generation started before the rename recognise its own draft after it;
    *  a genuine branch switch or a repo switch clears the whole record. */
   draftKeyRemaps: Record<string, string>;
+  /** In-repo Back/Forward trail, written by the recorder at the bottom of this file,
+   *  by the history-aware actions (goBack, goForward, syncNavLens, setNavHiddenTabs)
+   *  and by CROSS_REPO_RESET; rules live in nav-history.ts. */
+  navHistory: NavHistory;
+  /** Tabs whose panel does not render now (the Agent tab under Hide AI). Written only by
+   *  setNavHiddenTabs; the history keeps no entry on one except the current entry. */
+  navHiddenTabs: readonly RepoTab[];
+  /** One-shot: the Projects panel should return to this anchor. Armed only by goBack and
+   *  goForward; cleared by the panel's consume while it is the active tab, by a later
+   *  restore to an entry without an anchor, by a syncNavLens re-seed and by
+   *  CROSS_REPO_RESET. */
+  boardReturn: BoardReturnRequest | null;
   /** Monotonic count of user navigation/selection actions; an async continuation
    *  snapshots it and strands when it moved. Bumped by every action a USER reaches that
    *  changes what is selected or where they are, overlay screens included (their opens
@@ -464,11 +490,12 @@ interface UiState {
     section: PrSection | null;
     /** Review to scroll to once the PR's details land; omitted/null = none. */
     reviewId?: string | null;
-    /** Store-external state this navigation depends on (the caller's repo-lens
-     *  write), run inside the SAME view-transition callback as the selection.
-     *  Written outside it, it would land a render early — with View Transitions
-     *  the callback runs in a later task, crossfaded or not — pairing the new lens
-     *  with the old PR number and fetching a pair the user never selected. A
+    /** Store-external state this navigation depends on, run inside the SAME
+     *  view-transition callback as the selection, and only when the landing
+     *  applies: a caller's repo-lens write, or the board's opener ref that the
+     *  history's anchor read takes. With View Transitions the callback runs in a
+     *  later task, crossfaded or not, so a lens write made outside it would pair
+     *  the new lens with the old PR number and fetch a pair never selected. A
      *  {@link UiState.noteUserInteraction} it makes is dropped: this navigation's
      *  request-time bump covers it, and a late one would retire a newer action. */
     beforeSelect?: () => void;
@@ -680,6 +707,22 @@ interface UiState {
     fromBranch: string,
     toBranch: string,
   ) => void;
+  /** One step through {@link UiState.navHistory}: a single set that bumps the epoch
+   *  once. An empty direction, or any view but the repo, performs no set at all. */
+  goBack: () => void;
+  goForward: () => void;
+  /** Marks the NEXT ui-store change as a link hop; call it on the line immediately
+   *  before the select it describes. The mark dies with its task. The selecting
+   *  navigators (openPr, openIssue, openRun, openCommit) mark their own landing, and a
+   *  tab-only one needs no mark since a tab change always pushes, so a caller never
+   *  marks before a navigator. */
+  markLinkHop: () => void;
+  /** Brings the history's lens stamp in step with the live lens of `repoPath`, re-seeding
+   *  at the current location on a mismatch. Never bumps the epoch. */
+  syncNavLens: (repoPath: string, lens: RemoteLens) => void;
+  /** Records which tabs do not render and prunes their entries. Never bumps. */
+  setNavHiddenTabs: (tabs: readonly RepoTab[]) => void;
+  clearBoardReturn: () => void;
 }
 
 /** Starts the repo-shell warm-up for `root` and claims the open;
@@ -803,6 +846,23 @@ export const useUiStore = create<UiState>()((set, get) => {
     }
   };
 
+  // One plain set, not a transition: a restore changes no top-level view. The view is
+  // tested with an early return so this body never spells a view key (the leave-guard
+  // scan classes any member that does as a view writer).
+  const restoreNav = (delta: -1 | 1) => {
+    const s = get();
+    if (s.view !== "repo") return;
+    const step = restoreStep(s, delta, readNavAnchor);
+    if (step === null) return;
+    const epoch = s.interactionEpoch + 1;
+    set({
+      ...step.patch,
+      navHistory: step.navHistory,
+      interactionEpoch: epoch,
+      boardReturn: step.anchor ? { anchor: step.anchor, epoch } : null,
+    });
+  };
+
   return {
     view: "welcome",
     previousView: "welcome",
@@ -845,6 +905,9 @@ export const useUiStore = create<UiState>()((set, get) => {
     commitDrafts: {},
     activeDraftKey: null,
     draftKeyRemaps: {},
+    navHistory: EMPTY_NAV_HISTORY,
+    navHiddenTabs: [],
+    boardReturn: null,
     interactionEpoch: 0,
     settingsLeaveGuard: null,
     setSettingsLeaveGuard: (guard) => set({ settingsLeaveGuard: guard }),
@@ -905,6 +968,8 @@ export const useUiStore = create<UiState>()((set, get) => {
           // caller's write and this selection in one pass.
           runBeforeSelect(target.beforeSelect);
           const switchingRepo = get().repoPath !== target.repoPath;
+          // After `beforeSelect`, which can write the store and would spend the mark.
+          armLinkHop();
           set({
             view: "repo",
             previousView: "repo",
@@ -960,6 +1025,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           if (target.stillValid?.(epochAtRequest) === false) return;
           runBeforeSelect(target.beforeSelect);
           const switchingRepo = get().repoPath !== target.repoPath;
+          armLinkHop();
           set({
             view: "repo",
             previousView: "repo",
@@ -996,6 +1062,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         startViewTransition(() => {
           if (target.stillValid?.(epochAtRequest) === false) return;
           const switchingRepo = get().repoPath !== target.repoPath;
+          armLinkHop();
           set({
             view: "repo",
             previousView: "repo",
@@ -1091,12 +1158,14 @@ export const useUiStore = create<UiState>()((set, get) => {
     },
     setRepoTab: (tab) =>
       set((s) => ({ repoTab: tab, interactionEpoch: s.interactionEpoch + 1 })),
-    openCommit: (hash) =>
+    openCommit: (hash) => {
+      armLinkHop();
       set((s) => ({
         repoTab: "history",
         selectedCommitHash: hash,
         interactionEpoch: s.interactionEpoch + 1,
-      })),
+      }));
+    },
     // Atomic (a follow-up set() would be clobbered); rationale in the compareCommitHash doc.
     setCompareBranch: (branch) =>
       set((s) => ({
@@ -1445,5 +1514,45 @@ export const useUiStore = create<UiState>()((set, get) => {
         }
         return result;
       }),
+    goBack: () => restoreNav(-1),
+    goForward: () => restoreNav(1),
+    markLinkHop: () => armLinkHop(),
+    syncNavLens: (repoPath, lens) => {
+      const s = get();
+      // A lens read for another repository says nothing about this history.
+      if (s.view !== "repo" || s.repoPath === null) return;
+      if (s.repoPath !== repoPath) return;
+      const navHistory = syncLens(s, lens);
+      if (navHistory === s.navHistory) return;
+      // A re-seed drops the board entry a pending return was armed from.
+      if (navHistory.entries === s.navHistory.entries) set({ navHistory });
+      else set({ navHistory, boardReturn: null });
+    },
+    setNavHiddenTabs: (tabs) => {
+      const { navHiddenTabs, navHistory } = get();
+      const next = new Set(tabs);
+      const same =
+        next.size === new Set(navHiddenTabs).size &&
+        navHiddenTabs.every((tab) => next.has(tab));
+      if (same) return;
+      set({
+        navHiddenTabs: tabs,
+        navHistory: pruneHiddenTabs(navHistory, tabs),
+      });
+    },
+    clearBoardReturn: () => set({ boardReturn: null }),
   };
+});
+
+// The Back/Forward recorder: the one observer of committed location changes, since the
+// navigators apply in a later task and many writers move the location. Registered here,
+// ahead of every other module's subscriber. Its own write re-enters it, and that pass
+// records nothing, since the history itself moved. The write re-runs every listener, so
+// each later one is called twice per recorded change (nested, then the outer pass): a
+// listener registered after it must react to a field change, never to the call itself.
+// The outer pass reads the live state, so `navHistory` itself reads as changed in both.
+useUiStore.subscribe((next, prev) => {
+  const hop = takeLinkHop();
+  const navHistory = recordNavigation(next, prev, hop, readNavAnchor);
+  if (navHistory !== next.navHistory) useUiStore.setState({ navHistory });
 });

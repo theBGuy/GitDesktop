@@ -12,10 +12,15 @@ import {
   hasModifier,
   isTypeaheadKey,
 } from "@/lib/hotkeys/binding";
+import {
+  defaultBindingOf,
+  effectiveBindings,
+} from "@/lib/hotkeys/default-binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACTIONS,
   type ActionDef,
+  type ActionId,
   CATEGORY_ORDER,
 } from "@/lib/hotkeys/registry";
 import { matchesActionText, queryTokens } from "@/lib/hotkeys/search";
@@ -77,6 +82,25 @@ function refusalNote(binding: string): string {
     : `That key scrolls and navigates on its own, so this shortcut needs ${formatBinding("mod")} or ${formatBinding("alt")} added.`;
 }
 
+/** Why a reset left `action` unbound: another action's override in `overrides`
+ *  holds its default, which then yields. Null when the default is free or absent. */
+function yieldedNote(
+  action: ActionDef,
+  overrides: Record<string, string | null>,
+): string | null {
+  const def = defaultBindingOf(action);
+  if (
+    def === null ||
+    effectiveBindings(overrides).get(action.id as ActionId) !== null
+  )
+    return null;
+  const holder = ACTIONS.find(
+    (a) => a.id !== action.id && overrides[a.id] === def,
+  );
+  if (!holder) return null;
+  return `"${action.label}" stays unbound: ${formatBinding(def)} is bound to "${holder.label}".`;
+}
+
 export const KeyboardSection = withForm({
   ...settingsFormOpts,
   render: function KeyboardSectionRender({ form }) {
@@ -89,11 +113,12 @@ export const KeyboardSection = withForm({
     } | null>(null);
     /** Signature over the overrides draft a note was posted under. A mismatch
      *  retires the note outright, so a draft that later returns to that signature
-     *  can't resurrect a dismissed message. Steal and consequence notes describe
-     *  the draft, so any route changing it — including the footer's Discard, which
-     *  form.reset()s while this section stays mounted — retires them without
-     *  knowing to clear them; the refusal note is advisory (an attempted key, not
-     *  the draft), and retiring it early is the safe direction. */
+     *  can't resurrect a dismissed message. Steal, consequence and reset notes
+     *  describe the draft, so any route changing it — including the footer's
+     *  Discard, which form.reset()s while this section stays mounted — retires
+     *  them without knowing to clear them; the refusal note is advisory (an
+     *  attempted key, not the draft), and retiring it early is the safe
+     *  direction. */
     const draftSig = JSON.stringify(overrides);
     // Set during render of the component that owns the state: React's derived-state
     // reset, re-rendered before commit. An effect would commit — and announce — the
@@ -109,11 +134,11 @@ export const KeyboardSection = withForm({
     // so this is the only live "focus-filter" handler while Keyboard is open.
     useHotkeyAction("focus-filter", () => filterRef.current?.focus(), true);
 
-    const effective = (id: string): string | null => {
-      const override = overrides[id];
-      if (override !== undefined) return override;
-      return ACTIONS.find((a) => a.id === id)?.defaultBinding ?? null;
-    };
+    // Built once per render over the DRAFT, so the rows, the filter and the
+    // steal loop all read the same resolution the listener applies once saved.
+    const effectiveMap = effectiveBindings(overrides);
+    const effective = (id: string): string | null =>
+      effectiveMap.get(id as ActionId) ?? null;
 
     /** Assigns or clears a binding. Reports whether it posted the steal message
      *  — that note outranks any softer one the caller would add — along with the
@@ -130,13 +155,14 @@ export const KeyboardSection = withForm({
         // whichever action held it before.
         for (const action of ACTIONS) {
           if (action.id !== id && effective(action.id) === binding) {
-            if (action.defaultBinding === null) delete next[action.id];
+            if (defaultBindingOf(action) === null) delete next[action.id];
             else next[action.id] = null;
             stolenFrom = action.label;
           }
         }
       }
-      const def = ACTIONS.find((a) => a.id === id)?.defaultBinding ?? null;
+      const target = ACTIONS.find((a) => a.id === id);
+      const def = target ? defaultBindingOf(target) : null;
       if (binding === def) delete next[id];
       else next[id] = binding;
       form.setFieldValue("hotkeys", next);
@@ -353,6 +379,8 @@ export const KeyboardSection = withForm({
                         const next = { ...overrides };
                         delete next[action.id];
                         form.setFieldValue("hotkeys", next);
+                        const text = yieldedNote(action, next);
+                        if (text) setNote({ text, sig: JSON.stringify(next) });
                       }}
                     >
                       <ArrowCounterClockwiseIcon />

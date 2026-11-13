@@ -3549,6 +3549,20 @@ const EDITABLE_GUARD_RE = /\bisEditableTarget\s*\(/;
 const TYPEAHEAD_GUARD_RE = /\bisTypeaheadTarget\s*\(/;
 const TYPEAHEAD_KEY_RE = /\bisTypeaheadKey\s*\(/;
 
+// A member read of an ACTIONS row's `defaultBinding` (`.x`, `?.x`, the dot
+// wrapped onto either line), which skips the per-platform default. A spread
+// (`...defaultBinding`) is no member read; strings are scanned as written.
+const RAW_DEFAULT_BINDING_RE = /(?<!\.\.)\.\s*defaultBinding(?![\w$])/g;
+
+// A horizontal-arrow key handler: `ArrowLeft`/`ArrowRight` named as a key (a
+// quoted string or an object key, never an `…Icon` import) in a file that
+// consumes an event, with no chord test anywhere in the file. Coarse per file,
+// like `unguarded-binding-dispatcher`: a ratchet, not a proof.
+const ARROW_KEY_NAME_RE =
+  /["'`]Arrow(?:Left|Right)["'`]|\bArrow(?:Left|Right)\s*:/;
+const CONSUMES_EVENT_RE = /\.(?:preventDefault|stopPropagation)\s*\(/;
+const CHORD_TEST_RE = /\b(?:hasChordModifier|eventToBinding)\s*\(/;
+
 // A generator dialog that stays mounted across its own close: a one-shot AI
 // generator hook, in a file that also seeds on open. Both halves are needed —
 // the generator is what a close would otherwise strand, and `useSeedOnOpen` is
@@ -5861,11 +5875,11 @@ export const CHECKS = [
       // Same shape again: the project and view dialogs' mod+enter submit chord.
       "src/features/projects/ProjectLifecycleDialogs.tsx",
       // Its two `eventToBinding` calls (the board's handler and the
-      // table/roadmap grid's) test fixed tables, never a user binding: the
-      // hardcoded Alt chords (four reorder, four date-shift) and the grid's own
-      // cursor and Enter/Space keys. Each handler's DOM containment check
-      // already pins focus to a board card or a grid cell — none of which hold
-      // editable or typeahead targets for the guards to protect.
+      // table/roadmap grid's) prevent only on fixed tables: the hardcoded Alt
+      // chords (four reorder, four date-shift) and the grid's own cursor and
+      // Enter/Space keys. The user's Go back and Go forward bindings are
+      // compared only to RETURN unprevented, so the window listener applies the
+      // guards when it dispatches.
       "src/features/projects/ProjectsBoardPanel.tsx",
       // Same shape as the board entry above: its `eventToBinding` call
       // tests a hardcoded set (the four Alt move chords, unmodified
@@ -5879,6 +5893,43 @@ export const CHECKS = [
     ],
     message:
       "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers, and a file that dispatches no rebindable binding needs an allowlist entry with rationale",
+  },
+  {
+    name: "raw-default-binding-read",
+    appliesTo: () => true,
+    scan: perFile(RAW_DEFAULT_BINDING_RE),
+    // The resolver itself: `resolveDefaultBinding` is the one reader of the
+    // row's own value. Losing that read turns this entry stale.
+    allowlist: ["src/lib/hotkeys/registry.ts"],
+    expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
+    message:
+      "an action's default differs per platform (MAC_DEFAULT_BINDINGS in src/lib/hotkeys/registry.ts), so a `.defaultBinding` member read gives the wrong key on macOS: read a default through `defaultBindingOf` and resolve an override against it through `effectiveBindings` (src/lib/hotkeys/default-binding.ts), and a test that needs one platform's default calls `resolveDefaultBinding(action, mac)`. This check cannot see a destructured read (`const { defaultBinding } = action`) or a bracket read (`action[\"defaultBinding\"]`); both stay review concerns, never a way around it",
+  },
+  {
+    name: "chorded-arrow-handler",
+    appliesTo: notVendoredUi,
+    scan: unlessAllPresent(
+      [CHORD_TEST_RE],
+      onlyWhen(CONSUMES_EVENT_RE, perLine(ARROW_KEY_NAME_RE)),
+    ),
+    // Keyed per file. Each entry swallows chorded arrows on purpose or tests
+    // the modifiers itself; losing its arrow handler turns the entry stale.
+    allowlist: [
+      // Its arrow arm runs only on a `plain` key: no Alt, Ctrl, Meta or Shift.
+      "src/features/activity/ActivityDock.tsx",
+      // The next three render only inside a modal dialog: Go back stands down
+      // under a modal, and a chord let through would reach the app bindings
+      // behind the dialog. The image viewer's own DialogContent handler.
+      "src/components/image-lightbox.tsx",
+      // The create-issue dialog's Projects chips.
+      "src/features/issues/CreateIssueDialog.tsx",
+      // The repository settings dialog's topic input and chips (also an
+      // OWNS_CHORD site in scripts/activation-key-chords.test.mjs).
+      "src/features/repo-settings/TopicsField.tsx",
+    ],
+    expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
+    message:
+      "Go back and Go forward default to Alt+Left and Alt+Right, and the window listener skips an event a component already consumed, so a handler that takes every ArrowLeft/ArrowRight as its own swallows the chord: return on `hasChordModifier(e)` (src/lib/hotkeys/binding.ts) before acting on or preventing a horizontal arrow. A handler that renders only inside a modal dialog may keep swallowing chords (Go back stands down there, and a chord let through would reach app bindings behind the dialog) with an allowlist entry giving that reason. The check is per file and reads only that the file names the key, consumes some event (`preventDefault` or `stopPropagation`) and calls neither `hasChordModifier(` nor `eventToBinding(`. It cannot see: a second, unguarded handler in a file that already holds a guard token (LinkedIssuesField.tsx's modal-only Jira chip handler), or the loss of a guarded handler's bail in such a file (ChangesPanel.tsx's tree handler, which scripts/changes-tree-chord-bail.test.mjs pins instead), or an arm of a guarded handler that swallows chords on purpose (ProjectsBoardPanel.tsx's roadmap rows keep the Alt arrows for their own reorder and date-shift chords); files that pass only because they call `eventToBinding(` for another purpose (mention-autocomplete.tsx); arrow keys matched other than by name (`e.keyCode`, a key read from a table built elsewhere); a consume spelled as an optional call (`e.preventDefault?.()`) or as a keymap entry that returns true; a guard token that appears only inside a string literal; and handlers in vendored UI or inside libraries. Those stay review concerns",
   },
   {
     name: "titled-disabled-trigger",

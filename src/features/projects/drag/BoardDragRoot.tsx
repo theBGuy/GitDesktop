@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import type { BoardItem } from "@/lib/git/types";
+import { vetoSideButtonNavigation } from "@/lib/hotkeys/side-buttons";
 import { useUiStore } from "@/lib/stores/ui";
 import {
   type BoardColumnModel,
@@ -424,6 +425,8 @@ function createController(view: ControllerView) {
     if (session !== s) return;
     const live = liveSession();
     if (live === null) return;
+    // A side-button press spent on the cancel must not also navigate on release.
+    if (press !== null) vetoSideButtonNavigation(press);
     const rect = ghostRect();
     endSession(s);
     s.abort();

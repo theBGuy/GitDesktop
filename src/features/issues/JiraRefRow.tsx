@@ -58,6 +58,7 @@ export function JiraRefRow({
   const issues = useJiraIssues(repoPath, keys.length > 0 ? link : null, "all");
   const selectIssue = useUiStore((s) => s.selectIssue);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
 
   if (!link || keys.length === 0) return null;
 
@@ -67,6 +68,7 @@ export function JiraRefRow({
   function open(key: string) {
     // Both calls, always: selectIssue targets the panel selection, setRepoTab
     // brings the Issues tab forward so the selection is actually visible.
+    markLinkHop();
     selectIssue({ kind: "jira", id: key });
     setRepoTab("issues");
   }

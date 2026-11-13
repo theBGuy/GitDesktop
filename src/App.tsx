@@ -35,6 +35,8 @@ import {
 } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
+import { useNavHistoryActions } from "@/lib/hotkeys/nav-history-actions";
+import { useSideButtonNavigation } from "@/lib/hotkeys/side-buttons";
 import "@/lib/last-checkout/subscribe";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
 import {
@@ -48,11 +50,15 @@ import {
   useSaveSettings,
   useSettings,
 } from "@/lib/settings/queries";
-import { useUiStore } from "@/lib/stores/ui";
+import { type RepoTab, useUiStore } from "@/lib/stores/ui";
 import { COLD_INSTANCE_ID, COLD_START } from "@/lib/test-mode";
 import { nextTheme, THEME_LABELS } from "@/lib/theme";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+
+// Stable, so the hidden-tab effect hands the store the same array each time.
+const AGENT_HIDDEN: readonly RepoTab[] = ["agent"];
+const NOTHING_HIDDEN: readonly RepoTab[] = [];
 
 function App() {
   const view = useUiStore((s) => s.view);
@@ -188,6 +194,16 @@ function App() {
 
   // The app-wide hotkey dispatcher plus the always-available actions.
   useHotkeysListener();
+  useNavHistoryActions(dialogOpen);
+  useSideButtonNavigation();
+  // The same read as RepositoryView's gate on the Agent panel; empty while
+  // settings load, when that panel renders too.
+  const hideAi = settings.data?.hideAi;
+  useEffect(() => {
+    useUiStore
+      .getState()
+      .setNavHiddenTabs(hideAi ? AGENT_HIDDEN : NOTHING_HIDDEN);
+  }, [hideAi]);
   // The macOS menu bar routes into the same action dispatch; inert elsewhere.
   useMacAppMenu();
   // Settings… is exposed in the macOS menu bar, which stays clickable on the

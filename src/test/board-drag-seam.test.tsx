@@ -37,6 +37,8 @@ import {
 } from "@/features/projects/drag/use-board-drag-column";
 import { TabPanel } from "@/features/repository/TabPanel";
 import type { BoardItem } from "@/lib/git/types";
+import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useSideButtonNavigation } from "@/lib/hotkeys/side-buttons";
 import { useUiStore } from "@/lib/stores/ui";
 
 // The fake engine obeys E1-E10 by doing nothing on its own: each test drives the
@@ -1900,6 +1902,32 @@ describe("cancel (AC10)", () => {
     fireEvent.blur(window);
     expect(fireEvent.contextMenu(card)).toBe(true);
     expect(ancestorContextMenu).toHaveBeenCalledTimes(1);
+  });
+
+  it("a side press that cancels a lifted drag does not go back on its release; the next press does", () => {
+    const back = vi.fn();
+    function SideButtonNav() {
+      useSideButtonNavigation();
+      useHotkeyAction("go-back", back);
+      return null;
+    }
+    const host = baseHost();
+    render(
+      <>
+        <SideButtonNav />
+        <Shell host={host} />
+      </>,
+    );
+    const card = screen.getByTestId("card-a1");
+    lift("a1");
+    fireEvent.mouseDown(card, { button: 3 });
+    expect(host.announce).toHaveBeenCalledWith(MOVE_CANCELLED_ANNOUNCEMENT);
+    expect(dragState()).toBeNull();
+    fireEvent.mouseUp(card, { button: 3 });
+    expect(back).not.toHaveBeenCalled();
+    fireEvent.mouseDown(card, { button: 3 });
+    fireEvent.mouseUp(card, { button: 3 });
+    expect(back).toHaveBeenCalledTimes(1);
   });
 });
 

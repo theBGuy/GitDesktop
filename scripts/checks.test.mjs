@@ -268,6 +268,8 @@ const preparingSlotHide = scanner("preparing-slot-hide");
 const bareGroupLabel = scanner("bare-group-label");
 const unnamedRadioGroup = scanner("unnamed-radio-group");
 const unguardedDispatcher = scanner("unguarded-binding-dispatcher");
+const rawDefaultBinding = scanner("raw-default-binding-read");
+const chordedArrow = scanner("chorded-arrow-handler");
 const titledDisabledTrigger = scanner("titled-disabled-trigger");
 const titledBadge = scanner("titled-badge");
 const ungatedProducer = scanner("ungated-notification-producer");
@@ -2844,6 +2846,175 @@ test("unguarded-binding-dispatcher allowlists the non-rebindable dispatchers", (
   assert.deepEqual(runCheck(check, files, views).violations, [
     "src/features/pulls/SomeNewView.tsx:1",
   ]);
+});
+
+test("raw-default-binding-read flags every member-read spelling", () => {
+  assert.deepEqual(rawDefaultBinding("const d = action.defaultBinding;"), [1]);
+  assert.deepEqual(
+    rawDefaultBinding("const d = ACTIONS.find(f)?.defaultBinding ?? null;"),
+    [1],
+  );
+  assert.deepEqual(
+    rawDefaultBinding("const d = action . defaultBinding;"),
+    [1],
+  );
+  // The dot wrapped onto either line still reads the row.
+  assert.deepEqual(
+    rawDefaultBinding("const d = action\n  .defaultBinding;"),
+    [2],
+  );
+  assert.deepEqual(
+    rawDefaultBinding("const d = action?.\n  defaultBinding;"),
+    [1],
+  );
+});
+
+test("raw-default-binding-read passes the resolver's own spellings", () => {
+  for (const source of [
+    "const d = defaultBindingOf(action);",
+    "const d = resolveDefaultBinding(action, false);",
+    '{ id: "x", label: "X", category: "Navigation", defaultBinding: null },',
+    "const r = { ...defaultBinding };",
+    "const d = action.defaultBindingOf;",
+    "// action.defaultBinding in a comment is no read",
+    // The documented blind spots: neither is a member read.
+    "const { defaultBinding } = action;",
+    'const d = action["defaultBinding"];',
+  ]) {
+    assert.deepEqual(rawDefaultBinding(source), [], source);
+  }
+});
+
+test("raw-default-binding-read allowlists the registry's resolver alone", () => {
+  const check = CHECKS.find((c) => c.name === "raw-default-binding-read");
+  const read = view("return action.defaultBinding;");
+  const files = [
+    "src/lib/hotkeys/registry.ts",
+    "src/features/settings/KeyboardSection.tsx",
+    "src/test/some.test.ts",
+  ];
+  const views = new Map(files.map((f) => [f, read]));
+  const result = runCheck(check, files, views);
+  assert.deepEqual(result.violations, [
+    "src/features/settings/KeyboardSection.tsx:1",
+    "src/test/some.test.ts:1",
+  ]);
+  assert.deepEqual(result.stale, []);
+  // The registry no longer reading its rows turns the entry stale.
+  const unread = runCheck(
+    check,
+    files,
+    new Map(files.map((f) => [f, view("return null;")])),
+  );
+  assert.deepEqual(unread.stale, ["src/lib/hotkeys/registry.ts"]);
+});
+
+test("chorded-arrow-handler flags an arrow handler with no chord test", () => {
+  const handler = (key, consume = "e.preventDefault();") =>
+    [`if (e.key === ${key}) {`, `  ${consume}`, "  step(-1);", "}"].join("\n");
+  for (const key of ['"ArrowLeft"', "'ArrowRight'", "`ArrowLeft`"]) {
+    assert.deepEqual(chordedArrow(handler(key)), [1], key);
+  }
+  // A stopPropagation keeps the chord from the window listener just as surely.
+  assert.deepEqual(
+    chordedArrow(handler('"ArrowRight"', "e.stopPropagation();")),
+    [1],
+  );
+  // An object key names the arrow too (a key-to-step table).
+  assert.deepEqual(
+    chordedArrow(
+      [
+        "const STEP = { ArrowLeft: -1, ArrowRight : 1 };",
+        "const d = STEP[e.key];",
+        "if (d) e.preventDefault();",
+      ].join("\n"),
+    ),
+    [1],
+  );
+  // The consuming call may sit anywhere in the file.
+  assert.deepEqual(
+    chordedArrow(
+      [
+        'case "ArrowLeft":',
+        "  break;",
+        "function other(e) {",
+        "  e.preventDefault();",
+        "}",
+      ].join("\n"),
+    ),
+    [1],
+  );
+});
+
+test("chorded-arrow-handler passes guarded and non-handler shapes", () => {
+  for (const source of [
+    // The fix: a chord test anywhere in the file.
+    [
+      "if (hasChordModifier(e)) return;",
+      'if (e.key === "ArrowLeft") e.preventDefault();',
+    ].join("\n"),
+    // An eventToBinding call counts too (its documented blind spot).
+    [
+      "const b = eventToBinding(e);",
+      'if (e.key === "ArrowLeft") e.preventDefault();',
+    ].join("\n"),
+    // Icons, comments and bare identifiers name no key.
+    [
+      'import { ArrowLeftIcon } from "@phosphor-icons/react";',
+      "const icon = { ArrowLeftIcon: ArrowLeftIcon };",
+      '// "ArrowLeft" in a comment is no handler',
+      "e.preventDefault();",
+    ].join("\n"),
+    // A file that names the key but consumes nothing passes it through.
+    'const RESYNC = new Set(["ArrowLeft", "ArrowRight"]);',
+    // Vertical arrows are not Go back's keys.
+    'if (e.key === "ArrowUp") e.preventDefault();',
+  ]) {
+    assert.deepEqual(chordedArrow(source), [], source);
+  }
+});
+
+test("chorded-arrow-handler allowlists the modal-only and self-guarded files", () => {
+  const check = CHECKS.find((c) => c.name === "chorded-arrow-handler");
+  const handler = view('if (e.key === "ArrowLeft") e.preventDefault();');
+  const allowlisted = [
+    "src/features/activity/ActivityDock.tsx",
+    "src/components/image-lightbox.tsx",
+    "src/features/issues/CreateIssueDialog.tsx",
+    "src/features/repo-settings/TopicsField.tsx",
+  ];
+  const files = [
+    ...allowlisted,
+    "src/features/repository/insights/PunchCard.tsx",
+    "src/test/some.test.tsx",
+    "src/components/ui/slider.tsx",
+  ];
+  const result = runCheck(
+    check,
+    files,
+    new Map(files.map((f) => [f, handler])),
+  );
+  // Vendored UI is out of scope; a test file is scanned like any other.
+  assert.deepEqual(result.violations, [
+    "src/features/repository/insights/PunchCard.tsx:1",
+    "src/test/some.test.tsx:1",
+  ]);
+  assert.deepEqual(result.stale, []);
+  // An allowlisted file that gains the guard (or loses its handler) is stale.
+  const guarded = runCheck(
+    check,
+    files,
+    new Map(
+      files.map((f) => [
+        f,
+        view(
+          'if (hasChordModifier(e)) return;\nif (e.key === "ArrowLeft") e.preventDefault();',
+        ),
+      ]),
+    ),
+  );
+  assert.deepEqual(guarded.violations, []);
+  assert.deepEqual(guarded.stale, allowlisted);
 });
 
 test("titled-disabled-trigger flags both spellings of the hover-only reason", () => {

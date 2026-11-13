@@ -320,9 +320,9 @@ const ACTIONS_CLOSE = "] as const satisfies readonly ActionDef[];";
 /** An array literal's top-level elements as source text with the registry.ts
  *  line each starts on, or null when the body can't be scanned. `masked` is
  *  lexRegistry's, so no comment or bare `/` reaches the scan. The body starts
- *  at `offset` and stops at `end`, or at the array's own closing `]` when
- *  `end` is omitted. */
-function scanElements(masked, offset, end) {
+ *  at `offset` and stops at `end`, or at the literal's own `closer` (`]` for
+ *  an array, `}` for an object) when `end` is omitted. */
+function scanElements(masked, offset, end, closer = "]") {
   const body = masked.slice(offset, end);
   const elements = [];
   let depth = 0;
@@ -342,6 +342,12 @@ function scanElements(masked, offset, end) {
       close(i);
       continue;
     }
+    // The literal's own close ends the scan; after a trailing comma it opens
+    // no element.
+    if (depth === 0 && c === closer && end === undefined) {
+      close(i);
+      return elements;
+    }
     if (from < 0) from = i;
     if (c === '"' || c === "'" || c === "`") {
       let j = i + 1;
@@ -356,7 +362,7 @@ function scanElements(masked, offset, end) {
     else if ("}])".includes(c)) {
       depth--;
       if (depth < 0) {
-        if (end !== undefined || c !== "]") return null;
+        if (end !== undefined || c !== closer) return null;
         close(i);
         return elements;
       }
@@ -475,6 +481,62 @@ function registryFailures(text) {
       failures.push(`${row.id} reuses a zoom label`);
     }
   }
+  failures.push(...macDefaultFailures(text, rows));
+  return failures;
+}
+
+const MAC_OPEN = "export const MAC_DEFAULT_BINDINGS";
+// The annotation, then the object literal's opening brace.
+const MAC_BODY_RE = /^\s*(?::[^=;{}]*)?=\s*\{/;
+const MAC_ENTRY_RE = /^"([^"]+)":\s*"([^"]+)"$/;
+const MAC_SHAPE =
+  'write each entry as "<action id>": "<binding>", both plain double-quoted strings';
+
+/** The macOS defaults table read whole: each entry must name one current,
+ *  non-zoom action once and default it to no zoom binding. Fails, never skips,
+ *  on a table it can't find once or read entry by entry. */
+function macDefaultFailures(text, rows) {
+  const lexed = lexRegistry(text);
+  if (lexed.failure) return [lexed.failure];
+  const start = liveMarker(lexed.code, MAC_OPEN);
+  if (start.failure) return [start.failure];
+  const from = start.at + MAC_OPEN.length;
+  const open = lexed.code.slice(from).match(MAC_BODY_RE);
+  const elements =
+    open === null
+      ? null
+      : scanElements(lexed.masked, from + open[0].length, undefined, "}");
+  if (elements === null || elements.length === 0) {
+    return ["registry.ts MAC_DEFAULT_BINDINGS is unreadable"];
+  }
+  const ids = new Set(rows.map((r) => r.id));
+  const zoomIds = new Set(ZOOM_ROWS.map((r) => r.id));
+  const seen = new Set();
+  const failures = [];
+  for (const { text: element, line } of elements) {
+    const head = element.split("\n")[0];
+    if (element.includes("\\")) {
+      failures.push(
+        `registry.ts:${line} MAC_DEFAULT_BINDINGS entry \`${head}\` spells a backslash escape: write the literal plainly so this guard compares what the app reads`,
+      );
+      continue;
+    }
+    const m = element.match(MAC_ENTRY_RE);
+    if (!m) {
+      failures.push(
+        `registry.ts:${line} MAC_DEFAULT_BINDINGS entry \`${head}\` doesn't parse: ${MAC_SHAPE}`,
+      );
+      continue;
+    }
+    const [, id, binding] = m;
+    if (!ids.has(id)) failures.push(`mac default for unknown action ${id}`);
+    if (seen.has(id)) failures.push(`duplicate mac default ${id}`);
+    seen.add(id);
+    if (zoomIds.has(id)) failures.push(`mac default for zoom action ${id}`);
+    if (RESERVED_BINDINGS.includes(binding)) {
+      failures.push(`${id} defaults on macOS to the zoom binding ${binding}`);
+    }
+  }
   return failures;
 }
 
@@ -584,6 +646,88 @@ test("the registry carries the three zoom actions and no colliding default", () 
     `  { id: "open-settings", label: "X", category: "Application", defaultBinding: null },\n${ACTIONS_CLOSE}`,
   );
   assert.deepEqual(registryFailures(twin), ["duplicate action open-settings"]);
+});
+
+test("the registry guard reads the macOS defaults table whole", () => {
+  const text = read(REGISTRY);
+  assert.deepEqual(registryFailures(text), []);
+  const mutate = (from, to) => {
+    assert.equal(text.split(from).length - 1, 1, from);
+    return text.split(from).join(to);
+  };
+  const back = '"go-back": "mod+[",';
+  const forward = '"go-forward": "mod+]",';
+  // NEGATIVE CONTROLS, each on the real file's text.
+  for (const [name, mutant, expected] of [
+    [
+      "a zoom binding",
+      mutate(back, '"go-back": "mod++",'),
+      ["go-back defaults on macOS to the zoom binding mod++"],
+    ],
+    [
+      "the table renamed",
+      mutate(`${MAC_OPEN}:`, "export const MAC_DEFAULTS:"),
+      [`registry.ts has no live \`${MAC_OPEN}\``],
+    ],
+    [
+      "an unknown id",
+      mutate(forward, '"go-nowhere": "mod+]",'),
+      ["mac default for unknown action go-nowhere"],
+    ],
+    [
+      "a duplicate id",
+      mutate(forward, `${forward}\n  ${back}`),
+      ["duplicate mac default go-back"],
+    ],
+    [
+      "a zoom action",
+      mutate(forward, `${forward}\n  "app-zoom-in": "mod+i",`),
+      ["mac default for zoom action app-zoom-in"],
+    ],
+  ]) {
+    assert.deepEqual(registryFailures(mutant), expected, name);
+  }
+  // Unreadable entries fail closed, each with the shape to write.
+  for (const entry of [
+    'goBack: "mod+[",',
+    '"go-back": MOD_BRACKET,',
+    "'go-back': 'mod+[',",
+    '["go-back"]: "mod+[",',
+    "...EXTRA,",
+  ]) {
+    const failures = registryFailures(mutate(back, entry));
+    assert.equal(failures.length, 1, entry);
+    assert.match(failures[0], /MAC_DEFAULT_BINDINGS entry .* doesn't parse/);
+  }
+  const escape = `"go-back": "mod+${String.fromCharCode(92)}u005b",`;
+  assert.match(
+    registryFailures(mutate(back, escape))[0],
+    /MAC_DEFAULT_BINDINGS entry .* spells a backslash escape/,
+  );
+  // Declared twice, or with nothing to read, the table fails too.
+  const declaration = text.slice(
+    text.indexOf(MAC_OPEN),
+    text.indexOf("};", text.indexOf(MAC_OPEN)) + 2,
+  );
+  assert.deepEqual(registryFailures(`${text}\n${declaration}\n`), [
+    `registry.ts holds more than one live \`${MAC_OPEN}\`, so which one the app reads is ambiguous`,
+  ]);
+  // A longer name starting with the table's is another constant, not a second
+  // table.
+  assert.deepEqual(
+    registryFailures(
+      `${text}\n${declaration.replace(MAC_OPEN, `${MAC_OPEN}_SOMETHING`)}\n`,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    registryFailures(
+      text
+        .split(declaration)
+        .join(`${MAC_OPEN}: Partial<Record<ActionId, string>> = {};`),
+    ),
+    ["registry.ts MAC_DEFAULT_BINDINGS is unreadable"],
+  );
 });
 
 test("the registry guard refuses ACTIONS elements it can't parse whole", () => {

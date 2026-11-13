@@ -380,6 +380,7 @@ export function IssueSubIssues({
   const addSub = useAddSubIssue();
   const removeSub = useRemoveSubIssue(repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
   const [mode, setMode] = useState<null | "existing">(null);
   const [createOpen, setCreateOpen] = useState(false);
   if (held && (createOpen || mode !== null)) {
@@ -436,6 +437,7 @@ export function IssueSubIssues({
   ]);
 
   function open(n: number) {
+    markLinkHop();
     selectIssue({ kind: "remote", id: String(n) });
   }
 
@@ -610,6 +612,7 @@ export function IssueRelationships({
   const dependencies = useIssueDependencies(repoPath, number, lens);
   const setDep = useSetIssueDependency(repoPath, lens);
   const selectIssue = useUiStore((s) => s.selectIssue);
+  const markLinkHop = useUiStore((s) => s.markLinkHop);
   const [addRelation, setAddRelation] = useState<IssueRelation | null>(null);
   // From the cache, so a write still pending survives this section's remount.
   const pendingWrites = usePendingIssueWrites(repoPath);
@@ -663,6 +666,7 @@ export function IssueRelationships({
   ]);
 
   function open(n: number) {
+    markLinkHop();
     selectIssue({ kind: "remote", id: String(n) });
   }
 

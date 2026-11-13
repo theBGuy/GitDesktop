@@ -5,7 +5,8 @@
  * guide always shows the right key for the platform (⌘ on macOS) and reflects
  * the user's rebindings:
  *   - \`{{kbd:action-id}}\` — a rebindable action from the hotkey registry; resolves
- *     to its current effective binding (or "unbound" if the user cleared it).
+ *     to its current effective binding (or "unbound" if the user cleared it, or if
+ *     another action's override holds its default).
  *   - \`{{key:mod+b}}\` — a fixed, non-rebindable combo (e.g. the Markdown editor's
  *     formatting keys); resolves to the platform-formatted form only.
  *
@@ -2936,6 +2937,9 @@ change the board, an archived row, another change still being written, or the ro
 still refreshing after one) the keys say why instead. A date that is an organization's
 issue field moves only on an issue whose fields you can set, and a bar moves whole or not
 at all: if any date it would write can't change on that row, none of them move.
+On a roadmap row {{key:alt+left}} and {{key:alt+right}} always belong to the dates, so a
+Go back ({{kbd:go-back}}) or Go forward ({{kbd:go-forward}}) bound to one of them does
+nothing there; the mouse's side buttons and the command palette still work.
 
 Sections, selection, the row menu and the bulk bar work as they do in the table, and so
 do {{key:alt+up}} and {{key:alt+down}} for the project order.
@@ -2953,6 +2957,16 @@ board.
 Open an issue or pull request from its card and it lands on its own tab. One from another
 repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
 your browser instead.
+
+From an item you opened here, {{kbd:go-back}} or your mouse's back button returns to the
+board on the same project and view with that card focused (its row, in a table or
+roadmap), and {{kbd:go-forward}} goes forward again. That holds after a visit to Settings
+or another screen too: the board comes back on its view as saved, so any unsaved layout,
+grouping, date fields or zoom you had picked on the board starts over, and
+**Show archived cards** is put back as you had it, so an archived card is found again. If
+the card has left the board, focus goes to the first card instead (in a table or roadmap,
+to a row that is still there), and a screen reader is told the card is gone. Focus you
+have moved yourself while the board loaded is left where it is.
 
 {{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
 with the title, what the card is, and its dates — when it was opened, when it joined this
@@ -3178,7 +3192,9 @@ the next column at the same height, **Home / End** jump to a column's first or l
 Linux, {{key:shift+f10}} opens its menu. Hold {{key:alt}} with **↑ / ↓** or **Home / End**
 and the card moves instead of the cursor (above); hold {{key:shift}} with the same keys
 and the selection extends instead (above), with {{key:escape}} to drop it. Collapsing the
-sidebar ({{kbd:toggle-sidebar}}) hands the board its width.
+sidebar ({{kbd:toggle-sidebar}}) hands the board its width. {{kbd:go-back}} and
+{{kbd:go-forward}} work from a card and from any row in a table layout, section
+headers included, unless you rebind one to a key the board uses itself.
 
 GitHub only. Reading a board needs the same \`project\` or \`read:project\` sign-in scope the
 Projects picker on issues and pull requests already asks for; with neither, the tab says so
@@ -4232,6 +4248,12 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - {{kbd:show-repositories}} repositories · {{kbd:show-branches}} branches ·
   {{kbd:back-to-repositories}} back to repositories · {{kbd:focus-filter}} focus the
   filter.
+- {{kbd:go-back}} back · {{kbd:go-forward}} forward through the tabs and items you visited
+  in this repository: a tab switch, a \`#123\` link, a linked pull request, a card opened
+  from a board. The mouse's back and forward buttons do the same. Moving through a list
+  adds nothing to go back through, and the trail starts again when you open another
+  repository or switch between **Fork** and **Upstream**. While a dialog is open, those
+  keys and buttons do nothing.
 
 ## Doing things
 
@@ -4254,17 +4276,19 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
-combination, and if it clashes with another action the app moves it for you. A shortcut can
+combination, and if it clashes with another action the app moves it for you. Your own
+shortcut also outranks another action's built-in default on the same keys: that action
+shows as unbound for as long as yours holds them, even after a reset. A shortcut can
 be a single key: a bare character key stays quiet while you're typing or in a menu or
 picker, and fires everywhere else. {{key:space}} stays quiet as well on rows, cards
-and controls that use it themselves (a file in **Changes** stages, a board card
-peeks, a checkbox or switch toggles, a tab opens, a linked-issue chip flips its
-keyword), and when its shortcut has nothing to act on, {{key:space}} presses the
-focused button or scrolls as usual. The list there is filterable by action name,
-category, or key — {{kbd:focus-filter}} jumps to the filter while the section is
-open. Many actions (creating issues/releases, repository settings, stash
-views{{ai}}, most agent commands{{/ai}}) are palette-only until you bind a key.
-Defaults match GitHub Desktop where there's an equivalent.`,
+and controls that use it themselves (a file in **Changes** stages, a board card peeks,
+a checkbox or switch toggles, a tab opens, a linked-issue chip flips its keyword),
+and when its shortcut has nothing to act on, {{key:space}} presses the focused
+button or scrolls as usual. The list there is filterable by action name, category,
+or key — {{kbd:focus-filter}} jumps to the filter while the section is open. Many
+actions (creating issues/releases, repository settings, stash views{{ai}}, most agent
+commands{{/ai}}) are palette-only until you bind a key. Defaults match GitHub Desktop
+where there's an equivalent.`,
   },
   {
     id: "settings",

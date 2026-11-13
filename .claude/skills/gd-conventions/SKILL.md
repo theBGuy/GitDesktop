@@ -185,6 +185,14 @@ match today). Each token still has to be a literal substring of what remains, so
 a label built from different words than the surface shows stays unfindable.
 Keyboard's binding arms deliberately stay literal — key text means its
 separators.
+A default that differs on macOS lives in `MAC_DEFAULT_BINDINGS` (registry.ts),
+never in the ACTIONS row; every read of a default goes through `defaultBindingOf`
+(`src/lib/hotkeys/default-binding.ts`), since the row alone holds the
+Windows and Linux chord (guard `raw-default-binding-read`, which can't
+see a destructured or bracket read). The binding an action answers to
+comes from `effectiveBindings` / `useEffectiveBindings`, never a local
+override-else-default: a user's override beats another action's default on the
+same chord, and that action then reads as Unbound, a reset included.
 
 **Mod-key display.** Shortcut hints render via `isMac` / `formatBinding` from
 `@/lib/hotkeys/binding` — never a literal ⌘ or "Ctrl+"; only labels branch.
@@ -208,6 +216,16 @@ so bound chords reach the window listener, except inside a modal that owns no
 chord of its own, where letting one through would fire app bindings behind the
 dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 `scripts/activation-key-chords.test.mjs` scan is the ratchet.
+A handler that acts on a bare ArrowLeft or ArrowRight and can run outside
+a modal dialog returns on `hasChordModifier(e)` first, so Go back's
+Alt+arrow reaches the window listener. One that renders only inside a modal
+keeps its swallow under an allowlist entry: Go back stands down there,
+and a chord let through would fire app bindings behind the dialog (guard
+`chorded-arrow-handler`; its message names what it can't see, such as a second
+handler in a file that already holds a guard token). A surface that swallows
+chords it does not own lets the effective `go-back` and `go-forward` bindings
+through after its own chords, without preventing them (the Projects board card
+and table row are the reference).
 
 **Patterns the user has ruled on:**
 - No hover-revealed per-row buttons — contextual actions are always-visible,
@@ -772,6 +790,28 @@ Wiring a NEW call site onto one of these surfaces means the governing idiom
 applies — cite it in the spec or record "none applies"; the canonical site is
 one grep away on the named symbol. Grows via Conventions-sync.
 
+- **In-repo history** — the recorder (the ui store subscriber at the
+  end of `src/lib/stores/ui.ts`, whose rules are `recordNavigation` in
+  `src/lib/stores/nav-history.ts`) observes committed location changes,
+  so no call site pushes: a tab change always adds an entry, a selection
+  change only after `markLinkHop()`. A new tab or selection field joins
+  `NAV_SELECTION_FIELDS`. A same-tab jump that follows a reference (a `#N`
+  link, a linked issue, a badge) calls `markLinkHop()` on the line before its
+  select; list browsing never does, since it rewrites the current entry in
+  place (a list row's click may mark, its arrow route never: StackSection's
+  `followed`). A tab whose place the store can't name registers an anchor
+  provider (`registerNavAnchorProvider`) and consumes its return request while
+  active, epoch-checked (`useBoardReturn` on Projects is the instance); leaving
+  the repo view for an overlay records the current tab's anchor first, since
+  the panel unmounts under the overlay. A tab whose panel can stop rendering
+  is reported through `setNavHiddenTabs`; the history carries the lens it was
+  built under and `useNavLensSync` re-seeds it when the live lens differs; every
+  writer that keeps or adds entries returns through the module's one normalizer
+  (seeding writes one entry, and the stamp-only lens path returns the entries
+  unchanged); Back and Forward restore in one set and never call a navigator. A
+  mouse side-button press a surface spends on something else (cancelling a drag)
+  calls `vetoSideButtonNavigation` from its mousedown, so the release doesn't
+  also navigate.
 - **Repo-identity keying** — per-repo state keys on the repo IDENTITY
   (`useRepoIdentity` / the shared `--git-common-dir` resolver), never a raw
   checkout path; a raw-path key diverges across worktrees of one repo.
@@ -1474,11 +1514,12 @@ handles" → skip docs; silent spec + user-facing change → flag the gap in you
 report, don't exceed scope.
 
 Help-content specifics: shortcuts are `{{kbd:action-id}}` / `{{key:…}}`
-tokens, never literal keys — but a `defaultBinding: null` (palette-only)
-action gets **no token at all** (it renders the literal word "palette" —
-HelpScreen's `PALETTE_ONLY` set); mention it as plain prose. AI-only content
-gated with `ai: true` + `{{ai}}…{{/ai}}`. Verify every claim against code;
-sweep stale "coming soon" mentions when a feature ships.
+tokens, never literal keys — but an action with no default on this
+platform (`defaultBindingOf(a) === null`, palette-only) gets **no token at
+all** (it renders the literal word "palette" — the `PALETTE_ONLY` set in
+`src/features/help/resolve-body.ts`); mention it as plain prose. AI-only content
+gated with `ai: true` + `{{ai}}…{{/ai}}`. Verify every claim against code; sweep
+stale "coming soon" mentions when a feature ships.
 
 ## Prevention standing rules (owner-adopted 2026-08-15)
 
