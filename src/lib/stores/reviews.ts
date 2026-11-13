@@ -812,6 +812,7 @@ export async function startReview(
       timeoutConfigurable: true,
       effort,
       reviewTools,
+      rejectRefusal: true,
       setText: pushText,
       setStatus: (s) => {
         if (owns()) patch({ status: s });
