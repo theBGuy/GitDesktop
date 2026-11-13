@@ -1362,19 +1362,25 @@ fn wt_paths_match(a: &str, b: &str, windows: bool, same_dir: impl Fn(&str, &str)
 /// Whether both paths exist as one directory: equal canonical paths, or on unix one
 /// (device, inode), which holds however a case-insensitive volume spells the name.
 fn same_dir_on_disk(a: &str, b: &str) -> bool {
-    if matches!(
+    matches!(
         (std::fs::canonicalize(a), std::fs::canonicalize(b)),
         (Ok(x), Ok(y)) if x == y
-    ) {
-        return true;
+    ) || same_inode(a, b)
+}
+
+/// Whether both paths' metadata name one (device, inode); false when either read fails.
+#[cfg(unix)]
+fn same_inode(a: &str, b: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-            return x.dev() == y.dev() && x.ino() == y.ino();
-        }
-    }
+}
+
+/// No inode identity off unix; the canonical-path arm decides alone.
+#[cfg(not(unix))]
+fn same_inode(_a: &str, _b: &str) -> bool {
     false
 }
 
