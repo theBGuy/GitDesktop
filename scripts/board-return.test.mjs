@@ -232,6 +232,11 @@ const ARMS = [
     WAIT,
   ],
   [
+    "an anchor view with none active ends on a dead views read",
+    base({ activeViewId: null, views: "dead" }),
+    END,
+  ],
+  [
     "fields dead at the pick",
     base({ activeViewId: "V2", fields: "dead" }),
     END,
