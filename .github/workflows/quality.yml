@@ -106,7 +106,7 @@ jobs:
       # not redden a job whose contract is "never gates".
       - name: Install pnpm
         continue-on-error: true
-        uses: pnpm/action-setup@v6.1.0
+        uses: pnpm/action-setup@v6.1.1
 
       - name: Install Node
         continue-on-error: true
