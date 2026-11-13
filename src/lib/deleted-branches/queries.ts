@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { gitBranchTips } from "@/lib/git/api";
 import { keepPreviousDataForRepo, useRepoIdentity } from "@/lib/git/queries";
 import { repoIdentityStrict } from "@/lib/git/repo-identity";
 import { readTipStates } from "./restore";
@@ -46,6 +47,26 @@ export function useDeletedTipStates(
     staleTime: 30_000,
     retry: false,
     placeholderData: keepPreviousDataForRepo(repoPath),
+    networkMode: "always",
+  });
+}
+
+/** The live tips of listed names that exist again, so a row whose branch is
+ *  back at the recorded commit can clear. Keyed on the names as an array (a
+ *  name can hold a comma) inside the repo subtree, so a repo write re-reads it.
+ *  No placeholder: until this read answers, such a row stays held. */
+export function useDeletedNameTips(
+  repoPath: string,
+  names: readonly string[],
+  enabled: boolean,
+) {
+  const sorted = [...new Set(names)].sort();
+  return useQuery({
+    queryKey: ["repo", repoPath, "deleted-name-tips", sorted] as const,
+    queryFn: () => gitBranchTips(repoPath, sorted),
+    enabled: enabled && sorted.length > 0,
+    staleTime: 30_000,
+    retry: false,
     networkMode: "always",
   });
 }

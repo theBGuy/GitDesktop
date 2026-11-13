@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { awaitFocusRelease } from "@/lib/await-focus-release";
 import { openWithDefault } from "@/lib/git/api";
 import {
   useDeleteHook,
@@ -89,10 +90,6 @@ const MANAGED_CONFIRM: Record<
   },
 };
 
-/** How long a delete's row landing waits out a confirm still closing over it:
- *  a time bound, since a frame count shrinks with the display's refresh rate. */
-const CONFIRM_CLOSE_WAIT_MS = 500;
-
 export function HooksDialog({
   repoPath,
   open,
@@ -152,23 +149,22 @@ export function HooksDialog({
       return;
     }
     if (!outside(document.activeElement)) return;
-    const deadline = performance.now() + CONFIRM_CLOSE_WAIT_MS;
-    let frame = 0;
-    const wait = () => {
-      if (selectedRef.current !== null) return;
-      const active = document.activeElement;
-      if (unclaimed(active)) row()?.focus();
-      else if (outside(active) && performance.now() < deadline)
-        frame = requestAnimationFrame(wait);
-    };
-    frame = requestAnimationFrame(wait);
-    return () => cancelAnimationFrame(frame);
+    return awaitFocusRelease({
+      held: () => outside(document.activeElement),
+      aborted: () => selectedRef.current !== null,
+      onRelease: () => {
+        if (unclaimed(document.activeElement)) row()?.focus();
+      },
+    });
   }, [selected]);
   const [managerOutput, setManagerOutput] = useState<string | null>(null);
   const content = useHookContent(repoPath, selected);
 
   const entries = hooks.data?.entries ?? [];
   const entry = entries.find((e) => e.name === selected) ?? null;
+  // The inline swap is for an unmanaged hook only: a re-read that turns the
+  // entry managed drops it, so a later flip back can't revive it unpressed.
+  if (confirmDelete && entry?.managed) setConfirmDelete(false);
   const templates = HOOK_TEMPLATES.filter((t) => t.hook === selected);
   const manager = hooks.data?.manager ?? null;
   const managerConfig = hooks.data?.managerConfig ?? null;
@@ -518,8 +514,11 @@ export function HooksDialog({
                       </Button>
                     )}
                     <span className="flex-1" />
+                    {/* A re-read that turns the entry managed under an open swap
+                        drops it (above) and puts Delete… back, which asks the
+                        guard's own confirm. */}
                     {entry.state !== "inactive" &&
-                      (confirmDelete ? (
+                      (confirmDelete && !entry.managed ? (
                         <InlineConfirm
                           prompt="Recycle bin?"
                           promptClassName="text-xs"

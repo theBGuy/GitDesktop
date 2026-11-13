@@ -20,6 +20,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useDiffPaneHold } from "@/features/diff/diff-pane-hold";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
+import { awaitFocusRelease } from "@/lib/await-focus-release";
 import { appErrorDetail, presentError } from "@/lib/error-summary";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import {
@@ -80,9 +81,6 @@ import {
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 const baseName = (path: string) => path.split("/").pop() || path;
-
-/** How long a landing waits for a closing dialog to release focus. */
-const CONFIRM_CLOSE_WAIT_MS = 500;
 
 /** Focus inside a dialog that neither holds this pane nor sits inside it. */
 function inOtherDialog(active: Element | null, root: HTMLElement | null) {
@@ -493,10 +491,10 @@ export function ConflictFileView({
   const takeOverLanding = () => {
     landPendingRef.current = false;
   };
-  // The frame of a landing waiting for focus to leave another dialog; held
-  // across the landing effect's own re-run, cancelled by a press or unmount.
-  const landWaitRef = useRef(0);
-  useLayoutEffect(() => () => cancelAnimationFrame(landWaitRef.current), []);
+  // The cancel of a landing waiting for focus to leave another dialog; held
+  // across the landing effect's own re-run, called by a press or unmount.
+  const landWaitRef = useRef<() => void>(() => undefined);
+  useLayoutEffect(() => () => landWaitRef.current(), []);
   // The file the on-open landing ran for, or that input forfeited it for. A
   // ref, so an <Activity> re-show (which replays effects) or a poll re-read
   // never lands again; a new path re-arms it and a remount resets it.
@@ -515,7 +513,7 @@ export function ConflictFileView({
   // captured before any await: Chromium blurs it to <body> once the hold
   // disables it.
   function capturePress(): HTMLElement | null {
-    cancelAnimationFrame(landWaitRef.current);
+    landWaitRef.current();
     landPendingRef.current = true;
     const active = document.activeElement;
     return active instanceof HTMLElement && rootRef.current?.contains(active)
@@ -1012,17 +1010,14 @@ export function ConflictFileView({
     if (inOtherDialog(document.activeElement, rootRef.current)) {
       landPendingRef.current = true;
       const request = landRequest;
-      const deadline = performance.now() + CONFIRM_CLOSE_WAIT_MS;
-      const wait = () => {
-        landWaitRef.current = 0;
-        if (!landPendingRef.current) return;
-        if (!inOtherDialog(document.activeElement, rootRef.current))
-          setLandRequest(request);
-        else if (performance.now() < deadline)
-          landWaitRef.current = requestAnimationFrame(wait);
-        else landPendingRef.current = false;
-      };
-      landWaitRef.current = requestAnimationFrame(wait);
+      landWaitRef.current = awaitFocusRelease({
+        held: () => inOtherDialog(document.activeElement, rootRef.current),
+        aborted: () => !landPendingRef.current,
+        onRelease: () => setLandRequest(request),
+        onTimeout: () => {
+          landPendingRef.current = false;
+        },
+      });
       return;
     }
     const active = document.activeElement;

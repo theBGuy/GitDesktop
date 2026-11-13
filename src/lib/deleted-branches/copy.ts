@@ -104,11 +104,18 @@ export const unrestoredNoticeOpenDescription = (
 
 // Clean up branches (delete mode).
 
-/** The confirm's restorable tail, replacing "This can't be undone." */
+/** The confirm's restorable tail, replacing "This can't be undone." Past
+ *  `cap` (the list's size, passed in to keep this module import-free) only the
+ *  result notice's Restore all covers the whole batch. */
 export const cleanupRestorableTail = (
   count: number,
   removedWorktrees: string | null,
+  cap: number,
 ): string => {
+  if (count > cap)
+    return removedWorktrees !== null
+      ? ` The branches can be restored with Restore all on the result notice (Recover lost work keeps only the last ${cap}); the removed ${removedWorktrees} can't.`
+      : ` They can be restored with Restore all on the result notice; Recover lost work keeps only the last ${cap} of them.`;
   if (removedWorktrees !== null)
     return ` The ${count === 1 ? "branch" : "branches"} can be restored from Recover lost work; the removed ${removedWorktrees} can't.`;
   return count === 1
@@ -149,6 +156,8 @@ export const RESTORE_BRANCH_LABEL = "Restore branch";
 export const REMOVE_FROM_LIST_LABEL = "Remove from list";
 export const nameExistsHeld = (name: string) =>
   `A branch named ${name} exists again. Rename or delete it to restore this one.`;
+export const alreadyBackNote = (name: string) =>
+  `A branch named ${name} is already at this commit.`;
 export const RESTORE_RUNNING_HELD = "A restore is already running.";
 export const REMOVING_HELD = "Removing it from the list.";
 export const removeFailedTitle = (name: string) =>

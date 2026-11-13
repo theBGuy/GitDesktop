@@ -87,6 +87,17 @@ vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
   peekRepoIdentity: (path: string) => `${path}/.git`,
   repoIdentityStrict: (path: string) => Promise.resolve(`${path}/.git`),
 }));
+// The real promotion check unless a test flags a promote.
+const promote = vi.hoisted(() => ({ on: false }));
+vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/stores/worktree-removal")>();
+  return {
+    ...actual,
+    promotionBlocksCheckout: (repoPath: string) =>
+      promote.on || actual.promotionBlocksCheckout(repoPath),
+  };
+});
 // The record's own suite covers its store; here only what reaches it matters.
 vi.mock("@/lib/deleted-branches/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/deleted-branches/store")>()),
@@ -175,6 +186,7 @@ let info: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  promote.on = false;
   vi.mocked(loadSettings).mockImplementation(async () =>
     structuredClone(DEFAULT_SETTINGS),
   );
@@ -433,6 +445,70 @@ describe("deleting a branch from the branch menu", () => {
     expect(gitDeleteBranch).toHaveBeenCalledTimes(1);
     expect(error).not.toHaveBeenCalled();
     error.mockRestore();
+  });
+
+  it("stops the delete when a promote starts during the fresh branch read", async () => {
+    reads.branches.push(branchRow({ name: "feat/a" }));
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat/a");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.mocked(gitBranches).mockImplementation(async () => {
+      await held;
+      return reads.branches;
+    });
+    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    promote.on = true;
+    await act(async () => release());
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "A worktree is being promoted to your main workspace. Try again once it finishes.",
+        undefined,
+      ),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    expect(recordDeletedBranches).not.toHaveBeenCalled();
+    // The confirm is released.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+  });
+
+  it("says where HEAD went when a promote stops a current-branch delete after its switch", async () => {
+    reads.head = headOn("feat");
+    reads.branches = [
+      trackedRow("feat", { isCurrent: true }),
+      trackedRow("main"),
+    ];
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.mocked(gitBranches).mockImplementation(async () => {
+      await held;
+      return reads.branches;
+    });
+    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main"),
+    );
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    promote.on = true;
+    await act(async () => release());
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "A worktree is being promoted to your main workspace. Try again once it finishes.",
+        { description: "Switched to main; feat was kept." },
+      ),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
   });
 
   it("treats a tip-moved answer as not deleted", async () => {

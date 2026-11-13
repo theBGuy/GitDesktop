@@ -24,7 +24,10 @@ import {
   CleanupBranchesDialog,
   defaultBranchReadFailed,
 } from "@/features/repository/CleanupBranchesDialog";
-import { skippedMoved } from "@/lib/deleted-branches/copy";
+import {
+  cleanupRestorableTail,
+  skippedMoved,
+} from "@/lib/deleted-branches/copy";
 import {
   forgetDeletedBranch,
   recordDeletedBranches,
@@ -93,11 +96,19 @@ vi.mock("@/lib/deleted-branches/store", async (importOriginal) => ({
   recordDeletedBranches: vi.fn(),
   forgetDeletedBranch: vi.fn(),
 }));
-// promotionBlocksCheckout stays real; only the removal entry point is stubbed.
-vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/stores/worktree-removal")>()),
-  removeWorktreeForCleanup: vi.fn(),
-}));
+// promotionBlocksCheckout stays real unless a test flags a promote; only the
+// removal entry point is stubbed.
+const promote = vi.hoisted(() => ({ on: false }));
+vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/stores/worktree-removal")>();
+  return {
+    ...actual,
+    removeWorktreeForCleanup: vi.fn(),
+    promotionBlocksCheckout: (repoPath: string) =>
+      promote.on || actual.promotionBlocksCheckout(repoPath),
+  };
+});
 // The batch's fire-time checkout read before a plain Archive.
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
@@ -220,6 +231,7 @@ beforeEach(() => {
   statusByPath = new Map();
   branchRows = [];
   onCommit = null;
+  promote.on = false;
   vi.clearAllMocks();
   useUiStore.setState(useUiStore.getInitialState(), true);
   vi.mocked(gitBranchDivergence).mockImplementation(async (repo) =>
@@ -4665,7 +4677,20 @@ describe("Delete pins each branch to the tip this list read", () => {
     });
     await enterDelete(view.user);
     for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
-    await confirmDelete(view.user);
+    await view.user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    // Past the list's cap only the result notice can restore the whole batch.
+    expect(confirm.textContent).toContain(
+      "They can be restored with Restore all on the result notice; Recover lost work keeps only the last 50 of them.",
+    );
+    expect(confirm.textContent).not.toContain(
+      "They can be restored from Recover lost work.",
+    );
+    await view.user.click(
+      within(confirm).getByRole("button", { name: /^Delete 53 branches/ }),
+    );
     // 51 recorded, so the cap cut one of them; with the 2 failed, 3 in all.
     await waitFor(
       () =>
@@ -4746,12 +4771,73 @@ describe("Delete pins each branch to the tip this list read", () => {
         "Wait for the current batch to finish.",
       ),
     );
+    // Held, not disabled: buttons and checkboxes alike keep their tab stops
+    // and say why.
+    const archive = within(mainDialog()).getByRole("button", {
+      name: /^archive$/i,
+      hidden: true,
+    });
+    expect(archive).toHaveAttribute("aria-disabled", "true");
+    expect(archive).not.toBeDisabled();
+    expect(archive).toHaveAccessibleDescription(
+      "Wait for the current batch to finish.",
+    );
+    const thirty = within(mainDialog()).getByRole("button", {
+      name: "30",
+      hidden: true,
+    });
+    expect(thirty).toHaveAttribute("aria-disabled", "true");
+    expect(thirty).toHaveAccessibleDescription(
+      "Wait for the current batch to finish.",
+    );
+    const worktrees = within(mainDialog()).getByRole("checkbox", {
+      name: "Include branches checked out in a worktree",
+      hidden: true,
+    });
+    // Base UI's checkbox is a span: a native disable shows as data-disabled
+    // and drops it from the tab order.
+    expect(worktrees).toHaveAttribute("aria-disabled", "true");
+    expect(worktrees).not.toHaveAttribute("data-disabled");
+    expect(worktrees.tabIndex).toBe(0);
+    const worktreesChecked = worktrees.getAttribute("aria-checked");
+    expect(worktrees).toHaveAccessibleDescription(
+      "Wait for the current batch to finish.",
+    );
+    const row = boxOf("krl-1");
+    expect(row).toHaveAttribute("aria-disabled", "true");
+    expect(row).not.toHaveAttribute("data-disabled");
+    expect(row).toHaveAccessibleDescription(
+      expect.stringContaining("Wait for the current batch to finish."),
+    );
+    // Focusable while held, and a key press there toggles nothing.
+    act(() => worktrees.focus());
+    expect(document.activeElement).toBe(worktrees);
+    await view.user.keyboard(" ");
+    act(() => row.focus());
+    expect(document.activeElement).toBe(row);
+    await view.user.keyboard(" ");
+    // A click that still lands on a held control, or its label, changes nothing.
+    act(() => {
+      fireEvent.click(archive);
+      fireEvent.click(thirty);
+      fireEvent.click(worktrees);
+      fireEvent.click(
+        within(mainDialog()).getByText(
+          "Include branches checked out in a worktree",
+        ),
+      );
+      fireEvent.click(row);
+    });
+    expect(worktrees.getAttribute("aria-checked")).toBe(worktreesChecked);
+    expect(isChecked("krl-1")).toBe(true);
+    expect(archive).toHaveAttribute("aria-pressed", "false");
     expect(
       within(mainDialog()).getByRole("button", {
-        name: /^archive$/i,
+        name: /^delete$/i,
         hidden: true,
       }),
-    ).toBeDisabled();
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(thirty).toHaveAttribute("aria-pressed", "false");
     await view.user.keyboard("{Escape}");
     await view.user.click(cancel);
     expect(view.props().onClose).not.toHaveBeenCalled();
@@ -4765,6 +4851,64 @@ describe("Delete pins each branch to the tip this list read", () => {
     );
     expect(gitDeleteBranch).toHaveBeenCalledTimes(names.length);
     await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+  });
+
+  it("stops before the next row when a promote starts mid-batch", async () => {
+    const repo = "C:/repos/k-promote";
+    const names = ["kp-1", "kp-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => {
+      // A promote starts while the first row's delete runs.
+      promote.on = true;
+      return deletedAtPin(r, n, tip);
+    });
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(
+        "A worktree is being promoted to your main workspace. Try again once it finishes.",
+      ),
+    );
+    // The batch settles on the one row it deleted.
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 1 branch",
+        expect.anything(),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gitDeleteBranch).mock.calls[0]?.[1]).toBe("kp-1");
+    expect(isChecked("kp-2")).toBe(true);
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(mainDialog()).toBeInTheDocument();
+  });
+});
+
+describe("the delete confirm's restorable tail", () => {
+  it("keeps the Recover lost work wording up to the cap", () => {
+    expect(cleanupRestorableTail(1, null, 50)).toBe(
+      " It can be restored from Recover lost work.",
+    );
+    expect(cleanupRestorableTail(50, null, 50)).toBe(
+      " They can be restored from Recover lost work.",
+    );
+    expect(cleanupRestorableTail(50, "worktrees", 50)).toBe(
+      " The branches can be restored from Recover lost work; the removed worktrees can't.",
+    );
+  });
+
+  it("points past the cap at the result notice's Restore all", () => {
+    expect(cleanupRestorableTail(51, null, 50)).toBe(
+      " They can be restored with Restore all on the result notice; Recover lost work keeps only the last 50 of them.",
+    );
+    expect(cleanupRestorableTail(51, "2 worktrees", 50)).toBe(
+      " The branches can be restored with Restore all on the result notice (Recover lost work keeps only the last 50); the removed 2 worktrees can't.",
+    );
   });
 });
 

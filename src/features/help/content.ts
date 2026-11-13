@@ -1165,7 +1165,10 @@ and **Stashes** on the other tab. Its **Deleted branches** list shows each branc
 deleted in GitDesktop with its short commit id, when it was deleted, and a **Keep local**
 tag if it was kept local; arrow keys walk it, and **Restore branch** re-creates the
 selected one at that commit without checking it out. A row whose commit Git has removed
-says it can't be restored and offers **Remove from list**. The list keeps the newest 50
+says it can't be restored and offers **Remove from list**. A row whose name is in use
+again is held until you rename or delete that branch; when that branch already sits at
+the recorded commit the row says so, and **Restore branch** just clears the entry
+(turning **Keep local** back on if it was). The list keeps the newest 50
 deletes per repository, and only branches deleted from the branch switcher or **Clean up
 branches**: a branch deleted in a terminal{{ai}} or by an MCP client{{/ai}} isn't listed.
 

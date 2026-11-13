@@ -1890,6 +1890,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           toast.info(PROMOTION_BLOCKS_CHECKOUT);
           return;
         }
+        // The branch a current-branch delete checks out first. Every step past
+        // that checkout runs only once it landed, so a refusal there names it.
+        let fallback: string | undefined;
         // git refuses to delete the checked-out branch: move off it first — onto a
         // branch not already occupied by another worktree (that checkout fails too).
         if (deleteTarget === currentName) {
@@ -1925,7 +1928,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           if (refuseWhileRowPushes(deleteTarget)) return;
           const free = (b: string | null | undefined): b is string =>
             Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
-          let fallback: string | undefined;
           if (free(defaultName)) {
             fallback = defaultName;
           } else {
@@ -1980,6 +1982,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           return;
         // A push that started during the read.
         if (refuseWhileRowPushes(deleteTarget)) return;
+        // The read is long enough for a promote to start and free its branch.
+        if (promotionBlocksCheckout(repoPath)) {
+          toast.info(
+            PROMOTION_BLOCKS_CHECKOUT,
+            fallback === undefined
+              ? undefined
+              : {
+                  description: `Switched to ${fallback}; ${deleteTarget} was kept.`,
+                },
+          );
+          return;
+        }
         const outcome = await deleteBranch.mutateAsync(deleteTarget);
         switch (outcome.status) {
           case "deleted": {

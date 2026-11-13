@@ -3,6 +3,7 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
+    UPSTREAM_ATOM_INDEX,
 };
 use crate::git::diff::git_config_bool;
 use crate::git::remote::{
@@ -136,7 +137,8 @@ fn tracking_line_upstream_ref(
     if fields.first() != Some(&refname) {
         return None;
     }
-    match fields.get(7) {
+    let atoms = fields.get(4..).unwrap_or(&[]);
+    match atoms.get(UPSTREAM_ATOM_INDEX) {
         Some(full) => Some(full.to_string()).filter(|f| !f.is_empty()),
         None => Some(format!("refs/remotes/{remote}/{upstream}")),
     }

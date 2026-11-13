@@ -51,6 +51,7 @@ import {
 import type { ImageRevs } from "@/features/diff/ImageDiff";
 import { clipTitleFromText } from "@/lib/clip-title";
 import {
+  alreadyBackNote,
   DELETED_BRANCHES_CAPTION,
   DELETED_BRANCHES_EMPTY,
   DELETED_BRANCHES_LOADING_NAME,
@@ -70,6 +71,7 @@ import {
 import {
   DELETED_BRANCHES_KEY,
   useDeletedBranches,
+  useDeletedNameTips,
   useDeletedTipStates,
 } from "@/lib/deleted-branches/queries";
 import { restoreAndReport } from "@/lib/deleted-branches/restore";
@@ -542,11 +544,15 @@ type RowState =
   | "restorable"
   | "pruned"
   | "nameExists"
+  | "alreadyBack"
   | "restoring"
   | "removing";
 
 /** What the footer button says and does per selected row state; a non-null
- *  reason holds it. Pruned rows offer only removal: their commit is gone. */
+ *  reason holds it. Pruned rows offer only removal: their commit is gone. An
+ *  already-back row restores through the same path, which re-reads git, so a
+ *  stale tip read ends in whatever that read finds (a restore, or the
+ *  name-exists answer). */
 const ROW_FOOTER: Record<
   RowState,
   {
@@ -566,6 +572,11 @@ const ROW_FOOTER: Record<
     held: nameExistsHeld,
     action: null,
   },
+  alreadyBack: {
+    label: RESTORE_BRANCH_LABEL,
+    held: () => null,
+    action: "restore",
+  },
   restoring: {
     label: RESTORE_BRANCH_LABEL,
     held: () => RESTORE_RUNNING_HELD,
@@ -576,6 +587,14 @@ const ROW_FOOTER: Record<
     held: () => REMOVING_HELD,
     action: null,
   },
+};
+
+/** The note under a row whose state needs one. */
+const ROW_NOTE: Partial<
+  Record<RowState, { className: string; text: (name: string) => string }>
+> = {
+  pruned: { className: "text-destructive", text: () => PRUNED_ROW_NOTE },
+  alreadyBack: { className: "text-muted-foreground", text: alreadyBackNote },
 };
 
 /** The in-flight press; an object, so a settle clears only its own. Held per
@@ -601,6 +620,10 @@ function DeletedBranchesSection({
     open,
   );
   const branches = useBranches(repoPath);
+  const takenNames = rows
+    .map((e) => e.name)
+    .filter((name) => branches.data?.some((b) => b.name === name));
+  const nameTips = useDeletedNameTips(repoPath, takenNames, open);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [inFlights, setInFlights] = useState<InFlights>(new Map());
   // Two presses inside one render both pass the held check; this refuses the second.
@@ -611,10 +634,15 @@ function DeletedBranchesSection({
   const selected = rows.find((e) => e.id === selectedId) ?? rows[0] ?? null;
 
   // "pruned" only from a confirmed read; a pending, unknown or unloaded answer
-  // stays restorable and the press decides.
+  // stays restorable and the press decides. A taken name clears only on a tip
+  // read that answered with the recorded commit; anything else stays held.
   const rowState = (entry: DeletedBranchEntry): RowState => {
     if (tipStates.data?.get(entry.tip) === "pruned") return "pruned";
-    if (branches.data?.some((b) => b.name === entry.name)) return "nameExists";
+    if (branches.data?.some((b) => b.name === entry.name))
+      return nameTips.isSuccess &&
+        nameTips.data[entry.name]?.toLowerCase() === entry.tip.toLowerCase()
+        ? "alreadyBack"
+        : "nameExists";
     return "restorable";
   };
 
@@ -754,6 +782,7 @@ function DeletedBranchesSection({
               <div onKeyDown={onListKeyDown}>
                 {rows.map((entry) => {
                   const isSelected = selected?.id === entry.id;
+                  const note = ROW_NOTE[rowState(entry)];
                   return (
                     <button
                       type="button"
@@ -788,9 +817,9 @@ function DeletedBranchesSection({
                         )}
                         {entry.keptLocal && " · Keep local"}
                       </p>
-                      {rowState(entry) === "pruned" && (
-                        <p className="mt-0.5 text-[11px] text-destructive">
-                          {PRUNED_ROW_NOTE}
+                      {note && (
+                        <p className={cn("mt-0.5 text-[11px]", note.className)}>
+                          {note.text(entry.name)}
                         </p>
                       )}
                     </button>

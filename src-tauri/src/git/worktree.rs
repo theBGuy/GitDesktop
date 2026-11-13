@@ -767,7 +767,7 @@ enum TipRead {
 /// validated here, so an invalid name skips the whole delete rather than reaching
 /// this template or the `update-ref` argv downstream.
 async fn read_branch_tip(repo_path: &str, branch: &str) -> TipRead {
-    if crate::git::branches::validate_ref_name(branch).is_err() {
+    if crate::git::branches::validate_branch_name(branch).is_err() {
         return TipRead::Unreadable;
     }
     let Ok(out) = run_git_raw(
@@ -3610,6 +3610,25 @@ prunable gitdir file points to non-existent location
             read_branch_tip(&repo_s, "glob*name").await,
             TipRead::Unreadable
         );
+    }
+
+    /// A rev expression over a real branch would resolve under `refs/heads/`, so the tip
+    /// read refuses it as a branch name instead of reading a commit.
+    #[tokio::test]
+    async fn read_branch_tip_refuses_a_rev_expression_over_a_real_branch() {
+        let (_base, repo_s) = setup_repo("tip-read-rev-name").await;
+        run(&repo_s, &["branch", "rev-base"]).await;
+        assert!(matches!(
+            read_branch_tip(&repo_s, "rev-base").await,
+            TipRead::Present(_)
+        ));
+        for name in ["rev-base~0", "rev-base^{commit}", "rev-base@{0}"] {
+            assert_eq!(
+                read_branch_tip(&repo_s, name).await,
+                TipRead::Unreadable,
+                "{name}"
+            );
+        }
     }
 
     /// The exact JSON `removeWorktree` reads in `src/lib/git/worktree.ts`: camelCase

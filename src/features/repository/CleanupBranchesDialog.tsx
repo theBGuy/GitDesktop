@@ -83,7 +83,10 @@ import {
   promotionBlocksCheckout,
   removeWorktreeForCleanup,
 } from "@/lib/stores/worktree-removal";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
@@ -860,6 +863,7 @@ function ConfirmBody({ batch }: { batch: ConfirmBatch }) {
       {cleanupRestorableTail(
         count,
         worktrees > 0 ? worktreeNoun(worktrees) : null,
+        DELETED_BRANCHES_CAP,
       )}
     </>
   );
@@ -1016,6 +1020,20 @@ export function CleanupBranchesDialog({
   // The run-wide lock: dismissals, controls and rows hold from the batch's
   // start, its fresh read included; `running` alone starts at its progress.
   const locked = running || batchStarted;
+  // One reason node serves every locked control; the raw buttons take its
+  // aria-disabled form, so they keep their tab stops while the lock holds.
+  const lock = useDisabledReason({
+    disabled: locked,
+    reason: PRIMARY_RUNNING_REASON,
+  });
+  const lockedButton = {
+    disabled: lock.nativeProps.disabled,
+    "aria-disabled": lock.nativeProps["aria-disabled"],
+    "aria-describedby": lock.describedBy,
+  };
+  // The held controls take no pointer, so their hover wrappers show it.
+  const lockCursor =
+    lock.blockedReason !== null ? "cursor-not-allowed" : undefined;
   // The snapshot paints only while it applies: under its run, and through the
   // close a full success starts. A reopen paints the live list from its first
   // frame, before the seed clears the snapshot.
@@ -1758,6 +1776,12 @@ export function CleanupBranchesDialog({
         processed = i;
         break;
       }
+      // So can a promote, freeing its branch for a later row; it stops the same way.
+      if (mode === "delete" && promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        processed = i;
+        break;
+      }
       const name = names[i];
       const wtPath = worktreePaths.get(name);
       const skip = skipNow(name);
@@ -2039,24 +2063,37 @@ export function CleanupBranchesDialog({
           </DialogHeader>
 
           {/* Action / Show captions beside their controls, then the opt-in.
-              A running batch natively disables every control here and in the
-              list as one run-wide lock (`locked`), explained by the held
-              primary's reason and progress label. onOpenChange refuses every
-              dismissal meanwhile (Escape, the header close, a backdrop
-              press); that close stays enabled on purpose, since the vendored
-              one takes no reason. */}
+              A running batch holds every control here and in the list as one
+              run-wide lock (`locked`). Each stays focusable and carries its
+              reason: the buttons as aria-disabled, the Checkboxes as readOnly
+              (they take no other focusable hold), their handlers refusing
+              too. onOpenChange refuses every dismissal meanwhile
+              (Escape, the header close, a backdrop press); that close stays
+              enabled on purpose, since the vendored one takes no reason. */}
+          {lock.blockedReason !== null && (
+            <span id={lock.reasonId} className="sr-only">
+              {lock.blockedReason}
+            </span>
+          )}
           <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
             <LabeledGroup label="Action" className={CONTROL_ROW}>
-              <div className="inline-flex w-fit rounded-none ring-1 ring-border">
+              <div
+                className={cn(
+                  "inline-flex w-fit rounded-none ring-1 ring-border",
+                  lockCursor,
+                )}
+                title={lock.wrapperTitle}
+              >
                 {(["archive", "delete"] as const).map((m) => (
                   <button
                     key={m}
                     type="button"
-                    disabled={locked}
+                    {...lockedButton}
                     aria-pressed={mode === m}
                     onClick={() => changeMode(m)}
                     className={cn(
-                      "px-3 py-1 text-xs capitalize transition-colors first:border-r first:border-border disabled:opacity-50",
+                      "px-3 py-1 text-xs capitalize transition-colors first:border-r first:border-border",
+                      ARIA_DISABLED_CLASS,
                       mode === m
                         ? m === "delete"
                           ? "bg-destructive text-white"
@@ -2072,18 +2109,23 @@ export function CleanupBranchesDialog({
 
             <LabeledGroup label="Show" className={CONTROL_ROW}>
               <div
-                className="flex flex-wrap items-center gap-1.5"
+                className={cn(
+                  "flex flex-wrap items-center gap-1.5",
+                  lockCursor,
+                )}
+                title={lock.wrapperTitle}
                 onKeyDown={moveFocusInGroup}
               >
                 {(["merged", "closed"] as const).map((k) => (
                   <button
                     key={k}
                     type="button"
-                    disabled={locked}
+                    {...lockedButton}
                     aria-pressed={criteria[k]}
                     onClick={() => toggleCriterion(k)}
                     className={cn(
-                      "inline-flex items-center gap-1 px-2 py-1 ring-1 transition-colors disabled:opacity-50",
+                      "inline-flex items-center gap-1 px-2 py-1 ring-1 transition-colors",
+                      ARIA_DISABLED_CLASS,
                       criteria[k]
                         ? "bg-primary/10 text-foreground ring-primary/50"
                         : "text-muted-foreground ring-border hover:text-foreground",
@@ -2101,11 +2143,12 @@ export function CleanupBranchesDialog({
                 >
                   <button
                     type="button"
-                    disabled={locked}
+                    {...lockedButton}
                     aria-pressed={criteria.idle}
                     onClick={() => toggleCriterion("idle")}
                     className={cn(
-                      "inline-flex items-center gap-1 px-2 py-1 transition-colors disabled:opacity-50",
+                      "inline-flex items-center gap-1 px-2 py-1 transition-colors",
+                      ARIA_DISABLED_CLASS,
                       criteria.idle
                         ? "bg-primary/10 text-foreground"
                         : "text-muted-foreground hover:text-foreground",
@@ -2124,11 +2167,12 @@ export function CleanupBranchesDialog({
                       <button
                         key={d}
                         type="button"
-                        disabled={locked}
+                        {...lockedButton}
                         aria-pressed={windowDays === d}
                         onClick={() => changeWindow(d)}
                         className={cn(
-                          "border-l border-border px-2 py-1 tabular-nums transition-colors disabled:opacity-50",
+                          "border-l border-border px-2 py-1 tabular-nums transition-colors",
+                          ARIA_DISABLED_CLASS,
                           windowDays === d &&
                             criteria.idle &&
                             "bg-primary text-primary-foreground",
@@ -2154,13 +2198,18 @@ export function CleanupBranchesDialog({
 
             <label
               className={cn(
-                "col-start-2 flex w-fit cursor-pointer items-center gap-2",
+                "col-start-2 flex w-fit items-center gap-2",
+                lockCursor ?? "cursor-pointer",
                 !includeWorktrees && "text-muted-foreground",
               )}
+              title={lock.wrapperTitle}
             >
               <Checkbox
                 checked={includeWorktrees}
-                disabled={locked}
+                readOnly={locked}
+                aria-disabled={locked || undefined}
+                aria-describedby={lock.describedBy}
+                className={ARIA_DISABLED_CLASS}
                 onCheckedChange={(next) => changeIncludeWorktrees(next)}
               />
               Include branches checked out in a worktree
@@ -2172,31 +2221,37 @@ export function CleanupBranchesDialog({
               Withheld while the list is provisional — it would count rows an
               outstanding exclusion read may still remove. */}
           {showSelectAll && (
-            <button
-              type="button"
-              disabled={locked}
-              onClick={toggleAll}
-              aria-label={`${allChecked ? "Deselect all" : "Select all"}, ${selectedCount} of ${countedNames.length} selected`}
-              className="flex items-center gap-2 text-xs text-muted-foreground disabled:opacity-50"
-            >
-              <span
-                aria-hidden
+            // The hover reason sits on a wrapper: the held button takes no pointer.
+            <div className={lockCursor} title={lock.wrapperTitle}>
+              <button
+                type="button"
+                {...lockedButton}
+                onClick={toggleAll}
+                aria-label={`${allChecked ? "Deselect all" : "Select all"}, ${selectedCount} of ${countedNames.length} selected`}
                 className={cn(
-                  "flex size-4 shrink-0 items-center justify-center rounded-none border border-input",
-                  (allChecked || someChecked) &&
-                    "border-primary bg-primary text-primary-foreground",
+                  "flex items-center gap-2 text-xs text-muted-foreground",
+                  ARIA_DISABLED_CLASS,
                 )}
               >
-                {allChecked ? (
-                  <CheckIcon className="size-3.5" />
-                ) : someChecked ? (
-                  <MinusIcon className="size-3.5" />
-                ) : null}
-              </span>
-              <span>
-                {selectedCount} of {countedNames.length} selected
-              </span>
-            </button>
+                <span
+                  aria-hidden
+                  className={cn(
+                    "flex size-4 shrink-0 items-center justify-center rounded-none border border-input",
+                    (allChecked || someChecked) &&
+                      "border-primary bg-primary text-primary-foreground",
+                  )}
+                >
+                  {allChecked ? (
+                    <CheckIcon className="size-3.5" />
+                  ) : someChecked ? (
+                    <MinusIcon className="size-3.5" />
+                  ) : null}
+                </span>
+                <span>
+                  {selectedCount} of {countedNames.length} selected
+                </span>
+              </button>
+            </div>
           )}
 
           {/* Merged-detection status + the list it describes. `gap` (not
@@ -2423,6 +2478,7 @@ export function CleanupBranchesDialog({
                         ].filter((d) => d !== null);
                         const describedBy =
                           [
+                            lock.describedBy,
                             err ? errId : null,
                             holdReason ? holdId : null,
                             details.length > 0 ? detailId : null,
@@ -2445,26 +2501,27 @@ export function CleanupBranchesDialog({
                             <label
                               className={cn(
                                 "block",
-                                hold === null && "cursor-pointer",
+                                hold === null && !locked && "cursor-pointer",
                               )}
                             >
                               <span className="flex items-center gap-2">
-                                {/* A held row stays focusable and in the roving
-                                    order, so it can say why it won't toggle. */}
+                                {/* A held row, and every row under the lock,
+                                    stays focusable and in the roving order, so
+                                    it can say why it won't toggle. */}
                                 <Checkbox
                                   {...nav.rowProps(c)}
                                   checked={hold === null && selected.has(name)}
-                                  disabled={locked}
+                                  readOnly={locked}
                                   onCheckedChange={
                                     hold === null
                                       ? () => toggle(name)
                                       : undefined
                                   }
                                   aria-disabled={
-                                    hold === null ? undefined : true
+                                    hold === null && !locked ? undefined : true
                                   }
                                   className={
-                                    hold === null
+                                    hold === null && !locked
                                       ? undefined
                                       : ARIA_DISABLED_CLASS
                                   }

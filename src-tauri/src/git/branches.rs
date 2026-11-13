@@ -268,6 +268,10 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
 const PUSH_DESTINATION_ATOMS: &str =
     "%(push:remotename)%00%(push:remoteref)%00%(push)%00%(upstream)";
 
+/// The position of `%(upstream)` among [`PUSH_DESTINATION_ATOMS`], for readers that
+/// take that one atom off a line.
+pub(crate) const UPSTREAM_ATOM_INDEX: usize = 3;
+
 /// Runs `for-each-ref <pattern>` with `base_format` extended by
 /// [`PUSH_DESTINATION_ATOMS`]. A git that rejects one of them fails the whole command,
 /// so that failure re-runs `base_format` once and the lines carry no atoms: the
@@ -1133,7 +1137,7 @@ pub(crate) async fn git_delete_branch_core(
     name: String,
     expected_tip: Option<String>,
 ) -> AppResult<DeleteBranchOutcome> {
-    validate_ref_name(&name)?;
+    validate_branch_name(&name)?;
     let expected = expected_tip.as_deref().map(full_object_id).transpose()?;
     // Two halves of one window: the marker covers an update that has minted but not yet
     // registered its checkout (the `worktree add` is the long part), the porcelain arm
@@ -1215,9 +1219,11 @@ async fn measured_branch_tip(repo_path: &str, name: &str) -> AppResult<Option<St
 }
 
 /// `refs/heads/<name>` for the delete's tip read and its `update-ref` target, never a
-/// refspec; the name is validated here as well as at every entry point.
+/// refspec; the name is validated here as well as at every entry point, as a branch
+/// name, since a rev expression (`feat~1`) would resolve under `refs/heads/` to another
+/// commit.
 fn branch_full_ref(name: &str) -> AppResult<String> {
-    validate_ref_name(name)?;
+    validate_branch_name(name)?;
     Ok(format!("refs/heads/{name}"))
 }
 
@@ -3613,7 +3619,7 @@ mod tests {
     };
     use super::{
         is_unknown_format_atom, push_destination, read_refs_with_fallback,
-        read_refs_with_push_destination,
+        read_refs_with_push_destination, PUSH_DESTINATION_ATOMS, UPSTREAM_ATOM_INDEX,
     };
     use super::{DeleteBranchOutcome, DeletePhase, DeletePhaseHook, DELETE_PHASE_HOOK};
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
@@ -4239,6 +4245,12 @@ mod tests {
         assert!(!is_unknown_format_atom(
             "fatal: unrecognized %(upstream) argument: bogus"
         ));
+    }
+
+    #[test]
+    fn upstream_atom_index_names_the_upstream_atom() {
+        let atoms: Vec<&str> = PUSH_DESTINATION_ATOMS.split("%00").collect();
+        assert_eq!(atoms.get(UPSTREAM_ATOM_INDEX), Some(&"%(upstream)"));
     }
 
     /// The retry-once, live, over the status read's own format: an extended format this
@@ -9511,6 +9523,26 @@ mod tests {
             );
         }
         assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
+    }
+
+    /// A rev expression over a real branch resolves under `refs/heads/` to another
+    /// commit, so it is refused as a branch name, pinned or not, and nothing is deleted.
+    #[tokio::test]
+    async fn delete_branch_refuses_a_rev_expression_name() {
+        let (_g, repo, _feat, head) = delete_fixture("del-rev-name").await;
+        // One commit past its first tip, so `feat~1`, `feat^` and `feat@{1}` all resolve.
+        run(&repo, &["branch", "-f", "feat", &head]).await;
+        let state = AppState::default();
+        for name in ["feat~1", "feat^", "feat@{1}", "feat..HEAD"] {
+            for pin in [Some(head.as_str()), None] {
+                let err = delete(&state, &repo, name, pin).await.unwrap_err();
+                assert!(
+                    matches!(&err, AppError::InvalidArgument(m) if *m == format!("invalid branch name: {name}")),
+                    "{name} pin={pin:?}: {err:?}"
+                );
+            }
+        }
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(head));
     }
 
     #[tokio::test]

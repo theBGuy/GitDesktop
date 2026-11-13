@@ -172,6 +172,20 @@ describe("recordDeletedBranches", () => {
     ]);
   });
 
+  it("keeps existing entries when a mixed batch is partly written", async () => {
+    const store = await fresh();
+    await expect(store.recordDeletedBranches(REPO, [entry(1)])).resolves.toBe(
+      true,
+    );
+    await expect(
+      store.recordDeletedBranches(REPO, [entry(2, { tip: "main" }), entry(3)]),
+    ).resolves.toBe(false);
+    expect((h.data.get(ID) as DeletedBranchEntry[]).map((e) => e.id)).toEqual([
+      "id-3",
+      "id-1",
+    ]);
+  });
+
   it("orders entries minted in the same millisecond", async () => {
     vi.spyOn(Date, "now").mockReturnValue(5_000);
     try {

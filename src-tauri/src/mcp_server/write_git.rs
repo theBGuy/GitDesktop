@@ -319,16 +319,17 @@ fn full_commit_id(param: &str, pin: Option<String>) -> Result<Option<String>, Mc
     let Some(id) = pin else {
         return Ok(None);
     };
-    if !matches!(id.len(), 40 | 64) || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(McpError::invalid_params(
-            format!(
-                "{param} must be a full commit id (40 or 64 hex characters), as log and \
-                 repo_status report it"
-            ),
-            None,
-        ));
-    }
-    Ok(Some(id.to_ascii_lowercase()))
+    crate::git::branches::full_object_id(&id)
+        .map(Some)
+        .map_err(|_| {
+            McpError::invalid_params(
+                format!(
+                    "{param} must be a full commit id (40 or 64 hex characters), as log and \
+                     repo_status report it"
+                ),
+                None,
+            )
+        })
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

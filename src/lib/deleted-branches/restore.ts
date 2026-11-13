@@ -48,7 +48,9 @@ import {
 export type TipState = "present" | "pruned" | "unknown";
 
 export type RestoreOutcome =
-  | { status: "restored" }
+  /** `alreadyBack`: the name was at the recorded commit before this restore,
+   *  so nothing was created and that branch keeps whatever upstream it has. */
+  | { status: "restored"; alreadyBack?: true }
   | { status: "nameExists" }
   | { status: "pruned" }
   | { status: "failed"; error: unknown };
@@ -131,7 +133,7 @@ export async function restoreDeletedBranch(
       if (entry.keptLocal)
         await gitSetBranchKeepLocal(repoPath, entry.name, true);
       await forgetDeletedBranch(repoPath, entry.id);
-      return { status: "restored" };
+      return { status: "restored", alreadyBack: true };
     }
     if ((await readTipState(repoPath, entry.tip)) === "pruned")
       return { status: "pruned" };
@@ -150,9 +152,11 @@ export async function restoreDeletedBranch(
   }
 }
 
-/** After a create that rejected: the mark is unset only on a name git confirmed
- *  absent. A present name at the recorded tip is this restore's own create
- *  landing despite the rejection. */
+/** After a create that rejected: the Keep local mark stays, even on a name git
+ *  confirms absent, since another restore of the name may have set it for a
+ *  create still pending, and a leftover mark errs toward kept local. A present
+ *  name at the recorded tip is this restore's own create landing despite the
+ *  rejection. */
 async function rollBackFailedCreate(
   repoPath: string,
   entry: DeletedBranchEntry,
@@ -164,16 +168,7 @@ async function rollBackFailedCreate(
   } catch {
     return { status: "failed", error };
   }
-  if (state === "absent") {
-    if (entry.keptLocal) {
-      try {
-        await gitSetBranchKeepLocal(repoPath, entry.name, false);
-      } catch {
-        // Best-effort: a leftover mark errs toward kept local.
-      }
-    }
-    return { status: "failed", error };
-  }
+  if (state === "absent") return { status: "failed", error };
   if (state === "elsewhere") return { status: "nameExists" };
   await forgetDeletedBranch(repoPath, entry.id);
   return { status: "restored" };
@@ -237,7 +232,10 @@ function reportOutcome(
 ) {
   switch (outcome.status) {
     case "restored": {
-      const description = restoredDescription(entry.keptLocal, entry.upstream);
+      const description = restoredDescription(
+        entry.keptLocal,
+        outcome.alreadyBack ? null : entry.upstream,
+      );
       toast.success(
         restoredTitle(entry.name, away),
         description === undefined ? undefined : { description },
@@ -284,7 +282,8 @@ function reportAll(
   outcomes.forEach((outcome, i) => {
     if (outcome.status === "restored") {
       restored++;
-      if (entries[i].upstream !== null) upstreams = true;
+      if (entries[i].upstream !== null && !outcome.alreadyBack)
+        upstreams = true;
     } else {
       unrestored[outcome.status]++;
     }

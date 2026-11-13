@@ -146,7 +146,7 @@ function renderDialog(withHost = false) {
       {withHost && <ConfirmDialogHost />}
     </QueryClientProvider>,
   );
-  return { user: userEvent.setup() };
+  return { user: userEvent.setup(), client };
 }
 
 /** A hook's list row; its name runs into the label and chip in jsdom, which
@@ -308,10 +308,17 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     expect(document.activeElement).toBe(row("pre-push"));
   });
 
-  it("A2.7: after a confirmed Disable the row reads as an ordinary disabled hook", async () => {
+  it("A2.7: a disabled guard reads as an ordinary hook, and re-enabling it restores the label and the confirms", async () => {
+    // The backend lists a disabled guard as unmanaged and a re-enabled one
+    // (same bytes, marker intact) as active and managed again.
     vi.mocked(gitHooksList).mockImplementation(async () =>
-      vi.mocked(gitHookSetEnabled).mock.calls.length > 0
-        ? { ...info(), entries: [hook("pre-push", "disabled", false)] }
+      vi.mocked(gitHookSetEnabled).mock.lastCall?.[2] === false
+        ? {
+            ...info(),
+            entries: info().entries.map((e) =>
+              e.name === "pre-push" ? hook("pre-push", "disabled", false) : e,
+            ),
+          }
         : info(),
     );
     const { user } = renderDialog();
@@ -322,6 +329,15 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     await waitFor(() =>
       expect(screen.queryByText(LABEL)).not.toBeInTheDocument(),
     );
+    await user.type(screen.getByLabelText("Hook script"), "true");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(gitHookWrite).toHaveBeenCalledTimes(1));
+    expect(request()).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Delete…" }));
+    expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
+    expect(request()).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
     await user.click(screen.getByRole("button", { name: "Enable" }));
     await waitFor(() =>
       expect(gitHookSetEnabled).toHaveBeenLastCalledWith(
@@ -331,12 +347,66 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
       ),
     );
     expect(request()).toBeNull();
-    await user.type(screen.getByLabelText("Hook script"), "true");
+    await screen.findByText(LABEL);
+    await user.type(screen.getByLabelText("Hook script"), "x");
     await user.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(gitHookWrite).toHaveBeenCalledTimes(1));
-    expect(request()).toBeNull();
+    expectAsked("save");
+    await answer(false);
+    expect(gitHookWrite).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Delete…" }));
+    expectAsked("delete");
+    expect(screen.queryByText("Recycle bin?")).not.toBeInTheDocument();
+    await answer(false);
+    expect(gitHookDelete).not.toHaveBeenCalled();
+  });
+
+  it("an open inline delete gives way when a re-read turns the guard managed", async () => {
+    prePush = hook("pre-push", "disabled", false);
+    const { user, client } = renderDialog();
+    await select(user, "pre-push");
     await user.click(screen.getByRole("button", { name: "Delete…" }));
     expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
+    prePush = hook("pre-push", "active", true);
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["repo", REPO, "hooks"] }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Recycle bin?")).not.toBeInTheDocument(),
+    );
+    expect(gitHookDelete).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Delete…" }));
+    expectAsked("delete");
+    expect(screen.queryByText("Recycle bin?")).not.toBeInTheDocument();
+    await answer(false);
+    expect(gitHookDelete).not.toHaveBeenCalled();
+    // Back to unmanaged: the dropped swap stays dropped until a fresh press.
+    prePush = hook("pre-push", "disabled", false);
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["repo", REPO, "hooks"] }),
+    );
+    await screen.findByRole("button", { name: "Enable" });
+    expect(screen.queryByText("Recycle bin?")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete…" }));
+    expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
+    expect(request()).toBeNull();
+    expect(gitHookDelete).not.toHaveBeenCalled();
+  });
+
+  it("an open inline delete still works when a re-read turns the hook unmanaged", async () => {
+    prePush = hook("pre-push", "disabled", false);
+    const { user, client } = renderDialog();
+    await select(user, "pre-push");
+    await user.click(screen.getByRole("button", { name: "Delete…" }));
+    expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
+    prePush = hook("pre-push", "active", false);
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["repo", REPO, "hooks"] }),
+    );
+    expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push"),
+    );
     expect(request()).toBeNull();
   });
 

@@ -6,6 +6,7 @@ import {
   readTipState,
   readTipStates,
   restoreAllAndReport,
+  restoreAndReport,
   restoreDeletedBranch,
 } from "@/lib/deleted-branches/restore";
 import {
@@ -195,7 +196,7 @@ describe("restoreDeletedBranch", () => {
     nameAt(TIP.toUpperCase());
     await expect(
       restoreDeletedBranch(REPO, entry({ keptLocal: true })),
-    ).resolves.toEqual({ status: "restored" });
+    ).resolves.toEqual({ status: "restored", alreadyBack: true });
     expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "id-1");
     expect(gitCreateBranch).not.toHaveBeenCalled();
     expect(vi.mocked(gitSetBranchKeepLocal).mock.calls).toEqual([
@@ -210,6 +211,7 @@ describe("restoreDeletedBranch", () => {
     nameAt(TIP);
     await expect(restoreDeletedBranch(REPO, entry())).resolves.toEqual({
       status: "restored",
+      alreadyBack: true,
     });
     expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "id-1");
     expect(gitSetBranchKeepLocal).not.toHaveBeenCalled();
@@ -252,7 +254,7 @@ describe("restoreDeletedBranch", () => {
     expect(forgetDeletedBranch).not.toHaveBeenCalled();
   });
 
-  it("unsets the mark after a failed create when git confirms the name absent", async () => {
+  it("leaves the mark after a failed create when git confirms the name absent", async () => {
     const error = new Error("bad object");
     vi.mocked(gitCreateBranch).mockRejectedValue(error);
     await expect(
@@ -261,7 +263,6 @@ describe("restoreDeletedBranch", () => {
     expect(gitBranches).toHaveBeenCalledWith(REPO);
     expect(vi.mocked(gitSetBranchKeepLocal).mock.calls).toEqual([
       [REPO, "feat/x", true],
-      [REPO, "feat/x", false],
     ]);
     expect(forgetDeletedBranch).not.toHaveBeenCalled();
   });
@@ -375,6 +376,48 @@ describe("restoreAllAndReport", () => {
     expect(success).toHaveBeenCalledWith("Restored 2 branches", {
       description: "Upstream links weren't restored.",
     });
+  });
+
+  it("drops the upstream sentence for a name already back, keeping Keep local", async () => {
+    nameAt(TIP);
+    const client = new QueryClient();
+    await restoreAndReport(
+      client,
+      REPO,
+      entry({ keptLocal: true, upstream: "origin/feat/x" }),
+    );
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+    expect(success).toHaveBeenCalledWith("Restored feat/x", {
+      description: "Keep local is on again.",
+    });
+  });
+
+  it("keeps the upstream sentence for a restore that created the branch", async () => {
+    const client = new QueryClient();
+    await restoreAndReport(
+      client,
+      REPO,
+      entry({ keptLocal: true, upstream: "origin/feat/x" }),
+    );
+    expect(gitCreateBranch).toHaveBeenCalledTimes(1);
+    expect(success).toHaveBeenCalledWith("Restored feat/x", {
+      description:
+        "Keep local is on again. Its upstream link to origin/feat/x wasn't restored.",
+    });
+  });
+
+  it("raises no upstream note for a batch whose only upstream is already back", async () => {
+    vi.mocked(gitBranches).mockResolvedValue([localBranch("feat/b")]);
+    vi.mocked(gitBranchTips).mockResolvedValue({ "feat/b": TIP });
+    const client = new QueryClient();
+    await restoreAllAndReport(client, REPO, [
+      entry({ id: "a", name: "feat/a" }),
+      entry({ id: "b", name: "feat/b", upstream: "origin/feat/b" }),
+    ]);
+    expect(vi.mocked(gitCreateBranch).mock.calls.map((c) => c[1])).toEqual([
+      "feat/a",
+    ]);
+    expect(success).toHaveBeenCalledWith("Restored 2 branches", undefined);
   });
 
   it("names how many couldn't be restored and why", async () => {

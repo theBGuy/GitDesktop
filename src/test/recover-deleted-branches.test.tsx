@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -200,6 +201,8 @@ const footer = () =>
     .find((b) => !b.hasAttribute("data-deleted-branch")) as HTMLElement;
 const held = (b: HTMLElement) => b.getAttribute("aria-disabled") === "true";
 const PRUNED = "Can't be restored — Git has removed this commit.";
+/** The name-tips read for a list whose only taken name is feat/a. */
+const NAME_TIPS_KEY = ["repo", REPO, "deleted-name-tips", ["feat/a"]];
 
 describe("Recover lost work: deleted branches", () => {
   it("titles the view and lists deleted branches while the stash scan still runs", async () => {
@@ -408,6 +411,133 @@ describe("Recover lost work: deleted branches", () => {
     expect(held(footer())).toBe(true);
     await user.click(footer());
     expect(gitCreateBranch).not.toHaveBeenCalled();
+  });
+
+  it("clears a row whose name is back at the recorded commit through Restore, re-marking Keep local", async () => {
+    disk = [
+      entry("1", "feat/a", TIP_A, { keptLocal: true }),
+      entry("2", "feat/b", TIP_B),
+    ];
+    vi.mocked(gitBranches).mockResolvedValue([
+      branchRow("main"),
+      branchRow("feat/a"),
+    ]);
+    // Upper case: the compare ignores the hex digits' case.
+    vi.mocked(gitBranchTips).mockResolvedValue({
+      "feat/a": TIP_A.toUpperCase(),
+    });
+    const { user } = mount();
+    await waitFor(() =>
+      expect(
+        within(section()).getByText(
+          "A branch named feat/a is already at this commit.",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(gitBranchTips).toHaveBeenCalledWith(REPO, ["feat/a"]);
+    const button = footer();
+    expect(button.textContent).toBe("Restore branch");
+    expect(held(button)).toBe(false);
+    await user.click(button);
+    await waitFor(() =>
+      expect(within(section()).queryByText("feat/a")).toBeNull(),
+    );
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+    expect(gitSetBranchKeepLocal).toHaveBeenCalledWith(REPO, "feat/a", true);
+    expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "1");
+    expect(success).toHaveBeenCalledWith("Restored feat/a", {
+      description: "Keep local is on again.",
+    });
+    expect(row("feat/b").getAttribute("aria-current")).toBe("true");
+    expect(footer()).toBe(button);
+  });
+
+  it("keeps a taken name held when its tip read fails or is still pending", async () => {
+    disk = [entry("1", "feat/a", TIP_A)];
+    vi.mocked(gitBranches).mockResolvedValue([branchRow("feat/a")]);
+    vi.mocked(gitBranchTips).mockRejectedValue(new Error("spawn failed"));
+    const failed = mount();
+    const reason =
+      "A branch named feat/a exists again. Rename or delete it to restore this one.";
+    // Settled into its error, not just started: the reason shows while pending too.
+    await waitFor(() =>
+      expect(failed.client.getQueryState(NAME_TIPS_KEY)?.status).toBe("error"),
+    );
+    expect(within(section()).getByText(reason)).toBeTruthy();
+    expect(held(footer())).toBe(true);
+    expect(within(section()).queryByText(/already at this commit/)).toBeNull();
+    await failed.user.click(footer());
+    expect(forgetDeletedBranch).not.toHaveBeenCalled();
+    cleanup();
+
+    vi.mocked(gitBranchTips).mockReturnValue(new Promise(() => undefined));
+    mount();
+    await waitFor(() =>
+      expect(within(section()).getByText(reason)).toBeTruthy(),
+    );
+    await waitFor(() => expect(gitBranchTips).toHaveBeenCalledTimes(2));
+    expect(held(footer())).toBe(true);
+    expect(within(section()).queryByText(/already at this commit/)).toBeNull();
+  });
+
+  it("holds an already-back row again when a later tip read fails", async () => {
+    disk = [entry("1", "feat/a", TIP_A)];
+    vi.mocked(gitBranches).mockResolvedValue([branchRow("feat/a")]);
+    vi.mocked(gitBranchTips).mockResolvedValue({ "feat/a": TIP_A });
+    const { client } = mount();
+    await waitFor(() =>
+      expect(
+        within(section()).getByText(
+          "A branch named feat/a is already at this commit.",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(held(footer())).toBe(false);
+    vi.mocked(gitBranchTips).mockRejectedValue(new Error("spawn failed"));
+    await act(() => client.invalidateQueries({ queryKey: NAME_TIPS_KEY }));
+    await waitFor(() =>
+      expect(client.getQueryState(NAME_TIPS_KEY)?.status).toBe("error"),
+    );
+    await waitFor(() => expect(held(footer())).toBe(true));
+    expect(within(section()).queryByText(/already at this commit/)).toBeNull();
+    expect(
+      within(section()).getByText(
+        "A branch named feat/a exists again. Rename or delete it to restore this one.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("walks held, already-back and restorable rows with the arrow keys on one footer", async () => {
+    disk = [
+      entry("1", "feat/a", TIP_A),
+      entry("2", "main", TIP_B),
+      entry("3", "feat/c", TIP_C),
+    ];
+    vi.mocked(gitBranches).mockResolvedValue([
+      branchRow("main"),
+      branchRow("feat/a"),
+    ]);
+    vi.mocked(gitBranchTips).mockResolvedValue({
+      "feat/a": TIP_A,
+      main: TIP_A,
+    });
+    const { user } = mount();
+    await waitFor(() =>
+      expect(
+        within(section()).getByText(/already at this commit/),
+      ).toBeTruthy(),
+    );
+    const button = footer();
+    expect(held(button)).toBe(false);
+    await user.click(row("feat/a"));
+    await user.keyboard("{ArrowDown}");
+    expect(row("main").getAttribute("aria-current")).toBe("true");
+    expect(footer()).toBe(button);
+    expect(held(button)).toBe(true);
+    await user.keyboard("{ArrowDown}");
+    expect(row("feat/c").getAttribute("aria-current")).toBe("true");
+    expect(footer()).toBe(button);
+    expect(held(button)).toBe(false);
   });
 
   it("never offers removal on a row whose commit couldn't be read", async () => {
