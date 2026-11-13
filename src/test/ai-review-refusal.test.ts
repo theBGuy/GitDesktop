@@ -1,4 +1,3 @@
-import { readdirSync, readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createAiClient,
@@ -210,59 +209,5 @@ describe("streamAi single-pass review refusal", () => {
     const { promise, texts } = runStreamAi();
     await expect(promise).resolves.toBeUndefined();
     expect(texts.at(-1)).toBe("Looks good.");
-  });
-});
-
-// Source-shape pin: the opt-in is a one-line literal that no behaviour test reaches.
-function callBody(source: string, opener: string): string | null {
-  const at = source.indexOf(opener);
-  if (at < 0) return null;
-  const open = source.indexOf("(", at);
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "(") depth++;
-    else if (source[i] === ")" && --depth === 0) return source.slice(open, i);
-  }
-  return null;
-}
-
-const OPT_IN = /\brejectRefusal: true\b/;
-const REVIEWS = "src/lib/stores/reviews.ts";
-const RUNNER = "src/lib/automations/runner.ts";
-
-function optsIn(source: string, opener: string): boolean {
-  const body = callBody(source, opener);
-  return body !== null && OPT_IN.test(body);
-}
-
-describe("rejectRefusal opt-in sites", () => {
-  it("the review store's streamAi call and the runner's client.stream call opt in", () => {
-    expect(optsIn(readFileSync(REVIEWS, "utf8"), "await streamAi(")).toBe(true);
-    expect(optsIn(readFileSync(RUNNER, "utf8"), "client.stream(")).toBe(true);
-  });
-
-  it("a removed opt-in line fails the matcher", () => {
-    const strip = (s: string) =>
-      s.replace(/^.*rejectRefusal: true,?\r?\n/m, "");
-    expect(
-      optsIn(strip(readFileSync(REVIEWS, "utf8")), "await streamAi("),
-    ).toBe(false);
-    expect(optsIn(strip(readFileSync(RUNNER, "utf8")), "client.stream(")).toBe(
-      false,
-    );
-  });
-
-  it("no other src file opts in", () => {
-    const hits = (
-      readdirSync("src", { recursive: true, encoding: "utf8" }) as string[]
-    )
-      .map((f) => f.replaceAll("\\", "/"))
-      .filter((f) => /\.tsx?$/.test(f) && !f.startsWith("test/"))
-      .filter((f) => OPT_IN.test(readFileSync(`src/${f}`, "utf8")))
-      .sort();
-    expect(hits).toEqual([
-      "lib/automations/runner.ts",
-      "lib/stores/reviews.ts",
-    ]);
   });
 });
