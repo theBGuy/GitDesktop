@@ -12,6 +12,17 @@ import { isCliProvider, PROVIDERS_REQUIRING_KEY } from "./providers";
 import { httpToolStatusLine } from "./review-tools";
 import type { AiClient, AiSettings, AiStreamRequest } from "./types";
 
+/** A review the model refused (finishReason "content-filter"): the run fails and
+ *  nothing it streamed may survive as the review. */
+export class ModelRefusalError extends Error {
+  constructor() {
+    super(
+      "The model declined to review this change (content-filter). Try again, or choose a different model.",
+    );
+    this.name = "ModelRefusalError";
+  }
+}
+
 export class MissingApiKeyError extends Error {
   constructor(provider: string) {
     super(`No API key saved for ${provider}. Add one in Settings.`);
@@ -93,11 +104,15 @@ export async function createAiClient(
       // `textStream` forwards ONLY text deltas and routes an in-stream provider
       // error to the default `onError` (console.error), so a failed run ends
       // cleanly and reads as a short success. `fullStream` lets it throw instead.
+      let finishReason = "unknown";
       try {
         for await (const part of result.fullStream) {
           switch (part.type) {
             case "text-delta":
               yield part.text;
+              break;
+            case "finish":
+              finishReason = part.finishReason;
               break;
             case "error":
               throw new Error(providerErrorMessage(part.error));
@@ -124,6 +139,14 @@ export async function createAiClient(
           throw new DOMException("The generation was cancelled.", "AbortError");
         }
         throw new Error(providerErrorMessage(e));
+      }
+      // Outside the try so its catch can't rewrap it; a cancel after the finish part
+      // still reads as a cancel.
+      if (req.rejectRefusal && finishReason === "content-filter") {
+        if (req.abortSignal?.aborted) {
+          throw new DOMException("The generation was cancelled.", "AbortError");
+        }
+        throw new ModelRefusalError();
       }
     },
     async testConnection() {
@@ -317,6 +340,15 @@ export async function runAgenticStream(opts: AgenticStreamOpts): Promise<void> {
   } catch (e) {
     if (opts.abortSignal.aborted) return; // clean cancellation — not an error
     throw new Error(annotateToolError(providerErrorMessage(e)));
+  }
+
+  // Providers that flag a refusal report finishReason "content-filter" (some only for
+  // an explicit content filter), often with the refusal text; clearing it keeps the
+  // failed-run partial save from keeping it.
+  if (finishReason === "content-filter") {
+    if (opts.abortSignal.aborted) return;
+    opts.setText("");
+    throw new ModelRefusalError();
   }
 
   // A clean finish that produced no prose (all steps spent on tool calls, or ended on
