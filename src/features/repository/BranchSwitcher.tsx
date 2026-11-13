@@ -743,6 +743,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     deleteSessionRef.current = null;
     setDeleteTarget(null);
   }
+  // One delete at a time: the latch is set before the first await (the fresh
+  // read, or the occupancy read when deleting the current branch), before any
+  // mutation reads pending. The ref gates, since two presses can land before a
+  // re-render; the state holds the confirm's button.
+  const deleteRunningRef = useRef(false);
+  const [deleteRunning, setDeleteRunning] = useState(false);
   // The worktree a branch row offers to remove (resolved from `userWorktrees`).
   const [removeWorktreeTarget, setRemoveWorktreeTarget] =
     useState<UserWorktree | null>(null);
@@ -1845,6 +1851,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // been reopened on another branch, or the same name in another repo.
     const session = deleteSessionRef.current;
     if (!deleteTarget || !session) return;
+    if (deleteRunningRef.current) return;
     const deleteIn = session.repo;
     const clearTarget = () => {
       if (deleteSessionRef.current === session) closeDelete();
@@ -1872,6 +1879,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     // Outside the try, whose `.finally` cleanup would close the confirm.
     if (refuseWhileRowPushes(deleteTarget)) return;
+    // Set at the first await: nothing above it can interleave with a press.
+    deleteRunningRef.current = true;
+    setDeleteRunning(true);
     await (async () => {
       try {
         // Between freeing its branch and checking it out, a promote leaves that
@@ -1957,7 +1967,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // Read before the delete, which removes the branch's whole config
         // section: what Restore re-applies.
         const facts = deletedBranchFacts(
-          await readBranchRowsFresh(queryClient, deleteIn),
+          await readBranchRowsFresh(deleteIn),
           deleteTarget,
         );
         if (
@@ -1991,7 +2001,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 queryClient,
                 deleteIn,
                 [entry],
-                recorded ? 0 : 1,
+                new Set(recorded ? [] : [entry.id]),
                 true,
               ),
             );
@@ -2011,6 +2021,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
     })().finally(() => {
       clearTarget();
+      deleteRunningRef.current = false;
+      setDeleteRunning(false);
     });
   }
 
@@ -5260,7 +5272,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             ? branchPushHoldReason(pushOnBranch(deleteTarget)?.paused ?? false)
             : undefined
         }
-        pending={deleteBranch.isPending || checkout.isPending}
+        pending={deleteRunning || deleteBranch.isPending || checkout.isPending}
         onConfirm={doDelete}
       />
 

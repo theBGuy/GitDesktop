@@ -355,6 +355,32 @@ const UNPARSED: ConflictSides = {
   working: "<<<<<<< HEAD\nfn a() { 1 }\n",
 };
 
+/** Stands in for the shared confirm's popup, which keeps focus on its Cancel
+ *  through its exit animation; outside the pane, as the real one portals. */
+function closingConfirm() {
+  const popup = document.createElement("div");
+  popup.setAttribute("role", "alertdialog");
+  const cancel = document.createElement("button");
+  cancel.textContent = "Cancel";
+  popup.append(cancel);
+  document.body.append(popup);
+  act(() => cancel.focus());
+  return {
+    cancel,
+    close: () =>
+      act(() => {
+        cancel.blur();
+        popup.remove();
+      }),
+  };
+}
+
+const frames = (n: number) =>
+  act(async () => {
+    for (let i = 0; i < n; i++)
+      await new Promise((r) => requestAnimationFrame(r));
+  });
+
 describe("Mark resolved's Cancel keeps keyboard focus", () => {
   it.each([
     ["the too-large refusal", TOO_LARGE],
@@ -366,9 +392,32 @@ describe("Mark resolved's Cancel keeps keyboard focus", () => {
     await userEvent.setup().click(button);
     await waitFor(() => expect(confirmRequest()).not.toBeNull());
     blurLikeChromium();
+    const popup = closingConfirm();
     act(() => useConfirm.getState().answer(false));
+    // While the popup holds focus the landing waits instead of dropping.
+    await frames(2);
+    expect(document.activeElement).toBe(popup.cancel);
+    popup.close();
     await waitFor(() => expect(document.activeElement).toBe(button));
     expect(gitStage).not.toHaveBeenCalled();
+  });
+
+  it("a control the user focuses while the confirm closes keeps focus", async () => {
+    disk = UNPARSED;
+    renderView();
+    const button = await markButton();
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(confirmRequest()).not.toBeNull());
+    blurLikeChromium();
+    const popup = closingConfirm();
+    act(() => useConfirm.getState().answer(false));
+    await frames(2);
+    const elsewhere = screen.getByTestId("host-sink");
+    popup.close();
+    act(() => elsewhere.focus());
+    // The wait re-checks on the next frame and re-arms; two frames cover both.
+    await frames(3);
+    expect(document.activeElement).toBe(elsewhere);
   });
 
   it("the refusal's button stays focusable and explains the click-time hold", async () => {

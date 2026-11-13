@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import {
@@ -258,7 +265,10 @@ type ToastOptions = {
   description?: string;
   action?: {
     label: string;
-    onClick: (e: { currentTarget: HTMLElement }) => void;
+    onClick: (e: {
+      currentTarget: HTMLElement;
+      preventDefault: () => void;
+    }) => void;
   };
 };
 const deleteToast = () => {
@@ -384,14 +394,45 @@ describe("deleting a branch from the branch menu", () => {
     });
     reads.branches.push(branchRow({ name: "feat/a" }));
     const { user } = renderSwitcher();
+    const error = vi.spyOn(toast, "error");
     const confirm = await openDeleteConfirm(user, "feat/a");
     await user.click(within(confirm).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalled());
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 20));
-    });
+    // The failure's own toast ends the handler's path.
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    error.mockRestore();
     expect(recordDeletedBranches).not.toHaveBeenCalled();
     expect(success).not.toHaveBeenCalled();
+  });
+
+  it("deletes once when a second press lands during the fresh branch read", async () => {
+    reads.branches.push(branchRow({ name: "feat/a" }));
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat/a");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    vi.mocked(gitBranches).mockImplementation(async () => {
+      await held;
+      return reads.branches;
+    });
+    const error = vi.spyOn(toast, "error");
+    const button = within(confirm).getByRole("button", { name: "Delete" });
+    // Both presses land before a re-render.
+    act(() => {
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
+    await act(async () => release());
+    await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(1);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("treats a tip-moved answer as not deleted", async () => {
@@ -419,11 +460,16 @@ describe("the delete toast's Restore", () => {
     reads.branches.push(trackedRow("feat/b", { keepLocal: true }));
     const { user, switchTo } = renderSwitcher();
     await deleteBranch(user, "feat/b");
+    reads.branches = reads.branches.filter((b) => b.name !== "feat/b");
     const { options } = deleteToast();
     await switchTo(OTHER_REPO);
     const blur = vi.fn();
+    const readsBefore = vi.mocked(gitBranches).mock.calls.length;
     act(() => {
-      options.action?.onClick({ currentTarget: { blur } as never });
+      options.action?.onClick({
+        currentTarget: { blur } as never,
+        preventDefault: () => undefined,
+      });
     });
     await waitFor(() =>
       expect(success).toHaveBeenCalledWith("Restored feat/b in keep", {
@@ -432,10 +478,11 @@ describe("the delete toast's Restore", () => {
       }),
     );
     expect(blur).toHaveBeenCalledTimes(1);
+    // The press's own name check is the first branch read after it.
     expect(blur.mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(gitBranchTips).mock.invocationCallOrder[0],
+      vi.mocked(gitBranches).mock.invocationCallOrder[readsBefore],
     );
-    expect(gitBranchTips).toHaveBeenCalledWith(REPO, ["feat/b"]);
+    expect(vi.mocked(gitBranches).mock.calls[readsBefore]).toEqual([REPO]);
     expect(gitSetBranchKeepLocal).toHaveBeenCalledWith(REPO, "feat/b", true);
     expect(gitCreateBranch).toHaveBeenCalledWith(
       REPO,
@@ -455,6 +502,7 @@ describe("the delete toast's Restore", () => {
     act(() => {
       deleteToast().options.action?.onClick({
         currentTarget: { blur: () => undefined } as never,
+        preventDefault: () => undefined,
       });
     });
     await waitFor(() =>

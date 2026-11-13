@@ -41,14 +41,20 @@ test("the deleted-branches record is in the relocate migration's identity roster
   assert.deepEqual(identityStoreProblems(text), []);
   const needle = '  { file: "deleted-branches.json", merge: "id-merge" },\n';
   assert.ok(text.includes(needle), "the mutation needle applies");
-  for (const mutant of [
-    text.replace(needle, ""),
-    text.replace(needle, `  // ${needle.trimStart()}`),
-    text.replace(needle, needle.replace("id-merge", "keep-new")),
-    text.replace(needle, needle.replace("id-merge", "inner-key")),
-    text.replace(needle, `${needle}${needle}`),
+  for (const [label, mutant] of [
+    ["entry removed", text.replace(needle, "")],
+    ["entry commented out", text.replace(needle, `  // ${needle.trimStart()}`)],
+    [
+      "merge class keep-new",
+      text.replace(needle, needle.replace("id-merge", "keep-new")),
+    ],
+    [
+      "merge class inner-key",
+      text.replace(needle, needle.replace("id-merge", "inner-key")),
+    ],
+    ["entry duplicated", text.replace(needle, `${needle}${needle}`)],
   ]) {
-    assert.notDeepEqual(identityStoreProblems(mutant), [], mutant.slice(0, 0));
+    assert.notDeepEqual(identityStoreProblems(mutant), [], label);
   }
 });
 

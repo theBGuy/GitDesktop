@@ -1167,7 +1167,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   by `repoIdentityStrict`, written under `withAppStoreLock` with the tolerant
   reload and `writeWithRollback`, registered in `repo-data-migration.ts` and in
   `scripts/app-store-lock.test.mjs`'s ADOPTED roster — a record that skips one
-  strands across worktrees, races the MCP server or orphans on relocate.
+  strands across worktrees, races another writer (a second app instance, or
+  the MCP server for a store it writes) or orphans on relocate.
 - **Settings writes seed the cache** — component-started settings writes go
   through the `src/lib/settings/queries.ts` hooks, and any new settings
   `useMutation` spreads `...settingsSeedCallbacks(queryClient,
@@ -1256,10 +1257,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   reflog miss AND patch-twins present — strong evidence, not proof; the
   failure direction stays inaction), and the destructive action targets the
   measured sha, never a re-resolved ref.
-- **Local branch deletes compare-and-delete:** a local branch ref is deleted
-  only through `git::branches::delete_branch_ref_at` (`update-ref -d` at a
-  measured tip, its guards run under the config-write mutex), never a new
-  `branch -D`: that deletes whatever the ref points at when git runs.
+- **Local branch deletes compare-and-delete:** a user-requested local branch
+  delete goes only through `git::branches::delete_branch_ref_at` (`update-ref
+  -d` at a measured tip, its guards run under the config-write mutex), never a
+  new `branch -D`: that deletes whatever the ref points at when git runs. Any
+  other local branch ref delete (the root-commit undo, PR checkout's
+  stray-branch cleanup) stays old-value guarded (`update-ref -d <ref> <oid>`).
 - **Cached GitHub reads stay true:** gh REST GETs that adopt runner.rs's
   conditional layer (`run_gh_cached_get`/`run_gh_cached_get_raw`) key on
   (repo_path, host, argv) with the auth epoch in the value, detect a 304

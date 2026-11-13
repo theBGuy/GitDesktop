@@ -948,7 +948,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
   for agent sessions.
   Deleting asks first, and the notice that follows names the commit the branch pointed
-  at (**Deleted _name_ (was _abc1234_)**) with a **Restore** button for about 15 seconds.
+  at (**Deleted _name_ (was _abc1234_)**) with a **Restore** button for about 15 seconds
+  (when the delete couldn't be added to **Recover lost work**, the notice stays open, so a
+  failed Restore can be retried from it, until you close it or the branch is restored or
+  can no longer be).
   Restore re-creates the branch at that commit without checking it out, marks it **Keep
   local** again if it was, and doesn't restore its upstream link; if a branch of that name
   exists again, nothing is overwritten. Once the notice is gone, restore it from **Recover
@@ -1012,8 +1015,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   skips protected branches. A branch that couldn't be archived or deleted stays in the list
   with the reason under its name, ready to retry. Deleting removes each branch only at the
   commit the list showed: a branch that changed since the list loaded is kept, stays
-  listed and is checked again. The result notice offers **Restore all**, which re-creates
-  the deleted branches at their commits, and **Recover lost work** lists each one too. A
+  listed and is checked again. The result notice offers **Restore all** (**Restore** for a
+  single branch), which re-creates the deleted branches at their commits, and **Recover
+  lost work** lists each one it could record (the notice stays open for any it couldn't). A
   worktree removed along the way isn't restored, only its branch.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
@@ -1162,8 +1166,8 @@ deleted in GitDesktop with its short commit id, when it was deleted, and a **Kee
 tag if it was kept local; arrow keys walk it, and **Restore branch** re-creates the
 selected one at that commit without checking it out. A row whose commit Git has removed
 says it can't be restored and offers **Remove from list**. The list keeps the newest 50
-deletes per repository, and only deletes made in the GitDesktop window: a branch deleted
-in a terminal{{ai}} or by an MCP client{{/ai}} isn't listed.
+deletes per repository, and only branches deleted from the branch switcher or **Clean up
+branches**: a branch deleted in a terminal{{ai}} or by an MCP client{{/ai}} isn't listed.
 
 Under **Lost stashes**, it scans your repository (with \`git fsck\`) for *orphaned* stashes — uncommitted work a stash once saved that has since fallen out of
 **View stashes** (dropped, or abandoned by an interrupted operation) — and lists each one

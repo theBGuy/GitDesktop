@@ -90,7 +90,7 @@ const PINS = [
       "refuseWhileRowPushes(",
       DERIVED,
       DERIVED_ELSEWHERE,
-      "await readBranchRowsFresh(queryClient, deleteIn)",
+      "await readBranchRowsFresh(deleteIn)",
       "if (refuseWhileRowPushes(deleteTarget)) return;",
       "await deleteBranch.mutateAsync(deleteTarget)",
     ],

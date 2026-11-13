@@ -10,7 +10,7 @@
 // and fixture names (`"gd/session/abc"`) are not comparisons and pass.
 // What it cannot see: a prefix built by concatenation, a regex, a comparison
 // through a renamed or re-exported constant, `indexOf`/`slice` tests, and files
-// outside `src/` (the Rust side has its own guard).
+// outside `src/` (the Rust side is not scanned).
 //
 // Two allowances, each with its reason:
 // - PERMITTED folders (`src/features/{pulls,issues,conversations,projects}/`)

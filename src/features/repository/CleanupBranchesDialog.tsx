@@ -1008,6 +1008,14 @@ export function CleanupBranchesDialog({
     baseRef: string;
   } | null>(null);
   const running = progress !== null;
+  // One batch at a time: delete mode's fresh read is awaited before progress
+  // is set. The ref gates, since two confirms can land before a re-render; the
+  // state holds the primary through that read.
+  const batchRunningRef = useRef(false);
+  const [batchStarted, setBatchStarted] = useState(false);
+  // The run-wide lock: dismissals, controls and rows hold from the batch's
+  // start, its fresh read included; `running` alone starts at its progress.
+  const locked = running || batchStarted;
   // The snapshot paints only while it applies: under its run, and through the
   // close a full success starts. A reopen paints the live list from its first
   // frame, before the seed clears the snapshot.
@@ -1526,7 +1534,7 @@ export function CleanupBranchesDialog({
     countedNames.length > 0 && (shownFrozen !== null || !holdingReads);
 
   function toggle(name: string) {
-    if (running) return;
+    if (locked) return;
     keptTouchRef.current.delete(name);
     touchedRef.current.add(name);
     setSelected((prev) => {
@@ -1540,7 +1548,7 @@ export function CleanupBranchesDialog({
   // Select all adds to the checked rows a pending status read holds, so it never
   // drops one the user chose; Deselect all clears everything.
   function toggleAll() {
-    if (running) return;
+    if (locked) return;
     for (const name of candidateNames) touchedRef.current.add(name);
     for (const name of candidateNames) keptTouchRef.current.delete(name);
     const pendingHeld = candidates
@@ -1557,13 +1565,13 @@ export function CleanupBranchesDialog({
   // handlers (not an effect) so the post-batch refetch keeps the just-failed rows
   // flagged.
   function changeMode(next: Mode) {
-    if (running) return;
+    if (locked) return;
     setMode(next);
     setFailed(new Map());
   }
 
   function toggleCriterion(key: Criterion) {
-    if (running) return;
+    if (locked) return;
     setCriteria((prev) => ({ ...prev, [key]: !prev[key] }));
     setFailed(new Map());
   }
@@ -1571,14 +1579,14 @@ export function CleanupBranchesDialog({
   // A window press also turns Idle on, so the window never sits as a control
   // that does nothing.
   function changeWindow(next: number) {
-    if (running) return;
+    if (locked) return;
     setWindowDays(next);
     setCriteria((prev) => (prev.idle ? prev : { ...prev, idle: true }));
     setFailed(new Map());
   }
 
   function changeIncludeWorktrees(next: boolean) {
-    if (running) return;
+    if (locked) return;
     setIncludeWorktrees(next);
     setFailed(new Map());
     // A lock or unlock made outside the app shows only once the list re-reads.
@@ -1603,6 +1611,19 @@ export function CleanupBranchesDialog({
       currentBranch,
     };
   });
+
+  // The batch's one entry: holds the gate across every exit of runBatch.
+  async function startBatch() {
+    if (batchRunningRef.current) return;
+    batchRunningRef.current = true;
+    setBatchStarted(true);
+    try {
+      await runBatch();
+    } finally {
+      batchRunningRef.current = false;
+      setBatchStarted(false);
+    }
+  }
 
   async function runBatch() {
     // A confirm hands over the set and worktree rows it showed; an unconfirmed
@@ -1686,7 +1707,7 @@ export function CleanupBranchesDialog({
     // the branch's whole config section.
     let rowsBefore: Awaited<ReturnType<typeof readBranchRowsFresh>> = null;
     if (mode === "delete") {
-      rowsBefore = await readBranchRowsFresh(queryClient, repoPath);
+      rowsBefore = await readBranchRowsFresh(repoPath);
       if (
         refuseIfSwitched(
           repoPath,
@@ -1697,7 +1718,9 @@ export function CleanupBranchesDialog({
         return;
     }
     const restorable: DeletedBranchEntry[] = [];
-    let unrecorded = 0;
+    // Entries whose record write failed; the rest were recorded, in order.
+    const failedIds = new Set<string>();
+    const recorded: DeletedBranchEntry[] = [];
     // Awaited per row, so a crash mid-batch never strands a deleted tip.
     const recordDeleted = async (name: string, tip: string) => {
       const entry = mintDeletedBranch({
@@ -1705,7 +1728,8 @@ export function CleanupBranchesDialog({
         tip,
         ...deletedBranchFacts(rowsBefore, name),
       });
-      if (!(await recordDeletedBranches(repoPath, [entry]))) unrecorded++;
+      if (await recordDeletedBranches(repoPath, [entry])) recorded.push(entry);
+      else failedIds.add(entry.id);
       restorable.push(entry);
     };
     // Only a name the tips read answered without has no candidate at all.
@@ -1844,9 +1868,13 @@ export function CleanupBranchesDialog({
 
     const ok = processed - fails.size - skipped.size;
     const verb = mode === "archive" ? "Archived" : "Deleted";
-    // Each row's record reported true, but the list keeps the newest
-    // DELETED_BRANCHES_CAP, so a bigger batch's earliest entries were cut.
-    unrecorded += Math.max(0, restorable.length - DELETED_BRANCHES_CAP);
+    // The list keeps the newest DELETED_BRANCHES_CAP, so a batch that recorded
+    // more lost its earliest recorded entries; a failed write was never listed.
+    const cut = recorded.slice(
+      0,
+      Math.max(0, recorded.length - DELETED_BRANCHES_CAP),
+    );
+    const unrecordedIds = new Set([...failedIds, ...cut.map((e) => e.id)]);
     // The result toasts' one shape: a delete that left restorable entries
     // offers Restore all on the batch's own repo, which the title names after a
     // switch; anything else is title-only.
@@ -1855,7 +1883,7 @@ export function CleanupBranchesDialog({
       else
         toast[kind](
           `${title}${landedIn(repoPath).away}`,
-          deletedToastOptions(queryClient, repoPath, restorable, unrecorded),
+          deletedToastOptions(queryClient, repoPath, restorable, unrecordedIds),
         );
     };
     if (processed < names.length) {
@@ -1890,6 +1918,7 @@ export function CleanupBranchesDialog({
   // Delete always confirms; Archive confirms only when it removes a worktree,
   // since unarchiving doesn't bring the folder back.
   function onPrimary() {
+    if (batchRunningRef.current) return;
     const names = candidateNames.filter((n) => selected.has(n));
     const rowByName = new Map(candidates.map((c) => [c.branch.name, c]));
     const worktreePaths = new Map(
@@ -1918,12 +1947,14 @@ export function CleanupBranchesDialog({
     if (mode === "delete") openConfirm({ kind: "delete", ...snapshot });
     else if (worktreePaths.size > 0)
       openConfirm({ kind: "archiveWorktrees", ...snapshot });
-    else void runBatch();
+    else void startBatch();
   }
 
   function onConfirmBatch() {
     if (confirmBatch === null) return;
     setConfirmBatch(null);
+    // Before the hand-over, which an unconfirmed Archive would otherwise inherit.
+    if (batchRunningRef.current) return;
     if (
       refuseIfSwitched(
         confirmBatch.repoPath,
@@ -1936,7 +1967,7 @@ export function CleanupBranchesDialog({
       worktreePaths: confirmBatch.worktreePaths,
       tips: confirmBatch.tips,
     };
-    void runBatch();
+    void startBatch();
   }
 
   const verb = mode === "archive" ? "Archive" : "Delete";
@@ -1950,7 +1981,7 @@ export function CleanupBranchesDialog({
     candidates.some((c) => listed.failed.has(c.branch.name));
   const primaryHeldReason = ((): string | null => {
     switch (true) {
-      case running:
+      case locked:
         return PRIMARY_RUNNING_REASON;
       case defaultFailed:
         return DEFAULT_READ_FAILED_COPY;
@@ -1993,7 +2024,7 @@ export function CleanupBranchesDialog({
       <Dialog
         open={open}
         onOpenChange={(o) => {
-          if (!o && !running) onClose();
+          if (!o && !locked) onClose();
         }}
       >
         <DialogContent className="flex flex-col gap-4 sm:max-w-lg">
@@ -2009,10 +2040,11 @@ export function CleanupBranchesDialog({
 
           {/* Action / Show captions beside their controls, then the opt-in.
               A running batch natively disables every control here and in the
-              list as one run-wide lock, explained by the held primary's
-              progress label and reason. onOpenChange refuses every dismissal
-              meanwhile (Escape, the header close, a backdrop press); that close
-              stays enabled on purpose, since the vendored one takes no reason. */}
+              list as one run-wide lock (`locked`), explained by the held
+              primary's reason and progress label. onOpenChange refuses every
+              dismissal meanwhile (Escape, the header close, a backdrop
+              press); that close stays enabled on purpose, since the vendored
+              one takes no reason. */}
           <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
             <LabeledGroup label="Action" className={CONTROL_ROW}>
               <div className="inline-flex w-fit rounded-none ring-1 ring-border">
@@ -2020,7 +2052,7 @@ export function CleanupBranchesDialog({
                   <button
                     key={m}
                     type="button"
-                    disabled={running}
+                    disabled={locked}
                     aria-pressed={mode === m}
                     onClick={() => changeMode(m)}
                     className={cn(
@@ -2047,7 +2079,7 @@ export function CleanupBranchesDialog({
                   <button
                     key={k}
                     type="button"
-                    disabled={running}
+                    disabled={locked}
                     aria-pressed={criteria[k]}
                     onClick={() => toggleCriterion(k)}
                     className={cn(
@@ -2069,7 +2101,7 @@ export function CleanupBranchesDialog({
                 >
                   <button
                     type="button"
-                    disabled={running}
+                    disabled={locked}
                     aria-pressed={criteria.idle}
                     onClick={() => toggleCriterion("idle")}
                     className={cn(
@@ -2092,7 +2124,7 @@ export function CleanupBranchesDialog({
                       <button
                         key={d}
                         type="button"
-                        disabled={running}
+                        disabled={locked}
                         aria-pressed={windowDays === d}
                         onClick={() => changeWindow(d)}
                         className={cn(
@@ -2128,7 +2160,7 @@ export function CleanupBranchesDialog({
             >
               <Checkbox
                 checked={includeWorktrees}
-                disabled={running}
+                disabled={locked}
                 onCheckedChange={(next) => changeIncludeWorktrees(next)}
               />
               Include branches checked out in a worktree
@@ -2142,7 +2174,7 @@ export function CleanupBranchesDialog({
           {showSelectAll && (
             <button
               type="button"
-              disabled={running}
+              disabled={locked}
               onClick={toggleAll}
               aria-label={`${allChecked ? "Deselect all" : "Select all"}, ${selectedCount} of ${countedNames.length} selected`}
               className="flex items-center gap-2 text-xs text-muted-foreground disabled:opacity-50"
@@ -2422,7 +2454,7 @@ export function CleanupBranchesDialog({
                                 <Checkbox
                                   {...nav.rowProps(c)}
                                   checked={hold === null && selected.has(name)}
-                                  disabled={running}
+                                  disabled={locked}
                                   onCheckedChange={
                                     hold === null
                                       ? () => toggle(name)
@@ -2505,8 +2537,8 @@ export function CleanupBranchesDialog({
             <DisabledReasonButton
               type="button"
               variant="outline"
-              disabled={running}
-              reason={running ? PRIMARY_RUNNING_REASON : null}
+              disabled={locked}
+              reason={locked ? PRIMARY_RUNNING_REASON : null}
               onClick={onClose}
             >
               Cancel

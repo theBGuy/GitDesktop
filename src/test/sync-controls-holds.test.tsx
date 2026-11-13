@@ -300,8 +300,7 @@ describe("a session HEAD holds Push", () => {
     act(() => {
       expect(dispatchAction("push")).toBe(true);
     });
-    await settle();
-    expect(info).toHaveBeenCalledWith(reason);
+    await waitFor(() => expect(info).toHaveBeenCalledWith(reason));
     expect(useConfirm.getState().request).toBeNull();
     expect(pushSpy).not.toHaveBeenCalled();
     expect(forgeDetectForkPrForBranch).not.toHaveBeenCalled();
@@ -347,8 +346,7 @@ describe("Keep local and an ordinary HEAD", () => {
     act(() => {
       expect(dispatchAction("push")).toBe(true);
     });
-    await settle();
-    expect(info).toHaveBeenCalledWith(reason);
+    await waitFor(() => expect(info).toHaveBeenCalledWith(reason));
     expect(pushSpy).not.toHaveBeenCalled();
   });
 
@@ -398,8 +396,9 @@ describe("a sibling worktree pushing the same branch", () => {
     const { user, queryClient } = await renderBar();
     await startSiblingPush(queryClient, SIBLING, "feat");
     await user.click(pushButton());
-    await settle();
-    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE),
+    );
     expect(pushSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -428,8 +427,9 @@ describe("a sibling worktree pushing the same branch", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: /^Push to origin\/feat-x/ }),
     );
-    await settle();
-    expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE),
+    );
     expect(pushSpy).toHaveBeenCalledTimes(1);
   });
 

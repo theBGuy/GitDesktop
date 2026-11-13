@@ -688,7 +688,7 @@ pub(crate) async fn remove_worktree(
             }
             TipRead::Unreadable => {
                 return Err(AppError::Command(format!(
-                    "Couldn't read where {branch} points, so nothing was removed."
+                    "{branch}'s commit couldn't be read, so nothing was removed."
                 )));
             }
         }
@@ -3809,7 +3809,7 @@ prunable gitdir file points to non-existent location
         .expect_err("an unreadable pinned tip refuses");
         assert!(
             matches!(&err, AppError::Command(m)
-                if m == "Couldn't read where bad:name points, so nothing was removed."),
+                if m == "bad:name's commit couldn't be read, so nothing was removed."),
             "{err:?}"
         );
         assert!(std::path::Path::new(&wt_s).exists(), "nothing was removed");

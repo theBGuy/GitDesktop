@@ -176,7 +176,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Restore a deleted branch at its commit — from the delete notice or from Recover lost work, with Clean up deleting only the commits it listed",
+      "Restore a deleted branch at its commit — from the delete notice or from Recover lost work, with Clean up deleting each branch only at the commit it listed",
   },
   {
     group: "Branches & history",

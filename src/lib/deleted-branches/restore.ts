@@ -10,11 +10,7 @@ import {
 } from "@/lib/git/api";
 import { FULL_OID_RE } from "@/lib/git/oid";
 import { normPath } from "@/lib/git/path";
-import {
-  branchesOptions,
-  invalidateRepoAfterWrite,
-  repoKeys,
-} from "@/lib/git/queries";
+import { invalidateRepoAfterWrite, repoKeys } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -23,6 +19,7 @@ import {
   couldntRestoreTitle,
   DELETED_TOAST_MS,
   NAME_EXISTS_DESCRIPTION,
+  NAME_EXISTS_NOTICE_OPEN,
   prunedDescription,
   RESTORED_ALL_UPSTREAMS,
   restoreActionLabel,
@@ -31,10 +28,12 @@ import {
   restoredSomeTitle,
   restoredTitle,
   restoreFailedNote,
+  restoreFailedNoticeOpenNote,
   UNREADABLE_RECORDED_TIP,
   UNRESTORED_REASON,
   unrecordedNote,
   unrestoredDescription,
+  unrestoredNoticeOpenDescription,
 } from "./copy";
 import {
   DELETED_BRANCHES_KEY,
@@ -94,8 +93,26 @@ export async function readTipStates(
   return states;
 }
 
-const holdsName = async (repoPath: string, name: string) =>
-  Object.hasOwn(await gitBranchTips(repoPath, [name]), name);
+/** Whether the entry's name is free, back at its recorded tip, or taken at
+ *  another commit. Presence comes from the checked branch list, which rejects
+ *  when git fails (the tips read answers "absent" then); a present name whose
+ *  tip can't be read counts as taken, which sets no mark and creates nothing. */
+async function nameState(
+  repoPath: string,
+  entry: DeletedBranchEntry,
+): Promise<"absent" | "atTip" | "elsewhere"> {
+  const branches = await gitBranches(repoPath);
+  if (!branches.some((b) => b.name === entry.name)) return "absent";
+  let tip: string | undefined;
+  try {
+    tip = (await gitBranchTips(repoPath, [entry.name]))[entry.name];
+  } catch {
+    tip = undefined;
+  }
+  return tip !== undefined && tip.toLowerCase() === entry.tip.toLowerCase()
+    ? "atTip"
+    : "elsewhere";
+}
 
 /** Git work + record removal only; no toast, no cache work. Never rejects. */
 export async function restoreDeletedBranch(
@@ -106,7 +123,16 @@ export async function restoreDeletedBranch(
   if (!FULL_OID_RE.test(entry.tip))
     return { status: "failed", error: new Error(UNREADABLE_RECORDED_TIP) };
   try {
-    if (await holdsName(repoPath, entry.name)) return { status: "nameExists" };
+    const state = await nameState(repoPath, entry);
+    if (state === "elsewhere") return { status: "nameExists" };
+    if (state === "atTip") {
+      // Already at the recorded commit (another window's restore, or re-created
+      // by hand), and a hand-made one has no mark: set it before forgetting.
+      if (entry.keptLocal)
+        await gitSetBranchKeepLocal(repoPath, entry.name, true);
+      await forgetDeletedBranch(repoPath, entry.id);
+      return { status: "restored" };
+    }
     if ((await readTipState(repoPath, entry.tip)) === "pruned")
       return { status: "pruned" };
     // Marked before the branch exists, so it is never pushable for a moment.
@@ -124,23 +150,21 @@ export async function restoreDeletedBranch(
   }
 }
 
-/** After a create that rejected. Presence is read through the checked branch
- *  list, which rejects when git fails (the tips read answers "absent" then), so
- *  the mark is unset only on a name git confirmed absent. A present name at the
- *  recorded tip is this restore's own create landing despite the rejection. */
+/** After a create that rejected: the mark is unset only on a name git confirmed
+ *  absent. A present name at the recorded tip is this restore's own create
+ *  landing despite the rejection. */
 async function rollBackFailedCreate(
   repoPath: string,
   entry: DeletedBranchEntry,
   error: unknown,
 ): Promise<RestoreOutcome> {
-  let exists: boolean;
+  let state: Awaited<ReturnType<typeof nameState>>;
   try {
-    const branches = await gitBranches(repoPath);
-    exists = branches.some((b) => b.name === entry.name);
+    state = await nameState(repoPath, entry);
   } catch {
     return { status: "failed", error };
   }
-  if (!exists) {
+  if (state === "absent") {
     if (entry.keptLocal) {
       try {
         await gitSetBranchKeepLocal(repoPath, entry.name, false);
@@ -150,30 +174,20 @@ async function rollBackFailedCreate(
     }
     return { status: "failed", error };
   }
-  let tip: string | undefined;
-  try {
-    tip = (await gitBranchTips(repoPath, [entry.name]))[entry.name];
-  } catch {
-    tip = undefined;
-  }
-  if (tip === undefined || tip.toLowerCase() !== entry.tip.toLowerCase())
-    return { status: "nameExists" };
+  if (state === "elsewhere") return { status: "nameExists" };
   await forgetDeletedBranch(repoPath, entry.id);
   return { status: "restored" };
 }
 
 /** The local branch rows, read fresh before a delete: the cached list can predate
- *  a Keep local mark set in another window or with `git config`. Null when the
- *  read fails. */
+ *  a Keep local mark set in another window or with `git config`. Read straight
+ *  from git, never through the query cache, whose fetch would join a read
+ *  already in flight that started before such a mark. Null when the read fails. */
 export async function readBranchRowsFresh(
-  queryClient: QueryClient,
   repoPath: string,
 ): Promise<ReadonlyMap<string, Branch> | null> {
   try {
-    const rows = await queryClient.fetchQuery({
-      ...branchesOptions(repoPath),
-      staleTime: 0,
-    });
+    const rows = await gitBranches(repoPath);
     return new Map(rows.map((b) => [b.name, b] as const));
   } catch {
     return null;
@@ -196,7 +210,7 @@ export function deletedBranchFacts(
 /** One cache settle after one or many restores. Resolves once the refetches
  *  land, which a parked or slow forge read can hold indefinitely, so the
  *  reporters below start it and never wait on it before their toast. */
-export async function settleRestores(
+async function settleRestores(
   queryClient: QueryClient,
   repoPath: string,
 ): Promise<void> {
@@ -213,10 +227,13 @@ export async function settleRestores(
   await Promise.all(settles);
 }
 
+/** `noticeStays`: an unrecorded entry is still unsettled, so its delete notice
+ *  stays open and is the place to retry; Recover lost work doesn't list it. */
 function reportOutcome(
   outcome: RestoreOutcome,
   entry: DeletedBranchEntry,
   away: string,
+  noticeStays: boolean,
 ) {
   switch (outcome.status) {
     case "restored": {
@@ -229,7 +246,9 @@ function reportOutcome(
     }
     case "nameExists":
       toast.info(couldntRestoreTitle(entry.name, away), {
-        description: NAME_EXISTS_DESCRIPTION,
+        description: noticeStays
+          ? NAME_EXISTS_NOTICE_OPEN
+          : NAME_EXISTS_DESCRIPTION,
       });
       return;
     case "pruned":
@@ -238,7 +257,12 @@ function reportOutcome(
       });
       return;
     case "failed":
-      toastErrorWithNote(outcome.error, restoreFailedNote(entry.name, away));
+      toastErrorWithNote(
+        outcome.error,
+        noticeStays
+          ? restoreFailedNoticeOpenNote(entry.name, away)
+          : restoreFailedNote(entry.name, away),
+      );
       return;
     default: {
       const unhandled: never = outcome;
@@ -247,38 +271,24 @@ function reportOutcome(
   }
 }
 
-/** restore -> settle (started) -> the outcome toast. Returns the outcome. */
-export async function restoreAndReport(
-  queryClient: QueryClient,
-  repoPath: string,
-  entry: DeletedBranchEntry,
-): Promise<RestoreOutcome> {
-  const outcome = await restoreDeletedBranch(repoPath, entry);
-  void settleRestores(queryClient, repoPath);
-  reportOutcome(outcome, entry, landedIn(repoPath).away);
-  return outcome;
-}
-
-/** Sequential restores, one settle, one follow-up toast. */
-export async function restoreAllAndReport(
-  queryClient: QueryClient,
-  repoPath: string,
+/** One follow-up toast for several restores; `noticeStays` as above. */
+function reportAll(
+  outcomes: readonly RestoreOutcome[],
   entries: readonly DeletedBranchEntry[],
-): Promise<void> {
+  away: string,
+  noticeStays: boolean,
+) {
   const unrestored = { nameExists: 0, pruned: 0, failed: 0 };
   let restored = 0;
   let upstreams = false;
-  for (const entry of entries) {
-    const outcome = await restoreDeletedBranch(repoPath, entry);
+  outcomes.forEach((outcome, i) => {
     if (outcome.status === "restored") {
       restored++;
-      if (entry.upstream !== null) upstreams = true;
+      if (entries[i].upstream !== null) upstreams = true;
     } else {
       unrestored[outcome.status]++;
     }
-  }
-  void settleRestores(queryClient, repoPath);
-  const { away } = landedIn(repoPath);
+  });
   const total = entries.length;
   if (restored === total) {
     toast.success(
@@ -293,45 +303,133 @@ export async function restoreAllAndReport(
     .join("; ");
   toast.error(restoredSomeTitle(restored, total, away), {
     duration: DELETED_TOAST_MS,
-    description: unrestoredDescription(total - restored, reasons),
+    description: (noticeStays
+      ? unrestoredNoticeOpenDescription
+      : unrestoredDescription)(total - restored, reasons),
   });
 }
 
+/** Sequential restores, in order. */
+async function restoreEach(
+  repoPath: string,
+  entries: readonly DeletedBranchEntry[],
+): Promise<RestoreOutcome[]> {
+  const outcomes: RestoreOutcome[] = [];
+  for (const entry of entries)
+    outcomes.push(await restoreDeletedBranch(repoPath, entry));
+  return outcomes;
+}
+
+/** restore -> settle (started) -> the outcome toast. Returns the outcome. */
+export async function restoreAndReport(
+  queryClient: QueryClient,
+  repoPath: string,
+  entry: DeletedBranchEntry,
+): Promise<RestoreOutcome> {
+  const outcome = await restoreDeletedBranch(repoPath, entry);
+  void settleRestores(queryClient, repoPath);
+  reportOutcome(outcome, entry, landedIn(repoPath).away, false);
+  return outcome;
+}
+
+/** Sequential restores, one settle, one follow-up toast. */
+export async function restoreAllAndReport(
+  queryClient: QueryClient,
+  repoPath: string,
+  entries: readonly DeletedBranchEntry[],
+): Promise<void> {
+  const outcomes = await restoreEach(repoPath, entries);
+  void settleRestores(queryClient, repoPath);
+  reportAll(outcomes, entries, landedIn(repoPath).away, false);
+}
+
+let deletedToastSeq = 0;
+
 /** sonner options for a delete toast: duration, Restore action, not-recorded
- *  note. `single` marks the branch menu's delete, whose title names the commit. */
+ *  note. `single` marks the branch menu's delete, whose title names the commit.
+ *  An unrecorded entry has no other home, so its toast stays open (explicit id,
+ *  default-prevented action click) until every unrecorded entry is restored or
+ *  pruned; a press retries only entries not yet settled, one run at a time. */
 export function deletedToastOptions(
   queryClient: QueryClient,
   repoPath: string,
   entries: readonly DeletedBranchEntry[],
-  unrecorded: number,
+  unrecordedIds: ReadonlySet<string>,
   single = false,
 ): {
+  id?: string;
   duration: number;
   description?: string;
   action?: {
     label: string;
-    onClick: (e: { currentTarget: HTMLElement }) => void;
+    onClick: (e: {
+      currentTarget: HTMLElement;
+      preventDefault: () => void;
+    }) => void;
   };
 } {
   const pinned = [...entries];
+  const keepsOpen = unrecordedIds.size > 0;
+  const id = keepsOpen ? `deleted-branches-${++deletedToastSeq}` : undefined;
   const options = {
-    // Unrecorded entries can be restored only from here, so it stays until closed.
-    duration: unrecorded > 0 ? Number.POSITIVE_INFINITY : DELETED_TOAST_MS,
-    ...(unrecorded > 0 && {
-      description: unrecordedNote(unrecorded, pinned.length, single),
+    ...(id !== undefined && { id }),
+    duration: keepsOpen ? Number.POSITIVE_INFINITY : DELETED_TOAST_MS,
+    ...(keepsOpen && {
+      description: unrecordedNote(unrecordedIds.size, pinned.length, single),
     }),
   };
   if (pinned.length === 0) return options;
+  const label = restoreActionLabel(pinned.length);
+  if (id === undefined) {
+    // Only the first press acts: sonner keeps the action clickable while the
+    // toast animates out.
+    let pressed = false;
+    return {
+      ...options,
+      action: {
+        label,
+        onClick: (e) => {
+          // Blurred first so sonner's focus restore runs before anything it opens.
+          e.currentTarget.blur();
+          if (pressed) return;
+          pressed = true;
+          if (pinned.length === 1)
+            void restoreAndReport(queryClient, repoPath, pinned[0]);
+          else void restoreAllAndReport(queryClient, repoPath, pinned);
+        },
+      },
+    };
+  }
+  const settled = new Set<string>();
+  let running = false;
+  const run = async () => {
+    const todo = pinned.filter((entry) => !settled.has(entry.id));
+    const outcomes = await restoreEach(repoPath, todo);
+    outcomes.forEach((outcome, i) => {
+      if (outcome.status === "restored" || outcome.status === "pruned")
+        settled.add(todo[i].id);
+    });
+    void settleRestores(queryClient, repoPath);
+    const stays = [...unrecordedIds].some((u) => !settled.has(u));
+    const { away } = landedIn(repoPath);
+    if (pinned.length === 1 && todo.length === 1)
+      reportOutcome(outcomes[0], todo[0], away, stays);
+    else if (todo.length > 0) reportAll(outcomes, todo, away, stays);
+    if (!stays) toast.dismiss(id);
+  };
   return {
     ...options,
     action: {
-      label: restoreActionLabel(pinned.length),
+      label,
       onClick: (e) => {
-        // Blurred first so sonner's focus restore runs before anything it opens.
+        // Keeps sonner from closing the toast on this click.
+        e.preventDefault();
         e.currentTarget.blur();
-        if (pinned.length === 1)
-          void restoreAndReport(queryClient, repoPath, pinned[0]);
-        else void restoreAllAndReport(queryClient, repoPath, pinned);
+        if (running) return;
+        running = true;
+        void run().finally(() => {
+          running = false;
+        });
       },
     },
   };

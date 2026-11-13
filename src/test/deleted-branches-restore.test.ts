@@ -2,6 +2,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  deletedToastOptions,
   readTipState,
   readTipStates,
   restoreAllAndReport,
@@ -62,19 +63,27 @@ function entry(
 const match = (hash: string): CommitPrefixMatch =>
   ({ commit: { hash }, onBranch: false }) as CommitPrefixMatch;
 
-/** Names that exist, one answer per `gitBranchTips` call in order; the last
- *  answer repeats. */
-function namesPresent(...answers: boolean[]) {
-  const queue = [...answers];
-  vi.mocked(gitBranchTips).mockImplementation(async (_r, names) => {
-    const present = queue.length > 1 ? queue.shift() : queue[0];
-    return present ? { [names[0]]: TIP } : {};
+/** `feat/x` listed at `tip`, or not listed at all for null. */
+function nameAt(tip: string | null) {
+  vi.mocked(gitBranches).mockResolvedValue(
+    tip === null ? [] : [localBranch("feat/x")],
+  );
+  vi.mocked(gitBranchTips).mockResolvedValue(
+    tip === null ? {} : { "feat/x": tip },
+  );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
   });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  namesPresent(false);
+  vi.mocked(gitBranchTips).mockResolvedValue({});
   vi.mocked(gitBranches).mockResolvedValue([]);
   vi.mocked(gitObjectsPresent).mockResolvedValue(true);
   vi.mocked(gitFindCommitsByPrefix).mockResolvedValue([]);
@@ -150,7 +159,8 @@ describe("restoreDeletedBranch", () => {
     await expect(restoreDeletedBranch(REPO, e)).resolves.toEqual({
       status: "restored",
     });
-    expect(gitBranchTips).toHaveBeenCalledWith(REPO, ["feat/x"]);
+    expect(gitBranches).toHaveBeenCalledWith(REPO);
+    expect(gitBranchTips).not.toHaveBeenCalled();
     expect(gitCreateBranch).toHaveBeenCalledWith(
       REPO,
       "feat/x",
@@ -162,7 +172,7 @@ describe("restoreDeletedBranch", () => {
     expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "id-1");
     // Name check, then tip state, then the create, then the forget.
     const order = [
-      vi.mocked(gitBranchTips).mock.invocationCallOrder[0],
+      vi.mocked(gitBranches).mock.invocationCallOrder[0],
       vi.mocked(gitObjectsPresent).mock.invocationCallOrder[0],
       vi.mocked(gitCreateBranch).mock.invocationCallOrder[0],
       vi.mocked(forgetDeletedBranch).mock.invocationCallOrder[0],
@@ -170,15 +180,39 @@ describe("restoreDeletedBranch", () => {
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
 
-  it("refuses a name that exists again and creates nothing", async () => {
-    namesPresent(true);
-    await expect(restoreDeletedBranch(REPO, entry())).resolves.toEqual({
-      status: "nameExists",
-    });
+  it("refuses a name that exists again at another commit and creates nothing", async () => {
+    nameAt(OTHER);
+    await expect(
+      restoreDeletedBranch(REPO, entry({ keptLocal: true })),
+    ).resolves.toEqual({ status: "nameExists" });
     expect(gitObjectsPresent).not.toHaveBeenCalled();
     expect(gitCreateBranch).not.toHaveBeenCalled();
     expect(gitSetBranchKeepLocal).not.toHaveBeenCalled();
     expect(forgetDeletedBranch).not.toHaveBeenCalled();
+  });
+
+  it("counts a name already back at the recorded tip as restored, marking it Keep local before the forget", async () => {
+    nameAt(TIP.toUpperCase());
+    await expect(
+      restoreDeletedBranch(REPO, entry({ keptLocal: true })),
+    ).resolves.toEqual({ status: "restored" });
+    expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "id-1");
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+    expect(vi.mocked(gitSetBranchKeepLocal).mock.calls).toEqual([
+      [REPO, "feat/x", true],
+    ]);
+    expect(
+      vi.mocked(gitSetBranchKeepLocal).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(forgetDeletedBranch).mock.invocationCallOrder[0]);
+  });
+
+  it("leaves an unmarked entry's name at the recorded tip unmarked", async () => {
+    nameAt(TIP);
+    await expect(restoreDeletedBranch(REPO, entry())).resolves.toEqual({
+      status: "restored",
+    });
+    expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "id-1");
+    expect(gitSetBranchKeepLocal).not.toHaveBeenCalled();
   });
 
   it("refuses a pruned commit and creates nothing", async () => {
@@ -236,10 +270,9 @@ describe("restoreDeletedBranch", () => {
     vi.mocked(gitCreateBranch).mockRejectedValue(
       new Error("a branch named 'feat/x' already exists"),
     );
-    vi.mocked(gitBranches).mockResolvedValue([localBranch("feat/x")]);
-    vi.mocked(gitBranchTips)
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ "feat/x": OTHER });
+    // Absent at the pre-check, created at another commit before the create.
+    nameAt(OTHER);
+    vi.mocked(gitBranches).mockResolvedValueOnce([]);
     await expect(
       restoreDeletedBranch(REPO, entry({ keptLocal: true })),
     ).resolves.toEqual({ status: "nameExists" });
@@ -254,10 +287,8 @@ describe("restoreDeletedBranch", () => {
   it("counts a create that landed despite rejecting as restored, keeping the mark", async () => {
     const error = new Error("ipc timeout");
     vi.mocked(gitCreateBranch).mockRejectedValue(error);
-    vi.mocked(gitBranches).mockResolvedValue([localBranch("feat/x")]);
-    vi.mocked(gitBranchTips)
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ "feat/x": TIP });
+    nameAt(TIP);
+    vi.mocked(gitBranches).mockResolvedValueOnce([]);
     await expect(
       restoreDeletedBranch(REPO, entry({ keptLocal: true })),
     ).resolves.toEqual({ status: "restored" });
@@ -274,7 +305,9 @@ describe("restoreDeletedBranch", () => {
     vi.mocked(gitCreateBranch).mockRejectedValue(error);
     // git_branch_tips ignores git's exit code: a failed run reads as "absent".
     vi.mocked(gitBranchTips).mockResolvedValue({});
-    vi.mocked(gitBranches).mockRejectedValue(new Error("for-each-ref failed"));
+    vi.mocked(gitBranches)
+      .mockResolvedValueOnce([])
+      .mockRejectedValue(new Error("for-each-ref failed"));
     await expect(
       restoreDeletedBranch(REPO, entry({ keptLocal: true })),
     ).resolves.toEqual({ status: "failed", error });
@@ -304,13 +337,14 @@ describe("restoreDeletedBranch", () => {
     expect(gitSetBranchKeepLocal).not.toHaveBeenCalled();
   });
 
-  it("maps a failed name pre-check to failed, creating nothing", async () => {
-    const error = new Error("spawn");
-    vi.mocked(gitBranchTips).mockRejectedValue(error);
-    await expect(restoreDeletedBranch(REPO, entry())).resolves.toEqual({
-      status: "failed",
-      error,
-    });
+  it("maps a failed checked name read to failed before any mark, even if the tips read answers absent", async () => {
+    const error = new Error("for-each-ref failed");
+    vi.mocked(gitBranches).mockRejectedValue(error);
+    vi.mocked(gitBranchTips).mockResolvedValue({});
+    await expect(
+      restoreDeletedBranch(REPO, entry({ keptLocal: true })),
+    ).resolves.toEqual({ status: "failed", error });
+    expect(gitSetBranchKeepLocal).not.toHaveBeenCalled();
     expect(gitCreateBranch).not.toHaveBeenCalled();
   });
 });
@@ -344,10 +378,8 @@ describe("restoreAllAndReport", () => {
   });
 
   it("names how many couldn't be restored and why", async () => {
-    vi.mocked(gitBranchTips).mockImplementation(
-      async (_r, names): Promise<Record<string, string>> =>
-        names[0] === "feat/b" ? { "feat/b": TIP } : {},
-    );
+    vi.mocked(gitBranches).mockResolvedValue([localBranch("feat/b")]);
+    vi.mocked(gitBranchTips).mockResolvedValue({ "feat/b": OTHER });
     vi.mocked(gitObjectsPresent).mockImplementation(
       async (_r, oids) => oids[0] !== GONE,
     );
@@ -362,5 +394,176 @@ describe("restoreAllAndReport", () => {
       description:
         "2 couldn't be restored: a branch with that name exists again (1); Git has removed the commit (1). They're still listed in Recover lost work.",
     });
+  });
+});
+
+describe("deletedToastOptions", () => {
+  let success: ReturnType<typeof vi.spyOn>;
+  let info: ReturnType<typeof vi.spyOn>;
+  let error: ReturnType<typeof vi.spyOn>;
+  let dismiss: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    success = vi.spyOn(toast, "success");
+    info = vi.spyOn(toast, "info");
+    error = vi.spyOn(toast, "error");
+    dismiss = vi.spyOn(toast, "dismiss");
+    useUiStore.setState({ repoPath: REPO });
+  });
+  afterEach(() => {
+    for (const spy of [success, info, error, dismiss]) spy.mockRestore();
+  });
+
+  /** A press on the toast's action, as sonner hands it the click event. */
+  function press(options: ReturnType<typeof deletedToastOptions>) {
+    const event = {
+      currentTarget: { blur: vi.fn() } as unknown as HTMLElement,
+      preventDefault: vi.fn(),
+    };
+    options.action?.onClick(event);
+    return event;
+  }
+
+  it("keeps an unrecorded entry's notice open through a refused restore, then dismisses it once restored", async () => {
+    const e = entry();
+    const options = deletedToastOptions(
+      new QueryClient(),
+      REPO,
+      [e],
+      new Set([e.id]),
+      true,
+    );
+    expect(options.id).toEqual(expect.any(String));
+    expect(options.duration).toBe(Number.POSITIVE_INFINITY);
+    nameAt(OTHER);
+    expect(press(options).preventDefault).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(info).toHaveBeenCalledWith("Couldn't restore feat/x", {
+        description:
+          "A branch with that name exists again, and nothing was overwritten. Rename or delete it, then press Restore on the delete notice, which stays open.",
+      }),
+    );
+    expect(dismiss).not.toHaveBeenCalled();
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+    nameAt(null);
+    press(options);
+    await vi.waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Restored feat/x", undefined),
+    );
+    expect(dismiss).toHaveBeenCalledWith(options.id);
+  });
+
+  it("ignores a press while its restore runs", async () => {
+    const e = entry();
+    const options = deletedToastOptions(
+      new QueryClient(),
+      REPO,
+      [e],
+      new Set([e.id]),
+      true,
+    );
+    const read = deferred<Branch[]>();
+    vi.mocked(gitBranches).mockImplementationOnce(() => read.promise);
+    press(options);
+    expect(press(options).preventDefault).toHaveBeenCalledTimes(1);
+    expect(gitBranches).toHaveBeenCalledTimes(1);
+    read.resolve([]);
+    await vi.waitFor(() => expect(dismiss).toHaveBeenCalledWith(options.id));
+    expect(gitCreateBranch).toHaveBeenCalledTimes(1);
+    expect(success).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only the entries a batch press left unsettled, pointing at the open notice", async () => {
+    const a = entry({ id: "a", name: "feat/a" });
+    const b = entry({ id: "b", name: "feat/b" });
+    const options = deletedToastOptions(
+      new QueryClient(),
+      REPO,
+      [a, b],
+      new Set(["b"]),
+    );
+    expect(options.description).toBe(
+      "Couldn't add 1 of them to Recover lost work. Restore them from this notice.",
+    );
+    vi.mocked(gitCreateBranch).mockImplementation(async (_r, name) => {
+      if (name === "feat/b") throw new Error("config locked");
+    });
+    press(options);
+    await vi.waitFor(() =>
+      expect(error).toHaveBeenCalledWith("Restored 1 of 2 branches", {
+        duration: 15_000,
+        description:
+          "1 couldn't be restored: Git refused (1). The delete notice stays open so you can retry.",
+      }),
+    );
+    expect(dismiss).not.toHaveBeenCalled();
+    vi.mocked(gitCreateBranch).mockClear();
+    vi.mocked(gitCreateBranch).mockResolvedValue(undefined);
+    press(options);
+    await vi.waitFor(() => expect(dismiss).toHaveBeenCalledWith(options.id));
+    expect(vi.mocked(gitCreateBranch).mock.calls.map((c) => c[1])).toEqual([
+      "feat/b",
+    ]);
+    expect(success).toHaveBeenCalledWith("Restored 1 branch", undefined);
+  });
+
+  it("keeps sonner's close-on-press and the Recover lost work copy when every entry was recorded", async () => {
+    const e = entry();
+    const options = deletedToastOptions(
+      new QueryClient(),
+      REPO,
+      [e],
+      new Set(),
+      true,
+    );
+    expect(options.id).toBeUndefined();
+    expect(options.duration).toBe(15_000);
+    expect(options.description).toBeUndefined();
+    nameAt(OTHER);
+    expect(press(options).preventDefault).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(info).toHaveBeenCalledWith("Couldn't restore feat/x", {
+        description:
+          "A branch with that name exists again, and nothing was overwritten. Rename or delete it, then restore from Recover lost work.",
+      }),
+    );
+    expect(dismiss).not.toHaveBeenCalled();
+  });
+
+  it("starts one restore when a recorded single-entry toast is pressed twice", async () => {
+    const e = entry();
+    const options = deletedToastOptions(
+      new QueryClient(),
+      REPO,
+      [e],
+      new Set(),
+      true,
+    );
+    press(options);
+    press(options);
+    await vi.waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Restored feat/x", undefined),
+    );
+    await vi.waitFor(() => expect(forgetDeletedBranch).toHaveBeenCalled());
+    expect(gitCreateBranch).toHaveBeenCalledTimes(1);
+    expect(success).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores each entry once when a recorded batch toast is pressed twice", async () => {
+    const options = deletedToastOptions(
+      new QueryClient(),
+      REPO,
+      [entry({ id: "a", name: "feat/a" }), entry({ id: "b", name: "feat/b" })],
+      new Set(),
+    );
+    press(options);
+    press(options);
+    await vi.waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Restored 2 branches", undefined),
+    );
+    expect(vi.mocked(gitCreateBranch).mock.calls.map((c) => c[1])).toEqual([
+      "feat/a",
+      "feat/b",
+    ]);
+    expect(success).toHaveBeenCalledTimes(1);
   });
 });

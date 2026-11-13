@@ -81,6 +81,20 @@ import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 const baseName = (path: string) => path.split("/").pop() || path;
 
+/** How long a landing waits for a closing dialog to release focus. */
+const CONFIRM_CLOSE_WAIT_MS = 500;
+
+/** Focus inside a dialog that neither holds this pane nor sits inside it. */
+function inOtherDialog(active: Element | null, root: HTMLElement | null) {
+  const dialog = active?.closest('[role="dialog"], [role="alertdialog"]');
+  return (
+    dialog != null &&
+    root !== null &&
+    !dialog.contains(root) &&
+    !root.contains(dialog)
+  );
+}
+
 /** Where focus goes once a write settles: a region header by its conflict
  *  ordinal in the post-write file, or the header's pressed control. Pinned to
  *  the file it was armed for, and to the element that had focus at the press. */
@@ -479,6 +493,10 @@ export function ConflictFileView({
   const takeOverLanding = () => {
     landPendingRef.current = false;
   };
+  // The frame of a landing waiting for focus to leave another dialog; held
+  // across the landing effect's own re-run, cancelled by a press or unmount.
+  const landWaitRef = useRef(0);
+  useLayoutEffect(() => () => cancelAnimationFrame(landWaitRef.current), []);
   // The file the on-open landing ran for, or that input forfeited it for. A
   // ref, so an <Activity> re-show (which replays effects) or a poll re-read
   // never lands again; a new path re-arms it and a remount resets it.
@@ -497,6 +515,7 @@ export function ConflictFileView({
   // captured before any await: Chromium blurs it to <body> once the hold
   // disables it.
   function capturePress(): HTMLElement | null {
+    cancelAnimationFrame(landWaitRef.current);
     landPendingRef.current = true;
     const active = document.activeElement;
     return active instanceof HTMLElement && rootRef.current?.contains(active)
@@ -924,8 +943,9 @@ export function ConflictFileView({
         const ok = await useConfirm
           .getState()
           .ask(markerStagePrompt([flag], false));
-        // The click-time hold blurred the button to <body>, so a cancel lands
-        // focus back on the pane like every other exit.
+        // A cancel lands on the press like every other exit: the fallback
+        // button, which the click-time hold blurred to <body>, or the strip's
+        // button, which kept focus. The landing waits out the confirm's close.
         if (!ok) {
           armLanding("header", pressed);
           return;
@@ -978,7 +998,10 @@ export function ConflictFileView({
   // Waits out the hold, so the target is post-re-read and focusable. Consumed
   // whether or not it lands: it never takes focus the user moved elsewhere or
   // took over the pane from, and never lands on another file than its own.
-  // The pane stays mounted here, so its own sink is the fallback.
+  // The pane stays mounted here, so its own sink is the fallback. Focus inside
+  // another dialog (the shared confirm, still closing) isn't the user's: the
+  // landing stays pending and waits, bounded, for focus to leave it, then
+  // re-arms so these rules run against the live state; at the bound it drops.
   useLayoutEffect(() => {
     if (landRequest === null || busy) return;
     setLandRequest(null);
@@ -986,6 +1009,22 @@ export function ConflictFileView({
     landPendingRef.current = false;
     if (!pending) return;
     if (landRequest.repoPath !== repoPath || landRequest.path !== path) return;
+    if (inOtherDialog(document.activeElement, rootRef.current)) {
+      landPendingRef.current = true;
+      const request = landRequest;
+      const deadline = performance.now() + CONFIRM_CLOSE_WAIT_MS;
+      const wait = () => {
+        landWaitRef.current = 0;
+        if (!landPendingRef.current) return;
+        if (!inOtherDialog(document.activeElement, rootRef.current))
+          setLandRequest(request);
+        else if (performance.now() < deadline)
+          landWaitRef.current = requestAnimationFrame(wait);
+        else landPendingRef.current = false;
+      };
+      landWaitRef.current = requestAnimationFrame(wait);
+      return;
+    }
     const active = document.activeElement;
     if (
       active !== null &&

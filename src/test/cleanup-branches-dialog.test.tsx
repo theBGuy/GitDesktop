@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -4357,9 +4358,12 @@ describe("Delete pins each branch to the tip this list read", () => {
       action: { onClick: (e: { currentTarget: HTMLElement }) => void };
     };
 
+    // Only the second name exists again, at another commit.
+    vi.mocked(gitBranches).mockClear();
+    vi.mocked(gitBranches).mockResolvedValue([branch(order[1], OLD)]);
     vi.mocked(gitBranchTips).mockClear();
     vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
-      names[0] === order[1] ? { [order[1]]: tipFor(order[1]) } : {},
+      names[0] === order[1] ? { [order[1]]: "1".repeat(40) } : {},
     );
     vi.mocked(gitObjectsPresent).mockImplementation(
       async (_repo, oids) => !oids.includes(tipFor(order[2])),
@@ -4384,9 +4388,11 @@ describe("Delete pins each branch to the tip this list read", () => {
         },
       ),
     );
-    expect(vi.mocked(gitBranchTips).mock.calls).toEqual(
-      order.map((n) => [repo, [n]]),
+    // Each name's pre-check reads the batch's repo, never the live one.
+    expect(vi.mocked(gitBranches).mock.calls.slice(0, order.length)).toEqual(
+      order.map(() => [repo]),
     );
+    expect(vi.mocked(gitBranchTips).mock.calls).toEqual([[repo, [order[1]]]]);
     expect(vi.mocked(gitCreateBranch).mock.calls).toEqual([
       [repo, order[0], false, tipFor(order[0]), true],
     ]);
@@ -4640,6 +4646,126 @@ describe("Delete pins each branch to the tip this list read", () => {
     );
     expect(recordDeletedBranches).toHaveBeenCalledTimes(51);
   }, 30_000);
+
+  it("counts each unrecorded entry once: failed writes plus recorded entries the cap cut", async () => {
+    const repo = "C:/repos/k-overflow-failed";
+    const names = Array.from(
+      { length: 53 },
+      (_, i) => `kof-${String(i).padStart(2, "0")}`,
+    );
+    const failing = new Set(["kof-03", "kof-40"]);
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    vi.mocked(recordDeletedBranches).mockImplementation(
+      async (_r, [entry]) => !failing.has(entry.name),
+    );
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, FRESH)),
+      merged: names,
+    });
+    await enterDelete(view.user);
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    // 51 recorded, so the cap cut one of them; with the 2 failed, 3 in all.
+    await waitFor(
+      () =>
+        expect(toast.success).toHaveBeenCalledWith(
+          "Deleted 53 branches",
+          expect.objectContaining({
+            duration: Number.POSITIVE_INFINITY,
+            description:
+              "Couldn't add 3 of them to Recover lost work. Restore them from this notice.",
+          }),
+        ),
+      { timeout: 15_000 },
+    );
+  }, 30_000);
+
+  it("starts one batch when a second confirm lands during the fresh read", async () => {
+    const repo = "C:/repos/k-twice";
+    const names = ["kt-1", "kt-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    const read = deferred<Branch[]>();
+    vi.mocked(gitBranches).mockImplementation(() => read.promise);
+    await view.user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    const go = within(confirm).getByRole("button", {
+      name: /^Delete 2 branches/,
+    });
+    // Both presses land before a re-render.
+    act(() => {
+      fireEvent.click(go);
+      fireEvent.click(go);
+    });
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        "Wait for the current batch to finish.",
+      ),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    await act(async () => read.resolve(names.map((n) => branch(n, OLD))));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 2 branches",
+        withRestore(2),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(names.length);
+    expect(toast.success).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks dismissal and every control through the batch's fresh read", async () => {
+    const repo = "C:/repos/k-read-lock";
+    const names = ["krl-1", "krl-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    const read = deferred<Branch[]>();
+    vi.mocked(gitBranches).mockImplementation(() => read.promise);
+    await confirmDelete(view.user);
+    const cancel = within(mainDialog()).getByRole("button", {
+      name: "Cancel",
+      hidden: true,
+    });
+    await waitFor(() =>
+      expect(cancel).toHaveAccessibleDescription(
+        "Wait for the current batch to finish.",
+      ),
+    );
+    expect(
+      within(mainDialog()).getByRole("button", {
+        name: /^archive$/i,
+        hidden: true,
+      }),
+    ).toBeDisabled();
+    await view.user.keyboard("{Escape}");
+    await view.user.click(cancel);
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    await act(async () => read.resolve(names.map((n) => branch(n, OLD))));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 2 branches",
+        withRestore(2),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(names.length);
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+  });
 });
 
 describe("agent-session branches", () => {

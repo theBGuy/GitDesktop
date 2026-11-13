@@ -55,6 +55,11 @@ export const couldntRestoreTitle = (name: string, away: string) =>
 export const NAME_EXISTS_DESCRIPTION =
   "A branch with that name exists again, and nothing was overwritten. Rename or delete it, then restore from Recover lost work.";
 
+// The follow-ups' variants while an unrecorded entry's delete notice stays
+// open: Recover lost work doesn't list that entry, so they point at the notice.
+export const NAME_EXISTS_NOTICE_OPEN =
+  "A branch with that name exists again, and nothing was overwritten. Rename or delete it, then press Restore on the delete notice, which stays open.";
+
 export const prunedDescription = (tip: string) =>
   `Git has already removed its commit (${shortTip(tip)}), so it can no longer be restored.`;
 
@@ -64,6 +69,9 @@ export const UNREADABLE_RECORDED_TIP =
 
 export const restoreFailedNote = (name: string, away: string) =>
   `${name} wasn't restored${away}.`;
+
+export const restoreFailedNoticeOpenNote = (name: string, away: string) =>
+  `${restoreFailedNote(name, away)} Its delete notice stays open so you can retry.`;
 
 export const restoredAllTitle = (total: number, away: string) =>
   `Restored ${branchCount(total)}${away}`;
@@ -87,6 +95,12 @@ export const UNRESTORED_REASON: Record<
 
 export const unrestoredDescription = (failed: number, reasons: string) =>
   `${failed} couldn't be restored: ${reasons}. They're still listed in Recover lost work.`;
+
+export const unrestoredNoticeOpenDescription = (
+  failed: number,
+  reasons: string,
+) =>
+  `${failed} couldn't be restored: ${reasons}. The delete notice stays open so you can retry.`;
 
 // Clean up branches (delete mode).
 
