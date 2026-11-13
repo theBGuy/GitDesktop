@@ -270,6 +270,52 @@ describe("RemoteIssueView edit attachments", () => {
     expect(vi.mocked(forgeIssueEdit).mock.calls[0][5]).toBeUndefined();
   });
 
+  it("shows a running save's draft when Edit reopens on the same issue, Save held with its reason", async () => {
+    vi.mocked(toast.success).mockClear();
+    mount(7);
+    await shown(7);
+    await openEdit();
+    paste(editBox(), 1);
+    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+    const title = () =>
+      screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+    fireEvent.change(title(), { target: { value: "Typed title" } });
+    const typed = editBox().value;
+    const pending = deferred<{ failedAttachments: string[]; body: null }>();
+    vi.mocked(forgeIssueEdit).mockReset();
+    vi.mocked(forgeIssueEdit).mockReturnValueOnce(pending.promise);
+    // A running save's spinner prefixes its label ("Loading").
+    const save = () => screen.getByRole("button", { name: /^(Loading)?Save$/ });
+    fireEvent.click(save());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await openEdit();
+    expect(title().value).toBe("Typed title");
+    expect(editBox().value).toBe(typed);
+    expect(
+      screen.queryAllByRole("button", { name: /^Remove image-/ }),
+    ).toHaveLength(1);
+    expect(save()).not.toBeDisabled();
+    expect(save()).toHaveAttribute("aria-disabled", "true");
+    const reasonId = save().getAttribute("aria-describedby") ?? "";
+    expect(document.getElementById(reasonId)?.textContent).toBe(
+      "Applying this change…",
+    );
+    fireEvent.click(save());
+    fireEvent.submit(
+      screen.getByRole("dialog").querySelector("form") as HTMLFormElement,
+    );
+    await act(async () => undefined);
+    expect(forgeIssueEdit).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      pending.resolve({ failedAttachments: [], body: null }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(draftEntry(editKey(7))).toBeUndefined();
+  });
+
   it("re-reads the issue after a rejected edit (AC20)", async () => {
     mount(7);
     await shown(7);

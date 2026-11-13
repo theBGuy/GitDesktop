@@ -2268,7 +2268,13 @@ pub async fn forge_pr_edit(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Saved;
-                    let body = gitlab::body_with_uploads(&repo_path, &body, &s, verb).await?;
+                    // A retarget sends the new target branch beside the title.
+                    let fields: Vec<&String> = [Some(&title), base.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    let body =
+                        gitlab::body_with_uploads(&repo_path, &fields, &body, &s, verb).await?;
                     gitlab::edit_mr(&repo_path, number, &title, &body, base.as_deref()).await?;
                     crate::attachments::release_posted(&s, &[]).await;
                     return Ok(Default::default());
@@ -3127,7 +3133,8 @@ pub async fn forge_issue_edit(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Saved;
-                    let body = gitlab::body_with_uploads(&repo_path, &body, &s, verb).await?;
+                    let body =
+                        gitlab::body_with_uploads(&repo_path, &[&title], &body, &s, verb).await?;
                     gitlab::edit_issue(&repo_path, number, &title, &body).await?;
                     crate::attachments::release_posted(&s, &[]).await;
                     return Ok(Default::default());
@@ -3545,7 +3552,9 @@ pub async fn forge_issue_create(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Posted;
-                    let body = gitlab::body_with_uploads(&repo_path, &body, &s, verb).await?;
+                    let fields = gitlab::issue_create_fields(&title, &labels, assignees.len());
+                    let body =
+                        gitlab::body_with_uploads(&repo_path, &fields, &body, &s, verb).await?;
                     let pr = gitlab::create_issue(
                         &repo_path, &title, &body, &labels, &assignees, milestone,
                     )

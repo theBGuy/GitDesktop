@@ -620,14 +620,19 @@ export function CreatePrDialog({
         // The PR exists, so a failed labels/assignees step only warns.
         const followupError = followupErrorOf(createdRef);
         // Failed images can't follow the PR: the toast names the one image, or
-        // counts several, and the whole session goes with the draft.
+        // counts several, and the whole session goes with the draft. Without a
+        // ticket a reseed may already own the key, so only this submit's draft ends.
         if (ticket)
           settleAttachmentPost(ticket, {
             posted: true,
             failed: failedImages,
             discardFailed: true,
           });
-        else endDraftAttachments(attachDraftKey);
+        else if (
+          draftRepoRef.current === repoPath &&
+          seedGenRef.current === submitGen
+        )
+          endDraftAttachments(attachDraftKey);
         outcome = "success";
         if (number !== null) {
           created = { number, url };
@@ -1001,16 +1006,17 @@ export function CreatePrDialog({
       form.setFieldValue("body", (prev) => update(prev)),
   });
   // Generate rewrites the body and a running create already sent it, so both
-  // hold Attach and chip Remove.
+  // hold Attach and chip Remove. The posting arm also covers a reopen over a
+  // create still uploading, where a stage would be dropped silently.
   const descAttachments = draftAttachments.withHold(
     (() => {
       switch (true) {
         case generating:
           return AI_DRAFT_PENDING_REASON;
+        case draftAttachments.posting > 0:
+          return uploadingReason(draftAttachments.posting, "creating");
         case shownSubmitting:
-          return draftAttachments.posting > 0
-            ? uploadingReason(draftAttachments.posting, "creating")
-            : ACT_PENDING_REASON;
+          return ACT_PENDING_REASON;
         default:
           return null;
       }

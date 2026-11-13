@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { createdNumberOf } from "@/lib/attachments/references";
 import { presentError } from "@/lib/error-summary";
 import { forgeIssueComment } from "@/lib/git/api";
 import {
@@ -43,6 +44,15 @@ import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 
 type Destination = "forge" | "jira";
+
+/** The toast title of a promote whose new issue's number couldn't be read,
+ *  naming the steps it skipped: they link to or comment on that number. */
+function numberlessPromoteTitle(opened: string, hadComments: boolean) {
+  const skipped = hadComments
+    ? "Its comments weren't carried over and the local issue isn't linked to it."
+    : "The local issue isn't linked to it.";
+  return `${opened}, but its number couldn't be read. ${skipped}`;
+}
 
 /** The Jira toasts' View, success and partial failure alike. */
 const JIRA_VIEW_LABEL = "View in Jira";
@@ -224,7 +234,7 @@ export function PromoteLocalIssueDialog({
       const stamp = new Date().toISOString();
       await closeLocal(stamp);
       closedAt = stamp;
-      const { number, url } = await createIssue.mutateAsync({
+      const createdRef = await createIssue.mutateAsync({
         title: issue.title,
         body: issue.body,
         // Local labels are free-form and may not exist remotely; leave them off.
@@ -233,6 +243,25 @@ export function PromoteLocalIssueDialog({
         milestone: null,
         type: null,
       });
+      const { url } = createdRef;
+      // The issue exists but its number couldn't be read: the local close already
+      // records the promote, and nothing may link to, comment on or select issue 0.
+      const number = createdNumberOf(createdRef);
+      if (number === null) {
+        const { live, away } = landedIn(repoPath);
+        const title = numberlessPromoteTitle(
+          `Opened issue${away}`,
+          carried.length > 0,
+        );
+        toast.warning(title, {
+          description: url || undefined,
+          action: url
+            ? { label: forgeViewLabel ?? "View", onClick: () => openUrl(url) }
+            : undefined,
+        });
+        if (stillOnThisIssue(live)) flushSync(() => onOpenChange(false));
+        return;
+      }
       created = { number, url };
       // The back-link before the carry, so a carry failure still leaves it.
       await linkLocal(`Promoted to ${remoteLabel} issue [#${number}](${url}).`);

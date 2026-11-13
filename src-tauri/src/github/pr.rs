@@ -1192,6 +1192,7 @@ pub(crate) async fn run_gh_maybe_attached(
     if !s.dir.is_dir() {
         return Err(crate::attachments::no_longer_attached(&s.names[0]));
     }
+    refuse_long_gh_argv(args)?;
     let out = match run_gh_raw_in_dir(repo_path, &s.dir, args, attach_timeout(s.names.len())).await
     {
         // A session folder removed after that check fails the spawn: unix reports it as
@@ -1206,6 +1207,15 @@ pub(crate) async fn run_gh_maybe_attached(
         GhAttachRun::Failed => Err(attached_run_failure(out, slug, &s.names, write)),
         GhAttachRun::Posted | GhAttachRun::Partial => Ok(out),
     }
+}
+
+/// The command-line allowance for gh's program path.
+const GH_PROGRAM_UNITS: usize = 300;
+
+/// The attached-write length refusal for a gh run with `args`, decided before the spawn.
+fn refuse_long_gh_argv(args: &[&str]) -> AppResult<()> {
+    let units = crate::attachments::attached_command_line_units(GH_PROGRAM_UNITS, args);
+    crate::attachments::refuse_long_attached_argv(units, cfg!(windows))
 }
 
 /// Where a partial post's body is read back from.
@@ -1522,6 +1532,131 @@ mod attach_tests {
             Ok(_) => panic!("gh ran in a missing folder"),
         };
         assert_eq!(m, "image-1.png is no longer attached. Attach it again.");
+    }
+
+    use crate::attachments::{
+        attached_command_line_units, refuse_long_attached_argv, ATTACHED_COMMAND_LINE_LIMIT,
+    };
+
+    fn long_refused(body: &str, windows: bool) -> bool {
+        let args = ["issue", "comment", "1", "--body", body];
+        let units = attached_command_line_units(GH_PROGRAM_UNITS, &args);
+        refuse_long_attached_argv(units, windows).is_err()
+    }
+
+    #[test]
+    fn a_body_too_long_for_a_windows_command_line_is_refused_only_on_windows() {
+        let body = "a".repeat(40_000);
+        assert!(long_refused(&body, true));
+        assert!(!long_refused(&body, false));
+    }
+
+    #[test]
+    fn a_body_that_fits_passes_on_both_platforms() {
+        let body = "a".repeat(20_000);
+        assert!(!long_refused(&body, true));
+        assert!(!long_refused(&body, false));
+    }
+
+    #[test]
+    fn quotes_count_their_escape_allowance() {
+        assert!(long_refused(&"\"".repeat(16_000), true));
+    }
+
+    #[test]
+    fn a_body_is_counted_in_utf16_units() {
+        assert!(long_refused(&"\u{1F600}".repeat(20_000), true));
+        assert!(!long_refused(&"a".repeat(20_000), true));
+        // 40,000 bytes, 20,000 units.
+        assert!(!long_refused(&"\u{E9}".repeat(20_000), true));
+    }
+
+    // LaTeX or Windows paths: std adds no backslash unless a `"` or the closing quote follows.
+    #[test]
+    fn backslashes_without_a_quote_add_nothing() {
+        let body = format!("{}{}", "\\\\\\a".repeat(4_000), "b".repeat(4_000));
+        assert_eq!(body.chars().count(), 20_000);
+        assert_eq!(body.matches('\\').count(), 12_000);
+        assert!(!long_refused(&body, true));
+    }
+
+    const LENGTH_CHECK: &str = "refuse_long_gh_argv(&args)?;";
+
+    /// Every arm of the create decides its length once before its push, only when staged
+    /// and after the attach tail.
+    fn length_checked_before_each_push(body: &str) -> bool {
+        let staged_check = format!(
+            "if let Some(s) = &staged {{ args.extend(attach_tail(&s.names)); {LENGTH_CHECK} }}"
+        );
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let pushes: Vec<usize> = flat.match_indices("&[\"push\", ").map(|(i, _)| i).collect();
+        pushes.len() == 2
+            && pushes.iter().enumerate().all(|(arm, &at)| {
+                let from = if arm == 0 { 0 } else { pushes[arm - 1] };
+                let span = &flat[from..at];
+                span.contains(&staged_check) && span.matches("refuse_long_gh_argv(").count() == 1
+            })
+    }
+
+    #[test]
+    fn pr_create_decides_the_attached_length_before_either_push() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_create_core",
+        );
+        assert!(length_checked_before_each_push(&body), "{body}");
+        let upstream_unchecked = body.replacen(LENGTH_CHECK, "", 1);
+        assert!(!length_checked_before_each_push(&upstream_unchecked));
+        let last = body.rfind(LENGTH_CHECK).unwrap();
+        let origin_unchecked = format!("{}{}", &body[..last], &body[last + LENGTH_CHECK.len()..]);
+        assert_ne!(origin_unchecked, upstream_unchecked);
+        assert!(!length_checked_before_each_push(&origin_unchecked));
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let inside = format!("{LENGTH_CHECK} }}");
+        let at = flat.rfind(&inside).unwrap();
+        let outside = format!(
+            "{}}} {LENGTH_CHECK}{}",
+            &flat[..at],
+            &flat[at + inside.len()..]
+        );
+        assert!(!length_checked_before_each_push(&outside));
+    }
+
+    #[test]
+    fn the_long_body_refusal_is_the_attachment_sentence() {
+        match refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, true) {
+            Err(AppError::InvalidArgument(m)) => {
+                assert_eq!(m, crate::attachments::TOO_LONG_WITH_IMAGES_REFUSAL)
+            }
+            other => panic!("expected the long-body refusal, got {other:?}"),
+        }
+    }
+
+    // Wired before the spawn: gh never starts, so the OS's own length error can't surface.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_too_long_attached_write_is_refused_before_gh_runs() {
+        let base = tempfile::tempdir().unwrap();
+        let staged = StagedRefs {
+            names: names(),
+            dir: base.path().to_path_buf(),
+        };
+        let repo = base.path().to_string_lossy().into_owned();
+        let body = "a".repeat(40_000);
+        let r = run_gh_maybe_attached(
+            &repo,
+            "o/r",
+            &["issue", "comment", "1", "--body", &body],
+            Some(&staged),
+            AttachedWrite::Post,
+        )
+        .await;
+        let m = match r {
+            Err(AppError::InvalidArgument(m)) => m,
+            Err(e) => panic!("expected the long-body refusal, got {e:?}"),
+            Ok(_) => panic!("gh ran with an over-long command line"),
+        };
+        assert_eq!(m, crate::attachments::TOO_LONG_WITH_IMAGES_REFUSAL);
     }
 
     #[test]
@@ -9307,19 +9442,6 @@ pub(crate) async fn gh_pr_create_core(
         let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
         let fork_owner = crate::github::fork_owner_of(&origin_slug).to_string();
 
-        // Push `head` to origin — origin IS the fork; the PR's head lives there.
-        let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
-        let spec = crate::git::remote::publish_refspec(&head);
-        crate::git::remote::run_git_mutating_with_creds_for_branch(
-            state,
-            &repo_path,
-            &cred,
-            &["push", "-u", "origin", &spec],
-            NETWORK_TIMEOUT,
-            &head,
-        )
-        .await?;
-
         let cross_head = format!("{fork_owner}:{head}");
         let mut args = vec![
             "pr",
@@ -9340,7 +9462,22 @@ pub(crate) async fn gh_pr_create_core(
         }
         if let Some(s) = &staged {
             args.extend(attach_tail(&s.names));
+            refuse_long_gh_argv(&args)?;
         }
+
+        // Push `head` to origin — origin IS the fork; the PR's head lives there.
+        let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+        let spec = crate::git::remote::publish_refspec(&head);
+        crate::git::remote::run_git_mutating_with_creds_for_branch(
+            state,
+            &repo_path,
+            &cred,
+            &["push", "-u", "origin", &spec],
+            NETWORK_TIMEOUT,
+            &head,
+        )
+        .await?;
+
         let result = run_gh_maybe_attached(
             &repo_path,
             &parent_slug,
@@ -9371,19 +9508,6 @@ pub(crate) async fn gh_pr_create_core(
     // Origin lens (default): pin origin so this is a same-repo PR on the fork.
     let origin_slug = crate::github::gh_lens_slug(&repo_path, None).await?;
 
-    // gh can only open a PR for a branch that exists on the remote.
-    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
-    let spec = crate::git::remote::publish_refspec(&head);
-    crate::git::remote::run_git_mutating_with_creds_for_branch(
-        state,
-        &repo_path,
-        &cred,
-        &["push", "-u", "origin", &spec],
-        NETWORK_TIMEOUT,
-        &head,
-    )
-    .await?;
-
     let mut args = vec![
         "pr",
         "create",
@@ -9403,7 +9527,22 @@ pub(crate) async fn gh_pr_create_core(
     }
     if let Some(s) = &staged {
         args.extend(attach_tail(&s.names));
+        refuse_long_gh_argv(&args)?;
     }
+
+    // gh can only open a PR for a branch that exists on the remote.
+    let cred = crate::forge::credential_config_for_remote(&repo_path, "origin").await?;
+    let spec = crate::git::remote::publish_refspec(&head);
+    crate::git::remote::run_git_mutating_with_creds_for_branch(
+        state,
+        &repo_path,
+        &cred,
+        &["push", "-u", "origin", &spec],
+        NETWORK_TIMEOUT,
+        &head,
+    )
+    .await?;
+
     // Labels/assignees are applied AFTER create, NOT via `gh pr create
     // --label/--assignee`: gh 2.94 records each value TWICE on the activity timeline
     // when passed at create time (create mutation + follow-up re-apply), so the feed

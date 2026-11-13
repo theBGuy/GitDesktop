@@ -401,6 +401,91 @@ describe("RemotePrView edit attachments", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("keeps the base pick and issue chips with a running save's draft on a reopen", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    const user = userEvent.setup();
+    await openPrEdit({ issues: true });
+    // Switching the chip's keyword is an edit a re-peel of the body would undo.
+    fireEvent.click(button(/^Closes issue 3:/));
+    await waitFor(() => expect(button(/^Relates to issue 3:/)).toBeTruthy());
+    await pickBase(user, "next");
+    const pending = deferred<{ failedAttachments: string[] }>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(baseArg(0)).toBe("next");
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words");
+    expect(button(/^Relates to issue 3:/)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /^Closes issue 3:/ }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("combobox", { name: "Base branch" }),
+    ).toHaveTextContent("next");
+    // A running save's spinner prefixes its label ("Loading").
+    const save = button(/^(Loading)?Save$/);
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(reasonOf(save)).toBe("Applying this change…");
+    await act(async () => pending.resolve({ failedAttachments: [] }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(forgePrEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a save that failed while closed whole on the reopen, and Save again sends its images but not the base it applied", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    const user = userEvent.setup();
+    await openPrEdit({ issues: true });
+    // The Closes #3 chip switches keyword, an edit a re-peel of the body would undo.
+    fireEvent.click(button(/^Closes issue 3:/));
+    await waitFor(() => expect(button(/^Relates to issue 3:/)).toBeTruthy());
+    await pickBase(user, "next");
+    await pasteImage();
+    const typed = editBox().value;
+    const refs = { session: SESSION, names: ["image-1.png"] };
+    const pending = deferred<{ failedAttachments: string[] }>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(baseArg(0)).toBe("next");
+    expect(vi.mocked(forgePrEdit).mock.calls[0][6]).toEqual(refs);
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () =>
+      pending.reject({ kind: "gh", message: BODY_DROPPED }),
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe(typed);
+    expect(button("Remove image-1.png")).toBeTruthy();
+    expect(button(/^Relates to issue 3:/)).toBeTruthy();
+    expect(
+      screen.getByRole("combobox", { name: "Base branch" }),
+    ).toHaveTextContent("next");
+    expect(button("Save")).not.toHaveAttribute("aria-disabled", "true");
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    // The failed save applied the base before its description (onPartialSaved
+    // recorded it), so the retry leaves the base out.
+    expect(baseArg(1)).toBeUndefined();
+    expect(vi.mocked(forgePrEdit).mock.calls[1][6]).toEqual(refs);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("starts a generation from the chord unless a save carrying images is pending (AC30)", async () => {
     vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
     await openPrEdit();

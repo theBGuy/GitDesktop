@@ -4,6 +4,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { createdNumberOf } from "@/lib/attachments/references";
 import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
@@ -208,13 +209,16 @@ export function useCreatePr(repo: string) {
       // already frozen in the vars.
       identity: ["create-pr", repo],
       // The new PR's number comes back from the forge; its lens is the one it
-      // opened against.
-      onSuccess: (pr, args) =>
+      // opened against. A number that couldn't be read names no PR, so the
+      // numberless form re-reads the lens's details and CI badges instead.
+      onSuccess: (pr, args) => {
+        const number = createdNumberOf(pr);
         recheckRunsAfterPush(
           queryClient,
           repo,
-          prChecksRecheck(repo, args.lens ?? "origin", pr.number),
-        ),
+          prChecksRecheck(repo, args.lens ?? "origin", number ?? undefined),
+        );
+      },
     },
   );
 }

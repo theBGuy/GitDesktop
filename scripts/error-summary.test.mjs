@@ -1852,15 +1852,15 @@ test("the Keep local, mirror, local-upstream and agent-session push refusals lab
   }
 });
 
-/** github/pr.rs and github/issue.rs: an edit whose description upload failed
- *  after the title and base were saved; gh's transport stderr follows it. */
+/** github/pr.rs (`edit_body_dropped_text`): an edit whose description upload
+ *  failed after the title and base were saved; gh's transport stderr follows it. */
 const BODY_DROPPED =
   "The description wasn't saved because image-1.png didn't upload. Your other changes were saved. Save again to retry.";
 const DIAL_TAIL =
   'Post "https://uploads.github.com/": dial tcp 140.82.112.6:443: i/o timeout';
 
 test("an edit that saved its other changes headlines that, over a network tail", () => {
-  for (const kind of ["gh", "glab"]) {
+  for (const kind of ["gh"]) {
     const message = `${BODY_DROPPED}\n${DIAL_TAIL}`;
     const p = presentError(appError(kind, message));
     assert.equal(p.summary, BODY_DROPPED, kind);
@@ -1870,7 +1870,7 @@ test("an edit that saved its other changes headlines that, over a network tail",
   }
 });
 
-test("only line one of a gh or glab error carries the saved-changes marker", () => {
+test("only line one of a gh error carries the saved-changes marker", () => {
   const later = `${DIAL_TAIL}\n${BODY_DROPPED}`;
   assert.equal(presentError(appError("gh", later)).summary, reach("GitHub"));
   assert.equal(otherChangesSaved(appError("gh", later)), false);
@@ -1886,6 +1886,11 @@ test("a GitLab edit that saved nothing keeps the network rewrite", () => {
     reach("GitLab"),
   );
   assert.equal(otherChangesSaved(appError("glab", message)), false);
+  // No GitLab route emits the saved-changes marker, so line one carrying it
+  // is not headlined either.
+  const marked = `${BODY_DROPPED}\n${DIAL_TAIL}`;
+  assert.equal(presentError(appError("glab", marked)).summary, reach("GitLab"));
+  assert.equal(otherChangesSaved(appError("glab", marked)), false);
 });
 
 for (const verb of ["created", "posted"]) {

@@ -17,6 +17,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
+import { createdNumberOf } from "@/lib/attachments/references";
 import { presentError } from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
 import { useBranches, useCreatePr, useForgeStatus } from "@/lib/git/queries";
@@ -49,6 +50,15 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
+
+/** The toast title of a promote whose new pull request's number couldn't be
+ *  read, naming the steps it skipped: they link to or comment on that number. */
+function numberlessPromoteTitle(opened: string, hadComments: boolean) {
+  const skipped = hadComments
+    ? "Its comments weren't carried over and the local pull request isn't linked to it."
+    : "The local pull request isn't linked to it.";
+  return `${opened}, but its number couldn't be read. ${skipped}`;
+}
 
 /**
  * Publishes a local PR to the repo's provider (GitHub, GitLab, or Bitbucket):
@@ -259,15 +269,34 @@ export function PromoteLocalPrDialog({
         }
         return;
       }
-      const { number, url } = await createPr.mutateAsync({
+      const createdRef = await createPr.mutateAsync({
         base: pr.base,
         head: pr.head,
         title: pr.title,
         body: pr.body,
         draft,
       });
-      created = { number, url };
+      const { url } = createdRef;
       outcome = "success";
+      // The PR exists but its number couldn't be read: the local close already
+      // records the promote, and nothing may link to, comment on or select PR 0.
+      const number = createdNumberOf(createdRef);
+      if (number === null) {
+        const { live, away } = landedIn(repoPath);
+        const title = numberlessPromoteTitle(
+          `Opened ${prNoun}${away}`,
+          carried.length > 0,
+        );
+        toast.warning(title, {
+          description: url || undefined,
+          action: url
+            ? { label: forgeViewLabel ?? "View", onClick: () => openUrl(url) }
+            : undefined,
+        });
+        if (stillOnThisPr(live)) flushSync(() => onOpenChange(false));
+        return;
+      }
+      created = { number, url };
       // Flip the lane HERE, not in the finally: the comment carry-over below can
       // run long, and the strip would sit on "creating" with the number already
       // known. The watcher itself arms in the finally, once those steps are done.
@@ -372,6 +401,9 @@ export function PromoteLocalPrDialog({
           number: created.number,
           startedAt: claimedAt,
         });
+      } else if (created === null) {
+        // Created without a readable number: no row can ever match a hand-off.
+        settlePrCreate(repoPath, pr.head, "success");
       }
     }
   }

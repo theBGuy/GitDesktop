@@ -1785,8 +1785,9 @@ from an issue's relations included), and in the **Edit** dialog for an issue's, 
 request's or merge request's title and description. Paste one from the clipboard, or pick
 files with **Attach image**, the image button at the end of the formatting toolbar (the
 command palette's **Attach image** opens the same picker). PNG, JPEG, GIF and WebP work,
-up to 10 MB and 40 megapixels each, 10 per draft; only images the text still references
-count toward the 10, so ones whose reference you deleted make room when you attach more.
+up to 10 MB and 40 megapixels each, 10 per draft; when a draft is full, attaching another
+discards the images whose reference you deleted, to make room. On Windows, text longer
+than about 30,000 characters can't be sent with images: shorten it, or add them separately.
 Each image adds a Markdown reference at the cursor (\`![image](image-1.png)\` for a paste;
 a picked file's name, minus its extension, becomes the alt text), so you edit the alt text
 in the text itself. A chip under the editor shows each image's thumbnail, name and size:
@@ -1799,10 +1800,11 @@ cleared. If GitHub takes the comment but an image fails to upload, the comment p
 the failed images stay attached for a follow-up comment. A new issue or pull request is
 still created when a later image fails, and a warning says to edit the description to add
 it again; if the first image fails, nothing is created and the dialog keeps your text and
-images. In the **Edit** dialog, the description saves with the images that uploaded and the
-dialog stays open with the failed ones still attached, so pressing **Save** again adds
-them; if the first image fails, the description isn't saved (your other changes, such as
-the title, are) and an error says so. On GitLab an upload is all or nothing: if an image
+images. On GitHub, the **Edit** dialog saves the description with the images that uploaded
+and stays open with the failed ones still attached, so pressing **Save** again adds them
+(when the saved description can't be read back, it closes with a warning instead); if the
+first image fails, the description isn't saved (your other changes, such as the title,
+are) and an error says so. On GitLab an upload is all or nothing: if an image
 isn't accepted, nothing is posted or saved. Images need GitHub CLI 2.99 or newer on
 GitHub.com or GitHub Enterprise Cloud (not GitHub Enterprise Server) with write access to
 the repository, or GitLab CLI 1.91 or newer; Bitbucket has no image attachments. With some

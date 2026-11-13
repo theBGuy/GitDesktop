@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
@@ -16,7 +17,11 @@ import {
 } from "@/features/conversations/EditTitleBodyDialog";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import type { AttachmentRefs } from "@/lib/attachments/references";
-import { draftEntry, draftKeyFor } from "@/lib/attachments/store";
+import {
+  draftEntry,
+  draftKeyFor,
+  sweepOtherOwners,
+} from "@/lib/attachments/store";
 import {
   useAttachmentOwner,
   useDraftAttachments,
@@ -44,6 +49,7 @@ vi.mock("sonner", async (importOriginal) => ({
 
 const REPO = "C:/repo";
 const KEY = draftKeyFor("issue-edit", `${REPO}#origin#7`);
+const OTHER_KEY = draftKeyFor("issue-edit", `${REPO}#origin#8`);
 const ATTACHING = "Wait for the image to finish attaching.";
 const BODY_DROPPED =
   "The description wasn't saved because image-1.png didn't upload. Your other changes were saved. Save again to retry.";
@@ -100,6 +106,8 @@ type Save = (
 interface HarnessProps {
   save: Save;
   attach?: boolean;
+  /** The item the dialog edits; another key is another item. */
+  draftKey?: string;
   seedBody?: (stored: string) => string;
   onPartialSaved?: () => void;
   generating?: boolean;
@@ -110,6 +118,7 @@ interface HarnessProps {
 function Harness({
   save,
   attach = true,
+  draftKey = KEY,
   seedBody,
   onPartialSaved,
   generating,
@@ -120,12 +129,12 @@ function Harness({
     onSave: (value, begin) => save(value, begin?.(value.body)),
     successToast: "Issue updated",
     attach: attach
-      ? { draftKey: KEY, kind: "issue", seedBody, onPartialSaved }
+      ? { draftKey, kind: "issue", seedBody, onPartialSaved }
       : undefined,
   });
   const owner = useAttachmentOwner("issue-edit", true);
   const handle = useDraftAttachments({
-    draftKey: KEY,
+    draftKey,
     owner,
     gateReason: null,
     holdReason: null,
@@ -172,6 +181,14 @@ function mount(props: Omit<HarnessProps, "expose">) {
   return {
     open,
     rerender: (p: Omit<HarnessProps, "expose">) => view.rerender(ui(p)),
+    /** Unmounts the host, as selecting another kind of item does, and mounts a
+     *  new instance of it (a new form and attachment owner). */
+    remount: (p: Omit<HarnessProps, "expose">) => {
+      view.rerender(
+        <QueryClientProvider client={client}>{null}</QueryClientProvider>,
+      );
+      view.rerender(ui(p));
+    },
   };
 }
 
@@ -179,7 +196,10 @@ const desc = () =>
   screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
 const titleBox = () =>
   screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
-const saveButton = () => screen.getByRole("button", { name: "Save" });
+// A running save's spinner prefixes its label ("Loading").
+const saveButton = () =>
+  screen.getByRole("button", { name: /^(Loading)?Save$/ });
+const saveSpinner = () => within(saveButton()).queryByRole("status");
 const dialog = () => screen.queryByRole("dialog");
 const chipNames = () =>
   screen
@@ -192,8 +212,21 @@ function reasonOf(el: Element): string {
   const ids = el.getAttribute("aria-describedby")?.split(" ") ?? [];
   return ids.map((id) => document.getElementById(id)?.textContent).join(" ");
 }
+const APPLYING = "Applying this change…";
+/** Save live: neither disabled nor held by a reason. */
+function expectSaveLive() {
+  expect(saveButton()).not.toBeDisabled();
+  expect(saveButton()).not.toHaveAttribute("aria-disabled", "true");
+}
+/** Save held the reasoned way: focusable, aria-disabled, the reason read out. */
+function expectSaveHeld(reason: string) {
+  expect(saveButton()).not.toBeDisabled();
+  expect(saveButton()).toHaveAttribute("aria-disabled", "true");
+  expect(reasonOf(saveButton())).toBe(reason);
+}
 
-async function stageImages(count: number) {
+/** Stages `count` images; `last` is the name number the final one takes. */
+async function stageImages(count: number, last = count) {
   const files = Array.from(
     { length: count },
     () => new File([new Uint8Array([1, 2])], "shot.png", { type: "image/png" }),
@@ -201,7 +234,7 @@ async function stageImages(count: number) {
   fireEvent.paste(desc(), {
     clipboardData: { files, types: ["Files"], getData: () => "" },
   });
-  await waitFor(() => expect(desc().value).toContain(`](image-${count}.png)`));
+  await waitFor(() => expect(desc().value).toContain(`](image-${last}.png)`));
 }
 
 /** mod+enter as a keyboard user presses it (the dialog accepts either modifier). */
@@ -219,6 +252,25 @@ describe("edit dialog without attachments", () => {
     expect(dialog()?.querySelector("input[type='file']")).toBeNull();
     expect(screen.queryByRole("list", { name: "Attached images" })).toBeNull();
     expect(dialog()?.querySelector("form > span[aria-live]")).toBeNull();
+  });
+
+  it("keeps a local host's save as before: a reopen during it is a fresh form that saves", async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn<Save>(() => pending.promise);
+    const { open } = mount({ save, attach: false });
+    await open();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(saveButton()).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(dialog()).toBeNull());
+    await open("Fresh record");
+    expect(desc().value).toBe("Fresh record");
+    expect(saveButton()).not.toBeDisabled();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await act(async () => pending.resolve(undefined));
+    await waitFor(() => expect(dialog()).toBeNull());
   });
 });
 
@@ -263,10 +315,10 @@ describe("edit dialog outcomes", () => {
     saveButton().focus();
     fireEvent.click(saveButton());
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
-    // The browser drops focus from a control disabled under it.
+    // Focus leaves the form before the settle.
     (document.activeElement as HTMLElement | null)?.blur();
     await act(async () => pending.reject(new Error("edit refused")));
-    await waitFor(() => expect(saveButton()).not.toBeDisabled());
+    await waitFor(expectSaveLive);
     expect(dialog()).not.toBeNull();
     expect(toast.error).toHaveBeenCalledTimes(1);
     expect(titleBox().value).toBe("Typed title");
@@ -521,7 +573,7 @@ describe("edit dialog holds and late settles", () => {
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(dialog()).toBeNull());
-    // The end waits for the settle.
+    // The close leaves the posting draft to the settle.
     expect(draftEntry(KEY)?.posting).toEqual(["image-1.png"]);
     await act(async () =>
       pending.resolve({
@@ -537,21 +589,23 @@ describe("edit dialog holds and late settles", () => {
     expect(draftEntry(KEY)).toBeUndefined();
   });
 
-  it("lets a save that settles after a reopen leave the newer session alone (AC19)", async () => {
+  it("lets a save that settles after Edit opened on another item leave that item's fresh form alone (AC19)", async () => {
     const pending = deferred<unknown>();
     const save = vi.fn<Save>(() => pending.promise);
-    const { open } = mount({ save });
+    const { open, rerender } = mount({ save });
     await open("");
     await stageImages(1);
+    fireEvent.change(titleBox(), { target: { value: "Typed title" } });
     fireEvent.click(saveButton());
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(dialog()).toBeNull());
-    await open("Reopened");
-    // The reopened session can't stage into the draft still posting.
-    expect(reasonOf(screen.getByRole("button", { name: "Attach image" }))).toBe(
-      "Uploading 1 image and saving…",
-    );
+    rerender({ save, draftKey: OTHER_KEY });
+    await open("Other item");
+    expect(titleBox().value).toBe("Seven");
+    expect(desc().value).toBe("Other item");
+    expect(chipNames()).toEqual([]);
+    expectSaveLive();
     await act(async () =>
       pending.resolve({
         failedAttachments: ["image-1.png"],
@@ -559,9 +613,402 @@ describe("edit dialog holds and late settles", () => {
       }),
     );
     expect(dialog()).not.toBeNull();
-    expect(desc().value).toBe("Reopened");
+    expect(desc().value).toBe("Other item");
     expect(politeRegionText()).toBe("");
     expect(toast.warning).toHaveBeenCalledTimes(1);
     expect(draftEntry(KEY)).toBeUndefined();
+  });
+});
+
+describe("edit dialog reopened over its own save", () => {
+  const cancel = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+  /** Opens, types a title, stages one image and starts a save, then closes. */
+  async function saveThenClose(save: Save) {
+    const { open, rerender } = mount({ save, onPartialSaved });
+    await open("");
+    await stageImages(1);
+    fireEvent.change(titleBox(), { target: { value: "Typed title" } });
+    const typed = desc().value;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    return { open, rerender, typed };
+  }
+  const onPartialSaved = vi.fn();
+  beforeEach(() => onPartialSaved.mockClear());
+
+  it("shows the running save's draft on a reopen, Save held with its reason, and the settle closes it", async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn<Save>(() => pending.promise);
+    const { open, typed } = await saveThenClose(save);
+    expect(save).toHaveBeenCalledTimes(1);
+    await open("Stale record");
+    expect(titleBox().value).toBe("Typed title");
+    expect(desc().value).toBe(typed);
+    expect(chipNames()).toEqual(["Remove image-1.png"]);
+    expectSaveHeld(APPLYING);
+    saveButton().focus();
+    expect(document.activeElement).toBe(saveButton());
+    fireEvent.click(saveButton());
+    fireEvent.submit(dialog()?.querySelector("form") as HTMLFormElement);
+    await act(async () => undefined);
+    expect(save).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      pending.resolve({ failedAttachments: [], body: null }),
+    );
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(toast.success).toHaveBeenCalledTimes(1);
+    expect(draftEntry(KEY)).toBeUndefined();
+  });
+
+  it("shows a draft whose save failed while closed on the first reopen, ready to retry", async () => {
+    const first = deferred<unknown>();
+    const save = vi.fn<Save>(() => first.promise);
+    const { open, typed } = await saveThenClose(save);
+    await act(async () => first.reject({ kind: "gh", message: BODY_DROPPED }));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(onPartialSaved).toHaveBeenCalledTimes(1);
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    await open("Stale record");
+    expect(titleBox().value).toBe("Typed title");
+    expect(desc().value).toBe(typed);
+    expect(chipNames()).toEqual(["Remove image-1.png"]);
+    expectSaveLive();
+    save.mockRejectedValueOnce(new Error("edit refused"));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1][1]).toEqual({
+      session: SESSION,
+      names: ["image-1.png"],
+    });
+    // A failure in view is not kept past the close.
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(draftEntry(KEY)).toBeUndefined();
+    await open("Fresh record");
+    expect(titleBox().value).toBe("Seven");
+    expect(desc().value).toBe("Fresh record");
+    expect(chipNames()).toEqual([]);
+  });
+
+  it("drops a draft whose save failed in view at the close, and reopens fresh", async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn<Save>(() => pending.promise);
+    const { open } = mount({ save });
+    await open("");
+    await stageImages(1);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    await act(async () => pending.reject(new Error("edit refused")));
+    await waitFor(expectSaveLive);
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(draftEntry(KEY)).toBeUndefined();
+    await open("Fresh record");
+    expect(desc().value).toBe("Fresh record");
+    expect(chipNames()).toEqual([]);
+  });
+
+  it("keeps another item's running save in flight when an older save settles, so its failure while closed comes back whole", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const save = vi
+      .fn<Save>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    await stageImages(1, 2);
+    fireEvent.change(titleBox(), { target: { value: "Other title" } });
+    const typed = desc().value;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await act(async () => first.resolve({ failedAttachments: [], body: null }));
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    await act(async () => second.reject({ kind: "gh", message: BODY_DROPPED }));
+    expect(draftEntry(OTHER_KEY)?.images.map((i) => i.name)).toEqual([
+      "image-2.png",
+    ]);
+    await open("Stale record");
+    expect(titleBox().value).toBe("Other title");
+    expect(desc().value).toBe(typed);
+    expect(chipNames()).toEqual(["Remove image-2.png"]);
+    expectSaveLive();
+    save.mockResolvedValueOnce({ failedAttachments: [], body: null });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(save.mock.calls[2][1]).toEqual({
+      session: SESSION,
+      names: ["image-2.png"],
+    });
+  });
+
+  it("ends a draft kept by a failure while closed when Edit opens on another item", async () => {
+    const first = deferred<unknown>();
+    const save = vi.fn<Save>(() => first.promise);
+    const { open, rerender } = await saveThenClose(save);
+    await act(async () => first.reject(new Error("edit refused")));
+    expect(draftEntry(KEY)?.images.map((i) => i.name)).toEqual(["image-1.png"]);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    expect(desc().value).toBe("Other item");
+    expect(draftEntry(KEY)).toBeUndefined();
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+  });
+
+  it("reopens fresh when a failure while closed finds its draft's images already ended", async () => {
+    const first = deferred<unknown>();
+    const save = vi.fn<Save>(() => first.promise);
+    const { open } = await saveThenClose(save);
+    // Another mount of the surface sweeps the closed draft; its end waits for
+    // the post, and the failed settle discards the images.
+    act(() => sweepOtherOwners("issue-edit", {}));
+    await act(async () => first.reject({ kind: "gh", message: BODY_DROPPED }));
+    expect(draftEntry(KEY)).toBeUndefined();
+    await open("Fresh record");
+    expect(titleBox().value).toBe("Seven");
+    expect(desc().value).toBe("Fresh record");
+    expect(chipNames()).toEqual([]);
+    expectSaveLive();
+  });
+
+  it("keeps Save held on a reopen while that item's save runs after another item's save settled, and sends nothing more", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const save = vi
+      .fn<Save>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    await stageImages(1, 2);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    await act(async () => first.resolve({ failedAttachments: [], body: null }));
+    await open("Stale record");
+    expect(desc().value).toContain("](image-2.png)");
+    expectSaveHeld(APPLYING);
+    expect(saveSpinner()).not.toBeNull();
+    titleBox().focus();
+    await modEnter();
+    fireEvent.click(saveButton());
+    fireEvent.submit(dialog()?.querySelector("form") as HTMLFormElement);
+    await act(async () => undefined);
+    expect(save).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      second.resolve({ failedAttachments: [], body: null }),
+    );
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(toast.success).toHaveBeenCalledTimes(2);
+    expect(draftEntry(OTHER_KEY)).toBeUndefined();
+  });
+
+  it("keeps Save held in an open dialog while its item's save runs after another item's save settled", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const save = vi
+      .fn<Save>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    await stageImages(1, 2);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await act(async () => first.resolve({ failedAttachments: [], body: null }));
+    expect(dialog()).not.toBeNull();
+    expectSaveHeld(APPLYING);
+    titleBox().focus();
+    await modEnter();
+    await act(async () => undefined);
+    expect(save).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      second.resolve({ failedAttachments: [], body: null }),
+    );
+    await waitFor(() => expect(dialog()).toBeNull());
+  });
+
+  it("holds Save, but not the description, on a fresh form of an item whose older save runs", async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn<Save>(() => pending.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    rerender({ save, onPartialSaved });
+    await open("Fresh record");
+    expect(titleBox().value).toBe("Seven");
+    expect(desc().value).toBe("Fresh record");
+    expectSaveHeld(APPLYING);
+    expect(saveSpinner()).not.toBeNull();
+    expect(desc()).not.toBeDisabled();
+    titleBox().focus();
+    await modEnter();
+    await act(async () => undefined);
+    expect(save).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      pending.resolve({ failedAttachments: [], body: null }),
+    );
+    expect(dialog()).not.toBeNull();
+    expectSaveLive();
+    expect(saveSpinner()).toBeNull();
+  });
+
+  it("lets an older save landing after a host remount leave the new instance's draft and its images alone", async () => {
+    const first = deferred<unknown>();
+    const save = vi
+      .fn<Save>()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce({ failedAttachments: [], body: null });
+    const { open, remount } = mount({ save });
+    await open("");
+    await stageImages(1);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    remount({ save });
+    await open("Fresh record");
+    await stageImages(1, 2);
+    expect(chipNames()).toEqual(["Remove image-2.png"]);
+    await act(async () => first.resolve({ failedAttachments: [], body: null }));
+    expect(chipNames()).toEqual(["Remove image-2.png"]);
+    expect(draftEntry(KEY)?.images.map((i) => i.name)).toEqual(["image-2.png"]);
+    expect(desc().value).toContain("](image-2.png)");
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[1][1]).toEqual({
+      session: SESSION,
+      names: ["image-2.png"],
+    });
+  });
+
+  it("ends a left draft's images when its save fails after Edit opened on another item", async () => {
+    const first = deferred<unknown>();
+    const save = vi.fn<Save>(() => first.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    await act(async () => first.reject(new Error("edit refused")));
+    expect(draftEntry(KEY)).toBeUndefined();
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+  });
+
+  it("ends a left draft's unreferenced images when its save lands after Edit opened on another item", async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn<Save>(() => pending.promise);
+    const { open, rerender } = mount({ save });
+    await open("");
+    await stageImages(1);
+    fireEvent.change(desc(), { target: { value: "No images" } });
+    expect(draftEntry(KEY)?.images.map((i) => i.name)).toEqual(["image-1.png"]);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0][1]).toBeUndefined();
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    rerender({ save, draftKey: OTHER_KEY });
+    await open("Other item");
+    await act(async () =>
+      pending.resolve({ failedAttachments: [], body: null }),
+    );
+    expect(draftEntry(KEY)).toBeUndefined();
+  });
+
+  it("lets another item save while one item's save runs", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const save = vi
+      .fn<Save>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    expectSaveLive();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await act(async () =>
+      second.resolve({ failedAttachments: [], body: null }),
+    );
+    await waitFor(() => expect(dialog()).toBeNull());
+    await act(async () => first.resolve({ failedAttachments: [], body: null }));
+    expect(toast.success).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps another item's running save in flight when an older save fails, so its failure while closed comes back whole", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const save = vi
+      .fn<Save>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { open, rerender } = await saveThenClose(save);
+    rerender({ save, onPartialSaved, draftKey: OTHER_KEY });
+    await open("Other item");
+    await stageImages(1, 2);
+    fireEvent.change(titleBox(), { target: { value: "Other title" } });
+    const typed = desc().value;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await act(async () => first.reject(new Error("edit refused")));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expectSaveHeld(APPLYING);
+    cancel();
+    await waitFor(() => expect(dialog()).toBeNull());
+    await act(async () => second.reject({ kind: "gh", message: BODY_DROPPED }));
+    expect(toast.error).toHaveBeenCalledTimes(2);
+    expect(draftEntry(OTHER_KEY)?.images.map((i) => i.name)).toEqual([
+      "image-2.png",
+    ]);
+    await open("Stale record");
+    expect(titleBox().value).toBe("Other title");
+    expect(desc().value).toBe(typed);
+    expect(chipNames()).toEqual(["Remove image-2.png"]);
+    expectSaveLive();
+    save.mockResolvedValueOnce({ failedAttachments: [], body: null });
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(dialog()).toBeNull());
+    expect(save.mock.calls[2][1]).toEqual({
+      session: SESSION,
+      names: ["image-2.png"],
+    });
+  });
+
+  it("locks the description only while a save carrying images runs", async () => {
+    const plain = deferred<unknown>();
+    const save = vi.fn<Save>(() => plain.promise);
+    const { open } = mount({ save });
+    await open();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expectSaveHeld(APPLYING);
+    expect(desc()).not.toBeDisabled();
+    await act(async () => plain.reject(new Error("edit refused")));
+    await waitFor(expectSaveLive);
+    await stageImages(1);
+    const carrying = deferred<unknown>();
+    save.mockReturnValueOnce(carrying.promise);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(desc()).toBeDisabled();
+    await act(async () => carrying.reject(new Error("edit refused")));
+    await waitFor(() => expect(desc()).not.toBeDisabled());
   });
 });

@@ -9,11 +9,12 @@
   is posted and the image stays attached for a follow-up. If a later image
   fails on a new issue or pull request, GitHub still creates it, with a
   note to edit the description and add the image again; if the first one
-  fails, nothing is created and the dialog keeps your draft. An edit keeps
-  its dialog open with the image still attached, so pressing **Save** again
-  adds it. On GitLab an upload is all or nothing: if an image isn't
-  accepted, nothing is posted or saved. Images need GitHub CLI 2.99
-  or newer on GitHub.com or GitHub Enterprise Cloud with write access to
-  the repository, or GitLab CLI 1.91 or newer; Bitbucket has no image
-  attachments. With some GitHub CLI sign-in types, attaching needs GitHub
-  CLI 2.103.2 or newer, and the app says so when you post.
+  fails, nothing is created and the dialog keeps your draft. On GitHub, an
+  edit whose image fails keeps its dialog open with the image still
+  attached, so pressing **Save** again adds it. On GitLab an upload is all
+  or nothing: if an image isn't accepted, nothing is posted or saved.
+  Images need GitHub CLI 2.99 or newer on GitHub.com or GitHub Enterprise
+  Cloud with write access to the repository, or GitLab CLI 1.91 or newer;
+  Bitbucket has no image attachments. With some GitHub CLI sign-in
+  types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so
+  when you post.

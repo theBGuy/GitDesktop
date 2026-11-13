@@ -700,12 +700,9 @@ function createdDisclosure(
 }
 
 /** An edit whose description was dropped says on line one that its other
- *  changes were saved (github/pr.rs, github/issue.rs; keep the marker in
- *  step). That fact decides the retry, so it outranks the network rewrite. */
-const SAVED_DISCLOSURE_KINDS: ReadonlySet<AppError["kind"]> = new Set([
-  "gh",
-  "glab",
-]);
+ *  changes were saved (only `edit_body_dropped_text`, github/pr.rs). That
+ *  decides the retry, so it outranks the network rewrite; keep it in step. */
+const SAVED_DISCLOSURE_KINDS: ReadonlySet<AppError["kind"]> = new Set(["gh"]);
 const SAVED_DISCLOSURE = "Your other changes were saved";
 
 function savedDisclosure(

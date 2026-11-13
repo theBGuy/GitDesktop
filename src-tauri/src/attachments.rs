@@ -36,6 +36,9 @@ pub(crate) const GH_AUTH_TYPE_REFUSAL: &str = "This GitHub CLI version can't att
 /// gh's own GHES refusal when the host gate had no host to read (Rust-only sentence).
 pub(crate) const GHES_UNKNOWN_HOST_REFUSAL: &str =
     "Image attachments need GitHub.com or GitHub Enterprise Cloud.";
+/// Refused before gh starts or glab uploads anything: an attached text rides the CLI's argv,
+/// past Windows' command-line cap.
+pub(crate) const TOO_LONG_WITH_IMAGES_REFUSAL: &str = "This text is too long to send with images. Shorten it to about 30,000 characters, or add the images separately.";
 const TOO_MANY_REFUSAL: &str = "You can attach up to 10 images at a time.";
 const PASTED_LABEL: &str = "The pasted file";
 
@@ -74,8 +77,8 @@ pub struct CommentOutcome {
 
 /// The wire shape `forge_pr_create` and `forge_issue_create` return: `{number, url,
 /// failedAttachments, followupError}`, every key always present. `followupError` is the
-/// cause text when the item exists but its follow-up metadata step failed. `PrRef` stays unchanged because the discussion
-/// create serializes it too.
+/// cause text when the item exists but its follow-up metadata step failed. `PrRef` stays
+/// unchanged because the discussion create serializes it too.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCreateOutcome {
@@ -140,6 +143,43 @@ pub(crate) fn write_access_refusal(slug: &str) -> String {
 
 pub(crate) fn no_longer_attached(name: &str) -> AppError {
     AppError::InvalidArgument(format!("{name} is no longer attached. Attach it again."))
+}
+
+/// Below Windows' 32,767-unit command-line cap, leaving room for the estimates' slack.
+pub(crate) const ATTACHED_COMMAND_LINE_LIMIT: usize = 32_000;
+
+/// `fixed` plus the UTF-16 units std's `append_arg` gives `args`, each one assumed quoted
+/// (an upper bound): a backslash run of n gains n + 1 before an embedded `"` and n before
+/// the closing quote; other backslashes add nothing.
+pub(crate) fn attached_command_line_units(fixed: usize, args: &[&str]) -> usize {
+    let quoted_arg_units = |arg: &&str| {
+        // Two quotes and the separating space.
+        let mut units = 3;
+        let mut run = 0;
+        for u in arg.encode_utf16() {
+            units += 1;
+            if u == u16::from(b'\\') {
+                run += 1;
+            } else {
+                if u == u16::from(b'"') {
+                    units += run + 1;
+                }
+                run = 0;
+            }
+        }
+        units + run
+    };
+    fixed + args.iter().map(quoted_arg_units).sum::<usize>()
+}
+
+/// Refuses an attached write whose command line would pass the cap; only Windows has one.
+pub(crate) fn refuse_long_attached_argv(units: usize, windows: bool) -> AppResult<()> {
+    if windows && units > ATTACHED_COMMAND_LINE_LIMIT {
+        return Err(AppError::InvalidArgument(
+            TOO_LONG_WITH_IMAGES_REFUSAL.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn not_an_image(label: &str) -> AppError {
@@ -899,6 +939,36 @@ pub(crate) mod tests {
 
     fn b64(bytes: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    // Each count is the argument's units plus 3 (two quotes and a space) plus std's escapes.
+    #[test]
+    fn command_line_units_add_backslashes_where_std_does() {
+        let units = |arg: &str| attached_command_line_units(0, &[arg]);
+        assert_eq!(units("ab"), 5);
+        assert_eq!(units(r"a\b\\c"), 9);
+        assert_eq!(units(r#"a\\"b"#), 8 + 3);
+        assert_eq!(units(r#"""#), 4 + 1);
+        assert_eq!(units(r"a\\"), 6 + 2);
+        assert_eq!(units(r#"\"x\"#), 7 + 2 + 1);
+        assert_eq!(attached_command_line_units(300, &["a", "b"]), 300 + 4 + 4);
+    }
+
+    #[test]
+    fn command_line_units_count_utf16_units_not_bytes() {
+        assert_eq!(attached_command_line_units(0, &["\u{E9}"]), 4);
+        assert_eq!(attached_command_line_units(0, &["\u{1F600}"]), 5);
+        assert_eq!(
+            attached_command_line_units(0, &[&"\u{E9}".repeat(20_000)]),
+            20_003
+        );
+    }
+
+    #[test]
+    fn the_long_text_refusal_starts_one_unit_past_the_limit() {
+        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT, true).is_ok());
+        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, true).is_err());
+        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, false).is_ok());
     }
 
     fn webp_fixture() -> Vec<u8> {

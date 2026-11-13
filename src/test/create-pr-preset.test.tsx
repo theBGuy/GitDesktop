@@ -1480,6 +1480,101 @@ describe("CreatePrDialog image attachments", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:create-1");
     await waitFor(() => expect(attachmentStoreSizes()).toEqual(baseline));
   });
+
+  /** A host that owns `open` and whose repository can move: the only reseed
+   *  over a running create is an open in another repository. */
+  function renderMovingHost() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    let setShown!: (open: boolean) => void;
+    function Host({ repoPath }: { repoPath: string }) {
+      const [open, setOpen] = useState(true);
+      setShown = setOpen;
+      return (
+        <CreatePrDialog
+          repoPath={repoPath}
+          defaultHead="feat"
+          defaultBase="main"
+          open={open}
+          onOpenChange={setOpen}
+          host="compare"
+        />
+      );
+    }
+    const ui = (repoPath: string) => (
+      <QueryClientProvider client={client}>
+        <Host repoPath={repoPath} />
+      </QueryClientProvider>
+    );
+    const view = render(ui(REPO));
+    /** Closes the dialog and opens it again in `repo`, which reseeds it. */
+    const reopenIn = async (repo: string) => {
+      act(() => setShown(false));
+      useUiStore.setState({ repoPath: repo });
+      view.rerender(ui(repo));
+      act(() => setShown(true));
+      await waitFor(() => expect(description().value).toBe(""));
+    };
+    return { reopenIn };
+  }
+
+  /** Starts a create that settles only when the returned resolver runs. */
+  async function startHeldCreate() {
+    let finish!: (v: { number: number; url: string }) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    return finish;
+  }
+
+  const PR_7 = { number: 7, url: "https://github.com/me/project/pull/7" };
+
+  it("lets an image-less create that settles after a reopen elsewhere leave that draft's image alone", async () => {
+    const host = renderMovingHost();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "A title" },
+    });
+    fireEvent.change(description(), { target: { value: "No image here" } });
+    const finish = await startHeldCreate();
+    await host.reopenIn("C:/other");
+    await stageOne();
+    await act(async () => finish(PR_7));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+  });
+
+  it("ends the images of an image-less create's own draft when it lands", async () => {
+    await readyWithImages(1);
+    fireEvent.change(description(), { target: { value: "No image now" } });
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+  });
+
+  it("holds Attach with the uploading text when reseeded over a running create", async () => {
+    const host = renderMovingHost();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await stageOne();
+    const finish = await startHeldCreate();
+    // The reseed clears the submit, so only the posting arm holds Attach here.
+    await host.reopenIn("C:/other");
+    const attach = await screen.findByRole("button", { name: "Attach image" });
+    expect(attach).toHaveAccessibleDescription(
+      expect.stringContaining("Uploading 1 image and creating…"),
+    );
+    await act(async () => finish(PR_7));
+  });
 });
 
 describe("CreatePrDialog created with a warning", () => {
