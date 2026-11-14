@@ -149,9 +149,11 @@ Never "fix" a red by converting line endings.
 Two frontend test layers exist; pick by assertion kind, never by habit:
 
 - **Behaviour a user could observe** (render, interact, assert the outcome) →
-  a Vitest interaction test in `src/test/**/*.test.{ts,tsx}` (`pnpm test`; RTL +
-  user-event on jsdom; CI runs it in frontend.yml). Never add a NEW source-scan
-  pin for behaviour a jsdom test can exercise.
+  a Vitest interaction test in `src/test/**/*.test.{ts,tsx}` (RTL + user-event
+  on jsdom), run scoped with `pnpm exec vitest related --run <files>` while
+  iterating and through `pnpm test:vitest:full` at the end (CI runs the layer
+  in frontend.yml). Never add a NEW source-scan pin for behaviour a jsdom test
+  can exercise.
 - **"Every X does Y" class invariants** (roster/adopter scans over `src/`) and
   **pure-logic `.ts` imports** → `scripts/*.test.mjs` as before (installless:
   the `guards` job runs that glob with NO node_modules — a vitest-style test

@@ -1143,6 +1143,28 @@ test("B16 portFromEnv accepts only an integer 1024..65535", () => {
   }
 });
 
+test("B16 main binds the port GD_FULL_SUITE_PORT names", async () => {
+  const bound = [];
+  const lines = [];
+  await assert.rejects(
+    main(["vitest"], {
+      env: { GD_FULL_SUITE_PORT: "30123" },
+      exists: () => true,
+      bind: async (port) => {
+        bound.push(port);
+        throw Object.assign(new Error("denied"), { code: "EACCES" });
+      },
+      sleep: () => Promise.reject(new Error("stop polling")),
+      log: (line) => lines.push(line),
+    }),
+    /stop polling/,
+  );
+  assert.deepEqual(bound, [30123]);
+  assert.deepEqual(lines, [
+    "full-suite: using port 30123 from GD_FULL_SUITE_PORT",
+  ]);
+});
+
 test("B17 SIGTERM releases a running wrapper and spares a checking one's evidence", {
   skip:
     process.platform === "win32"
