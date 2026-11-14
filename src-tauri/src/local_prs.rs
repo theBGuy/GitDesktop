@@ -249,7 +249,7 @@ pub(crate) fn resolve_store_dir(
 ) -> AppResult<PathBuf> {
     match test_override {
         Some(dir) => Ok(dir),
-        None if is_test => Ok(std::env::temp_dir().join("gd-local-prs-test")),
+        None if is_test => Ok(crate::oplog::test_fallback_dir("gd-local-prs-test")),
         None => {
             let data = dirs::data_dir().ok_or_else(|| {
                 AppError::Command("could not resolve the app-data directory".to_string())
@@ -889,9 +889,7 @@ pub(crate) mod tests {
         let path = store_path().unwrap();
         assert_eq!(
             path,
-            std::env::temp_dir()
-                .join("gd-local-prs-test")
-                .join(STORE_FILE)
+            crate::oplog::test_fallback_dir("gd-local-prs-test").join(STORE_FILE)
         );
         let real_root = dirs::data_dir().expect("app-data dir");
         assert!(

@@ -120,21 +120,24 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Component tests (Vitest)
-        run: pnpm exec vitest run --shard=${{ matrix.shard }}/2
+        run: pnpm test --shard=${{ matrix.shard }}/2
 
   # The required status check (context = this job id, so it takes no `name:`).
   # always() keeps it from being skipped when a need fails, since a skipped
-  # required check reads as passing; the step then fails on any non-success.
+  # required check reads as passing; check-needs-success.mjs then fails it on
+  # any need that did not succeed (skipped and cancelled included).
   build:
     needs: [checks, vitest]
     if: always()
     runs-on: ubuntu-26.04
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      # The runner's preinstalled Node; the script is stdlib-only.
       - name: Require every frontend job to succeed
         env:
-          CHECKS: ${{ needs.checks.result }}
-          VITEST: ${{ needs.vitest.result }}
-        shell: bash
-        run: |
-          echo "checks=$CHECKS vitest=$VITEST"
-          [ "$CHECKS" = "success" ] && [ "$VITEST" = "success" ]
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/check-needs-success.mjs

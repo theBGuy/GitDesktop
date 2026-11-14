@@ -89,7 +89,7 @@ fn notes_lock() -> &'static Mutex<()> {
 fn resolve_store_base(gd_review_notes_dir: Option<&str>, is_test: bool) -> AppResult<PathBuf> {
     match gd_review_notes_dir {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ if is_test => Ok(std::env::temp_dir().join("gd-review-notes-test")),
+        _ if is_test => Ok(crate::oplog::test_fallback_dir("gd-review-notes-test")),
         _ => {
             let data = dirs::data_dir().ok_or_else(|| {
                 AppError::Command("could not resolve the app-data directory".to_string())
@@ -376,12 +376,12 @@ mod tests {
         // An empty override is ignored (falls through to the next arm).
         assert_eq!(
             resolve_store_base(Some(""), true).unwrap(),
-            std::env::temp_dir().join("gd-review-notes-test")
+            crate::oplog::test_fallback_dir("gd-review-notes-test")
         );
         // 2. No override + test → the temp subdir.
         assert_eq!(
             resolve_store_base(None, true).unwrap(),
-            std::env::temp_dir().join("gd-review-notes-test")
+            crate::oplog::test_fallback_dir("gd-review-notes-test")
         );
         // 3. No override + non-test → the real app-data dir, so the production path
         //    stays …/com.thebguy.gitdesktop/review-notes.json, unchanged by the seam.

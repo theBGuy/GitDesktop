@@ -75,6 +75,7 @@ import {
   parsePackageVersions,
   SINGLETONS,
 } from "./check-lockfile-dedupe.mjs";
+import { NEEDS_ENV, needsVerdict } from "./check-needs-success.mjs";
 import {
   cardRefOf,
   frontmatterOf,
@@ -237,6 +238,77 @@ test("changelog-fragment: invalid inputs fail closed", () => {
   ]) {
     assert.throws(() => fragmentVerdict(input), TypeError);
   }
+});
+
+// ---------------------------------------------------------- check-needs-success
+
+const needsJson = (results) =>
+  JSON.stringify(
+    Object.fromEntries(
+      Object.entries(results).map(([name, result]) => [
+        name,
+        { result, outputs: {} },
+      ]),
+    ),
+  );
+
+for (const [name, raw, ok] of [
+  ["all success", needsJson({ checks: "success", vitest: "success" }), true],
+  ["one failure", needsJson({ checks: "success", vitest: "failure" }), false],
+  [
+    "one cancelled",
+    needsJson({ checks: "cancelled", vitest: "success" }),
+    false,
+  ],
+  ["one skipped", needsJson({ checks: "success", vitest: "skipped" }), false],
+  // A matrix need reports one aggregate result for all its legs.
+  ["matrix aggregate failure", needsJson({ vitest: "failure" }), false],
+  ["empty object", "{}", false],
+  ["missing env", undefined, false],
+  ["empty string", "", false],
+  ["whitespace only", "  \n", false],
+  ["malformed JSON", "{checks:", false],
+  ["JSON array", "[]", false],
+  ["JSON null", "null", false],
+  ["JSON string", '"success"', false],
+  ["need missing result", '{"checks":{"result":"success"},"vitest":{}}', false],
+  ["need with non-string result", '{"checks":{"result":true}}', false],
+  ["need that is null", '{"checks":null}', false],
+]) {
+  test(`needs-success: ${name}`, () => {
+    const verdict = needsVerdict(raw);
+    assert.equal(verdict.ok, ok);
+    assert.ok(verdict.lines.length > 0);
+  });
+}
+
+test("needs-success: prints each need's result", () => {
+  const { lines } = needsVerdict(
+    needsJson({ checks: "success", vitest: "cancelled" }),
+  );
+  assert.deepEqual(lines, ["checks=success", "vitest=cancelled"]);
+});
+
+test("needs-success: the CLI exits by the verdict and reads only its env var", () => {
+  const gate = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "check-needs-success.mjs",
+  );
+  const run = (value) => {
+    const env = { ...process.env };
+    delete env[NEEDS_ENV];
+    if (value !== undefined) env[NEEDS_ENV] = value;
+    try {
+      execFileSync(process.execPath, [gate], { env, stdio: "pipe" });
+      return 0;
+    } catch (err) {
+      return err.status;
+    }
+  };
+  assert.equal(run(needsJson({ checks: "success", vitest: "success" })), 0);
+  assert.equal(run(needsJson({ checks: "success", vitest: "failure" })), 1);
+  assert.equal(run(undefined), 1);
+  assert.equal(run("not json"), 1);
 });
 
 // ------------------------------------------------------- check-banned-patterns

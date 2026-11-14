@@ -145,11 +145,28 @@ fn resolve_test_store(repo: &str) -> (PathBuf, &'static str) {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     norm_repo_key(repo).hash(&mut hash);
     (
-        std::env::temp_dir()
-            .join("gd-oplog-test")
-            .join(format!("{:016x}", hash.finish())),
+        test_fallback_dir("gd-oplog-test").join(format!("{:016x}", hash.finish())),
         STORE_FILE,
     )
+}
+
+/// The temp dir a `cfg!(test)` store falls back to, one named dir per store (the
+/// oplog, review-notes and local-PR stores each resolve theirs here). Nextest runs each test in its own process, where the stores'
+/// in-process mutexes serialize nothing, so that mode gets a per-process dir; plain
+/// `cargo test` keeps one reused dir so local runs don't leak a dir per run.
+pub(crate) fn test_fallback_dir(name: &str) -> PathBuf {
+    let mode = std::env::var("NEXTEST_EXECUTION_MODE").ok();
+    test_fallback_dir_for(name, mode.as_deref(), std::process::id())
+}
+
+/// Nextest sets `NEXTEST_EXECUTION_MODE=process-per-test` in every test process
+/// (<https://nexte.st/docs/configuration/env-vars/>).
+fn test_fallback_dir_for(name: &str, execution_mode: Option<&str>, pid: u32) -> PathBuf {
+    let base = std::env::temp_dir();
+    match execution_mode {
+        Some("process-per-test") => base.join(format!("{name}-{pid}")),
+        _ => base.join(name),
+    }
 }
 
 /// Store path: tests with a Git admin directory under temp use `gd-oplog-test.json`;
@@ -993,6 +1010,31 @@ mod tests {
     }
 
     #[test]
+    fn test_fallback_dir_is_per_process_only_under_nextest() {
+        let temp = std::env::temp_dir();
+        // Plain `cargo test` (no or another mode): the fixed, reused name.
+        assert_eq!(
+            test_fallback_dir_for("gd-x-test", None, 42),
+            temp.join("gd-x-test")
+        );
+        assert_eq!(
+            test_fallback_dir_for("gd-x-test", Some("other"), 42),
+            temp.join("gd-x-test")
+        );
+        // Nextest's process-per-test mode: suffixed with the process id.
+        assert_eq!(
+            test_fallback_dir_for("gd-x-test", Some("process-per-test"), 42),
+            temp.join("gd-x-test-42")
+        );
+        // The public helper reads this process's mode and pid.
+        let mode = std::env::var("NEXTEST_EXECUTION_MODE").ok();
+        assert_eq!(
+            test_fallback_dir("gd-x-test"),
+            test_fallback_dir_for("gd-x-test", mode.as_deref(), std::process::id())
+        );
+    }
+
+    #[test]
     fn store_path_honors_gd_oplog_dir_override() {
         // Drive the pure resolver directly — deterministic + parallel-safe (no
         // process-env mutation).
@@ -1013,7 +1055,7 @@ mod tests {
                 .unwrap()
                 .parent()
                 .unwrap(),
-            std::env::temp_dir().join("gd-oplog-test")
+            test_fallback_dir("gd-oplog-test")
         );
         // 3. No override + non-test → the real app-data dir (ends with the identifier).
         let real = resolve_store_base(None, false, r"C:\oplog\resolver-pin").unwrap();
@@ -1032,7 +1074,7 @@ mod tests {
             "different repositories need different test stores"
         );
         assert_eq!(first, resolve_store_base(None, true, "c:/x").unwrap());
-        let fallback = std::env::temp_dir().join("gd-oplog-test");
+        let fallback = test_fallback_dir("gd-oplog-test");
         assert_eq!(first.parent(), Some(fallback.as_path()));
         let hash = first.file_name().unwrap().to_str().unwrap();
         assert_eq!(hash.len(), 16);
@@ -1076,7 +1118,7 @@ mod tests {
         let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         let outside = temp.ancestors().last().unwrap();
         assert!(!outside.starts_with(&temp));
-        let fallback = std::env::temp_dir().join("gd-oplog-test");
+        let fallback = test_fallback_dir("gd-oplog-test");
         for repo in [outside.to_str().unwrap(), "."] {
             let base = resolve_store_base(None, true, repo).unwrap();
             assert_eq!(base.parent(), Some(fallback.as_path()));
