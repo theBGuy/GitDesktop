@@ -253,8 +253,8 @@ function removeSidecar(file) {
 }
 
 /**
- * Waits for the port, then for any previous run's live child, then writes
- * this run's record. Contention always waits; only a bind error other than
+ * Waits for the port, then for any previous run that is still alive (its
+ * process group on POSIX, its child on win32), then writes this run's record. Contention always waits; only a bind error other than
  * EADDRINUSE on every attempt for a whole announceMs runs unserialized.
  */
 export async function acquireLock({
@@ -263,7 +263,8 @@ export async function acquireLock({
   sidecarFile,
   record,
   bind = bindPort,
-  isAlive = isRunAlive,
+  platform = process.platform,
+  isAlive = (pid) => isRunAlive(pid, platform),
   isWrapperAlive = isPidAlive,
   now = Date.now,
   sleep = defaultSleep,
@@ -316,8 +317,13 @@ export async function acquireLock({
     if (orphanAt === null || now() - orphanAt >= announceMs) {
       orphanAt = now();
       const { child, age } = describeRun(previous, now);
+      // On POSIX the recorded pid is a process group whose leader may be gone.
+      const what =
+        platform === "win32"
+          ? `child is still alive (${previous.suite}, child pid ${child}`
+          : `process group is still alive (${previous.suite}, group ${child}`;
       log(
-        `${PREFIX}waiting - holding port ${heldPort}; the previous run's child is still alive (${previous.suite}, child pid ${child}, cwd ${previous.cwd}, started ${age} ago) [sidecar ${file}]`,
+        `${PREFIX}waiting - holding port ${heldPort}; the previous run's ${what}, cwd ${previous.cwd}, started ${age} ago) [sidecar ${file}]`,
       );
     }
     await sleep(pollMs);
@@ -390,6 +396,7 @@ export async function runUnderLock({
 }) {
   const held = await acquireLock({
     ...lockOptions,
+    platform,
     now,
     log,
     record: { wrapperPid: process.pid, suite, cwd },

@@ -45,7 +45,11 @@ const BOUND_MS = 30_000;
 const FAKE_CHILD = 4242;
 const noop = () => {};
 const WIN32 = process.platform === "win32";
-const STILL_ALIVE = "the previous run's child is still alive";
+// The orphan line names a child on win32 and a process group on POSIX.
+const STILL_ALIVE = WIN32
+  ? "the previous run's child is still alive"
+  : "the previous run's process group is still alive";
+const RUN_ID = WIN32 ? "child pid" : "group";
 
 let root;
 let harness;
@@ -100,8 +104,8 @@ before(() => {
     [
       'import { spawn } from "node:child_process";',
       'import { existsSync, renameSync, writeFileSync } from "node:fs";',
-      "const [grandchild, gone, pidFile, trigger] = process.argv.slice(2);",
-      "const child = spawn(process.execPath, [grandchild, gone], { stdio: 'ignore' });",
+      "const [grandchild, gone, pidFile, trigger, mode] = process.argv.slice(2);",
+      "const child = spawn(process.execPath, [grandchild, gone, mode ?? ''], { stdio: 'ignore' });",
       "child.unref();",
       "writeFileSync(`${pidFile}.tmp`, String(child.pid));",
       "renameSync(`${pidFile}.tmp`, pidFile);",
@@ -115,14 +119,16 @@ before(() => {
       "",
     ].join("\n"),
   );
-  // Takes a second to shut down on SIGTERM, and marks that it did.
+  // Takes a second to shut down on SIGTERM and marks that it did, or, when
+  // stubborn, ignores SIGTERM so only a SIGKILL ends it.
   grandchild = join(root, "grandchild.mjs");
   writeFileSync(
     grandchild,
     [
       'import { writeFileSync } from "node:fs";',
-      "const [gone] = process.argv.slice(2);",
-      "process.on('SIGTERM', () => setTimeout(() => {",
+      "const [gone, mode] = process.argv.slice(2);",
+      "if (mode === 'stubborn') process.on('SIGTERM', () => {});",
+      "else process.on('SIGTERM', () => setTimeout(() => {",
       "  writeFileSync(gone, 'gone');",
       "  process.exit(0);",
       "}, 1000));",
@@ -499,7 +505,7 @@ test("B4 a live child of the previous run keeps the new holder waiting", async (
   assert.equal(lines.length, 1);
   assert.ok(
     lines[0].includes(
-      `holding port ${port}; the previous run's child is still alive (rust, child pid ${FAKE_CHILD}, cwd C:/previous, started 1m 0`,
+      `holding port ${port}; ${STILL_ALIVE} (rust, ${RUN_ID} ${FAKE_CHILD}, cwd C:/previous, started 1m 0`,
     ),
     lines[0],
   );
@@ -689,7 +695,7 @@ test("B6 the default cap releases an orphan at exactly MAX_HOLD_MS", async () =>
   );
   await clock2.idle();
   assert.equal(waiting.done, false);
-  assert.match(lines[0], /the previous run's child is still alive/);
+  assert.ok(lines[0].includes(STILL_ALIVE), lines[0]);
   const held = await bounded(clock2.drive(waiting), "the cap to pass");
   assert.equal(clock2.sleeps, 1);
   await held.release();
@@ -1338,10 +1344,7 @@ test("B17 SIGTERM releases a running wrapper and spares a checking one's evidenc
   checking.child.kill("SIGTERM");
   await bounded(checking.exit, "the checker to exit");
   await waitFor(
-    () =>
-      next.err.includes(
-        `holding port ${port2}; the previous run's child is still alive`,
-      ),
+    () => next.err.includes(`holding port ${port2}; ${STILL_ALIVE}`),
     `the next run to rebind port ${port2}`,
   );
   assert.equal(readFileSync(sidecarFile, "utf8"), body);
@@ -1372,11 +1375,14 @@ test("B19 killGroup refuses every group id that is not a real pgid above 1", () 
   assert.deepEqual(calls, []);
 });
 
+const LINUX_ONLY =
+  process.platform === "linux" ? false : "reads process state from /proc";
+
 const POSIX_ONLY = WIN32
   ? "POSIX process groups: on win32 the kill-on-close jobs end the tree"
   : false;
 
-function fakeCargoStep(dir, trigger = "") {
+function fakeCargoStep(dir, trigger = "", mode = "") {
   return {
     suite: "rust",
     file: NODE,
@@ -1386,6 +1392,7 @@ function fakeCargoStep(dir, trigger = "") {
       join(dir, "gone"),
       join(dir, "gc.pid"),
       trigger,
+      mode,
     ],
   };
 }
@@ -1540,7 +1547,7 @@ test("B22 test-side pids accept only 2..2**31-1", async () => {
 });
 
 test("B23 job control and SIGQUIT reach the suite's group", {
-  skip: POSIX_ONLY,
+  skip: LINUX_ONLY,
 }, async () => {
   const dir = caseDir("b23");
   const holder = startHarness({
@@ -1572,6 +1579,45 @@ test("B23 job control and SIGQUIT reach the suite's group", {
   assert.deepEqual(exited, { code: 1, signal: null }, holder.err);
   assert.equal(isPidAlive(gcPid), false);
   pids.delete(gcPid);
+});
+
+test("B24 a group that ignores SIGTERM is SIGKILLed before the port is released", {
+  skip: POSIX_ONLY,
+}, async () => {
+  const dir = caseDir("b24");
+  const ran = join(dir, "contender-ran");
+  const holder = startHarness({
+    steps: [fakeCargoStep(dir, "", "stubborn")],
+    suite: "rust",
+    cwd: tmpdir(),
+    port: 0,
+    sidecarDir: dir,
+    pollMs: 20,
+  });
+  await waitFor(() => acquiredPort(holder.err) !== null, "the holder's port");
+  const port = acquiredPort(holder.err);
+  const gcPid = watchPid(await pidFromFile(join(dir, "gc.pid")));
+  const contender = startHarness({
+    steps: [markerStep(ran)],
+    suite: "vitest",
+    cwd: tmpdir(),
+    port,
+    sidecarDir: dir,
+    pollMs: 20,
+  });
+  await waitFor(
+    () => contender.err.includes(`waiting - rust holds port ${port}`),
+    `the contender to wait on port ${port}`,
+  );
+  holder.child.kill("SIGTERM");
+  await bounded(holder.exit, "the holder to exit");
+  assert.ok(holder.err.includes("sending SIGKILL"), holder.err);
+  assert.equal(holder.err.includes("releasing anyway"), false, holder.err);
+  assert.equal(isPidAlive(gcPid), false);
+  pids.delete(gcPid);
+  const exited = await bounded(contender.exit, `contender on port ${port}`);
+  assert.equal(exited.code, 0, contender.err);
+  assert.equal(existsSync(ran), true);
 });
 
 test("B18 no test here names DEFAULT_PORT as a port to bind", () => {
