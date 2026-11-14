@@ -97,7 +97,10 @@ fn oplog_lock() -> &'static Mutex<()> {
 
 /// A non-empty override wins; otherwise tests use a Git admin directory under
 /// temp or a normalized-repo hash under temp; the app uses its app-data directory.
-/// Only the test arm probes paths and gitdir pointers; parents are created on write.
+/// Only the test arm touches the filesystem: it probes paths and gitdir pointers, and the
+/// process's first hashed-base resolution resets its own temp folder and, outside
+/// nextest's process-per-test mode, sweeps stale ones ([`test_fallback_dir`]).
+/// Parents are created on write.
 fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool, repo: &str) -> AppResult<PathBuf> {
     match gd_oplog_dir {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
@@ -153,12 +156,18 @@ fn resolve_test_store(repo: &str) -> (PathBuf, &'static str) {
 /// The temp dir a `cfg!(test)` store falls back to: `<temp>/<name>-<pid>`, so each
 /// test process gets its own (the oplog, review-notes, local-PR and local-issue stores
 /// each resolve theirs here). The stores' in-process mutexes can't serialize two
-/// concurrent runs, nor nextest's one process per test.
+/// concurrent runs, nor nextest's one process per test. In `cfg(test)` builds the
+/// first call per name also runs `prepare_fallback_dir_once`.
 pub(crate) fn test_fallback_dir(name: &str) -> PathBuf {
     let pid = std::process::id();
     let dir = test_fallback_dir_for(name, pid);
     #[cfg(test)]
-    sweep_fallback_dirs_once(&dir, name, pid);
+    if let Some(base) = dir.parent() {
+        let mode = std::env::var("NEXTEST_EXECUTION_MODE");
+        let per_test_process = mode.as_deref() == Ok("process-per-test");
+        let now = std::time::SystemTime::now();
+        prepare_fallback_dir_once(base, name, pid, per_test_process, now);
+    }
     dir
 }
 
@@ -167,34 +176,47 @@ fn test_fallback_dir_for(name: &str, pid: u32) -> PathBuf {
     std::env::temp_dir().join(format!("{name}-{pid}"))
 }
 
-/// Sweeps `name`'s day-old per-process dirs beside `dir`, once per store name per
-/// process: store paths resolve on every read and write. Skipped under nextest's
-/// process-per-test mode (<https://nexte.st/docs/configuration/env-vars/>), where every
-/// test process would rescan a temp dir that gains one dir per process.
+/// Store names this process has prepared; its lock is held across a whole preparation.
 #[cfg(test)]
-fn sweep_fallback_dirs_once(dir: &Path, name: &str, pid: u32) {
-    static SWEPT: Mutex<std::collections::BTreeSet<String>> =
-        Mutex::new(std::collections::BTreeSet::new());
-    if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() == Ok("process-per-test") {
-        return;
-    }
-    let first = SWEPT
+static PREPARED_FALLBACKS: Mutex<std::collections::BTreeSet<String>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// On the first call per store name in this process: removes `base/<name>-<pid>`, which
+/// (barring pid namespaces that share one temp dir) can only be a dead process's
+/// leftover under a reused pid (a live sweeper would see it as stale while this process
+/// writes there), then sweeps other processes' day-old dirs. The lock is held
+/// throughout, so no thread receives the path before the reset lands. The sweep is
+/// skipped under nextest's process-per-test mode
+/// (<https://nexte.st/docs/configuration/env-vars/>), whose every process would rescan a
+/// temp dir that gains a dir per process; the reset is not.
+#[cfg(test)]
+fn prepare_fallback_dir_once(
+    base: &Path,
+    name: &str,
+    pid: u32,
+    per_test_process: bool,
+    now: std::time::SystemTime,
+) {
+    let mut prepared = PREPARED_FALLBACKS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(name.to_string());
-    if !first {
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !prepared.insert(name.to_string()) {
         return;
     }
-    if let Some(base) = dir.parent() {
-        let day = std::time::Duration::from_secs(24 * 60 * 60);
-        sweep_stale_fallback_dirs(base, name, pid, std::time::SystemTime::now(), day);
+    let _ = std::fs::remove_dir_all(base.join(format!("{name}-{pid}")));
+    if per_test_process {
+        return;
     }
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    sweep_stale_fallback_dirs(base, name, pid, now, day);
 }
 
 /// Deletes each plain dir in `base` named `{name}-<digits>`, other than `own_pid`'s,
-/// last modified more than `max_age` before `now`. Best-effort: concurrent sweepers
-/// race harmlessly and any I/O error skips the entry. The name filter runs before any
-/// metadata call, and links, junctions and files are never followed or removed.
+/// last modified more than `max_age` before `now` (a future time never qualifies).
+/// Best-effort: concurrent sweepers race harmlessly and any I/O error skips the entry.
+/// The name filter runs before any metadata call. A link, junction or file directly in
+/// `base` is skipped, never followed; inside a swept dir everything goes, and links
+/// there are unlinked rather than followed.
 #[cfg(test)]
 fn sweep_stale_fallback_dirs(
     base: &Path,
@@ -1081,10 +1103,6 @@ mod tests {
             test_fallback_dir("gd-x-test"),
             test_fallback_dir_for("gd-x-test", std::process::id())
         );
-        assert_eq!(
-            test_fallback_dir("gd-x-test"),
-            test_fallback_dir("gd-x-test")
-        );
     }
 
     #[test]
@@ -1129,6 +1147,153 @@ mod tests {
         // A missing base, or a file in its place, is a quiet no-op.
         sweep_stale_fallback_dirs(&base.join("missing"), name, own_pid, SystemTime::now(), day);
         sweep_stale_fallback_dirs(&file, name, own_pid, SystemTime::now(), day);
+    }
+
+    const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+    /// A dir at `base/<name>` holding one file, returned for the survival checks.
+    fn dir_with_file(base: &Path, name: &str) -> PathBuf {
+        let dir = base.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("store.json"), "{}").unwrap();
+        dir
+    }
+
+    // The gate tests each use their own store name: the once-per-name latch is a
+    // process-wide static.
+
+    #[test]
+    fn prepare_fallback_dir_sweeps_on_first_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "gd-gate-sweep-test";
+        let stale = dir_with_file(tmp.path(), &format!("{name}-123"));
+        let later = std::time::SystemTime::now() + 2 * DAY;
+        prepare_fallback_dir_once(tmp.path(), name, 4242, false, later);
+        assert!(!stale.exists(), "another process's stale dir survived");
+    }
+
+    #[test]
+    fn prepare_fallback_dir_resets_its_own_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "gd-gate-reset-test";
+        let own = dir_with_file(tmp.path(), &format!("{name}-4242"));
+        prepare_fallback_dir_once(tmp.path(), name, 4242, false, std::time::SystemTime::now());
+        assert!(
+            !own.exists(),
+            "a dead predecessor's dir under this pid survived"
+        );
+    }
+
+    #[test]
+    fn prepare_fallback_dir_runs_once_per_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "gd-gate-once-test";
+        prepare_fallback_dir_once(tmp.path(), name, 4242, false, std::time::SystemTime::now());
+        let own = dir_with_file(tmp.path(), &format!("{name}-4242"));
+        let stale = dir_with_file(tmp.path(), &format!("{name}-123"));
+        let later = std::time::SystemTime::now() + 2 * DAY;
+        prepare_fallback_dir_once(tmp.path(), name, 4242, false, later);
+        assert!(
+            own.join("store.json").is_file(),
+            "a second call reset the live dir"
+        );
+        assert!(stale.is_dir(), "a second call swept again");
+    }
+
+    #[test]
+    fn prepare_fallback_dir_under_process_per_test_resets_but_skips_the_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "gd-gate-nextest-test";
+        let own = dir_with_file(tmp.path(), &format!("{name}-4242"));
+        let stale = dir_with_file(tmp.path(), &format!("{name}-123"));
+        let later = std::time::SystemTime::now() + 2 * DAY;
+        prepare_fallback_dir_once(tmp.path(), name, 4242, true, later);
+        assert!(!own.exists(), "the own-dir reset runs in every mode");
+        assert!(stale.is_dir(), "process-per-test mode must not sweep");
+    }
+
+    #[test]
+    fn prepare_fallback_dir_spares_another_process_dir_under_a_day_old() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "gd-gate-young-test";
+        let young = dir_with_file(tmp.path(), &format!("{name}-123"));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(23 * 60 * 60);
+        prepare_fallback_dir_once(tmp.path(), name, 4242, false, later);
+        assert!(young.is_dir(), "a dir under a day old was swept");
+    }
+
+    /// `dir`'s modified time as the sweep reads it: from its parent's listing, which on
+    /// Windows can differ from a `metadata` call on the path itself.
+    fn listed_modified(dir: &Path) -> std::time::SystemTime {
+        std::fs::read_dir(dir.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path() == dir)
+            .expect("the dir is listed")
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+    }
+
+    #[test]
+    fn sweep_spares_future_and_exactly_max_age_dirs() {
+        let name = "gd-age-test";
+        let future = tempfile::tempdir().unwrap();
+        let dir = dir_with_file(future.path(), &format!("{name}-1"));
+        let modified = listed_modified(&dir);
+        let earlier = modified - std::time::Duration::from_secs(60);
+        sweep_stale_fallback_dirs(future.path(), name, 0, earlier, std::time::Duration::ZERO);
+        assert!(dir.is_dir(), "a dir modified after `now` was swept");
+
+        let boundary = tempfile::tempdir().unwrap();
+        let dir = dir_with_file(boundary.path(), &format!("{name}-2"));
+        let modified = listed_modified(&dir);
+        sweep_stale_fallback_dirs(boundary.path(), name, 0, modified + DAY, DAY);
+        assert!(dir.is_dir(), "a dir exactly max_age old was swept");
+        let past = modified + DAY + std::time::Duration::from_secs(1);
+        sweep_stale_fallback_dirs(boundary.path(), name, 0, past, DAY);
+        assert!(!dir.exists(), "a dir past max_age survived");
+    }
+
+    /// A directory link: a junction on Windows (`mklink /J` needs no privilege), a
+    /// symlink on unix.
+    fn dir_link(target: &Path, link: &Path) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn sweep_skips_a_stale_named_link_and_leaves_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "gd-link-test";
+        let target = dir_with_file(tmp.path(), "target");
+        let link = tmp.path().join(format!("{name}-123"));
+        dir_link(&target, &link);
+        let later = std::time::SystemTime::now() + 2 * DAY;
+        sweep_stale_fallback_dirs(tmp.path(), name, 0, later, DAY);
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "the link was removed"
+        );
+        assert!(
+            target.join("store.json").is_file(),
+            "the link's target was emptied"
+        );
     }
 
     #[test]

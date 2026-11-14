@@ -57,7 +57,7 @@ const EXCLUDED = [
     fn: "test_fallback_dir_for",
     count: 1,
     reason:
-      "This fn joins a store's cfg!(test) fallback dir, suffixed with the process id so each test process gets its own; the oplog, review-notes, local-PR and local-issue stores each resolve theirs through it. Its only caller is test_fallback_dir, which also sweeps day-old leftovers beside it in cfg(test) builds only, and which is reached only from resolve_test_store and the is_test arms of local_prs::resolve_store_dir, local_issues::resolve_store_dir and review_notes::resolve_store_base, which callers take only under cfg!(test), so release builds never build this path.",
+      "This fn joins a store's cfg!(test) fallback dir, suffixed with the process id so each test process gets its own; the oplog, review-notes, local-PR and local-issue stores each resolve theirs through it. Its only caller is test_fallback_dir. In cfg(test) builds, that fn's first call per store name also removes a leftover dir with this process's pid and, outside nextest's process-per-test mode, sweeps other processes' day-old dirs; both take the returned dir's parent as their base, so they add no temp_dir() call. test_fallback_dir is reached only from resolve_test_store and the is_test arms of local_prs::resolve_store_dir, local_issues::resolve_store_dir and review_notes::resolve_store_base, which callers take only under cfg!(test), so release builds never build this path.",
   },
 ];
 

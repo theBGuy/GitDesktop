@@ -1496,8 +1496,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   Its `cfg!(test)` temp arm calls `crate::oplog::test_fallback_dir`, never a
   hand-rolled `temp_dir()` join: the helper gives each test process its own
   `<name>-<pid>` dir (concurrent runs and nextest's per-test processes never
-  share a store file) and, outside nextest, sweeps that store's day-old
-  leftovers once per process.
+  share a store file) and, on its first use per store name in a process,
+  removes a dead predecessor's same-pid dir and, outside nextest, sweeps that
+  store's day-old leftovers.
   Concurrency: the MCP server is a second writing process, so both stores'
   read→modify→writes take the cross-process file lock in `store_lock.rs` (a
   `create_new` lock file beside the store, stale-evicted, fail-open) on top of
