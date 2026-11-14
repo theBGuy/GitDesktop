@@ -254,8 +254,9 @@ function removeSidecar(file) {
 
 /**
  * Waits for the port, then for any previous run that is still alive (its
- * process group on POSIX, its child on win32), then writes this run's record. Contention always waits; only a bind error other than
- * EADDRINUSE on every attempt for a whole announceMs runs unserialized.
+ * process group on POSIX, its child on win32), then writes this run's
+ * record. Contention always waits; only a bind error other than EADDRINUSE
+ * on every attempt for a whole announceMs runs unserialized.
  */
 export async function acquireLock({
   port = DEFAULT_PORT,

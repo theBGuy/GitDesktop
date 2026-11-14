@@ -96,19 +96,18 @@ before(() => {
       "",
     ].join("\n"),
   );
-  // Like cargo: starts a process that stays in its group, exits on SIGTERM
-  // without forwarding it, and otherwise exits once its trigger file appears.
+  // Like cargo: starts a process that stays in its group (which writes the
+  // pid file itself), exits on SIGTERM without forwarding it, and otherwise
+  // exits once its trigger file appears.
   fakeCargo = join(root, "fake-cargo.mjs");
   writeFileSync(
     fakeCargo,
     [
       'import { spawn } from "node:child_process";',
-      'import { existsSync, renameSync, writeFileSync } from "node:fs";',
+      'import { existsSync } from "node:fs";',
       "const [grandchild, gone, pidFile, trigger, mode] = process.argv.slice(2);",
-      "const child = spawn(process.execPath, [grandchild, gone, mode ?? ''], { stdio: 'ignore' });",
+      "const child = spawn(process.execPath, [grandchild, gone, pidFile, mode ?? ''], { stdio: 'ignore' });",
       "child.unref();",
-      "writeFileSync(`${pidFile}.tmp`, String(child.pid));",
-      "renameSync(`${pidFile}.tmp`, pidFile);",
       "process.on('SIGTERM', () => process.exit(143));",
       "const deadline = Date.now() + 60_000;",
       "const poll = () => {",
@@ -120,18 +119,22 @@ before(() => {
     ].join("\n"),
   );
   // Takes a second to shut down on SIGTERM and marks that it did, or, when
-  // stubborn, ignores SIGTERM so only a SIGKILL ends it.
+  // stubborn, ignores SIGTERM so only a SIGKILL ends it. Its pid file lands
+  // (temp + rename) only once the handler is installed, so a test that read
+  // the pid can signal it without racing the handler.
   grandchild = join(root, "grandchild.mjs");
   writeFileSync(
     grandchild,
     [
-      'import { writeFileSync } from "node:fs";',
-      "const [gone, mode] = process.argv.slice(2);",
+      'import { renameSync, writeFileSync } from "node:fs";',
+      "const [gone, pidFile, mode] = process.argv.slice(2);",
       "if (mode === 'stubborn') process.on('SIGTERM', () => {});",
       "else process.on('SIGTERM', () => setTimeout(() => {",
       "  writeFileSync(gone, 'gone');",
       "  process.exit(0);",
       "}, 1000));",
+      "writeFileSync(`${pidFile}.tmp`, String(process.pid));",
+      "renameSync(`${pidFile}.tmp`, pidFile);",
       "setTimeout(() => {}, 60_000);",
       "",
     ].join("\n"),
