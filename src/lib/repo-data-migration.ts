@@ -83,6 +83,9 @@ const IDENTITY_STORES: IdentityStore[] = [
   // The reserved "global-markers" key is not a repo key, and the walk below only
   // touches keys matching the old checkout path — so it is naturally untouched.
   { file: "automation-history.json", merge: "id-merge" },
+  // Its reader sorts and caps, so a merge that leaves the array unsorted or
+  // over the cap needs nothing here.
+  { file: "deleted-branches.json", merge: "id-merge" },
   { file: "pr-review-drafts.json", merge: "inner-key" },
   { file: "review-notes.json", merge: "inner-key" },
   { file: "automation-dismissals.json", merge: "inner-key" },
@@ -298,8 +301,10 @@ export async function migrateRepoData(
   newPath: string,
 ): Promise<void> {
   try {
-    // Even a fallback (raw-path) new key is fine to proceed with — the stores' own
-    // legacy folding will re-home it onto the true identity later.
+    // A fallback (raw-path) new key still proceeds. Stores that fold legacy keys
+    // re-home it onto the true identity later; stores with no folding
+    // (deleted-branches, last-checkout) keep it under the raw path, which their
+    // identity-keyed reads never consult.
     const newKey = await repoIdentity(newPath);
     for (const desc of IDENTITY_STORES) {
       try {

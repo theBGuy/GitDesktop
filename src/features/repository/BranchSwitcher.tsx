@@ -62,6 +62,20 @@ import {
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
+import {
+  DELETE_CONFIRM_RESTORABLE,
+  DELETE_TIP_MOVED,
+  deletedBranchTitle,
+} from "@/lib/deleted-branches/copy";
+import {
+  deletedBranchFacts,
+  deletedToastOptions,
+  readBranchRowsFresh,
+} from "@/lib/deleted-branches/restore";
+import {
+  mintDeletedBranch,
+  recordDeletedBranches,
+} from "@/lib/deleted-branches/store";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import { applyFrozenOrder } from "@/lib/frozen-order";
 import {
@@ -729,6 +743,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     deleteSessionRef.current = null;
     setDeleteTarget(null);
   }
+  // One delete at a time: the latch is set before the first await (the fresh
+  // read, or the occupancy read when deleting the current branch), before any
+  // mutation reads pending. The ref gates, since two presses can land before a
+  // re-render; the state holds the confirm's button.
+  const deleteRunningRef = useRef(false);
+  const [deleteRunning, setDeleteRunning] = useState(false);
   // The worktree a branch row offers to remove (resolved from `userWorktrees`).
   const [removeWorktreeTarget, setRemoveWorktreeTarget] =
     useState<UserWorktree | null>(null);
@@ -854,8 +874,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Memoized by hand: every downstream memo lists `allBranches` as a dep, so
   // its identity holds per `branches.data` whatever the compiler decides.
   const allBranches = useMemo(
-    () =>
-      (branches.data ?? []).filter((b) => !b.name.startsWith("gd/session/")),
+    () => (branches.data ?? []).filter((b) => !isSessionBranchName(b.name)),
     [branches.data],
   );
   // Archived branches are hidden from the list and the merge picker.
@@ -1832,6 +1851,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // been reopened on another branch, or the same name in another repo.
     const session = deleteSessionRef.current;
     if (!deleteTarget || !session) return;
+    if (deleteRunningRef.current) return;
     const deleteIn = session.repo;
     const clearTarget = () => {
       if (deleteSessionRef.current === session) closeDelete();
@@ -1859,6 +1879,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     // Outside the try, whose `.finally` cleanup would close the confirm.
     if (refuseWhileRowPushes(deleteTarget)) return;
+    // Set at the first await: nothing above it can interleave with a press.
+    deleteRunningRef.current = true;
+    setDeleteRunning(true);
     await (async () => {
       try {
         // Between freeing its branch and checking it out, a promote leaves that
@@ -1867,6 +1890,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           toast.info(PROMOTION_BLOCKS_CHECKOUT);
           return;
         }
+        // The branch a current-branch delete checks out first. Every step past
+        // that checkout runs only once it landed, so a refusal there names it.
+        let fallback: string | undefined;
         // git refuses to delete the checked-out branch: move off it first — onto a
         // branch not already occupied by another worktree (that checkout fails too).
         if (deleteTarget === currentName) {
@@ -1902,7 +1928,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           if (refuseWhileRowPushes(deleteTarget)) return;
           const free = (b: string | null | undefined): b is string =>
             Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
-          let fallback: string | undefined;
           if (free(defaultName)) {
             fallback = defaultName;
           } else {
@@ -1941,13 +1966,77 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           )
             return;
         }
-        await deleteBranch.mutateAsync(deleteTarget);
-        toast.success(`Deleted ${deleteTarget}`);
+        // Read before the delete, which removes the branch's whole config
+        // section: what Restore re-applies.
+        const facts = deletedBranchFacts(
+          await readBranchRowsFresh(deleteIn),
+          deleteTarget,
+        );
+        if (
+          refuseIfSwitched(
+            deleteIn,
+            `${deleteTarget} was kept`,
+            "before the delete started",
+          )
+        )
+          return;
+        // A push that started during the read.
+        if (refuseWhileRowPushes(deleteTarget)) return;
+        // The read is long enough for a promote to start and free its branch.
+        if (promotionBlocksCheckout(repoPath)) {
+          toast.info(
+            PROMOTION_BLOCKS_CHECKOUT,
+            fallback === undefined
+              ? undefined
+              : {
+                  description: `Switched to ${fallback}; ${deleteTarget} was kept.`,
+                },
+          );
+          return;
+        }
+        const outcome = await deleteBranch.mutateAsync(deleteTarget);
+        switch (outcome.status) {
+          case "deleted": {
+            // Closed before the record write, so a second press can't re-enter.
+            clearTarget();
+            const entry = mintDeletedBranch({
+              name: deleteTarget,
+              tip: outcome.tip,
+              ...facts,
+            });
+            const recorded = await recordDeletedBranches(deleteIn, [entry]);
+            toast.success(
+              deletedBranchTitle(
+                deleteTarget,
+                outcome.tip,
+                landedIn(deleteIn).away,
+              ),
+              deletedToastOptions(
+                queryClient,
+                deleteIn,
+                [entry],
+                new Set(recorded ? [] : [entry.id]),
+                true,
+              ),
+            );
+            break;
+          }
+          // Only a call pinned to an expected tip answers this; kept exhaustive.
+          case "tipMoved":
+            toast.info(DELETE_TIP_MOVED(deleteTarget));
+            break;
+          default: {
+            const unhandled: never = outcome;
+            return unhandled;
+          }
+        }
       } catch (e) {
         onError(e);
       }
     })().finally(() => {
       clearTarget();
+      deleteRunningRef.current = false;
+      setDeleteRunning(false);
     });
   }
 
@@ -2576,6 +2665,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    if (refuseWhileSiblingPush(branch.name)) return;
     if (willPublish({ ...branch, setUpstream: retrack }))
       void beginPublishBranch(branch, remote, retrack);
     else
@@ -2604,6 +2694,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return true;
     }
     return refuseWhilePushRuns(queryClient, repoPath);
+  }
+
+  // A push of `branch` refuses while a sibling worktree of the repository pushes
+  // it; this checkout's own pushes are pushAlreadyActive's. Never the row hold
+  // below: its fork-PR arm would refuse the publish that owns the detection.
+  function refuseWhileSiblingPush(branch: string): boolean {
+    return refuseWhileBranchPushes(
+      queryClient,
+      repoPath,
+      branch,
+      currentNameRef.current,
+    );
   }
 
   // Fire-time hold for routes that move or remove `branch`'s ref: this switcher's
@@ -2729,6 +2831,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       releaseMark();
       return;
     }
+    if (refuseWhileSiblingPush(branch.name)) {
+      releaseMark();
+      return;
+    }
     const presence = presenceUnderUrls(
       remoteHasBranch(list, destination, branch.name),
       fetchUrl,
@@ -2806,6 +2912,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
       if (pushAlreadyActive() || refuseWhilePublishing(queryClient, repoPath))
         return;
+      if (refuseWhileSiblingPush(branch.name)) return;
       if (match) {
         withdrawPublishConfirm(publishAsk);
         openGuard(match);
@@ -2837,6 +2944,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    if (refuseWhileSiblingPush(branch.name)) return;
     const copyRemote = remote ?? "origin";
     const pushedIn = repoPath;
     try {
@@ -5167,6 +5275,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             only on it.
             {shownDeleteTarget === currentName &&
               " You'll be switched to another branch first."}
+            {DELETE_CONFIRM_RESTORABLE}
           </>
         }
         confirmLabel="Delete"
@@ -5177,7 +5286,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             ? branchPushHoldReason(pushOnBranch(deleteTarget)?.paused ?? false)
             : undefined
         }
-        pending={deleteBranch.isPending || checkout.isPending}
+        pending={deleteRunning || deleteBranch.isPending || checkout.isPending}
         onConfirm={doDelete}
       />
 

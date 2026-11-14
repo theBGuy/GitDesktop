@@ -7,12 +7,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeepLocalHookDialog } from "@/features/repository/KeepLocalHookDialog";
 import { copyText } from "@/lib/clipboard";
 import {
+  gitHookDelete,
+  gitHookSetEnabled,
   gitHooksList,
+  gitHookWrite,
+  gitInstallHookManager,
   gitKeepLocalHookInstall,
   gitKeepLocalHookRemove,
   gitKeepLocalHookStatus,
 } from "@/lib/git/api";
-import { useHooks, useKeepLocalHookStatus } from "@/lib/git/queries";
+import {
+  useDeleteHook,
+  useHooks,
+  useInstallHookManager,
+  useKeepLocalHookStatus,
+  useSetHookEnabled,
+  useWriteHook,
+} from "@/lib/git/queries";
 import type { HooksInfo, KeepLocalHookStatus } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -25,6 +36,10 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitHooksList: vi.fn(),
+  gitHookWrite: vi.fn(),
+  gitHookSetEnabled: vi.fn(),
+  gitHookDelete: vi.fn(),
+  gitInstallHookManager: vi.fn(),
   gitKeepLocalHookStatus: vi.fn(),
   gitKeepLocalHookInstall: vi.fn(),
   gitKeepLocalHookRemove: vi.fn(),
@@ -773,6 +788,7 @@ describe("the other checkouts of the repository", () => {
       description: "",
       state: "active" as const,
       hasSample: false,
+      managed: false,
     })),
   });
 
@@ -902,6 +918,105 @@ describe("the other checkouts of the repository", () => {
       );
       expect(seen.slice(shownBefore).filter((t) => t.includes("no "))).toEqual(
         [],
+      );
+    });
+  }
+
+  /** The Hooks dialog's four hooks-folder writers, each run once from REPO. */
+  const HOOK_WRITERS = [
+    { name: "Save", api: gitHookWrite },
+    { name: "Disable", api: gitHookSetEnabled },
+    { name: "Delete", api: gitHookDelete },
+    { name: "Install hooks", api: gitInstallHookManager },
+  ] as const;
+  let runWriter: (() => Promise<unknown>) | null = null;
+  function Writer({ which }: { which: (typeof HOOK_WRITERS)[number]["name"] }) {
+    const write = useWriteHook(REPO);
+    const setEnabled = useSetHookEnabled(REPO);
+    const del = useDeleteHook(REPO);
+    const install = useInstallHookManager(REPO);
+    const runs = {
+      Save: () =>
+        write.mutateAsync({ name: "pre-push", content: "#!/bin/sh\n" }),
+      Disable: () =>
+        setEnabled.mutateAsync({ name: "pre-push", enabled: false }),
+      Delete: () => del.mutateAsync("pre-push"),
+      "Install hooks": () => install.mutateAsync("lefthook"),
+    };
+    runWriter = runs[which];
+    return null;
+  }
+  function renderWriter(
+    which: (typeof HOOK_WRITERS)[number]["name"],
+    beside?: ReactNode,
+  ) {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Writer which={which} />
+        {beside}
+      </QueryClientProvider>,
+    );
+    return queryClient;
+  }
+
+  for (const w of HOOK_WRITERS) {
+    it(`the Hooks dialog's ${w.name} clears an unobserved sibling's status and hook list, nothing else`, async () => {
+      vi.mocked(w.api).mockResolvedValue(undefined as never);
+      const queryClient = renderWriter(w.name);
+      seed(queryClient);
+      queryClient.setQueryData(listKey(UNRELATED), hooksInfo(1));
+      await act(async () => {
+        await runWriter?.();
+      });
+      expect(w.api).toHaveBeenCalledTimes(1);
+      expect(queryClient.getQueryData(statusKey(SIBLING))).toBeUndefined();
+      expect(queryClient.getQueryData(listKey(SIBLING))).toBeUndefined();
+      expect(queryClient.getQueryData(contentKey(SIBLING))).toBe("echo old");
+      expect(queryClient.getQueryData(statusKey(UNRELATED))).toEqual(
+        hookStatus("absent"),
+      );
+      expect(queryClient.getQueryData(listKey(UNRELATED))).toEqual(
+        hooksInfo(1),
+      );
+      expect(queryClient.getQueryData(statusKey(UNKNOWN))).toBeUndefined();
+    });
+
+    it(`the Hooks dialog's ${w.name} from a checkout of unknown identity clears every other checkout's reads`, async () => {
+      // The writer's own identity was never learned: any other checkout may
+      // share its hooks folder, so even UNRELATED's reads count as a sibling's.
+      IDENTITIES.delete(REPO);
+      vi.mocked(w.api).mockResolvedValue(undefined as never);
+      const queryClient = renderWriter(w.name);
+      seed(queryClient);
+      queryClient.setQueryData(listKey(UNRELATED), hooksInfo(1));
+      await act(async () => {
+        await runWriter?.();
+      });
+      expect(w.api).toHaveBeenCalledTimes(1);
+      expect(queryClient.getQueryData(statusKey(SIBLING))).toBeUndefined();
+      expect(queryClient.getQueryData(listKey(SIBLING))).toBeUndefined();
+      expect(queryClient.getQueryData(statusKey(UNRELATED))).toBeUndefined();
+      expect(queryClient.getQueryData(listKey(UNRELATED))).toBeUndefined();
+      expect(queryClient.getQueryData(contentKey(SIBLING))).toBe("echo old");
+    });
+
+    it(`the Hooks dialog's ${w.name} re-reads an observed sibling in place`, async () => {
+      vi.mocked(w.api).mockResolvedValue(undefined as never);
+      renderWriter(w.name, <SiblingObserver seen={[]} />);
+      const sibling = await screen.findByTestId("sibling");
+      await waitFor(() =>
+        expect(sibling).toHaveTextContent("absent / 1 hooks"),
+      );
+      siblingStatus = hookStatus("installed");
+      siblingHooks = 2;
+      await act(async () => {
+        await runWriter?.();
+      });
+      await waitFor(() =>
+        expect(sibling).toHaveTextContent("installed / 2 hooks"),
       );
     });
   }

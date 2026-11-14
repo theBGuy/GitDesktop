@@ -67,8 +67,27 @@ export const gitRenameBranch = (
     newName,
   });
 
-export const gitDeleteBranch = (repoPath: string, name: string) =>
-  invoke<void>("git_delete_branch", { repoPath, name });
+/** What a local branch delete did. `tip` is the commit the branch pointed at
+ *  when it was deleted (a lowercase full id). `tipMoved` comes back only when an
+ *  `expectedTip` was sent and the branch pointed elsewhere: nothing was deleted. */
+export type DeleteBranchOutcome =
+  | { status: "deleted"; tip: string }
+  | { status: "tipMoved"; expected: string; actual: string };
+
+/** Deletes a local branch. With `expectedTip` (a full object id) the delete
+ *  happens only while the branch still points there. The delete also removes
+ *  the branch's whole `branch.<name>` config section (Keep local, upstream), so
+ *  a caller that restores those reads them before this call. */
+export const gitDeleteBranch = (
+  repoPath: string,
+  name: string,
+  expectedTip?: string,
+) =>
+  invoke<DeleteBranchOutcome>("git_delete_branch", {
+    repoPath,
+    name,
+    expectedTip: expectedTip ?? null,
+  });
 
 /** Deletes `name` on `remote` (`git push <remote> --delete`). Idempotent when
  *  the remote ref is already gone. */
@@ -183,6 +202,18 @@ export const gitUpdateBranchFrom = (
  *  Branches that don't exist are omitted. Used to watch open local PRs' heads. */
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
+
+/** A name's tip from a {@link gitBranchTips} answer, or undefined when the read
+ *  omitted it: the answer is a plain object, so an omitted name that matches an
+ *  `Object.prototype` key (`constructor`, `__proto__`) would index an inherited
+ *  member. */
+export const tipOf = (
+  tips: Readonly<Record<string, string>>,
+  name: string,
+): string | undefined => {
+  const tip: unknown = Object.hasOwn(tips, name) ? tips[name] : undefined;
+  return typeof tip === "string" ? tip : undefined;
+};
 
 /** "clean": every change on the branch reached the base, at its tip or in a
  *  first-parent commit of its history, or the branch is an older version of a

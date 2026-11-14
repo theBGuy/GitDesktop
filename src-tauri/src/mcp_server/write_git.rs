@@ -310,22 +310,26 @@ struct UndoLastCommitArgs {
     expected_head: Option<String>,
 }
 
-/// An `expectedHead` in the form the core compares: a full commit id, lowercased. An
-/// abbreviated or malformed pin could only ever miss that compare, and the miss would
-/// report a moved HEAD that never moved. The length check doesn't know the repo's
-/// object format: an id of the other format's length still passes and reads as moved.
-fn full_commit_id(expected_head: Option<String>) -> Result<Option<String>, McpError> {
-    let Some(id) = expected_head else {
+/// A pin (`param` names it in the refusal) in the form the core compares: a full commit
+/// id, lowercased. An abbreviated or malformed pin could only ever miss that compare,
+/// and the miss would report a move that never happened. The length check doesn't know
+/// the repo's object format: an id of the other format's length still passes and reads
+/// as moved.
+fn full_commit_id(param: &str, pin: Option<String>) -> Result<Option<String>, McpError> {
+    let Some(id) = pin else {
         return Ok(None);
     };
-    if !matches!(id.len(), 40 | 64) || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(McpError::invalid_params(
-            "expectedHead must be a full commit id (40 or 64 hex characters), as log and \
-             repo_status report it",
-            None,
-        ));
-    }
-    Ok(Some(id.to_ascii_lowercase()))
+    crate::git::branches::full_object_id(&id)
+        .map(Some)
+        .map_err(|_| {
+            McpError::invalid_params(
+                format!(
+                    "{param} must be a full commit id (40 or 64 hex characters), as log and \
+                     repo_status report it"
+                ),
+                None,
+            )
+        })
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -355,6 +359,16 @@ struct CreateBranchArgs {
 struct BranchNameArgs {
     /// The branch name.
     name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DeleteBranchArgs {
+    /// The branch name.
+    name: String,
+    /// Optional: delete only while the branch still points at this full commit id;
+    /// otherwise nothing is deleted. Omit to delete wherever the branch points.
+    #[serde(default, rename = "expectedTip", alias = "expected_tip")]
+    expected_tip: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -771,7 +785,7 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         // The core consults the pin only for an amend, so only an amend validates it.
         let expected_head = if args.amend {
-            full_commit_id(args.expected_head)?
+            full_commit_id("expectedHead", args.expected_head)?
         } else {
             None
         };
@@ -824,7 +838,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<UndoLastCommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
-        let expected_head = full_commit_id(args.expected_head)?;
+        let expected_head = full_commit_id("expectedHead", args.expected_head)?;
         let _promote = self.promote_gate().await?;
         crate::git::commit::git_undo_commit_core(
             &self.state,
@@ -1327,28 +1341,50 @@ impl GitDesktopMcp {
     // ---- DESTRUCTIVE (ensure_destructive) --------------------------------
 
     #[tool(
-        description = "Force-delete a local branch (git branch -D) in the bound repository — \
-                       UNMERGED commits on it are irrecoverably lost. Refuses to delete a \
-                       GitDesktop agent-session branch (gd/session/*, in any letter case). \
-                       Requires --allow-git-write AND --allow-destructive.",
+        description = "Force-delete a local branch in the bound repository. The result names \
+                       the full commit id the branch pointed at, and create_branch with `from` \
+                       set to that id restores the branch (its upstream and settings are not \
+                       restored); commits only that branch held stay until git prunes them. \
+                       Optional expectedTip: delete only while the branch still points at that \
+                       full commit id, otherwise nothing is deleted and the error names where \
+                       the branch is now. Refuses to delete a GitDesktop agent-session branch \
+                       (gd/session/*, in any letter case). Requires --allow-git-write AND \
+                       --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn delete_branch(
         &self,
-        Parameters(args): Parameters<BranchNameArgs>,
+        Parameters(args): Parameters<DeleteBranchArgs>,
     ) -> Result<CallToolResult, McpError> {
+        use crate::git::branches::DeleteBranchOutcome;
         self.ensure_destructive()?;
         ensure_not_flag(&args.name, "branch name")?;
         ensure_not_session_branch(&args.name)?;
+        let expected_tip = full_commit_id("expectedTip", args.expected_tip)?;
         let _promote = self.promote_gate().await?;
-        crate::git::branches::git_delete_branch_core(
+        let name = args.name;
+        let outcome = crate::git::branches::git_delete_branch_core(
             &self.state,
             self.repo.clone(),
-            args.name.clone(),
+            name.clone(),
+            expected_tip,
         )
         .await
         .map_err(app_err)?;
-        ok_text(format!("branch deleted: {}", args.name))
+        match outcome {
+            DeleteBranchOutcome::Deleted { tip } => ok_text(format!(
+                "branch deleted: {name} (was {tip}) — create_branch with `from` set to that id \
+                 restores it"
+            )),
+            // A caller-supplied precondition failed, the class the session-branch refusal uses.
+            DeleteBranchOutcome::TipMoved { expected, actual } => Err(McpError::invalid_params(
+                format!(
+                    "branch not deleted: {name} is at {actual}, not the expected \
+                     {expected} — nothing was deleted"
+                ),
+                None,
+            )),
+        }
     }
 
     #[tool(
@@ -1568,6 +1604,13 @@ impl GitDesktopMcp {
 mod tests {
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
+
+    fn delete_args(name: &str) -> DeleteBranchArgs {
+        DeleteBranchArgs {
+            name: name.into(),
+            expected_tip: None,
+        }
+    }
 
     fn args_stage() -> StagePathsArgs {
         StagePathsArgs {
@@ -1844,7 +1887,7 @@ mod tests {
 
         // Destructive tools: with BOTH flags missing, --allow-git-write is the one named.
         assert_gated!(
-            h.delete_branch(Parameters(BranchNameArgs { name: "b".into() })),
+            h.delete_branch(Parameters(delete_args("b"))),
             "--allow-git-write"
         );
         assert_gated!(
@@ -1898,7 +1941,7 @@ mod tests {
             }};
         }
 
-        assert_destructive_gated!(h.delete_branch(Parameters(BranchNameArgs { name: "b".into() })));
+        assert_destructive_gated!(h.delete_branch(Parameters(delete_args("b"))));
         assert_destructive_gated!(
             h.discard_changes(Parameters(DiscardChangesArgs { paths: vec![] }))
         );
@@ -1942,7 +1985,7 @@ mod tests {
         );
 
         let err = h
-            .delete_branch(Parameters(BranchNameArgs { name: "b".into() }))
+            .delete_branch(Parameters(delete_args("b")))
             .await
             .expect_err("expected the gate to fire");
         assert!(err.to_string().contains("--allow-git-write"));
@@ -2554,6 +2597,115 @@ mod tests {
             .await
             .expect("an uppercase full id is the same commit");
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), a);
+    }
+
+    fn delete_wire(wire: serde_json::Value) -> DeleteBranchArgs {
+        serde_json::from_value(wire).unwrap()
+    }
+
+    async fn branch_tip(repo: &str, name: &str) -> Option<String> {
+        crate::git::branches::branch_tip_sha(repo, name)
+            .await
+            .unwrap()
+    }
+
+    fn result_text(result: &CallToolResult) -> String {
+        serde_json::to_string(&result.content).unwrap()
+    }
+
+    /// The result names the full deleted tip, the restore route, and the branch.
+    #[tokio::test]
+    async fn delete_branch_tool_names_the_deleted_tip() {
+        let (_dir, repo, a, _b) = two_commit_repo("gd-mcp-delete-tip-").await;
+        git(&repo, &["branch", "feat", &a]).await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, true);
+
+        let result = h
+            .delete_branch(Parameters(delete_args("feat")))
+            .await
+            .expect("the delete runs");
+        let text = result_text(&result);
+        assert!(text.contains("branch deleted: feat"), "{text}");
+        assert!(text.contains(&format!("(was {a})")), "{text}");
+        assert_eq!(branch_tip(&repo, "feat").await, None);
+    }
+
+    /// Both spellings of the pin reach the core: a stale one refuses as invalid params
+    /// naming both ids with the branch kept, and the current one deletes.
+    #[tokio::test]
+    async fn delete_branch_tool_honours_expected_tip_under_either_spelling() {
+        let (_dir, repo, a, b) = two_commit_repo("gd-mcp-delete-pin-").await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, true);
+        assert!(delete_wire(serde_json::json!({ "name": "x" }))
+            .expected_tip
+            .is_none());
+
+        for key in ["expectedTip", "expected_tip"] {
+            let name = format!("feat-{key}");
+            git(&repo, &["branch", &name, &b]).await;
+            let mut wire = serde_json::json!({ "name": name });
+            wire[key] = serde_json::json!(a);
+            let err = h
+                .delete_branch(Parameters(delete_wire(wire)))
+                .await
+                .expect_err("a stale pin refuses");
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{key}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("branch not deleted: {name} is at {b}"))
+                    && msg.contains(&format!("not the expected {a}"))
+                    && msg.contains("nothing was deleted"),
+                "{key}: {msg}"
+            );
+            assert_eq!(branch_tip(&repo, &name).await, Some(b.clone()), "{key}");
+
+            let mut wire = serde_json::json!({ "name": name });
+            wire[key] = serde_json::json!(b);
+            h.delete_branch(Parameters(delete_wire(wire)))
+                .await
+                .expect("the current tip deletes");
+            assert_eq!(branch_tip(&repo, &name).await, None, "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_branch_tool_refuses_an_abbreviated_pin() {
+        let (_dir, repo, a, _b) = two_commit_repo("gd-mcp-delete-short-").await;
+        git(&repo, &["branch", "feat", &a]).await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, true);
+
+        let err = h
+            .delete_branch(Parameters(delete_wire(
+                serde_json::json!({ "name": "feat", "expectedTip": &a[..12] }),
+            )))
+            .await
+            .expect_err("an abbreviated pin is refused");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expectedTip must be a full commit id"),
+            "{msg}"
+        );
+        assert_eq!(branch_tip(&repo, "feat").await, Some(a));
+    }
+
+    #[tokio::test]
+    async fn delete_branch_tool_still_refuses_a_session_branch() {
+        let (_dir, repo, a, _b) = two_commit_repo("gd-mcp-delete-session-").await;
+        git(&repo, &["branch", "gd/session/x", &a]).await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, true);
+
+        let err = h
+            .delete_branch(Parameters(delete_wire(
+                serde_json::json!({ "name": "gd/session/x", "expectedTip": a }),
+            )))
+            .await
+            .expect_err("a session branch is refused");
+        assert!(
+            err.to_string().contains("reserved for agent sessions"),
+            "{err}"
+        );
+        assert_eq!(branch_tip(&repo, "gd/session/x").await, Some(a));
     }
 
     async fn all_push_keys_unset(repo: &str, what: &str, keys: &[&str]) -> bool {
@@ -3600,9 +3752,7 @@ mod tests {
         let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, true, true);
 
         let err = h
-            .delete_branch(Parameters(BranchNameArgs {
-                name: "gd/session/xyz".into(),
-            }))
+            .delete_branch(Parameters(delete_args("gd/session/xyz")))
             .await
             .expect_err("session branch delete should be refused");
         assert!(
@@ -3650,8 +3800,7 @@ mod tests {
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         for name in ["GD/Session/xyz", "gd/session/xyz"] {
             let refusals = [
-                h.delete_branch(Parameters(BranchNameArgs { name: name.into() }))
-                    .await,
+                h.delete_branch(Parameters(delete_args(name))).await,
                 h.rename_branch(Parameters(RenameBranchArgs {
                     from: name.into(),
                     to: "renamed".into(),
@@ -3758,11 +3907,9 @@ mod tests {
             }))
             .await
             .expect_err("rename refuses mid-promote"),
-            h.delete_branch(Parameters(BranchNameArgs {
-                name: "feature".into(),
-            }))
-            .await
-            .expect_err("delete refuses mid-promote"),
+            h.delete_branch(Parameters(delete_args("feature")))
+                .await
+                .expect_err("delete refuses mid-promote"),
             h.stash_push(Parameters(StashPushArgs {
                 paths: Vec::new(),
                 literal: true,

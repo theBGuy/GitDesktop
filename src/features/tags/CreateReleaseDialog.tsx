@@ -76,6 +76,7 @@ import {
   useRepoStatus,
   useTagList,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { CommitSummary, GeneratedNotes } from "@/lib/git/types";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -658,7 +659,7 @@ export function CreateReleaseDialog({
                     // target (same rule as BranchSwitcher).
                     branches={(branches.data ?? [])
                       .map((b) => b.name)
-                      .filter((n) => !n.startsWith("gd/session/"))}
+                      .filter((n) => !isSessionBranchName(n))}
                     commits={recent.data ?? []}
                     value={target}
                     onChange={(v) => form.setFieldValue("target", v)}

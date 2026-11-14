@@ -24,6 +24,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { RelativeTime, useRelativeNow } from "@/components/relative-time";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -33,9 +34,30 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { clipTitleFromText } from "@/lib/clip-title";
+import {
+  cleanupRestorableTail,
+  NOT_LISTED_REASON,
+  skippedMoved,
+  TIPS_READ_FAILED_HELD,
+  TIPS_READ_FAILED_STATUS,
+  UNREADABLE_LISTED_TIP_REASON,
+} from "@/lib/deleted-branches/copy";
+import {
+  deletedBranchFacts,
+  deletedToastOptions,
+  readBranchRowsFresh,
+} from "@/lib/deleted-branches/restore";
+import {
+  DELETED_BRANCHES_CAP,
+  type DeletedBranchEntry,
+  mintDeletedBranch,
+  recordDeletedBranches,
+} from "@/lib/deleted-branches/store";
 import { presentError } from "@/lib/error-summary";
 import * as api from "@/lib/git/api";
+import { FULL_OID_RE } from "@/lib/git/oid";
 import { normPath } from "@/lib/git/path";
 import {
   type ContentCheckOffReason,
@@ -45,13 +67,15 @@ import {
   repoStatusOptions,
   useBranchContentCheck,
   useBranchDivergence,
+  useListedBranchTips,
   worktreeKey,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { Branch } from "@/lib/git/types";
 import { listWorktrees } from "@/lib/git/worktree";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import {
   type CleanupRemovalOutcome,
   isBranchPromoting,
@@ -59,7 +83,10 @@ import {
   promotionBlocksCheckout,
   removeWorktreeForCleanup,
 } from "@/lib/stores/worktree-removal";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
@@ -250,7 +277,8 @@ const DESCRIPTION_PR_CLAUSE: Record<PrCheckState, string> = {
 
 const MODE_SENTENCE: Record<Mode, string> = {
   archive: "Archiving hides them from the switcher — unarchive anytime.",
-  delete: "Deleting removes them permanently, including commits only on them.",
+  delete:
+    "Deleting removes them, including commits only on them — restore from Recover lost work.",
 };
 
 /** The empty state's merged-clause aside, per PR-check outcome, on the same
@@ -503,6 +531,9 @@ interface ConfirmBatch {
   changes: number;
   /** The ref `changes` was measured against. */
   baseRef: string;
+  /** Branch → the full object id a delete is pinned to: the content verdict's
+   *  measured head, else the listed tip. A name missing here is not deleted. */
+  tips: ReadonlyMap<string, string>;
 }
 
 const CONFIRM_TITLE: Record<ConfirmKind, (batch: ConfirmBatch) => string> = {
@@ -528,11 +559,13 @@ const CONFIRM_REFUSED: Record<ConfirmKind, string> = {
 };
 
 /** Why a confirmed name was skipped at its turn: it became the branch the
- *  list never offers after the confirm captured it. */
-type SkipReason = "default" | "current";
+ *  list never offers after the confirm captured it, or it moved off the tip
+ *  the list showed (kept, and re-checked under the tip measured instead). */
+type SkipReason = "default" | "current" | "moved";
 const SKIPPED_TOAST: Record<SkipReason, (name: string) => string> = {
   default: (name) => `Skipped ${name} — it's now the default branch.`,
   current: (name) => `Skipped ${name} — it's now checked out.`,
+  moved: skippedMoved,
 };
 
 /** Left/Right step and Home/End jump across a control group's buttons; plain
@@ -816,7 +849,7 @@ function ConfirmBody({ batch }: { batch: ConfirmBatch }) {
   const lead =
     worktrees > 0
       ? `Removes ${pluralWorktrees(worktrees)} and deletes ${branches}`
-      : `Permanently deletes ${branches}`;
+      : `Deletes ${branches}`;
   return (
     <>
       {`${lead}, including commits that exist only on ${branchPronoun(count)}.`}
@@ -827,7 +860,11 @@ function ConfirmBody({ batch }: { batch: ConfirmBatch }) {
           <span className="font-mono">{batch.baseRef}</span>.
         </>
       ) : null}
-      {" This can't be undone."}
+      {cleanupRestorableTail(
+        count,
+        worktrees > 0 ? worktreeNoun(worktrees) : null,
+        DELETED_BRANCHES_CAP,
+      )}
     </>
   );
 }
@@ -946,7 +983,7 @@ export function CleanupBranchesDialog({
   // confirm counted reach it here; it consumes the ref before its first await.
   const confirmedRef = useRef<Pick<
     ConfirmBatch,
-    "names" | "worktreePaths"
+    "names" | "worktreePaths" | "tips"
   > | null>(null);
   // Batch progress + per-branch failures (kept visible so a partial run is honest).
   const [progress, setProgress] = useState<{
@@ -975,6 +1012,28 @@ export function CleanupBranchesDialog({
     baseRef: string;
   } | null>(null);
   const running = progress !== null;
+  // One batch at a time: delete mode's fresh read is awaited before progress
+  // is set. The ref gates, since two confirms can land before a re-render; the
+  // state holds the primary through that read.
+  const batchRunningRef = useRef(false);
+  const [batchStarted, setBatchStarted] = useState(false);
+  // The run-wide lock: dismissals, controls and rows hold from the batch's
+  // start, its fresh read included; `running` alone starts at its progress.
+  const locked = running || batchStarted;
+  // One reason node serves every locked control; the raw buttons take its
+  // aria-disabled form, so they keep their tab stops while the lock holds.
+  const lock = useDisabledReason({
+    disabled: locked,
+    reason: PRIMARY_RUNNING_REASON,
+  });
+  const lockedButton = {
+    disabled: lock.nativeProps.disabled,
+    "aria-disabled": lock.nativeProps["aria-disabled"],
+    "aria-describedby": lock.describedBy,
+  };
+  // The held controls take no pointer, so their hover wrappers show it.
+  const lockCursor =
+    lock.blockedReason !== null ? "cursor-not-allowed" : undefined;
   // The snapshot paints only while it applies: under its run, and through the
   // close a full success starts. A reopen paints the live list from its first
   // frame, before the seed clears the snapshot.
@@ -1060,7 +1119,7 @@ export function CleanupBranchesDialog({
         b.isCurrent ||
         b.name === currentBranch ||
         b.name === defaultOrNull ||
-        b.name.startsWith("gd/session/")
+        isSessionBranchName(b.name)
       )
         continue;
       const ts = Date.parse(b.lastCommitDate);
@@ -1223,6 +1282,13 @@ export function CleanupBranchesDialog({
       if (!c.merged && c.prHead !== null) heads.set(c.branch.name, c.prHead);
     return heads;
   }, [candidates]);
+  // Each branch's tip as this open first read it: every delete is pinned to it
+  // (or to the verdict's measured head), and every verdict is keyed on it.
+  const listed = useListedBranchTips(
+    repoPath,
+    branches.map((b) => b.name),
+    open,
+  );
   // A failed read passes as still loading, so the open latches the name a
   // recovery brings rather than null, which would end the check for the open.
   const check = useBranchContentCheck(
@@ -1231,7 +1297,14 @@ export function CleanupBranchesDialog({
     checkNames,
     open,
     prHeadByBranch,
+    listed,
   );
+  /** The full object id a delete of `name` is pinned to, or undefined: the
+   *  verdict's measured head, else the listed tip, never a PR head. */
+  function expectedTipFor(name: string): string | undefined {
+    const tip = check.results.get(name)?.headSha ?? listed.tips.get(name);
+    return tip !== undefined && FULL_OID_RE.test(tip) ? tip : undefined;
+  }
   // The selection re-seeds when the repo changes, or when the pre-checked SET
   // (sorted keys, so a new-but-equal array or a reorder on the 30s clock isn't
   // one) changes across a control change or a reopen; new data that moves the
@@ -1479,7 +1552,7 @@ export function CleanupBranchesDialog({
     countedNames.length > 0 && (shownFrozen !== null || !holdingReads);
 
   function toggle(name: string) {
-    if (running) return;
+    if (locked) return;
     keptTouchRef.current.delete(name);
     touchedRef.current.add(name);
     setSelected((prev) => {
@@ -1493,7 +1566,7 @@ export function CleanupBranchesDialog({
   // Select all adds to the checked rows a pending status read holds, so it never
   // drops one the user chose; Deselect all clears everything.
   function toggleAll() {
-    if (running) return;
+    if (locked) return;
     for (const name of candidateNames) touchedRef.current.add(name);
     for (const name of candidateNames) keptTouchRef.current.delete(name);
     const pendingHeld = candidates
@@ -1510,13 +1583,13 @@ export function CleanupBranchesDialog({
   // handlers (not an effect) so the post-batch refetch keeps the just-failed rows
   // flagged.
   function changeMode(next: Mode) {
-    if (running) return;
+    if (locked) return;
     setMode(next);
     setFailed(new Map());
   }
 
   function toggleCriterion(key: Criterion) {
-    if (running) return;
+    if (locked) return;
     setCriteria((prev) => ({ ...prev, [key]: !prev[key] }));
     setFailed(new Map());
   }
@@ -1524,14 +1597,14 @@ export function CleanupBranchesDialog({
   // A window press also turns Idle on, so the window never sits as a control
   // that does nothing.
   function changeWindow(next: number) {
-    if (running) return;
+    if (locked) return;
     setWindowDays(next);
     setCriteria((prev) => (prev.idle ? prev : { ...prev, idle: true }));
     setFailed(new Map());
   }
 
   function changeIncludeWorktrees(next: boolean) {
-    if (running) return;
+    if (locked) return;
     setIncludeWorktrees(next);
     setFailed(new Map());
     // A lock or unlock made outside the app shows only once the list re-reads.
@@ -1557,6 +1630,19 @@ export function CleanupBranchesDialog({
     };
   });
 
+  // The batch's one entry: holds the gate across every exit of runBatch.
+  async function startBatch() {
+    if (batchRunningRef.current) return;
+    batchRunningRef.current = true;
+    setBatchStarted(true);
+    try {
+      await runBatch();
+    } finally {
+      batchRunningRef.current = false;
+      setBatchStarted(false);
+    }
+  }
+
   async function runBatch() {
     // A confirm hands over the set and worktree rows it showed; an unconfirmed
     // Archive acts on the live selection and removes no worktree, since it
@@ -1566,6 +1652,7 @@ export function CleanupBranchesDialog({
     const names =
       confirmed?.names ?? candidateNames.filter((n) => selected.has(n));
     const worktreePaths = confirmed?.worktreePaths ?? new Map<string, string>();
+    const tips = confirmed?.tips ?? new Map<string, string>();
     if (names.length === 0) return;
     // A promote's branch sits in no checkout while it moves, so the worktree
     // exclusion can't see it.
@@ -1626,6 +1713,48 @@ export function CleanupBranchesDialog({
       if (name === live.currentBranch) return "current";
       return null;
     };
+    // Rows that moved off their pinned tip: kept, listed and re-checked.
+    const moved = new Set<string>();
+    const keepMoved = (name: string, actual: string) => {
+      skipped.add(name);
+      moved.add(name);
+      listed.relist(name, actual);
+      toast.info(SKIPPED_TOAST.moved(name));
+    };
+    // What Restore re-applies is read fresh before any delete: a delete removes
+    // the branch's whole config section.
+    let rowsBefore: Awaited<ReturnType<typeof readBranchRowsFresh>> = null;
+    if (mode === "delete") {
+      rowsBefore = await readBranchRowsFresh(repoPath);
+      if (
+        refuseIfSwitched(
+          repoPath,
+          CONFIRM_REFUSED.delete,
+          "before the delete started",
+        )
+      )
+        return;
+    }
+    const restorable: DeletedBranchEntry[] = [];
+    // Entries whose record write failed; the rest were recorded, in order.
+    const failedIds = new Set<string>();
+    const recorded: DeletedBranchEntry[] = [];
+    // Awaited per row, so a crash mid-batch never strands a deleted tip.
+    const recordDeleted = async (name: string, tip: string) => {
+      const entry = mintDeletedBranch({
+        name,
+        tip,
+        ...deletedBranchFacts(rowsBefore, name),
+      });
+      if (await recordDeletedBranches(repoPath, [entry])) recorded.push(entry);
+      else failedIds.add(entry.id);
+      restorable.push(entry);
+    };
+    // Only a name the tips read answered without has no candidate at all.
+    const missingTipReason = (name: string) =>
+      (check.results.get(name)?.headSha ?? listed.tips.get(name)) === undefined
+        ? NOT_LISTED_REASON
+        : UNREADABLE_LISTED_TIP_REASON;
     setFailed(new Map());
     setFrozen({
       rows: candidates,
@@ -1647,6 +1776,12 @@ export function CleanupBranchesDialog({
         processed = i;
         break;
       }
+      // So can a promote, freeing its branch for a later row; it stops the same way.
+      if (mode === "delete" && promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        processed = i;
+        break;
+      }
       const name = names[i];
       const wtPath = worktreePaths.get(name);
       const skip = skipNow(name);
@@ -1660,7 +1795,15 @@ export function CleanupBranchesDialog({
           // covers rules that land after the confirm captured its names, or
           // during the batch. First, so a protected branch keeps its worktree.
           fails.set(name, "protected by a branch rule");
+        } else if (
+          wtPath !== undefined &&
+          mode === "delete" &&
+          !tips.has(name)
+        ) {
+          // Nothing to pin the delete to, so the worktree stays too.
+          fails.set(name, missingTipReason(name));
         } else if (wtPath !== undefined) {
+          const tip = mode === "delete" ? tips.get(name) : undefined;
           // Called per row as it starts: the removal re-checks updates and
           // other removals at call time, which a pre-loop pass would miss.
           const out = await removeWorktreeForCleanup(queryClient, {
@@ -1669,9 +1812,14 @@ export function CleanupBranchesDialog({
             name,
             branch: name,
             then: mode,
+            ...(tip !== undefined && { expectedTip: tip }),
           });
-          if (!out.ok) fails.set(name, out.reason);
-          else {
+          if (!out.ok) {
+            if (out.movedTo !== undefined) keepMoved(name, out.movedTo);
+            else fails.set(name, out.reason);
+          } else {
+            if (out.deletedTip !== null)
+              await recordDeleted(name, out.deletedTip);
             const keptReason = KEPT_BRANCH_REASON[out.branch];
             if (keptReason !== null) {
               fails.set(name, keptReason);
@@ -1687,7 +1835,13 @@ export function CleanupBranchesDialog({
             await api.gitSetBranchArchived(repoPath, name, true);
           }
         } else {
-          await api.gitDeleteBranch(repoPath, name);
+          const tip = tips.get(name);
+          if (tip === undefined) fails.set(name, missingTipReason(name));
+          else {
+            const out = await api.gitDeleteBranch(repoPath, name, tip);
+            if (out.status === "tipMoved") keepMoved(name, out.actual);
+            else await recordDeleted(name, out.tip);
+          }
         }
       } catch (e) {
         fails.set(name, presentError(e).summary);
@@ -1727,7 +1881,7 @@ export function CleanupBranchesDialog({
     // A stopped or partly failed batch leaves the dialog open: the rows left
     // keep the user's choices, and the live list takes over. A full success
     // closes it still frozen.
-    if (processed < names.length || fails.size > 0) {
+    if (processed < names.length || fails.size > 0 || moved.size > 0) {
       selectionSeed.current = {
         ...selectionSeed.current,
         afterBatch: selectionContext,
@@ -1738,26 +1892,46 @@ export function CleanupBranchesDialog({
 
     const ok = processed - fails.size - skipped.size;
     const verb = mode === "archive" ? "Archived" : "Deleted";
+    // The list keeps the newest DELETED_BRANCHES_CAP, so a batch that recorded
+    // more lost its earliest recorded entries; a failed write was never listed.
+    const cut = recorded.slice(
+      0,
+      Math.max(0, recorded.length - DELETED_BRANCHES_CAP),
+    );
+    const unrecordedIds = new Set([...failedIds, ...cut.map((e) => e.id)]);
+    // The result toasts' one shape: a delete that left restorable entries
+    // offers Restore all on the batch's own repo, which the title names after a
+    // switch; anything else is title-only.
+    const resultToast = (kind: "success" | "error", title: string) => {
+      if (restorable.length === 0) toast[kind](title);
+      else
+        toast[kind](
+          `${title}${landedIn(repoPath).away}`,
+          deletedToastOptions(queryClient, repoPath, restorable, unrecordedIds),
+        );
+    };
     if (processed < names.length) {
       if (fails.size > 0) {
         setFailed(fails);
         setFailedIn(repoPath);
-        toast.error(`${verb} ${ok}, ${fails.size} failed`);
-      } else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);
+        resultToast("error", `${verb} ${ok}, ${fails.size} failed`);
+      } else if (ok > 0)
+        resultToast("success", `${verb} ${pluralBranches(ok)}`);
       return;
     }
     // A run whose only misses are skips closes like a success; its skip
     // toasts already said what didn't happen.
     if (fails.size === 0) {
-      if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);
-      onClose();
+      if (ok > 0) resultToast("success", `${verb} ${pluralBranches(ok)}`);
+      // A moved row stays listed for its re-check, so the dialog stays open.
+      if (moved.size === 0) onClose();
       return;
     }
     setFailed(fails);
     setFailedIn(repoPath);
     // The successful ones drop out of the candidate list on refetch, leaving the
     // failures on screen with their reason; the user can retry them.
-    toast.error(`${verb} ${ok}, ${fails.size} failed`);
+    resultToast("error", `${verb} ${ok}, ${fails.size} failed`);
   }
 
   function openConfirm(batch: ConfirmBatch) {
@@ -1768,6 +1942,7 @@ export function CleanupBranchesDialog({
   // Delete always confirms; Archive confirms only when it removes a worktree,
   // since unarchiving doesn't bring the folder back.
   function onPrimary() {
+    if (batchRunningRef.current) return;
     const names = candidateNames.filter((n) => selected.has(n));
     const rowByName = new Map(candidates.map((c) => [c.branch.name, c]));
     const worktreePaths = new Map(
@@ -1786,16 +1961,24 @@ export function CleanupBranchesDialog({
         (n) => tipUnverified.has(n) || check.verdicts.get(n) === "changes",
       ).length,
       baseRef,
+      tips: new Map(
+        names.flatMap((n) => {
+          const tip = expectedTipFor(n);
+          return tip === undefined ? [] : [[n, tip] as const];
+        }),
+      ),
     };
     if (mode === "delete") openConfirm({ kind: "delete", ...snapshot });
     else if (worktreePaths.size > 0)
       openConfirm({ kind: "archiveWorktrees", ...snapshot });
-    else void runBatch();
+    else void startBatch();
   }
 
   function onConfirmBatch() {
     if (confirmBatch === null) return;
     setConfirmBatch(null);
+    // Before the hand-over, which an unconfirmed Archive would otherwise inherit.
+    if (batchRunningRef.current) return;
     if (
       refuseIfSwitched(
         confirmBatch.repoPath,
@@ -1806,8 +1989,9 @@ export function CleanupBranchesDialog({
     confirmedRef.current = {
       names: confirmBatch.names,
       worktreePaths: confirmBatch.worktreePaths,
+      tips: confirmBatch.tips,
     };
-    void runBatch();
+    void startBatch();
   }
 
   const verb = mode === "archive" ? "Archive" : "Delete";
@@ -1815,20 +1999,35 @@ export function CleanupBranchesDialog({
   const primaryLabel = running
     ? `${gerund}… ${progress?.done ?? 0}/${progress?.total ?? 0}`
     : `${verb} ${pluralBranches(selectedCount)}`;
+  // Archive needs no tip, so only Delete is held by a failed tips read.
+  const tipsReadFailed =
+    mode === "delete" &&
+    candidates.some((c) => listed.failed.has(c.branch.name));
   const primaryHeldReason = ((): string | null => {
     switch (true) {
-      case running:
+      case locked:
         return PRIMARY_RUNNING_REASON;
       case defaultFailed:
         return DEFAULT_READ_FAILED_COPY;
       case holdingReads:
         return PRIMARY_HOLDING_REASON;
+      // Delete pins every row to its listed tip, so it waits for the tips read.
+      case mode === "delete" &&
+        candidates.some((c) => listed.waiting.has(c.branch.name)):
+        return PRIMARY_HOLDING_REASON;
+      case tipsReadFailed:
+        return TIPS_READ_FAILED_HELD;
       case selectedCount === 0:
         return PRIMARY_EMPTY_REASON[mode];
       default:
         return null;
     }
   })();
+  // The failed-read line and its Retry show only while that failure is what
+  // holds Delete: not mid-batch, and not under an earlier hold.
+  const tipsReadHolds = primaryHeldReason === TIPS_READ_FAILED_HELD;
+  const { hostRef: tipsRetryHost, retryRef: tipsRetryRef } =
+    useRetryFocusRescue(tipsReadHolds);
   const failedHere = failedIn === repoPath ? failed : NO_FAILURES;
   // The mode's own exclusions can empty the list while stale branches remain, so
   // both empty states name the exclusion instead of reporting none. One string
@@ -1849,7 +2048,7 @@ export function CleanupBranchesDialog({
       <Dialog
         open={open}
         onOpenChange={(o) => {
-          if (!o && !running) onClose();
+          if (!o && !locked) onClose();
         }}
       >
         <DialogContent className="flex flex-col gap-4 sm:max-w-lg">
@@ -1864,23 +2063,37 @@ export function CleanupBranchesDialog({
           </DialogHeader>
 
           {/* Action / Show captions beside their controls, then the opt-in.
-              A running batch natively disables every control here and in the
-              list as one run-wide lock, explained by the held primary's
-              progress label and reason. onOpenChange refuses every dismissal
-              meanwhile (Escape, the header close, a backdrop press); that close
-              stays enabled on purpose, since the vendored one takes no reason. */}
+              A running batch holds every control here and in the list as one
+              run-wide lock (`locked`). Each stays focusable and carries its
+              reason: the buttons as aria-disabled, the Checkboxes as readOnly
+              (they take no other focusable hold), their handlers refusing
+              too. onOpenChange refuses every dismissal meanwhile
+              (Escape, the header close, a backdrop press); that close stays
+              enabled on purpose, since the vendored one takes no reason. */}
+          {lock.blockedReason !== null && (
+            <span id={lock.reasonId} className="sr-only">
+              {lock.blockedReason}
+            </span>
+          )}
           <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
             <LabeledGroup label="Action" className={CONTROL_ROW}>
-              <div className="inline-flex w-fit rounded-none ring-1 ring-border">
+              <div
+                className={cn(
+                  "inline-flex w-fit rounded-none ring-1 ring-border",
+                  lockCursor,
+                )}
+                title={lock.wrapperTitle}
+              >
                 {(["archive", "delete"] as const).map((m) => (
                   <button
                     key={m}
                     type="button"
-                    disabled={running}
+                    {...lockedButton}
                     aria-pressed={mode === m}
                     onClick={() => changeMode(m)}
                     className={cn(
-                      "px-3 py-1 text-xs capitalize transition-colors first:border-r first:border-border disabled:opacity-50",
+                      "px-3 py-1 text-xs capitalize transition-colors first:border-r first:border-border",
+                      ARIA_DISABLED_CLASS,
                       mode === m
                         ? m === "delete"
                           ? "bg-destructive text-white"
@@ -1896,18 +2109,23 @@ export function CleanupBranchesDialog({
 
             <LabeledGroup label="Show" className={CONTROL_ROW}>
               <div
-                className="flex flex-wrap items-center gap-1.5"
+                className={cn(
+                  "flex flex-wrap items-center gap-1.5",
+                  lockCursor,
+                )}
+                title={lock.wrapperTitle}
                 onKeyDown={moveFocusInGroup}
               >
                 {(["merged", "closed"] as const).map((k) => (
                   <button
                     key={k}
                     type="button"
-                    disabled={running}
+                    {...lockedButton}
                     aria-pressed={criteria[k]}
                     onClick={() => toggleCriterion(k)}
                     className={cn(
-                      "inline-flex items-center gap-1 px-2 py-1 ring-1 transition-colors disabled:opacity-50",
+                      "inline-flex items-center gap-1 px-2 py-1 ring-1 transition-colors",
+                      ARIA_DISABLED_CLASS,
                       criteria[k]
                         ? "bg-primary/10 text-foreground ring-primary/50"
                         : "text-muted-foreground ring-border hover:text-foreground",
@@ -1925,11 +2143,12 @@ export function CleanupBranchesDialog({
                 >
                   <button
                     type="button"
-                    disabled={running}
+                    {...lockedButton}
                     aria-pressed={criteria.idle}
                     onClick={() => toggleCriterion("idle")}
                     className={cn(
-                      "inline-flex items-center gap-1 px-2 py-1 transition-colors disabled:opacity-50",
+                      "inline-flex items-center gap-1 px-2 py-1 transition-colors",
+                      ARIA_DISABLED_CLASS,
                       criteria.idle
                         ? "bg-primary/10 text-foreground"
                         : "text-muted-foreground hover:text-foreground",
@@ -1948,11 +2167,12 @@ export function CleanupBranchesDialog({
                       <button
                         key={d}
                         type="button"
-                        disabled={running}
+                        {...lockedButton}
                         aria-pressed={windowDays === d}
                         onClick={() => changeWindow(d)}
                         className={cn(
-                          "border-l border-border px-2 py-1 tabular-nums transition-colors disabled:opacity-50",
+                          "border-l border-border px-2 py-1 tabular-nums transition-colors",
+                          ARIA_DISABLED_CLASS,
                           windowDays === d &&
                             criteria.idle &&
                             "bg-primary text-primary-foreground",
@@ -1978,13 +2198,18 @@ export function CleanupBranchesDialog({
 
             <label
               className={cn(
-                "col-start-2 flex w-fit cursor-pointer items-center gap-2",
+                "col-start-2 flex w-fit items-center gap-2",
+                lockCursor ?? "cursor-pointer",
                 !includeWorktrees && "text-muted-foreground",
               )}
+              title={lock.wrapperTitle}
             >
               <Checkbox
                 checked={includeWorktrees}
-                disabled={running}
+                readOnly={locked}
+                aria-disabled={locked || undefined}
+                aria-describedby={lock.describedBy}
+                className={ARIA_DISABLED_CLASS}
                 onCheckedChange={(next) => changeIncludeWorktrees(next)}
               />
               Include branches checked out in a worktree
@@ -1996,37 +2221,47 @@ export function CleanupBranchesDialog({
               Withheld while the list is provisional — it would count rows an
               outstanding exclusion read may still remove. */}
           {showSelectAll && (
-            <button
-              type="button"
-              disabled={running}
-              onClick={toggleAll}
-              aria-label={`${allChecked ? "Deselect all" : "Select all"}, ${selectedCount} of ${countedNames.length} selected`}
-              className="flex items-center gap-2 text-xs text-muted-foreground disabled:opacity-50"
-            >
-              <span
-                aria-hidden
+            // The hover reason sits on a wrapper: the held button takes no pointer.
+            <div className={lockCursor} title={lock.wrapperTitle}>
+              <button
+                type="button"
+                {...lockedButton}
+                onClick={toggleAll}
+                aria-label={`${allChecked ? "Deselect all" : "Select all"}, ${selectedCount} of ${countedNames.length} selected`}
                 className={cn(
-                  "flex size-4 shrink-0 items-center justify-center rounded-none border border-input",
-                  (allChecked || someChecked) &&
-                    "border-primary bg-primary text-primary-foreground",
+                  "flex items-center gap-2 text-xs text-muted-foreground",
+                  ARIA_DISABLED_CLASS,
                 )}
               >
-                {allChecked ? (
-                  <CheckIcon className="size-3.5" />
-                ) : someChecked ? (
-                  <MinusIcon className="size-3.5" />
-                ) : null}
-              </span>
-              <span>
-                {selectedCount} of {countedNames.length} selected
-              </span>
-            </button>
+                <span
+                  aria-hidden
+                  className={cn(
+                    "flex size-4 shrink-0 items-center justify-center rounded-none border border-input",
+                    (allChecked || someChecked) &&
+                      "border-primary bg-primary text-primary-foreground",
+                  )}
+                >
+                  {allChecked ? (
+                    <CheckIcon className="size-3.5" />
+                  ) : someChecked ? (
+                    <MinusIcon className="size-3.5" />
+                  ) : null}
+                </span>
+                <span>
+                  {selectedCount} of {countedNames.length} selected
+                </span>
+              </button>
+            </div>
           )}
 
           {/* Merged-detection status + the list it describes. `gap` (not
               `space-y`) spaces the two, so the status region contributes none
               while it is sr-only and therefore out of flow. */}
-          <div className="flex flex-col gap-0.5">
+          <div
+            ref={tipsRetryHost}
+            tabIndex={-1}
+            className="flex flex-col gap-0.5 outline-none"
+          >
             {/* Mounted unconditionally: a live region created together with its
                 text announces unreliably, so the region pre-exists and only its
                 CONTENT changes. `sr-only` keeps the silent states out of layout.
@@ -2041,6 +2276,7 @@ export function CleanupBranchesDialog({
                   !showPrFailedLine &&
                   !worktreeCheckFailed &&
                   checkOffNote === null &&
+                  !tipsReadHolds &&
                   "sr-only",
               )}
             >
@@ -2119,7 +2355,26 @@ export function CleanupBranchesDialog({
                   {checkOffNote}
                 </p>
               ) : null}
+              {tipsReadHolds ? (
+                <p className="px-1 py-1 text-[11px] text-muted-foreground">
+                  {TIPS_READ_FAILED_STATUS}
+                </p>
+              ) : null}
             </div>
+            {/* Outside the live region, so it isn't read as part of the status.
+                Its press unmounts it; the box above takes focus back. */}
+            {tipsReadHolds ? (
+              <div ref={tipsRetryRef} className="px-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => listed.retry()}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : null}
             {tickingBase ? (
               <p
                 aria-hidden
@@ -2223,6 +2478,7 @@ export function CleanupBranchesDialog({
                         ].filter((d) => d !== null);
                         const describedBy =
                           [
+                            lock.describedBy,
                             err ? errId : null,
                             holdReason ? holdId : null,
                             details.length > 0 ? detailId : null,
@@ -2245,26 +2501,27 @@ export function CleanupBranchesDialog({
                             <label
                               className={cn(
                                 "block",
-                                hold === null && "cursor-pointer",
+                                hold === null && !locked && "cursor-pointer",
                               )}
                             >
                               <span className="flex items-center gap-2">
-                                {/* A held row stays focusable and in the roving
-                                    order, so it can say why it won't toggle. */}
+                                {/* A held row, and every row under the lock,
+                                    stays focusable and in the roving order, so
+                                    it can say why it won't toggle. */}
                                 <Checkbox
                                   {...nav.rowProps(c)}
                                   checked={hold === null && selected.has(name)}
-                                  disabled={running}
+                                  readOnly={locked}
                                   onCheckedChange={
                                     hold === null
                                       ? () => toggle(name)
                                       : undefined
                                   }
                                   aria-disabled={
-                                    hold === null ? undefined : true
+                                    hold === null && !locked ? undefined : true
                                   }
                                   className={
-                                    hold === null
+                                    hold === null && !locked
                                       ? undefined
                                       : ARIA_DISABLED_CLASS
                                   }
@@ -2337,8 +2594,8 @@ export function CleanupBranchesDialog({
             <DisabledReasonButton
               type="button"
               variant="outline"
-              disabled={running}
-              reason={running ? PRIMARY_RUNNING_REASON : null}
+              disabled={locked}
+              reason={locked ? PRIMARY_RUNNING_REASON : null}
               onClick={onClose}
             >
               Cancel

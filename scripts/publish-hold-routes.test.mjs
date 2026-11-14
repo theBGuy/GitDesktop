@@ -128,6 +128,11 @@ const EXCLUDED = {
     reason:
       "a Vitest harness whose push never reaches the backend; it starts pushes only to test the local delete's and the branch update's fire-time holds",
   },
+  "test/sync-controls-holds.test.tsx": {
+    hooks: ["usePush"],
+    reason:
+      "a Vitest harness whose push never reaches the backend; it starts a sibling worktree's push only to test the sync bar's fire-time sibling hold",
+  },
 };
 
 const REFUSE = "refuseWhilePublishing(";

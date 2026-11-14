@@ -12,7 +12,7 @@ import { peekRepoIdentity } from "../repo-identity";
 import { repoKeys, useRepoIdentity } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { prChecksRecheck } from "./pr-actions";
-import { pendingMutationEntries } from "./pr-writes";
+import { type PendingMutationEntry, pendingMutationEntries } from "./pr-writes";
 import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
@@ -386,11 +386,31 @@ export function refuseWhilePushRuns(
   return true;
 }
 
+/** A branch push filed before its checkout's identity resolved keys on the path
+ *  alone, which no sibling's check could match, so its identity is peeked from
+ *  the memo by that path at check time. A key that already names an identity, or
+ *  a path the memo never learned, is left as it is. */
+function withLearnedIdentities(
+  entries: PendingMutationEntry[],
+): PendingMutationEntry[] {
+  return entries.map((e) => {
+    const [prefix, path, keyIdentity] = e.key ?? [];
+    if (prefix !== BRANCH_PUSH_KEY[0] || typeof path !== "string") return e;
+    if (keyIdentity !== undefined) return e;
+    const learned = peekRepoIdentity(path);
+    return learned === undefined
+      ? e
+      : { ...e, key: branchPushKey(path, learned) };
+  });
+}
+
 /** The fire-time refusal for a route that moves or removes `branch`'s ref: true
  *  (and says why) while a push in this checkout, or in another worktree of the
  *  same repository, is sending it. `currentName` is this checkout's HEAD branch
- *  (null when unknown). Synchronous: the identity is peeked, never resolved, so an
- *  unresolved one matches this checkout's own pushes only. `alsoHeld` adds a hold
+ *  (null when unknown). Synchronous: identities are peeked, never resolved, so a
+ *  checker whose own identity is unresolved matches this checkout's own pushes
+ *  only, while a push filed before its identity resolved is matched once the memo
+ *  holds it ({@link withLearnedIdentities}). `alsoHeld` adds a hold
  *  the caller tracks itself; `message` overrides the toast, and
  *  `elsewhereMessage` overrides it when only another worktree's push holds. */
 export function refuseWhileBranchPushes(
@@ -405,10 +425,12 @@ export function refuseWhileBranchPushes(
   } = {},
 ): boolean {
   const pushes = pendingBranchPushesFor(
-    pendingMutationEntries(
-      queryClient
-        .getMutationCache()
-        .findAll({ mutationKey: BRANCH_PUSH_KEY, status: "pending" }),
+    withLearnedIdentities(
+      pendingMutationEntries(
+        queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: BRANCH_PUSH_KEY, status: "pending" }),
+      ),
     ),
     repo,
     peekRepoIdentity(repo),

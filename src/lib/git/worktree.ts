@@ -115,23 +115,31 @@ export type BranchCleanup =
 /** Mirrors `WorktreeRemoveOutcome` in `src-tauri/src/git/worktree.rs`. */
 export interface WorktreeRemoveOutcome {
   branchCleanup: BranchCleanup;
+  /** The commit the deleted branch pointed at; non-null exactly when branchCleanup is "deleted". */
+  branchTip: string | null;
+  /** Non-null only when `expectedBranchTip` was sent and the branch pointed elsewhere
+   *  before the removal began: nothing was removed, the worktree is still there. */
+  tipMoved: { expected: string; actual: string } | null;
 }
 
 /** Removes a session worktree and (when given) deletes its branch, unless the
  *  branch moved since. `force` is required to drop a worktree with
- *  uncommitted changes. */
+ *  uncommitted changes. `expectedBranchTip` (full object id, only with a
+ *  non-null `branch`) pins the delete; the key is sent only when it is a
+ *  string, so a caller without a pin sends no `expectedBranchTip`. */
 export const removeWorktree = (
   repoPath: string,
   path: string,
   branch: string | null,
   force: boolean,
+  expectedBranchTip?: string | null,
 ) =>
-  invoke<WorktreeRemoveOutcome>("git_worktree_remove", {
-    repoPath,
-    path,
-    branch,
-    force,
-  });
+  invoke<WorktreeRemoveOutcome>(
+    "git_worktree_remove",
+    typeof expectedBranchTip === "string"
+      ? { repoPath, path, branch, force, expectedBranchTip }
+      : { repoPath, path, branch, force },
+  );
 
 /** Prunes stale worktree admin entries (e.g. after a crash). */
 export const pruneWorktrees = (repoPath: string) =>

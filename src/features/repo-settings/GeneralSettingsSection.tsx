@@ -27,6 +27,7 @@ import {
   useRepoSettings,
   useUpdateRepoSettings,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { Branch, RepoSettings, RepoSettingsInput } from "@/lib/git/types";
 import { usePublishGenerateAction } from "@/lib/hotkeys/useGenerateChord";
 import { NO_CHANGES_REASON } from "@/lib/offline-writes";
@@ -323,7 +324,7 @@ function GeneralForm({
   // agent-session branches (`gd/session/*`) — they're app-internal.
   const branchNames = branches
     .map((b) => b.name)
-    .filter((n) => !n.startsWith("gd/session/"));
+    .filter((n) => !isSessionBranchName(n));
   const branchOptions = branchNames.includes(form.defaultBranch)
     ? branchNames
     : [form.defaultBranch, ...branchNames];

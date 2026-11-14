@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -24,6 +25,14 @@ import {
   defaultBranchReadFailed,
 } from "@/features/repository/CleanupBranchesDialog";
 import {
+  cleanupRestorableTail,
+  skippedMoved,
+} from "@/lib/deleted-branches/copy";
+import {
+  forgetDeletedBranch,
+  recordDeletedBranches,
+} from "@/lib/deleted-branches/store";
+import {
   type BranchContentMerged,
   type ContentCheckBase,
   type ContentCheckBaseRead,
@@ -31,15 +40,22 @@ import {
   type ContentVerdict,
   gitBranchContentMerged,
   gitBranchDivergence,
+  gitBranches,
+  gitBranchTips,
   gitContentCheckBase,
+  gitCreateBranch,
   gitDeleteBranch,
+  gitFindCommitsByPrefix,
+  gitObjectsPresent,
   gitSetBranchArchived,
   gitStatus,
 } from "@/lib/git/api";
+import { refuseWhilePushRuns } from "@/lib/git/queries";
 import type { Branch, FileEntry, RepoStatus } from "@/lib/git/types";
 import { listWorktrees } from "@/lib/git/worktree";
 import { useUiStore } from "@/lib/stores/ui";
 import {
+  CLEANUP_TIP_MOVED_REASON,
   type CleanupRemovalOutcome,
   removeWorktreeForCleanup,
   useWorktreeRemovalStore,
@@ -52,17 +68,47 @@ import { unmockedCommands } from "./setup";
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitBranchDivergence: vi.fn(),
+  // The batch's fresh read of Keep local and upstream before a delete.
+  gitBranches: vi.fn(),
+  gitBranchTips: vi.fn(),
   gitContentCheckBase: vi.fn(),
   gitBranchContentMerged: vi.fn(),
   gitStatus: vi.fn(),
   gitSetBranchArchived: vi.fn(),
   gitDeleteBranch: vi.fn(),
+  // Restore all, from a result toast.
+  gitObjectsPresent: vi.fn(),
+  gitFindCommitsByPrefix: vi.fn(),
+  gitCreateBranch: vi.fn(),
+  gitSetBranchKeepLocal: vi.fn(),
 }));
-// promotionBlocksCheckout stays real; only the removal entry point is stubbed.
-vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/stores/worktree-removal")>()),
-  removeWorktreeForCleanup: vi.fn(),
+// A push starting mid-batch is staged through this one read.
+vi.mock("@/lib/git/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/git/queries")>();
+  return {
+    ...actual,
+    refuseWhilePushRuns: vi.fn(actual.refuseWhilePushRuns),
+  };
+});
+// The record's writers; minting stays real.
+vi.mock("@/lib/deleted-branches/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/deleted-branches/store")>()),
+  recordDeletedBranches: vi.fn(),
+  forgetDeletedBranch: vi.fn(),
 }));
+// promotionBlocksCheckout stays real unless a test flags a promote; only the
+// removal entry point is stubbed.
+const promote = vi.hoisted(() => ({ on: false }));
+vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/stores/worktree-removal")>();
+  return {
+    ...actual,
+    removeWorktreeForCleanup: vi.fn(),
+    promotionBlocksCheckout: (repoPath: string) =>
+      promote.on || actual.promotionBlocksCheckout(repoPath),
+  };
+});
 // The batch's fire-time checkout read before a plain Archive.
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
@@ -118,7 +164,9 @@ interface VerdictCall {
   settled: boolean;
   resolve: (
     verdict: ContentVerdict,
-    detail?: Partial<Pick<BranchContentMerged, "landedIn" | "viaPrHead">>,
+    detail?: Partial<
+      Pick<BranchContentMerged, "landedIn" | "viaPrHead" | "headSha">
+    >,
   ) => void;
 }
 interface RemovalCall {
@@ -135,10 +183,28 @@ let baseAnswer: ContentCheckBaseRead | Promise<ContentCheckBaseRead> = READY;
 let mergedByRepo = new Map<string, string[]>();
 /** Worktree status answers by path; a missing path stays in flight, and a
  *  promise is one the test settles. */
+/** What the fresh branch read answers: the rows the dialog was last given. */
+let branchRows: Branch[] = [];
 let statusByPath = new Map<
   string,
   "clean" | "dirty" | "reject" | Promise<RepoStatus>
 >();
+
+/** A delete result toast that offers Restore for `count` recorded entries. */
+const withRestore = (count: number) =>
+  expect.objectContaining({
+    duration: 15_000,
+    action: expect.objectContaining({
+      label: count === 1 ? "Restore" : "Restore all",
+    }),
+  });
+
+/** The full object id the tips read answers for `name`, distinct per name. */
+function tipFor(name: string): string {
+  let h = 7;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return h.toString(16).padStart(8, "1").repeat(5);
+}
 
 function branch(name: string, days: number, archived = false): Branch {
   return {
@@ -163,7 +229,9 @@ beforeEach(() => {
   baseAnswer = READY;
   mergedByRepo = new Map();
   statusByPath = new Map();
+  branchRows = [];
   onCommit = null;
+  promote.on = false;
   vi.clearAllMocks();
   useUiStore.setState(useUiStore.getInitialState(), true);
   vi.mocked(gitBranchDivergence).mockImplementation(async (repo) =>
@@ -209,8 +277,17 @@ beforeEach(() => {
     });
   });
   vi.mocked(gitSetBranchArchived).mockImplementation(async () => undefined);
-  vi.mocked(gitDeleteBranch).mockImplementation(async () => undefined);
+  vi.mocked(gitBranches).mockImplementation(async () => branchRows);
+  vi.mocked(gitDeleteBranch).mockImplementation(async () => ({
+    status: "deleted",
+    tip: "a".repeat(40),
+  }));
   vi.mocked(listWorktrees).mockResolvedValue([]);
+  vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
+    Object.fromEntries(names.map((n) => [n, tipFor(n)])),
+  );
+  vi.mocked(recordDeletedBranches).mockResolvedValue(true);
+  vi.mocked(forgetDeletedBranch).mockResolvedValue(true);
   vi.mocked(removeWorktreeForCleanup).mockImplementation((_client, args) => {
     const d = deferred<CleanupRemovalOutcome>();
     removalCalls.push({ args, resolve: d.resolve });
@@ -307,6 +384,7 @@ function renderDialog(s: Setup) {
     defaultOptions: { queries: { retry: false } },
   });
   let props = propsFor(s);
+  branchRows = props.branches;
   const view = render(
     <QueryClientProvider client={client}>
       <Profiler id="cleanup" onRender={() => onCommit?.()}>
@@ -321,6 +399,7 @@ function renderDialog(s: Setup) {
     props: () => props,
     rerender(patch: Partial<DialogProps>) {
       props = { ...props, ...patch };
+      branchRows = props.branches;
       view.rerender(
         <QueryClientProvider client={client}>
           <Profiler id="cleanup" onRender={() => onCommit?.()}>
@@ -929,7 +1008,7 @@ describe("the batch", () => {
       name: "Delete branches?",
     });
     expect(confirm).toHaveTextContent(
-      "Removes 2 worktrees and deletes 3 branches, including commits that exist only on them. Removing a worktree deletes its folder, including ignored files such as build output. This can't be undone.",
+      "Removes 2 worktrees and deletes 3 branches, including commits that exist only on them. Removing a worktree deletes its folder, including ignored files such as build output. The branches can be restored from Recover lost work; the removed worktrees can't.",
     );
     await user.click(
       within(confirm).getByRole("button", { name: "Delete 3 branches" }),
@@ -941,6 +1020,7 @@ describe("the batch", () => {
       name: "i-w1",
       branch: "i-w1",
       then: "delete",
+      expectedTip: tipFor("i-w1"),
     });
     // The batch's own removal mark doesn't drop the row mid-run.
     view.rerender({ isWorktreeRemoving: (n) => n === "i-w1" });
@@ -958,12 +1038,17 @@ describe("the batch", () => {
     expect(removalCalls[1].args.path).toBe("C:/wt/i-w2");
     expect(gitDeleteBranch).not.toHaveBeenCalled();
     await act(async () => {
-      removalCalls[1].resolve({ ok: true, branch: "keptMoved" });
+      removalCalls[1].resolve({
+        ok: true,
+        branch: "keptMoved",
+        deletedTip: null,
+      });
     });
     await waitFor(() =>
       expect(gitDeleteBranch).toHaveBeenCalledWith(
         "C:/repos/ordered",
         "i-plain",
+        tipFor("i-plain"),
       ),
     );
     await waitFor(() =>
@@ -976,7 +1061,10 @@ describe("the batch", () => {
         "Couldn't delete: the worktree was removed, but the branch gained new commits and was kept",
       ),
     ).toBeInTheDocument();
-    expect(toast.error).toHaveBeenCalledWith("Deleted 1, 2 failed");
+    expect(toast.error).toHaveBeenCalledWith(
+      "Deleted 1, 2 failed",
+      withRestore(1),
+    );
     expect(view.props().onClose).not.toHaveBeenCalled();
   });
 
@@ -1020,7 +1108,7 @@ describe("confirms", () => {
       name: "Delete branches?",
     });
     const body =
-      "Permanently deletes 2 branches, including commits that exist only on them. 1 of the branches has changes not in origin/main. This can't be undone.";
+      "Deletes 2 branches, including commits that exist only on them. 1 of the branches has changes not in origin/main. They can be restored from Recover lost work.";
     expect(confirm).toHaveTextContent(body);
     // A verdict landing under the confirm checks the row in the list only.
     await landVerdicts({ "s-late": "clean" });
@@ -1452,10 +1540,17 @@ describe("across reseeds, reopens and batches", () => {
     // row turns plain under its earlier "clean".
     view.rerender({ worktreeFacts: new Map() });
     await act(async () => {
-      removalCalls[0].resolve({ ok: true, branch: "keptMoved" });
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "keptMoved",
+        deletedTip: null,
+      });
     });
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     expect(
       screen.getByText(
@@ -1502,7 +1597,11 @@ describe("across reseeds, reopens and batches", () => {
     // The worktree is gone, so the row turns plain under its earlier "clean".
     view.rerender({ worktreeFacts: new Map() });
     await act(async () => {
-      removalCalls[0].resolve({ ok: true, branch: "keptInUse" });
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "keptInUse",
+        deletedTip: null,
+      });
     });
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("Archived 0, 1 failed"),
@@ -1527,7 +1626,7 @@ describe("across reseeds, reopens and batches", () => {
     await user.click(primary());
     const del = await screen.findByRole("dialog", { name: "Delete branch?" });
     expect(del).toHaveTextContent(
-      "Permanently deletes 1 branch, including commits that exist only on it. This can't be undone.",
+      "Deletes 1 branch, including commits that exist only on it. It can be restored from Recover lost work.",
     );
     expect(del).not.toHaveTextContent(/changes not in/);
   });
@@ -1571,7 +1670,7 @@ describe("across reseeds, reopens and batches", () => {
       name: "Delete branch?",
     });
     expect(confirm).toHaveTextContent(
-      "Permanently deletes 1 branch, including commits that exist only on it. This can't be undone.",
+      "Deletes 1 branch, including commits that exist only on it. It can be restored from Recover lost work.",
     );
     // The branch is checked out in a new worktree while the confirm is open.
     view.rerender({
@@ -1589,6 +1688,7 @@ describe("across reseeds, reopens and batches", () => {
       expect(gitDeleteBranch).toHaveBeenCalledWith(
         "C:/repos/confirm-worktrees",
         "sn-b",
+        tipFor("sn-b"),
       ),
     );
     expect(removeWorktreeForCleanup).not.toHaveBeenCalled();
@@ -1662,7 +1762,10 @@ describe("across reseeds, reopens and batches", () => {
       removalCalls[0].resolve({ ok: false, reason: "the worktree is locked" });
     });
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     expect(boxOf("rt-w")).toHaveAttribute("aria-disabled", "true");
     await act(async () =>
@@ -1699,7 +1802,11 @@ describe("across reseeds, reopens and batches", () => {
     await waitFor(() => expect(removalCalls).toHaveLength(1));
     view.rerender({ worktreeFacts: new Map() });
     await act(async () => {
-      removalCalls[0].resolve({ ok: true, branch: "keptMoved" });
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "keptMoved",
+        deletedTip: null,
+      });
     });
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("Deleted 0, 1 failed"),
@@ -1713,7 +1820,7 @@ describe("across reseeds, reopens and batches", () => {
       name: "Delete branch?",
     });
     expect(again).toHaveTextContent(
-      "Permanently deletes 1 branch, including commits that exist only on it. It has changes not in origin/main. This can't be undone.",
+      "Deletes 1 branch, including commits that exist only on it. It has changes not in origin/main. It can be restored from Recover lost work.",
     );
   });
 
@@ -1743,7 +1850,11 @@ describe("across reseeds, reopens and batches", () => {
     // Its worktree gone, the row turns plain and joins the ancestry seed.
     view.rerender({ worktreeFacts: new Map() });
     await act(async () => {
-      removalCalls[0].resolve({ ok: true, branch: "keptUnreadable" });
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "keptUnreadable",
+        deletedTip: null,
+      });
     });
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("Deleted 0, 1 failed"),
@@ -1812,7 +1923,11 @@ describe("across reseeds, reopens and batches", () => {
     // The run's own removal mark empties the live list in Delete mode.
     view.rerender({ isWorktreeRemoving: (n) => n === "fs-w" });
     await act(async () => {
-      removalCalls[0].resolve({ ok: true, branch: "deleted" });
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "deleted",
+        deletedTip: null,
+      });
     });
     await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
     await act(async () => {
@@ -2320,12 +2435,15 @@ describe("a confirmed name the list no longer offers", () => {
     );
     await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
     expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
-      ["C:/repos/skip-default", "sd-a"],
+      ["C:/repos/skip-default", "sd-a", tipFor("sd-a")],
     ]);
     expect(toast.info).toHaveBeenCalledWith(
       "Skipped sd-b — it's now the default branch.",
     );
-    expect(toast.success).toHaveBeenCalledWith("Deleted 1 branch");
+    expect(toast.success).toHaveBeenCalledWith(
+      "Deleted 1 branch",
+      withRestore(1),
+    );
     expect(toast.error).not.toHaveBeenCalled();
   });
 
@@ -2407,7 +2525,7 @@ describe("a confirmed name the list no longer offers", () => {
     );
     await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
     expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
-      ["C:/repos/skip-protected-default", "pd-a"],
+      ["C:/repos/skip-protected-default", "pd-a", tipFor("pd-a")],
     ]);
     expect(toast.info).toHaveBeenCalledWith(
       "Skipped pd-b — it's now the default branch.",
@@ -2854,7 +2972,7 @@ describe("after a batch", () => {
     await user.click(screen.getByRole("button", { name: /^delete$/i }));
     await landVerdicts({ "fb-a": "clean", "fb-b": "clean" });
     await waitFor(() => expect(isChecked("fb-b")).toBe(true));
-    const first = deferred<undefined>();
+    const first = deferred<Awaited<ReturnType<typeof gitDeleteBranch>>>();
     vi.mocked(gitDeleteBranch).mockImplementationOnce(() => first.promise);
     await user.click(primary());
     const confirm = await screen.findByRole("dialog", {
@@ -2874,7 +2992,10 @@ describe("after a batch", () => {
     await waitFor(() => expect(document.activeElement).toBe(held));
     await act(async () => first.reject(new Error("branch is busy")));
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(primary());
@@ -2918,7 +3039,10 @@ describe("after a batch", () => {
       removalCalls[0].resolve({ ok: false, reason: "the worktree is locked" });
     });
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     // The deleted branch leaves the list on the refetch.
     view.rerender({ branches: [branch("sa-w", OLD), branch("sa-other", OLD)] });
@@ -2966,10 +3090,17 @@ describe("after a batch", () => {
     await waitFor(() => expect(removalCalls).toHaveLength(1));
     view.rerender({ worktreeFacts: new Map() });
     await act(async () => {
-      removalCalls[0].resolve({ ok: true, branch: "keptMoved" });
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "keptMoved",
+        deletedTip: null,
+      });
     });
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     expect(isChecked(w)).toBe(false);
     return view;
@@ -3086,11 +3217,14 @@ describe("Select all, a late rule and a reopen", () => {
       within(confirm).getByRole("button", { name: "Delete 2 branches" }),
     );
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     expect(removeWorktreeForCleanup).not.toHaveBeenCalled();
     expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
-      ["C:/repos/protect-late", "pl-plain"],
+      ["C:/repos/protect-late", "pl-plain", tipFor("pl-plain")],
     ]);
   });
 
@@ -3136,7 +3270,7 @@ describe("a running batch", () => {
     await user.click(screen.getByRole("button", { name: /^delete$/i }));
     await landRest(names, "clean");
     await waitFor(() => expect(isChecked(names[1])).toBe(true));
-    const first = deferred<undefined>();
+    const first = deferred<Awaited<ReturnType<typeof gitDeleteBranch>>>();
     vi.mocked(gitDeleteBranch).mockImplementationOnce(() => first.promise);
     await user.click(primary());
     const confirm = await screen.findByRole("dialog", {
@@ -3146,7 +3280,13 @@ describe("a running batch", () => {
       within(confirm).getByRole("button", { name: "Delete 2 branches" }),
     );
     await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(1));
-    return { view, release: () => act(async () => first.resolve(undefined)) };
+    return {
+      view,
+      release: () =>
+        act(async () =>
+          first.resolve({ status: "deleted", tip: "a".repeat(40) }),
+        ),
+    };
   }
 
   it("refuses a branch whose rule lands while the batch runs", async () => {
@@ -3157,10 +3297,13 @@ describe("a running batch", () => {
     view.rerender({ isProtected: (n) => n === "rm-b" });
     await release();
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
     );
     expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
-      ["C:/repos/rule-mid-batch", "rm-a"],
+      ["C:/repos/rule-mid-batch", "rm-a", tipFor("rm-a")],
     ]);
   });
 
@@ -3186,10 +3329,13 @@ describe("a running batch", () => {
     });
     await release();
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith("Deleted 1, 1 failed"),
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed in rule-switch-a",
+        withRestore(1),
+      ),
     );
     expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
-      ["C:/repos/rule-switch-a", "rs-a"],
+      ["C:/repos/rule-switch-a", "rs-a", tipFor("rs-a")],
     ]);
     expect(asked).not.toContain("rs-b");
   });
@@ -3563,7 +3709,7 @@ describe("a row that turns out to be checked out in a worktree", () => {
       name: "Delete branch?",
     });
     expect(confirm).toHaveTextContent(
-      "Permanently deletes 1 branch, including commits that exist only on it. This can't be undone.",
+      "Deletes 1 branch, including commits that exist only on it. It can be restored from Recover lost work.",
     );
   });
 
@@ -3852,5 +3998,931 @@ describe("what a clean verdict rests on", () => {
       "title",
       "An earlier version of #6. The pull request's final version is all in origin/main",
     );
+  });
+});
+
+describe("Delete pins each branch to the tip this list read", () => {
+  const MOVED = "9".repeat(40);
+  /** The deleted outcome for the tip the call was pinned to. */
+  const deletedAtPin = async (
+    _repo: string,
+    _name: string,
+    tip?: string | null,
+  ) => ({ status: "deleted" as const, tip: tip ?? "a".repeat(40) });
+
+  async function enterDelete(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+  }
+
+  async function confirmDelete(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: /^Delete branch(es)?\?$/,
+    });
+    await user.click(
+      within(confirm).getByRole("button", { name: /^Delete \d+ branch/ }),
+    );
+  }
+
+  /** Lands `name`'s next unsettled check. */
+  async function landNext(
+    name: string,
+    verdict: ContentVerdict,
+    detail: Partial<
+      Pick<BranchContentMerged, "landedIn" | "viaPrHead" | "headSha">
+    > = {},
+  ) {
+    await waitFor(() =>
+      expect(verdictCalls.some((c) => !c.settled && c.branch === name)).toBe(
+        true,
+      ),
+    );
+    await act(async () => {
+      verdictCalls
+        .find((c) => !c.settled && c.branch === name)
+        ?.resolve(verdict, detail);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  it("reads names that arrive after the open, and pins each row kind to its tip, never a PR head", async () => {
+    const repo = "C:/repos/k2-kinds";
+    const head = "d".repeat(40);
+    const prHead = "c".repeat(40);
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [],
+      merged: ["k2-anc"],
+      prMerged: { "k2-pr": "#7" },
+      prHeads: { "k2-pr": prHead },
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(gitBranchTips).not.toHaveBeenCalled();
+    view.rerender({
+      branches: [
+        branch("k2-anc", FRESH),
+        {
+          ...branch("k2-head", OLD),
+          keepLocal: true,
+          upstream: "origin/k2-head",
+        },
+        branch("k2-null", OLD),
+        branch("k2-pr", FRESH),
+      ],
+    });
+    await waitFor(() =>
+      expect(gitBranchTips).toHaveBeenCalledWith(repo, [
+        "k2-anc",
+        "k2-head",
+        "k2-null",
+        "k2-pr",
+      ]),
+    );
+    await enterDelete(view.user);
+    await landNext("k2-head", "clean", { headSha: head });
+    await landNext("k2-null", "clean");
+    await landNext("k2-pr", "clean");
+    for (const n of ["k2-anc", "k2-head", "k2-null", "k2-pr"])
+      await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(4));
+    const pins = Object.fromEntries(
+      vi.mocked(gitDeleteBranch).mock.calls.map(([, name, tip]) => [name, tip]),
+    );
+    expect(pins).toEqual({
+      "k2-anc": tipFor("k2-anc"),
+      "k2-head": head,
+      "k2-null": tipFor("k2-null"),
+      "k2-pr": tipFor("k2-pr"),
+    });
+    // Each record is written, awaited, before the next row's delete.
+    await waitFor(() => expect(recordDeletedBranches).toHaveBeenCalledTimes(4));
+    const records = vi.mocked(recordDeletedBranches).mock;
+    const deletes = vi.mocked(gitDeleteBranch).mock;
+    for (let i = 0; i < 3; i++)
+      expect(records.invocationCallOrder[i]).toBeLessThan(
+        deletes.invocationCallOrder[i + 1],
+      );
+    expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
+      expect.objectContaining({
+        name: "k2-head",
+        tip: head,
+        keptLocal: true,
+        upstream: "origin/k2-head",
+      }),
+    ]);
+    expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
+      expect.objectContaining({
+        name: "k2-anc",
+        tip: tipFor("k2-anc"),
+        keptLocal: false,
+        upstream: null,
+      }),
+    ]);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 4 branches",
+        withRestore(4),
+      ),
+    );
+  });
+
+  it("refuses a row with no listed tip, with a reason for each way it has none", async () => {
+    const repo = "C:/repos/k4-no-tip";
+    statusByPath.set("C:/wt/k4-wt", "clean");
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
+      Object.fromEntries(
+        names
+          .filter((n) => n !== "k4-gone" && n !== "k4-wt")
+          .map((n) => [n, n === "k4-short" ? "abc1234" : tipFor(n)]),
+      ),
+    );
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [
+        branch("k4-gone", OLD),
+        branch("k4-short", OLD),
+        branch("k4-ok", OLD),
+        branch("k4-wt", OLD),
+      ],
+      worktrees: { "k4-wt": { path: "C:/wt/k4-wt" } },
+    });
+    await enterDelete(view.user);
+    await view.user.click(optIn());
+    await landVerdicts({
+      "k4-gone": "clean",
+      "k4-short": "clean",
+      "k4-ok": "clean",
+      "k4-wt": "clean",
+    });
+    await waitFor(() =>
+      expect(boxOf("k4-wt")).not.toHaveAttribute("aria-disabled"),
+    );
+    await view.user.click(boxOf("k4-wt"));
+    for (const n of ["k4-gone", "k4-short", "k4-ok"])
+      await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 3 failed",
+        withRestore(1),
+      ),
+    );
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      [repo, "k4-ok", tipFor("k4-ok")],
+    ]);
+    expect(removeWorktreeForCleanup).not.toHaveBeenCalled();
+    expect(
+      screen.getAllByText("Couldn't delete: git no longer lists this branch"),
+    ).toHaveLength(2);
+    expect(
+      screen.getByText(
+        "Couldn't delete: this list couldn't read its commit — close and reopen Clean up branches",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a plain row whose tip moved: listed, re-checked once, skipped, and a retry pins the measured tip", async () => {
+    const repo = "C:/repos/k6-moved";
+    let failOnce = true;
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, name, tip) => {
+      if (name === "mv-moved" && tip === tipFor("mv-moved"))
+        return { status: "tipMoved", expected: tip, actual: MOVED };
+      if (name === "mv-fail" && failOnce) {
+        failOnce = false;
+        throw new Error("branch refused");
+      }
+      return deletedAtPin(r, name, tip);
+    });
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [
+        branch("mv-moved", OLD),
+        branch("mv-ok", OLD),
+        branch("mv-fail", OLD),
+      ],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({
+      "mv-moved": "clean",
+      "mv-ok": "clean",
+      "mv-fail": "clean",
+    });
+    for (const n of ["mv-moved", "mv-ok", "mv-fail"])
+      await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "Deleted 1, 1 failed",
+        withRestore(1),
+      ),
+    );
+    expect(toast.info).toHaveBeenCalledWith(skippedMoved("mv-moved"));
+    expect(recordDeletedBranches).toHaveBeenCalledTimes(1);
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(listed()).toContain("mv-moved");
+    expect(isChecked("mv-moved")).toBe(false);
+    // The relist re-keys its verdict: one new check, for that row only.
+    await waitFor(() =>
+      expect(verdictCalls.filter((c) => c.branch === "mv-moved")).toHaveLength(
+        2,
+      ),
+    );
+    expect(verdictCalls.filter((c) => c.branch === "mv-ok")).toHaveLength(1);
+    await landNext("mv-moved", "clean");
+    await waitFor(() =>
+      expect(boxOf("mv-moved")).not.toHaveAttribute("aria-disabled"),
+    );
+    await view.user.click(boxOf("mv-moved"));
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(gitDeleteBranch).toHaveBeenCalledWith(repo, "mv-moved", MOVED),
+    );
+  });
+
+  it("keeps a worktree row whose tip moved, with its worktree, and a retry pins the measured tip", async () => {
+    const repo = "C:/repos/k6-moved-wt";
+    statusByPath.set("C:/wt/mw-w", "clean");
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("mw-w", OLD)],
+      worktrees: { "mw-w": { path: "C:/wt/mw-w" } },
+    });
+    await enterDelete(view.user);
+    await view.user.click(optIn());
+    await landVerdicts({ "mw-w": "clean" });
+    await waitFor(() =>
+      expect(boxOf("mw-w")).not.toHaveAttribute("aria-disabled"),
+    );
+    await view.user.click(boxOf("mw-w"));
+    await confirmDelete(view.user);
+    await waitFor(() => expect(removalCalls).toHaveLength(1));
+    expect(removalCalls[0].args.expectedTip).toBe(tipFor("mw-w"));
+    await act(async () =>
+      removalCalls[0].resolve({
+        ok: false,
+        reason: CLEANUP_TIP_MOVED_REASON,
+        movedTo: MOVED,
+      }),
+    );
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(skippedMoved("mw-w")),
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Couldn't delete:/)).toBeNull();
+    expect(within(rowOf("mw-w")).getByText("worktree")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(verdictCalls.filter((c) => c.branch === "mw-w")).toHaveLength(2),
+    );
+    await landNext("mw-w", "clean");
+    await waitFor(() =>
+      expect(boxOf("mw-w")).not.toHaveAttribute("aria-disabled"),
+    );
+    if (!isChecked("mw-w")) await view.user.click(boxOf("mw-w"));
+    await confirmDelete(view.user);
+    await waitFor(() => expect(removalCalls).toHaveLength(2));
+    expect(removalCalls[1].args).toMatchObject({
+      path: "C:/wt/mw-w",
+      expectedTip: MOVED,
+    });
+  });
+
+  it("records a worktree row's deleted tip, and counts one deleted with none without offering it", async () => {
+    const repo = "C:/repos/k5-worktrees";
+    const tip = "4".repeat(40);
+    statusByPath.set("C:/wt/wd-tip", "clean");
+    statusByPath.set("C:/wt/wd-none", "clean");
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("wd-tip", OLD), branch("wd-none", OLD)],
+      worktrees: {
+        "wd-tip": { path: "C:/wt/wd-tip" },
+        "wd-none": { path: "C:/wt/wd-none" },
+      },
+    });
+    await enterDelete(view.user);
+    await view.user.click(optIn());
+    await landVerdicts({ "wd-tip": "clean", "wd-none": "clean" });
+    for (const n of ["wd-tip", "wd-none"]) {
+      await waitFor(() =>
+        expect(boxOf(n)).not.toHaveAttribute("aria-disabled"),
+      );
+      await view.user.click(boxOf(n));
+    }
+    await confirmDelete(view.user);
+    for (let i = 0; i < 2; i++) {
+      await waitFor(() => expect(removalCalls).toHaveLength(i + 1));
+      const { name } = removalCalls[i].args;
+      await act(async () =>
+        removalCalls[i].resolve({
+          ok: true,
+          branch: "deleted",
+          deletedTip: name === "wd-tip" ? tip : null,
+        }),
+      );
+    }
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 2 branches",
+        withRestore(1),
+      ),
+    );
+    expect(vi.mocked(recordDeletedBranches).mock.calls).toEqual([
+      [repo, [expect.objectContaining({ name: "wd-tip", tip })]],
+    ]);
+  });
+
+  it("offers Restore all on a batch a push stopped, restoring in batch order on the batch's repo", async () => {
+    const repo = "C:/repos/k9-restore-all";
+    const all = ["k9-1", "k9-2", "k9-3", "k9-4"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: all.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(all, "clean");
+    for (const n of all) await waitFor(() => expect(isChecked(n)).toBe(true));
+    // The batch's up-front check and its first three rows pass; a push starts
+    // before the fourth.
+    vi.mocked(refuseWhilePushRuns)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 3 branches",
+        withRestore(3),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(3);
+    const order = vi.mocked(gitDeleteBranch).mock.calls.map(([, n]) => n);
+    const options = vi.mocked(toast.success).mock.calls[0][1] as unknown as {
+      action: { onClick: (e: { currentTarget: HTMLElement }) => void };
+    };
+
+    // Only the second name exists again, at another commit.
+    vi.mocked(gitBranches).mockClear();
+    vi.mocked(gitBranches).mockResolvedValue([branch(order[1], OLD)]);
+    vi.mocked(gitBranchTips).mockClear();
+    vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
+      names[0] === order[1] ? { [order[1]]: "1".repeat(40) } : {},
+    );
+    vi.mocked(gitObjectsPresent).mockImplementation(
+      async (_repo, oids) => !oids.includes(tipFor(order[2])),
+    );
+    vi.mocked(gitFindCommitsByPrefix).mockResolvedValue([]);
+    vi.mocked(gitCreateBranch).mockResolvedValue(undefined);
+    act(() => useUiStore.setState({ repoPath: "C:/repos/k9-elsewhere" }));
+    const blur = vi.fn();
+    act(() =>
+      options.action.onClick({
+        currentTarget: { blur } as unknown as HTMLElement,
+      }),
+    );
+    expect(blur).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringMatching(/^Restored 1 of 3 branches in /),
+        {
+          duration: 15_000,
+          description:
+            "2 couldn't be restored: a branch with that name exists again (1); Git has removed the commit (1). They're still listed in Recover lost work.",
+        },
+      ),
+    );
+    // Each name's pre-check reads the batch's repo, never the live one.
+    expect(vi.mocked(gitBranches).mock.calls.slice(0, order.length)).toEqual(
+      order.map(() => [repo]),
+    );
+    expect(vi.mocked(gitBranchTips).mock.calls).toEqual([[repo, [order[1]]]]);
+    expect(vi.mocked(gitCreateBranch).mock.calls).toEqual([
+      [repo, order[0], false, tipFor(order[0]), true],
+    ]);
+  });
+
+  it("shows the failed-read line and its Retry only while that failure holds Delete", async () => {
+    const repo = "C:/repos/k10-scope";
+    const status =
+      "Couldn't read the listed branches' commits, so nothing can be deleted yet.";
+    vi.mocked(gitBranchTips).mockRejectedValueOnce(
+      new Error("tips read failed"),
+    );
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("ks-anc", FRESH)],
+      merged: ["ks-anc"],
+    });
+    await enterDelete(view.user);
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        /Retry the read to delete./,
+      ),
+    );
+    expect(screen.getByText(status)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // An earlier hold outranks the failed read: neither the line nor Retry.
+    view.rerender({ rulesSettling: true });
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        /Wait for the list to finish checking which branches it can act on./,
+      ),
+    );
+    expect(screen.queryByText(status)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    view.rerender({ rulesSettling: false });
+    await waitFor(() => expect(screen.getByText(status)).toBeInTheDocument());
+  });
+
+  it("holds Delete while a shown row's tip is read, and on a failed read offers Retry; Archive is never held", async () => {
+    const repo = "C:/repos/k10-holds";
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const first = deferred<Record<string, string>>();
+    const second = deferred<Record<string, string>>();
+    vi.mocked(gitBranchTips)
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("k10-anc", FRESH), branch("k10-idle", OLD)],
+      merged: ["k10-anc"],
+    });
+    await enterDelete(view.user);
+    await waitFor(() => expect(isChecked("k10-anc")).toBe(true));
+    expect(primary()).toHaveAttribute("aria-disabled", "true");
+    expect(primary()).toHaveAccessibleDescription(
+      /Wait for the list to finish checking which branches it can act on\./,
+    );
+    expect(verdictCalls).toHaveLength(0);
+
+    await act(async () => first.reject(new Error("tips read failed")));
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        /Couldn't read the listed branches' commits\. Retry the read to delete\./,
+      ),
+    );
+    expect(primary()).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByText(
+        "Couldn't read the listed branches' commits, so nothing can be deleted yet.",
+      ),
+    ).toBeInTheDocument();
+    // A failed read checks the row under no tip, so Archive can still act.
+    await landVerdicts({ "k10-idle": "clean" });
+
+    await view.user.click(screen.getByRole("button", { name: /^archive$/i }));
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(
+      screen.queryByText(/^Couldn't read the listed branches' commits/),
+    ).toBeNull();
+
+    await enterDelete(view.user);
+    await view.user.click(await screen.findByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(gitBranchTips).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(primary()).toHaveAccessibleDescription(
+      /Wait for the list to finish checking which branches it can act on\./,
+    );
+    await act(async () =>
+      second.resolve({
+        "k10-anc": tipFor("k10-anc"),
+        "k10-idle": tipFor("k10-idle"),
+      }),
+    );
+    // The tip changes the idle row's signature, so it is checked once more.
+    await waitFor(() =>
+      expect(verdictCalls.filter((c) => c.branch === "k10-idle")).toHaveLength(
+        2,
+      ),
+    );
+    await landNext("k10-idle", "clean");
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(gitDeleteBranch).toHaveBeenCalledWith(
+        repo,
+        "k10-anc",
+        tipFor("k10-anc"),
+      ),
+    );
+  });
+
+  it("Archive sends no tip, stays title-only, and runs over a failed tips read", async () => {
+    const repo = "C:/repos/k-archive";
+    vi.mocked(gitBranchTips).mockRejectedValue(new Error("tips read failed"));
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("ka-1", OLD), branch("ka-2", OLD)],
+    });
+    await landVerdicts({ "ka-1": "clean", "ka-2": "clean" });
+    await waitFor(() => expect(isChecked("ka-2")).toBe(true));
+    expect(isChecked("ka-1")).toBe(true);
+    expect(primary()).not.toHaveAttribute("aria-disabled");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    await view.user.click(primary());
+    await waitFor(() =>
+      expect(vi.mocked(toast.success).mock.calls).toEqual([
+        ["Archived 2 branches"],
+      ]),
+    );
+    expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual(
+      expect.arrayContaining([
+        [repo, "ka-1", true],
+        [repo, "ka-2", true],
+      ]),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    expect(recordDeletedBranches).not.toHaveBeenCalled();
+  });
+
+  it("reads Keep local fresh at the batch's start, over a stale listed row", async () => {
+    const repo = "C:/repos/k-fresh";
+    const names = ["kf-1", "kf-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    // Marked in another window after the dialog was handed its rows.
+    branchRows = [
+      { ...branch("kf-1", OLD), keepLocal: true },
+      branch("kf-2", OLD),
+    ];
+    await confirmDelete(view.user);
+    await waitFor(() => expect(recordDeletedBranches).toHaveBeenCalledTimes(2));
+    expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
+      expect.objectContaining({ name: "kf-1", keptLocal: true }),
+    ]);
+    expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
+      expect.objectContaining({ name: "kf-2", keptLocal: false }),
+    ]);
+    expect(gitBranches).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gitBranches).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(gitDeleteBranch).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("records every row Keep local when the fresh read fails", async () => {
+    const repo = "C:/repos/k-fresh-failed";
+    const names = ["kff-1", "kff-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    vi.mocked(gitBranches).mockRejectedValueOnce(new Error("spawn failed"));
+    await confirmDelete(view.user);
+    await waitFor(() => expect(recordDeletedBranches).toHaveBeenCalledTimes(2));
+    for (const name of names)
+      expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
+        expect.objectContaining({ name, keptLocal: true }),
+      ]);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 2 branches",
+        withRestore(2),
+      ),
+    );
+  });
+
+  it("names the batch's repository on its Restore toast after a switch", async () => {
+    const repo = "C:/repos/k-away";
+    const gate = deferred<void>();
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => {
+      await gate.promise;
+      return deletedAtPin(r, n, tip);
+    });
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("kw-1", OLD)],
+    });
+    await enterDelete(view.user);
+    await landRest(["kw-1"], "clean");
+    await waitFor(() => expect(isChecked("kw-1")).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(1));
+    act(() => useUiStore.setState({ repoPath: "C:/repos/k-away-elsewhere" }));
+    await act(async () => gate.resolve());
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 1 branch in k-away",
+        withRestore(1),
+      ),
+    );
+  });
+
+  it("keeps the toast up with its note when the batch deleted more than the record holds", async () => {
+    const repo = "C:/repos/k-overflow";
+    const names = Array.from(
+      { length: 51 },
+      (_, i) => `ko-${String(i).padStart(2, "0")}`,
+    );
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, FRESH)),
+      merged: names,
+    });
+    await enterDelete(view.user);
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(
+      () =>
+        expect(toast.success).toHaveBeenCalledWith(
+          "Deleted 51 branches",
+          expect.objectContaining({
+            duration: Number.POSITIVE_INFINITY,
+            description:
+              "Couldn't add 1 of them to Recover lost work. Restore them from this notice.",
+            action: expect.objectContaining({ label: "Restore all" }),
+          }),
+        ),
+      { timeout: 15_000 },
+    );
+    expect(recordDeletedBranches).toHaveBeenCalledTimes(51);
+  }, 30_000);
+
+  it("counts each unrecorded entry once: failed writes plus recorded entries the cap cut", async () => {
+    const repo = "C:/repos/k-overflow-failed";
+    const names = Array.from(
+      { length: 53 },
+      (_, i) => `kof-${String(i).padStart(2, "0")}`,
+    );
+    const failing = new Set(["kof-03", "kof-40"]);
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    vi.mocked(recordDeletedBranches).mockImplementation(
+      async (_r, [entry]) => !failing.has(entry.name),
+    );
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, FRESH)),
+      merged: names,
+    });
+    await enterDelete(view.user);
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    await view.user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    // Past the list's cap only the result notice can restore the whole batch.
+    expect(confirm.textContent).toContain(
+      "They can be restored with Restore all on the result notice; Recover lost work keeps only the last 50 of them.",
+    );
+    expect(confirm.textContent).not.toContain(
+      "They can be restored from Recover lost work.",
+    );
+    await view.user.click(
+      within(confirm).getByRole("button", { name: /^Delete 53 branches/ }),
+    );
+    // 51 recorded, so the cap cut one of them; with the 2 failed, 3 in all.
+    await waitFor(
+      () =>
+        expect(toast.success).toHaveBeenCalledWith(
+          "Deleted 53 branches",
+          expect.objectContaining({
+            duration: Number.POSITIVE_INFINITY,
+            description:
+              "Couldn't add 3 of them to Recover lost work. Restore them from this notice.",
+          }),
+        ),
+      { timeout: 15_000 },
+    );
+  }, 30_000);
+
+  it("starts one batch when a second confirm lands during the fresh read", async () => {
+    const repo = "C:/repos/k-twice";
+    const names = ["kt-1", "kt-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    const read = deferred<Branch[]>();
+    vi.mocked(gitBranches).mockImplementation(() => read.promise);
+    await view.user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    const go = within(confirm).getByRole("button", {
+      name: /^Delete 2 branches/,
+    });
+    // Both presses land before a re-render.
+    act(() => {
+      fireEvent.click(go);
+      fireEvent.click(go);
+    });
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        "Wait for the current batch to finish.",
+      ),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    await act(async () => read.resolve(names.map((n) => branch(n, OLD))));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 2 branches",
+        withRestore(2),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(names.length);
+    expect(toast.success).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks dismissal and every control through the batch's fresh read", async () => {
+    const repo = "C:/repos/k-read-lock";
+    const names = ["krl-1", "krl-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    const read = deferred<Branch[]>();
+    vi.mocked(gitBranches).mockImplementation(() => read.promise);
+    await confirmDelete(view.user);
+    const cancel = within(mainDialog()).getByRole("button", {
+      name: "Cancel",
+      hidden: true,
+    });
+    await waitFor(() =>
+      expect(cancel).toHaveAccessibleDescription(
+        "Wait for the current batch to finish.",
+      ),
+    );
+    // Held, not disabled: buttons and checkboxes alike keep their tab stops
+    // and say why.
+    const archive = within(mainDialog()).getByRole("button", {
+      name: /^archive$/i,
+      hidden: true,
+    });
+    expect(archive).toHaveAttribute("aria-disabled", "true");
+    expect(archive).not.toBeDisabled();
+    expect(archive).toHaveAccessibleDescription(
+      "Wait for the current batch to finish.",
+    );
+    const thirty = within(mainDialog()).getByRole("button", {
+      name: "30",
+      hidden: true,
+    });
+    expect(thirty).toHaveAttribute("aria-disabled", "true");
+    expect(thirty).toHaveAccessibleDescription(
+      "Wait for the current batch to finish.",
+    );
+    const worktrees = within(mainDialog()).getByRole("checkbox", {
+      name: "Include branches checked out in a worktree",
+      hidden: true,
+    });
+    // Base UI's checkbox is a span: a native disable shows as data-disabled
+    // and drops it from the tab order.
+    expect(worktrees).toHaveAttribute("aria-disabled", "true");
+    expect(worktrees).not.toHaveAttribute("data-disabled");
+    expect(worktrees.tabIndex).toBe(0);
+    const worktreesChecked = worktrees.getAttribute("aria-checked");
+    expect(worktrees).toHaveAccessibleDescription(
+      "Wait for the current batch to finish.",
+    );
+    const row = boxOf("krl-1");
+    expect(row).toHaveAttribute("aria-disabled", "true");
+    expect(row).not.toHaveAttribute("data-disabled");
+    expect(row).toHaveAccessibleDescription(
+      expect.stringContaining("Wait for the current batch to finish."),
+    );
+    // Focusable while held, and a key press there toggles nothing.
+    act(() => worktrees.focus());
+    expect(document.activeElement).toBe(worktrees);
+    await view.user.keyboard(" ");
+    act(() => row.focus());
+    expect(document.activeElement).toBe(row);
+    await view.user.keyboard(" ");
+    // A click that still lands on a held control, or its label, changes nothing.
+    act(() => {
+      fireEvent.click(archive);
+      fireEvent.click(thirty);
+      fireEvent.click(worktrees);
+      fireEvent.click(
+        within(mainDialog()).getByText(
+          "Include branches checked out in a worktree",
+        ),
+      );
+      fireEvent.click(row);
+    });
+    expect(worktrees.getAttribute("aria-checked")).toBe(worktreesChecked);
+    expect(isChecked("krl-1")).toBe(true);
+    expect(archive).toHaveAttribute("aria-pressed", "false");
+    expect(
+      within(mainDialog()).getByRole("button", {
+        name: /^delete$/i,
+        hidden: true,
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(thirty).toHaveAttribute("aria-pressed", "false");
+    await view.user.keyboard("{Escape}");
+    await view.user.click(cancel);
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    await act(async () => read.resolve(names.map((n) => branch(n, OLD))));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 2 branches",
+        withRestore(2),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(names.length);
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+  });
+
+  it("stops before the next row when a promote starts mid-batch", async () => {
+    const repo = "C:/repos/k-promote";
+    const names = ["kp-1", "kp-2"];
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => {
+      // A promote starts while the first row's delete runs.
+      promote.on = true;
+      return deletedAtPin(r, n, tip);
+    });
+    const view = renderDialog({
+      repoPath: repo,
+      branches: names.map((n) => branch(n, OLD)),
+    });
+    await enterDelete(view.user);
+    await landRest(names, "clean");
+    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
+    await confirmDelete(view.user);
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(
+        "A worktree is being promoted to your main workspace. Try again once it finishes.",
+      ),
+    );
+    // The batch settles on the one row it deleted.
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "Deleted 1 branch",
+        expect.anything(),
+      ),
+    );
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gitDeleteBranch).mock.calls[0]?.[1]).toBe("kp-1");
+    expect(isChecked("kp-2")).toBe(true);
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(mainDialog()).toBeInTheDocument();
+  });
+});
+
+describe("the delete confirm's restorable tail", () => {
+  it("keeps the Recover lost work wording up to the cap", () => {
+    expect(cleanupRestorableTail(1, null, 50)).toBe(
+      " It can be restored from Recover lost work.",
+    );
+    expect(cleanupRestorableTail(50, null, 50)).toBe(
+      " They can be restored from Recover lost work.",
+    );
+    expect(cleanupRestorableTail(50, "worktrees", 50)).toBe(
+      " The branches can be restored from Recover lost work; the removed worktrees can't.",
+    );
+  });
+
+  it("points past the cap at the result notice's Restore all", () => {
+    expect(cleanupRestorableTail(51, null, 50)).toBe(
+      " They can be restored with Restore all on the result notice; Recover lost work keeps only the last 50 of them.",
+    );
+    expect(cleanupRestorableTail(51, "2 worktrees", 50)).toBe(
+      " The branches can be restored with Restore all on the result notice (Recover lost work keeps only the last 50); the removed 2 worktrees can't.",
+    );
+  });
+});
+
+describe("agent-session branches", () => {
+  it("never lists one, whatever the prefix's case", async () => {
+    renderDialog({
+      repoPath: "C:/repos/session",
+      branches: [
+        branch("GD/Session/x", OLD),
+        branch("gd/session/y", OLD),
+        branch("s1-idle", OLD),
+      ],
+    });
+    await waitFor(() => expect(listed()).toContain("s1-idle"));
+    expect(listed()).toEqual(["s1-idle"]);
   });
 });

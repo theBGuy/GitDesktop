@@ -214,7 +214,15 @@ arrows, and a branch marked Keep local wears a `kept local` chip.
   out in another linked worktree can join the list; acting on one removes
   its clean worktree first, and the confirmation counts the worktrees and
   branches it touches. Each row shows every reason it's listed; the dialog
-  opens on Archive with every filter on and a 60-day window.
+  opens on Archive with every filter on and a 60-day window. Deleting
+  removes each branch only at the commit the list showed, keeping any that
+  changed since it loaded.
+- **Restore deleted branches**: deleting a branch from the switcher leaves a
+  notice naming the commit it pointed at with **Restore**, and Clean up
+  branches' result notice offers **Restore all** (**Restore** for a single
+  branch). Recover lost work lists the newest 50 deletes per repository to
+  restore later. A restored branch comes back at its commit without being
+  checked out, and a Keep local mark comes back with it.
 - **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
   memory before you commit (fast-forward, already up to date, clean, or
   exactly which files will conflict), with `--no-ff` and a clearly cautioned
@@ -260,7 +268,9 @@ arrows, and a branch marked Keep local wears a `kept local` chip.
   too. Turn the mark off the same way. An optional **terminal push guard**
   from the same menu or the command palette installs a pre-push hook so
   `git push` stops as well; it covers this clone only, and running
-  `git push --no-verify` skips it.
+  `git push --no-verify` skips it. The Git hooks dialog labels that
+  hook **Managed by GitDesktop** and asks before you save over, disable
+  or delete it.
 - **Start a branch from any base**: the new-branch dialog's *Base it on*
   picker is a searchable list of local and remote branches. Basing on a
   remote branch (e.g. `origin/epic/big-feature`) starts from the remote tip
@@ -338,7 +348,9 @@ apart.
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted
   operation), and restores any of them non-destructively to the working
-  tree.
+  tree. It also lists the branches you deleted from the branch switcher or
+  Clean up branches, each one restorable at its commit while Git still has
+  it.
 - **Operation journal** ⭐: records the risky compound operations GitDesktop
   runs (local PR merges and local PR branch updates, cherry-picks, history
   edits, rebases). If one is interrupted by a crash or restart, a calm

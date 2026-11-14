@@ -536,14 +536,20 @@ async function removeWorktreeFreeingBranch(
   repoPath: string,
   path: string,
   branch: string | null,
+  expectedBranchTip?: string,
 ): Promise<WorktreeRemoveOutcome> {
+  // The pin rides both attempts; without one, no expectedBranchTip is sent.
+  const attempt = () =>
+    expectedBranchTip === undefined
+      ? removeWorktree(repoPath, path, branch, false)
+      : removeWorktree(repoPath, path, branch, false, expectedBranchTip);
   try {
-    return await removeWorktree(repoPath, path, branch, false);
+    return await attempt();
   } catch (e) {
     const msg = removalErrorText(e, path);
     if (/close any program|in use|being used|invalid argument/i.test(msg)) {
       await new Promise((resolve) => setTimeout(resolve, 300));
-      return await removeWorktree(repoPath, path, branch, false);
+      return await attempt();
     }
     throw e;
   }
@@ -689,8 +695,17 @@ export type CleanupRemovalOutcome =
         | "keptMoved"
         | "keptUnreadable"
         | "keptInUse";
+      /** The deleted branch's tip; null unless `branch` is "deleted" and the
+       *  backend reported one (a branch that was already gone reports none). */
+      deletedTip: string | null;
     }
-  | { ok: false; reason: string };
+  | {
+      ok: false;
+      reason: string;
+      /** Set when nothing was removed because the branch was no longer at the
+       *  expected tip: the tip measured instead. */
+      movedTo?: string;
+    };
 
 // Clean up branches' row reasons read after "Couldn't archive: " / "Couldn't
 // delete: ", so each is a lowercase phrase with no period. "Already" stays the
@@ -711,6 +726,8 @@ const CLEANUP_WORKTREE_GONE_REASON = "the worktree was moved or removed";
 const CLEANUP_BRANCH_CHANGED_REASON =
   "the worktree no longer has this branch checked out";
 const CLEANUP_LIST_UNREADABLE_REASON = "the worktree list was unreadable";
+export const CLEANUP_TIP_MOVED_REASON =
+  "the branch changed since this list loaded, so its worktree was kept";
 const CLEANUP_OP_IN_PROGRESS_REASON: Record<RepoOp, string> = {
   merge: "the worktree is in the middle of a merge",
   rebase: "the worktree is in the middle of a rebase",
@@ -884,9 +901,12 @@ export async function removeWorktreeForCleanup(
     name: string;
     branch: string;
     then: "archive" | "delete";
+    /** The listed tip the delete is pinned to; sent only when `then` is
+     *  "delete". */
+    expectedTip?: string;
   },
 ): Promise<CleanupRemovalOutcome> {
-  const { repoPath, path, name, branch, then } = args;
+  const { repoPath, path, name, branch, then, expectedTip } = args;
   // The same two admission reads `startRemoval` refuses on.
   if (isRemovalInFlight(useWorktreeRemovalStore.getState().byRepo, path))
     return { ok: false, reason: CLEANUP_REMOVING_REASON };
@@ -916,7 +936,16 @@ export async function removeWorktreeForCleanup(
       repoPath,
       path,
       then === "delete" ? branch : null,
+      then === "delete" ? expectedTip : undefined,
     );
+    // Read before branchCleanup: it rides "sparedMoved", and under it nothing
+    // was removed, so there is nothing to prune.
+    if (removal.tipMoved !== null)
+      return {
+        ok: false,
+        reason: CLEANUP_TIP_MOVED_REASON,
+        movedTo: removal.tipMoved.actual,
+      };
     // Best-effort cleanup; a clean remove already drops its own admin entry.
     await pruneWorktrees(repoPath).catch(() => undefined);
   } catch (e) {
@@ -932,11 +961,11 @@ export async function removeWorktreeForCleanup(
       // Already archived is this row's end state too: the set is idempotent.
       case "archived":
       case "alreadyArchived":
-        return { ok: true, branch: "archived" };
+        return { ok: true, branch: "archived", deletedTip: null };
       case "isDefault":
         return { ok: false, reason: CLEANUP_DEFAULT_BRANCH_REASON };
       case "inUse":
-        return { ok: true, branch: "keptInUse" };
+        return { ok: true, branch: "keptInUse", deletedTip: null };
       case "failed":
         return {
           ok: false,
@@ -949,15 +978,16 @@ export async function removeWorktreeForCleanup(
     }
   }
   switch (removal.branchCleanup) {
-    // notRequested with a branch passed: the ref was already gone, at the tip
-    // pin or when the delete re-read it, which is this row's end state.
     case "deleted":
+      return { ok: true, branch: "deleted", deletedTip: removal.branchTip };
+    // notRequested with a branch passed: the ref was already gone when the
+    // delete re-read it, which is this row's end state; there is no tip.
     case "notRequested":
-      return { ok: true, branch: "deleted" };
+      return { ok: true, branch: "deleted", deletedTip: null };
     case "sparedMoved":
-      return { ok: true, branch: "keptMoved" };
+      return { ok: true, branch: "keptMoved", deletedTip: null };
     case "sparedUnreadable":
-      return { ok: true, branch: "keptUnreadable" };
+      return { ok: true, branch: "keptUnreadable", deletedTip: null };
   }
 }
 

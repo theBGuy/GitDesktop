@@ -12,6 +12,7 @@ import {
 } from "@/lib/git/api";
 import {
   type BranchContentCheck,
+  type ListedBranchTips,
   useBranchContentCheck,
 } from "@/lib/git/queries";
 import { unmockedCommands } from "./setup";
@@ -72,18 +73,27 @@ interface Props {
   branches: readonly string[];
   enabled: boolean;
   prHeads?: ReadonlyMap<string, string>;
+  listed?: Pick<ListedBranchTips, "tips" | "waiting">;
 }
 
 /** One entry per COMMITTED render: render-time adjusts never commit. */
 const commits: BranchContentCheck[] = [];
 
-function Probe({ repoPath, defaultBranch, branches, enabled, prHeads }: Props) {
+function Probe({
+  repoPath,
+  defaultBranch,
+  branches,
+  enabled,
+  prHeads,
+  listed,
+}: Props) {
   const check = useBranchContentCheck(
     repoPath,
     defaultBranch,
     branches,
     enabled,
     prHeads,
+    listed,
   );
   useLayoutEffect(() => {
     commits.push({ ...check, verdicts: new Map(check.verdicts) });
@@ -1101,5 +1111,97 @@ describe("useBranchContentCheck's merged-PR heads", () => {
     calls[2].settle("changes");
     await waitFor(() => expect(view.latest().status).toBe("settled"));
     expect(view.latest().verdicts).toEqual(new Map([["us-shared", "changes"]]));
+  });
+});
+
+describe("useBranchContentCheck's listed tips", () => {
+  const listedOf = (
+    tips: Record<string, string>,
+    waiting: readonly string[] = [],
+  ) => ({ tips: new Map(Object.entries(tips)), waiting: new Set(waiting) });
+  const tip = (d: string) => d.repeat(40);
+
+  it("starts no check for a waiting branch, then checks each branch once under its tip", async () => {
+    const repo = "C:/repos/cc-listed-wait";
+    const branches = ["lw-a", "lw-b", "lw-c"];
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("c"));
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    const view = mount({
+      ...props,
+      enabled: true,
+      listed: listedOf({}, branches),
+    });
+    await waitFor(() => expect(gitContentCheckBase).toHaveBeenCalledTimes(1));
+    await flush();
+    expect(calls).toHaveLength(0);
+    expect(view.latest().status).toBe("pending");
+    expect(view.latest().pendingCount).toBe(3);
+
+    view.update({
+      ...props,
+      enabled: true,
+      listed: listedOf({ "lw-a": tip("1") }, ["lw-b", "lw-c"]),
+    });
+    await waitFor(() => expect(calls).toHaveLength(1));
+    // lw-c's read answered without it: checked under no tip, never waiting.
+    view.update({
+      ...props,
+      enabled: true,
+      listed: listedOf({ "lw-a": tip("1"), "lw-b": tip("2") }),
+    });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await flush();
+    expect(calls.map((c) => c.branch)).toEqual(branches);
+    for (const c of calls) c.settle();
+    await flush();
+    expect(view.latest().status).toBe("settled");
+    expect(view.latest().verdicts.size).toBe(3);
+    expect(calls).toHaveLength(3);
+    const signatures = view
+      .entries(repo)
+      .filter((q) => q.queryKey[3] === "verdict")
+      .map((q) => q.queryKey[7])
+      .sort();
+    expect(signatures).toEqual(["", tip("1"), tip("2")]);
+  });
+
+  it("a relist re-runs only that branch's check, once, pending until it lands", async () => {
+    const repo = "C:/repos/cc-listed-relist";
+    const branches = ["lr-a", "lr-b"];
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("d"));
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    const view = mount({
+      ...props,
+      enabled: true,
+      listed: listedOf({ "lr-a": tip("1"), "lr-b": tip("2") }),
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    for (const c of calls) c.settle("clean");
+    await flush();
+    expect(view.latest().status).toBe("settled");
+
+    view.update({
+      ...props,
+      enabled: true,
+      listed: listedOf({ "lr-a": tip("3"), "lr-b": tip("2") }),
+    });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await flush();
+    expect(calls).toHaveLength(3);
+    expect(calls[2].branch).toBe("lr-a");
+    // A verdict under another tip reads as absent.
+    expect(view.latest().status).toBe("pending");
+    expect(view.latest().pendingCount).toBe(1);
+    expect(view.latest().verdicts.has("lr-a")).toBe(false);
+    expect(view.latest().verdicts.get("lr-b")).toBe("clean");
+
+    calls[2].settle("changes");
+    await flush();
+    expect(view.latest().status).toBe("settled");
+    expect(view.latest().verdicts.get("lr-a")).toBe("changes");
+    await act(() => view.client.invalidateQueries());
+    await flush();
+    expect(calls).toHaveLength(3);
+    expect(view.latest().verdicts.get("lr-a")).toBe("changes");
   });
 });

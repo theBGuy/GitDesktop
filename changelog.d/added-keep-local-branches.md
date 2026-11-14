@@ -7,3 +7,5 @@
   The row wears a "kept local" chip, and one more menu item (also in the
   command palette) adds an optional pre-push hook so `git push` from a
   terminal stops as well (this clone only; `git push --no-verify` skips it).
+  The Git hooks dialog labels that hook **Managed by GitDesktop** and asks
+  before you save over, disable or delete it.

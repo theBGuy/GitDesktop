@@ -49,6 +49,7 @@ const ADOPTED = new Set([
   "src/lib/automations/store.ts",
   "src/lib/branch-rules/store.ts",
   "src/lib/conversation-filters/store.ts",
+  "src/lib/deleted-branches/store.ts",
   "src/lib/issues/local.ts",
   "src/lib/jira/store.ts",
   "src/lib/last-checkout/store.ts",

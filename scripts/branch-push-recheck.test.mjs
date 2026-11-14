@@ -82,18 +82,24 @@ const PINS = [
       "isDeletionBlocked(rulesConfig, deleteTarget)",
       "if (refuseWhileRowPushes(deleteTarget)) return;",
       "try {",
+      "promotionBlocksCheckout(repoPath)",
       "await listUserWorktrees(repoPath)",
       '"before the delete started"',
       "if (refuseWhileRowPushes(deleteTarget)) return;",
+      "promotionBlocksCheckout(repoPath)",
       "await checkout.mutateAsync(fallback)",
       "`before ${deleteTarget} was deleted`",
       "refuseWhileRowPushes(",
       DERIVED,
       DERIVED_ELSEWHERE,
+      "await readBranchRowsFresh(deleteIn)",
+      "if (refuseWhileRowPushes(deleteTarget)) return;",
+      "promotionBlocksCheckout(repoPath)",
       "await deleteBranch.mutateAsync(deleteTarget)",
     ],
     mutate: [
       "if (refuseWhileRowPushes(deleteTarget)) return;",
+      "promotionBlocksCheckout(repoPath)",
       DERIVED,
       DERIVED_ELSEWHERE,
     ],
@@ -228,6 +234,7 @@ const PINS = [
     file: `${R}CleanupBranchesDialog.tsx`,
     anchor: "async function runBatch() {",
     seq: [
+      "promotionBlocksCheckout(repoPath)",
       "refuseWhilePushRuns(queryClient, repoPath) ||",
       "names.some((n) =>",
       "refuseWhileBranchPushes(queryClient, repoPath, n, currentBranch)",
@@ -237,10 +244,14 @@ const PINS = [
       "refuseWhileBranchPushes(queryClient, repoPath, names[i], currentBranch)",
       "processed = i;",
       "break;",
+      "promotionBlocksCheckout(repoPath)",
+      "processed = i;",
+      "break;",
       "await api.gitSetBranchArchived",
       "const ok = processed - fails.size - skipped.size;",
       "if (processed < names.length) {",
-      "} else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);",
+      "} else if (ok > 0)",
+      'resultToast("success", `${verb} ${pluralBranches(ok)}`);',
       "return;",
       "if (fails.size === 0) {",
       "onClose();",
@@ -249,6 +260,7 @@ const PINS = [
       "refuseWhilePushRuns(queryClient, repoPath) ||",
       "refuseWhileBranchPushes(queryClient, repoPath, n, currentBranch)",
       "refuseWhileBranchPushes(queryClient, repoPath, names[i], currentBranch)",
+      "promotionBlocksCheckout(repoPath)",
       "const ok = processed - fails.size - skipped.size;",
       "if (processed < names.length) {",
     ],
@@ -1402,10 +1414,11 @@ test("mutants with a check removed fail", () => {
       }
     }
   }
-  // doDelete's and both doResetToUpstream's second boundaries, Clean up's
-  // per-row check, the stash-reapply helper's branchless arm, and the late
-  // boundaries of undo, Edit dates and Edit history.
-  assert.equal(doubled, 8, "doubled needles");
+  // doDelete's and both doResetToUpstream's second boundaries, doDelete's and
+  // Clean up's repeated promotion checks, Clean up's per-row check, the
+  // stash-reapply helper's branchless arm, and the late boundaries of undo,
+  // Edit dates and Edit history.
+  assert.equal(doubled, 10, "doubled needles");
 });
 
 test("an amend pin that drops its amend gate or its pin expression fails", () => {
