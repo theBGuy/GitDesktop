@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import {
   Dialog,
@@ -13,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import type { ReviewVerdict } from "@/lib/git/api";
+import { useForgeGhHost } from "@/lib/git/host";
 import {
   isPendingFor,
   usePendingPrWrites,
@@ -143,6 +145,7 @@ export function SubmitReviewDialog({
   // and a fresh observer would re-arm Submit beside a submit still posting. The
   // variables carry no lens, so the same number in the other lens holds too.
   const pendingWrites = usePendingPrWrites(repoPath);
+  const ghHost = useForgeGhHost(repoPath);
   const submitInFlight = isPendingFor(
     pendingWrites,
     "submit-review",
@@ -282,6 +285,7 @@ export function SubmitReviewDialog({
             onChange={setSummary}
             rows={4}
             textareaClassName="max-h-48 min-h-20 resize-y"
+            hostedImages={hostedImagesFor(repoPath, ghHost)}
           />
 
           {error && (

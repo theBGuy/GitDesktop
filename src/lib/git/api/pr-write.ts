@@ -1,7 +1,8 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
   AttachmentRefs,
-  PrRef,
+  CreatedRef,
+  EditOutcome,
   RemoteLens,
   StackWriteOutcome,
 } from "../types";
@@ -22,7 +23,7 @@ export const forgePrCreate = (
   lens: RemoteLens,
   attachments?: AttachmentRefs,
 ) =>
-  invoke<PrRef>("forge_pr_create", {
+  invoke<CreatedRef>("forge_pr_create", {
     repoPath,
     base,
     head,
@@ -51,8 +52,9 @@ export const forgePrEdit = (
   body: string,
   lens: RemoteLens,
   base?: string,
+  attachments?: AttachmentRefs,
 ) =>
-  invoke<void>("forge_pr_edit", {
+  invoke<EditOutcome>("forge_pr_edit", {
     repoPath,
     number,
     title,
@@ -61,6 +63,7 @@ export const forgePrEdit = (
     // Explicit null for "no retarget", the same wire shape every other optional
     // arg here uses — an `undefined` value is dropped by IPC serialization.
     base: base ?? null,
+    attachments: attachments ?? null,
   });
 
 /** Create a stack from `pullRequests` (bottom→top; the forge validates that each

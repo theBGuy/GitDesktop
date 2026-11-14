@@ -17,9 +17,37 @@ export interface HostedImage {
 }
 
 /** Loads a `user-attachments` image through the user's GitHub CLI sign-in.
- *  Never rejects by design: every refusal and failure resolves as an
+ *  Never rejects except for a signal already aborted at call time: every
+ *  refusal and failure resolves as an
  *  `unavailable` kind (a rejection means the IPC itself failed). Named in the
  *  `gh` family on purpose: the networkMode guard reads `get…`/`read…`/`load…`
- *  callees as local reads. */
-export const ghHostedImage = (repoPath: string, url: string) =>
-  invoke<HostedImage>("github_hosted_image", { repoPath, url });
+ *  callees as local reads.
+ *  An abort while the read is pending withdraws it on the backend once, by its
+ *  per-call request id, and still settles with the backend's answer (`failed`
+ *  for a withdrawn read); a signal already aborted rejects without invoking. */
+export const ghHostedImage = async (
+  repoPath: string,
+  url: string,
+  signal?: AbortSignal,
+): Promise<HostedImage> => {
+  signal?.throwIfAborted();
+  // Never reused, so a backend tombstone can only be adopted by its own read.
+  const requestId = crypto.randomUUID();
+  const read = invoke<HostedImage>("github_hosted_image", {
+    repoPath,
+    url,
+    requestId,
+  });
+  if (signal === undefined) return read;
+  const withdraw = () => {
+    invoke<void>("github_hosted_image_cancel", { requestId }).catch(
+      () => undefined,
+    );
+  };
+  signal.addEventListener("abort", withdraw, { once: true });
+  try {
+    return await read;
+  } finally {
+    signal.removeEventListener("abort", withdraw);
+  }
+};

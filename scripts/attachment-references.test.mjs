@@ -10,8 +10,10 @@ import { test } from "node:test";
 
 import {
   appendReferenceText,
+  createdNumberOf,
   failedAttachmentsOf,
   failedReferencesDraft,
+  followupErrorOf,
   imageReference,
   insertionFor,
   isStagedName,
@@ -21,6 +23,7 @@ import {
   refusalSize,
   removalSplice,
   removeReferences,
+  savedBodyOf,
   tooBigRefusal,
   uploadingReason,
 } from "../src/lib/attachments/references.ts";
@@ -468,4 +471,54 @@ test("uploading copy per act", () => {
     uploadingReason(2, "creating"),
     "Uploading 2 images and creating…",
   );
+  assert.equal(uploadingReason(1, "saving"), "Uploading 1 image and saving…");
+  assert.equal(uploadingReason(5, "saving"), "Uploading 5 images and saving…");
+});
+
+// Every shape an older backend, a test mock or a malformed answer can resolve;
+// the present-value rows are each reader's control.
+const ABSENT_SHAPES = [
+  ["undefined", undefined],
+  ["null", null],
+  ["a string", "followupError"],
+  ["a number", 7],
+  ["an empty object", {}],
+  ["an older create outcome", { number: 7, url: "https://x/7" }],
+];
+
+test("followupErrorOf: null for every absent, non-string or empty reason", () => {
+  for (const [label, value] of ABSENT_SHAPES)
+    assert.equal(followupErrorOf(value), null, label);
+  assert.equal(followupErrorOf({ followupError: null }), null);
+  assert.equal(followupErrorOf({ followupError: "" }), null);
+  assert.equal(followupErrorOf({ followupError: 422 }), null);
+  assert.equal(followupErrorOf({ followupError: ["HTTP 422"] }), null);
+  assert.equal(followupErrorOf({ followupError: "HTTP 422" }), "HTTP 422");
+  // Every line as received: an issue's reason can be two causes.
+  assert.equal(
+    followupErrorOf({ followupError: "first cause\nsecond cause" }),
+    "first cause\nsecond cause",
+  );
+});
+
+test("savedBodyOf: null for every absent or non-string body, '' kept", () => {
+  for (const [label, value] of ABSENT_SHAPES)
+    assert.equal(savedBodyOf(value), null, label);
+  assert.equal(savedBodyOf({ body: null }), null);
+  assert.equal(savedBodyOf({ body: 3 }), null);
+  assert.equal(savedBodyOf({ failedAttachments: ["a.png"] }), null);
+  assert.equal(savedBodyOf({ body: "" }), "");
+  assert.equal(savedBodyOf({ body: "text ![x](a.png)" }), "text ![x](a.png)");
+});
+
+test("createdNumberOf: only a positive integer is a number", () => {
+  for (const [label, value] of ABSENT_SHAPES.slice(0, 5))
+    assert.equal(createdNumberOf(value), null, label);
+  assert.equal(createdNumberOf({ number: 0, url: "" }), null);
+  assert.equal(createdNumberOf({ number: -3 }), null);
+  assert.equal(createdNumberOf({ number: 1.5 }), null);
+  assert.equal(createdNumberOf({ number: "7" }), null);
+  assert.equal(createdNumberOf({ number: Number.NaN }), null);
+  assert.equal(createdNumberOf({ number: 7, url: "https://x/7" }), 7);
+  assert.equal(createdNumberOf({ number: 1 }), 1);
 });

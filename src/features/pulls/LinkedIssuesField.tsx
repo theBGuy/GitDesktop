@@ -80,9 +80,23 @@ function handOffFocusBeforeRemoving(
   setFocusIndex(Math.min(index, nextCount - 1));
 }
 
+/** When the chips' lines reach the description: a create dialog composes them
+ *  on create, an Edit dialog on Save. */
+type AppliedOn = "create" | "save";
+
+const APPLIED_ON_HINT: Record<AppliedOn, string> = {
+  create: "Added to the description on create.",
+  save: "Added to the description when you save.",
+};
+
+interface SharedFieldProps {
+  /** Absent ⇒ "create". */
+  appliedOn?: AppliedOn;
+}
+
 /** Props for the native (GitHub/GitLab) issue-link cluster. `variant` is optional
  *  (absent ⇒ native), so existing call sites compile unchanged. */
-interface NativeFieldProps {
+interface NativeFieldProps extends SharedFieldProps {
   variant?: "native";
   repoPath: string;
   lens: RemoteLens;
@@ -95,7 +109,7 @@ interface NativeFieldProps {
 
 /** Props for the Jira mention-only cluster (Bitbucket + linked project). No
  *  keyword toggle — the chips are mention-only. */
-interface JiraFieldProps {
+interface JiraFieldProps extends SharedFieldProps {
   variant: "jira";
   repoPath: string;
   /** The repo's Jira link (site + project) — drives the picker. */
@@ -126,6 +140,7 @@ function NativeLinkedIssuesField({
   onRemove,
   onPick,
   disabled,
+  appliedOn = "create",
 }: NativeFieldProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   // Roving tabindex: the band is a single tab stop; ArrowLeft/Right move the
@@ -303,7 +318,7 @@ function NativeLinkedIssuesField({
             })}
           </div>
           <p className="text-xs text-muted-foreground">
-            Added to the description on create.
+            {APPLIED_ON_HINT[appliedOn]}
           </p>
         </>
       )}
@@ -322,6 +337,7 @@ function JiraMentionsField({
   onRemove,
   onPick,
   disabled,
+  appliedOn = "create",
 }: JiraFieldProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   // Roving tabindex: the band is a single tab stop; ArrowLeft/Right move the
@@ -479,7 +495,7 @@ function JiraMentionsField({
             })}
           </div>
           <p className="text-xs text-muted-foreground">
-            Added to the description on create.
+            {APPLIED_ON_HINT[appliedOn]}
           </p>
         </>
       )}

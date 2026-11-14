@@ -312,9 +312,11 @@ export function markPrCreateArmed(
  *   is the one the strip sits in, and `pr-create-handoff` for closed evidence
  *   and the long stop — and reaches them only through
  *   {@link settlePrCreateIfCurrent}: the lane ends when the list contains the
- *   PR, not when the forge answers. It clears the latch, as
- *   {@link markPrCreated} already did at the phase flip, so the outcome stays
- *   meaningful for any caller that could reach it without one.
+ *   PR, not when the forge answers. The exception is a create whose number
+ *   couldn't be read (CreatePrDialog's and PromoteLocalPrDialog's numberless
+ *   arms): no row can ever match it, so it settles directly. `success` clears
+ *   the latch, as {@link markPrCreated} already did at the phase flip, so the
+ *   outcome stays meaningful for any caller that could reach it without one.
  * - `"release"` is for a lane holder with no draft to protect —
  *   PromoteLocalPrDialog's failed-before-create path, and CreatePrDialog's own
  *   failure once a seed has taken its draft. It only frees the entry, leaving

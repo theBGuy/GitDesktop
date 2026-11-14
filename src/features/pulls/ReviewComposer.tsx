@@ -1,5 +1,6 @@
 import { type KeyboardEvent, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
@@ -188,6 +189,7 @@ export function ReviewComposer({
         rows={3}
         textareaClassName="max-h-48 min-h-16 resize-y"
         mentions={mentions}
+        hostedImages={hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost)}
       />
       <div className="flex items-center gap-2">
         {canCreateThread && (

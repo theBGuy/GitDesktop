@@ -700,6 +700,12 @@ export function useFocusCommentAction(
   );
 }
 
+/** `text` with `lines` appended as a trailing block, joined as the composers do. */
+function withRefLines(text: string, lines: string[]): string {
+  if (lines.length === 0) return text;
+  return [text.trimEnd(), lines.join("\n")].filter(Boolean).join("\n\n");
+}
+
 export function RemotePrView({
   repoPath,
   number,
@@ -2106,29 +2112,68 @@ export function RemotePrView({
   // the dialog's local state rather than the shared form, which the issue views
   // reuse and which has no base field.
   const [editBase, setEditBase] = useState("");
+  // The base an earlier save of this open dialog already applied (a partial
+  // save, or an Err that saved its other changes), so Save again doesn't resend
+  // it; null on open.
+  const [savedEditBase, setSavedEditBase] = useState<string | null>(null);
+  const sentEditBaseRef = useRef<string | undefined>(undefined);
+  // The edit draft is keyed on the selected PR, the one the write addresses.
+  const editDraftKey = draftKeyFor("pr-edit", entityKey);
   const edit = useEditTitleBody({
-    onSave: async ({ title, body }) => {
-      await editPr.mutateAsync({
+    onSave: ({ title, body }, begin) => {
+      // The active cluster owns the trailing ref block — re-compose from the
+      // stripped text + its chips, never the raw body (that would double the refs).
+      const finalBody =
+        canJiraMention && jiraChips.length > 0
+          ? composeBodyWithJiraRefs(body, jiraChips)
+          : canLinkIssues
+            ? composeBodyWithRefs(body, linkedIssues)
+            : body;
+      // Retarget only when the picker actually moved: an unchanged base is
+      // still a forge write, and GitHub rejects one on a stacked PR.
+      const base =
+        editBase && editBase !== (savedEditBase ?? details.data?.baseRefName)
+          ? editBase
+          : undefined;
+      sentEditBaseRef.current = base;
+      return editPr.mutateAsync({
         number,
         title,
-        // The active cluster owns the trailing ref block — re-compose from the
-        // stripped text + its chips, never the raw body (that would double the refs).
-        body:
-          canJiraMention && jiraChips.length > 0
-            ? composeBodyWithJiraRefs(body, jiraChips)
-            : canLinkIssues
-              ? composeBodyWithRefs(body, linkedIssues)
-              : body,
-        // Retarget only when the picker actually moved: an unchanged base is
-        // still a forge write, and GitHub rejects one on a stacked PR.
-        base:
-          editBase && editBase !== details.data?.baseRefName
-            ? editBase
-            : undefined,
+        body: finalBody,
+        base,
+        attachments: begin?.(finalBody),
       });
     },
     successToast: "Pull request updated",
+    attach: {
+      draftKey: editDraftKey,
+      kind: "pr",
+      seedBody: (stored, submitted) => partialSaveText(stored, submitted),
+      onPartialSaved: () => {
+        const sent = sentEditBaseRef.current;
+        if (sent !== undefined) setSavedEditBase(sent);
+      },
+    },
   });
+  const editAttachOwner = useAttachmentOwner("pr-edit", true);
+  const editAttachGate = useAttachmentSupport({
+    forge: forge.data,
+    access: writeAccess.data,
+    enabled: edit.open,
+  });
+  const editAttachments = useDraftAttachments({
+    draftKey: editDraftKey,
+    owner: editAttachOwner,
+    gateReason: editAttachGate,
+    holdReason: null,
+    writeDraft: (key, update) => {
+      if (edit.ownsDraft(key))
+        edit.form.setFieldValue("body", (prev) => update(prev));
+    },
+  });
+  // A save carrying images and a generation never overlap: a partial save
+  // re-seeds the description, which must not land under a stream.
+  const editSavingImages = editAttachments.posting > 0;
   // Local branches for the base picker, fetched only while the dialog is open.
   // The PR's current base is force-kept: it may be archived, or (fork/upstream
   // lens) have no local branch at all, and it must stay displayable either way.
@@ -3154,6 +3199,10 @@ export function RemotePrView({
               busy
               disabled
               reason={PR_SWITCH_LOADING_REASON}
+              hostedImages={hostedImagesFor(
+                mentions.refs?.repoPath,
+                mentions.ghHost,
+              )}
             />
           ) : null
         }
@@ -3218,28 +3267,60 @@ export function RemotePrView({
   // No tracker ⇒ no chips, open the raw body. `prForGen` aliases the narrowed `pr`
   // because TS doesn't carry the outer `!pr` guard into these hoisted closures.
   const prForGen = pr;
+  /** A stored body as the edit field's text, with the active cluster's chips
+   *  reset from its trailing ref block (on open). */
+  function seedEditBody(stored: string): string {
+    if (canLinkIssues) {
+      // Native active: numeric refs → chips; any trailing Jira line rides back in
+      // `text` so an unedited save can't drop it.
+      const { text, refs } = splitBodyRefBlock(stored, "native");
+      resetLinkedIssues(refs);
+      return text;
+    }
+    if (canJiraMention) {
+      // Jira active: mention keys → chips; any trailing numeric line rides back in
+      // `text` (mirror preservation).
+      const { text, jiraRefs } = splitBodyRefBlock(stored, "jira");
+      resetJiraChips(jiraRefs);
+      return text;
+    }
+    return stored;
+  }
+  /** A partial save's read-back as the edit field's text, leaving the chips
+   *  alone: they composed its trailing block and hold every change made since.
+   *  Block lines the submitted text itself ended with stay in the text. */
+  function partialSaveText(stored: string, submitted: string): string {
+    if (canLinkIssues) {
+      const typed = splitBodyRefBlock(submitted, "native").refs.map((r) =>
+        r.keyword === "closes"
+          ? `Closes #${r.number}`
+          : `Relates to #${r.number}`,
+      );
+      return withRefLines(splitBodyRefBlock(stored, "native").text, typed);
+    }
+    if (canJiraMention) {
+      const typed = splitBodyRefBlock(submitted, "jira").jiraRefs.map(
+        (key) => `Relates to ${key}`,
+      );
+      return withRefLines(splitBodyRefBlock(stored, "jira").text, typed);
+    }
+    return stored;
+  }
   function openEditWithChips() {
     // Every seed below is read off the rendered PR, which is the previous one
     // during a switch — an edit opened then would carry its title and body.
     if (detailsStale) return;
+    // A kept draft (its save running, or failed while closed) keeps its base
+    // pick and chips with its text.
+    if (edit.resumeEdit()) return;
     // Seed the base picker from the PR as it stands, so a re-open never carries
     // a previous session's unsaved pick.
     setEditBase(prForGen.baseRefName);
-    if (canLinkIssues) {
-      // Native active: numeric refs → chips; any trailing Jira line rides back in
-      // `text` so an unedited save can't drop it.
-      const { text, refs } = splitBodyRefBlock(prForGen.body, "native");
-      edit.openEdit({ title: prForGen.title, body: text });
-      resetLinkedIssues(refs);
-    } else if (canJiraMention) {
-      // Jira active: mention keys → chips; any trailing numeric line rides back in
-      // `text` (mirror preservation).
-      const { text, jiraRefs } = splitBodyRefBlock(prForGen.body, "jira");
-      edit.openEdit({ title: prForGen.title, body: text });
-      resetJiraChips(jiraRefs);
-    } else {
-      edit.openEdit({ title: prForGen.title, body: prForGen.body });
-    }
+    setSavedEditBase(null);
+    edit.openEdit({
+      title: prForGen.title,
+      body: seedEditBody(prForGen.body),
+    });
   }
 
   // AI title+description generation — shared by the Edit dialog's Generate button
@@ -4585,6 +4666,10 @@ export function RemotePrView({
                 endDraftAttachments(attachments.draftKey);
               }}
               attachments={attachments}
+              hostedImages={hostedImagesFor(
+                mentions.refs?.repoPath,
+                mentions.ghHost,
+              )}
               submitLabel="Comment"
               ariaLabel="Leave a comment"
               placeholder="Leave a comment…"
@@ -5131,8 +5216,11 @@ export function RemotePrView({
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
         mentions={mentions}
+        hostedImages={hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost)}
         onGenerate={aiEnabled ? runGenerate : undefined}
         generating={prGen.generating}
+        generateDisabled={editSavingImages}
+        attachments={editAttachments}
         belowBody={
           <>
             <BaseBranchField
@@ -5151,6 +5239,7 @@ export function RemotePrView({
                 onRemove={removeIssue}
                 onPick={pickIssue}
                 disabled={prGen.generating}
+                appliedOn="save"
               />
             ) : canJiraMention ? (
               <LinkedIssuesField
@@ -5161,6 +5250,7 @@ export function RemotePrView({
                 onRemove={removeJiraChip}
                 onPick={pickJiraChip}
                 disabled={prGen.generating}
+                appliedOn="save"
               />
             ) : null}
           </>
@@ -5177,16 +5267,18 @@ export function RemotePrView({
               Cancel
             </Button>
           ) : (
-            <Button
+            <DisabledReasonButton
               type="button"
               variant="outline"
               size="xs"
               onClick={runGenerate}
+              disabled={editSavingImages}
+              reason={editSavingImages ? ACT_PENDING_REASON : null}
               title={`Generate the title and description with AI${generateHint}`}
             >
               <SparkleIcon data-icon="inline-start" />
               Generate
-            </Button>
+            </DisabledReasonButton>
           )
         }
       />

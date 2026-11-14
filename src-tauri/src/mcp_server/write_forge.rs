@@ -438,6 +438,21 @@ fn updater_notes_to_sync(notes: Option<&str>, sync: Option<bool>) -> Option<Stri
         .map(str::to_string)
 }
 
+/// `create_pull_request`'s result: the PR ref, plus `followup_warning` only when the PR
+/// was created but its labels/assignees step failed (a caveat, not a tool error).
+fn pr_create_result(outcome: crate::attachments::PrCreateOutcome) -> serde_json::Value {
+    let mut result = serde_json::json!({
+        "number": outcome.pr.number,
+        "url": outcome.pr.url,
+    });
+    if let Some(cause) = outcome.followup_error {
+        result["followup_warning"] = serde_json::Value::String(format!(
+            "The pull request was created, but its labels and assignees weren't applied: {cause}"
+        ));
+    }
+    result
+}
+
 /// `detect_non_github` returning None is forge's resilient GitHub default.
 async fn on_github(repo: &str) -> bool {
     crate::forge::detect_non_github(repo).await.is_none()
@@ -549,7 +564,7 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CreateIssueArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
-        let pr_ref = crate::forge::forge_issue_create(
+        let outcome = crate::forge::forge_issue_create(
             self.repo.clone(),
             args.title,
             args.body,
@@ -559,10 +574,11 @@ impl GitDesktopMcp {
             None,
             // Lens: MCP stays origin-pinned in v1 (documented gap). Same below.
             None,
+            None,
         )
         .await
         .map_err(app_err)?;
-        json_result(&pr_ref)
+        json_result(&outcome.pr)
     }
 
     #[tool(
@@ -660,8 +676,10 @@ impl GitDesktopMcp {
                        combination. Refuses a GitDesktop agent-session `head` (gd/session/*, in any \
                        letter case) or a `head` marked Keep local in GitDesktop, and refuses when \
                        pushing `head` would go to a remote configured as a mirror. Returns the \
-                       created PR ref (number + URL) as JSON. Requires BOTH --allow-remote-write \
-                       AND --allow-git-write, because it pushes `head` to origin first.",
+                       created PR ref (number + URL) as JSON, plus `followup_warning` when the PR \
+                       was created but its labels/assignees couldn't be applied. Requires BOTH \
+                       --allow-remote-write AND --allow-git-write, because it pushes `head` to \
+                       origin first.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_pull_request(
@@ -676,7 +694,7 @@ impl GitDesktopMcp {
         super::write_git::ensure_not_publishing_branch(&self.repo, &args.head).await?;
         // Branch names reach a git/CLI argv position, but every provider arm already
         // rejects an empty or '-'-leading branch, so no extra guard is needed here.
-        let pr_ref = crate::forge::forge_pr_create_core(
+        let outcome = crate::forge::forge_pr_create_core(
             &self.state,
             self.repo.clone(),
             args.base,
@@ -692,7 +710,7 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(super::write_git::push_refusal_err)?;
-        json_result(&pr_ref)
+        json_result(&pr_create_result(outcome))
     }
 
     #[tool(
@@ -774,9 +792,17 @@ impl GitDesktopMcp {
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
-        crate::forge::forge_pr_edit(self.repo.clone(), args.number, title, body, None, args.base)
-            .await
-            .map_err(app_err)?;
+        crate::forge::forge_pr_edit(
+            self.repo.clone(),
+            args.number,
+            title,
+            body,
+            None,
+            args.base,
+            None,
+        )
+        .await
+        .map_err(app_err)?;
         json_result(&serde_json::json!({ "pull_request": args.number, "action": "updated" }))
     }
 
@@ -1446,7 +1472,7 @@ impl GitDesktopMcp {
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
-        crate::forge::forge_issue_edit(self.repo.clone(), args.number, title, body, None)
+        crate::forge::forge_issue_edit(self.repo.clone(), args.number, title, body, None, None)
             .await
             .map_err(app_err)?;
         json_result(&serde_json::json!({ "issue": args.number, "action": "updated" }))
@@ -1808,6 +1834,34 @@ mod tests {
             error.message.contains("a PR title is required"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn pr_create_result_warns_only_when_the_followup_failed() {
+        let outcome = |followup_error: Option<&str>| crate::attachments::PrCreateOutcome {
+            pr: crate::github::pr::PrRef {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".into(),
+            },
+            failed_attachments: Vec::new(),
+            followup_error: followup_error.map(str::to_string),
+        };
+        let bare = serde_json::to_value(crate::github::pr::PrRef {
+            number: 7,
+            url: "https://github.com/o/r/pull/7".into(),
+        })
+        .unwrap();
+        assert_eq!(pr_create_result(outcome(None)), bare);
+
+        let warned = pr_create_result(outcome(Some("could not add label: 'x' not found")));
+        assert_eq!(warned["number"], 7);
+        assert_eq!(warned["url"], "https://github.com/o/r/pull/7");
+        assert_eq!(
+            warned["followup_warning"],
+            "The pull request was created, but its labels and assignees weren't applied: \
+             could not add label: 'x' not found"
+        );
+        assert_eq!(warned.as_object().unwrap().len(), 3);
     }
 
     #[test]

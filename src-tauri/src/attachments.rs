@@ -36,6 +36,9 @@ pub(crate) const GH_AUTH_TYPE_REFUSAL: &str = "This GitHub CLI version can't att
 /// gh's own GHES refusal when the host gate had no host to read (Rust-only sentence).
 pub(crate) const GHES_UNKNOWN_HOST_REFUSAL: &str =
     "Image attachments need GitHub.com or GitHub Enterprise Cloud.";
+/// Refused before gh starts or glab uploads anything: an attached text rides the CLI's argv,
+/// past Windows' command-line cap.
+pub(crate) const TOO_LONG_WITH_IMAGES_REFUSAL: &str = "This text is too long to send with images. Shorten it to about 30,000 characters, or add the images separately.";
 const TOO_MANY_REFUSAL: &str = "You can attach up to 10 images at a time.";
 const PASTED_LABEL: &str = "The pasted file";
 
@@ -72,14 +75,27 @@ pub struct CommentOutcome {
     pub failed_attachments: Vec<String>,
 }
 
-/// `forge_pr_create`'s wire shape: `{number, url, failedAttachments}`. `PrRef` stays
-/// unchanged because the issue and discussion creates serialize it too.
+/// The wire shape `forge_pr_create` and `forge_issue_create` return: `{number, url,
+/// failedAttachments, followupError}`, every key always present. `followupError` is the
+/// cause text when the item exists but its follow-up metadata step failed. `PrRef` stays
+/// unchanged because the discussion create serializes it too.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCreateOutcome {
     #[serde(flatten)]
     pub pr: PrRef,
     pub failed_attachments: Vec<String>,
+    pub followup_error: Option<String>,
+}
+
+/// `forge_issue_edit` / `forge_pr_edit`'s wire shape: `{failedAttachments, body}`, both
+/// keys always present. `body` is the stored description, set only on a partial save
+/// whose read-back agrees with gh's stderr about which images failed.
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EditOutcome {
+    pub failed_attachments: Vec<String>,
+    pub body: Option<String>,
 }
 
 /// Attachments that passed every structural check; only [`post_checks`] builds one,
@@ -127,6 +143,43 @@ pub(crate) fn write_access_refusal(slug: &str) -> String {
 
 pub(crate) fn no_longer_attached(name: &str) -> AppError {
     AppError::InvalidArgument(format!("{name} is no longer attached. Attach it again."))
+}
+
+/// Below Windows' 32,767-unit command-line cap, leaving room for the estimates' slack.
+pub(crate) const ATTACHED_COMMAND_LINE_LIMIT: usize = 32_000;
+
+/// `fixed` plus the UTF-16 units std's `append_arg` gives `args`, each one assumed quoted
+/// (an upper bound): a backslash run of n gains n + 1 before an embedded `"` and n before
+/// the closing quote; other backslashes add nothing.
+pub(crate) fn attached_command_line_units(fixed: usize, args: &[&str]) -> usize {
+    let quoted_arg_units = |arg: &&str| {
+        // Two quotes and the separating space.
+        let mut units = 3;
+        let mut run = 0;
+        for u in arg.encode_utf16() {
+            units += 1;
+            if u == u16::from(b'\\') {
+                run += 1;
+            } else {
+                if u == u16::from(b'"') {
+                    units += run + 1;
+                }
+                run = 0;
+            }
+        }
+        units + run
+    };
+    fixed + args.iter().map(quoted_arg_units).sum::<usize>()
+}
+
+/// Refuses an attached write whose command line would pass the cap; only Windows has one.
+pub(crate) fn refuse_long_attached_argv(units: usize, windows: bool) -> AppResult<()> {
+    if windows && units > ATTACHED_COMMAND_LINE_LIMIT {
+        return Err(AppError::InvalidArgument(
+            TOO_LONG_WITH_IMAGES_REFUSAL.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn not_an_image(label: &str) -> AppError {
@@ -664,9 +717,15 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
     }
 }
 
-/// The structural checks: grammar, unique, 1..=10, each file present (a real file in a
-/// real session folder, never a link), each referenced. `None` or no names gives
-/// `Ok(None)`, and the post proceeds exactly as without attachments.
+/// Whether a folder's listed entry names hold `name` byte for byte. A case-insensitive
+/// file system also opens a case variant, which the frontend tracks as another image.
+fn has_exact_entry(listed: &[std::ffi::OsString], name: &str) -> bool {
+    listed.iter().any(|entry| entry.as_os_str() == name)
+}
+
+/// The structural checks: grammar, unique, 1..=10, each file present under exactly its
+/// name (a real file in a real session folder, never a link), each referenced. `None` or
+/// no names gives `Ok(None)`, and the post proceeds exactly as without attachments.
 pub(crate) fn post_checks(
     root: &Path,
     body: &str,
@@ -697,7 +756,14 @@ pub(crate) fn post_checks(
     if session_is_linked(&dir) {
         return Err(not_private(&dir));
     }
+    // An unreadable folder lists nothing, so every name is no longer attached.
+    let listed: Vec<std::ffi::OsString> = fs::read_dir(&dir)
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
     for name in &names {
+        if !has_exact_entry(&listed, name) {
+            return Err(no_longer_attached(name));
+        }
         match fs::symlink_metadata(dir.join(name)) {
             Ok(meta) if is_link(&meta) => return Err(not_private(&dir)),
             Ok(meta) if meta.is_file() => {}
@@ -750,18 +816,22 @@ pub(crate) async fn release_posted(staged: &StagedRefs, failed: &[String]) {
     let _ = tauri::async_runtime::spawn_blocking(move || release_in(&dir, &names, &failed)).await;
 }
 
-/// The origin-lens PR create's only release: after the labels/assignees follow-up, so
-/// that follow-up's Err keeps every staged file.
-pub(crate) async fn finish_attached(
-    followup: AppResult<()>,
+/// A created item's outcome. Releases the posted files whatever the follow-up did: the
+/// item exists, so a failed follow-up is reported in `followup_error`, never as an Err.
+pub(crate) async fn created_outcome(
+    pr: PrRef,
     staged: Option<&StagedRefs>,
     failed: Vec<String>,
-) -> AppResult<Vec<String>> {
-    followup?;
+    followup: AppResult<()>,
+) -> PrCreateOutcome {
     if let Some(staged) = staged {
         release_posted(staged, &failed).await;
     }
-    Ok(failed)
+    PrCreateOutcome {
+        pr,
+        failed_attachments: failed,
+        followup_error: followup.err().map(|e| e.to_string()),
+    }
 }
 
 /// The newest mtime among a folder and its direct entries: an NTFS directory mtime
@@ -875,13 +945,43 @@ pub async fn attachment_discard(session: String, names: Option<Vec<String>>) -> 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::image_sniff::{gif_fixture, jpeg_fixture, png_fixture, webp_lossy_fixture};
     use base64::Engine;
 
     fn b64(bytes: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    // Each count is the argument's units plus 3 (two quotes and a space) plus std's escapes.
+    #[test]
+    fn command_line_units_add_backslashes_where_std_does() {
+        let units = |arg: &str| attached_command_line_units(0, &[arg]);
+        assert_eq!(units("ab"), 5);
+        assert_eq!(units(r"a\b\\c"), 9);
+        assert_eq!(units(r#"a\\"b"#), 8 + 3);
+        assert_eq!(units(r#"""#), 4 + 1);
+        assert_eq!(units(r"a\\"), 6 + 2);
+        assert_eq!(units(r#"\"x\"#), 7 + 2 + 1);
+        assert_eq!(attached_command_line_units(300, &["a", "b"]), 300 + 4 + 4);
+    }
+
+    #[test]
+    fn command_line_units_count_utf16_units_not_bytes() {
+        assert_eq!(attached_command_line_units(0, &["\u{E9}"]), 4);
+        assert_eq!(attached_command_line_units(0, &["\u{1F600}"]), 5);
+        assert_eq!(
+            attached_command_line_units(0, &[&"\u{E9}".repeat(20_000)]),
+            20_003
+        );
+    }
+
+    #[test]
+    fn the_long_text_refusal_starts_one_unit_past_the_limit() {
+        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT, true).is_ok());
+        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, true).is_err());
+        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, false).is_ok());
     }
 
     fn webp_fixture() -> Vec<u8> {
@@ -905,9 +1005,9 @@ mod tests {
         }
     }
 
-    const SID: &str = "0123456789abcdef0123456789abcdef";
+    pub(crate) const SID: &str = "0123456789abcdef0123456789abcdef";
 
-    fn entries(dir: &Path) -> Vec<String> {
+    pub(crate) fn entries(dir: &Path) -> Vec<String> {
         let mut v: Vec<String> = fs::read_dir(dir)
             .map(|es| {
                 es.flatten()
@@ -928,7 +1028,7 @@ mod tests {
 
     /// A temp root as `prepare_root` would leave it: on unix a plain temp dir is created
     /// 0o755, which every staging check refuses as not private.
-    fn private_root() -> tempfile::TempDir {
+    pub(crate) fn private_root() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
@@ -939,11 +1039,31 @@ mod tests {
         root
     }
 
-    fn fill(dir: &Path, n: usize) {
+    pub(crate) fn fill(dir: &Path, n: usize) {
         fs::create_dir_all(dir).unwrap();
         for i in 1..=n {
             fs::write(dir.join(format!("image-{i}.png")), b"x").unwrap();
         }
+    }
+
+    #[test]
+    fn edit_outcome_wire_shape_is_exact_camel_case() {
+        let e = serde_json::to_value(EditOutcome::default()).unwrap();
+        assert!(e.get("failed_attachments").is_none());
+        let mut keys: Vec<&String> = e.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["body", "failedAttachments"]);
+        assert_eq!(e["failedAttachments"], serde_json::json!([]));
+        assert_eq!(e["body"], serde_json::Value::Null);
+        let partial = serde_json::to_value(EditOutcome {
+            failed_attachments: vec!["image-2.png".into()],
+            body: Some("text".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            partial,
+            serde_json::json!({"failedAttachments": ["image-2.png"], "body": "text"})
+        );
     }
 
     #[test]
@@ -977,10 +1097,26 @@ mod tests {
                 url: "u".into(),
             },
             failed_attachments: vec!["a.png".into()],
+            followup_error: None,
         })
         .unwrap();
         assert!(p.get("pr").is_none() && p.get("failed_attachments").is_none());
-        assert_eq!(keys(p), ["failedAttachments", "number", "url"]);
+        assert!(p.get("followup_error").is_none());
+        assert_eq!(p["followupError"], serde_json::Value::Null);
+        assert_eq!(
+            keys(p),
+            ["failedAttachments", "followupError", "number", "url"]
+        );
+        let f = serde_json::to_value(PrCreateOutcome {
+            pr: PrRef {
+                number: 7,
+                url: "u".into(),
+            },
+            failed_attachments: Vec::new(),
+            followup_error: Some("cause".into()),
+        })
+        .unwrap();
+        assert_eq!(f["followupError"], "cause");
 
         let bare = serde_json::to_value(PrRef {
             number: 7,
@@ -1263,6 +1399,43 @@ mod tests {
         assert_eq!(entries(&root.path().join(SID)), ["A-2.png", "a.png"]);
     }
 
+    // A discarded name whose case variant was staged later is no longer attached, on a
+    // case-insensitive file system too: the variant is another image.
+    #[test]
+    fn post_checks_refuse_a_discarded_name_whose_case_variant_is_staged() {
+        let root = private_root();
+        let png = b64(&png_fixture(1, 1));
+        let old = stage_in(root.path(), Some(SID), Some("a.png"), &png).unwrap();
+        assert_eq!(old.name, "a.png");
+        discard_in(root.path(), SID, Some(&["a.png".to_string()])).unwrap();
+        let new = stage_in(root.path(), Some(SID), Some("A.png"), &png).unwrap();
+        assert_eq!(new.name, "A.png");
+        assert_eq!(
+            msg(post_checks(
+                root.path(),
+                "![x](a.png)",
+                refs(SID, &["a.png"])
+            )),
+            "a.png is no longer attached. Attach it again."
+        );
+        let live = post_checks(root.path(), "![x](A.png)", refs(SID, &["A.png"]));
+        assert_eq!(live.unwrap().unwrap().names, ["A.png"]);
+    }
+
+    // The exact-name decision itself, so case-sensitive file systems pin it too.
+    #[test]
+    fn an_entry_matches_only_its_exact_name() {
+        let listed: Vec<std::ffi::OsString> = ["A.png", "image-1.png"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        assert!(has_exact_entry(&listed, "A.png"));
+        assert!(has_exact_entry(&listed, "image-1.png"));
+        for name in ["a.png", "Image-1.png", "IMAGE-1.PNG", "A.pn", "A.png "] {
+            assert!(!has_exact_entry(&listed, name), "{name}");
+        }
+        assert!(!has_exact_entry(&[], "A.png"));
+    }
+
     // Exactly 10 MiB is accepted.
     #[test]
     fn stage_accepts_exactly_the_cap() {
@@ -1506,7 +1679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_attached_releases_only_after_an_ok_followup() {
+    async fn created_outcome_releases_posted_files_even_when_the_followup_failed() {
         let root = private_root();
         let dir = root.path().join(SID);
         fill(&dir, 3);
@@ -1514,21 +1687,35 @@ mod tests {
             names: (1..=3).map(|i| format!("image-{i}.png")).collect(),
             dir: dir.clone(),
         };
-        let failed = vec!["image-2.png".to_string()];
-        let err = finish_attached(
-            Err(AppError::Gh("labels failed".into())),
+        let pr = PrRef {
+            number: 91,
+            url: "https://github.com/o/r/pull/91".into(),
+        };
+        let out = created_outcome(
+            pr,
             Some(&staged),
-            failed.clone(),
+            vec!["image-2.png".to_string()],
+            Err(AppError::Gh("labels failed".into())),
         )
         .await;
-        assert!(matches!(err, Err(AppError::Gh(ref m)) if m == "labels failed"));
-        assert_eq!(entries(&dir), ["image-1.png", "image-2.png", "image-3.png"]);
-
-        let ok = finish_attached(Ok(()), Some(&staged), failed)
-            .await
-            .unwrap();
-        assert_eq!(ok, ["image-2.png"]);
+        assert_eq!(out.followup_error.as_deref(), Some("labels failed"));
+        assert_eq!(out.failed_attachments, ["image-2.png"]);
+        assert_eq!(out.pr.number, 91);
+        assert_eq!(out.pr.url, "https://github.com/o/r/pull/91");
         assert_eq!(entries(&dir), ["image-2.png"]);
+
+        let clean = created_outcome(
+            PrRef {
+                number: 0,
+                url: String::new(),
+            },
+            None,
+            Vec::new(),
+            Ok(()),
+        )
+        .await;
+        assert_eq!(clean.followup_error, None);
+        assert!(clean.failed_attachments.is_empty());
     }
 
     /// A directory link at `link`: a junction on Windows (mklink /J needs no privilege).

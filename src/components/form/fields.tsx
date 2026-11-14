@@ -1,4 +1,5 @@
 import { type ComponentProps, type ReactNode, useEffect, useId } from "react";
+import type { MarkdownHostedImages } from "@/components/markdown/markdown";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { SelectClipText } from "@/components/select-clip-text";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -127,6 +128,7 @@ export function MarkdownField({
   actions,
   mentions,
   attachments,
+  hostedImages,
 }: {
   label?: ReactNode;
   placeholder?: string;
@@ -139,6 +141,8 @@ export function MarkdownField({
   mentions?: MentionSource;
   /** Opt in to image attachments; see `MarkdownEditor`. */
   attachments?: DraftAttachmentsHandle;
+  /** Preview's hosted-image source; see `MarkdownEditor`. */
+  hostedImages?: MarkdownHostedImages;
 }) {
   const field = useFieldContext<string>();
   const id = useId();
@@ -154,6 +158,7 @@ export function MarkdownField({
         actions={actions}
         mentions={mentions}
         attachments={attachments}
+        hostedImages={hostedImages}
         value={field.state.value}
         onChange={field.handleChange}
       />

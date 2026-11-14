@@ -1970,6 +1970,15 @@ fn refuse_empty_comment(body: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// The edit and create cores' empty-title refusal, raised the same way ahead of every
+/// attachment check; `sentence` is that core's own wording.
+fn refuse_empty_title(title: &str, sentence: &str) -> AppResult<()> {
+    if title.trim().is_empty() {
+        return Err(AppError::InvalidArgument(sentence.into()));
+    }
+    Ok(())
+}
+
 /// The provider check on Bitbucket, which refuses every attachment.
 fn attachments_refused_on_bitbucket() -> AppError {
     use crate::attachments::{attach_gate_verdict, AttachForge, BITBUCKET_REFUSAL};
@@ -2235,6 +2244,10 @@ pub async fn forge_pr_reviewer_candidates(
 /// alone on every provider (each arm omits its field rather than echoing the
 /// current value). A stacked GitHub PR's base is server-locked — the 422 explaining
 /// that passes through, so the stack must be dissolved first.
+///
+/// With `attachments`, GitHub runs `gh pr edit --attach` and may return a partial
+/// save (`failedAttachments`, `body`); GitLab uploads first and saves all or nothing;
+/// Bitbucket refuses. Without them every arm runs as before and returns the default.
 #[tauri::command]
 pub async fn forge_pr_edit(
     repo_path: String,
@@ -2243,16 +2256,58 @@ pub async fn forge_pr_edit(
     body: String,
     lens: Option<String>,
     base: Option<String>,
-) -> AppResult<()> {
-    match detect_non_github(&repo_path).await {
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::EditOutcome> {
+    let detected = detect_non_github(&repo_path).await;
+    let attachments = crate::attachments::normalize(attachments);
+    if attachments.is_some() {
+        match detected {
+            Some((Provider::Bitbucket, _)) => return Err(attachments_refused_on_bitbucket()),
+            Some((Provider::GitLab, _)) => {
+                refuse_empty_title(&title, "a merge request title is required")?;
+                let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
+                if let Some(s) = staged {
+                    let verb = gitlab::UploadVerb::Saved;
+                    // A retarget sends the new target branch beside the title.
+                    let fields: Vec<&String> = [Some(&title), base.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
+                    let body =
+                        gitlab::body_with_uploads(&repo_path, &enc, &fields, &body, &s, verb)
+                            .await?;
+                    let base = base.as_deref();
+                    gitlab::edit_mr_in(&repo_path, &enc, number, &title, &body, base).await?;
+                    crate::attachments::release_posted(&s, &[]).await;
+                    return Ok(Default::default());
+                }
+            }
+            _ => {
+                refuse_empty_title(&title, "a PR title is required")?;
+                crate::github::lens_remote(lens.as_deref())?;
+                let staged =
+                    crate::github::pr::gh_attach_checks(&repo_path, &body, attachments, false)
+                        .await?;
+                let base = base.as_deref();
+                return github::edit_pr(&repo_path, number, &title, &body, lens, base, staged)
+                    .await;
+            }
+        }
+    }
+    match detected {
         Some((Provider::GitLab, _)) => {
             gitlab::edit_mr(&repo_path, number, &title, &body, base.as_deref()).await
         }
         Some((Provider::Bitbucket, _)) => {
             bitbucket::edit_pr(&repo_path, number, &title, &body, base.as_deref()).await
         }
-        _ => github::edit_pr(&repo_path, number, &title, &body, lens, base.as_deref()).await,
-    }
+        _ => {
+            let base = base.as_deref();
+            return github::edit_pr(&repo_path, number, &title, &body, lens, base, None).await;
+        }
+    }?;
+    Ok(Default::default())
 }
 
 /// Group open pull requests into a NEW stack, `pull_requests` bottom→top. GitHub
@@ -3058,7 +3113,9 @@ pub async fn forge_issue_reopen(repo_path: String, number: u64, lens: Option<Str
 }
 
 /// Edit an issue's title/body, behind the abstraction — the shared edit dialog.
-/// GitHub PATCHes the issue; GitLab PUTs title/description.
+/// GitHub PATCHes the issue; GitLab PUTs title/description. With `attachments`,
+/// GitHub runs `gh issue edit --attach` and may return a partial save
+/// (`failedAttachments`, `body`); GitLab uploads first and saves all or nothing.
 #[tauri::command]
 pub async fn forge_issue_edit(
     repo_path: String,
@@ -3066,14 +3123,46 @@ pub async fn forge_issue_edit(
     title: String,
     body: String,
     lens: Option<String>,
-) -> AppResult<()> {
-    match detect_non_github(&repo_path).await {
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::EditOutcome> {
+    let detected = detect_non_github(&repo_path).await;
+    let attachments = crate::attachments::normalize(attachments);
+    // Bitbucket keeps its issues refusal first, so its arm below answers either way.
+    if attachments.is_some() {
+        match detected {
+            Some((Provider::Bitbucket, _)) => {}
+            Some((Provider::GitLab, _)) => {
+                refuse_empty_title(&title, "an issue title is required")?;
+                let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
+                if let Some(s) = staged {
+                    let verb = gitlab::UploadVerb::Saved;
+                    let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
+                    let body =
+                        gitlab::body_with_uploads(&repo_path, &enc, &[&title], &body, &s, verb)
+                            .await?;
+                    gitlab::edit_issue_in(&repo_path, &enc, number, &title, &body).await?;
+                    crate::attachments::release_posted(&s, &[]).await;
+                    return Ok(Default::default());
+                }
+            }
+            _ => {
+                refuse_empty_title(&title, "an issue title is required")?;
+                crate::github::lens_remote(lens.as_deref())?;
+                let staged =
+                    crate::github::pr::gh_attach_checks(&repo_path, &body, attachments, false)
+                        .await?;
+                return github::edit_issue(&repo_path, number, &title, &body, lens, staged).await;
+            }
+        }
+    }
+    match detected {
         Some((Provider::GitLab, _)) => gitlab::edit_issue(&repo_path, number, &title, &body).await,
         Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
             "Bitbucket issues aren't supported yet.".into(),
         )),
-        _ => github::edit_issue(&repo_path, number, &title, &body, lens).await,
-    }
+        _ => return github::edit_issue(&repo_path, number, &title, &body, lens, None).await,
+    }?;
+    Ok(Default::default())
 }
 
 /// Lock an issue's conversation, behind the abstraction. GitHub locks with an
@@ -3438,10 +3527,11 @@ pub async fn forge_mr_set_assignees(
     }
 }
 
-/// Create an issue, behind the abstraction. Returns the new number + URL. GitHub sends
-/// the full field set; GitLab takes everything but the org issue type (no analogue —
-/// the dialog hides that picker). `milestone` is whatever `forge_milestones` returned
-/// as `number`.
+/// Create an issue, behind the abstraction. GitHub sends the full field set; GitLab
+/// takes everything but the org issue type (the dialog hides that picker). `milestone`
+/// is whatever `forge_milestones` returned as `number`. With `attachments`, GitHub runs
+/// `gh issue create --attach` and reports failed images and a failed follow-up
+/// (`followupError`) on the created issue; GitLab uploads first and posts all or nothing.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn forge_issue_create(
@@ -3453,8 +3543,58 @@ pub async fn forge_issue_create(
     milestone: Option<u64>,
     issue_type: Option<String>,
     lens: Option<String>,
-) -> AppResult<crate::github::pr::PrRef> {
-    match detect_non_github(&repo_path).await {
+    attachments: Option<crate::attachments::AttachmentRefs>,
+) -> AppResult<crate::attachments::PrCreateOutcome> {
+    use crate::attachments::created_outcome;
+    let detected = detect_non_github(&repo_path).await;
+    let attachments = crate::attachments::normalize(attachments);
+    // Bitbucket keeps its issues refusal first, so its arm below answers either way.
+    if attachments.is_some() {
+        match detected {
+            Some((Provider::Bitbucket, _)) => {}
+            Some((Provider::GitLab, _)) => {
+                refuse_empty_title(&title, "an issue title is required")?;
+                let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
+                if let Some(s) = staged {
+                    let verb = gitlab::UploadVerb::Posted;
+                    // The length refusal needs no lookup, so it runs first; every lookup the
+                    // create needs then runs before the first upload, so a miss uploads nothing.
+                    gitlab::refuse_long_issue_create(
+                        &title,
+                        &labels,
+                        assignees.len(),
+                        &body,
+                        &s,
+                        cfg!(windows),
+                    )?;
+                    let ids = gitlab::create_assignee_ids(&repo_path, &assignees).await?;
+                    let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
+                    let fields = gitlab::issue_create_fields(&title, &labels, &ids);
+                    let body =
+                        gitlab::body_with_uploads(&repo_path, &enc, &fields, &body, &s, verb)
+                            .await?;
+                    let pr = gitlab::create_issue_in(
+                        &repo_path, &enc, &title, &body, &labels, &ids, milestone,
+                    )
+                    .await?;
+                    return Ok(created_outcome(pr, Some(&s), Vec::new(), Ok(())).await);
+                }
+            }
+            _ => {
+                refuse_empty_title(&title, "an issue title is required")?;
+                crate::github::lens_remote(lens.as_deref())?;
+                let staged =
+                    crate::github::pr::gh_attach_checks(&repo_path, &body, attachments, false)
+                        .await?;
+                return github::create_issue(
+                    &repo_path, &title, &body, labels, assignees, milestone, issue_type, lens,
+                    staged,
+                )
+                .await;
+            }
+        }
+    }
+    let pr = match detected {
         Some((Provider::GitLab, _)) => {
             gitlab::create_issue(&repo_path, &title, &body, &labels, &assignees, milestone).await
         }
@@ -3462,12 +3602,13 @@ pub async fn forge_issue_create(
             "Bitbucket issues aren't supported yet.".into(),
         )),
         _ => {
-            github::create_issue(
-                &repo_path, &title, &body, labels, assignees, milestone, issue_type, lens,
+            return github::create_issue(
+                &repo_path, &title, &body, labels, assignees, milestone, issue_type, lens, None,
             )
-            .await
+            .await;
         }
-    }
+    }?;
+    Ok(created_outcome(pr, None, Vec::new(), Ok(())).await)
 }
 
 /// The repo's web URL for "View on GitHub/GitLab", behind the abstraction.
@@ -4743,7 +4884,7 @@ pub(crate) async fn forge_publish_repo_core(
 /// GitHub then delegates to `gh pr create`; GitLab POSTs the MR with draft mapped to
 /// the `Draft:` title prefix; Bitbucket POSTs after a duplicate-PR pre-guard (a
 /// duplicate create silently overwrites there). Returns `{number, url,
-/// failedAttachments}`.
+/// failedAttachments, followupError}`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn forge_pr_create(
@@ -4780,8 +4921,8 @@ pub async fn forge_pr_create(
 }
 
 /// The attachment-free entry to [`forge_pr_create_with_attachments`] for the MCP
-/// server's `create_pull_request` tool, callable off the Tauri runtime. It never
-/// carries attachments, so its `PrRef` return stays the MCP caller's shape.
+/// server's `create_pull_request` tool, callable off the Tauri runtime. The outcome's
+/// `followup_error` is how a created PR reports labels/assignees that weren't applied.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forge_pr_create_core(
     state: &crate::state::AppState,
@@ -4795,12 +4936,11 @@ pub(crate) async fn forge_pr_create_core(
     labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
     lens: Option<String>,
-) -> AppResult<crate::github::pr::PrRef> {
+) -> AppResult<crate::attachments::PrCreateOutcome> {
     forge_pr_create_with_attachments(
         state, repo_path, base, head, title, body, draft, reviewers, labels, assignees, lens, None,
     )
     .await
-    .map(|o| o.pr)
 }
 
 /// The provider-dispatch core of [`forge_pr_create`], taking a plain `&AppState` (not
@@ -4913,6 +5053,7 @@ pub(crate) async fn forge_pr_create_with_attachments(
     Ok(crate::attachments::PrCreateOutcome {
         pr,
         failed_attachments: Vec::new(),
+        followup_error: None,
     })
 }
 
@@ -5058,6 +5199,182 @@ mod tests {
         assert!(unknown(&pr), "PR comment: {pr:?}");
         let issue = forge_issue_comment(repo, 1, body, lens(), refs()).await;
         assert!(unknown(&issue), "issue comment: {issue:?}");
+    }
+
+    /// A temp repository whose only configuration is an `origin` URL.
+    async fn origin_only_repo(origin: &str) -> tempfile::TempDir {
+        use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+        let dir = tempfile::Builder::new()
+            .prefix("gd-attach-edit-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(
+            Some(&repo),
+            &["remote", "add", "origin", origin],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        dir
+    }
+
+    fn edit_refs() -> Option<crate::attachments::AttachmentRefs> {
+        Some(crate::attachments::AttachmentRefs {
+            session: "0123456789abcdef0123456789abcdef".into(),
+            names: vec!["image-1.png".into()],
+        })
+    }
+
+    fn refused_with(r: &AppResult<crate::attachments::EditOutcome>, sentence: &str) -> bool {
+        matches!(r, Err(AppError::InvalidArgument(m)) if m == sentence)
+    }
+
+    /// An empty title on an edit carrying attachments keeps each core's own refusal,
+    /// ahead of every attachment check (which would report the missing staged file).
+    #[tokio::test]
+    async fn an_empty_title_on_an_edit_with_attachments_is_refused_before_its_checks() {
+        let body = || "![x](image-1.png)".to_string();
+        for (origin, pr_sentence) in [
+            ("https://github.com/o/r.git", "a PR title is required"),
+            (
+                "https://gitlab.com/o/r.git",
+                "a merge request title is required",
+            ),
+        ] {
+            let dir = origin_only_repo(origin).await;
+            let repo = dir.path().to_string_lossy().into_owned();
+            let pr = forge_pr_edit(
+                repo.clone(),
+                1,
+                " \n".into(),
+                body(),
+                None,
+                None,
+                edit_refs(),
+            )
+            .await;
+            assert!(refused_with(&pr, pr_sentence), "{origin} PR edit: {pr:?}");
+            let issue = forge_issue_edit(repo, 1, " \n".into(), body(), None, edit_refs()).await;
+            assert!(
+                refused_with(&issue, "an issue title is required"),
+                "{origin} issue edit: {issue:?}"
+            );
+        }
+    }
+
+    /// An unknown lens on a GitHub edit carrying attachments keeps its own refusal.
+    #[tokio::test]
+    async fn an_unknown_lens_on_an_edit_with_attachments_is_refused_before_its_checks() {
+        let dir = origin_only_repo("https://github.com/o/r.git").await;
+        let repo = dir.path().to_string_lossy().into_owned();
+        let body = || "![x](image-1.png)".to_string();
+        let lens = || Some("bogus".to_string());
+        let unknown = "unknown remote lens: bogus";
+        let pr = forge_pr_edit(
+            repo.clone(),
+            1,
+            "T".into(),
+            body(),
+            lens(),
+            None,
+            edit_refs(),
+        )
+        .await;
+        assert!(refused_with(&pr, unknown), "PR edit: {pr:?}");
+        let issue = forge_issue_edit(repo, 1, "T".into(), body(), lens(), edit_refs()).await;
+        assert!(refused_with(&issue, unknown), "issue edit: {issue:?}");
+    }
+
+    /// Bitbucket answers an edit carrying attachments before any call: the PR edit with
+    /// the attachment refusal, the issue edit with its issues refusal.
+    #[tokio::test]
+    async fn bitbucket_edits_with_attachments_are_refused_before_any_call() {
+        let dir = origin_only_repo("https://bitbucket.org/o/r.git").await;
+        let repo = dir.path().to_string_lossy().into_owned();
+        let body = || "![x](image-1.png)".to_string();
+        let pr = forge_pr_edit(repo.clone(), 1, "T".into(), body(), None, None, edit_refs()).await;
+        assert!(
+            refused_with(&pr, crate::attachments::BITBUCKET_REFUSAL),
+            "PR edit: {pr:?}"
+        );
+        let issue = forge_issue_edit(repo, 1, "T".into(), body(), None, edit_refs()).await;
+        assert!(
+            refused_with(&issue, "Bitbucket issues aren't supported yet."),
+            "issue edit: {issue:?}"
+        );
+    }
+
+    /// The refusal an issue create returned, if it is `InvalidArgument(sentence)`.
+    fn create_refused_with(
+        r: &AppResult<crate::attachments::PrCreateOutcome>,
+        sentence: &str,
+    ) -> bool {
+        matches!(r, Err(AppError::InvalidArgument(m)) if m == sentence)
+    }
+
+    async fn create_issue_with_attachments(
+        repo: String,
+        title: &str,
+        lens: Option<String>,
+    ) -> AppResult<crate::attachments::PrCreateOutcome> {
+        forge_issue_create(
+            repo,
+            title.into(),
+            "![x](image-1.png)".into(),
+            vec!["bug".into()],
+            vec!["a".into()],
+            Some(3),
+            Some("Bug".into()),
+            lens,
+            edit_refs(),
+        )
+        .await
+    }
+
+    /// An empty title on an issue create carrying attachments keeps the core's own
+    /// refusal on GitHub and GitLab, ahead of every attachment check.
+    #[tokio::test]
+    async fn an_empty_title_on_an_issue_create_with_attachments_is_refused_before_its_checks() {
+        for origin in ["https://github.com/o/r.git", "https://gitlab.com/o/r.git"] {
+            let dir = origin_only_repo(origin).await;
+            let repo = dir.path().to_string_lossy().into_owned();
+            let r = create_issue_with_attachments(repo, " \n", None).await;
+            assert!(
+                create_refused_with(&r, "an issue title is required"),
+                "{origin}: {:?}",
+                r.as_ref().err()
+            );
+        }
+    }
+
+    /// An unknown lens on a GitHub issue create carrying attachments keeps its own refusal.
+    #[tokio::test]
+    async fn an_unknown_lens_on_an_issue_create_with_attachments_is_refused_before_its_checks() {
+        let dir = origin_only_repo("https://github.com/o/r.git").await;
+        let repo = dir.path().to_string_lossy().into_owned();
+        let r = create_issue_with_attachments(repo, "T", Some("bogus".into())).await;
+        assert!(
+            create_refused_with(&r, "unknown remote lens: bogus"),
+            "{:?}",
+            r.as_ref().err()
+        );
+    }
+
+    /// Bitbucket answers an issue create carrying attachments with its issues refusal.
+    #[tokio::test]
+    async fn bitbucket_issue_create_with_attachments_is_refused_before_any_call() {
+        let dir = origin_only_repo("https://bitbucket.org/o/r.git").await;
+        let repo = dir.path().to_string_lossy().into_owned();
+        let r = create_issue_with_attachments(repo, "T", None).await;
+        assert!(
+            create_refused_with(&r, "Bitbucket issues aren't supported yet."),
+            "{:?}",
+            r.as_ref().err()
+        );
     }
 
     /// Runs the walker over full pages on a fake clock that each fetch moves `step`

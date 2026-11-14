@@ -20,6 +20,7 @@ import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -43,10 +44,13 @@ import { keptLocalPrReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
-import { partialCreateWarning } from "@/lib/attachments/comment-post";
+import { createdWarning } from "@/lib/attachments/comment-post";
+import { toastCreatedWarning } from "@/lib/attachments/created-warning";
 import {
   ATTACHING_REASON,
+  createdNumberOf,
   failedAttachmentsOf,
+  followupErrorOf,
   uploadingReason,
 } from "@/lib/attachments/references";
 import {
@@ -64,6 +68,7 @@ import { triggerAutomations } from "@/lib/automations/runner";
 import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import * as api from "@/lib/git/api";
+import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
   useBranchAhead,
@@ -607,22 +612,34 @@ export function CreatePrDialog({
             settleAttachmentPost(ticket, { posted: false, failed: [] });
           throw e;
         }
-        const { number, url } = createdRef;
+        const { url } = createdRef;
+        // Null when the PR exists but its number couldn't be read: nothing below
+        // may print, link, watch for or comment on PR 0.
+        const number = createdNumberOf(createdRef);
         const failedImages = failedAttachmentsOf(createdRef);
+        // The PR exists, so a failed labels/assignees step only warns.
+        const followupError = followupErrorOf(createdRef);
         // Failed images can't follow the PR: the toast names the one image, or
-        // counts several, and the whole session goes with the draft.
+        // counts several, and the whole session goes with the draft. Without a
+        // ticket a reseed may already own the key, so only this submit's draft ends.
         if (ticket)
           settleAttachmentPost(ticket, {
             posted: true,
             failed: failedImages,
             discardFailed: true,
           });
-        else endDraftAttachments(attachDraftKey);
+        else if (
+          draftRepoRef.current === repoPath &&
+          seedGenRef.current === submitGen
+        )
+          endDraftAttachments(attachDraftKey);
         outcome = "success";
-        created = { number, url };
-        // Flip here, arm in the `finally`: the lane outlives the forge's answer,
-        // so the strip needs the number now, while the steps below still run.
-        markPrCreated(repoPath, value.head, { number, url });
+        if (number !== null) {
+          created = { number, url };
+          // Flip here, arm in the `finally`: the lane outlives the forge's answer,
+          // so the strip needs the number now, while the steps below still run.
+          markPrCreated(repoPath, value.head, { number, url });
+        }
         const notes = value.notes.trim();
         track({
           name: "pull_request_created",
@@ -635,7 +652,8 @@ export function CreatePrDialog({
         // Reviewer notes are an AI-only surface (the field renders only when AI
         // is enabled), so the whole post + consume is gated on `aiEnabled` —
         // Hide-AI must post nothing and consume no deposit (no behavior change).
-        if (aiEnabled) {
+        // Without a number there is no PR to post on, so the notes stay deposited.
+        if (aiEnabled && number !== null) {
           // Post the author's reviewer notes as the FIRST comment, BEFORE the review
           // fires — the automated review reads the conversation, so ordering is the
           // whole point. `asBot: false` (the user's own content). Its own try/catch:
@@ -693,13 +711,30 @@ export function CreatePrDialog({
         const where = targetSlug
           ? ` in ${targetSlug}`
           : landedIn(repoPath).away;
-        const createdToast = {
-          description: url,
-          action: { label: "View", onClick: () => openUrl(url) },
-        };
-        if (failedImages.length > 0)
-          toast.warning(partialCreateWarning(failedImages), createdToast);
-        else toast.success(`Opened ${prNoun} #${number}${where}`, createdToast);
+        const view = url
+          ? { label: "View", url, onClick: () => openUrl(url) }
+          : undefined;
+        const warning = createdWarning("pr", failedImages, followupError);
+        if (warning !== null)
+          toastCreatedWarning({
+            kind: "pr",
+            title: warning,
+            followupError,
+            // The warning's title has no `where`, so a settle elsewhere names
+            // the origin repo here.
+            description:
+              [originNoteFor(repoPath), url].filter(Boolean).join(" · ") ||
+              undefined,
+            view,
+          });
+        else
+          toast.success(
+            `Opened ${prNoun}${number === null ? "" : ` #${number}`}${where}`,
+            {
+              description: url || undefined,
+              action: view && { label: view.label, onClick: view.onClick },
+            },
+          );
         // Close only: under <Activity>, setRepoTab/selectPr here would defer the close and
         // unmount until the panel is next shown (hoist navigation to RepositoryView, like
         // CreateLocalPrDialog). `open` is one host state across repos, so stillHere() and
@@ -713,7 +748,7 @@ export function CreatePrDialog({
         // pr-open directly, and an EXTERNAL ready flip rides the catch-up poller's
         // 14-day window. Don't "fix" this by dropping the gate.
         const reviewDraftPrs = settings.data?.reviewDraftPrs ?? false;
-        if (!value.draft || reviewDraftPrs) {
+        if (number !== null && (!value.draft || reviewDraftPrs)) {
           triggerAutomations({
             kind: "pr-open",
             repoPath,
@@ -784,6 +819,10 @@ export function CreatePrDialog({
             number: created.number,
             startedAt: claimedAt,
           });
+        } else if (created === null) {
+          // Created without a readable number: no row can ever match a hand-off,
+          // so the lane frees now ("success" also clears a stale failed latch).
+          settlePrCreate(repoPath, value.head, "success");
         }
       }
     },
@@ -952,6 +991,7 @@ export function CreatePrDialog({
   const shownSubmitting = useRetained(isSubmitting, open);
   const attachOwner = useAttachmentOwner("pr-create", true, host);
   const createAccess = useRepoWriteAccess(repoPath, createLens, open);
+  const descHostedImages = hostedImagesFor(repoPath, useForgeGhHost(repoPath));
   const attachGate = useAttachmentSupport({
     forge: forge.data,
     access: createAccess.data,
@@ -966,16 +1006,17 @@ export function CreatePrDialog({
       form.setFieldValue("body", (prev) => update(prev)),
   });
   // Generate rewrites the body and a running create already sent it, so both
-  // hold Attach and chip Remove.
+  // hold Attach and chip Remove. The posting arm also covers a reopen over a
+  // create still uploading, where a stage would be dropped silently.
   const descAttachments = draftAttachments.withHold(
     (() => {
       switch (true) {
         case generating:
           return AI_DRAFT_PENDING_REASON;
+        case draftAttachments.posting > 0:
+          return uploadingReason(draftAttachments.posting, "creating");
         case shownSubmitting:
-          return draftAttachments.posting > 0
-            ? uploadingReason(draftAttachments.posting, "creating")
-            : ACT_PENDING_REASON;
+          return ACT_PENDING_REASON;
         default:
           return null;
       }
@@ -1635,6 +1676,7 @@ export function CreatePrDialog({
                   label="Description"
                   placeholder="Describe what changed and why"
                   attachments={descAttachments}
+                  hostedImages={descHostedImages}
                   rows={7}
                   textareaClassName="ph-no-capture max-h-72 min-h-24 resize-y font-mono"
                   actions={

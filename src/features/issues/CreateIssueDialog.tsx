@@ -5,7 +5,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent,
   type ReactNode,
+  useEffect,
   useEffectEvent,
+  useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -13,6 +16,7 @@ import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -37,10 +41,33 @@ import {
   CREATE_PENDING_GENERATE_REASON,
   useFinishAndSurface,
 } from "@/features/conversations/useAiStream";
+import {
+  createdWarning,
+  FOLLOWUP_HEADING,
+} from "@/lib/attachments/comment-post";
+import { toastCreatedWarning } from "@/lib/attachments/created-warning";
+import {
+  ATTACHING_REASON,
+  createdNumberOf,
+  failedAttachmentsOf,
+  followupErrorOf,
+  uploadingReason,
+} from "@/lib/attachments/references";
+import {
+  beginAttachmentPost,
+  draftKeyFor,
+  endDraftAttachments,
+  settleAttachmentPost,
+} from "@/lib/attachments/store";
+import { useAttachmentSupport } from "@/lib/attachments/use-attachment-support";
+import {
+  useAttachmentOwner,
+  useDraftAttachments,
+} from "@/lib/attachments/use-draft-attachments";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
-import { useActiveGhHost } from "@/lib/git/host";
+import { useActiveGhHost, useForgeGhHost } from "@/lib/git/host";
 import {
   useAddIssueToProjects,
   useAddSubIssue,
@@ -49,8 +76,10 @@ import {
   useForgeStatus,
   useGhScopes,
   useRepoLabels,
+  useRepoWriteAccess,
 } from "@/lib/git/queries";
 import type {
+  CreatedRef,
   ForgeUserRef,
   IssueType,
   ProjectV2Ref,
@@ -98,6 +127,9 @@ const LINK_FAILED: Record<"project" | "projects" | "sub-issue", string> = {
   "sub-issue": "linking as a sub-issue failed",
 };
 
+/** Which panel hosts a dialog instance; both can be mounted at once. */
+export type CreateIssueHost = "issues-panel" | "sub-issue";
+
 export function CreateIssueDialog({
   repoPath,
   lens,
@@ -105,6 +137,7 @@ export function CreateIssueDialog({
   onOpenChange,
   initialDraft,
   subIssueParentId,
+  host,
 }: {
   repoPath: string;
   /** The issues surface's origin|upstream lens. Under "upstream" the issue is
@@ -118,8 +151,13 @@ export function CreateIssueDialog({
   /** When set, the created issue is linked as a sub-issue of this node id
    *  (parent), and the view stays on the parent instead of navigating away. */
   subIssueParentId?: string;
+  /** A new mount ends the staged images an earlier instance of this same host
+   *  left behind (its draft text went with it), never the other host's. */
+  host: CreateIssueHost;
 }) {
   const createIssue = useCreateIssue(repoPath, lens);
+  // Per instance: two hosts mount this dialog, each holding its own form.
+  const attachDraftKey = draftKeyFor("issue-create", useId());
   const addSubIssue = useAddSubIssue();
   const repoLabels = useRepoLabels(repoPath, open, lens);
   // Under the upstream lens the issue is created ON THE PARENT; name that repo
@@ -177,6 +215,14 @@ export function CreateIssueDialog({
   // repo stamp can't tell drafts apart within one repo: an A→B→A round trip
   // restores the same path behind different content.
   const seedGenRef = useRef(0);
+  // The live `open` for the create's settle, whose closure holds the submit-time one.
+  const openRef = useRef(open);
+  useLayoutEffect(() => {
+    openRef.current = open;
+  }, [open]);
+  // Set when this dialog's own draft failed to create while it was closed, so the
+  // next open shows it again; that open consumes it.
+  const failedWhileClosedRef = useRef(false);
 
   // The Projects row is GitHub-only and ORIGIN-only. `!isGitLab` would be the wrong
   // gate on both counts: Bitbucket mounts issue surfaces in some states and has no
@@ -257,7 +303,9 @@ export function CreateIssueDialog({
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
       const submitGen = seedGenRef.current;
-      let created: { number: number; url: string };
+      // Begun after every early return, so a refusal leaves the chips as they were.
+      const ticket = beginAttachmentPost(attachDraftKey, value.body, false);
+      let created: CreatedRef;
       try {
         created = await createIssue.mutateAsync({
           title: value.title.trim(),
@@ -266,8 +314,17 @@ export function CreateIssueDialog({
           assignees: assignees.map((a) => a.id),
           milestone,
           type: issueType?.name ?? null,
+          attachments: ticket?.refs,
         });
       } catch (e) {
+        // Rust keeps every staged file on any Err, so the chips still hold.
+        if (ticket) settleAttachmentPost(ticket, { posted: false, failed: [] });
+        if (
+          !openRef.current &&
+          draftRepoRef.current === repoPath &&
+          seedGenRef.current === submitGen
+        )
+          failedWhileClosedRef.current = true;
         // The create itself failed — nothing exists yet, so retrying is correct
         // and the dialog stays open holding the draft. This is the ONLY arm that
         // re-arms the submit; past it the issue is real and a second submit would
@@ -278,11 +335,35 @@ export function CreateIssueDialog({
         else toastError(e);
         return;
       }
-      const { number, url } = created;
-      const action = {
-        label: forgeViewLabel ?? "View",
-        onClick: () => openUrl(url),
-      };
+      const { url } = created;
+      // Null when the issue exists but its number couldn't be read: nothing below
+      // may print, link or open issue 0.
+      const number = createdNumberOf(created);
+      const numberSuffix = number === null ? "" : ` #${number}`;
+      const failedImages = failedAttachmentsOf(created);
+      const followupError = followupErrorOf(created);
+      // Failed images can't follow the issue: the toast names the one image, or
+      // counts several, and the whole session goes with the draft. Without a
+      // ticket a reseed may already own the key, so only this submit's draft ends.
+      if (ticket)
+        settleAttachmentPost(ticket, {
+          posted: true,
+          failed: failedImages,
+          discardFailed: true,
+        });
+      else if (
+        draftRepoRef.current === repoPath &&
+        seedGenRef.current === submitGen
+      )
+        endDraftAttachments(attachDraftKey);
+      const view = url
+        ? {
+            label: forgeViewLabel ?? "View",
+            url,
+            onClick: () => openUrl(url),
+          }
+        : undefined;
+      const action = view && { label: view.label, onClick: view.onClick };
       /** Open the new issue — but only if the app is still where it was created.
        *  Every path below sits after at least one await, and this dialog doesn't
        *  register the modal gate, so a chord can switch repos inside that window.
@@ -295,7 +376,7 @@ export function CreateIssueDialog({
        *  The TOAST stays unconditional wherever the user ended up: it names the
        *  issue and carries its URL, which are true from any repo. */
       function openCreatedIssue() {
-        if (number <= 0) return;
+        if (number === null) return;
         if (useUiStore.getState().repoPath !== repoPath) return;
         selectIssue({ kind: "remote", id: String(number) });
       }
@@ -303,11 +384,11 @@ export function CreateIssueDialog({
       // issue says nothing about whether its parent will take it, so each runs on
       // its own and reports into `failures` rather than throwing past the other.
       // A shared try/catch let the first failure cancel the second link silently.
-      // `number > 0` guards both — a forge that answered without one names no
+      // A known number guards both — a forge that answered without one names no
       // issue to link.
       const failures: { heading: string; error: unknown }[] = [];
       const addProjectIds = pickedProjects.map((p) => p.id);
-      if (showProjects && addProjectIds.length > 0 && number > 0) {
+      if (showProjects && addProjectIds.length > 0 && number !== null) {
         try {
           await addToProjects.mutateAsync({
             repo: repoPath,
@@ -321,7 +402,7 @@ export function CreateIssueDialog({
         }
       }
       let subIssueLinked = false;
-      if (subIssueParentId && number > 0) {
+      if (subIssueParentId && number !== null) {
         try {
           await addSubIssue.mutateAsync({
             repo: repoPath,
@@ -343,6 +424,11 @@ export function CreateIssueDialog({
       const ourDraft =
         draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
       if (ourDraft) onOpenChange(false);
+      // One toast per create: a follow-up or image warning rides whichever
+      // toast this outcome shows rather than adding its own.
+      const warning = createdWarning("issue", failedImages, followupError);
+      const description =
+        [originNote, url].filter(Boolean).join(" · ") || undefined;
       if (failures.length > 0) {
         // Every failure in one message, so a run that lost both links doesn't
         // report one and hide the other. The title keeps each step mid-sentence
@@ -350,14 +436,21 @@ export function CreateIssueDialog({
         const reasons = failures.map(
           (f) => `${f.heading}: ${presentError(f.error).summary}`,
         );
+        const errors: unknown[] = failures.map((f) => f.error);
+        const headings = failures.map(
+          (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
+        );
+        if (followupError !== null) {
+          errors.push(followupError);
+          headings.push(FOLLOWUP_HEADING.issue);
+        }
         toastComposedError({
-          title: `Created issue #${number}, but ${reasons.join("; ")}`,
-          errors: failures.map((f) => f.error),
-          headings: failures.map(
-            (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
-          ),
-          description: originNote,
-          view: { url, label: forgeViewLabel },
+          title: `Created issue${numberSuffix}, but ${reasons.join("; ")}`,
+          errors,
+          headings,
+          description:
+            [originNote, warning].filter(Boolean).join(" · ") || undefined,
+          view: url ? { url, label: forgeViewLabel } : undefined,
           duration: 10000,
         });
         // The issue EXISTS whatever the links did, so it still opens — the same
@@ -366,19 +459,27 @@ export function CreateIssueDialog({
         if (!subIssueParentId) openCreatedIssue();
         return;
       }
+      if (warning !== null) {
+        toastCreatedWarning({
+          kind: "issue",
+          title: warning,
+          followupError,
+          description,
+          view,
+        });
+        if (!subIssueLinked) openCreatedIssue();
+        return;
+      }
       if (subIssueLinked) {
         // Stay on the parent so the new issue appears in its sub-issue list
         // (GitHub's own behavior) — no navigate.
-        toast.success(`Created sub-issue #${number}`, {
-          description: originNote ? `${originNote} · ${url}` : url,
+        toast.success(`Created sub-issue${numberSuffix}`, {
+          description,
           action,
         });
         return;
       }
-      toast.success(`Opened issue #${number}`, {
-        description: originNote ? `${originNote} · ${url}` : url,
-        action,
-      });
+      toast.success(`Opened issue${numberSuffix}`, { description, action });
       openCreatedIssue();
     },
   });
@@ -391,6 +492,13 @@ export function CreateIssueDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
+    // A create still running in this repo keeps its draft, so a failed create
+    // leaves it to retry; another repo's draft resets, or a retry would land there.
+    const sameRepoInFlight =
+      form.state.isSubmitting && draftRepoRef.current === repoPath;
+    const keptFailure =
+      failedWhileClosedRef.current && draftRepoRef.current === repoPath;
+    failedWhileClosedRef.current = false;
     draftRepoRef.current = repoPath;
     // The only host that seeds this dialog clears its request at close, so a
     // draft present here is always a fresh explicit ask (duplicate, reference)
@@ -399,7 +507,11 @@ export function CreateIssueDialog({
     if (isNewRequest) {
       if (generating) cancel();
       void surface.consumeSkipSeed();
-    } else if (surface.shouldSkipSeed(generating)) {
+    } else if (
+      surface.shouldSkipSeed(generating) ||
+      sameRepoInFlight ||
+      keptFailure
+    ) {
       // A generation still streaming — or one that settled while the dialog was
       // closed — leaves the whole draft in form state, which this reset would
       // blank on reopen.
@@ -418,6 +530,8 @@ export function CreateIssueDialog({
       return;
     }
     seedGenRef.current += 1;
+    // The images belong to the text this reset replaces.
+    endDraftAttachments(attachDraftKey);
     form.reset(
       { title: initialDraft?.title ?? "", body: initialDraft?.body ?? "" },
       { keepDefaultValues: true },
@@ -430,6 +544,20 @@ export function CreateIssueDialog({
     stateLensRef.current = lens;
   });
   useSeedOnOpen(open, seedOnOpen);
+
+  // A close ends the staged images unless the draft is kept: a generation running
+  // (it latches when it settles) or a create in flight (a landed settle ends them, a
+  // failed one leaves them with the draft). Edge only: an `<Activity>` replay ends nothing.
+  const wasOpenRef = useRef(open);
+  const endDiscardedAttachments = useEffectEvent(() => {
+    if (generating || form.state.isSubmitting) return;
+    endDraftAttachments(attachDraftKey);
+  });
+  useEffect(() => {
+    const closed = wasOpenRef.current && !open;
+    wasOpenRef.current = open;
+    if (closed) endDiscardedAttachments();
+  }, [open]);
 
   function toggleLabel(name: string, on: boolean) {
     setLabels((prev) => {
@@ -541,13 +669,48 @@ export function CreateIssueDialog({
     enabled: aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,
     run: runGenerate,
   });
+  const attachOwner = useAttachmentOwner("issue-create", true, host);
+  const createAccess = useRepoWriteAccess(repoPath, lens, open);
+  const descHostedImages = hostedImagesFor(repoPath, useForgeGhHost(repoPath));
+  const attachGate = useAttachmentSupport({
+    forge: forge.data,
+    access: createAccess.data,
+    enabled: open,
+  });
+  const draftAttachments = useDraftAttachments({
+    draftKey: attachDraftKey,
+    owner: attachOwner,
+    gateReason: attachGate,
+    holdReason: null,
+    writeDraft: (_key, update) =>
+      form.setFieldValue("body", (prev) => update(prev)),
+  });
+  // Generate rewrites the body and a running create already sent it, so both
+  // hold Attach and chip Remove. The posting arm also covers a reopen over a
+  // create still uploading, where a stage would be dropped silently.
+  const descAttachments = draftAttachments.withHold(
+    (() => {
+      switch (true) {
+        case generating:
+          return AI_DRAFT_PENDING_REASON;
+        case draftAttachments.posting > 0:
+          return uploadingReason(draftAttachments.posting, "creating");
+        case isSubmitting:
+          return ACT_PENDING_REASON;
+        default:
+          return null;
+      }
+    })(),
+  );
   // The one submit gate, shared by the button and the form's native submit:
   // Enter must submit exactly when the button would. A create holds offline
   // rather than park: a parked one would land after the dialog was left behind.
   const offlineHold = useOfflineHold();
-  const submitBlocked = generating || !!offlineHold;
-  // The running draft, the running create, and offline carry a reason, ranked
-  // running-first, so a flip between them never drops focus to a native disable.
+  const submitBlocked =
+    generating || !!offlineHold || draftAttachments.attaching;
+  // The running draft, the running create, offline and an image still
+  // attaching carry a reason, ranked in that order, so a flip between them
+  // never drops focus to a native disable.
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked || isSubmitting,
     reason: (() => {
@@ -556,8 +719,12 @@ export function CreateIssueDialog({
           return AI_DRAFT_PENDING_REASON;
         case isSubmitting:
           return ACT_PENDING_REASON;
-        default:
+        case !!offlineHold:
           return offlineHold;
+        case draftAttachments.attaching:
+          return ATTACHING_REASON;
+        default:
+          return null;
       }
     })(),
   });
@@ -572,8 +739,10 @@ export function CreateIssueDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (submitBlocked) return;
-            form.handleSubmit();
+            // Form-core doesn't refuse a submit while one runs.
+            if (form.state.isSubmitting) return;
+            if (!submitBlocked) form.handleSubmit();
+            else draftAttachments.noteSubmitHeld();
           }}
         >
           <DialogHeader>
@@ -703,6 +872,8 @@ export function CreateIssueDialog({
                 <field.MarkdownField
                   label="Description"
                   placeholder="Jot down rough notes, then draft with AI"
+                  attachments={descAttachments}
+                  hostedImages={descHostedImages}
                   rows={8}
                   textareaClassName="max-h-72 min-h-24 resize-y font-mono"
                   actions={

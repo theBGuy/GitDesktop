@@ -17,8 +17,9 @@ import {
 } from "vitest";
 import { PromoteLocalPrDialog } from "@/features/pulls/PromoteLocalPrDialog";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
-import { forgeStatus, gitBranches } from "@/lib/git/api";
-import { repoKeys } from "@/lib/git/queries";
+import { forgePrComment, forgeStatus, gitBranches } from "@/lib/git/api";
+import { prChecksRecheck, repoKeys } from "@/lib/git/queries";
+import { recheckRunsAfterPush } from "@/lib/git/queries/push-writes";
 import type { Branch } from "@/lib/git/types";
 import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
 import { type LocalPr, updateLocalPr } from "@/lib/pulls/local";
@@ -36,7 +37,14 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   // Never answered: the noun stays "pull request" and nothing gates on it.
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
   forgePrCreate,
+  forgePrComment: vi.fn(async () => ({ failedAttachments: [] })),
 }));
+// Spied through to the real arm, so the call's PR checks reads can be read.
+vi.mock("@/lib/git/queries/push-writes", async (importOriginal) => {
+  const real =
+    await importOriginal<typeof import("@/lib/git/queries/push-writes")>();
+  return { ...real, recheckRunsAfterPush: vi.fn(real.recheckRunsAfterPush) };
+});
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
   updateLocalPr: vi.fn(),
@@ -61,7 +69,9 @@ const PR: LocalPr = {
 const row = (name: string, keepLocal: boolean) =>
   ({ name, isCurrent: false, archived: false, keepLocal }) as Branch;
 
-function renderDialog() {
+function renderDialog(
+  props: { pr?: LocalPr; onOpenChange?: (open: boolean) => void } = {},
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -69,9 +79,9 @@ function renderDialog() {
     <QueryClientProvider client={client}>
       <PromoteLocalPrDialog
         repoPath={REPO}
-        pr={PR}
+        pr={props.pr ?? PR}
         open
-        onOpenChange={() => undefined}
+        onOpenChange={props.onOpenChange ?? (() => undefined)}
       />
     </QueryClientProvider>,
   );
@@ -188,4 +198,61 @@ describe("PromoteLocalPrDialog with a kept-local head", () => {
     expect(screen.queryByText(C_PROMOTE)).toBeNull();
     expect(toast.info).not.toHaveBeenCalled();
   });
+});
+
+describe("PromoteLocalPrDialog over a PR whose number couldn't be read", () => {
+  it.each([
+    {
+      variant: "with comments to carry",
+      comments: [{ id: "c1", body: "Carry me", createdAt: PR.createdAt }],
+      title:
+        "Opened pull request, but its number couldn't be read. Its comments weren't carried over and the local pull request isn't linked to it.",
+    },
+    {
+      variant: "with no comments",
+      comments: [],
+      title:
+        "Opened pull request, but its number couldn't be read. The local pull request isn't linked to it.",
+    },
+  ])(
+    "warns it opened $variant, links, comments on and selects nothing, and re-reads the lens's checks",
+    async ({ comments, title: expected }) => {
+      const url = "https://github.com/me/project/pull/new";
+      vi.mocked(gitBranches).mockResolvedValue([
+        row("main", false),
+        row("feat", false),
+      ]);
+      vi.mocked(updateLocalPr).mockResolvedValue({ ...PR, status: "closed" });
+      forgePrCreate.mockResolvedValue({ number: 0, url });
+      const success = vi.spyOn(toast, "success").mockImplementation(() => "");
+      const warning = vi.spyOn(toast, "warning").mockImplementation(() => "");
+      const onOpenChange = vi.fn();
+      useUiStore.setState({ selectedPr: { kind: "local", id: PR.id } });
+      const user = userEvent.setup();
+      renderDialog({ pr: { ...PR, comments }, onOpenChange });
+      await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+      await user.click(publishButton());
+      await waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
+      expect(success).not.toHaveBeenCalled();
+      const [title, options] = warning.mock.calls[0];
+      expect(title).toBe(expected);
+      expect(options).toMatchObject({
+        description: url,
+        action: { label: "View" },
+      });
+      // The local close is the only local write: no back-link follows it.
+      expect(updateLocalPr).toHaveBeenCalledTimes(1);
+      expect(forgePrComment).not.toHaveBeenCalled();
+      expect(recheckRunsAfterPush).toHaveBeenCalledWith(
+        expect.anything(),
+        REPO,
+        prChecksRecheck(REPO, "origin"),
+      );
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(useUiStore.getState().selectedPr).toEqual({
+        kind: "local",
+        id: PR.id,
+      });
+    },
+  );
 });

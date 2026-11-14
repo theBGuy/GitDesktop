@@ -3871,9 +3871,27 @@ const UPLOAD_TOO_LARGE: &str = "it is larger than this project allows";
 /// The reason when an upload exited 0 without a usable `url`.
 const UPLOAD_UNREADABLE: &str = "GitLab's reply couldn't be read";
 
-fn upload_refusal(name: &str, reason: &str) -> AppError {
+/// What the upload refusal says did not happen: a comment or create is not posted, an
+/// edit is not saved.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum UploadVerb {
+    Posted,
+    Saved,
+}
+
+impl UploadVerb {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Posted => "posted",
+            Self::Saved => "saved",
+        }
+    }
+}
+
+fn upload_refusal(verb: UploadVerb, name: &str, reason: &str) -> AppError {
     AppError::Glab(format!(
-        "Nothing was posted. GitLab didn't accept {name}: {reason}."
+        "Nothing was {}. GitLab didn't accept {name}: {reason}.",
+        verb.word()
     ))
 }
 
@@ -3914,9 +3932,10 @@ struct UploadReply {
 }
 
 /// One upload call's result: the `url` of an exit-0 reply, else the upload refusal.
-fn upload_outcome(name: &str, out: &GlabOutput) -> AppResult<String> {
+fn upload_outcome(verb: UploadVerb, name: &str, out: &GlabOutput) -> AppResult<String> {
     if out.code != 0 {
         return Err(upload_refusal(
+            verb,
             name,
             &upload_failure_reason(out.code, &out.stderr),
         ));
@@ -3925,7 +3944,7 @@ fn upload_outcome(name: &str, out: &GlabOutput) -> AppResult<String> {
         .ok()
         .and_then(|r| r.url)
         .filter(|url| upload_url_ok(url))
-        .ok_or_else(|| upload_refusal(name, UPLOAD_UNREADABLE))
+        .ok_or_else(|| upload_refusal(verb, name, UPLOAD_UNREADABLE))
 }
 
 /// Uploads one staged file to the project `enc` and returns its `/uploads/...` URL.
@@ -3934,6 +3953,7 @@ async fn glab_upload(
     enc: &str,
     path: &std::path::Path,
     name: &str,
+    verb: UploadVerb,
 ) -> AppResult<String> {
     let endpoint = format!("projects/{enc}/uploads");
     let file_arg = format!("file=@{}", path.display());
@@ -3943,8 +3963,8 @@ async fn glab_upload(
         GLAB_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(|e| upload_refusal(name, &e.to_string()))?;
-    upload_outcome(name, &out)
+    .map_err(|e| upload_refusal(verb, name, &e.to_string()))?;
+    upload_outcome(verb, name, &out)
 }
 
 /// Replaces every `](NAME)` with `](URL)`, the reference rule the checks used.
@@ -3955,24 +3975,117 @@ pub(crate) fn rewrite_body(body: &str, uploaded: &[(String, String)]) -> String 
     })
 }
 
+/// The rest of a glab write's command line besides the fields and body it is estimated over.
+const GLAB_FIXED_UNITS: usize = 1_000;
+/// How much longer one rewritten `/uploads/...` reference may be than the name it
+/// replaces, multiplied by the number of references to the staged names in the body.
+const UPLOAD_REFERENCE_UNITS: usize = 100;
+
+/// The command-line estimate for a glab write sending `fields` (each other argument a
+/// user can lengthen) and `body`, once every reference to `names` is rewritten.
+fn glab_attached_units(fields: &[&str], body: &str, names: &[String]) -> usize {
+    use crate::attachments::reference_token;
+    let references: usize = names
+        .iter()
+        .map(|name| body.matches(&reference_token(name)).count())
+        .sum();
+    let fixed = GLAB_FIXED_UNITS + UPLOAD_REFERENCE_UNITS * references;
+    let texts: Vec<&str> = fields.iter().copied().chain([body]).collect();
+    crate::attachments::attached_command_line_units(fixed, &texts)
+}
+
+/// The `labels=` field a create sends, absent without labels.
+fn labels_field(labels: &[String]) -> Option<String> {
+    (!labels.is_empty()).then(|| format!("labels={}", labels.join(",")))
+}
+
+/// The `assignee_ids=` field a create sends, absent without assignees.
+fn assignee_ids_field(ids: &[u64]) -> Option<String> {
+    (!ids.is_empty()).then(|| {
+        let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+        format!("assignee_ids={}", ids.join(","))
+    })
+}
+
+/// The fields an attached [`create_issue_in`] is estimated over, from the assignee ids
+/// it then sends (resolved before the uploads).
+pub(crate) fn issue_create_fields(title: &str, labels: &[String], ids: &[u64]) -> Vec<String> {
+    [
+        Some(title.trim().to_string()),
+        labels_field(labels),
+        assignee_ids_field(ids),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// [`glab_attached_units`] for an issue create with `assignees` ids not yet looked up:
+/// each counts at the widest id, so no resolved set can estimate longer.
+fn issue_create_upper_units(
+    title: &str,
+    labels: &[String],
+    assignees: usize,
+    body: &str,
+    names: &[String],
+) -> usize {
+    let fields = issue_create_fields(title, labels, &vec![u64::MAX; assignees]);
+    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+    glab_attached_units(&fields, body, names)
+}
+
+/// Refuses an attached issue create too long for the command line however its
+/// `assignees` resolve, so the refusal needs no lookup and runs before one.
+pub(crate) fn refuse_long_issue_create(
+    title: &str,
+    labels: &[String],
+    assignees: usize,
+    body: &str,
+    staged: &crate::attachments::StagedRefs,
+    windows: bool,
+) -> AppResult<()> {
+    let units = issue_create_upper_units(title, labels, assignees, body, &staged.names);
+    crate::attachments::refuse_long_attached_argv(units, windows)
+}
+
 /// Uploads every staged file in order to the project `enc`, then returns `body` with
-/// each reference pointing at its upload. Any failure stops before anything is posted.
+/// each reference pointing at its upload. The length refusal stops before any upload;
+/// every failure stops before anything is posted.
 async fn upload_and_rewrite(
     repo_path: &str,
     enc: &str,
+    fields: &[&str],
     body: &str,
     staged: &crate::attachments::StagedRefs,
+    verb: UploadVerb,
 ) -> AppResult<String> {
+    let units = glab_attached_units(fields, body, &staged.names);
+    crate::attachments::refuse_long_attached_argv(units, cfg!(windows))?;
+    if let Some(gone) = staged.names.iter().find(|n| !staged.dir.join(n).is_file()) {
+        return Err(crate::attachments::no_longer_attached(gone));
+    }
     let mut uploaded = Vec::with_capacity(staged.names.len());
     for name in &staged.names {
         let path = staged.dir.join(name);
-        if !path.is_file() {
-            return Err(crate::attachments::no_longer_attached(name));
-        }
-        let url = glab_upload(repo_path, enc, &path, name).await?;
+        let url = glab_upload(repo_path, enc, &path, name, verb).await?;
         uploaded.push((name.clone(), url));
     }
     Ok(rewrite_body(body, &uploaded))
+}
+
+/// [`upload_and_rewrite`] into the project `enc` for a write that also sends `fields`:
+/// the body to send in place of `body`. The write then targets that same `enc`. An Err
+/// keeps every staged file and nothing has been posted.
+pub(crate) async fn body_with_uploads(
+    repo_path: &str,
+    enc: &str,
+    fields: &[impl AsRef<str>],
+    body: &str,
+    staged: &crate::attachments::StagedRefs,
+    verb: UploadVerb,
+) -> AppResult<String> {
+    let fields: Vec<&str> = fields.iter().map(AsRef::as_ref).collect();
+    upload_and_rewrite(repo_path, enc, &fields, body, staged, verb).await
 }
 
 /// Posts a note whose body references staged images: uploads them to this project,
@@ -3986,7 +4099,7 @@ pub async fn post_note_with_images(
     staged: &crate::attachments::StagedRefs,
 ) -> AppResult<crate::attachments::CommentOutcome> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let body = upload_and_rewrite(repo_path, &enc, body, staged).await?;
+    let body = upload_and_rewrite(repo_path, &enc, &[], body, staged, UploadVerb::Posted).await?;
     let endpoint = format!("projects/{enc}/{endpoint_tail}");
     let body_arg = format!("body={body}");
     run_glab(
@@ -4015,6 +4128,381 @@ mod attach_tests {
         match r {
             Err(AppError::Glab(m)) => m,
             other => panic!("expected AppError::Glab, got {other:?}"),
+        }
+    }
+
+    use crate::attachments::{attached_command_line_units, refuse_long_attached_argv};
+
+    fn glab_refused(fields: &[&str], body: &str, names: &[String], windows: bool) -> bool {
+        let units = glab_attached_units(fields, body, names);
+        refuse_long_attached_argv(units, windows).is_err()
+    }
+
+    fn staged_names(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("image-{i}.png")).collect()
+    }
+
+    /// One `![](name)` reference per name, then `filler` characters.
+    fn citing(names: &[String], filler: usize) -> String {
+        let refs: String = names.iter().map(|n| format!("![]({n})")).collect();
+        refs + &"a".repeat(filler)
+    }
+
+    #[test]
+    fn a_long_body_with_an_image_is_refused_only_on_windows() {
+        let one = staged_names(1);
+        let body = citing(&one, 40_000);
+        assert!(glab_refused(&["Title"], &body, &one, true));
+        assert!(!glab_refused(&["Title"], &body, &one, false));
+        assert!(glab_refused(&[], &body, &one, true));
+        let ten = staged_names(10);
+        assert!(!glab_refused(&["Title"], &citing(&ten, 20_000), &ten, true));
+    }
+
+    #[test]
+    fn the_glab_estimate_counts_each_field_each_reference_and_the_rest_of_the_line() {
+        assert_eq!(glab_attached_units(&[], "ab", &[]), 1_000 + 5);
+        let body = "](image-1.png)](image-2.png)";
+        let two = staged_names(2);
+        assert_eq!(
+            glab_attached_units(&["t"], body, &two),
+            1_000 + 200 + 4 + 31
+        );
+        assert_eq!(
+            glab_attached_units(&["t", "u"], body, &two[..1]),
+            1_000 + 100 + 8 + 31
+        );
+    }
+
+    // 60 references at 100 units each: 31,103 units with one allowance, 37,003 with sixty.
+    #[test]
+    fn one_image_cited_60_times_is_counted_60_times() {
+        let one = staged_names(1);
+        let body = format!("{}{}", "![](image-1.png)".repeat(60), "a".repeat(29_040));
+        let once = GLAB_FIXED_UNITS + UPLOAD_REFERENCE_UNITS;
+        assert!(
+            refuse_long_attached_argv(attached_command_line_units(once, &[&body]), true).is_ok()
+        );
+        assert!(glab_refused(&[], &body, &one, true));
+        assert!(!glab_refused(&[], &body, &one, false));
+    }
+
+    #[test]
+    fn an_issue_create_is_estimated_over_its_labels_and_resolved_assignee_ids() {
+        let labels = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            issue_create_fields(" T ", &labels, &[7, 42]),
+            ["T", "labels=a,b", "assignee_ids=7,42"]
+        );
+        assert_eq!(issue_create_fields("T", &[], &[]), ["T"]);
+    }
+
+    #[test]
+    fn the_pre_lookup_issue_create_estimate_bounds_every_resolved_one() {
+        let labels = vec!["bug".to_string()];
+        let one = staged_names(1);
+        let body = citing(&one, 10);
+        let widths = [0, 7, 42, 99_999, u64::MAX / 2, u64::MAX - 1, u64::MAX];
+        for count in 0..=3 {
+            let upper = issue_create_upper_units("T", &labels, count, &body, &one);
+            let mixed: Vec<u64> = widths.iter().copied().cycle().skip(2).take(count).collect();
+            for ids in widths.iter().map(|&w| vec![w; count]).chain([mixed]) {
+                let fields = issue_create_fields("T", &labels, &ids);
+                let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                let resolved = glab_attached_units(&fields, &body, &one);
+                assert!(upper >= resolved, "{count}: {ids:?}");
+            }
+        }
+        let widest = issue_create_fields("T", &labels, &[u64::MAX; 2]);
+        let widest: Vec<&str> = widest.iter().map(String::as_str).collect();
+        assert_eq!(
+            issue_create_upper_units("T", &labels, 2, &body, &one),
+            glab_attached_units(&widest, &body, &one)
+        );
+    }
+
+    #[test]
+    fn the_issue_create_refusal_counts_its_assignees_and_staged_references() {
+        use crate::attachments::{
+            StagedRefs, ATTACHED_COMMAND_LINE_LIMIT, TOO_LONG_WITH_IMAGES_REFUSAL as TOO_LONG,
+        };
+        let too_long =
+            |r: AppResult<()>| matches!(r, Err(AppError::InvalidArgument(m)) if m == TOO_LONG);
+        let labels = vec!["bug".to_string()];
+        let one = staged_names(1);
+        let staged = StagedRefs {
+            names: one.clone(),
+            dir: std::path::PathBuf::new(),
+        };
+        let unstaged = StagedRefs {
+            names: Vec::new(),
+            dir: std::path::PathBuf::new(),
+        };
+        let limit = ATTACHED_COMMAND_LINE_LIMIT;
+        let upper = |assignees, body: &str, names: &[String]| {
+            issue_create_upper_units("T", &labels, assignees, body, names)
+        };
+        // Filler that brings 0 assignees over `names` exactly to the limit.
+        let filled = |names: &[String]| citing(&one, limit - upper(0, &citing(&one, 0), names));
+        let refuse = |assignees, body: &str, staged: &StagedRefs, windows| {
+            refuse_long_issue_create("T", &labels, assignees, body, staged, windows)
+        };
+
+        let body = filled(&one);
+        assert!(upper(0, &body, &one) <= limit && upper(3, &body, &one) > limit);
+        assert!(too_long(refuse(3, &body, &staged, true)));
+        assert!(refuse(0, &body, &staged, true).is_ok());
+        assert!(refuse(3, &body, &staged, false).is_ok());
+
+        let body = filled(&[]);
+        assert!(upper(0, &body, &[]) <= limit && upper(0, &body, &one) > limit);
+        assert!(too_long(refuse(0, &body, &staged, true)));
+        assert!(refuse(0, &body, &unstaged, true).is_ok());
+    }
+
+    // 3,006 units of labels: 30,111 units without them, 33,120 with them.
+    #[test]
+    fn long_labels_on_an_attached_issue_create_are_refused_on_windows() {
+        let one = staged_names(1);
+        let body = citing(&one, 28_984);
+        let labels: Vec<String> = (0..100)
+            .map(|i| format!("{i:03}{}", "l".repeat(26)))
+            .collect();
+        let fields = issue_create_fields("Title", &labels, &[]);
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        let title_only = glab_attached_units(&["Title"], &body, &one);
+        assert!(refuse_long_attached_argv(title_only, true).is_ok());
+        assert!(glab_refused(&fields, &body, &one, true));
+        assert!(!glab_refused(&fields, &body, &one, false));
+    }
+
+    /// `source` (CRLF read as LF) without each column-0 `#[cfg(test)]` + `mod name` item: a
+    /// block through its first column-0 `}` line, or a `mod name;` or `mod name {}` line.
+    /// Any other `#[cfg(test)]` site panics, since where it ends is not known.
+    fn production_text(source: &str) -> String {
+        let source = source.replace("\r\n", "\n");
+        let mut kept = String::new();
+        let mut from = 0;
+        while let Some(found) = source[from..].find("#[cfg(test)]") {
+            let at = from + found;
+            let end = source[at..]
+                .strip_prefix("#[cfg(test)]\nmod ")
+                .filter(|_| at == 0 || source[..at].ends_with('\n'))
+                .and_then(|item| {
+                    let line = item.split('\n').next().unwrap_or_default();
+                    let line_end = source.len() - item.len() + line.len();
+                    let tail =
+                        line.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+                    let rest = &source[line_end..];
+                    let close = rest
+                        .find("\n}")
+                        .filter(|&i| matches!(rest[i + 2..].chars().next(), None | Some('\n')));
+                    match tail {
+                        _ if tail.len() == line.len() => None,
+                        ";" | " {}" => Some(line_end),
+                        " {" => close.map(|i| line_end + i + 2),
+                        _ => None,
+                    }
+                });
+            let Some(end) = end else {
+                let site: Vec<&str> = source[at..].lines().take(2).collect();
+                panic!("production_text cannot cut this #[cfg(test)] site: {site:?}");
+            };
+            kept.push_str(&source[from..at]);
+            from = end;
+        }
+        kept + &source[from..]
+    }
+
+    #[test]
+    fn production_text_cuts_only_the_test_module_forms_it_knows() {
+        let after = "fn kept() {\n    glab_upload(x);\n}\n";
+        let cut = |module: &str| production_text(&["fn a() {}\n", module, after].concat());
+        let expected = ["fn a() {}\n", "\n", after].concat();
+        assert_eq!(cut("#[cfg(test)]\nmod t {\n    fn b() {}\n}\n"), expected);
+        assert_eq!(cut("#[cfg(test)]\nmod t;\n"), expected);
+        assert_eq!(cut("#[cfg(test)]\nmod t {}\n"), expected);
+        assert_eq!(cut("#[cfg(test)]\r\nmod t;\r\n"), expected);
+        for unknown in [
+            "#[cfg(test)]\npub(crate) mod t {\n}\n",
+            "#[cfg(test)]\n#[allow(dead_code)]\nmod t {\n}\n",
+            "#[cfg(test)]\nmod t { fn b() {} }\n",
+            "#[cfg(test)]\nmod t {\n    fn b() {}\n});\n",
+            "    #[cfg(test)]\n    mod t {\n    }\n",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| cut(unknown)).is_err(),
+                "{unknown:?}"
+            );
+        }
+    }
+
+    /// Both occur in `body`, and the first `earlier` comes before the first `later`.
+    fn precedes(body: &str, earlier: &str, later: &str) -> bool {
+        body.find(earlier)
+            .zip(body.find(later))
+            .is_some_and(|(e, l)| e < l)
+    }
+
+    /// The length decision runs before the first upload.
+    fn decides_before_uploading(body: &str) -> bool {
+        precedes(body, "refuse_long_attached_argv(", "glab_upload(")
+    }
+
+    #[test]
+    fn every_gitlab_attached_route_decides_the_length_before_uploading() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gitlab = include_str!("gitlab.rs");
+        let forge = include_str!("mod.rs");
+        let core = wiring_body(gitlab, "upload_and_rewrite");
+        assert!(decides_before_uploading(&core), "{core}");
+        let unchecked = core.replace("refuse_long_attached_argv(", "skipped(");
+        assert!(!decides_before_uploading(&unchecked));
+        // Every staged file is found before the upload loop, so a missing one uploads nothing.
+        assert!(
+            precedes(&core, "no_longer_attached(", "for name in &staged.names"),
+            "{core}"
+        );
+        let production = production_text(gitlab);
+        assert!(production.contains("\nasync fn upload_and_rewrite("));
+        assert!(!production.contains("mod attach_tests"));
+        let code = |text: String| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let gitlab_code = code(production);
+        let forge_code = code(production_text(forge));
+        // The core holds the only upload call, and only `glab_upload` spells the endpoint.
+        assert_eq!(
+            gitlab_code.matches("glab_upload").count(),
+            2,
+            "its definition and the core's call"
+        );
+        assert_eq!(
+            gitlab_code.matches("/uploads").count(),
+            2,
+            "glab_upload's endpoint and upload_url_ok's prefix"
+        );
+        let endpoint = wiring_body(gitlab, "glab_upload");
+        assert!(endpoint.contains("format!(\"projects/{enc}/uploads\")"));
+        let url_check = wiring_body(gitlab, "upload_url_ok");
+        assert!(url_check.contains("strip_prefix(\"/uploads/\")"));
+        assert_eq!(forge_code.matches("/uploads").count(), 0);
+        // Each route reaches the uploads only through the core, passing the fields it sends.
+        let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let with_fields = "upload_and_rewrite(repo_path, &enc, &fields, ";
+        let mr_fields = "[&source_arg, &target_arg, &title_arg] .into_iter() \
+                         .chain(labels_arg.iter().chain(&assignees_arg))";
+        let core_routes: [(&str, &[&str]); 3] = [
+            (
+                "body_with_uploads",
+                &["upload_and_rewrite(repo_path, enc, &fields, "],
+            ),
+            (
+                "post_note_with_images",
+                &["upload_and_rewrite(repo_path, &enc, &[], "],
+            ),
+            (
+                "create_mr",
+                &[
+                    with_fields,
+                    mr_fields,
+                    "let title_arg = format!(\"title={full_title}\");",
+                ],
+            ),
+        ];
+        for (name, calls) in core_routes {
+            let body = flat(wiring_body(gitlab, name));
+            for call in calls {
+                assert!(body.contains(call), "{name}: {call}\n{body}");
+            }
+        }
+        // A route's write targets the project its uploads went to, its `enc` read before them
+        // (the issue create's members lookup still reads the project path on its own).
+        let with_fields = "body_with_uploads(&repo_path, &enc, &fields, ";
+        let note = "post_note_with_images(";
+        let enc = "let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);";
+        let forge_routes: [(&str, &[&str]); 5] = [
+            (
+                "forge_pr_edit",
+                &[
+                    enc,
+                    with_fields,
+                    "[Some(&title), base.as_ref()]",
+                    "gitlab::edit_mr_in(&repo_path, &enc, ",
+                ],
+            ),
+            (
+                "forge_issue_edit",
+                &[
+                    enc,
+                    "body_with_uploads(&repo_path, &enc, &[&title], ",
+                    "gitlab::edit_issue_in(&repo_path, &enc, ",
+                ],
+            ),
+            (
+                "forge_issue_create",
+                &[
+                    enc,
+                    with_fields,
+                    "gitlab::refuse_long_issue_create( &title, &labels, assignees.len(), &body, &s, cfg!(windows), )?;",
+                    "let ids = gitlab::create_assignee_ids(&repo_path, &assignees).await?;",
+                    "gitlab::issue_create_fields(&title, &labels, &ids)",
+                    "gitlab::create_issue_in( &repo_path, &enc, &title, &body, &labels, &ids, ",
+                ],
+            ),
+            ("forge_pr_comment", &[note]),
+            ("forge_issue_comment", &[note]),
+        ];
+        for (name, calls) in forge_routes {
+            let body = flat(wiring_body(forge, name));
+            for call in calls {
+                assert!(body.contains(call), "{name}: {call}\n{body}");
+            }
+        }
+        // The lookup-free length refusal precedes the assignee lookup, which precedes the first
+        // upload: a too-long create reads no member page, and a lookup miss uploads nothing.
+        let create = flat(wiring_body(forge, "forge_issue_create"));
+        let lookup = "gitlab::create_assignee_ids(";
+        assert!(
+            precedes(&create, "gitlab::refuse_long_issue_create(", lookup),
+            "{create}"
+        );
+        assert!(
+            precedes(&create, lookup, "gitlab::body_with_uploads("),
+            "{create}"
+        );
+        // Every caller in gitlab.rs and mod.rs of the core and its two wrappers is on a roster above.
+        let both = format!("{gitlab_code}\n{forge_code}");
+        let callers = |name: &str| {
+            let defined = both.matches(&format!("fn {name}(")).count();
+            assert_eq!(defined, 1, "{name}");
+            both.matches(name).count() - defined
+        };
+        assert_eq!(callers("upload_and_rewrite"), core_routes.len());
+        assert_eq!(
+            callers("body_with_uploads") + callers("post_note_with_images"),
+            forge_routes.len()
+        );
+        // create_mr's argv after the push sends the bindings the estimate was fed: each is
+        // defined once, read once by the estimate's fields and once by that argv.
+        let mr = flat(wiring_body(gitlab, "create_mr"));
+        let pushed = mr
+            .find("run_git_mutating_with_creds_for_branch(")
+            .map_or("", |at| &mr[at..]);
+        let argv = "\"-f\", &source_arg, \"-f\", &target_arg, \"-f\", &title_arg, \
+                    \"-f\", &desc_arg, ]; for field in labels_arg.iter().chain(&assignees_arg) {";
+        assert!(pushed.contains(argv), "{mr}");
+        for binding in [
+            "source_arg",
+            "target_arg",
+            "title_arg",
+            "labels_arg",
+            "assignees_arg",
+        ] {
+            assert_eq!(mr.matches(binding).count(), 3, "{binding}\n{mr}");
         }
     }
 
@@ -4061,7 +4549,7 @@ mod attach_tests {
     fn upload_reply_needs_a_project_upload_url() {
         let ok = r#"{"id":1,"alt":"image-1","url":"/uploads/0123abcd/image-1.png","full_path":"/-/project/1/uploads/0123abcd/image-1.png","markdown":"![image-1](/uploads/0123abcd/image-1.png)"}"#;
         assert_eq!(
-            upload_outcome("image-1.png", &out(0, ok, "")).unwrap(),
+            upload_outcome(UploadVerb::Posted, "image-1.png", &out(0, ok, "")).unwrap(),
             "/uploads/0123abcd/image-1.png"
         );
         for url in [
@@ -4099,7 +4587,11 @@ mod attach_tests {
             r#"{"url":"/uploads/%2E/x"}"#,
         ] {
             assert_eq!(
-                glab_msg(upload_outcome("image-1.png", &out(0, reply, ""))),
+                glab_msg(upload_outcome(
+                    UploadVerb::Posted,
+                    "image-1.png",
+                    &out(0, reply, "")
+                )),
                 unreadable,
                 "{reply}"
             );
@@ -4108,7 +4600,13 @@ mod attach_tests {
 
     #[test]
     fn upload_refusals_name_the_file_and_reason() {
-        let refused = |stderr: &str| glab_msg(upload_outcome("image-1.png", &out(1, "", stderr)));
+        let refused = |stderr: &str| {
+            glab_msg(upload_outcome(
+                UploadVerb::Posted,
+                "image-1.png",
+                &out(1, "", stderr),
+            ))
+        };
         let too_large =
             "Nothing was posted. GitLab didn't accept image-1.png: it is larger than this project allows.";
         assert_eq!(
@@ -4129,10 +4627,39 @@ mod attach_tests {
             "Nothing was posted. GitLab didn't accept image-1.png: glab exited with code 1."
         );
         assert!(matches!(
-            upload_refusal("image-2.png", &AppError::GlabNotFound.to_string()),
+            upload_refusal(
+                UploadVerb::Posted,
+                "image-2.png",
+                &AppError::GlabNotFound.to_string()
+            ),
             AppError::Glab(ref m)
                 if m == "Nothing was posted. GitLab didn't accept image-2.png: GitLab CLI (glab) not found."
         ));
+    }
+
+    // One builder, two verbs: a comment or create says "posted", an edit says "saved".
+    #[test]
+    fn upload_refusals_say_posted_or_saved_by_verb() {
+        let refusal = |verb| match upload_refusal(verb, "image-1.png", UPLOAD_UNREADABLE) {
+            AppError::Glab(m) => m,
+            other => panic!("expected AppError::Glab, got {other:?}"),
+        };
+        assert_eq!(
+            refusal(UploadVerb::Posted),
+            "Nothing was posted. GitLab didn't accept image-1.png: GitLab's reply couldn't be read."
+        );
+        assert_eq!(
+            refusal(UploadVerb::Saved),
+            "Nothing was saved. GitLab didn't accept image-1.png: GitLab's reply couldn't be read."
+        );
+        assert_eq!(
+            glab_msg(upload_outcome(
+                UploadVerb::Saved,
+                "image-1.png",
+                &out(1, "", "glab: HTTP 413\n")
+            )),
+            "Nothing was saved. GitLab didn't accept image-1.png: it is larger than this project allows."
+        );
     }
 }
 
@@ -4339,6 +4866,20 @@ pub async fn edit_mr(
         ));
     }
     let enc = encode_project(&project_path(repo_path).await?);
+    edit_mr_in(repo_path, &enc, number, title, body, base).await
+}
+
+/// [`edit_mr`]'s PUT into the project `enc` (an attached edit passes the one it uploaded
+/// to). The title is checked by the caller.
+pub(crate) async fn edit_mr_in(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+    base: Option<&str>,
+) -> AppResult<()> {
+    let title = title.trim();
     let endpoint = format!("projects/{enc}/merge_requests/{number}");
     let args = edit_mr_args(&endpoint, title, body, base);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -5593,6 +6134,19 @@ pub async fn edit_issue(repo_path: &str, number: u64, title: &str, body: &str) -
         ));
     }
     let enc = encode_project(&project_path(repo_path).await?);
+    edit_issue_in(repo_path, &enc, number, title, body).await
+}
+
+/// [`edit_issue`]'s PUT into the project `enc` (an attached edit passes the one it
+/// uploaded to). The title is checked by the caller.
+pub(crate) async fn edit_issue_in(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+) -> AppResult<()> {
+    let title = title.trim();
     let endpoint = format!("projects/{enc}/issues/{number}");
     let title_arg = format!("title={title}");
     let desc_arg = format!("description={body}");
@@ -7620,20 +8174,36 @@ pub async fn create_issue(
             "an issue title is required".into(),
         ));
     }
-    let labels_arg = (!labels.is_empty()).then(|| format!("labels={}", labels.join(",")));
-    let mut ids_arg = None;
-    if !assignees.is_empty() {
-        // Full resolution or error — never create with a silently-reduced set.
-        let ids = resolve_assignee_ids(repo_path, assignees).await?;
-        ids_arg = Some(format!(
-            "assignee_ids={}",
-            ids.iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-    }
+    let ids = create_assignee_ids(repo_path, assignees).await?;
     let enc = encode_project(&project_path(repo_path).await?);
+    create_issue_in(repo_path, &enc, title, body, labels, &ids, milestone).await
+}
+
+/// Full resolution or error, never a silently reduced set; no assignees reads nothing.
+pub(crate) async fn create_assignee_ids(
+    repo_path: &str,
+    assignees: &[String],
+) -> AppResult<Vec<u64>> {
+    if assignees.is_empty() {
+        return Ok(Vec::new());
+    }
+    resolve_assignee_ids(repo_path, assignees).await
+}
+
+/// [`create_issue`]'s POST into the project `enc` with assignee ids already resolved, so
+/// an attached create decides both before its uploads. The title is checked by the caller.
+pub(crate) async fn create_issue_in(
+    repo_path: &str,
+    enc: &str,
+    title: &str,
+    body: &str,
+    labels: &[String],
+    ids: &[u64],
+    milestone: Option<u64>,
+) -> AppResult<PrRef> {
+    let title = title.trim();
+    let labels_arg = labels_field(labels);
+    let ids_arg = assignee_ids_field(ids);
     let endpoint = format!("projects/{enc}/issues");
     let title_arg = format!("title={title}");
     let desc_arg = format!("description={body}");
@@ -7703,11 +8273,29 @@ pub async fn create_mr(
     } else {
         resolve_assignee_ids(repo_path, assignees).await?
     };
+    // GitLab drafts are the `Draft:` title prefix (no field on create).
+    let full_title = if draft && !title.to_ascii_lowercase().starts_with("draft:") {
+        format!("Draft: {title}")
+    } else {
+        title.to_string()
+    };
+    let source_arg = format!("source_branch={head}");
+    let target_arg = format!("target_branch={base}");
+    let title_arg = format!("title={full_title}");
+    // Labels travel as a comma-joined name list; assignees as comma-joined ids
+    // (resolved above). Omitted entirely when empty so create behavior is unchanged.
+    let labels_arg = labels_field(labels);
+    let assignees_arg = assignee_ids_field(&assignee_ids);
     // Uploads also run before the push, into the project the MR is created in.
     let body = match &staged {
         Some(s) => {
+            let fields: Vec<&str> = [&source_arg, &target_arg, &title_arg]
+                .into_iter()
+                .chain(labels_arg.iter().chain(&assignees_arg))
+                .map(String::as_str)
+                .collect();
             let enc = encode_project(&project_path(repo_path).await?);
-            upload_and_rewrite(repo_path, &enc, body, s).await?
+            upload_and_rewrite(repo_path, &enc, &fields, body, s, UploadVerb::Posted).await?
         }
         None => body.to_string(),
     };
@@ -7740,17 +8328,8 @@ pub async fn create_mr(
     )
     .await?;
 
-    // GitLab drafts are the `Draft:` title prefix (no field on create).
-    let full_title = if draft && !title.to_ascii_lowercase().starts_with("draft:") {
-        format!("Draft: {title}")
-    } else {
-        title.to_string()
-    };
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests");
-    let source_arg = format!("source_branch={head}");
-    let target_arg = format!("target_branch={base}");
-    let title_arg = format!("title={full_title}");
     let desc_arg = format!("description={body}");
     let mut args = vec![
         "api",
@@ -7766,24 +8345,9 @@ pub async fn create_mr(
         "-f",
         &desc_arg,
     ];
-    // Labels travel as a comma-joined name list; assignees as comma-joined ids
-    // (resolved above). Omitted entirely when empty so create behavior is unchanged.
-    let labels_arg = format!("labels={}", labels.join(","));
-    if !labels.is_empty() {
+    for field in labels_arg.iter().chain(&assignees_arg) {
         args.push("-f");
-        args.push(&labels_arg);
-    }
-    let assignees_arg = format!(
-        "assignee_ids={}",
-        assignee_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    if !assignee_ids.is_empty() {
-        args.push("-f");
-        args.push(&assignees_arg);
+        args.push(field);
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
     let created: GlabCreated = serde_json::from_str(&out.stdout_lossy())

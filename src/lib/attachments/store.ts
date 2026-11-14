@@ -15,9 +15,13 @@ import {
   type DraftStatus,
   endTransition,
   newEntry,
+  postCandidates,
+  reclaimable,
   type SettleOutcome,
   type StagedRecord,
   settleTransition,
+  startGesture,
+  withoutRecords,
   withStaged,
 } from "./draft-attachments";
 import { encodeBase64 } from "./encode";
@@ -26,6 +30,7 @@ import {
   type AttachSource,
   isStagedName,
   MAX_IMAGE_BYTES,
+  MAX_STAGED_IMAGES,
   referencedNames,
   tooBigRefusal,
 } from "./references";
@@ -38,14 +43,23 @@ import {
 // keeps its entry for the session); never on a repo switch, since the key
 // already carries the repo.
 
-export type AttachmentSurface = "issue-comment" | "pr-comment" | "pr-create";
+export type AttachmentSurface =
+  | "issue-comment"
+  | "pr-comment"
+  | "pr-create"
+  | "issue-create"
+  | "issue-edit"
+  | "pr-edit";
 
 /** Whether a surface's landed post keeps its images for the optimistic row.
- *  Create PR renders no synthetic row, so it holds nothing. */
+ *  Creates and edits render no synthetic row, so they hold nothing. */
 const HOLDS_POSTED: Record<AttachmentSurface, boolean> = {
   "issue-comment": true,
   "pr-comment": true,
   "pr-create": false,
+  "issue-create": false,
+  "issue-edit": false,
+  "pr-edit": false,
 };
 
 export function draftKeyFor(surface: AttachmentSurface, identity: string) {
@@ -246,7 +260,7 @@ export function startAttachGesture(
   owner: object,
 ): () => boolean {
   const entry = ownEntry(draftKey, owner);
-  entries.set(draftKey, { ...entry, status: null });
+  entries.set(draftKey, startGesture(entry, stagesInFlight(draftKey)));
   notify();
   const { gen } = entry;
   return () => {
@@ -271,12 +285,16 @@ export async function stageAttachment({
   file,
   source,
   blockedReason,
+  text,
 }: {
   draftKey: string;
   owner: object;
   file: File;
   source: AttachSource;
   blockedReason: string | null;
+  /** The draft's text as it reads right now, or null when the caller can't
+   *  read it; a cap reclaim runs only over a text it can read. */
+  text?: () => string | null;
 }): Promise<StagedImage | null> {
   if (blockedReason !== null) {
     noteAttachBlocked(draftKey, owner, blockedReason);
@@ -294,10 +312,44 @@ export async function stageAttachment({
   // runs in the same task, so no input event lands between the two.
   countStage(draftKey, 1);
   try {
-    return await stageCounted(draftKey, owner, file, hint);
+    return await stageCounted(draftKey, owner, file, hint, text);
   } finally {
     countStage(draftKey, -1);
   }
+}
+
+/**
+ * Frees the cap for one more stage: at MAX_STAGED_IMAGES, the records the text
+ * no longer references (fresh ones excepted) are discarded and leave the entry.
+ * A failed discard keeps every record in the entry, though Rust tries each name
+ * and may have removed some files; Rust's own cap refusal answers.
+ */
+async function reclaimForStage(
+  draftKey: string,
+  entry: DraftEntry,
+  text: (() => string | null) | undefined,
+) {
+  const { session } = entry;
+  if (session === null || entry.images.length < MAX_STAGED_IMAGES) return;
+  if (entry.posting.length > 0) return;
+  const body = text?.() ?? null;
+  if (body === null) return;
+  const live = entry.images.map((i) => i.name);
+  const names = reclaimable(entry, referencedNames(body, live));
+  if (names.length === 0) return;
+  try {
+    await attachmentDiscard(session, names);
+  } catch {
+    return;
+  }
+  // The files are gone whatever the draft did meanwhile, so their records go
+  // from whichever entry still holds that session.
+  const cur = entries.get(draftKey);
+  if (cur?.session !== session) return;
+  const next = withoutRecords(cur, names);
+  revokeAll(next.revoke);
+  entries.set(draftKey, next.entry);
+  notify();
 }
 
 async function stageCounted(
@@ -305,6 +357,7 @@ async function stageCounted(
   owner: object,
   file: File,
   hint: string | null,
+  text: (() => string | null) | undefined,
 ): Promise<StagedImage | null> {
   const started = ownEntry(draftKey, owner);
   notify();
@@ -323,6 +376,9 @@ async function stageCounted(
     return null;
   }
   return enqueue(draftKey, async () => {
+    const before = entries.get(draftKey);
+    if (before?.gen !== gen) return null;
+    await reclaimForStage(draftKey, before, text);
     const live = entries.get(draftKey);
     if (live?.gen !== gen) return null;
     let staged: StagedImage;
@@ -394,7 +450,8 @@ function mintPostToken(): string {
 }
 
 /** Marks the draft posting with the staged names `body` references, in
- *  first-occurrence order; null when it references none. Either way the draft
+ *  first-occurrence order; null when it references none. A reclaimed name the
+ *  text still references counts, so Rust refuses it. Either way the draft
  *  takes a new gen, so a stage still in flight lands nowhere: its reference was
  *  never in the posted text, and its file is discarded. `seedable` says whether
  *  the post's server copy can show hosted URLs (a GitHub hosted-image source);
@@ -407,12 +464,7 @@ export function beginAttachmentPost(
   const entry = entries.get(draftKey);
   if (!entry || entry.posting.length > 0) return null;
   const names =
-    entry.session === null
-      ? []
-      : referencedNames(
-          body,
-          entry.images.map((i) => i.name),
-        );
+    entry.session === null ? [] : referencedNames(body, postCandidates(entry));
   const next = beginTransition(entry, names);
   const gen = {};
   entries.set(draftKey, { ...(next ?? entry), gen });

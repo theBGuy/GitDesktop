@@ -7,6 +7,10 @@
  *  so an oversized file is never read. */
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+/** Rust's per-draft image cap (MAX_IMAGES in src-tauri/src/attachments.rs);
+ *  scripts/attachment-drafts.test.mjs keeps the two equal. */
+export const MAX_STAGED_IMAGES = 10;
+
 export type AttachSource = "paste" | "picker";
 
 export interface AttachmentRefs {
@@ -367,7 +371,33 @@ export function failedAttachmentsOf(value: unknown): string[] {
   return failed.filter((n): n is string => typeof n === "string");
 }
 
-export type UploadAct = "posting" | "creating";
+/** A create's follow-up reason (the item exists, its metadata step failed);
+ *  null for any outcome without a non-empty string there. */
+export function followupErrorOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const reason = (value as { followupError?: unknown }).followupError;
+  return typeof reason === "string" && reason !== "" ? reason : null;
+}
+
+/** A created item's number; null when it couldn't be read (the backend answers
+ *  0), so nothing navigates to, links or prints "#0". */
+export function createdNumberOf(value: unknown): number | null {
+  if (typeof value !== "object" || value === null) return null;
+  const number = (value as { number?: unknown }).number;
+  return typeof number === "number" && Number.isInteger(number) && number > 0
+    ? number
+    : null;
+}
+
+/** A partial edit's saved description; null when the outcome carries none. An
+ *  empty string is a saved (empty) description, so it is returned as is. */
+export function savedBodyOf(value: unknown): string | null {
+  if (typeof value !== "object" || value === null) return null;
+  const body = (value as { body?: unknown }).body;
+  return typeof body === "string" ? body : null;
+}
+
+export type UploadAct = "posting" | "creating" | "saving";
 
 const UPLOADING: Record<
   UploadAct,
@@ -380,6 +410,10 @@ const UPLOADING: Record<
   creating: {
     one: "Uploading 1 image and creating…",
     many: (n) => `Uploading ${n} images and creating…`,
+  },
+  saving: {
+    one: "Uploading 1 image and saving…",
+    many: (n) => `Uploading ${n} images and saving…`,
   },
 };
 

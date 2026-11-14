@@ -9,7 +9,15 @@ import {
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { toast } from "sonner";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import {
   CreatePrDialog,
   type CreatePrHost,
@@ -18,7 +26,9 @@ import {
 import { TabPanel } from "@/features/repository/TabPanel";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import { attachmentStoreSizes } from "@/lib/attachments/store";
+import { triggerAutomations } from "@/lib/automations/runner";
 import {
+  forgePrComment,
   forgeStatus,
   gitBranchAhead,
   gitBranchDiff,
@@ -34,9 +44,12 @@ import type {
   ForgeStatus,
   RemoteBranch,
 } from "@/lib/git/types";
+import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
-import { usePrCreateStore } from "@/lib/stores/pr-create";
+import { useErrorDialog } from "@/lib/stores/error-dialog";
+import { prCreatePhase, usePrCreateStore } from "@/lib/stores/pr-create";
+import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
 
@@ -63,6 +76,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitRemoteBranches: vi.fn(),
   gitRemoteAdd: vi.fn(),
   forgePrCreate,
+  // The reviewer-notes comment a create posts on its new pull request.
+  forgePrComment: vi.fn(async () => ({ failedAttachments: [] })),
   gitFetchRemote: vi.fn(async () => undefined),
   gitRemoteDefaultBranch: vi.fn(async () => "main"),
   forgePrsForBranch: vi.fn(async () => []),
@@ -117,6 +132,14 @@ vi.mock("@/lib/automations/runner", () => ({
 vi.mock("@/lib/stores/pr-create-handoff", () => ({
   armPrCreateHandOff: vi.fn(),
 }));
+// Spied through to the real notification, so a failed create still emits one.
+vi.mock("@/lib/notifications/pr-create-failed", async (importOriginal) => {
+  const real =
+    await importOriginal<
+      typeof import("@/lib/notifications/pr-create-failed")
+    >();
+  return { ...real, notifyPrCreateFailed: vi.fn(real.notifyPrCreateFailed) };
+});
 
 const REPO = "C:/repo";
 const ORIGIN_REF = "refs/remotes/origin/feature-x";
@@ -169,6 +192,7 @@ function renderDialog(props: {
   host?: CreatePrHost;
   /** Hosts the dialog in a repository tab, which `hide`/`show` toggle. */
   tab?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -187,7 +211,7 @@ function renderDialog(props: {
         defaultBase={opener.defaultBase}
         preset={opener.preset}
         open={open}
-        onOpenChange={() => undefined}
+        onOpenChange={props.onOpenChange ?? (() => undefined)}
         host={props.host ?? "compare"}
       />
     );
@@ -1252,7 +1276,7 @@ describe("CreatePrDialog image attachments", () => {
     });
     await waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
     expect(warning.mock.calls[0][0]).toBe(
-      "Pull request created, but image-2.png didn't upload. Add it in a comment on the pull request.",
+      "Pull request created, but image-2.png didn't upload. Edit the description to add it again.",
     );
     expect(success).not.toHaveBeenCalled();
     await waitFor(() =>
@@ -1455,5 +1479,372 @@ describe("CreatePrDialog image attachments", () => {
     );
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:create-1");
     await waitFor(() => expect(attachmentStoreSizes()).toEqual(baseline));
+  });
+
+  /** A host that owns `open` and whose repository can move: the only reseed
+   *  over a running create is an open in another repository. */
+  function renderMovingHost() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    let setShown!: (open: boolean) => void;
+    function Host({ repoPath }: { repoPath: string }) {
+      const [open, setOpen] = useState(true);
+      setShown = setOpen;
+      return (
+        <CreatePrDialog
+          repoPath={repoPath}
+          defaultHead="feat"
+          defaultBase="main"
+          open={open}
+          onOpenChange={setOpen}
+          host="compare"
+        />
+      );
+    }
+    const ui = (repoPath: string) => (
+      <QueryClientProvider client={client}>
+        <Host repoPath={repoPath} />
+      </QueryClientProvider>
+    );
+    const view = render(ui(REPO));
+    /** Closes the dialog and opens it again in `repo`, which reseeds it. */
+    const reopenIn = async (repo: string) => {
+      act(() => setShown(false));
+      useUiStore.setState({ repoPath: repo });
+      view.rerender(ui(repo));
+      act(() => setShown(true));
+      await waitFor(() => expect(description().value).toBe(""));
+    };
+    return { reopenIn };
+  }
+
+  /** Starts a create that settles only when the returned resolver runs. */
+  async function startHeldCreate() {
+    let finish!: (v: { number: number; url: string }) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    return finish;
+  }
+
+  const PR_7 = { number: 7, url: "https://github.com/me/project/pull/7" };
+
+  it("lets an image-less create that settles after a reopen elsewhere leave that draft's image alone", async () => {
+    const host = renderMovingHost();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "A title" },
+    });
+    fireEvent.change(description(), { target: { value: "No image here" } });
+    const finish = await startHeldCreate();
+    await host.reopenIn("C:/other");
+    await stageOne();
+    await act(async () => finish(PR_7));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+  });
+
+  it("ends the images of an image-less create's own draft when it lands", async () => {
+    await readyWithImages(1);
+    fireEvent.change(description(), { target: { value: "No image now" } });
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+  });
+
+  it("holds Attach with the uploading text when reseeded over a running create", async () => {
+    const host = renderMovingHost();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await stageOne();
+    const finish = await startHeldCreate();
+    // The reseed clears the submit, so only the posting arm holds Attach here.
+    await host.reopenIn("C:/other");
+    const attach = await screen.findByRole("button", { name: "Attach image" });
+    expect(attach).toHaveAccessibleDescription(
+      expect.stringContaining("Uploading 1 image and creating…"),
+    );
+    await act(async () => finish(PR_7));
+  });
+});
+
+describe("CreatePrDialog created with a warning", () => {
+  const SESSION = "d".repeat(32);
+  const PR_FOLLOWUP =
+    "Pull request created, but its labels and assignees weren't applied. Add them from the pull request.";
+  const REASON =
+    "HTTP 422: Validation Failed\ncould not add label 'needs triage'";
+  const URL_7 = "https://github.com/me/project/pull/7";
+
+  let warning: ReturnType<typeof vi.spyOn>;
+  let success: ReturnType<typeof vi.spyOn>;
+  let error: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    vi.mocked(attachmentStage).mockImplementation(async (session) => ({
+      session: session ?? SESSION,
+      name: "image-1.png",
+      mime: "image/png",
+      size: 2,
+      width: 1,
+      height: 1,
+    }));
+    URL.createObjectURL = vi.fn(() => "blob:warn-1");
+    URL.revokeObjectURL = vi.fn();
+    warning = vi.spyOn(toast, "warning");
+    success = vi.spyOn(toast, "success");
+    error = vi.spyOn(toast, "error");
+    useErrorDialog.setState({ presentation: null });
+  });
+  afterEach(() => {
+    warning.mockRestore();
+    success.mockRestore();
+    error.mockRestore();
+  });
+
+  const description = () =>
+    screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+
+  /** Opens the dialog titled and ready, optionally with one staged image and
+   *  reviewer notes typed. */
+  async function ready(opts: { image?: boolean; notes?: boolean } = {}) {
+    const onOpenChange = vi.fn();
+    renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+      onOpenChange,
+    });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Title"), {
+      target: { value: "A title" },
+    });
+    if (opts.image) {
+      fireEvent.paste(description(), {
+        clipboardData: {
+          files: [
+            new File([new Uint8Array([1])], "shot.png", { type: "image/png" }),
+          ],
+          types: ["Files"],
+          getData: () => "",
+        },
+      });
+      await waitFor(() =>
+        expect(description().value).toContain("](image-1.png)"),
+      );
+    }
+    if (opts.notes) {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Notes for reviewers" }),
+      );
+      fireEvent.change(
+        screen.getByPlaceholderText(
+          "Deliberate calls, tradeoffs, and context reviewers should ground against…",
+        ),
+        { target: { value: "Look at the parser." } },
+      );
+    }
+    vi.mocked(attachmentDiscard).mockClear();
+    return { onOpenChange };
+  }
+
+  const create = () =>
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+
+  /** Every toast's text, of every tone, as one string per call. */
+  const toastTexts = () =>
+    [warning, success, error].flatMap((spy) =>
+      spy.mock.calls.map((call: unknown[]) => JSON.stringify(call)),
+    );
+
+  it("closes and warns, with the reason under Details, when only the labels step failed", async () => {
+    const { onOpenChange } = await ready({ image: true });
+    forgePrCreate.mockResolvedValueOnce({
+      number: 7,
+      url: URL_7,
+      failedAttachments: [],
+      followupError: REASON,
+    } as never);
+    create();
+    await waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
+    const [title, options] = warning.mock.calls[0] as [
+      string,
+      {
+        description?: string;
+        duration?: number;
+        action?: { label: string };
+        cancel?: {
+          label: string;
+          onClick: (e: { currentTarget: { blur(): void } }) => void;
+        };
+      },
+    ];
+    expect(title).toBe(PR_FOLLOWUP);
+    expect(options.description).toBe(URL_7);
+    expect(options.action?.label).toBe("View");
+    expect(options.duration).toBe(10000);
+    expect(options.cancel?.label).toBe("Details");
+    options.cancel?.onClick({ currentTarget: { blur: () => undefined } });
+    const shown = useErrorDialog.getState().presentation;
+    expect(shown?.summary).toBe(PR_FOLLOWUP);
+    expect(shown?.fullText).toBe(
+      `Its labels and assignees weren't applied\n${REASON}`,
+    );
+    expect(shown?.link).toEqual({ url: URL_7, label: "View" });
+    // The success path ran whole; nothing of the old failure path did.
+    expect(success).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(notifyPrCreateFailed).not.toHaveBeenCalled();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(armPrCreateHandOff).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(armPrCreateHandOff).mock.calls[0][1]).toMatchObject({
+      repoPath: REPO,
+      head: "feat",
+      number: 7,
+    });
+    expect(prCreatePhase(REPO, "feat")).toBe("created");
+    expect(triggerAutomations).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, null),
+    );
+  });
+
+  it("names the origin repository in the warning when the create settles elsewhere", async () => {
+    await ready();
+    let land!: (v: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        land = resolve;
+      }) as never,
+    );
+    create();
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    useUiStore.setState({ repoPath: "C:/other" });
+    try {
+      await act(async () =>
+        land({
+          number: 7,
+          url: URL_7,
+          failedAttachments: [],
+          followupError: REASON,
+        }),
+      );
+      await waitFor(() => expect(warning).toHaveBeenCalledTimes(1));
+      const [title, options] = warning.mock.calls[0] as [
+        string,
+        { description?: string },
+      ];
+      expect(title).toBe(PR_FOLLOWUP);
+      expect(options.description).toBe(`In repo · ${URL_7}`);
+    } finally {
+      useUiStore.setState({ repoPath: REPO });
+    }
+  });
+
+  it("puts the image sentence after the follow-up sentence in the one toast", async () => {
+    await ready({ image: true });
+    forgePrCreate.mockResolvedValueOnce({
+      number: 7,
+      url: URL_7,
+      failedAttachments: ["image-1.png"],
+      followupError: REASON,
+    } as never);
+    create();
+    await waitFor(() => expect(armPrCreateHandOff).toHaveBeenCalledTimes(1));
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0][0]).toBe(
+      `${PR_FOLLOWUP} Also, image-1.png didn't upload. Edit the description to add it again.`,
+    );
+    expect(success).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("still takes the failure path, chips kept, when the create is rejected", async () => {
+    const { onOpenChange } = await ready({ image: true });
+    forgePrCreate.mockRejectedValueOnce(new Error("push rejected"));
+    create();
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(notifyPrCreateFailed).toHaveBeenCalledTimes(1);
+    expect(warning).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(armPrCreateHandOff).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Remove image-1.png" }),
+    ).toBeInTheDocument();
+    expect(attachmentDiscard).not.toHaveBeenCalled();
+  });
+
+  it("reports a PR whose number couldn't be read as created, with no #0 anywhere", async () => {
+    const { onOpenChange } = await ready({ notes: true });
+    forgePrCreate.mockResolvedValueOnce({
+      number: 0,
+      url: "",
+      failedAttachments: [],
+      followupError: REASON,
+    } as never);
+    create();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(usePrCreateStore.getState().byRepo).toEqual({}));
+    expect(warning).toHaveBeenCalledTimes(1);
+    const [title, options] = warning.mock.calls[0] as [
+      string,
+      { description?: string; action?: { label: string }; cancel?: unknown },
+    ];
+    expect(title).toBe(PR_FOLLOWUP);
+    expect(options.description).toBeUndefined();
+    // No View without a URL; Details takes the action slot.
+    expect(options.action?.label).toBe("Details");
+    expect(options.cancel).toBeUndefined();
+    expect(success).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(toastTexts().some((t) => t.includes("#0"))).toBe(false);
+    expect(document.body.textContent).not.toContain("#0");
+    expect(forgePrComment).not.toHaveBeenCalled();
+    expect(triggerAutomations).not.toHaveBeenCalled();
+    expect(armPrCreateHandOff).not.toHaveBeenCalled();
+    expect(notifyPrCreateFailed).not.toHaveBeenCalled();
+  });
+
+  it("says only that it opened a PR whose number couldn't be read and nothing failed", async () => {
+    const { onOpenChange } = await ready();
+    forgePrCreate.mockResolvedValueOnce({
+      number: 0,
+      url: "",
+      failedAttachments: [],
+      followupError: null,
+    } as never);
+    create();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(success).toHaveBeenCalledTimes(1);
+    expect(success.mock.calls[0][0]).toBe("Opened pull request");
+    expect(warning).not.toHaveBeenCalled();
+    expect(armPrCreateHandOff).not.toHaveBeenCalled();
+    await waitFor(() => expect(usePrCreateStore.getState().byRepo).toEqual({}));
+  });
+
+  it("marks, comments on, triggers and hands off a PR with a number, as before", async () => {
+    const { onOpenChange } = await ready({ notes: true });
+    forgePrCreate.mockResolvedValueOnce({
+      number: 7,
+      url: URL_7,
+    } as never);
+    create();
+    await waitFor(() => expect(armPrCreateHandOff).toHaveBeenCalledTimes(1));
+    expect(prCreatePhase(REPO, "feat")).toBe("created");
+    expect(vi.mocked(forgePrComment).mock.calls[0]?.[1]).toBe(7);
+    expect(triggerAutomations).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(success).toHaveBeenCalledTimes(1);
+    expect(success.mock.calls[0][0]).toBe("Opened pull request #7");
+    expect(warning).not.toHaveBeenCalled();
   });
 });

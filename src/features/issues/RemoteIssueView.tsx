@@ -513,11 +513,34 @@ export function RemoteIssueView({
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferDest, setTransferDest] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // The edit draft is keyed on the selected issue, the one the write addresses.
+  const editDraftKey = draftKeyFor("issue-edit", issueIdentity);
   const edit = useEditTitleBody({
-    onSave: async ({ title, body }) => {
-      await editIssue.mutateAsync({ number, title, body });
-    },
+    onSave: ({ title, body }, begin) =>
+      editIssue.mutateAsync({
+        number,
+        title,
+        body,
+        attachments: begin?.(body),
+      }),
     successToast: "Issue updated",
+    attach: { draftKey: editDraftKey, kind: "issue" },
+  });
+  const editAttachOwner = useAttachmentOwner("issue-edit", true);
+  const editAttachGate = useAttachmentSupport({
+    forge: forge.data,
+    access: writeAccess.data,
+    enabled: edit.open,
+  });
+  const editAttachments = useDraftAttachments({
+    draftKey: editDraftKey,
+    owner: editAttachOwner,
+    gateReason: editAttachGate,
+    holdReason: null,
+    writeDraft: (key, update) => {
+      if (edit.ownsDraft(key))
+        edit.form.setFieldValue("body", (prev) => update(prev));
+    },
   });
   // A different issue must never inherit this one's open delete/transfer/edit
   // dialogs — a render-time state adjustment, not an effect. The SHOWN identity
@@ -1881,6 +1904,10 @@ export function RemoteIssueView({
           onSubmit={submitComment}
           mentions={mentions}
           attachments={attachments}
+          hostedImages={hostedImagesFor(
+            mentions.refs?.repoPath,
+            mentions.ghHost,
+          )}
           submitLabel="Comment"
           busy={busy}
           reason={composerReason}
@@ -1925,6 +1952,8 @@ export function RemoteIssueView({
         contentClassName="sm:max-w-lg"
         bodyTextareaClassName="max-h-72 min-h-24 resize-y font-mono"
         mentions={mentions}
+        attachments={editAttachments}
+        hostedImages={hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost)}
       />
 
       <DeleteCommentDialog

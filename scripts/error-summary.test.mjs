@@ -23,6 +23,7 @@ after(() => hooks.deregister());
 const {
   composedErrorPresentation,
   isTransportError,
+  otherChangesSaved,
   presentError,
   RUST_TRANSPORT_PHRASES,
 } = await import("@/lib/error-summary");
@@ -1850,3 +1851,92 @@ test("the Keep local, mirror, local-upstream and agent-session push refusals lab
     assert.equal(p.summary, e.message, e.kind);
   }
 });
+
+/** github/pr.rs (`edit_body_dropped_text`): an edit whose description upload
+ *  failed after the title and base were saved; gh's transport stderr follows it. */
+const BODY_DROPPED =
+  "The description wasn't saved because image-1.png didn't upload. Your other changes were saved. Save again to retry.";
+const DIAL_TAIL =
+  'Post "https://uploads.github.com/": dial tcp 140.82.112.6:443: i/o timeout';
+
+test("an edit that saved its other changes headlines that, over a network tail", () => {
+  for (const kind of ["gh"]) {
+    const message = `${BODY_DROPPED}\n${DIAL_TAIL}`;
+    const p = presentError(appError(kind, message));
+    assert.equal(p.summary, BODY_DROPPED, kind);
+    assert.equal(p.fullText, message, kind);
+    assert.equal(p.long, true, kind);
+    assert.equal(otherChangesSaved(appError(kind, message)), true, kind);
+  }
+});
+
+test("only line one of a gh error carries the saved-changes marker", () => {
+  const later = `${DIAL_TAIL}\n${BODY_DROPPED}`;
+  assert.equal(presentError(appError("gh", later)).summary, reach("GitHub"));
+  assert.equal(otherChangesSaved(appError("gh", later)), false);
+  assert.equal(otherChangesSaved(appError("git", BODY_DROPPED)), false);
+  assert.equal(otherChangesSaved(new Error(BODY_DROPPED)), false);
+  assert.equal(otherChangesSaved(BODY_DROPPED), false);
+});
+
+test("a gh line one carrying the marker without the producer's lead is no saved disclosure", () => {
+  const midLine =
+    "HTTP 422: Validation failed. Your other changes were saved. Save again to retry.";
+  assert.equal(otherChangesSaved(appError("gh", midLine)), false);
+  assert.equal(
+    otherChangesSaved(appError("gh", `${midLine}\n${DIAL_TAIL}`)),
+    false,
+  );
+  const leadOnly =
+    "The description wasn't saved because image-1.png didn't upload.";
+  assert.equal(otherChangesSaved(appError("gh", leadOnly)), false);
+});
+
+test("a GitLab edit that saved nothing keeps the network rewrite", () => {
+  const message = `Nothing was saved. GitLab didn't accept image-1.png.\n${DIAL_TAIL}`;
+  assert.equal(
+    presentError(appError("glab", message)).summary,
+    reach("GitLab"),
+  );
+  assert.equal(otherChangesSaved(appError("glab", message)), false);
+  // No GitLab route emits the saved-changes marker, so line one carrying it
+  // is not headlined either.
+  const marked = `${BODY_DROPPED}\n${DIAL_TAIL}`;
+  assert.equal(presentError(appError("glab", marked)).summary, reach("GitLab"));
+  assert.equal(otherChangesSaved(appError("glab", marked)), false);
+});
+
+for (const verb of ["created", "posted"]) {
+  const headline = `Nothing was ${verb} because image-1.png didn't upload. Try again.`;
+  const message = `${headline}\n${DIAL_TAIL}`;
+
+  test(`a gh "Nothing was ${verb} because" line one outranks the network rewrite`, () => {
+    // The tail alone is a transport failure the summary rewrites.
+    assert.equal(
+      presentError(appError("gh", `gh: upload failed\n${DIAL_TAIL}`)).summary,
+      reach("GitHub"),
+    );
+    const p = presentError(appError("gh", message));
+    assert.equal(p.summary, headline);
+    assert.equal(p.long, true);
+    assert.equal(p.fullText, message);
+    assert.ok(p.fullText.includes(DIAL_TAIL));
+  });
+
+  test(`the "Nothing was ${verb} because" rule reads line one alone`, () => {
+    const message = `gh: upload failed\n${headline}\n${DIAL_TAIL}`;
+    assert.equal(
+      presentError(appError("gh", message)).summary,
+      reach("GitHub"),
+    );
+  });
+
+  test(`the "Nothing was ${verb} because" rule reads the gh kind alone`, () => {
+    // git is no network kind: its summary is line one by the plain fall-through.
+    assert.equal(presentError(appError("git", message)).summary, headline);
+    assert.equal(
+      presentError(appError("glab", message)).summary,
+      reach("GitLab"),
+    );
+  });
+}

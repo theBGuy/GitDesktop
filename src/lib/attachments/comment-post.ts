@@ -20,11 +20,64 @@ export function partialCommentNotice(failed: readonly string[]): string {
     : `Comment posted, but ${failed.length} images didn't upload. They're still attached here, so you can post them in a follow-up comment.`;
 }
 
-/** The warning toast that replaces Create PR's success toast. */
-export function partialCreateWarning(failed: readonly string[]): string {
+/** What a create or edit wrote. The wording doesn't follow `prNoun`: GitLab is
+ *  all or nothing, so its outcomes never carry a warning. */
+export type ItemKind = "issue" | "pr";
+
+const ITEM_NOUN: Record<ItemKind, string> = {
+  issue: "Issue",
+  pr: "Pull request",
+};
+
+const FOLLOWUP_WARNING: Record<ItemKind, string> = {
+  issue:
+    "Issue created, but some of its details weren't applied. Check its labels, assignees, milestone and type.",
+  pr: "Pull request created, but its labels and assignees weren't applied. Add them from the pull request.",
+};
+
+/** The Details heading over a follow-up reason. */
+export const FOLLOWUP_HEADING: Record<ItemKind, string> = {
+  issue: "Some of its details weren't applied",
+  pr: "Its labels and assignees weren't applied",
+};
+
+function didntUpload(failed: readonly string[]): string {
   return failed.length === 1
-    ? `Pull request created, but ${failed[0]} didn't upload. Add it in a comment on the pull request.`
-    : `Pull request created, but ${failed.length} images didn't upload. Add them in a comment on the pull request.`;
+    ? `${failed[0]} didn't upload. Edit the description to add it again.`
+    : `${failed.length} images didn't upload. Edit the description to add them again.`;
+}
+
+/** The warning that replaces a create's success toast; null when the create
+ *  left nothing to warn about. A follow-up failure leads, so the sentence
+ *  never opens with a file name. */
+export function createdWarning(
+  kind: ItemKind,
+  failed: readonly string[],
+  followupError: string | null,
+): string | null {
+  if (followupError !== null)
+    return failed.length > 0
+      ? `${FOLLOWUP_WARNING[kind]} Also, ${didntUpload(failed)}`
+      : FOLLOWUP_WARNING[kind];
+  if (failed.length > 0)
+    return `${ITEM_NOUN[kind]} created, but ${didntUpload(failed)}`;
+  return null;
+}
+
+/** An edit that saved without its failed images and closed anyway. */
+export function updatedWarning(
+  kind: ItemKind,
+  failed: readonly string[],
+): string {
+  return `${ITEM_NOUN[kind]} updated, but ${didntUpload(failed)}`;
+}
+
+/** The in-dialog line of an edit that saved while its failed images stay
+ *  attached for the next Save. */
+export function partialEditNotice(failed: readonly string[]): string {
+  return failed.length === 1
+    ? `Saved, but ${failed[0]} didn't upload. It's still attached here. Save again to add it.`
+    : `Saved, but ${failed.length} images didn't upload. They're still attached here. Save again to add them.`;
 }
 
 /** Request changes posts the draft through a command that takes no images. */

@@ -713,6 +713,7 @@ pub fn run() {
             dependabot::dependabot_delete,
             link_preview::fetch_link_preview,
             hosted_image::github_hosted_image,
+            hosted_image::github_hosted_image_cancel,
             github::insights::gh_community_insights,
             github::insights::gh_repo_traffic,
             github::insights::gh_repo_dependencies,

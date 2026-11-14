@@ -17,6 +17,7 @@ import {
   settleAttachmentPost,
   stageAttachment,
   stagedImageUrl,
+  startAttachGesture,
   sweepOtherOwners,
   watchPostedCopies,
 } from "@/lib/attachments/store";
@@ -571,5 +572,268 @@ describe("no collection outgrows its posts", () => {
     settleAttachmentPost(ticket, { posted: true, failed: ["image-1.png"] });
     expect(attachmentStoreSizes().retired).toBe(before.retired);
     expect(draftEntry(k)?.notice).toEqual({ failed: ["image-1.png"] });
+  });
+});
+
+describe("the cap reclaims staged files the text no longer references", () => {
+  const refs = (...ns: number[]) =>
+    ns.map((n) => `![image](image-${n}.png)`).join("\n");
+  const stageText = (k: string, owner: object, text: string | null) =>
+    stageAttachment({
+      draftKey: k,
+      owner,
+      file: png(),
+      source: "paste",
+      blockedReason: null,
+      text: () => text,
+    });
+  /** Ten staged in an earlier gesture, so none is fresh for the next one. */
+  async function tenStaged(k: string, owner: object) {
+    startAttachGesture(k, owner);
+    for (let i = 0; i < 10; i++) await stage(k, owner);
+    startAttachGesture(k, owner);
+    calls.length = 0;
+  }
+  const names = (k: string) => draftEntry(k)?.images.map((i) => i.name);
+  const done = async (k: string) => {
+    endDraftAttachments(k);
+    await flushChains();
+  };
+
+  it("discards the unreferenced three before the eleventh stage, which lands", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    const staged = await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7));
+    expect(staged?.name).toBe("image-11.png");
+    expect(calls).toEqual([
+      `discard:${SESSION}:image-8.png,image-9.png,image-10.png`,
+      `stage:${SESSION}`,
+    ]);
+    expect(names(k)).toEqual(
+      [1, 2, 3, 4, 5, 6, 7, 11].map((n) => `image-${n}.png`),
+    );
+    expect(draftEntry(k)?.reclaimed).toEqual([
+      "image-8.png",
+      "image-9.png",
+      "image-10.png",
+    ]);
+    await done(k);
+  });
+
+  it("discards nothing when all ten are referenced, and Rust's refusal shows (control)", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    vi.mocked(attachmentStage).mockRejectedValueOnce(
+      new Error("You can attach up to 10 images at a time."),
+    );
+    const staged = await stageText(
+      k,
+      owner,
+      refs(1, 2, 3, 4, 5, 6, 7, 8, 9, 10),
+    );
+    expect(staged).toBeNull();
+    expect(calls).toEqual([]);
+    expect(names(k)).toHaveLength(10);
+    expect(draftEntry(k)?.status?.text).toBe(
+      "You can attach up to 10 images at a time.",
+    );
+    await done(k);
+  });
+
+  it("never reclaims a name staged in the current gesture, whose reference may still be on its way", async () => {
+    const k = key();
+    const owner = {};
+    startAttachGesture(k, owner);
+    for (let i = 0; i < 9; i++) await stage(k, owner);
+    startAttachGesture(k, owner);
+    calls.length = 0;
+    // One gesture of two files; the text never shows the first's reference.
+    const text = refs(1, 2, 3, 4, 5, 6, 7, 8, 9);
+    await Promise.all([stageText(k, owner, text), stageText(k, owner, text)]);
+    expect(calls).toEqual([`stage:${SESSION}`, `stage:${SESSION}`]);
+    expect(names(k)).toContain("image-10.png");
+    await done(k);
+  });
+
+  it("keeps the fresh names while another gesture's stage is still in flight", async () => {
+    const k = key();
+    const owner = {};
+    startAttachGesture(k, owner);
+    for (let i = 0; i < 9; i++) await stage(k, owner);
+    startAttachGesture(k, owner);
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const real = vi.mocked(attachmentStage).getMockImplementation();
+    if (!real) throw new Error("no stage mock");
+    vi.mocked(attachmentStage)
+      .mockImplementationOnce(real)
+      .mockImplementationOnce(async (s, h, d) => {
+        await held;
+        return real(s, h, d);
+      });
+    // Gesture A: image-10 lands, then its second file is still in flight when
+    // gesture B starts, so image-10 stays fresh for B.
+    await stageText(k, owner, null);
+    const second = stageText(k, owner, null);
+    await flushChains();
+    startAttachGesture(k, owner);
+    release();
+    await second;
+    calls.length = 0;
+    await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7, 8, 9));
+    expect(calls).toEqual([`stage:${SESSION}`]);
+    await done(k);
+  });
+
+  it("keeps every record when the discard fails, and the stage still runs", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    vi.mocked(attachmentDiscard).mockRejectedValueOnce(new Error("io"));
+    vi.mocked(attachmentStage).mockRejectedValueOnce(
+      new Error("You can attach up to 10 images at a time."),
+    );
+    expect(await stageText(k, owner, refs(1))).toBeNull();
+    expect(vi.mocked(attachmentStage)).toHaveBeenCalledTimes(11);
+    expect(names(k)).toHaveLength(10);
+    expect(draftEntry(k)?.reclaimed).toEqual([]);
+    expect(draftEntry(k)?.status?.text).toBe(
+      "You can attach up to 10 images at a time.",
+    );
+    await done(k);
+  });
+
+  it("reclaims nothing over a text it can't read", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    await stageText(k, owner, null);
+    expect(calls).toEqual([`stage:${SESSION}`]);
+    await done(k);
+  });
+
+  it("sends a reclaimed name the text references again, alone or beside live names", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7));
+    const alone = beginAttachmentPost(k, refs(9), false);
+    expect(alone?.refs).toEqual({ session: SESSION, names: ["image-9.png"] });
+    if (!alone) throw new Error("no ticket");
+    // Rust refuses it as no longer attached: nothing was posted.
+    settleAttachmentPost(alone, { posted: false, failed: [] });
+    expect(names(k)).toHaveLength(8);
+    const mixed = beginAttachmentPost(k, refs(9, 1, 11), false);
+    expect(mixed?.refs.names).toEqual([
+      "image-9.png",
+      "image-1.png",
+      "image-11.png",
+    ]);
+    if (!mixed) throw new Error("no ticket");
+    settleAttachmentPost(mixed, { posted: false, failed: [] });
+    // A staged-shaped name this draft never staged sends nothing (control).
+    expect(beginAttachmentPost(k, refs(42), false)).toBeNull();
+    await done(k);
+  });
+
+  it("keeps a reclaimed name a stage returns in another case, and sends it when referenced", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7));
+    vi.mocked(attachmentStage).mockImplementationOnce(async (s) => ({
+      session: s ?? SESSION,
+      name: "IMAGE-9.png",
+      mime: "image/png",
+      size: 1,
+      width: 1,
+      height: 1,
+    }));
+    startAttachGesture(k, owner);
+    await stageText(k, owner, null);
+    expect(draftEntry(k)?.reclaimed).toEqual([
+      "image-8.png",
+      "image-9.png",
+      "image-10.png",
+    ]);
+    // The old reference still reaches Rust, which refuses it; never dropped.
+    const ticket = beginAttachmentPost(k, refs(9), false);
+    expect(ticket?.refs.names).toEqual(["image-9.png"]);
+    if (!ticket) throw new Error("no ticket");
+    settleAttachmentPost(ticket, { posted: false, failed: [] });
+    await done(k);
+  });
+
+  it("remembers a reclaimed case variant beside the other case, and sends each it references", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7));
+    vi.mocked(attachmentStage).mockImplementationOnce(async (s) => ({
+      session: s ?? SESSION,
+      name: "IMAGE-9.png",
+      mime: "image/png",
+      size: 1,
+      width: 1,
+      height: 1,
+    }));
+    startAttachGesture(k, owner);
+    await stageText(k, owner, null);
+    await stageText(k, owner, null);
+    // The variant's reference is gone from the text, so the next cap reclaim
+    // takes it.
+    startAttachGesture(k, owner);
+    await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7, 11, 12));
+    expect(draftEntry(k)?.reclaimed).toEqual([
+      "image-8.png",
+      "image-9.png",
+      "image-10.png",
+      "IMAGE-9.png",
+    ]);
+    const variant = beginAttachmentPost(k, "![image](IMAGE-9.png)", false);
+    expect(variant?.refs.names).toEqual(["IMAGE-9.png"]);
+    if (!variant) throw new Error("no ticket");
+    settleAttachmentPost(variant, { posted: false, failed: [] });
+    // Both cases go to Rust, whose duplicate-name refusal answers the post.
+    const both = beginAttachmentPost(
+      k,
+      `${refs(9)}\n![image](IMAGE-9.png)`,
+      false,
+    );
+    expect(both?.refs.names).toEqual(["image-9.png", "IMAGE-9.png"]);
+    if (!both) throw new Error("no ticket");
+    settleAttachmentPost(both, { posted: false, failed: [] });
+    await done(k);
+  });
+
+  it("issues the lowest free name after a reclaim, which is live again while the others stay reclaimed", async () => {
+    const k = key();
+    const owner = {};
+    await tenStaged(k, owner);
+    // Rust names a new file from the lowest free gap.
+    vi.mocked(attachmentStage).mockImplementationOnce(async (s) => ({
+      session: s ?? SESSION,
+      name: "image-8.png",
+      mime: "image/png",
+      size: 1,
+      width: 1,
+      height: 1,
+    }));
+    const staged = await stageText(k, owner, refs(1, 2, 3, 4, 5, 6, 7));
+    expect(staged?.name).toBe("image-8.png");
+    expect(draftEntry(k)?.reclaimed).toEqual(["image-9.png", "image-10.png"]);
+    const live = beginAttachmentPost(k, refs(8), false);
+    expect(live?.refs.names).toEqual(["image-8.png"]);
+    if (!live) throw new Error("no ticket");
+    settleAttachmentPost(live, { posted: false, failed: [] });
+    const reclaimed = beginAttachmentPost(k, refs(9), false);
+    expect(reclaimed?.refs.names).toEqual(["image-9.png"]);
+    if (!reclaimed) throw new Error("no ticket");
+    settleAttachmentPost(reclaimed, { posted: false, failed: [] });
+    await done(k);
   });
 });

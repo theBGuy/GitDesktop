@@ -582,6 +582,7 @@ export function IssueSubIssues({
         open={createOpen}
         onOpenChange={setCreateOpen}
         subIssueParentId={issueId}
+        host="sub-issue"
       />
     </div>
   );

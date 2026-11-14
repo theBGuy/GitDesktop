@@ -13,11 +13,18 @@ import {
 import { CommentComposer as Composer } from "@/features/conversations/CommentComposer";
 import { useRepoDrop } from "@/features/welcome/useRepoDrop";
 import {
+  createdWarning,
+  FOLLOWUP_HEADING,
   partialCommentNotice,
-  partialCreateWarning,
+  partialEditNotice,
+  updatedWarning,
   withFailedReferences,
 } from "@/lib/attachments/comment-post";
-import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
+import { uploadingReason } from "@/lib/attachments/references";
+import {
+  type DraftAttachmentsHandle,
+  uploadActFor,
+} from "@/lib/attachments/use-draft-attachments";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 
@@ -247,17 +254,92 @@ describe("CommentComposer attachments", () => {
 
 describe("post copy helpers", () => {
   it("builds the Create PR warning and the failed-references merge", () => {
-    expect(partialCreateWarning(["image-1.png"])).toBe(
-      "Pull request created, but image-1.png didn't upload. Add it in a comment on the pull request.",
+    expect(createdWarning("pr", ["image-1.png"], null)).toBe(
+      "Pull request created, but image-1.png didn't upload. Edit the description to add it again.",
     );
-    expect(partialCreateWarning(["a.png", "b.png"])).toBe(
-      "Pull request created, but 2 images didn't upload. Add them in a comment on the pull request.",
+    expect(createdWarning("pr", ["a.png", "b.png"], null)).toBe(
+      "Pull request created, but 2 images didn't upload. Edit the description to add them again.",
     );
     expect(withFailedReferences("", "![image](image-2.png)")).toBe(
       "![image](image-2.png)",
     );
     expect(withFailedReferences("typed\n", "![image](image-2.png)")).toBe(
       "typed\n\n![image](image-2.png)",
+    );
+  });
+
+  it("builds the created warnings for an issue, one image and several", () => {
+    expect(createdWarning("issue", ["image-1.png"], null)).toBe(
+      "Issue created, but image-1.png didn't upload. Edit the description to add it again.",
+    );
+    expect(createdWarning("issue", ["a.png", "b.png", "c.png"], null)).toBe(
+      "Issue created, but 3 images didn't upload. Edit the description to add them again.",
+    );
+  });
+
+  it("leads with the follow-up sentence, alone or with the image sentence", () => {
+    const PR_FOLLOWUP =
+      "Pull request created, but its labels and assignees weren't applied. Add them from the pull request.";
+    const ISSUE_FOLLOWUP =
+      "Issue created, but some of its details weren't applied. Check its labels, assignees, milestone and type.";
+    expect(createdWarning("pr", [], "HTTP 422")).toBe(PR_FOLLOWUP);
+    expect(createdWarning("issue", [], "HTTP 422")).toBe(ISSUE_FOLLOWUP);
+    expect(createdWarning("pr", ["image-1.png"], "HTTP 422")).toBe(
+      `${PR_FOLLOWUP} Also, image-1.png didn't upload. Edit the description to add it again.`,
+    );
+    expect(createdWarning("pr", ["a.png", "b.png"], "HTTP 422")).toBe(
+      `${PR_FOLLOWUP} Also, 2 images didn't upload. Edit the description to add them again.`,
+    );
+    expect(createdWarning("issue", ["image-1.png"], "HTTP 422")).toBe(
+      `${ISSUE_FOLLOWUP} Also, image-1.png didn't upload. Edit the description to add it again.`,
+    );
+    expect(createdWarning("issue", ["a.png", "b.png"], "HTTP 422")).toBe(
+      `${ISSUE_FOLLOWUP} Also, 2 images didn't upload. Edit the description to add them again.`,
+    );
+    expect(FOLLOWUP_HEADING).toEqual({
+      pr: "Its labels and assignees weren't applied",
+      issue: "Some of its details weren't applied",
+    });
+  });
+
+  it("has no warning for a clean create", () => {
+    expect(createdWarning("pr", [], null)).toBeNull();
+    expect(createdWarning("issue", [], null)).toBeNull();
+  });
+
+  it("builds the edit copy: the in-dialog line and the fallback toast", () => {
+    expect(partialEditNotice(["image-1.png"])).toBe(
+      "Saved, but image-1.png didn't upload. It's still attached here. Save again to add it.",
+    );
+    expect(partialEditNotice(["a.png", "b.png"])).toBe(
+      "Saved, but 2 images didn't upload. They're still attached here. Save again to add them.",
+    );
+    expect(updatedWarning("issue", ["image-1.png"])).toBe(
+      "Issue updated, but image-1.png didn't upload. Edit the description to add it again.",
+    );
+    expect(updatedWarning("issue", ["a.png", "b.png"])).toBe(
+      "Issue updated, but 2 images didn't upload. Edit the description to add them again.",
+    );
+    expect(updatedWarning("pr", ["image-1.png"])).toBe(
+      "Pull request updated, but image-1.png didn't upload. Edit the description to add it again.",
+    );
+    expect(updatedWarning("pr", ["a.png", "b.png"])).toBe(
+      "Pull request updated, but 2 images didn't upload. Edit the description to add them again.",
+    );
+  });
+
+  it("names the act of each surface's in-flight post", () => {
+    expect(uploadActFor("issue-comment|r#origin#1")).toBe("posting");
+    expect(uploadActFor("pr-comment|r#origin#1")).toBe("posting");
+    expect(uploadActFor("pr-create|r1")).toBe("creating");
+    expect(uploadActFor("issue-create|r1")).toBe("creating");
+    expect(uploadActFor("issue-edit|r#origin#7")).toBe("saving");
+    expect(uploadActFor("pr-edit|r#origin#7")).toBe("saving");
+    expect(uploadingReason(1, uploadActFor("pr-edit|r#origin#7"))).toBe(
+      "Uploading 1 image and saving…",
+    );
+    expect(uploadingReason(4, uploadActFor("issue-edit|r#origin#7"))).toBe(
+      "Uploading 4 images and saving…",
     );
   });
 });

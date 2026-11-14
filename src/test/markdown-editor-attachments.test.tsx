@@ -11,11 +11,15 @@ import { useState } from "react";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
-import type { AttachmentSurface } from "@/lib/attachments/store";
+import {
+  type AttachmentSurface,
+  endDraftAttachments,
+} from "@/lib/attachments/store";
 import {
   useAttachmentOwner,
   useDraftAttachments,
 } from "@/lib/attachments/use-draft-attachments";
+import { ghHostedImage } from "@/lib/hosted-images/api";
 import { dispatchAction, hasLiveHandler } from "@/lib/hotkeys/handler-registry";
 import { unmockedCommands } from "./setup";
 
@@ -23,6 +27,7 @@ vi.mock("@/lib/attachments/api", () => ({
   attachmentStage: vi.fn(),
   attachmentDiscard: vi.fn(async () => undefined),
 }));
+vi.mock("@/lib/hosted-images/api", () => ({ ghHostedImage: vi.fn() }));
 
 const SESSION = "0123456789abcdef0123456789abcdef";
 let seq = 0;
@@ -31,6 +36,7 @@ let urlSeq = 0;
 beforeEach(() => {
   vi.mocked(attachmentStage).mockReset();
   vi.mocked(attachmentDiscard).mockClear();
+  vi.mocked(ghHostedImage).mockReset();
   let n = 0;
   vi.mocked(attachmentStage).mockImplementation(async (session) => {
     n += 1;
@@ -416,5 +422,168 @@ describe("MarkdownEditor with attachments", () => {
       fireEvent.click(btn);
     expect(dispatchAction("attach-image")).toBe(false);
     click.mockRestore();
+  });
+});
+
+describe("a full draft reclaims the images its text no longer references", () => {
+  const refs = (...ns: number[]) =>
+    ns.map((n) => `![image](image-${n}.png)`).join("\n");
+
+  async function tenReferenced(key: string) {
+    await act(async () => {
+      paste(
+        textbox(),
+        Array.from({ length: 10 }, () => png()),
+      );
+    });
+    await waitFor(() => expect(texts()[key]).toContain("](image-10.png)"));
+    // The user deletes three references; their chips go, their files stay.
+    fireEvent.change(textbox(), {
+      target: { value: refs(1, 2, 3, 4, 5, 6, 7) },
+    });
+  }
+
+  it("discards them before an eleventh pasted image, which then lands", async () => {
+    const key = freshKey();
+    render(wrap(<Host draftKey={key} />));
+    await tenReferenced(key);
+    await act(async () => {
+      paste(textbox(), [png()]);
+    });
+    await waitFor(() => expect(texts()[key]).toContain("](image-11.png)"));
+    expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, [
+      "image-8.png",
+      "image-9.png",
+      "image-10.png",
+    ]);
+    expect(attachmentStage).toHaveBeenCalledTimes(11);
+    act(() => endDraftAttachments(key));
+  });
+
+  it.each([
+    ["moves to another draft", "move"],
+    ["unmounts", "unmount"],
+  ] as const)(
+    "reclaims nothing for a gesture's later file once the editor %s",
+    async (_, how) => {
+      const a = freshKey();
+      const b = freshKey();
+      const initial = { [b]: "Another draft" };
+      const { rerender, unmount } = render(
+        wrap(<Host draftKey={a} initial={initial} />),
+      );
+      await tenReferenced(a);
+      // Every image referenced, so the gesture's first file reclaims nothing.
+      fireEvent.change(textbox(), {
+        target: { value: refs(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) },
+      });
+      const staged = (name: string) => ({
+        session: SESSION,
+        name,
+        mime: "image/png",
+        size: 1,
+        width: 1,
+        height: 1,
+      });
+      let land: (v: Awaited<ReturnType<typeof attachmentStage>>) => void = () =>
+        undefined;
+      vi.mocked(attachmentStage)
+        .mockImplementationOnce(
+          () =>
+            new Promise((r) => {
+              land = r;
+            }),
+        )
+        .mockImplementationOnce(async () => staged("image-12.png"));
+      await act(async () => {
+        paste(textbox(), [png(), png()]);
+      });
+      await waitFor(() => expect(attachmentStage).toHaveBeenCalledTimes(11));
+      // A text the second file's reclaim would read as no longer referencing
+      // image-8 to image-10, were it read.
+      fireEvent.change(textbox(), {
+        target: { value: refs(1, 2, 3, 4, 5, 6, 7) },
+      });
+      if (how === "move")
+        rerender(wrap(<Host draftKey={b} initial={initial} />));
+      else unmount();
+      await act(async () => land(staged("image-11.png")));
+      await waitFor(() => expect(attachmentStage).toHaveBeenCalledTimes(12));
+      await act(async () => undefined);
+      expect(attachmentDiscard).not.toHaveBeenCalled();
+      act(() => endDraftAttachments(a));
+    },
+  );
+
+  it("reads the draft's text in Preview too, for a picked image", async () => {
+    const key = freshKey();
+    const { container } = render(wrap(<Host draftKey={key} />));
+    await tenReferenced(key);
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    const input = container.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [png("eleven.png")] } });
+    });
+    await waitFor(() => expect(texts()[key]).toContain("](image-11.png)"));
+    expect(attachmentDiscard).toHaveBeenCalledWith(SESSION, [
+      "image-8.png",
+      "image-9.png",
+      "image-10.png",
+    ]);
+    act(() => endDraftAttachments(key));
+  });
+});
+
+describe("Preview's hosted images", () => {
+  const URL1 =
+    "https://github.com/user-attachments/assets/c162f463-c831-4173-8a80-4197acc4a8ac";
+  const SRC = { repoPath: "C:/repos/demo", host: "github.com" };
+
+  it("loads a draft's hosted URL through the loader when given a source", async () => {
+    vi.mocked(ghHostedImage).mockResolvedValue({
+      bytes: { base64: "AAAA", mime: "image/png", tooLarge: false, size: 3 },
+      unavailable: null,
+    });
+    render(
+      wrap(
+        <MarkdownEditor
+          aria-label="Comment"
+          value={`![shot](${URL1})`}
+          onChange={vi.fn()}
+          hostedImages={SRC}
+        />,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    await waitFor(() =>
+      expect(ghHostedImage).toHaveBeenCalledWith(
+        SRC.repoPath,
+        URL1,
+        expect.anything(),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("img", { name: "shot" }).getAttribute("src"),
+      ).toBe("data:image/png;base64,AAAA"),
+    );
+  });
+
+  it("makes no loader call without the prop (control)", async () => {
+    render(
+      wrap(
+        <MarkdownEditor
+          aria-label="Comment"
+          value={`![shot](${URL1})`}
+          onChange={vi.fn()}
+        />,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+    expect(await screen.findByRole("img", { name: "shot" })).toBeTruthy();
+    await act(async () => undefined);
+    expect(ghHostedImage).not.toHaveBeenCalled();
   });
 });

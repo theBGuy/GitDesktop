@@ -30,6 +30,7 @@ import {
 } from "@/lib/git/queries";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { updateLocalPr } from "@/lib/pulls/local";
 import { useCreateLocalPr } from "@/lib/pulls/queries";
 import { deleteReviewNote } from "@/lib/review-notes/store";
@@ -104,6 +105,9 @@ export function CreateLocalPrDialog({
   // repo check can't tell drafts apart within one repo: closing and reopening
   // mid-create puts a fresh draft behind the same path.
   const seedGenRef = useRef(0);
+  // Which repo's draft the form holds, stamped on every open: the dialog is
+  // hoisted in RepositoryView and outlives a repository switch.
+  const draftRepoRef = useRef(repoPath);
 
   const currentName = status.data?.branch?.name ?? null;
   // Retained on `open`, not on the values: an unseeded next open must resync to
@@ -230,10 +234,17 @@ export function CreateLocalPrDialog({
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded head/base back to empty (untouched form).
   const seedOnOpen = useEffectEvent(() => {
+    // A create still running in this repo keeps its draft with Create held; a
+    // request naming a head or base still replaces it, and another repo resets.
+    const sameRepoInFlight =
+      form.state.isSubmitting && draftRepoRef.current === repoPath;
+    draftRepoRef.current = repoPath;
+    const isNewRequest = defaultHead !== undefined || defaultBase !== undefined;
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
     if (surface.shouldSkipSeed(generating)) return;
+    if (sameRepoInFlight && !isNewRequest) return;
     seedGenRef.current += 1;
     // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
     // the dialog opens with no seeded body refs; extraction/AI seeding then
@@ -364,10 +375,19 @@ export function CreateLocalPrDialog({
     }
   })();
   const submitBlocked = generating || holdReason !== null;
+  // A running create holds Create with its reason, ranked above the pair's hold
+  // as in CreateIssueDialog, so the held button stays focusable and says why.
   const { blockedReason, reasonId, wrapperTitle, describedBy } =
     useDisabledReason({
-      disabled: submitBlocked,
-      reason: holdReason,
+      disabled: submitBlocked || isSubmitting,
+      reason: (() => {
+        switch (true) {
+          case isSubmitting:
+            return ACT_PENDING_REASON;
+          default:
+            return holdReason;
+        }
+      })(),
       title: SUBMIT_HINT,
     });
 
@@ -388,7 +408,10 @@ export function CreateLocalPrDialog({
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
-            if (!submitBlocked) form.handleSubmit();
+            // Form-core doesn't refuse a submit while one runs, and the render-time
+            // flag lags a fast second press, so the live store value decides.
+            if (!e.repeat && !submitBlocked && !form.state.isSubmitting)
+              form.handleSubmit();
             return;
           }
           // The generate chord runs this dialog's own Generate while it's open.
@@ -407,7 +430,7 @@ export function CreateLocalPrDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (submitBlocked) return;
+            if (submitBlocked || form.state.isSubmitting) return;
             form.handleSubmit();
           }}
         >

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { MarkdownHostedImages } from "@/components/markdown/markdown";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -26,6 +27,7 @@ export function CommentEditor({
   ariaLabel,
   textareaClassName,
   mentions,
+  hostedImages,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -41,6 +43,8 @@ export function CommentEditor({
   /** Opt in to `@`/`#`/`!` autocomplete — only surfaces whose forge autolinks the
    *  completed reference pass one. */
   mentions?: MentionSource;
+  /** Preview's hosted-image source; see `MarkdownEditor`. */
+  hostedImages?: MarkdownHostedImages;
 }) {
   const editorRef = useRef<MarkdownEditorHandle>(null);
 
@@ -72,6 +76,7 @@ export function CommentEditor({
         disabled={pending}
         textareaClassName={textareaClassName}
         mentions={mentions}
+        hostedImages={hostedImages}
       />
       <div className="flex items-center gap-2">
         <Button

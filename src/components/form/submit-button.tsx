@@ -10,13 +10,19 @@ import { heldButtonRender } from "@/lib/use-disabled-reason";
  * `disabled` reasons (e.g. an AI generation in flight) are OR'd in, and every
  * other prop reaches the Button — a caller explaining a disabled submit points
  * `aria-describedby` at its own hint. The exception is `render`, which a
- * reasoned hold replaces while it stands (no caller passes one).
+ * reasoned hold replaces while it stands (no caller passes one). `pending`
+ * shows the spinner for a submit the form's own state can't see.
  */
 export function SubmitButton({
   children,
   disabled,
+  pending,
   ...props
-}: ComponentProps<typeof Button> & { children: ReactNode }) {
+}: ComponentProps<typeof Button> & {
+  children: ReactNode;
+  /** A submit running outside form-core's `isSubmitting`; spinner only. */
+  pending?: boolean;
+}) {
   const form = useFormContext();
   return (
     <form.Subscribe
@@ -36,7 +42,7 @@ export function SubmitButton({
               props.render,
             )}
           >
-            {isSubmitting && <Spinner data-icon="inline-start" />}
+            {(isSubmitting || pending) && <Spinner data-icon="inline-start" />}
             {children}
           </Button>
         );

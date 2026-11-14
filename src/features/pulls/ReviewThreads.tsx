@@ -785,6 +785,10 @@ export function ReviewThreadCard({
                   rows={2}
                   textareaClassName="max-h-32 min-h-12 resize-y"
                   mentions={mentions}
+                  hostedImages={hostedImagesFor(
+                    mentions?.refs?.repoPath,
+                    mentions?.ghHost,
+                  )}
                 />
                 <div className="flex items-center gap-2">
                   <DisabledReasonButton
