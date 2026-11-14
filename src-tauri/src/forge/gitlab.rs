@@ -4007,18 +4007,45 @@ fn assignee_ids_field(ids: &[u64]) -> Option<String> {
     })
 }
 
-/// The fields an attached [`create_issue`] is estimated over: its ids resolve after the
-/// uploads, so each one counts at its widest.
-pub(crate) fn issue_create_fields(title: &str, labels: &[String], assignees: usize) -> Vec<String> {
-    let widest = vec![u64::MAX; assignees];
+/// The fields an attached [`create_issue_in`] is estimated over, from the assignee ids
+/// it then sends (resolved before the uploads).
+pub(crate) fn issue_create_fields(title: &str, labels: &[String], ids: &[u64]) -> Vec<String> {
     [
         Some(title.trim().to_string()),
         labels_field(labels),
-        assignee_ids_field(&widest),
+        assignee_ids_field(ids),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// [`glab_attached_units`] for an issue create with `assignees` ids not yet looked up:
+/// each counts at the widest id, so no resolved set can estimate longer.
+fn issue_create_upper_units(
+    title: &str,
+    labels: &[String],
+    assignees: usize,
+    body: &str,
+    names: &[String],
+) -> usize {
+    let fields = issue_create_fields(title, labels, &vec![u64::MAX; assignees]);
+    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+    glab_attached_units(&fields, body, names)
+}
+
+/// Refuses an attached issue create too long for the command line however its
+/// `assignees` resolve, so the refusal needs no lookup and runs before one.
+pub(crate) fn refuse_long_issue_create(
+    title: &str,
+    labels: &[String],
+    assignees: usize,
+    body: &str,
+    staged: &crate::attachments::StagedRefs,
+    windows: bool,
+) -> AppResult<()> {
+    let units = issue_create_upper_units(title, labels, assignees, body, &staged.names);
+    crate::attachments::refuse_long_attached_argv(units, windows)
 }
 
 /// Uploads every staged file in order to the project `enc`, then returns `body` with
@@ -4034,31 +4061,31 @@ async fn upload_and_rewrite(
 ) -> AppResult<String> {
     let units = glab_attached_units(fields, body, &staged.names);
     crate::attachments::refuse_long_attached_argv(units, cfg!(windows))?;
+    if let Some(gone) = staged.names.iter().find(|n| !staged.dir.join(n).is_file()) {
+        return Err(crate::attachments::no_longer_attached(gone));
+    }
     let mut uploaded = Vec::with_capacity(staged.names.len());
     for name in &staged.names {
         let path = staged.dir.join(name);
-        if !path.is_file() {
-            return Err(crate::attachments::no_longer_attached(name));
-        }
         let url = glab_upload(repo_path, enc, &path, name, verb).await?;
         uploaded.push((name.clone(), url));
     }
     Ok(rewrite_body(body, &uploaded))
 }
 
-/// [`upload_and_rewrite`] into the origin project for a write that also sends `fields`:
-/// the body to send in place of `body`. An Err keeps every staged file and nothing has
-/// been posted.
+/// [`upload_and_rewrite`] into the project `enc` for a write that also sends `fields`:
+/// the body to send in place of `body`. The write then targets that same `enc`. An Err
+/// keeps every staged file and nothing has been posted.
 pub(crate) async fn body_with_uploads(
     repo_path: &str,
+    enc: &str,
     fields: &[impl AsRef<str>],
     body: &str,
     staged: &crate::attachments::StagedRefs,
     verb: UploadVerb,
 ) -> AppResult<String> {
     let fields: Vec<&str> = fields.iter().map(AsRef::as_ref).collect();
-    let enc = encode_project(&project_path(repo_path).await?);
-    upload_and_rewrite(repo_path, &enc, &fields, body, staged, verb).await
+    upload_and_rewrite(repo_path, enc, &fields, body, staged, verb).await
 }
 
 /// Posts a note whose body references staged images: uploads them to this project,
@@ -4161,13 +4188,76 @@ mod attach_tests {
     }
 
     #[test]
-    fn an_issue_create_is_estimated_over_its_labels_and_widest_assignee_ids() {
+    fn an_issue_create_is_estimated_over_its_labels_and_resolved_assignee_ids() {
         let labels = vec!["a".to_string(), "b".to_string()];
         assert_eq!(
-            issue_create_fields(" T ", &labels, 1),
-            ["T", "labels=a,b", "assignee_ids=18446744073709551615"]
+            issue_create_fields(" T ", &labels, &[7, 42]),
+            ["T", "labels=a,b", "assignee_ids=7,42"]
         );
-        assert_eq!(issue_create_fields("T", &[], 0), ["T"]);
+        assert_eq!(issue_create_fields("T", &[], &[]), ["T"]);
+    }
+
+    #[test]
+    fn the_pre_lookup_issue_create_estimate_bounds_every_resolved_one() {
+        let labels = vec!["bug".to_string()];
+        let one = staged_names(1);
+        let body = citing(&one, 10);
+        let widths = [0, 7, 42, 99_999, u64::MAX / 2, u64::MAX - 1, u64::MAX];
+        for count in 0..=3 {
+            let upper = issue_create_upper_units("T", &labels, count, &body, &one);
+            let mixed: Vec<u64> = widths.iter().copied().cycle().skip(2).take(count).collect();
+            for ids in widths.iter().map(|&w| vec![w; count]).chain([mixed]) {
+                let fields = issue_create_fields("T", &labels, &ids);
+                let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                let resolved = glab_attached_units(&fields, &body, &one);
+                assert!(upper >= resolved, "{count}: {ids:?}");
+            }
+        }
+        let widest = issue_create_fields("T", &labels, &[u64::MAX; 2]);
+        let widest: Vec<&str> = widest.iter().map(String::as_str).collect();
+        assert_eq!(
+            issue_create_upper_units("T", &labels, 2, &body, &one),
+            glab_attached_units(&widest, &body, &one)
+        );
+    }
+
+    #[test]
+    fn the_issue_create_refusal_counts_its_assignees_and_staged_references() {
+        use crate::attachments::{
+            StagedRefs, ATTACHED_COMMAND_LINE_LIMIT, TOO_LONG_WITH_IMAGES_REFUSAL as TOO_LONG,
+        };
+        let too_long =
+            |r: AppResult<()>| matches!(r, Err(AppError::InvalidArgument(m)) if m == TOO_LONG);
+        let labels = vec!["bug".to_string()];
+        let one = staged_names(1);
+        let staged = StagedRefs {
+            names: one.clone(),
+            dir: std::path::PathBuf::new(),
+        };
+        let unstaged = StagedRefs {
+            names: Vec::new(),
+            dir: std::path::PathBuf::new(),
+        };
+        let limit = ATTACHED_COMMAND_LINE_LIMIT;
+        let upper = |assignees, body: &str, names: &[String]| {
+            issue_create_upper_units("T", &labels, assignees, body, names)
+        };
+        // Filler that brings 0 assignees over `names` exactly to the limit.
+        let filled = |names: &[String]| citing(&one, limit - upper(0, &citing(&one, 0), names));
+        let refuse = |assignees, body: &str, staged: &StagedRefs, windows| {
+            refuse_long_issue_create("T", &labels, assignees, body, staged, windows)
+        };
+
+        let body = filled(&one);
+        assert!(upper(0, &body, &one) <= limit && upper(3, &body, &one) > limit);
+        assert!(too_long(refuse(3, &body, &staged, true)));
+        assert!(refuse(0, &body, &staged, true).is_ok());
+        assert!(refuse(3, &body, &staged, false).is_ok());
+
+        let body = filled(&[]);
+        assert!(upper(0, &body, &[]) <= limit && upper(0, &body, &one) > limit);
+        assert!(too_long(refuse(0, &body, &staged, true)));
+        assert!(refuse(0, &body, &unstaged, true).is_ok());
     }
 
     // 3,006 units of labels: 30,111 units without them, 33,120 with them.
@@ -4178,7 +4268,7 @@ mod attach_tests {
         let labels: Vec<String> = (0..100)
             .map(|i| format!("{i:03}{}", "l".repeat(26)))
             .collect();
-        let fields = issue_create_fields("Title", &labels, 0);
+        let fields = issue_create_fields("Title", &labels, &[]);
         let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
         let title_only = glab_attached_units(&["Title"], &body, &one);
         assert!(refuse_long_attached_argv(title_only, true).is_ok());
@@ -4247,11 +4337,16 @@ mod attach_tests {
         }
     }
 
+    /// Both occur in `body`, and the first `earlier` comes before the first `later`.
+    fn precedes(body: &str, earlier: &str, later: &str) -> bool {
+        body.find(earlier)
+            .zip(body.find(later))
+            .is_some_and(|(e, l)| e < l)
+    }
+
     /// The length decision runs before the first upload.
     fn decides_before_uploading(body: &str) -> bool {
-        body.find("refuse_long_attached_argv(")
-            .zip(body.find("glab_upload("))
-            .is_some_and(|(check, upload)| check < upload)
+        precedes(body, "refuse_long_attached_argv(", "glab_upload(")
     }
 
     #[test]
@@ -4263,6 +4358,11 @@ mod attach_tests {
         assert!(decides_before_uploading(&core), "{core}");
         let unchecked = core.replace("refuse_long_attached_argv(", "skipped(");
         assert!(!decides_before_uploading(&unchecked));
+        // Every staged file is found before the upload loop, so a missing one uploads nothing.
+        assert!(
+            precedes(&core, "no_longer_attached(", "for name in &staged.names"),
+            "{core}"
+        );
         let production = production_text(gitlab);
         assert!(production.contains("\nasync fn upload_and_rewrite("));
         assert!(!production.contains("mod attach_tests"));
@@ -4296,7 +4396,10 @@ mod attach_tests {
         let mr_fields = "[&source_arg, &target_arg, &title_arg] .into_iter() \
                          .chain(labels_arg.iter().chain(&assignees_arg))";
         let core_routes: [(&str, &[&str]); 3] = [
-            ("body_with_uploads", &[with_fields]),
+            (
+                "body_with_uploads",
+                &["upload_and_rewrite(repo_path, enc, &fields, "],
+            ),
             (
                 "post_note_with_images",
                 &["upload_and_rewrite(repo_path, &enc, &[], "],
@@ -4316,22 +4419,38 @@ mod attach_tests {
                 assert!(body.contains(call), "{name}: {call}\n{body}");
             }
         }
-        let with_fields = "body_with_uploads(&repo_path, &fields, ";
+        // A route's write targets the project its uploads went to, its `enc` read before them
+        // (the issue create's members lookup still reads the project path on its own).
+        let with_fields = "body_with_uploads(&repo_path, &enc, &fields, ";
         let note = "post_note_with_images(";
+        let enc = "let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);";
         let forge_routes: [(&str, &[&str]); 5] = [
             (
                 "forge_pr_edit",
-                &[with_fields, "[Some(&title), base.as_ref()]"],
+                &[
+                    enc,
+                    with_fields,
+                    "[Some(&title), base.as_ref()]",
+                    "gitlab::edit_mr_in(&repo_path, &enc, ",
+                ],
             ),
             (
                 "forge_issue_edit",
-                &["body_with_uploads(&repo_path, &[&title], "],
+                &[
+                    enc,
+                    "body_with_uploads(&repo_path, &enc, &[&title], ",
+                    "gitlab::edit_issue_in(&repo_path, &enc, ",
+                ],
             ),
             (
                 "forge_issue_create",
                 &[
+                    enc,
                     with_fields,
-                    "gitlab::issue_create_fields(&title, &labels, assignees.len())",
+                    "gitlab::refuse_long_issue_create( &title, &labels, assignees.len(), &body, &s, cfg!(windows), )?;",
+                    "let ids = gitlab::create_assignee_ids(&repo_path, &assignees).await?;",
+                    "gitlab::issue_create_fields(&title, &labels, &ids)",
+                    "gitlab::create_issue_in( &repo_path, &enc, &title, &body, &labels, &ids, ",
                 ],
             ),
             ("forge_pr_comment", &[note]),
@@ -4343,6 +4462,18 @@ mod attach_tests {
                 assert!(body.contains(call), "{name}: {call}\n{body}");
             }
         }
+        // The lookup-free length refusal precedes the assignee lookup, which precedes the first
+        // upload: a too-long create reads no member page, and a lookup miss uploads nothing.
+        let create = flat(wiring_body(forge, "forge_issue_create"));
+        let lookup = "gitlab::create_assignee_ids(";
+        assert!(
+            precedes(&create, "gitlab::refuse_long_issue_create(", lookup),
+            "{create}"
+        );
+        assert!(
+            precedes(&create, lookup, "gitlab::body_with_uploads("),
+            "{create}"
+        );
         // Every caller in gitlab.rs and mod.rs of the core and its two wrappers is on a roster above.
         let both = format!("{gitlab_code}\n{forge_code}");
         let callers = |name: &str| {
@@ -4735,6 +4866,20 @@ pub async fn edit_mr(
         ));
     }
     let enc = encode_project(&project_path(repo_path).await?);
+    edit_mr_in(repo_path, &enc, number, title, body, base).await
+}
+
+/// [`edit_mr`]'s PUT into the project `enc` (an attached edit passes the one it uploaded
+/// to). The title is checked by the caller.
+pub(crate) async fn edit_mr_in(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+    base: Option<&str>,
+) -> AppResult<()> {
+    let title = title.trim();
     let endpoint = format!("projects/{enc}/merge_requests/{number}");
     let args = edit_mr_args(&endpoint, title, body, base);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -5989,6 +6134,19 @@ pub async fn edit_issue(repo_path: &str, number: u64, title: &str, body: &str) -
         ));
     }
     let enc = encode_project(&project_path(repo_path).await?);
+    edit_issue_in(repo_path, &enc, number, title, body).await
+}
+
+/// [`edit_issue`]'s PUT into the project `enc` (an attached edit passes the one it
+/// uploaded to). The title is checked by the caller.
+pub(crate) async fn edit_issue_in(
+    repo_path: &str,
+    enc: &str,
+    number: u64,
+    title: &str,
+    body: &str,
+) -> AppResult<()> {
+    let title = title.trim();
     let endpoint = format!("projects/{enc}/issues/{number}");
     let title_arg = format!("title={title}");
     let desc_arg = format!("description={body}");
@@ -8016,14 +8174,36 @@ pub async fn create_issue(
             "an issue title is required".into(),
         ));
     }
-    let labels_arg = labels_field(labels);
-    let mut ids_arg = None;
-    if !assignees.is_empty() {
-        // Full resolution or error — never create with a silently-reduced set.
-        let ids = resolve_assignee_ids(repo_path, assignees).await?;
-        ids_arg = assignee_ids_field(&ids);
-    }
+    let ids = create_assignee_ids(repo_path, assignees).await?;
     let enc = encode_project(&project_path(repo_path).await?);
+    create_issue_in(repo_path, &enc, title, body, labels, &ids, milestone).await
+}
+
+/// Full resolution or error, never a silently reduced set; no assignees reads nothing.
+pub(crate) async fn create_assignee_ids(
+    repo_path: &str,
+    assignees: &[String],
+) -> AppResult<Vec<u64>> {
+    if assignees.is_empty() {
+        return Ok(Vec::new());
+    }
+    resolve_assignee_ids(repo_path, assignees).await
+}
+
+/// [`create_issue`]'s POST into the project `enc` with assignee ids already resolved, so
+/// an attached create decides both before its uploads. The title is checked by the caller.
+pub(crate) async fn create_issue_in(
+    repo_path: &str,
+    enc: &str,
+    title: &str,
+    body: &str,
+    labels: &[String],
+    ids: &[u64],
+    milestone: Option<u64>,
+) -> AppResult<PrRef> {
+    let title = title.trim();
+    let labels_arg = labels_field(labels);
+    let ids_arg = assignee_ids_field(ids);
     let endpoint = format!("projects/{enc}/issues");
     let title_arg = format!("title={title}");
     let desc_arg = format!("description={body}");

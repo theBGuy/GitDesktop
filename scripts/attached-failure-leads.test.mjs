@@ -2,8 +2,9 @@
 // (src-tauri/src/github/pr.rs) to the rules that read them in
 // src/lib/error-summary.ts: `attached_run_failure`'s line must start with one of
 // NOTHING_EXISTS_DISCLOSURES, or the summary rewrites it as a network failure, and
-// `edit_body_dropped_text`'s must carry the saved-changes marker
-// `otherChangesSaved` keys on. A one-sided rewording would silently lose either.
+// `edit_body_dropped_text`'s must start with SAVED_DISCLOSURE_LEAD and carry the
+// saved-changes marker `otherChangesSaved` keys on. A one-sided rewording would
+// silently lose either.
 //
 // A source-shape pin, so each case also runs the check over in-memory mutants
 // to prove it can fail. The TS module loads through the shared src hooks, as in
@@ -16,8 +17,12 @@ import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
-const { NOTHING_EXISTS_DISCLOSURES, otherChangesSaved, presentError } =
-  await import("@/lib/error-summary");
+const {
+  NOTHING_EXISTS_DISCLOSURES,
+  otherChangesSaved,
+  presentError,
+  SAVED_DISCLOSURE_LEAD,
+} = await import("@/lib/error-summary");
 
 const RUST = new URL("../src-tauri/src/github/pr.rs", import.meta.url);
 const read = (url) => readFileSync(url, "utf8");
@@ -77,7 +82,8 @@ function attachedMismatch(src) {
   return null;
 }
 
-/** Null when `edit_body_dropped_text`'s sentence carries the saved marker. */
+/** Null when `edit_body_dropped_text`'s sentence starts with the TS lead and
+ *  carries the saved marker. */
 function droppedMismatch(src) {
   const body = fnBody(src, "edit_body_dropped_text");
   if (body === null) return "edit_body_dropped_text not found exactly once";
@@ -88,6 +94,8 @@ function droppedMismatch(src) {
   // runtime, which could move the marker off line one unseen.
   if (/[{}\\]/.test(line))
     return "the literal holds a placeholder or escape this pin can't fill";
+  if (!line.startsWith(SAVED_DISCLOSURE_LEAD))
+    return `${JSON.stringify(line)} doesn't start with the TS lead`;
   return otherChangesSaved({ kind: "gh", message: line })
     ? null
     : `no saved marker in ${JSON.stringify(line)}`;
@@ -102,7 +110,7 @@ test("attached_run_failure's lines lead with the TS rule's leads", () => {
   ]);
 });
 
-test("edit_body_dropped_text's sentence carries the saved-changes marker", () => {
+test("edit_body_dropped_text's sentence leads with the TS lead and carries the saved-changes marker", () => {
   assert.equal(droppedMismatch(read(RUST)), null);
 });
 
@@ -110,7 +118,10 @@ test("both pins fail on a reworded, renamed or duplicated Rust source", () => {
   const src = read(RUST);
   const lead = '"Nothing was {verb} because';
   const marker = "Your other changes were saved.";
-  assert.ok(src.includes(lead) && src.includes(marker));
+  const droppedLead = "\"The description wasn't saved because";
+  assert.ok(
+    src.includes(lead) && src.includes(marker) && src.includes(droppedLead),
+  );
   const swap = (from, to) => src.replace(from, () => to);
   const attachedMutants = [
     ["a reworded lead", swap(lead, '"Nothing got {verb} because')],
@@ -123,6 +134,14 @@ test("both pins fail on a reworded, renamed or duplicated Rust source", () => {
     assert.notEqual(attachedMismatch(mutant), null, `mutant passed: ${name}`);
   const droppedMutants = [
     ["a reworded marker", swap(marker, "The rest was saved.")],
+    [
+      "a reworded lead",
+      swap(droppedLead, '"The description was not saved because'),
+    ],
+    [
+      "a lead moved off the start",
+      swap(droppedLead, `"Edit: ${droppedLead.slice(1)}`),
+    ],
     ["a line break before the marker", swap(marker, `\\n${marker}`)],
     ["a renamed fn", swap("fn edit_body_dropped_text(", "fn dropped_text(")],
   ];

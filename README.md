@@ -1306,8 +1306,9 @@ review via its subscription login. The full list is under
   GitHub CLI sign-in types, attaching needs GitHub CLI 2.103.2 or newer,
   and the app says so when you post. On GitHub.com and Enterprise Cloud,
   attached images that GitHub hosts at its `user-attachments` links load
-  in descriptions, comments, review threads, discussions and release notes
-  through your GitHub CLI sign-in, so they show in private repositories too.
+  in descriptions, comments, review threads, discussions and release notes,
+  and in most issue and pull request Previews while you write, through your
+  GitHub CLI sign-in, so they show in private repositories too.
 - **References are links**: `#123` and `@user` in a rendered description,
   comment, review thread, AI review, or release note open what they name. On
   GitHub, `#123` opens that issue or pull request in the app, whichever it

@@ -2273,9 +2273,12 @@ pub async fn forge_pr_edit(
                         .into_iter()
                         .flatten()
                         .collect();
+                    let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
                     let body =
-                        gitlab::body_with_uploads(&repo_path, &fields, &body, &s, verb).await?;
-                    gitlab::edit_mr(&repo_path, number, &title, &body, base.as_deref()).await?;
+                        gitlab::body_with_uploads(&repo_path, &enc, &fields, &body, &s, verb)
+                            .await?;
+                    let base = base.as_deref();
+                    gitlab::edit_mr_in(&repo_path, &enc, number, &title, &body, base).await?;
                     crate::attachments::release_posted(&s, &[]).await;
                     return Ok(Default::default());
                 }
@@ -3133,9 +3136,11 @@ pub async fn forge_issue_edit(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Saved;
+                    let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
                     let body =
-                        gitlab::body_with_uploads(&repo_path, &[&title], &body, &s, verb).await?;
-                    gitlab::edit_issue(&repo_path, number, &title, &body).await?;
+                        gitlab::body_with_uploads(&repo_path, &enc, &[&title], &body, &s, verb)
+                            .await?;
+                    gitlab::edit_issue_in(&repo_path, &enc, number, &title, &body).await?;
                     crate::attachments::release_posted(&s, &[]).await;
                     return Ok(Default::default());
                 }
@@ -3552,11 +3557,24 @@ pub async fn forge_issue_create(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Posted;
-                    let fields = gitlab::issue_create_fields(&title, &labels, assignees.len());
+                    // The length refusal needs no lookup, so it runs first; every lookup the
+                    // create needs then runs before the first upload, so a miss uploads nothing.
+                    gitlab::refuse_long_issue_create(
+                        &title,
+                        &labels,
+                        assignees.len(),
+                        &body,
+                        &s,
+                        cfg!(windows),
+                    )?;
+                    let ids = gitlab::create_assignee_ids(&repo_path, &assignees).await?;
+                    let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
+                    let fields = gitlab::issue_create_fields(&title, &labels, &ids);
                     let body =
-                        gitlab::body_with_uploads(&repo_path, &fields, &body, &s, verb).await?;
-                    let pr = gitlab::create_issue(
-                        &repo_path, &title, &body, &labels, &assignees, milestone,
+                        gitlab::body_with_uploads(&repo_path, &enc, &fields, &body, &s, verb)
+                            .await?;
+                    let pr = gitlab::create_issue_in(
+                        &repo_path, &enc, &title, &body, &labels, &ids, milestone,
                     )
                     .await?;
                     return Ok(created_outcome(pr, Some(&s), Vec::new(), Ok(())).await);

@@ -1879,6 +1879,19 @@ test("only line one of a gh error carries the saved-changes marker", () => {
   assert.equal(otherChangesSaved(BODY_DROPPED), false);
 });
 
+test("a gh line one carrying the marker without the producer's lead is no saved disclosure", () => {
+  const midLine =
+    "HTTP 422: Validation failed. Your other changes were saved. Save again to retry.";
+  assert.equal(otherChangesSaved(appError("gh", midLine)), false);
+  assert.equal(
+    otherChangesSaved(appError("gh", `${midLine}\n${DIAL_TAIL}`)),
+    false,
+  );
+  const leadOnly =
+    "The description wasn't saved because image-1.png didn't upload.";
+  assert.equal(otherChangesSaved(appError("gh", leadOnly)), false);
+});
+
 test("a GitLab edit that saved nothing keeps the network rewrite", () => {
   const message = `Nothing was saved. GitLab didn't accept image-1.png.\n${DIAL_TAIL}`;
   assert.equal(

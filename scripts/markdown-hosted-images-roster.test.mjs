@@ -4,7 +4,10 @@
 // and every Thread / ReviewThreadCard / ReviewThreadList site passes the
 // `mentions=` source that Thread and the review cards derive the hosted source
 // from. Sites are anchored on a code snippet in the element, never a line
-// number. Stdlib only.
+// number. Stdlib only. Out of reach: JSX nested in an attribute expression of
+// the opening tag (`footer={<X hostedImages={h} />}`) reads as passing the prop,
+// as does a default parameter or an assignment inside an attribute's arrow
+// (`({ mentions = m }) =>`, `() => (mentions = m)`).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -20,6 +23,16 @@ import {
 } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/** Whether the opening tag at `masked[start, tagClose)` passes `name`: the
+ *  attribute name not preceded by a name character, dot, colon or hyphen, so
+ *  `data-hostedImages=` is not the prop, and its `=` not starting `==` or `=>`,
+ *  so a comparison or an arrow is not either. */
+function passesProp(masked, start, tagClose, name) {
+  return new RegExp(`(?<![\\w$.:-])${name}\\s*=(?![=>])`).test(
+    masked.slice(start, tagClose),
+  );
+}
 
 /** Bodies a forge (GitHub included) authored, which load hosted images. */
 const GETS = [
@@ -228,7 +241,7 @@ export function audit(files) {
       const [entry] = matched;
       entry.hits++;
       const [, tagClose] = openingTags(rel, text, masked, start, end)[0];
-      const passes = masked.slice(start, tagClose).includes("hostedImages=");
+      const passes = passesProp(masked, start, tagClose, "hostedImages");
       if (entry.gets && !passes)
         problems.push(`${where}: a forge body without hostedImages=`);
       if (!entry.gets && passes)
@@ -243,7 +256,7 @@ export function audit(files) {
           start,
           start + 1e6,
         )[0];
-        if (!masked.slice(start, tagClose).includes("mentions="))
+        if (!passesProp(masked, start, tagClose, "mentions"))
           problems.push(
             `${rel}:${lineOf(text, start)}: <${name} without mentions=`,
           );
@@ -452,7 +465,7 @@ export function auditEditors(files) {
         }
         entry.hits++;
         const [, tagClose] = openingTags(rel, text, masked, start, end)[0];
-        const passes = masked.slice(start, tagClose).includes("hostedImages=");
+        const passes = passesProp(masked, start, tagClose, "hostedImages");
         if (entry.without === undefined && !passes)
           problems.push(`${where}: <${tag} without hostedImages=`);
         if (entry.without !== undefined && passes)
@@ -572,6 +585,54 @@ test("an editor site that drops hostedImages= fails", () => {
     auditEditors(next).join("\n"),
     /CreateIssueDialog.*field\.MarkdownField without hostedImages=/,
   );
+});
+
+test("a data- attribute ending in the prop's name is not the prop", () => {
+  const editor = edited(
+    corpus(),
+    "src/features/issues/CreateIssueDialog.tsx",
+    "hostedImages={descHostedImages}",
+    "data-hostedImages={descHostedImages}",
+  );
+  assert.match(
+    auditEditors(editor).join("\n"),
+    /CreateIssueDialog.*field\.MarkdownField without hostedImages=/,
+  );
+  const files = corpus();
+  const file = "src/features/pulls/RemotePrView.tsx";
+  const text = files.get(file);
+  const prop = text.lastIndexOf("hostedImages=", text.indexOf("{pr.body}"));
+  const body = new Map(files);
+  body.set(file, `${text.slice(0, prop)}data-${text.slice(prop)}`);
+  assert.match(audit(body).join("\n"), /RemotePrView.*without hostedImages=/);
+  const hop = "src/features/issues/RemoteIssueView.tsx";
+  const hopText = files.get(hop);
+  const at = hopText.indexOf("mentions=", hopText.indexOf("<Thread"));
+  const mentions = new Map(files);
+  mentions.set(hop, `${hopText.slice(0, at)}data-${hopText.slice(at)}`);
+  assert.match(
+    audit(mentions).join("\n"),
+    /RemoteIssueView.*Thread without mentions=/,
+  );
+});
+
+test("a comparison or an arrow over the prop's name is not the prop", () => {
+  for (const shape of [
+    "data-x={hostedImages === descHostedImages}",
+    "data-x={hostedImages => descHostedImages}",
+  ]) {
+    const editor = edited(
+      corpus(),
+      "src/features/issues/CreateIssueDialog.tsx",
+      "hostedImages={descHostedImages}",
+      shape,
+    );
+    assert.match(
+      auditEditors(editor).join("\n"),
+      /CreateIssueDialog.*field\.MarkdownField without hostedImages=/,
+      shape,
+    );
+  }
 });
 
 test("a new editor element fails until EDITOR_SITES names it", () => {

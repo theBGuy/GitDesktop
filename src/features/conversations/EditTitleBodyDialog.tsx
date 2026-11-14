@@ -163,8 +163,9 @@ export function useEditTitleBody(opts: {
   attach?: {
     draftKey: string;
     kind: ItemKind;
-    /** The host's on-open body seeding; default identity. */
-    seedBody?: (stored: string) => string;
+    /** A partial save's read-back as the description text, given the text that
+     *  save submitted; default identity. */
+    seedBody?: (stored: string, submitted: string) => string;
     /** A save of the same session that kept failed images, or failed after
      *  saving its other changes. */
     onPartialSaved?: () => void;
@@ -292,7 +293,7 @@ export function useEditTitleBody(opts: {
             discardFailed: !reseed,
           });
         if (body !== null && reseed && kept) {
-          const seeded = attach.seedBody?.(body) ?? body;
+          const seeded = attach.seedBody?.(body, value.body) ?? body;
           const missing = failed.filter(
             (name) => !referencesName(seeded, name),
           );
@@ -493,15 +494,17 @@ export const EditTitleBodyDialog = withForm({
       })(),
     );
     const attaching = attachments?.attaching === true;
-    // A running save of the shown item, from this session or an older one, and
-    // an image still attaching hold Save with a reason, so it keeps focus and
-    // says why. Other items' saves hold nothing here.
+    // A generation, an image still attaching and, with `attach`, a running save
+    // of the shown item from any session hold Save with a reason, so it keeps
+    // focus and says why. Other items' saves hold nothing here.
     const saveHold = useDisabledReason({
-      disabled: attaching || saveRunning,
+      disabled: generating || attaching || saveRunning,
       reason: (() => {
         switch (true) {
-          case saveRunning:
+          case saveRunning && !!attachments:
             return ACT_PENDING_REASON;
+          case generating:
+            return AI_DRAFT_PENDING_REASON;
           case attaching:
             return ATTACHING_REASON;
           default:
@@ -535,9 +538,14 @@ export const EditTitleBodyDialog = withForm({
     }, [saveRunning, open]);
     function submit() {
       // The chord's and form submit's guard (a held Save refuses its own click):
-      // the shown item's running save, from any session, or form-core's flag:
-      // the whole guard without `attach`, only a validating submit with it.
-      if (form.state.isSubmitting || shownSaveOf(ledger.get()).running) return;
+      // a generation, the shown item's running save from any session, or
+      // form-core's flag (all of it without `attach`, a validating submit with).
+      if (
+        generating ||
+        form.state.isSubmitting ||
+        shownSaveOf(ledger.get()).running
+      )
+        return;
       if (attaching) {
         attachments?.noteSubmitHeld();
         return;
@@ -647,38 +655,35 @@ export const EditTitleBodyDialog = withForm({
                 Cancel
               </Button>
               <form.AppForm>
-                {/* disabled while generating: the mouse path must match the chord
+                {/* Held while generating: the mouse path must match the chord
                     path's !generating gate, or a click could persist a
                     half-streamed title/body (create dialogs do the same). */}
-                {attachments ? (
-                  <span
-                    className={cn(
-                      "inline-flex",
-                      saveHold.blockedReason && "cursor-not-allowed",
-                    )}
-                    title={saveHold.wrapperTitle}
+                <span
+                  className={cn(
+                    "inline-flex",
+                    saveHold.blockedReason && "cursor-not-allowed",
+                  )}
+                  title={saveHold.wrapperTitle}
+                >
+                  <form.SubmitButton
+                    focusableWhenDisabled={!!saveHold.blockedReason}
+                    disabled={generating || attaching || saveRunning}
+                    pending={shownSave.running}
+                    aria-describedby={saveHold.describedBy}
+                    // The shortcut hint describes Save unless a reason holds it; the
+                    // reason then takes its description and the wrapper's hover.
+                    title={saveHold.blockedReason ? undefined : SUBMIT_HINT}
+                    className={ARIA_DISABLED_CLASS}
+                    onKeyDown={ignoreHeldEnter}
                   >
-                    <form.SubmitButton
-                      focusableWhenDisabled={!!saveHold.blockedReason}
-                      disabled={generating || attaching || saveRunning}
-                      pending={shownSave.running}
-                      aria-describedby={saveHold.describedBy}
-                      className={ARIA_DISABLED_CLASS}
-                      onKeyDown={ignoreHeldEnter}
-                    >
-                      Save
-                    </form.SubmitButton>
-                    {saveHold.blockedReason ? (
-                      <span id={saveHold.reasonId} className="sr-only">
-                        {saveHold.blockedReason}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : (
-                  <form.SubmitButton disabled={generating} title={SUBMIT_HINT}>
                     Save
                   </form.SubmitButton>
-                )}
+                  {saveHold.blockedReason ? (
+                    <span id={saveHold.reasonId} className="sr-only">
+                      {saveHold.blockedReason}
+                    </span>
+                  ) : null}
+                </span>
               </form.AppForm>
             </DialogFooter>
           </form>

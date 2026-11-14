@@ -26,6 +26,7 @@ import {
   useAttachmentOwner,
   useDraftAttachments,
 } from "@/lib/attachments/use-draft-attachments";
+import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 
@@ -213,6 +214,7 @@ function reasonOf(el: Element): string {
   return ids.map((id) => document.getElementById(id)?.textContent).join(" ");
 }
 const APPLYING = "Applying this change…";
+const AI_DRAFT = "Wait for the AI draft to finish";
 /** Save live: neither disabled nor held by a reason. */
 function expectSaveLive() {
   expect(saveButton()).not.toBeDisabled();
@@ -269,6 +271,39 @@ describe("edit dialog without attachments", () => {
     expect(saveButton()).not.toBeDisabled();
     fireEvent.click(saveButton());
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    await act(async () => pending.resolve(undefined));
+    await waitFor(() => expect(dialog()).toBeNull());
+  });
+
+  it("holds a local host's Save with the AI-draft reason while a generation runs, so a plain Enter's click is refused", async () => {
+    const save = vi.fn<Save>(async () => undefined);
+    const { open } = mount({ save, attach: false, generating: true });
+    await open();
+    expectSaveHeld(AI_DRAFT);
+    titleBox().focus();
+    // The held Save refuses the implicit-submit click; submit() is never reached.
+    await userEvent.keyboard("{Enter}");
+    await act(async () => undefined);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("describes a local host's live Save with the shortcut hint", async () => {
+    const { open } = mount({ save: vi.fn(), attach: false });
+    await open();
+    expectSaveLive();
+    expect(saveButton()).toHaveAccessibleDescription(SUBMIT_HINT);
+  });
+
+  it("gives a local host's running Save the AI-draft reason once a generation starts", async () => {
+    const pending = deferred<unknown>();
+    const save = vi.fn<Save>(() => pending.promise);
+    const { open, rerender } = mount({ save, attach: false });
+    await open();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(saveButton()).toBeDisabled();
+    rerender({ save, attach: false, generating: true });
+    expectSaveHeld(AI_DRAFT);
     await act(async () => pending.resolve(undefined));
     await waitFor(() => expect(dialog()).toBeNull());
   });
@@ -552,14 +587,32 @@ describe("edit dialog holds and late settles", () => {
     const save = vi.fn<Save>(async () => undefined);
     const { open } = mount({ save, generating: true });
     await open();
-    expect(saveButton()).toBeDisabled();
+    expectSaveHeld(AI_DRAFT);
     titleBox().focus();
     await modEnter();
     await act(async () => undefined);
     expect(save).not.toHaveBeenCalled();
     expect(reasonOf(screen.getByRole("button", { name: "Attach image" }))).toBe(
-      "Wait for the AI draft to finish",
+      AI_DRAFT,
     );
+  });
+
+  it("saves nothing while a generation runs: the held Save refuses a plain Enter, submit() a form submit", async () => {
+    const save = vi.fn<Save>(async () => undefined);
+    const { open } = mount({ save, generating: true });
+    await open();
+    expectSaveHeld(AI_DRAFT);
+    titleBox().focus();
+    // The held Save refuses the implicit-submit click; submit() is never reached.
+    await userEvent.keyboard("{Enter}");
+    await act(async () => undefined);
+    const form = dialog()?.querySelector("form");
+    if (!form) throw new Error("no form");
+    // A direct form submit is what reaches submit()'s generating arm.
+    fireEvent.submit(form);
+    await act(async () => undefined);
+    expect(save).not.toHaveBeenCalled();
+    expect(dialog()).not.toBeNull();
   });
 
   it("lets a save that settles after a close neither re-seed nor reopen, and still toasts (AC19)", async () => {

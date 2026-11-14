@@ -717,9 +717,15 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
     }
 }
 
-/// The structural checks: grammar, unique, 1..=10, each file present (a real file in a
-/// real session folder, never a link), each referenced. `None` or no names gives
-/// `Ok(None)`, and the post proceeds exactly as without attachments.
+/// Whether a folder's listed entry names hold `name` byte for byte. A case-insensitive
+/// file system also opens a case variant, which the frontend tracks as another image.
+fn has_exact_entry(listed: &[std::ffi::OsString], name: &str) -> bool {
+    listed.iter().any(|entry| entry.as_os_str() == name)
+}
+
+/// The structural checks: grammar, unique, 1..=10, each file present under exactly its
+/// name (a real file in a real session folder, never a link), each referenced. `None` or
+/// no names gives `Ok(None)`, and the post proceeds exactly as without attachments.
 pub(crate) fn post_checks(
     root: &Path,
     body: &str,
@@ -750,7 +756,14 @@ pub(crate) fn post_checks(
     if session_is_linked(&dir) {
         return Err(not_private(&dir));
     }
+    // An unreadable folder lists nothing, so every name is no longer attached.
+    let listed: Vec<std::ffi::OsString> = fs::read_dir(&dir)
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
     for name in &names {
+        if !has_exact_entry(&listed, name) {
+            return Err(no_longer_attached(name));
+        }
         match fs::symlink_metadata(dir.join(name)) {
             Ok(meta) if is_link(&meta) => return Err(not_private(&dir)),
             Ok(meta) if meta.is_file() => {}
@@ -1384,6 +1397,43 @@ pub(crate) mod tests {
         let second = stage_in(root.path(), Some(SID), Some("A.png"), &png).unwrap();
         assert_eq!(second.name, "A-2.png");
         assert_eq!(entries(&root.path().join(SID)), ["A-2.png", "a.png"]);
+    }
+
+    // A discarded name whose case variant was staged later is no longer attached, on a
+    // case-insensitive file system too: the variant is another image.
+    #[test]
+    fn post_checks_refuse_a_discarded_name_whose_case_variant_is_staged() {
+        let root = private_root();
+        let png = b64(&png_fixture(1, 1));
+        let old = stage_in(root.path(), Some(SID), Some("a.png"), &png).unwrap();
+        assert_eq!(old.name, "a.png");
+        discard_in(root.path(), SID, Some(&["a.png".to_string()])).unwrap();
+        let new = stage_in(root.path(), Some(SID), Some("A.png"), &png).unwrap();
+        assert_eq!(new.name, "A.png");
+        assert_eq!(
+            msg(post_checks(
+                root.path(),
+                "![x](a.png)",
+                refs(SID, &["a.png"])
+            )),
+            "a.png is no longer attached. Attach it again."
+        );
+        let live = post_checks(root.path(), "![x](A.png)", refs(SID, &["A.png"]));
+        assert_eq!(live.unwrap().unwrap().names, ["A.png"]);
+    }
+
+    // The exact-name decision itself, so case-sensitive file systems pin it too.
+    #[test]
+    fn an_entry_matches_only_its_exact_name() {
+        let listed: Vec<std::ffi::OsString> = ["A.png", "image-1.png"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        assert!(has_exact_entry(&listed, "A.png"));
+        assert!(has_exact_entry(&listed, "image-1.png"));
+        for name in ["a.png", "Image-1.png", "IMAGE-1.PNG", "A.pn", "A.png "] {
+            assert!(!has_exact_entry(&listed, name), "{name}");
+        }
+        assert!(!has_exact_entry(&[], "A.png"));
     }
 
     // Exactly 10 MiB is accepted.

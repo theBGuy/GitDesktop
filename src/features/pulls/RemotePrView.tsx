@@ -700,6 +700,12 @@ export function useFocusCommentAction(
   );
 }
 
+/** `text` with `lines` appended as a trailing block, joined as the composers do. */
+function withRefLines(text: string, lines: string[]): string {
+  if (lines.length === 0) return text;
+  return [text.trimEnd(), lines.join("\n")].filter(Boolean).join("\n\n");
+}
+
 export function RemotePrView({
   repoPath,
   number,
@@ -2142,7 +2148,7 @@ export function RemotePrView({
     attach: {
       draftKey: editDraftKey,
       kind: "pr",
-      seedBody: (stored) => seedEditBody(stored),
+      seedBody: (stored, submitted) => partialSaveText(stored, submitted),
       onPartialSaved: () => {
         const sent = sentEditBaseRef.current;
         if (sent !== undefined) setSavedEditBase(sent);
@@ -3262,8 +3268,7 @@ export function RemotePrView({
   // because TS doesn't carry the outer `!pr` guard into these hoisted closures.
   const prForGen = pr;
   /** A stored body as the edit field's text, with the active cluster's chips
-   *  reset from its trailing ref block: on open, and for a partial save's
-   *  read-back. */
+   *  reset from its trailing ref block (on open). */
   function seedEditBody(stored: string): string {
     if (canLinkIssues) {
       // Native active: numeric refs → chips; any trailing Jira line rides back in
@@ -3278,6 +3283,26 @@ export function RemotePrView({
       const { text, jiraRefs } = splitBodyRefBlock(stored, "jira");
       resetJiraChips(jiraRefs);
       return text;
+    }
+    return stored;
+  }
+  /** A partial save's read-back as the edit field's text, leaving the chips
+   *  alone: they composed its trailing block and hold every change made since.
+   *  Block lines the submitted text itself ended with stay in the text. */
+  function partialSaveText(stored: string, submitted: string): string {
+    if (canLinkIssues) {
+      const typed = splitBodyRefBlock(submitted, "native").refs.map((r) =>
+        r.keyword === "closes"
+          ? `Closes #${r.number}`
+          : `Relates to #${r.number}`,
+      );
+      return withRefLines(splitBodyRefBlock(stored, "native").text, typed);
+    }
+    if (canJiraMention) {
+      const typed = splitBodyRefBlock(submitted, "jira").jiraRefs.map(
+        (key) => `Relates to ${key}`,
+      );
+      return withRefLines(splitBodyRefBlock(stored, "jira").text, typed);
     }
     return stored;
   }

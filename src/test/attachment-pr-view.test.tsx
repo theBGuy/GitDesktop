@@ -14,6 +14,7 @@ import { LinkedIssuesField } from "@/features/pulls/LinkedIssuesField";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import {
+  forgeIssueList,
   forgePrApprovals,
   forgePrComment,
   forgePrEdit,
@@ -22,7 +23,12 @@ import {
   forgeStatus,
   gitBranches,
 } from "@/lib/git/api";
-import type { Branch, ForgeStatus, PrDetails } from "@/lib/git/types";
+import type {
+  Branch,
+  ForgeStatus,
+  IssueInfo,
+  PrDetails,
+} from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/handler-registry";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -36,6 +42,7 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(),
+  forgeIssueList: vi.fn(),
   forgePrView: vi.fn(),
   forgePrApprovals: vi.fn(),
   forgePrComment: vi.fn(),
@@ -177,6 +184,9 @@ beforeEach(() => {
   vi.mocked(attachmentStage).mockReset();
   vi.mocked(attachmentDiscard).mockClear();
   vi.mocked(forgePrEdit).mockReset();
+  // The open-issues page the chips resolve against: unread unless a test lists one.
+  vi.mocked(forgeIssueList).mockReset();
+  vi.mocked(forgeIssueList).mockRejectedValue(new Error("not listed"));
   vi.mocked(gitBranches).mockResolvedValue(
     ["main", "next", "old"].map(
       (name) =>
@@ -372,7 +382,11 @@ describe("RemotePrView edit attachments", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("re-seeds a partial save's read-back through the issue chips (AC14)", async () => {
+  it("re-seeds a partial save's read-back as text beside the issue chips (AC14)", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
     vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
     await openPrEdit({ issues: true });
     await pasteImage();
@@ -397,6 +411,110 @@ describe("RemotePrView edit attachments", () => {
         "Added to the description on create.",
       ),
     ).toBeNull();
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  const sentBody = (call: number) =>
+    vi.mocked(forgePrEdit).mock.calls[call][3] as string;
+  const chipButton = (n: number) =>
+    screen.queryByRole("button", { name: new RegExp(`issue ${n}:`) });
+
+  it("keeps the chip edits made while a partial save ran, and sends them next", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3\nCloses #4",
+    }));
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit({ issues: true });
+    await pasteImage();
+    const pending = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(sentBody(0)).toMatch(/\n\nCloses #3\nCloses #4$/);
+    fireEvent.click(button("Remove #3"));
+    fireEvent.click(button(/^Closes issue 4:/));
+    await waitFor(() => expect(button(/^Relates to issue 4:/)).toBeTruthy());
+    await act(async () =>
+      pending.resolve({
+        failedAttachments: ["image-1.png"],
+        body: sentBody(0),
+      }),
+    );
+    await waitFor(() => expect(politeLine()).toBe(PARTIAL_LINE));
+    expect(editBox().value).not.toMatch(/#[34]/);
+    expect(chipButton(3)).toBeNull();
+    expect(button(/^Relates to issue 4:/)).toBeTruthy();
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(sentBody(1)).toMatch(/\n\nRelates to #4$/);
+    expect(sentBody(1)).not.toContain("#3");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("brings back no extracted chip removed before a partial save", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      headRefName: "fix/42-thing",
+    }));
+    vi.mocked(forgeIssueList).mockResolvedValue([
+      {
+        number: 42,
+        url: "",
+        title: "Fix the thing",
+        state: "OPEN",
+        createdAt: "",
+        updatedAt: "",
+        author: null,
+        labels: [],
+      } satisfies IssueInfo,
+    ]);
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(42)).toBeTruthy());
+    fireEvent.click(button("Remove #42"));
+    await waitFor(() => expect(chipButton(42)).toBeNull());
+    await pasteImage();
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: ["image-1.png"],
+      body: "x ![](image-1.png)",
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(editBox().value).toBe("x ![](image-1.png)"));
+    await act(async () => undefined);
+    await act(async () => undefined);
+    expect(chipButton(42)).toBeNull();
+  });
+
+  it("keeps ref lines the text itself ended with through a partial save", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    await openPrEdit({ issues: true });
+    await pasteImage();
+    const typed = `${editBox().value}\n\nRelates to #5`;
+    fireEvent.change(editBox(), { target: { value: typed } });
+    const pending = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(sentBody(0)).toBe(`${typed}\n\nCloses #3`);
+    await act(async () =>
+      pending.resolve({
+        failedAttachments: ["image-1.png"],
+        body: sentBody(0),
+      }),
+    );
+    await waitFor(() => expect(politeLine()).toBe(PARTIAL_LINE));
+    expect(editBox().value).toBe(typed);
+    expect(button(/^Closes issue 3:/)).toBeTruthy();
     fireEvent.click(button("Cancel"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
