@@ -66,6 +66,7 @@ import {
   useRepoStatus,
   useUpdateFromUpstream,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { BranchRewriteStatus, ForkPrMatch } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
@@ -128,6 +129,7 @@ import {
   type MismatchMenu,
   type MismatchMenuItem,
   SYNC_BUSY_REASON,
+  sessionBranchPushReason,
 } from "./sync-controls-state";
 import { usePullDropGuard } from "./usePullDropGuard";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
@@ -371,6 +373,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     localAtRisk,
     remoteNewExists,
     keptLocal: keptHead !== null && keptHead === head?.name,
+    sessionHead: !!head?.name && isSessionBranchName(head.name),
   };
   const sync = deriveSyncControls(syncInput);
   // A fork-PR check holds Push alone, at both of its render sites; derive's own
@@ -761,6 +764,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    if (refuseWhileSiblingPush(branch)) return;
     let guard: PushGuard | undefined;
     // The push starts here, outside the try: the compiler refuses its
     // variables' value blocks inside one, and the push scans read them inline.
@@ -873,6 +877,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     forceConfirm?.branch ?? null,
     keptHead,
   );
+  // A HEAD that moved onto an agent session's branch under the open confirm
+  // holds it too. Ranked after Keep local, which holds only while HEAD is still
+  // the confirm's branch: a session HEAD never opens the confirm, so the two
+  // can't both hold.
+  const forceSessionBranch =
+    head?.name && isSessionBranchName(head.name) ? head.name : null;
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
   // head pushes a separate copy to origin and leaves the PR untouched — check
@@ -994,6 +1004,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       releaseMark();
       return;
     }
+    if (refuseWhileSiblingPush(branch)) {
+      releaseMark();
+      return;
+    }
     const presence = presenceUnderUrls(
       remoteHasBranch(list, "origin", branch),
       fetchUrl,
@@ -1059,6 +1073,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       }
       if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
         return;
+      if (refuseWhileSiblingPush(branch)) return;
       if (match) {
         withdrawPublishConfirm(publishAsk);
         openGuard(match);
@@ -1117,6 +1132,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // A push that started during the reads refuses before any prompt.
     if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
       return;
+    if (refuseWhileSiblingPush(branch)) return;
     const ok = await askPublishConfirm(
       {
         branch,
@@ -1140,6 +1156,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    if (refuseWhileSiblingPush(branch)) return;
     const destination =
       pushBranch === branch ? {} : { remoteBranch: pushBranch };
     try {
@@ -1194,6 +1211,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       toast.info("HEAD moved — nothing was pushed.");
       return;
     }
+    if (refuseWhileSiblingPush(branch)) return;
     // Runs outside the try that catches it: the compiler refuses its value
     // blocks inside one, and the push scans read its writes where they are.
     const pushing = (async () => {
@@ -1266,6 +1284,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           toast.info("HEAD moved — nothing was pushed.");
           return;
         }
+        if (refuseWhileSiblingPush(branch)) return;
         await push.mutateAsync({
           setUpstream: true,
           branch,
@@ -1341,6 +1360,20 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     return refuseWhilePushRuns(queryClient, repoPath);
   }
 
+  // A push of a branch another worktree of this repository is already sending
+  // would race it. Own pushes refuse first through refuseWhilePushing, so this
+  // adds only the sibling arm; `branch` absent = HEAD.
+  function refuseWhileSiblingPush(branch?: string): boolean {
+    const sending = branch ?? headNameRef.current;
+    if (!sending) return false;
+    return refuseWhileBranchPushes(
+      queryClient,
+      repoPath,
+      sending,
+      headNameRef.current ?? null,
+    );
+  }
+
   // Hotkeys mirror the buttons' own holds (sync-controls-state.ts); the routes
   // they start refuse while another surface's push runs. The held Publish arm
   // renders none of these four buttons, so every one of their hotkeys holds too.
@@ -1357,6 +1390,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "push",
     () => {
+      if (sync.pushSessionReason) {
+        toast.info(sync.pushSessionReason);
+        return;
+      }
       if (sync.pushKeptLocalReason) {
         toast.info(sync.pushKeptLocalReason);
         return;
@@ -1706,6 +1743,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
               variant="destructive"
               disabled={
                 forceKeptBranch !== null ||
+                forceSessionBranch !== null ||
                 forceActPending ||
                 otherPushRunning ||
                 !!offlineHold
@@ -1714,6 +1752,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                 switch (true) {
                   case forceKeptBranch !== null:
                     return keptLocalReason(forceKeptBranch, "push");
+                  case forceSessionBranch !== null:
+                    return sessionBranchPushReason(forceSessionBranch);
                   case forceActPending:
                     return ACT_PENDING_REASON;
                   case otherPushRunning:

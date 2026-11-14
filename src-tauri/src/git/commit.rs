@@ -937,7 +937,7 @@ async fn commit_parents(repo_path: &str, oid: &str) -> Option<Vec<String>> {
 /// The refusal an undo gets when HEAD is no longer the commit the user chose.
 /// KEEP IN STEP: this exact sentence is the one wording for a moved-HEAD undo on
 /// every route (GUI toast, MCP tool error); ops.rs and branches.rs carry the
-/// reset twins of its "… — nothing was <verb>." shape.
+/// ref-move refusals (reset and delete) of its "… — nothing was <verb>." shape.
 const UNDO_HEAD_MOVED: &str = "The latest commit changed — nothing was undone.";
 
 /// The refusal an undo gets when HEAD sits on another branch (or none) than the one

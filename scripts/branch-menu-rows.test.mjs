@@ -409,7 +409,7 @@ function sourceProblems(raw) {
   // Session branches are filtered upstream of the helper, on both lists.
   need(
     flat.includes(
-      'constallBranches=useMemo(()=>(branches.data??[]).filter((b)=>!b.name.startsWith("gd/session/")),[branches.data],);',
+      "constallBranches=useMemo(()=>(branches.data??[]).filter((b)=>!isSessionBranchName(b.name)),[branches.data],);",
     ),
     "gd/session filter on allBranches",
   );
@@ -473,7 +473,10 @@ test("the source pins catch their mutants", () => {
       "  ) {\n    setRewriteProbe(null);\n    setBranchMenuOpen(false);\n",
     ],
     // the session filter moved off the memo
-    ['!b.name.startsWith("gd/session/")', "true"],
+    [
+      "(branches.data ?? []).filter((b) => !isSessionBranchName(b.name))",
+      "(branches.data ?? []).filter((b) => true)",
+    ],
     // the list no longer telling the pin which row holds focus
     [
       '        setFocusedName(\n          e.target.closest("[data-row]")?.getAttribute("data-row") ?? null,\n        );\n',

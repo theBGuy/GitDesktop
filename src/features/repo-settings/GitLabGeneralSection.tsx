@@ -21,6 +21,7 @@ import {
   useGlRepoSettings,
   useUpdateGlRepoSettings,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type {
   Branch,
   GitLabRepoSettings,
@@ -273,7 +274,7 @@ function GitLabGeneralForm({
   // agent-session branches (`gd/session/*`) — they're app-internal.
   const branchNames = branches
     .map((b) => b.name)
-    .filter((n) => !n.startsWith("gd/session/"));
+    .filter((n) => !isSessionBranchName(n));
   const branchOptions =
     form.defaultBranch && !branchNames.includes(form.defaultBranch)
       ? [form.defaultBranch, ...branchNames]

@@ -91,7 +91,7 @@ import {
   useUndoCommit,
   useUnpushedCount,
 } from "@/lib/git/queries";
-import { sanitizeRefName } from "@/lib/git/ref-name";
+import { isSessionBranchName, sanitizeRefName } from "@/lib/git/ref-name";
 import type {
   CommitDetails,
   CommitSummary,
@@ -640,7 +640,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // ComparePanel / BranchSwitcher. Archived branches are hidden here for the same
   // reason they are hidden elsewhere: they were archived to get them out of the way.
   const pickOntoCandidates = (branches.data ?? []).filter(
-    (b) => !b.isCurrent && !b.name.startsWith("gd/session/"),
+    (b) => !b.isCurrent && !isSessionBranchName(b.name),
   );
   const targetBranches = pickOntoCandidates.filter((b) => !b.archived);
   const fromCommitPlaceholder = useMemo(

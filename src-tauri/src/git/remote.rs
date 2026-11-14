@@ -817,6 +817,26 @@ pub(crate) async fn remote_head_branch(repo_path: &str, remote: &str) -> AppResu
     .await
 }
 
+/// The full ref `refs/remotes/<remote>/HEAD` points at; None when unset or unreadable
+/// (unmeasured).
+pub(crate) async fn remote_head_target(repo_path: &str, remote: &str) -> AppResult<Option<String>> {
+    read_symbolic_ref(repo_path, &format!("refs/remotes/{remote}/HEAD"), "").await
+}
+
+/// Whether an upstream is its remote's default branch, comparing FULL tracking refs so
+/// a remapped fetch refspec answers the same as the default one. Some only from a
+/// remote HEAD that answered; None = unmeasured (no name fallback).
+pub(crate) fn upstream_is_remote_default(
+    remote_head_target: Option<&str>,
+    upstream_tracking_ref: &str,
+) -> Option<bool> {
+    let target = remote_head_target.filter(|t| !t.is_empty())?;
+    if upstream_tracking_ref.is_empty() {
+        return None;
+    }
+    Some(target == upstream_tracking_ref)
+}
+
 /// Read a symbolic ref and strip `prefix` off its target, returning the tail
 /// (the branch name). `None` when the ref is unset — `git symbolic-ref` exits
 /// non-zero — or its target doesn't start with `prefix`.
@@ -1106,7 +1126,7 @@ fn refuse_session_destination(branch: &str, remote: &str, dest: &str) -> AppResu
 }
 
 /// Where a bare push of `local` lands, off the first line of a HEAD tracking read
-/// ([`UPSTREAM_TRACKING_FORMAT`]'s four fields, then the push atoms): None/None when the
+/// ([`UPSTREAM_TRACKING_FORMAT`]'s fields, then the push atoms): None/None when the
 /// line is missing (an unborn HEAD), names another ref, or carries no atoms. Out of
 /// reach: an upstream remote with no fetch refspec leaves `%(upstream)` and `%(push)`
 /// empty while push.default=upstream still pushes to `branch.<b>.merge` (git 2.51.1).
@@ -1124,7 +1144,7 @@ fn bare_push_destination(
     }
     let upstream_remoteref = fields.get(1).copied().unwrap_or("");
     let upstream_remote = fields.get(2).copied().unwrap_or("");
-    let atoms = fields.get(4..).unwrap_or(&[]);
+    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
     crate::git::branches::push_destination_fields(local, atoms, upstream_remote, upstream_remoteref)
 }
 
@@ -1137,7 +1157,10 @@ fn bare_push_local_upstream(text: &str, refname: &str) -> Option<String> {
         return None;
     };
     let line = text.lines().next()?;
-    let push_remote = line.split('\0').nth(4).unwrap_or(&remotename);
+    let push_remote = line
+        .split('\0')
+        .nth(UPSTREAM_TRACKING_FIELDS)
+        .unwrap_or(&remotename);
     (push_remote == ".").then_some(up)
 }
 
@@ -1578,6 +1601,10 @@ fn without_force_if_includes<'a>(argv: &[&'a str]) -> Vec<&'a str> {
 /// of the remote's fetch-refspec layout, and covers a local (`.`) upstream.
 pub(crate) const UPSTREAM_TRACKING_FORMAT: &str =
     "--format=%(refname)%00%(upstream:remoteref)%00%(upstream:remotename)%00%(upstream:track)";
+
+/// How many fields [`UPSTREAM_TRACKING_FORMAT`] writes, so the push atoms a read appends
+/// start at this index.
+pub(crate) const UPSTREAM_TRACKING_FIELDS: usize = 4;
 
 /// What a local branch tracks, as [`build_push_args`] needs it.
 #[derive(Debug, Clone, PartialEq)]
@@ -3136,8 +3163,26 @@ mod tests {
     }
 
     /// Set up a bare origin seeded with one commit on `main`, and return the temp
-    /// guard, the base dir, and the origin's path plus its `file://` URL.
+    /// guard, the base dir, and the origin's path plus its `file://` URL. The work
+    /// repo pins `remote.origin.mirror=false` and `remote.pushDefault=origin` locally,
+    /// so a hostile global config can't turn its pushes into mirror pushes or route
+    /// them elsewhere.
     async fn seeded_origin(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+        seeded_origin_pinned(tag, true).await
+    }
+
+    /// [`seeded_origin`] without the `remote.pushDefault` pin, for tests that assert
+    /// that key starts absent locally; a global `remote.pushDefault` stays out of reach.
+    async fn seeded_origin_unpinned_push_default(
+        tag: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
+        seeded_origin_pinned(tag, false).await
+    }
+
+    async fn seeded_origin_pinned(
+        tag: &str,
+        pin_push_default: bool,
+    ) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
         let (guard, base) = temp_base(tag);
         let origin = base.join("origin.git");
         let work = base.join("work");
@@ -3150,8 +3195,88 @@ mod tests {
         init_repo(&work_s, "a.txt").await;
         run(&work_s, &["branch", "-M", "main"]).await;
         run(&work_s, &["remote", "add", "origin", &url]).await;
+        run(&work_s, &["config", "remote.origin.mirror", "false"]).await;
+        if pin_push_default {
+            run(&work_s, &["config", "remote.pushDefault", "origin"]).await;
+        }
         run(&work_s, &["push", "-q", "-u", "origin", "main"]).await;
         (guard, base, origin.to_string_lossy().into_owned(), url)
+    }
+
+    /// Reads `key` in `repo` with a hostile global config file pointed at by
+    /// `GIT_CONFIG_GLOBAL` on this one spawn; `local` restricts it to the repo's own file.
+    async fn config_under_hostile_global(
+        repo: &str,
+        global: &str,
+        key: &str,
+        local: bool,
+    ) -> crate::git::runner::GitOutput {
+        let mut args = vec!["config"];
+        if local {
+            args.push("--local");
+        }
+        args.extend(["--get", key]);
+        crate::git::runner::run_git_raw_env(
+            Some(repo),
+            &args,
+            &[("GIT_CONFIG_GLOBAL", global)],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn seeded_origin_holds_under_a_hostile_global_config() {
+        let (_g, scratch) = temp_base("hostile-global");
+        let global = scratch.join("hostile.gitconfig");
+        std::fs::write(
+            &global,
+            "[remote \"origin\"]\n\tmirror = true\n[remote]\n\tpushDefault = elsewhere\n",
+        )
+        .unwrap();
+        let global = global.to_string_lossy().into_owned();
+        let read =
+            |out: crate::git::runner::GitOutput| (out.code, out.stdout_lossy().trim().to_string());
+        // The hostile file is live: a repo without the pins reads its values.
+        let control_dir = scratch.join("control");
+        run(&scratch.to_string_lossy(), &["init", "-q", "control"]).await;
+        let control = control_dir.to_string_lossy().into_owned();
+        let mirror = config_under_hostile_global(&control, &global, "remote.origin.mirror", false);
+        assert_eq!(read(mirror.await), (0, "true".into()), "control");
+
+        let (_guard, base, _origin, _url) = seeded_origin("hostile-pinned").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let mirror = config_under_hostile_global(&work, &global, "remote.origin.mirror", false);
+        assert_eq!(read(mirror.await), (0, "false".into()));
+        let push = config_under_hostile_global(&work, &global, "remote.pushDefault", false);
+        assert_eq!(read(push.await), (0, "origin".into()));
+
+        let (_guard, base, _origin, _url) =
+            seeded_origin_unpinned_push_default("hostile-unpinned").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let mirror = config_under_hostile_global(&work, &global, "remote.origin.mirror", false);
+        assert_eq!(read(mirror.await), (0, "false".into()));
+        let local_push = config_under_hostile_global(&work, &global, "remote.pushDefault", true);
+        assert_eq!(read(local_push.await).0, 1, "no local remote.pushDefault");
+    }
+
+    #[test]
+    fn upstream_is_remote_default_table() {
+        let full = "refs/remotes/origin/mirror/main";
+        for (target, upstream, want) in [
+            (None, full, None),
+            (Some(""), full, None),
+            (Some(full), full, Some(true)),
+            (Some("refs/remotes/origin/main"), full, Some(false)),
+            (Some(full), "", None),
+        ] {
+            assert_eq!(
+                super::upstream_is_remote_default(target, upstream),
+                want,
+                "{target:?} vs {upstream:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4929,9 +5054,11 @@ mod tests {
         assert_eq!(local("", r), None, "unborn");
     }
 
+    /// Unpinned, so the untracked HEAD reads no push remote, the shape most repos take.
     #[tokio::test]
     async fn session_publish_guard_lets_feature_publish() {
-        let (_guard, base, _origin, _url) = seeded_origin("session-publish-feature").await;
+        let (_guard, base, _origin, _url) =
+            seeded_origin_unpinned_push_default("session-publish-feature").await;
         let work = base.join("work").to_string_lossy().into_owned();
         run(&work, &["checkout", "-q", "-b", "feature/y"]).await;
         git_push_core(
@@ -5423,7 +5550,8 @@ mod tests {
     /// writes is beyond the held-lock seam; its url-only state fails a re-run.
     #[tokio::test]
     async fn git_loses_each_remote_verbs_config_write_at_a_measured_point() {
-        let (_guard, base, _origin_s, url) = seeded_origin("remote-verb-shapes").await;
+        let (_guard, base, _origin_s, url) =
+            seeded_origin_unpinned_push_default("remote-verb-shapes").await;
         let work = base.join("work");
         let work_s = work.to_string_lossy().into_owned();
         let lock = work.join(".git").join("config.lock");
@@ -5495,7 +5623,8 @@ mod tests {
     async fn remote_verbs_that_lose_the_config_lock_still_land() {
         use crate::git::runner::{release_config_lock_before_attempt, CONFIG_WRITE_ATTEMPT_HOOK};
         use std::sync::atomic::Ordering;
-        let (_guard, base, origin_s, url) = seeded_origin("remote-verb-repairs").await;
+        let (_guard, base, origin_s, url) =
+            seeded_origin_unpinned_push_default("remote-verb-repairs").await;
         let work = base.join("work");
         let work_s = work.to_string_lossy().into_owned();
         let lock = work.join(".git").join("config.lock");
@@ -5646,7 +5775,8 @@ mod tests {
     /// changed nothing beyond what git itself did, and trying again finishes.
     #[tokio::test]
     async fn remote_verbs_whose_repair_also_loses_say_try_again() {
-        let (_guard, base, _origin_s, url) = seeded_origin("remote-verb-held").await;
+        let (_guard, base, _origin_s, url) =
+            seeded_origin_unpinned_push_default("remote-verb-held").await;
         let work = base.join("work");
         let work_s = work.to_string_lossy().into_owned();
         run(&work_s, &["branch", "--unset-upstream", "main"]).await;
@@ -5702,7 +5832,8 @@ mod tests {
         use crate::git::runner::CONFIG_WRITE_ATTEMPT_HOOK;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
-        let (_guard, base, _origin_s, _url) = seeded_origin("remote-push-default-held").await;
+        let (_guard, base, _origin_s, _url) =
+            seeded_origin_unpinned_push_default("remote-push-default-held").await;
         let work = base.join("work");
         let work_s = work.to_string_lossy().into_owned();
         run(&work_s, &["branch", "--unset-upstream", "main"]).await;
@@ -6074,11 +6205,7 @@ mod tests {
         let (_guard, base, origin_s, _url) = seeded_origin("name-mismatch").await;
         let work_s = base.join("work").to_string_lossy().into_owned();
         run(&work_s, &["config", "push.default", "simple"]).await;
-        for key in [
-            "branch.feat/y.pushRemote",
-            "remote.pushDefault",
-            "remote.origin.push",
-        ] {
+        for key in ["branch.feat/y.pushRemote", "remote.origin.push"] {
             let out = run_git_raw(Some(&work_s), &["config", "--get", key], DEFAULT_TIMEOUT)
                 .await
                 .unwrap();
@@ -6273,11 +6400,7 @@ mod tests {
         let (_guard, base, origin_s, _url) = seeded_origin("pull-upstream").await;
         let work_s = base.join("work").to_string_lossy().into_owned();
         run(&work_s, &["config", "push.default", "simple"]).await;
-        for key in [
-            "branch.pr-7.pushRemote",
-            "remote.pushDefault",
-            "remote.origin.push",
-        ] {
+        for key in ["branch.pr-7.pushRemote", "remote.origin.push"] {
             let out = run_git_raw(Some(&work_s), &["config", "--get", key], DEFAULT_TIMEOUT)
                 .await
                 .unwrap();
@@ -7412,6 +7535,14 @@ and the repository exists.
         assert_eq!(resolve_push_target(None, "upstream", false), "upstream");
         assert_eq!(resolve_push_target(None, "", false), "origin");
         assert_eq!(resolve_push_target(None, "upstream", true), "origin");
+    }
+
+    #[test]
+    fn upstream_tracking_fields_counts_the_format_atoms() {
+        let atoms = UPSTREAM_TRACKING_FORMAT
+            .strip_prefix("--format=")
+            .expect("the format is a --format= argument");
+        assert_eq!(atoms.split("%00").count(), super::UPSTREAM_TRACKING_FIELDS);
     }
 
     #[test]

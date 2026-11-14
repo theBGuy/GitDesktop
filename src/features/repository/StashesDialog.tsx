@@ -1,16 +1,21 @@
 import { TrashIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useDeferredValue,
   useEffect,
   useEffectEvent,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
 import { DiffStat } from "@/components/diff-stat";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { ListRowSkeletons } from "@/components/list-row-skeleton";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -44,8 +49,40 @@ import {
   useSlotRead,
 } from "@/features/diff/file-slot";
 import type { ImageRevs } from "@/features/diff/ImageDiff";
-import { presentError } from "@/lib/error-summary";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
+  alreadyBackNote,
+  DELETED_BRANCHES_CAPTION,
+  DELETED_BRANCHES_EMPTY,
+  DELETED_BRANCHES_LOADING_NAME,
+  DELETED_BRANCHES_READ_FAILED,
+  LOST_STASHES_CAPTION,
+  nameExistsHeld,
+  PRUNED_ROW_NOTE,
+  RECOVER_DESCRIPTION,
+  RECOVER_TITLE,
+  REMOVE_FROM_LIST_LABEL,
+  REMOVING_HELD,
+  RESTORE_BRANCH_LABEL,
+  RESTORE_RUNNING_HELD,
+  removeFailedTitle,
+  shortTip,
+} from "@/lib/deleted-branches/copy";
+import {
+  DELETED_BRANCHES_KEY,
+  useDeletedBranches,
+  useDeletedNameTips,
+  useDeletedTipStates,
+} from "@/lib/deleted-branches/queries";
+import { restoreAndReport } from "@/lib/deleted-branches/restore";
+import {
+  type DeletedBranchEntry,
+  forgetDeletedBranch,
+} from "@/lib/deleted-branches/store";
+import { presentError } from "@/lib/error-summary";
+import { tipOf } from "@/lib/git/api";
+import {
+  useBranches,
   useDropStashAtAnyDepth,
   useOrphanedStashes,
   useOrphanedStashFileDiff,
@@ -60,7 +97,7 @@ import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
-import { parseableDate } from "@/lib/time";
+import { parseableDate, validEpochMs } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
@@ -80,6 +117,16 @@ import {
 
 /** Which source the left list is drawn from. */
 type StashesView = "stashes" | "recoverable";
+
+/** The dialog's title and description follow the view. */
+const VIEW_COPY: Record<StashesView, { title: string; description: string }> = {
+  stashes: {
+    title: "Stashes",
+    description:
+      "Changes set aside with stash. Apply re-applies a stash to the working tree; pop also removes it from the stack.",
+  },
+  recoverable: { title: RECOVER_TITLE, description: RECOVER_DESCRIPTION },
+};
 
 /** Which list the inner file browser was opened from. Both kinds read the stash
  *  commit by its sha, never a live stash's `stash@{N}` slot, which shifts. */
@@ -155,9 +202,9 @@ export function StashesDialog({
   // gate; the ref refuses the second, so one confirm fires one drop.
   const droppingRef = useRef(false);
   // Apply/pop confirm as a NESTED dialog, like the drop confirm below. The
-  // app-root confirm host is a SIBLING dialog, and Base UI only suppresses a
-  // parent's Escape for dialogs nested in its React tree — Esc over a sibling
-  // would close this dialog underneath it too.
+  // app-root confirm host is a SIBLING dialog: it handles its own Escape once
+  // it holds focus, but an Escape in the frame before that still reaches this
+  // dialog. Base UI suppresses a parent's Escape only for nested dialogs.
   const [confirmApply, setConfirmApply] = useState<PendingApply | null>(null);
   const shownApply = useRetained(confirmApply);
   const shownDrop = useRetained(confirmDrop);
@@ -303,12 +350,8 @@ export function StashesDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[70vh] flex-col sm:max-w-5xl">
         <DialogHeader>
-          <DialogTitle>Stashes</DialogTitle>
-          <DialogDescription>
-            {view === "recoverable"
-              ? "Lost, uncommitted work that fell out of the stash list — often left by an interrupted operation. Restore re-applies it to the working tree."
-              : "Changes set aside with stash. Apply re-applies a stash to the working tree; pop also removes it from the stack."}
-          </DialogDescription>
+          <DialogTitle className="pr-8">{VIEW_COPY[view].title}</DialogTitle>
+          <DialogDescription>{VIEW_COPY[view].description}</DialogDescription>
         </DialogHeader>
 
         {/* Segmented source toggle — keyboard-focusable native buttons. */}
@@ -467,9 +510,357 @@ export function StashesDialog({
   );
 }
 
-/** The "Recoverable" view: auto-scans (fsck) for orphaned stashes, lists them,
- *  browses their files/diffs, and restores non-destructively. */
+/** The "Recoverable" view: the branches deleted in this app above the lost
+ *  stashes. Each section renders on its own reads, so the slow fsck scan never
+ *  hides the deleted list, and the stash pane's state never re-keys with it. */
 function RecoverableView({
+  repoPath,
+  open,
+}: {
+  repoPath: string;
+  open: boolean;
+}) {
+  const stashesCaption = useId();
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <DeletedBranchesSection repoPath={repoPath} open={open} />
+      <section
+        aria-labelledby={stashesCaption}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <h3
+          id={stashesCaption}
+          className="pb-1 text-xs font-medium text-muted-foreground"
+        >
+          {LOST_STASHES_CAPTION}
+        </h3>
+        <LostStashesPane repoPath={repoPath} open={open} />
+      </section>
+    </div>
+  );
+}
+
+/** A deleted-branch row's state; the footer's one button reads it. */
+type RowState =
+  | "restorable"
+  | "pruned"
+  | "nameExists"
+  | "alreadyBack"
+  | "restoring"
+  | "removing";
+
+/** What the footer button says and does per selected row state; a non-null
+ *  reason holds it. Pruned rows offer only removal: their commit is gone. An
+ *  already-back row restores through the same path, which re-reads git, so a
+ *  stale tip read ends in whatever that read finds (a restore, or the
+ *  name-exists answer). */
+const ROW_FOOTER: Record<
+  RowState,
+  {
+    label: string;
+    held: (name: string) => string | null;
+    action: "restore" | "forget" | null;
+  }
+> = {
+  restorable: {
+    label: RESTORE_BRANCH_LABEL,
+    held: () => null,
+    action: "restore",
+  },
+  pruned: { label: REMOVE_FROM_LIST_LABEL, held: () => null, action: "forget" },
+  nameExists: {
+    label: RESTORE_BRANCH_LABEL,
+    held: nameExistsHeld,
+    action: null,
+  },
+  alreadyBack: {
+    label: RESTORE_BRANCH_LABEL,
+    held: () => null,
+    action: "restore",
+  },
+  restoring: {
+    label: RESTORE_BRANCH_LABEL,
+    held: () => RESTORE_RUNNING_HELD,
+    action: null,
+  },
+  removing: {
+    label: REMOVE_FROM_LIST_LABEL,
+    held: () => REMOVING_HELD,
+    action: null,
+  },
+};
+
+/** The note under a row whose state needs one. */
+const ROW_NOTE: Partial<
+  Record<RowState, { className: string; text: (name: string) => string }>
+> = {
+  pruned: { className: "text-destructive", text: () => PRUNED_ROW_NOTE },
+  alreadyBack: { className: "text-muted-foreground", text: alreadyBackNote },
+};
+
+/** The in-flight press; an object, so a settle clears only its own. Held per
+ *  repository: a press there holds nothing in another repository's list. */
+type InFlight = { kind: "restoring" | "removing" };
+type InFlights = ReadonlyMap<string, InFlight>;
+
+/** The deleted branches recorded for this repository, newest first, with one
+ *  footer button acting on the selected row. */
+function DeletedBranchesSection({
+  repoPath,
+  open,
+}: {
+  repoPath: string;
+  open: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const deleted = useDeletedBranches(repoPath, open);
+  const rows = deleted.data ?? [];
+  const tipStates = useDeletedTipStates(
+    repoPath,
+    rows.map((e) => e.tip),
+    open,
+  );
+  const branches = useBranches(repoPath);
+  const takenNames = rows
+    .map((e) => e.name)
+    .filter((name) => branches.data?.some((b) => b.name === name));
+  const nameTips = useDeletedNameTips(repoPath, takenNames, open);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [inFlights, setInFlights] = useState<InFlights>(new Map());
+  // Two presses inside one render both pass the held check; this refuses the second.
+  const flights = useRef(new Map<string, InFlight>());
+  const inFlight = inFlights.get(repoPath) ?? null;
+  const caption = useId();
+
+  const selected = rows.find((e) => e.id === selectedId) ?? rows[0] ?? null;
+
+  // "pruned" only from a confirmed read; a pending, unknown or unloaded answer
+  // stays restorable and the press decides. A taken name clears only on a tip
+  // read that answered with the recorded commit; anything else stays held.
+  const rowState = (entry: DeletedBranchEntry): RowState => {
+    if (tipStates.data?.get(entry.tip) === "pruned") return "pruned";
+    if (branches.data?.some((b) => b.name === entry.name))
+      return nameTips.isSuccess &&
+        tipOf(nameTips.data, entry.name)?.toLowerCase() ===
+          entry.tip.toLowerCase()
+        ? "alreadyBack"
+        : "nameExists";
+    return "restorable";
+  };
+
+  async function press(entry: DeletedBranchEntry) {
+    // Pinned at the press: the settle acts on this repository whatever is open.
+    const repo = repoPath;
+    const action = ROW_FOOTER[rowState(entry)].action;
+    if (action === null || flights.current.has(repo)) return;
+    const token: InFlight = {
+      kind: action === "restore" ? "restoring" : "removing",
+    };
+    flights.current.set(repo, token);
+    setInFlights((cur) => new Map(cur).set(repo, token));
+    const at = rows.indexOf(entry);
+    const next = rows[at + 1] ?? rows[at - 1] ?? null;
+    try {
+      let left: boolean;
+      if (action === "restore") {
+        left =
+          (await restoreAndReport(queryClient, repo, entry)).status ===
+          "restored";
+      } else {
+        left = await forgetDeletedBranch(repo, entry.id);
+        if (!left) toast.error(removeFailedTitle(entry.name));
+      }
+      if (left) {
+        // A pick made during the wait stands; only the pressed row or the
+        // unpicked fallback moves on.
+        setSelectedId((cur) =>
+          cur === null || cur === entry.id ? (next?.id ?? null) : cur,
+        );
+        // Held until the list re-reads, so the row that left can't be pressed.
+        await queryClient.invalidateQueries({ queryKey: DELETED_BRANCHES_KEY });
+      }
+    } finally {
+      if (flights.current.get(repo) === token) flights.current.delete(repo);
+      setInFlights((cur) => {
+        if (cur.get(repo) !== token) return cur;
+        const next = new Map(cur);
+        next.delete(repo);
+        return next;
+      });
+    }
+  }
+
+  const onListKeyDown = listKeyboardNav({
+    items: rows,
+    activeIndex: selected ? rows.indexOf(selected) : -1,
+    onActivate: (e) => setSelectedId(e.id),
+    rowKey: (e) => e.id,
+    rowAttr: "data-deleted-branch",
+  });
+
+  const showRetry = deleted.isError && deleted.data === undefined;
+  // Rows already on screen stay under a notice when a refresh fails.
+  const degraded = deleted.data !== undefined && refreshFailed(deleted);
+  const { hostRef, retryRef } = useRetryFocusRescue(showRetry);
+  // A restored or removed row, or an arm swap, can unmount the focused node and
+  // drop focus to <body>; land it on the section. Change-only, so a mount never
+  // takes focus from elsewhere.
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const frame = `${deleted.data === undefined ? "none" : rows.length}:${selected?.id ?? ""}`;
+  const lastFrame = useRef(frame);
+  useLayoutEffect(() => {
+    if (lastFrame.current === frame) return;
+    lastFrame.current = frame;
+    if (document.activeElement === document.body)
+      sectionRef.current?.focus({ preventScroll: true });
+  }, [frame]);
+
+  const body = (() => {
+    if (deleted.data === undefined) {
+      if (deleted.isError)
+        return (
+          <div className="flex flex-col items-start gap-1.5 px-3 py-2 text-xs">
+            <p>{DELETED_BRANCHES_READ_FAILED}</p>
+            <p className="text-muted-foreground">
+              {presentError(deleted.error).summary}
+            </p>
+            <Button
+              ref={retryRef}
+              variant="outline"
+              size="xs"
+              onClick={() => void deleted.refetch()}
+            >
+              Retry
+            </Button>
+          </div>
+        );
+      return (
+        <ListRowSkeletons
+          rows={2}
+          lines={2}
+          name={DELETED_BRANCHES_LOADING_NAME}
+        />
+      );
+    }
+    if (rows.length === 0)
+      return (
+        <p className="px-3 py-2 text-xs text-muted-foreground">
+          {DELETED_BRANCHES_EMPTY}
+        </p>
+      );
+    return null;
+  })();
+
+  // The label follows the selected row; only the hold follows a running press.
+  const footer = selected === null ? null : ROW_FOOTER[rowState(selected)];
+  const heldReason =
+    selected === null || footer === null
+      ? null
+      : ROW_FOOTER[inFlight?.kind ?? rowState(selected)].held(selected.name);
+
+  return (
+    <section
+      ref={(node) => {
+        hostRef(node);
+        sectionRef.current = node;
+      }}
+      tabIndex={-1}
+      aria-labelledby={caption}
+      className="flex shrink-0 flex-col outline-none"
+    >
+      <h3
+        id={caption}
+        className="pb-1 text-xs font-medium text-muted-foreground"
+      >
+        {DELETED_BRANCHES_CAPTION}
+      </h3>
+      <DegradedListNotice
+        noun="deleted branches"
+        degraded={degraded}
+        onRetry={() => void deleted.refetch()}
+      />
+      <div className="flex flex-col border">
+        {body ?? (
+          <>
+            {/* A plain scroller: ScrollArea's viewport is size-full, which a
+                max-height parent never bounds. */}
+            <div className="max-h-44 overflow-y-auto">
+              <div onKeyDown={onListKeyDown}>
+                {rows.map((entry) => {
+                  const isSelected = selected?.id === entry.id;
+                  const note = ROW_NOTE[rowState(entry)];
+                  return (
+                    <button
+                      type="button"
+                      key={entry.id}
+                      data-deleted-branch={entry.id}
+                      aria-current={isSelected || undefined}
+                      // One tab stop for the list; arrows move between rows.
+                      tabIndex={isSelected ? 0 : -1}
+                      className={cn(
+                        "block w-full border-b px-3 py-2 text-left",
+                        isSelected
+                          ? "bg-accent text-accent-foreground"
+                          : "hover:bg-muted/60",
+                      )}
+                      onClick={() => setSelectedId(entry.id)}
+                    >
+                      <p
+                        className="truncate font-mono text-xs font-medium"
+                        onMouseEnter={clipTitleFromText}
+                      >
+                        {entry.name}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {shortTip(entry.tip)}
+                        {validEpochMs(entry.deletedAt) && (
+                          <>
+                            {" · deleted "}
+                            <RelativeTime
+                              date={new Date(entry.deletedAt).toISOString()}
+                            />
+                          </>
+                        )}
+                        {entry.keptLocal && " · Keep local"}
+                      </p>
+                      {note && (
+                        <p className={cn("mt-0.5 text-[11px]", note.className)}>
+                          {note.text(entry.name)}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {selected !== null && footer !== null && (
+              <div className="flex items-center gap-1.5 p-2">
+                {inFlight && <Spinner className="size-3" />}
+                <span className="flex-1" />
+                {/* One mounted button whose label follows the selected row, so
+                    focus never moves with it; a held Enter repeats onto the
+                    next row and must not act on it. */}
+                <DisabledReasonButton
+                  size="xs"
+                  disabled={heldReason !== null}
+                  reason={heldReason}
+                  onKeyDown={ignoreHeldEnter}
+                  onClick={() => void press(selected)}
+                >
+                  {footer.label}
+                </DisabledReasonButton>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** The lost stashes: auto-scans (fsck) for orphaned stashes, lists them,
+ *  browses their files/diffs, and restores non-destructively. */
+function LostStashesPane({
   repoPath,
   open,
 }: {
@@ -529,7 +920,7 @@ function RecoverableView({
     return (
       <div className="flex flex-1 items-center justify-center gap-2 text-xs text-muted-foreground">
         <Spinner className="size-4" />
-        Scanning for recoverable work…
+        Scanning for lost stashes…
       </div>
     );
   }
@@ -538,7 +929,7 @@ function RecoverableView({
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3">
         <p className="text-center text-xs text-muted-foreground">
-          No recoverable work found.
+          No lost stashes found.
         </p>
         <Button variant="outline" size="xs" onClick={() => orphaned.refetch()}>
           Rescan

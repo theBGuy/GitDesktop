@@ -3,11 +3,12 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
+    UPSTREAM_ATOM_INDEX,
 };
 use crate::git::diff::git_config_bool;
 use crate::git::remote::{
-    is_named_remote, parse_upstream_tracking, remote_head_branch, Upstream,
-    UPSTREAM_TRACKING_FORMAT,
+    is_named_remote, parse_upstream_tracking, remote_head_target, upstream_is_remote_default,
+    Upstream, UPSTREAM_TRACKING_FIELDS, UPSTREAM_TRACKING_FORMAT,
 };
 use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
 use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus, SubmoduleChange};
@@ -56,7 +57,9 @@ pub async fn git_status(_state: State<'_, AppState>, repo_path: String) -> AppRe
 /// toward inaction: any failed read leaves its facts None/false. One spawn per upstream
 /// (two on a git without the push atoms); a cross-name upstream, a push remote other
 /// than the upstream's, or a destination other than a live upstream adds one config
-/// listing, and a refused bare push the remote-HEAD probe.
+/// listing, and a refused bare push the remote-HEAD probe. Without the atoms the
+/// remote-default compare derives the upstream's tracking ref by name, exact only under
+/// the default fetch refspec.
 async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     let (Some(name), Some(_)) = (head.name.clone(), head.upstream.as_ref()) else {
         return;
@@ -110,10 +113,35 @@ async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
         return;
     }
     head.push_name_mismatch = true;
-    head.upstream_is_remote_default = match remote_head_branch(repo_path, &remote).await {
-        Ok(Some(default)) => Some(default == up),
-        _ => None,
-    };
+    head.upstream_is_remote_default =
+        match tracking_line_upstream_ref(&text, &refname, &remote, &up) {
+            Some(full) => match remote_head_target(repo_path, &remote).await {
+                Ok(target) => upstream_is_remote_default(target.as_deref(), &full),
+                Err(_) => None,
+            },
+            None => None,
+        };
+}
+
+/// The upstream's full tracking ref: `%(upstream)`, the last push-destination atom, or
+/// on a read that fell back without the atoms `refs/remotes/<remote>/<upstream>`, exact
+/// only under the default fetch refspec. None when the line isn't `refname`'s or the
+/// atom is empty.
+fn tracking_line_upstream_ref(
+    text: &str,
+    refname: &str,
+    remote: &str,
+    upstream: &str,
+) -> Option<String> {
+    let fields: Vec<&str> = text.lines().next()?.split('\0').collect();
+    if fields.first() != Some(&refname) {
+        return None;
+    }
+    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
+    match atoms.get(UPSTREAM_ATOM_INDEX) {
+        Some(full) => Some(full.to_string()).filter(|f| !f.is_empty()),
+        None => Some(format!("refs/remotes/{remote}/{upstream}")),
+    }
 }
 
 /// What one tracking line says about the upstream, before any config read.
@@ -377,7 +405,7 @@ fn configured_destination(
 }
 
 /// The push destination off the first line of a tracking read, its atoms after the
-/// shared format's four fields, plus the raw `%(push:remotename)`; None/None and empty
+/// shared format's fields, plus the raw `%(push:remotename)`; None/None and empty
 /// when the line is missing, names another ref, or the read fell back without the atoms.
 fn tracking_line_push_destination(
     text: &str,
@@ -394,7 +422,7 @@ fn tracking_line_push_destination(
     }
     let upstream_remoteref = fields.get(1).copied().unwrap_or("");
     let upstream_remote = fields.get(2).copied().unwrap_or("");
-    let atoms = fields.get(4..).unwrap_or(&[]);
+    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
     let dest = push_destination_fields(name, atoms, upstream_remote, upstream_remoteref);
     (dest, atoms.first().copied().unwrap_or("").to_string())
 }
@@ -2218,6 +2246,121 @@ mod tests {
         assert!(head.push_name_mismatch);
         assert_eq!(head.upstream_branch.as_deref(), Some("main"));
         assert_eq!(head.upstream_is_remote_default, Some(true));
+    }
+
+    /// A clone-free repo whose `origin` fetches under the remapped refspec
+    /// `+refs/heads/*:refs/remotes/origin/mirror/*`, standing on `feat` tracking the
+    /// remote's `main`, one commit ahead.
+    /// `head` hand-sets `refs/remotes/origin/HEAD` at the remapped `main`; without it the
+    /// symref is absent. Push config is pinned locally; None when a leaked key skips.
+    async fn remapped_refspec_fixture(base: &std::path::Path, head: bool) -> Option<String> {
+        let d = base.to_string_lossy().into_owned();
+        let path = |name: &str| base.join(name).to_string_lossy().into_owned();
+        git(&d, &["init", "-q", "--bare", "-b", "main", "origin.git"]).await;
+        git(&d, &["init", "-q", "-b", "main", "work"]).await;
+        let work = path("work");
+        for (key, value) in [
+            ("user.email", "t@t.local"),
+            ("user.name", "T"),
+            ("commit.gpgsign", "false"),
+            ("push.default", "simple"),
+            ("remote.pushDefault", "origin"),
+        ] {
+            git(&work, &["config", key, value]).await;
+        }
+        git(&work, &["remote", "add", "origin", &path("origin.git")]).await;
+        git(&work, &["config", "remote.origin.mirror", "false"]).await;
+        let remap = "+refs/heads/*:refs/remotes/origin/mirror/*";
+        git(&work, &["config", "remote.origin.fetch", remap]).await;
+        if !all_unset(
+            &work,
+            "the remapped-refspec default check",
+            &["branch.feat.pushRemote", "remote.origin.push"],
+        )
+        .await
+        {
+            return None;
+        }
+        commit_one(&work, "a.txt").await;
+        git(&work, &["push", "-q", "origin", "main"]).await;
+        git(&work, &["fetch", "-q", "origin"]).await;
+        let _ = run_git_raw(
+            Some(&work),
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        if head {
+            let target = "refs/remotes/origin/mirror/main";
+            git(&work, &["symbolic-ref", "refs/remotes/origin/HEAD", target]).await;
+        }
+        let upstream = "origin/mirror/main";
+        git(&work, &["switch", "-q", "-c", "feat", "--track", upstream]).await;
+        commit_one(&work, "feat.txt").await;
+        Some(work)
+    }
+
+    async fn feat_row_is_remote_default(work: &str) -> bool {
+        let rows = crate::git::branches::git_branches(work.to_string())
+            .await
+            .unwrap();
+        let feat = rows.iter().find(|b| b.name == "feat").unwrap();
+        assert_eq!(feat.upstream_remote_ref.as_deref(), Some("refs/heads/main"));
+        feat.upstream_is_remote_default
+    }
+
+    /// The sync bar and the branch row read the remote default through one helper, so
+    /// a remapped fetch refspec answers the same on both.
+    #[tokio::test]
+    async fn remote_default_agrees_under_a_remapped_fetch_refspec() {
+        let (_guard, base) = temp_base("remap-default");
+        let Some(work) = remapped_refspec_fixture(&base, true).await else {
+            return;
+        };
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.push_name_mismatch, "{head:?}");
+        assert_eq!(head.upstream_branch.as_deref(), Some("main"));
+        assert_eq!(head.upstream_is_remote_default, Some(true));
+        assert!(feat_row_is_remote_default(&work).await);
+    }
+
+    /// No remote HEAD symref: unmeasured on the bar, false on the row, never a guess.
+    #[tokio::test]
+    async fn remote_default_reads_unmeasured_without_a_remote_head() {
+        let (_guard, base) = temp_base("remap-nohead");
+        let Some(work) = remapped_refspec_fixture(&base, false).await else {
+            return;
+        };
+        let head = status_core(&work).await.unwrap().branch;
+        assert!(head.push_name_mismatch, "{head:?}");
+        assert_eq!(head.upstream_is_remote_default, None);
+        assert!(!feat_row_is_remote_default(&work).await);
+    }
+
+    /// The atom wins where the read carried it (a remapped refspec included); a no-atom
+    /// read derives the default-refspec tracking ref from the remote and upstream names.
+    #[test]
+    fn tracking_line_upstream_ref_reads_the_last_atom_of_the_named_line() {
+        let r = "refs/heads/feat";
+        let read = |text: &str| tracking_line_upstream_ref(text, r, "origin", "main");
+        let remapped = "refs/heads/feat\0refs/heads/main\0origin\0\0origin\0\0p\0\
+                        refs/remotes/origin/mirror/main";
+        for (text, want) in [
+            (remapped, Some("refs/remotes/origin/mirror/main")),
+            (
+                "refs/heads/feat\0refs/heads/main\0origin\0\0origin\0\0p\0",
+                None,
+            ),
+            (
+                "refs/heads/feat\0refs/heads/main\0origin\0",
+                Some("refs/remotes/origin/main"),
+            ),
+            ("refs/heads/other\0refs/heads/main\0origin\0", None),
+            (&remapped.replace("feat", "other"), None),
+            ("", None),
+        ] {
+            assert_eq!(read(text).as_deref(), want, "{text:?}");
+        }
     }
 
     /// The shapes that are never a mismatch, each read off a real repository. The

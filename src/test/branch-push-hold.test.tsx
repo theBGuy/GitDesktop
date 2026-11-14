@@ -185,9 +185,12 @@ describe("refuseWhileBranchPushes", () => {
     expect(info).toHaveBeenLastCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
   });
 
-  it("a push filed before its checkout's identity resolved is invisible to siblings", async () => {
+  it("a push filed before its checkout's identity resolved holds siblings once it is known", async () => {
     await startPush("named", EARLY, true);
     await waitFor(() => expect(resolveEarly).toBeDefined());
+    // Before the memo learns EARLY's identity, no sibling can match the push.
+    expect(refuse(MAIN, "feat", "main")).toBe(false);
+    expect(info).not.toHaveBeenCalled();
     resolveEarly?.(ID);
     // The observer re-keys; the pending push keeps its path-only start key.
     await waitFor(() =>
@@ -199,8 +202,12 @@ describe("refuseWhileBranchPushes", () => {
       .getMutationCache()
       .findAll({ status: "pending" });
     expect(pending.options.mutationKey).toEqual(["branch-push", EARLY]);
-    expect(refuse(MAIN, "feat", "main")).toBe(false);
+    expect(refuse(MAIN, "feat", "main")).toBe(true);
+    expect(info).toHaveBeenLastCalledWith(BRANCH_PUSH_ELSEWHERE_MESSAGE);
+    expect(refuse(MAIN, "other", "main")).toBe(false);
+    expect(refuse(OTHER, "feat", "main")).toBe(false);
     expect(refuse(EARLY, "feat", "main")).toBe(true);
+    expect(info).toHaveBeenLastCalledWith(BRANCH_PUSH_ACTIVE_MESSAGE);
   });
 
   it("a different repository's same-named branch is not held", async () => {

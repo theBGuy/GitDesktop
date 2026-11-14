@@ -1061,8 +1061,8 @@ pub async fn git_reset(
 }
 
 /// The refusal a reset gets when HEAD is no longer the tip the user confirmed.
-/// KEEP IN STEP: one wording family with branches.rs's ref-move refusal and
-/// commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
+/// KEEP IN STEP: one wording family with branches.rs's ref-move refusals (reset and
+/// delete) and commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
 const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothing was reset.";
 
 /// The refusal a reset gets when HEAD sits on another branch (or none) than the one
@@ -4045,7 +4045,8 @@ async fn remove_resolve_worktree(state: &AppState, repo_path: &str, worktree_pat
 pub(crate) fn parse_worktree_branches(porcelain: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in porcelain.lines() {
-        let line = line.trim_end();
+        // Only a stray CR is stripped: a branch name may end in non-ASCII whitespace.
+        let line = line.trim_end_matches('\r');
         if line.starts_with("worktree ") {
             // A new stanza — default its branch to empty (detached) until a
             // `branch` line fills it in.
@@ -4062,9 +4063,10 @@ pub(crate) fn parse_worktree_branches(porcelain: &str) -> Vec<String> {
 /// The `worktree <path>` line of every stanza in `git worktree list --porcelain`,
 /// in list order.
 pub(crate) fn parse_worktree_paths(porcelain: &str) -> Vec<String> {
+    // Only a stray CR is stripped: a path may end in whitespace, ASCII or not.
     porcelain
         .lines()
-        .filter_map(|line| line.trim_end().strip_prefix("worktree "))
+        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("worktree "))
         .map(str::to_string)
         .collect()
 }
@@ -18755,6 +18757,27 @@ detached
         // Membership check mirrors finalize_base's "checked out elsewhere" test.
         assert!(got.iter().any(|b| b == "feature"));
         assert!(!got.iter().any(|b| b == "nope"));
+    }
+
+    /// A trailing U+00A0 is part of the branch name, so a worktree holding `tr\u{a0}`
+    /// never reads as holding `tr`, nor the reverse.
+    #[test]
+    fn parse_worktree_branches_keeps_non_ascii_whitespace_in_names() {
+        let porcelain = "worktree /x\nHEAD 1111\nbranch refs/heads/tr\u{a0}\n";
+        assert_eq!(
+            parse_worktree_branches(porcelain),
+            vec!["tr\u{a0}".to_string()]
+        );
+    }
+
+    /// The path twin: a trailing U+00A0 stays part of the worktree's path.
+    #[test]
+    fn parse_worktree_paths_keeps_non_ascii_whitespace_in_paths() {
+        let porcelain = "worktree /x/wt\u{a0}\nHEAD 1111\nbranch refs/heads/tr\n";
+        assert_eq!(
+            parse_worktree_paths(porcelain),
+            vec!["/x/wt\u{a0}".to_string()]
+        );
     }
 
     #[test]

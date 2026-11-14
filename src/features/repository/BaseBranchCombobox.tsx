@@ -21,6 +21,7 @@ import {
   useRemoteBranches,
   useUserWorktrees,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { Branch } from "@/lib/git/types";
 import { rowCheckoutCopy } from "./checkout-copy";
 
@@ -31,7 +32,7 @@ import { rowCheckoutCopy } from "./checkout-copy";
  *  the picker's Local group and the `useHasBaseOptions` gate can't drift. */
 function isOfferableLocal(b: Branch, currentName: string | null): boolean {
   return (
-    !b.name.startsWith("gd/session/") && (!b.archived || b.name === currentName)
+    !isSessionBranchName(b.name) && (!b.archived || b.name === currentName)
   );
 }
 
@@ -41,7 +42,7 @@ function isOfferableLocal(b: Branch, currentName: string | null): boolean {
  *  if the only remote collides with a local, that local exists and the Local
  *  group is non-empty.) */
 function isOfferableRemoteName(name: string): boolean {
-  return !name.startsWith("gd/session/");
+  return !isSessionBranchName(name);
 }
 
 /** Metadata a combobox row renders, keyed off the option's value string. */
@@ -268,7 +269,7 @@ export function useSeedBase(
       // the offerability check can run against real data.
       const offerable = b
         ? isOfferableLocal(b, currentName)
-        : !candidate.startsWith("gd/session/");
+        : !isSessionBranchName(candidate);
       if (offerable) return candidate;
     }
     return "";

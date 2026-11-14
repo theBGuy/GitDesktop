@@ -328,7 +328,7 @@ function syncProblems(src) {
     out.push("SyncControls: the push hotkey ignores the check");
   if (
     !flat.includes(
-      'useHotkeyAction("push", () => {if (sync.pushKeptLocalReason) {toast.info(sync.pushKeptLocalReason); return;} if (!refuseWhilePushing()) pressPush();}, hotkeys.push && !publishPending && !detecting);',
+      'useHotkeyAction("push", () => {if (sync.pushSessionReason) {toast.info(sync.pushSessionReason); return;} if (sync.pushKeptLocalReason) {toast.info(sync.pushKeptLocalReason); return;} if (!refuseWhilePushing()) pressPush();}, hotkeys.push && !publishPending && !detecting);',
     )
   )
     out.push("SyncControls: the push hotkey skips the Keep local refusal");

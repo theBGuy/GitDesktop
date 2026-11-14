@@ -6,6 +6,9 @@ export interface HookEntry {
   state: "active" | "disabled" | "inactive";
   /** Whether git's stock `<name>.sample` is present. */
   hasSample: boolean;
+  /** GitDesktop's own Keep local pre-push guard: the active `pre-push` in the
+   *  folder the guard manages, carrying the app's marker. */
+  managed: boolean;
 }
 
 export interface HooksInfo {

@@ -28,9 +28,11 @@ import {
   REMOTES_PENDING_REASON,
   rowNameMismatch,
   rowSyncIndicator,
+  SESSION_PULL_REASON,
   STATUS_PENDING_REASON,
   STATUS_READ_FAILED_REASON,
   SYNC_BUSY_REASON,
+  sessionBranchPushReason,
 } from "../src/features/repository/sync-controls-state.ts";
 
 // No `oid` key on purpose: a head without one must keep reading as born.
@@ -60,6 +62,7 @@ const input = (over = {}) => ({
   localAtRisk: 0,
   remoteNewExists: false,
   keptLocal: false,
+  sessionHead: false,
   ...over,
 });
 
@@ -1595,4 +1598,185 @@ test("a mutant dropping the kept-local Pull arm fails the rows", async () => {
     input({ head: head({ upstream: null }), keptLocal: true }),
   );
   assert.notEqual(d.pullName, KEPT_LOCAL_PULL_REASON.untracked("feature", ""));
+});
+
+// Agent session: HEAD's branch is in `gd/session/` (any case; the caller
+// decides), which the backend never pushes, so every push of it is held with
+// one reason that outranks Keep local's and every transient one.
+const SESSION = "gd/session/abc";
+const SESSION_PUSH = sessionBranchPushReason(SESSION);
+const sessionHead = (over = {}) =>
+  head({ name: SESSION, upstream: `origin/${SESSION}`, ...over });
+
+test("session: the reasons' spellings", () => {
+  assert.equal(
+    SESSION_PUSH,
+    "gd/session/abc belongs to an agent session, so GitDesktop never pushes or publishes it.",
+  );
+  assert.equal(
+    SESSION_PULL_REASON.untracked(SESSION, ""),
+    "Pull — gd/session/abc belongs to an agent session and has no upstream branch to pull from",
+  );
+  assert.equal(
+    SESSION_PULL_REASON.gone(SESSION, "origin/x"),
+    "Pull — gd/session/abc belongs to an agent session and its upstream origin/x was deleted on the remote, so there is nothing to pull",
+  );
+});
+
+test("session holds Push, Publish branch and Force push with its reason", () => {
+  const rows = [
+    ["tracked", sessionHead({ ahead: 2 }), "Push"],
+    ["untracked", sessionHead({ upstream: null }), "Publish branch"],
+    ["gone", sessionHead({ upstreamGone: true }), "Publish branch"],
+    ["diverged", sessionHead({ ahead: 2, behind: 1 }), "Force push"],
+  ];
+  for (const [what, h, label] of rows) {
+    const d = deriveSyncControls(input({ head: h, sessionHead: true }));
+    assert.equal(d.pushLabel, label, what);
+    assert.equal(d.pushSessionReason, SESSION_PUSH, what);
+    assert.equal(d.pushKeptLocalReason, undefined, what);
+    assert.deepEqual(d.push, { disabled: true, reason: SESSION_PUSH }, what);
+    assert.equal(d.pushName, `${label} — ${SESSION_PUSH}`, what);
+    assert.equal(d.hotkeys.push, true, what);
+  }
+});
+
+test("a case-variant session name holds the same way", () => {
+  const name = "GD/Session/Mixed";
+  const d = deriveSyncControls(
+    input({ head: head({ name, upstream: null }), sessionHead: true }),
+  );
+  assert.deepEqual(d.push, {
+    disabled: true,
+    reason: sessionBranchPushReason(name),
+  });
+});
+
+test("session outranks busy, offline and an unknown remotes read", () => {
+  const rows = [
+    ["busy", { busy: true }],
+    ["offline", { offlineHold: "You're offline" }],
+    ["remotes pending", { remotes: undefined }],
+    ["remotes failed", { remotes: undefined, remotesError: true }],
+  ];
+  for (const [what, over] of rows) {
+    const held = deriveSyncControls(
+      input({ head: sessionHead({ ahead: 1 }), sessionHead: true, ...over }),
+    );
+    assert.deepEqual(held.push, { disabled: true, reason: SESSION_PUSH }, what);
+    assert.equal(held.hotkeys.push, true, what);
+    const plain = deriveSyncControls(
+      input({ head: sessionHead({ ahead: 1 }), ...over }),
+    );
+    assert.notEqual(plain.push.reason, SESSION_PUSH, what);
+    assert.equal(plain.hotkeys.push, false, what);
+  }
+});
+
+test("session's live push key needs an origin", () => {
+  for (const [what, h] of [
+    ["tracked", sessionHead({ ahead: 1 })],
+    ["untracked", sessionHead({ upstream: null })],
+  ]) {
+    const bare = deriveSyncControls(
+      input({ head: h, sessionHead: true, remotes: [] }),
+    );
+    assert.equal(bare.hotkeys.push, false, `no remotes, ${what}`);
+    const other = deriveSyncControls(
+      input({ head: h, sessionHead: true, remotes: ["upstream"] }),
+    );
+    assert.equal(other.hotkeys.push, false, `no origin, ${what}`);
+    const withOrigin = deriveSyncControls(
+      input({ head: h, sessionHead: true }),
+    );
+    assert.equal(withOrigin.hotkeys.push, true, `origin, ${what}`);
+  }
+});
+
+test("session and Keep local together: the session reason holds, Keep local's stays set", () => {
+  const d = deriveSyncControls(
+    input({
+      head: sessionHead({ upstream: null }),
+      sessionHead: true,
+      keptLocal: true,
+    }),
+  );
+  assert.deepEqual(d.push, { disabled: true, reason: SESSION_PUSH });
+  assert.equal(d.pushName, `Publish branch — ${SESSION_PUSH}`);
+  assert.equal(d.pushSessionReason, SESSION_PUSH);
+  assert.equal(d.pushKeptLocalReason, keptLocalReason(SESSION, "publish"));
+  assert.equal(d.pullName, SESSION_PULL_REASON.untracked(SESSION, ""));
+});
+
+test("session's Pull reasons never advise publishing, and the caret repeats them", () => {
+  const rows = [
+    [
+      "untracked",
+      sessionHead({ upstream: null }),
+      SESSION_PULL_REASON.untracked(SESSION, ""),
+    ],
+    [
+      "gone",
+      sessionHead({ upstreamGone: true }),
+      SESSION_PULL_REASON.gone(SESSION, `origin/${SESSION}`),
+    ],
+  ];
+  for (const [what, h, reason] of rows) {
+    const d = deriveSyncControls(input({ head: h, sessionHead: true }));
+    assert.equal(d.pullName, reason, what);
+    assert.deepEqual(d.pull, { disabled: true, reason }, what);
+    assert.deepEqual(d.pullOptions, { disabled: true, reason }, what);
+    assert.ok(!/publish/i.test(d.pullName), what);
+  }
+  const tracked = deriveSyncControls(
+    input({ head: sessionHead({ behind: 2 }), sessionHead: true }),
+  );
+  assert.equal(
+    tracked.pullName,
+    `Pull — 2 commits to pull from origin/${SESSION}`,
+  );
+});
+
+test("sessionHead false, or no named HEAD, holds nothing", () => {
+  const off = deriveSyncControls(input({ head: sessionHead({ ahead: 2 }) }));
+  assert.equal(off.pushSessionReason, undefined);
+  assert.deepEqual(off.push, {
+    disabled: false,
+    reason: `Push — 2 commits to push to origin/${SESSION}`,
+  });
+  for (const [what, over] of [
+    ["status unknown", { head: undefined }],
+    [
+      "detached",
+      { head: head({ name: null, detached: true, upstream: null }) },
+    ],
+  ]) {
+    const d = deriveSyncControls(input({ ...over, sessionHead: true }));
+    const plain = deriveSyncControls(input(over));
+    assert.equal(d.pushSessionReason, undefined, what);
+    assert.deepEqual(d.push, plain.push, what);
+    assert.deepEqual(d.hotkeys, plain.hotkeys, what);
+  }
+});
+
+test("a mutant dropping the session Pull arm fails the rows", async () => {
+  const m = await mutant(
+    "if (sessionHeadName !== null && !hasUpstream)",
+    "if (false && !hasUpstream)",
+  );
+  const d = m.deriveSyncControls(
+    input({ head: sessionHead({ upstream: null }), sessionHead: true }),
+  );
+  assert.notEqual(d.pullName, SESSION_PULL_REASON.untracked(SESSION, ""));
+});
+
+test("a mutant dropping the session arm of the push hold fails the rows", async () => {
+  const m = await mutant(
+    "if (pushSessionReason !== undefined)\n      return { disabled: true, reason: pushSessionReason };",
+    "",
+  );
+  const d = m.deriveSyncControls(
+    input({ head: sessionHead({ ahead: 1 }), sessionHead: true, busy: true }),
+  );
+  assert.notDeepEqual(d.push, { disabled: true, reason: SESSION_PUSH });
 });

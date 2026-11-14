@@ -20,6 +20,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useDiffPaneHold } from "@/features/diff/diff-pane-hold";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
+import { awaitFocusRelease } from "@/lib/await-focus-release";
 import { appErrorDetail, presentError } from "@/lib/error-summary";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import {
@@ -40,6 +41,7 @@ import {
   parseConflictSegments,
   resolveBlock,
 } from "@/lib/git/conflict-parse";
+import { sidesRefusal } from "@/lib/git/conflict-prefilter";
 import {
   refreshConflictFile,
   repoKeys,
@@ -59,6 +61,11 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { type AppError, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import {
   conflictCount as conflictCountLabel,
@@ -74,6 +81,17 @@ import {
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** Focus inside a dialog that neither holds this pane nor sits inside it. */
+function inOtherDialog(active: Element | null, root: HTMLElement | null) {
+  const dialog = active?.closest('[role="dialog"], [role="alertdialog"]');
+  return (
+    dialog != null &&
+    root !== null &&
+    !dialog.contains(root) &&
+    !root.contains(dialog)
+  );
+}
 
 /** Where focus goes once a write settles: a region header by its conflict
  *  ordinal in the post-write file, or the header's pressed control. Pinned to
@@ -138,6 +156,9 @@ const CONFLICT_UNDECODABLE_NOTE =
 const AI_UNDECODABLE_REASON =
   "This file isn't UTF-8 text, so AI resolution would change its bytes.";
 
+/** The refusal strip's Mark resolved hold: a write or the click-time read. */
+const MARK_BUSY_REASON = "Checking the file…";
+
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
   ours: { side: "current", other: "incoming" },
@@ -190,23 +211,64 @@ const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
 const LINKED_LEAF_REASON = "it's a symbolic link";
 const LINKED_LEAF_TAIL = ` — ${LINKED_LEAF_REASON}. Nothing was changed.`;
 
-/** The backend refuses binary or oversized files as invalidArgument; a path-gate
- *  refusal shares that kind but renders its own sentence instead. `io` covers a
- *  lock, a permission change, or a directory at the path (a conflicted submodule),
- *  none promised to pass. Other kinds take the fallback. */
+/** `io` covers a lock, a permission change, or a directory at the path (a
+ *  conflicted submodule), none promised to pass. The two read refusals and the
+ *  path-gate refusals render their own copy; every other error takes the
+ *  fallback. */
 const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
-  invalidArgument: (
-    <>
-      This looks like a binary or oversized conflict, so it can't be merged as
-      text. Take a side with{" "}
-      <span className="font-medium">Accept all current</span> /{" "}
-      <span className="font-medium">incoming</span>, or open it in your editor.
-    </>
-  ),
   io: "Couldn't read this file. It may be locked, its permissions may have changed, or a folder (such as a conflicted submodule) may sit at this path. Open it in your editor to resolve the conflict, or try again if it becomes readable.",
 };
 const READ_ERROR_FALLBACK =
   "Couldn't read this file, so it can't be shown here. Resolve the conflict in your editor.";
+
+/** The backend's two refusals to read a working file as text. Matched through
+ *  the prefilter's twins of conflict.rs's sentences, never the error kind alone:
+ *  path-gate refusals share `invalidArgument`, and staging is no answer there. */
+type ReadRefusal = "tooLarge" | "binary";
+
+function readRefusalOf(error: unknown): ReadRefusal | null {
+  if (!isAppError(error) || error.kind !== "invalidArgument") return null;
+  const refusal = sidesRefusal(appErrorDetail(error.kind, error.message), null);
+  return refusal === "tooLarge" || refusal === "binary" ? refusal : null;
+}
+
+const READ_REFUSAL_LEAD: Record<ReadRefusal, string> = {
+  tooLarge:
+    "This file is too large to show here, so its conflict can't be resolved region by region.",
+  binary:
+    "This looks like a binary file, so its conflict can't be merged as text.",
+};
+
+const READ_REFUSAL_TAIL = (
+  <>
+    {" "}
+    Take a side with <span className="font-medium">Accept all current</span> /{" "}
+    <span className="font-medium">incoming</span>, or resolve it outside
+    GitDesktop and then <span className="font-medium">Mark resolved</span> to
+    stage it exactly as it is on disk. You'll be asked first, because GitDesktop
+    can't check this file for conflict markers.
+  </>
+);
+
+/** The whole-file writes' answer when git no longer lists the path as
+ *  conflicted at the click. */
+const notConflictedCopy = (name: string) =>
+  `${name} is no longer conflicted — nothing was changed.`;
+
+const REREAD_FAILED_TOAST =
+  "Couldn't re-read the file — nothing was marked resolved.";
+
+/** Whether git status still lists `path` as unmerged on either side. */
+function listsConflicted(
+  status: Awaited<ReturnType<typeof gitStatus>>,
+  path: string,
+): boolean {
+  return status.entries.some(
+    (entry) =>
+      entry.path === path &&
+      (entry.staged === "conflicted" || entry.unstaged === "conflicted"),
+  );
+}
 
 /** The two working-file states with no text to show, each worded for what
  *  staging it actually records (content vs. a removal). */
@@ -429,6 +491,10 @@ export function ConflictFileView({
   const takeOverLanding = () => {
     landPendingRef.current = false;
   };
+  // The cancel of a landing waiting for focus to leave another dialog; held
+  // across the landing effect's own re-run, called by a press or unmount.
+  const landWaitRef = useRef<() => void>(() => undefined);
+  useLayoutEffect(() => () => landWaitRef.current(), []);
   // The file the on-open landing ran for, or that input forfeited it for. A
   // ref, so an <Activity> re-show (which replays effects) or a poll re-read
   // never lands again; a new path re-arms it and a remount resets it.
@@ -447,6 +513,7 @@ export function ConflictFileView({
   // captured before any await: Chromium blurs it to <body> once the hold
   // disables it.
   function capturePress(): HTMLElement | null {
+    landWaitRef.current();
     landPendingRef.current = true;
     const active = document.activeElement;
     return active instanceof HTMLElement && rootRef.current?.contains(active)
@@ -529,8 +596,9 @@ export function ConflictFileView({
     recovering ||
     awaitingRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
-  // can't be text-merged: it offers whole-file resolution + the editor, and a
-  // path-gate refusal leaves only the editor (a leaf link also keeps Accept all).
+  // can't be text-merged: it offers whole-file resolution + the editor (binary
+  // and too large also Mark resolved), and a path-gate refusal leaves only the
+  // editor (a leaf link also keeps Accept all).
   const textResolvable = !file.isError;
   const pathRefusal: string | null = (() => {
     if (
@@ -559,6 +627,47 @@ export function ConflictFileView({
         );
     }
   })();
+  // A file refused as too large or binary can still be staged as it is on disk.
+  // Such a read never re-polls, so Mark resolved re-checks status at the click.
+  const readRefusal =
+    file.isError && pathRefusal === null ? readRefusalOf(file.error) : null;
+  // Held focusable, so the click-time read never blurs the pressed button. The
+  // strip carries the hover reason: the button stays the strip's direct child.
+  const markHeld = useDisabledReason({
+    disabled: busy,
+    reason: MARK_BUSY_REASON,
+  });
+  const readErrorView =
+    readRefusal === null ? (
+      <p className="p-4 text-xs text-muted-foreground">{readErrorBody}</p>
+    ) : (
+      <div
+        className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground"
+        title={markHeld.wrapperTitle}
+      >
+        <p className="min-w-0 flex-1">
+          {READ_REFUSAL_LEAD[readRefusal]}
+          {READ_REFUSAL_TAIL}
+        </p>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={busy}
+          focusableWhenDisabled={!!markHeld.blockedReason}
+          aria-describedby={markHeld.describedBy}
+          className={ARIA_DISABLED_CLASS}
+          render={heldButtonRender(!!markHeld.blockedReason)}
+          onClick={markResolved}
+        >
+          Mark resolved
+        </Button>
+        {markHeld.blockedReason ? (
+          <span id={markHeld.reasonId} className="sr-only">
+            {markHeld.blockedReason}
+          </span>
+        ) : null}
+      </div>
+    );
   // The working file alone: per-region accepts rebuild from it, so a clean
   // working file over a non-UTF-8 stage blob stays lossless for them. The AI
   // button holds on it too, but deliberately leaves that blob-only case to
@@ -711,7 +820,7 @@ export function ConflictFileView({
       } finally {
         setChecking(false);
       }
-      const notConflictedToast = `${name} is no longer conflicted — nothing was changed.`;
+      const notConflictedToast = notConflictedCopy(name);
       if (fresh !== null && noLongerConflicted(fresh)) {
         toast.info(notConflictedToast);
         if (!mountedRef.current) return;
@@ -753,7 +862,8 @@ export function ConflictFileView({
     file.data && !file.isError && segments === null
       ? fallbackArm(file.data)
       : null;
-  const canMarkResolved = arm !== null && MARK_RESOLVED_ARMS.has(arm);
+  const canMarkResolved =
+    (arm !== null && MARK_RESOLVED_ARMS.has(arm)) || readRefusal !== null;
 
   // A staging write's re-read lands before git status is even requested, and an
   // outside `git add` can beat the status poll: refresh status once, so the host
@@ -776,6 +886,19 @@ export function ConflictFileView({
     }
   })();
 
+  // Mark resolved's answer to a failed click-time read: the toast it stops
+  // with, or null for a too-large or binary refusal of a path git still lists
+  // as conflicted, which stages after the confirm. That refused read never
+  // re-polls, so the pane can be arbitrarily stale; status decides instead.
+  async function rereadFailureStop(error: unknown): Promise<string | null> {
+    if (readRefusalOf(error) === null) return REREAD_FAILED_TOAST;
+    const status = await gitStatus(repoPath).catch(() => null);
+    if (status === null) return REREAD_FAILED_TOAST;
+    return listsConflicted(status, path)
+      ? null
+      : notConflictedCopy(baseName(path));
+  }
+
   // The button and the palette action both land here, so this is the one gate:
   // staging is a plain `git add`, which would take any remaining markers along.
   // It asks the generic stage routes' question, from their shared builder. The
@@ -787,15 +910,21 @@ export function ConflictFileView({
     inFlightRef.current = true;
     try {
       const markIn = repoPath;
-      let fresh: ConflictSides;
+      // Null when the read refused a file git still lists as conflicted: its
+      // markers can't be checked, so the confirm always shows.
+      let fresh: ConflictSides | null;
       setChecking(true);
       try {
         fresh = await conflictSides(repoPath, path, []);
-      } catch {
-        toast.info("Couldn't re-read the file — nothing was marked resolved.");
-        await refreshAfterError();
-        armLanding("header", pressed);
-        return;
+      } catch (err) {
+        const stop = await rereadFailureStop(err);
+        if (stop !== null) {
+          toast.info(stop);
+          await refreshAfterError();
+          armLanding("header", pressed);
+          return;
+        }
+        fresh = null;
       } finally {
         setChecking(false);
       }
@@ -807,12 +936,19 @@ export function ConflictFileView({
         )
       )
         return;
-      if (markNeedsConfirm(fresh)) {
-        const flag = { name: baseName(path), unchecked: false };
+      if (fresh === null || markNeedsConfirm(fresh)) {
+        const flag = { name: baseName(path), unchecked: fresh === null };
         const ok = await useConfirm
           .getState()
           .ask(markerStagePrompt([flag], false));
-        if (!ok || refuseIfMoved(markIn, "nothing was marked resolved")) return;
+        // A cancel lands on the press like every other exit: the fallback
+        // button, which the click-time hold blurred to <body>, or the strip's
+        // button, which kept focus. The landing waits out the confirm's close.
+        if (!ok) {
+          armLanding("header", pressed);
+          return;
+        }
+        if (refuseIfMoved(markIn, "nothing was marked resolved")) return;
       }
       try {
         await markResolve.mutateAsync(path);
@@ -827,11 +963,8 @@ export function ConflictFileView({
         // stay disabled across it.
         setRecovering(true);
         const status = await gitStatus(repoPath).catch(() => null);
-        const resolvedElsewhere = status?.entries.every(
-          (entry) =>
-            entry.path !== path ||
-            (entry.staged !== "conflicted" && entry.unstaged !== "conflicted"),
-        );
+        const resolvedElsewhere =
+          status !== null && !listsConflicted(status, path);
         if (!resolvedElsewhere) toastError(e);
         await refreshAfterError();
         armLanding("header", pressed);
@@ -863,7 +996,10 @@ export function ConflictFileView({
   // Waits out the hold, so the target is post-re-read and focusable. Consumed
   // whether or not it lands: it never takes focus the user moved elsewhere or
   // took over the pane from, and never lands on another file than its own.
-  // The pane stays mounted here, so its own sink is the fallback.
+  // The pane stays mounted here, so its own sink is the fallback. Focus inside
+  // another dialog (the shared confirm, still closing) isn't the user's: the
+  // landing stays pending and waits, bounded, for focus to leave it, then
+  // re-arms so these rules run against the live state; at the bound it drops.
   useLayoutEffect(() => {
     if (landRequest === null || busy) return;
     setLandRequest(null);
@@ -871,6 +1007,19 @@ export function ConflictFileView({
     landPendingRef.current = false;
     if (!pending) return;
     if (landRequest.repoPath !== repoPath || landRequest.path !== path) return;
+    if (inOtherDialog(document.activeElement, rootRef.current)) {
+      landPendingRef.current = true;
+      const request = landRequest;
+      landWaitRef.current = awaitFocusRelease({
+        held: () => inOtherDialog(document.activeElement, rootRef.current),
+        aborted: () => !landPendingRef.current,
+        onRelease: () => setLandRequest(request),
+        onTimeout: () => {
+          landPendingRef.current = false;
+        },
+      });
+      return;
+    }
     const active = document.activeElement;
     if (
       active !== null &&
@@ -1129,7 +1278,7 @@ export function ConflictFileView({
             Reading the conflict…
           </p>
         ) : file.isError ? (
-          <p className="p-4 text-xs text-muted-foreground">{readErrorBody}</p>
+          readErrorView
         ) : segments === null ? (
           <ConflictFallback
             path={path}

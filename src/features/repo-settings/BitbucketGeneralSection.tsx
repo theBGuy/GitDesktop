@@ -21,6 +21,7 @@ import {
   useBbUpdateRepoSettings,
   useBranches,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type {
   BitbucketRepoSettings,
   BitbucketRepoSettingsInput,
@@ -218,7 +219,7 @@ function BitbucketGeneralForm({
   // agent-session branches (`gd/session/*`) — they're app-internal.
   const branchNames = branches
     .map((b) => b.name)
-    .filter((n) => !n.startsWith("gd/session/"));
+    .filter((n) => !isSessionBranchName(n));
   const branchOptions =
     form.mainBranch && !branchNames.includes(form.mainBranch)
       ? [form.mainBranch, ...branchNames]
