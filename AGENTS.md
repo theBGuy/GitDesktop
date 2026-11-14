@@ -50,8 +50,19 @@ either in the tree.
 - `pnpm build` — typecheck plus frontend bundle. Plain `tsc --noEmit` is a no-op
   in this repo; only `tsc -b` (or `pnpm build`) typechecks.
 - `pnpm run checks` — the repo guard scripts CI runs.
-- `pnpm test` — Vitest component tests (jsdom).
-- `cargo test --manifest-path src-tauri/Cargo.toml`
+- While iterating, SCOPED tests only: Rust
+  `cargo test --manifest-path src-tauri/Cargo.toml <module path>::` for each
+  edited module plus the modules that call each changed item; frontend
+  `pnpm exec vitest related --run <changed src files> <edited test files>`.
+- Before reporting done, the FULL suites ONCE through the lock wrapper:
+  `pnpm test:rust:full` (Rust changed), `pnpm test:vitest:full` (frontend
+  changed, Vitest component tests on jsdom), `pnpm test:all:full` (both).
+  Start it in the background: it may wait for another session's run.
+- A raw full `cargo test --manifest-path src-tauri/Cargo.toml` (no filter),
+  `pnpm test` or `vitest run` outside the wrapper is the violation: two full
+  suites overlapping across sessions time out git calls and red tests that
+  pass solo. Details: `.claude/skills/gd-conventions/SKILL.md`, "Scoped while
+  iterating, full once at the end".
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
 - `cd site && pnpm build` — the marketing site.
 

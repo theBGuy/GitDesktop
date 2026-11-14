@@ -40,16 +40,101 @@ Where this file and generic best practice disagree, this file wins.
 pnpm build                             # tsc + bundle — the frontend gate
 pnpm exec tsc -b --noEmit              # typecheck alone — plain `tsc --noEmit` is a NO-OP here (project refs); only -b checks
 pnpm exec biome check ./src/           # lint/format CHECK (no mutation)
-cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cd site && pnpm build                  # when the marketing site changed
 pnpm run checks                        # guard scripts + self-tests — CI quality.yml guards job
-pnpm test                              # Vitest component tests (jsdom) — CI frontend.yml installed job
+# while iterating: SCOPED tests (rules below)
+cargo test --manifest-path src-tauri/Cargo.toml <module path>::
+pnpm exec vitest related --run <changed src files> <edited test files>
+# before done / commit-ready / handback: the FULL suites ONCE, through the wrapper
+pnpm test:rust:full                    # Rust changed
+pnpm test:vitest:full                  # frontend changed (Vitest component tests, jsdom; CI runs Vitest in frontend.yml)
+pnpm test:all:full                     # both
 ```
 
-Frontend changes run the first pair plus `pnpm test` (CI runs it on every
-`src/**` change, and "which surfaces a suite exercises" is not decidable
-locally); Rust changes add the cargo pair. Not "done" until green.
+Frontend changes run the first pair; Rust changes add clippy; both run the
+scoped tests while iterating and the matching full suite once at the end. Not
+"done" until all of it is green.
+
+### Scoped while iterating, full once at the end
+
+Two full suites overlapping across sessions on one machine time out git calls
+and red tests that pass solo. `scripts/full-suite.mjs` (the `test:*:full`
+scripts) serializes FULL runs machine-wide by holding localhost port 27483 for
+the length of the run; its exit code is the suite's.
+
+- **Scoped, while iterating.** Rust: the tests of each edited module,
+  `cargo test --manifest-path src-tauri/Cargo.toml <module path>::` (file
+  `src-tauri/src/git/branches.rs` → `git::branches::`; several modules go
+  after `--`:
+  `cargo test --manifest-path src-tauri/Cargo.toml -- git::branches:: git::remote::`),
+  plus the modules that CALL each changed item, found with
+  `git grep -n "<item>" -- src-tauri/src`. Frontend:
+  `pnpm exec vitest related --run <changed src files> <edited test files>`.
+  In a session whose worktree-isolated Bash guard refuses a cargo filter
+  containing `git::`, run the same command with the PowerShell tool.
+- **Full, once, at the end.** Before reporting done, commit-ready, or handing
+  a package back: `pnpm test:rust:full` (Rust changed),
+  `pnpm test:vitest:full` (frontend changed), `pnpm test:all:full` (both). It
+  is mandatory because which surfaces a suite exercises is not decidable
+  locally. Extra args pass through:
+  `node scripts/full-suite.mjs vitest [args]`,
+  `node scripts/full-suite.mjs rust [args]` (`all` takes none).
+- **Shared test infrastructure goes straight to the full run**, not a scoped
+  one: tests of one binary share a process, so state that several modules'
+  tests mutate interferes only when they run together, which a module-scoped
+  run never does. Rust members, and the greps that find them:
+  - in-process test seams: `git grep -nE "static TEST_[A-Z_]+" -- src-tauri/src`;
+  - env-var seams:
+    `git grep -nE "env::var(_os)?\(\s*\"GD_[A-Z_]+\"" -- src-tauri/src`, and
+    tests that set process env: `git grep -n "env::set_var" -- src-tauri/src`;
+  - the shared runners and their process-wide state:
+    `src-tauri/src/git/runner.rs` (the one spawn path under every git call)
+    and `src-tauri/src/github/runner.rs` (auth epoch, body cache, rate gate);
+  - shared test helpers: `git grep -n "mod test_support" -- src-tauri/src`;
+  - what every module compiles against: `src-tauri/src/error.rs`, `state.rs`,
+    `lib.rs`, `build.rs`, `Cargo.toml`, `Cargo.lock`;
+  - the rest, measured: an item whose caller grep spans more than five
+    modules counts as shared.
+
+  Frontend members: `package.json`, `vite.config.ts` and `vitest.config.ts`
+  (Vitest's `forceRerunTriggers` reruns every file for them, so `related` over
+  them IS a raw full run); `src/test/setup.ts` and everything it imports
+  (`@/lib/transport`), since a changed setup dependency returns every spec;
+  `pnpm-lock.yaml` (a dependency move is in no import graph `related` walks).
+- **The violation:** a raw full
+  `cargo test --manifest-path src-tauri/Cargo.toml` (no filter), `pnpm test`
+  or `vitest run` outside the wrapper, which re-opens the cross-session overlap
+  above.
+- **Unlocked:** scoped runs and clippy never take the lock (nor does
+  `pnpm run checks`).
+- **Always in the background** (the Bash tool's `run_in_background`, or the
+  PowerShell tool's): a full run may wait for another session's, and a
+  foreground tool timeout on Windows kills the shell but not the wrapper and
+  its children, which keep running and holding the lock with nobody reading
+  them. Read its `full-suite:` lines (`waiting - …`, `lock acquired …`,
+  `<suite> exited <code> after <n>s`); never work around a wait with a raw
+  run, and never set `GD_FULL_SUITE_PORT` to get past one. Don't force-stop a
+  full run mid-run except deliberately: its verdict is lost. On Windows a hard
+  kill of the wrapper ends cargo and its test binary with it (measured), so no
+  orphan outlives it there. On POSIX cargo and its test binary run in the
+  suite's own process group (the app's git and CLI children start groups of
+  their own, which it does not cover). The wrapper forwards signals, job
+  control included, to that group and holds the port until the group is
+  empty, or about 10 s after cargo exits (SIGKILL, then released anyway); the
+  next run waits on a killed wrapper's group, so a test binary that outlives
+  cargo still blocks it. A container needs an init (`docker run --init`):
+  without one, a killed run's unreaped zombies read as alive until the 2 h cap.
+- **Not yet evidence:** a `vitest related` run that finds no test files exits
+  0 and is NO coverage (say so; the end run is that file's coverage). A red in
+  a scoped Rust run and a red in a full run are each re-run alone,
+  `cargo test --manifest-path src-tauri/Cargo.toml -- --exact <full::test::path>`,
+  before they are believed: the lock serializes full suites only, and another
+  session's scoped run can still overlap.
+- **CI can disagree:** the local end run is `cargo test`, which runs a
+  binary's tests as threads of one process; a CI leg under nextest gives each
+  test its own process, so in-process interference shows up locally or not at
+  all.
 
 ⚠ **Formatting fixes stay in scope:** implementers format only their own files,
 via the targeted `pnpm exec biome check --write <files in scope>`, never the
@@ -70,9 +155,11 @@ Never "fix" a red by converting line endings.
 Two frontend test layers exist; pick by assertion kind, never by habit:
 
 - **Behaviour a user could observe** (render, interact, assert the outcome) →
-  a Vitest interaction test in `src/test/**/*.test.{ts,tsx}` (`pnpm test`; RTL +
-  user-event on jsdom; CI runs it in frontend.yml's installed job). Never add a
-  NEW source-scan pin for behaviour a jsdom test can exercise.
+  a Vitest interaction test in `src/test/**/*.test.{ts,tsx}` (RTL + user-event
+  on jsdom), run scoped with `pnpm exec vitest related --run <files>` while
+  iterating and through `pnpm test:vitest:full` at the end (CI runs the layer
+  in frontend.yml). Never add a NEW source-scan pin for behaviour a jsdom test
+  can exercise.
 - **"Every X does Y" class invariants** (roster/adopter scans over `src/`) and
   **pure-logic `.ts` imports** → `scripts/*.test.mjs` as before (installless:
   the `guards` job runs that glob with NO node_modules — a vitest-style test
@@ -108,7 +195,9 @@ Component-layer mechanics (set by the spike; extend, don't re-derive):
   file is fixed in the test, never by widening the guard.
 - Under an agent session vitest picks its minimal reporter, which hides console
   output from passing tests — act warnings and the unmocked-command warning only
-  show under `pnpm exec vitest run --silent=false`.
+  show under `--silent=false`, added to a scoped run
+  (`pnpm exec vitest related --run <files> --silent=false`) or passed through
+  the wrapper (`node scripts/full-suite.mjs vitest --silent=false`).
 
 ## Frontend conventions
 
@@ -1579,10 +1668,12 @@ stale "coming soon" mentions when a feature ships.
 
 ## Definition of done
 
-Verification green (failures quoted verbatim, passes one line each); edge
-cases exercised (first/last/empty, boundaries); keyboard nav + palette
-registration wired for new UI; docs-sync per the spec's `Docs-sync:` field
-(gaps flagged, never silently skipped); footprint sweep via
+Verification green (failures quoted verbatim, passes one line each), the full
+suites run once through the wrapper (`pnpm test:rust:full`,
+`pnpm test:vitest:full` or `pnpm test:all:full`); edge cases exercised
+(first/last/empty, boundaries); keyboard nav + palette registration wired for
+new UI; docs-sync per the spec's `Docs-sync:` field (gaps flagged, never
+silently skipped); footprint sweep via
 `git --no-pager status` accounting for YOUR files only (the tree may hold the
 user's parallel WIP and sibling packages — don't touch or explain what isn't
 yours).
