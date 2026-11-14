@@ -331,9 +331,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Experiment: macOS compiles the test binary ~2.5x slower than Windows (CI
-      # logs), and line tables alone keep backtraces readable. Set before the
-      # cache step because rust-cache hashes CARGO_* env into its key.
+      # Experiment: macOS compiles the test binary ~1.6-2.5x slower than
+      # Windows (recent CI logs), and line tables alone keep backtraces
+      # readable. Set before the cache step because rust-cache hashes CARGO_*
+      # env into its key; the gate skips master's post-merge matrix, so after
+      # changing this, re-run that master run once to seed the new cache.
       - name: Trim macOS debug info
         if: runner.os == 'macOS'
         shell: bash
@@ -347,7 +349,7 @@ jobs:
           # image in the key, Linux legs share one cache and an image bump
           # restores the previous image's build. Shards share the platform key,
           # so only the clippy leg saves: an exact-key hit never re-saves, and
-          # the saved cache must hold the clippy artifacts.
+          # the saved cache must include the dependency builds clippy needs.
           key: ${{ matrix.platform }}
           save-if: ${{ matrix.clippy }}
 
@@ -381,7 +383,7 @@ jobs:
           tool: cargo-nextest@0.9.151
 
       # nextest runs no doctests; the Linux legs' `cargo test` covers them.
-      - name: Run tests (shard ${{ matrix.shard }}/2)
+      - name: Run tests (nextest shard)
         if: matrix.shard
         run: cargo nextest run --manifest-path src-tauri/Cargo.toml --partition slice:${{ matrix.shard }}/2 --no-fail-fast
 
