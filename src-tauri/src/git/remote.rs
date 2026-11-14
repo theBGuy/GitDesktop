@@ -1903,7 +1903,7 @@ mod tests {
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
     use crate::git::runner::{
         config_lock_busy, hold_config_lock, is_config_lock_contention, run_git, run_git_raw,
-        DEFAULT_TIMEOUT, NETWORK_TIMEOUT,
+        DEFAULT_TIMEOUT, NETWORK_TIMEOUT, TEST_GIT_HANG_GUARD,
     };
     use crate::state::AppState;
     use std::time::Duration;
@@ -3220,7 +3220,7 @@ mod tests {
             Some(repo),
             &args,
             &[("GIT_CONFIG_GLOBAL", global)],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -4494,7 +4494,7 @@ mod tests {
     /// Whether every key reads unset (git exits 1); otherwise logs the skip.
     async fn unset_outside(repo: &str, what: &str, keys: &[&str]) -> bool {
         for key in keys {
-            let out = run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), &["config", "--get", key], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             if out.code != 1 {
@@ -5536,7 +5536,7 @@ mod tests {
         run_git_raw(
             Some(repo),
             &["config", "--local", "--get-regexp", r"^(remote|branch)\."],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -7128,7 +7128,7 @@ and the repository exists.
 
     /// stderr of a git call that must fail, run the way the app's runner runs it.
     async fn failing_stderr(repo: &str, args: &[&str]) -> String {
-        match run_git(Some(repo), args, DEFAULT_TIMEOUT).await {
+        match run_git(Some(repo), args, TEST_GIT_HANG_GUARD).await {
             Err(AppError::Git { stderr, .. }) => stderr,
             Err(other) => panic!("expected `git {args:?}` to fail with a git error, got {other:?}"),
             Ok(_) => panic!("expected `git {args:?}` to fail, but it succeeded"),
@@ -7647,7 +7647,7 @@ and the repository exists.
     // --- Real-repo tests for git_remote_remove (temp_dir, git on PATH). ---
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()

@@ -1247,9 +1247,10 @@ fn is_unknown_option(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()

@@ -944,7 +944,7 @@ fn stem_age(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::run_git;
+    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
 
     fn temp_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()

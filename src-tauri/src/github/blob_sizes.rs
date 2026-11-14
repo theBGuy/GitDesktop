@@ -141,7 +141,7 @@ fn github_sizes_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
     use crate::github::test_support::{
         gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
     };
@@ -374,7 +374,9 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
     }
 
     async fn remote_repo(origin: Option<&str>) -> (tempfile::TempDir, String) {

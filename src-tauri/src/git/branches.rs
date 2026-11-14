@@ -3699,6 +3699,7 @@ mod tests {
     use crate::git::runner::{
         acquire_repo_lock, hold_config_lock, release_config_lock_before_attempt, run_git,
         run_git_raw, CONFIG_WRITE_ATTEMPT_HOOK, CONFIG_WRITE_LOCK_EVENTS, DEFAULT_TIMEOUT,
+        TEST_GIT_HANG_GUARD,
     };
     use crate::state::AppState;
     use std::collections::HashSet;
@@ -3847,7 +3848,7 @@ mod tests {
     // --- Real-repo test for the `--no-track` seam (temp_dir, git on PATH). ---
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -5316,11 +5317,10 @@ mod tests {
             released.notify_one();
             out
         };
-        let (first, second) = tokio::time::timeout(Duration::from_secs(30), async {
-            tokio::join!(first, second)
-        })
-        .await
-        .expect("neither rename deadlocks");
+        let (first, second) =
+            tokio::time::timeout(TEST_GIT_HANG_GUARD, async { tokio::join!(first, second) })
+                .await
+                .expect("neither rename deadlocks");
         first.expect("a -> b succeeds");
         second.expect("b -> c succeeds once a -> b is done");
 
@@ -5461,11 +5461,9 @@ mod tests {
             (store_lock_free, written)
         };
         let (renamed, (store_lock_free, written)) =
-            tokio::time::timeout(Duration::from_secs(30), async {
-                tokio::join!(rename, writer)
-            })
-            .await
-            .expect("neither side hangs");
+            tokio::time::timeout(TEST_GIT_HANG_GUARD, async { tokio::join!(rename, writer) })
+                .await
+                .expect("neither side hangs");
         renamed.expect("the rename succeeds");
         assert!(
             store_lock_free,
@@ -5629,7 +5627,7 @@ mod tests {
             .expect("the marker mints");
         drop(held);
 
-        let err = tokio::time::timeout(Duration::from_secs(30), rename)
+        let err = tokio::time::timeout(TEST_GIT_HANG_GUARD, rename)
             .await
             .expect("the rename settles once the lock is free")
             .expect_err("an update that started during the wait refuses the rename");
@@ -5660,16 +5658,20 @@ mod tests {
         run_git(
             None,
             &["init", "-q", "--bare", "-b", "main", &remote_s],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("init bare remote");
 
         let server = base.join("server");
         let server_s = server.to_string_lossy().into_owned();
-        run_git(None, &["clone", "-q", &remote_s, &server_s], DEFAULT_TIMEOUT)
-            .await
-            .expect("clone server");
+        run_git(
+            None,
+            &["clone", "-q", &remote_s, &server_s],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .expect("clone server");
         run(&server_s, &["config", "user.email", "t@t.local"]).await;
         run(&server_s, &["config", "user.name", "T"]).await;
         std::fs::write(server.join("seed.txt"), "seed\n").unwrap();
@@ -5680,9 +5682,13 @@ mod tests {
         let local = base.join("local");
         let local_s = local.to_string_lossy().into_owned();
         run(&remote_s, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
-        run_git(None, &["clone", "-q", &remote_s, &local_s], DEFAULT_TIMEOUT)
-            .await
-            .expect("clone local");
+        run_git(
+            None,
+            &["clone", "-q", &remote_s, &local_s],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .expect("clone local");
         run(&local_s, &["config", "user.email", "t@t.local"]).await;
         run(&local_s, &["config", "user.name", "T"]).await;
         run(&local_s, &["switch", "-qc", "feature"]).await;
@@ -9199,7 +9205,7 @@ mod tests {
 
     async fn archived_flag(repo: &str, branch: &str) -> Option<String> {
         let key = format!("branch.{branch}.gitdesktopArchived");
-        let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(repo), &["config", "--get", &key], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (out.code == 0).then(|| out.stdout_lossy().trim().to_string())
@@ -9369,7 +9375,7 @@ mod tests {
         run_git_raw(
             Some(repo),
             &["config", "--get-regexp", &pattern],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -9529,7 +9535,7 @@ mod tests {
         let out = run_git_raw(
             Some(repo),
             &["rev-parse", "--verify", "--quiet", rev],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -9537,10 +9543,14 @@ mod tests {
     }
 
     async fn reflog_exists(repo: &str, full_ref: &str) -> bool {
-        run_git_raw(Some(repo), &["reflog", "exists", full_ref], DEFAULT_TIMEOUT)
-            .await
-            .unwrap()
-            .code
+        run_git_raw(
+            Some(repo),
+            &["reflog", "exists", full_ref],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .code
             == 0
     }
 
@@ -10316,7 +10326,7 @@ mod tests {
         run_git(
             Some(repo),
             &["rev-parse", "--abbrev-ref", &spec],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .ok()
@@ -10355,7 +10365,7 @@ mod tests {
         let get = |key: &'static str| {
             let key = format!("branch.{branch}.{key}");
             async move {
-                let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+                let out = run_git_raw(Some(repo), &["config", "--get", &key], TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap();
                 (out.code == 0).then(|| out.stdout_lossy().trim().to_string())
@@ -10753,7 +10763,7 @@ mod tests {
         let head = run_git_raw(
             Some(repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

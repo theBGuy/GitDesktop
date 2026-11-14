@@ -11,6 +11,11 @@ use crate::error::{AppError, AppResult};
 use crate::state::{AppState, HolderSlot, LockDomain};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-spawn budget for git that tests run themselves: a hang guard, not a contract.
+/// Headroom over `DEFAULT_TIMEOUT` so ordinary machine load does not fail a fixture step;
+/// a wedged child still fails the test.
+#[cfg(test)]
+pub(crate) const TEST_GIT_HANG_GUARD: Duration = Duration::from_secs(120);
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Adding and removing a worktree both write or delete a whole checkout, so their
 /// cost is proportional to the tree rather than fixed. A node_modules-scale
@@ -1329,7 +1334,7 @@ mod stdin_tests {
             Some(&repo),
             &["check-ignore", "--verbose", "-z", "--stdin"],
             Some(&input),
-            Duration::from_secs(30),
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("check-ignore answers inside the timeout");
@@ -1524,7 +1529,7 @@ mod config_write_lock_tests {
     use super::*;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
             .stdout_lossy()

@@ -599,6 +599,7 @@ pub(crate) async fn clear_branch_state(repo: &str) {
 #[cfg(test)]
 pub(crate) mod branch_state_fixtures {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     /// Which branch-state names exist in `repo` now, as files or as refs. Test-only: the
     /// parity pins compare it across git's own reset and the compare-and-swap ones.
@@ -639,7 +640,7 @@ pub(crate) mod branch_state_fixtures {
         run_git(
             Some(repo),
             &["update-ref", "AUTO_MERGE", oid],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -651,7 +652,9 @@ pub(crate) mod branch_state_fixtures {
     pub(crate) async fn stop_an_autostashed_squash(repo: &str) -> String {
         let dir = Path::new(repo);
         let git = |args: &'static [&'static str]| async move {
-            run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap()
+            run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap()
         };
         let start = crate::git::branches::current_branch_name(repo)
             .await
@@ -664,7 +667,7 @@ pub(crate) mod branch_state_fixtures {
         git(&["switch", "-qc", "autostash-feature"]).await;
         std::fs::write(dir.join("auto.txt"), "theirs\n").unwrap();
         git(&["commit", "-qam", "autostash theirs"]).await;
-        run_git(Some(repo), &["switch", "-q", &start], DEFAULT_TIMEOUT)
+        run_git(Some(repo), &["switch", "-q", &start], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         std::fs::write(dir.join("auto.txt"), "mine\n").unwrap();
@@ -673,7 +676,7 @@ pub(crate) mod branch_state_fixtures {
         let squash = run_git_raw(
             Some(repo),
             &["merge", "--squash", "--autostash", "autostash-feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -8835,6 +8838,7 @@ mod tests {
         branch_state_present, stop_an_autostashed_squash, write_unguarded_branch_state,
     };
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     // Test-only: the interleave control queues on the lock WITHOUT a wait bound.
     use crate::git::runner::acquire_repo_lock_unbounded;
 
@@ -8961,7 +8965,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -10681,7 +10685,7 @@ mod tests {
                 Some(repo),
                 &["hash-object", "-t", "commit", "-w", "--stdin"],
                 Some(&object),
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -12071,7 +12075,7 @@ mod tests {
                 ("GIT_SEQUENCE_EDITOR", editor.as_str()),
                 ("GIT_EDITOR", "true"),
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -14342,7 +14346,7 @@ mod tests {
             Some(repo),
             &args,
             &[("GIT_COMMITTER_DATE", committer)],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -15818,7 +15822,7 @@ mod tests {
     /// A commit object's raw bytes, split into its headers (through the last header's
     /// newline) and its message.
     async fn raw_object_parts(repo: &str, r: &str) -> (Vec<u8>, Vec<u8>) {
-        let object = run_git(Some(repo), &["cat-file", "commit", r], DEFAULT_TIMEOUT)
+        let object = run_git(Some(repo), &["cat-file", "commit", r], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout;
@@ -17611,7 +17615,7 @@ mod tests {
             Some(repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -17889,7 +17893,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "side"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -25576,7 +25580,7 @@ detached
         git(&repo, &["switch", &base]).await;
         commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
         // run_git_raw: a conflicting merge exits non-zero.
-        let merge = run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+        let merge = run_git_raw(Some(&repo), &["merge", "other"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(merge.code, 0, "merge should conflict");

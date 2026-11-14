@@ -1916,7 +1916,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
             .stdout_lossy()
@@ -1950,7 +1950,7 @@ mod tests {
         let _ = crate::git::runner::run_git(
             Some(&repo),
             &["cherry-pick", &pick],
-            crate::git::runner::DEFAULT_TIMEOUT,
+            crate::git::runner::TEST_GIT_HANG_GUARD,
         )
         .await;
         assert!(

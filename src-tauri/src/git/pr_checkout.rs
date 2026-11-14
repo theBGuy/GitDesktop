@@ -727,17 +727,18 @@ pub async fn native_pr_checkout_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     use crate::git::worktree::diverged_message;
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?} in {repo}: {e}"))
             .stdout_lossy()
     }
 
     async fn exit(repo: &str, args: &[&str]) -> i32 {
-        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .code
@@ -1247,7 +1248,7 @@ mod tests {
     }
 
     async fn config(repo: &str, key: &str) -> (i32, String) {
-        let out = run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(repo), &["config", "--get", key], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (out.code, out.stdout_lossy().trim().to_string())

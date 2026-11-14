@@ -1936,6 +1936,7 @@ pub(crate) async fn checkout_pre_spawn_gate_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     // The module itself no longer calls the working-tree runner — the interleave
     // tests below drive it as an ordinary caller would.
     use crate::git::ops::parse_gitdir_pointer;
@@ -2159,7 +2160,7 @@ prunable gitdir file points to non-existent location
     }
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -3377,7 +3378,7 @@ prunable gitdir file points to non-existent location
         let mut got = Vec::new();
         for key in ["remote", "merge"] {
             let key = format!("branch.{branch}.{key}");
-            let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), &["config", "--get", &key], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             got.push((out.code == 0).then(|| out.stdout_lossy().trim().to_string()));

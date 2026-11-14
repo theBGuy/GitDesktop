@@ -9660,7 +9660,7 @@ mod tests {
         ForkPrMatch, RawDivergenceRefs, RawForkPr, RawLogin, RawPr, RawReview,
     };
     use crate::error::AppError;
-    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
     use crate::github::test_support::{
         gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
     };
@@ -12214,7 +12214,7 @@ mod tests {
     #[tokio::test]
     async fn origin_reachable_oids_are_not_distinctive_contributor_work() {
         async fn run(repo: &str, args: &[&str]) -> String {
-            run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap()
                 .stdout_lossy()
@@ -12291,7 +12291,7 @@ mod tests {
     #[tokio::test]
     async fn repo_url_no_lens_arm_resolves_from_origin_without_gh() {
         async fn run(repo: &str, args: &[&str]) {
-            let _ = run_git(Some(repo), args, DEFAULT_TIMEOUT).await;
+            let _ = run_git(Some(repo), args, TEST_GIT_HANG_GUARD).await;
         }
 
         async fn repo_with_origin(tag: &str, remote: &str) -> (tempfile::TempDir, String) {

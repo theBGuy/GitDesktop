@@ -525,10 +525,10 @@ fn lexically_normal(path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod lock_key_tests {
     use super::*;
-    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::git::runner::{run_git, DEFAULT_TIMEOUT, TEST_GIT_HANG_GUARD};
 
     async fn git(repo: &str, args: &[&str]) {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?} in {repo} failed: {e:?}"));
     }

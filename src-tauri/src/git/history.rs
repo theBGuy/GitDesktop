@@ -1105,6 +1105,7 @@ pub async fn git_commit_file_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     use std::path::Path;
 
     #[tokio::test]
@@ -1197,11 +1198,13 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
     }
 
     async fn git_out(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1348,7 +1351,7 @@ mod tests {
         /// Picks `commit` onto a HEAD that already holds its change, so git stops
         /// with the pick empty.
         async fn empty_pick_stop(repo: &str, commit: &str) {
-            let out = run_git_raw(Some(repo), &["cherry-pick", commit], DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), &["cherry-pick", commit], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert_ne!(out.code, 0, "the pick stops");
@@ -1727,7 +1730,7 @@ mod tests {
         std::fs::write(&file, "first\n").unwrap();
         git(&repo, &["add", "."]).await;
         git(&repo, &["commit", "-m", "one"]).await;
-        let first = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let first = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1735,7 +1738,7 @@ mod tests {
             .to_string();
         std::fs::write(&file, "first\nsecond\n").unwrap();
         git(&repo, &["commit", "-am", "two"]).await;
-        let second = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let second = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2038,7 +2041,7 @@ mod tests {
     }
 
     async fn head_sha(repo: &str) -> String {
-        run_git(Some(repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        run_git(Some(repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2072,7 +2075,7 @@ mod tests {
         run_git(
             Some(repo),
             &["log", "--follow", "--format=%H", "--", &spec],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2563,7 +2566,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2583,7 +2586,7 @@ mod tests {
                 "--batch-all-objects",
                 "--batch-check=%(objectname) %(objecttype)",
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2606,7 +2609,7 @@ mod tests {
         run_git(
             Some(repo),
             &["log", "-1", "--format=%s", id],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2764,7 +2767,7 @@ mod tests {
     }
 
     async fn head_sha_of(repo: &str, rev: &str) -> String {
-        run_git(Some(repo), &["rev-parse", rev], DEFAULT_TIMEOUT)
+        run_git(Some(repo), &["rev-parse", rev], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()

@@ -805,7 +805,7 @@ mod path_is_dir_tests {
 mod validate_repo_tests {
     use super::{git_says_not_a_repository, validate_repo};
     use crate::error::AppError;
-    use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
+    use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT, TEST_GIT_HANG_GUARD};
     use std::path::{Path, PathBuf};
 
     /// git's own words for each shape (measured, git 2.51.1.windows.1).
@@ -823,7 +823,7 @@ mod validate_repo_tests {
     }
 
     async fn git(repo: &Path, args: &[&str]) {
-        run_git(Some(&s(repo)), args, DEFAULT_TIMEOUT)
+        run_git(Some(&s(repo)), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
     }
@@ -1277,9 +1277,12 @@ mod origin_path_tests {
     /// would serve the first remote's cached URL to every later assertion.
     async fn origin_of(tag: &str, remote: Option<&str>) -> RepoOrigin {
         async fn run(repo: &str, args: &[&str]) {
-            let _ =
-                crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
-                    .await;
+            let _ = crate::git::runner::run_git(
+                Some(repo),
+                args,
+                crate::git::runner::TEST_GIT_HANG_GUARD,
+            )
+            .await;
         }
         let dir = tempfile::Builder::new()
             .prefix(&format!("gd-origin-path-{tag}-"))

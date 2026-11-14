@@ -621,15 +621,19 @@ pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
     tokio::fs::write(Path::new(repo).join(path), content)
         .await
         .unwrap();
-    run_git(Some(repo), &["add", "--", path], DEFAULT_TIMEOUT)
-        .await
-        .unwrap();
+    run_git(
+        Some(repo),
+        &["add", "--", path],
+        crate::git::runner::TEST_GIT_HANG_GUARD,
+    )
+    .await
+    .unwrap();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::run_git;
+    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
 
     #[tokio::test]
     async fn private_temp_diff_contents_concurrent_calls_stay_separate() {
@@ -870,7 +874,11 @@ mod tests {
         let (dir, repo) = temp_repo(tag);
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
         git(vec!["init"]).await;
         git(vec!["config", "user.email", "t@t"]).await;
@@ -892,7 +900,7 @@ mod tests {
         std::fs::write(&file, ours).unwrap();
         git(vec!["commit", "-am", "ours"]).await;
         // The merge is expected to conflict (non-zero exit), so run it raw.
-        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+        run_git_raw(Some(&repo), &["merge", "feature"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (dir, repo)
@@ -1013,11 +1021,13 @@ mod tests {
     }
 
     async fn git_ok(repo: &str, args: &[&str]) {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
     }
 
     async fn stdout_of(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1076,7 +1086,7 @@ mod tests {
         git_ok(&repo, &["commit", "-m", "ours"]).await;
 
         // The merge is expected to conflict (non-zero exit), so run it raw.
-        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+        run_git_raw(Some(&repo), &["merge", "feature"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (dir, repo)

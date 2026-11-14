@@ -749,9 +749,10 @@ fn dropped_sha(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1695,7 +1696,7 @@ mod tests {
         const REBASE_STAGED: &str = "cannot rebase: your index contains uncommitted changes";
 
         async fn refusal(repo: &str, args: &[&str]) -> String {
-            let out = run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert_ne!(out.code, 0, "expected git to refuse {args:?}");

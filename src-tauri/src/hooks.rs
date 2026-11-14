@@ -795,6 +795,7 @@ pub async fn git_keep_local_hook_remove(repo_path: String) -> AppResult<KeepLoca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     #[test]
     fn accepts_known_client_hooks() {
@@ -831,7 +832,7 @@ mod tests {
     use KeepLocalHookState::{Absent, Blocked, Installed};
 
     async fn git(repo: &str, args: &[&str]) -> GitOutput {
-        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
     }

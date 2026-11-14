@@ -1116,7 +1116,7 @@ async fn stage_gitmodules(repo_path: &str) -> AppResult<()> {
 mod tests {
     use super::*;
     use crate::git::repo::clone_repo_core;
-    use crate::git::runner::{hold_config_lock, lock_events};
+    use crate::git::runner::{hold_config_lock, lock_events, TEST_GIT_HANG_GUARD};
 
     /// git refuses `file` transport for submodule clones by default
     /// (`fatal: transport 'file' not allowed`), and the block lives in the CHILD
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?} in {repo}: {e}"))
             .stdout_lossy()

@@ -102,16 +102,21 @@ import {
   checkShortRefNames,
   checkStderrOnlyGitError,
   checkSyncCommands,
+  checkTestHangGuard,
   checkTestMarkerBranches,
   enclosingFn,
+  fnAttributes,
   GH_EXIT_ABSENCE_ALLOWLIST,
   ghExitAbsenceScope,
   lexRust,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
   reportEmptyGhScope,
+  reportEmptyHangGuardScope,
   splitStaleEntries,
   staleAllowlistEntries,
+  TEST_HANG_GUARD_ALLOWLIST,
+  TEST_HANG_GUARD_NOTE,
   TEST_MARKER_ALLOWLIST,
 } from "./check-rust-invariants.mjs";
 import {
@@ -7425,6 +7430,322 @@ test("check J's empty scope lands on J wherever it sits in the list", () => {
   assert.deepEqual(quiet.hits, []);
   // Losing J from the list fails loudly rather than misrouting.
   assert.throws(() => reportEmptyGhScope([k], []), /check J is missing/);
+});
+
+function hangGuardHits(
+  src,
+  file = "git/fixture.rs",
+  allowlist = TEST_HANG_GUARD_ALLOWLIST,
+  corpus = undefined,
+) {
+  const hits = [];
+  checkTestHangGuard(file, src, src.split("\n"), hits, allowlist, corpus);
+  return hits;
+}
+
+const hangGuardModule = (body) =>
+  `#[cfg(test)]\nmod tests {\n    use super::*;\n${body}\n}\n`;
+
+const hangGuardSites = (hits) => hits.map((h) => `${h.fn}:${h.line}`);
+
+test("check L flags a helper in a test module, its methods and its closures", () => {
+  const src = hangGuardModule(
+    [
+      "    async fn git(dir: &Path, args: &[&str]) -> String {",
+      "        run_git(Some(dir), args, DEFAULT_TIMEOUT).await.unwrap().stdout",
+      "    }",
+      "    pub(crate) fn sync_helper(dir: &Path) {",
+      "        let spawn = |args: &[&str]| run_git_raw(dir, args, DEFAULT_TIMEOUT);",
+      "        spawn(&[]);",
+      "    }",
+      "    impl Fixture {",
+      "        async fn install(&self) {",
+      "            run_git(Some(&self.dir), &[], crate::git::runner::DEFAULT_TIMEOUT).await;",
+      "        }",
+      "    }",
+    ].join("\n"),
+  );
+  const hits = hangGuardHits(src);
+  assert.deepEqual(hangGuardSites(hits), [
+    "git:5",
+    "sync_helper:8",
+    "install:13",
+  ]);
+  for (const h of hits) {
+    assert.equal(h.file, "git/fixture.rs");
+    assert.equal(h.allowlisted, false);
+    assert.match(h.fix, /TEST_GIT_HANG_GUARD/);
+  }
+});
+
+test("check L flags a nested fn inside a test fn as a helper", () => {
+  const src = hangGuardModule(
+    [
+      "    #[tokio::test]",
+      "    async fn a_test() {",
+      "        async fn run(repo: &str, args: &[&str]) {",
+      "            let _ = run_git(Some(repo), args, DEFAULT_TIMEOUT).await;",
+      "        }",
+      '        run("r", &[]).await;',
+      "    }",
+    ].join("\n"),
+  );
+  assert.deepEqual(hangGuardSites(hangGuardHits(src)), ["run:7"]);
+});
+
+test("check L skips qualifiers before reading a cfg(test) fn's attributes", () => {
+  const src = [
+    "#[cfg(test)]",
+    "/// A racing writer for the lock tests.",
+    "pub(crate) async fn racing_git(dir: &Path) {",
+    "    run_git(Some(dir), &[], crate::git::runner::DEFAULT_TIMEOUT).await;",
+    "}",
+    "#[cfg(test)]",
+    'pub unsafe extern "C" fn ffi_helper() {',
+    "    let _ = DEFAULT_TIMEOUT;",
+    "}",
+    "#[cfg(test)]",
+    "pub(in crate::git) const fn budget() -> Duration {",
+    "    DEFAULT_TIMEOUT",
+    "}",
+  ].join("\n");
+  assert.deepEqual(hangGuardSites(hangGuardHits(src)), [
+    "racing_git:4",
+    "ffi_helper:8",
+    "budget:12",
+  ]);
+});
+
+test("check L leaves test fn bodies alone, however their attributes are spelled", () => {
+  const src = hangGuardModule(
+    [
+      "    #[test]",
+      "    fn plain() { let _ = DEFAULT_TIMEOUT; }",
+      "    #[tokio::test]",
+      "    async fn tokio_bare() { let _ = DEFAULT_TIMEOUT; }",
+      '    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]',
+      "    async fn tokio_args() { let _ = DEFAULT_TIMEOUT; }",
+      "    /// Doc comment above the attributes.",
+      "    #[tokio::test]",
+      "    // A note between attributes.",
+      '    #[ignore = "slow ] fn decoy"]',
+      "    /** Block doc. */",
+      '    #[should_panic(expected = "#[test]")]',
+      "    async fn interleaved() {",
+      "        let pick = || run_git(None, &[], DEFAULT_TIMEOUT);",
+      "        pick();",
+      "    }",
+      "    #[test] fn one_line() { DEFAULT_TIMEOUT; }",
+    ].join("\n"),
+  );
+  assert.deepEqual(hangGuardHits(src), []);
+});
+
+test("check L leaves production, use lines, comments and literals alone", () => {
+  const src = [
+    "use crate::git::runner::{run_git, DEFAULT_TIMEOUT};",
+    "pub async fn product(dir: &Path) {",
+    "    run_git(Some(dir), &[], DEFAULT_TIMEOUT).await;",
+    "}",
+    "#[cfg(any(unix, test))]",
+    "fn shared_with_production() { let _ = DEFAULT_TIMEOUT; }",
+    "const BUDGET: Duration = DEFAULT_TIMEOUT;",
+    hangGuardModule(
+      [
+        "    use crate::git::runner::{",
+        "        run_git,",
+        "        DEFAULT_TIMEOUT,",
+        "    };",
+        "    use crate::git::runner::DEFAULT_TIMEOUT as _;",
+        "    fn helper() {",
+        "        // DEFAULT_TIMEOUT in a line comment",
+        "        /* DEFAULT_TIMEOUT in a /* nested */ block */",
+        '        let a = "DEFAULT_TIMEOUT";',
+        '        let b = r#"DEFAULT_TIMEOUT"#;',
+        "        let c = DEFAULT_TIMEOUT_MS;",
+        "        run_git(None, &[], TEST_GIT_HANG_GUARD);",
+        "    }",
+      ].join("\n"),
+    ),
+  ].join("\n");
+  assert.deepEqual(hangGuardHits(src), []);
+});
+
+test("check L allowlists a (file, fn) row and reports a stale row", () => {
+  const src = hangGuardModule(
+    [
+      "    async fn start_with_todo(repo: &str) {",
+      "        start_planned_rebase(repo, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT).await;",
+      "    }",
+    ].join("\n"),
+  );
+  const row = {
+    file: "git/ops.rs",
+    fn: "start_with_todo",
+    rationale: "fixture",
+  };
+  const hits = hangGuardHits(src, "git/ops.rs", [row]);
+  assert.deepEqual(
+    hits.map((h) => h.allowlisted),
+    [true, true],
+  );
+  assert.deepEqual(splitStaleEntries([row], hits).failing, []);
+  // Another file's row never covers this one.
+  assert.deepEqual(
+    hangGuardHits(src, "git/branches.rs", [row]).map((h) => h.allowlisted),
+    [false, false],
+  );
+  // A row whose function no longer passes DEFAULT_TIMEOUT is stale.
+  const gone = hangGuardHits(
+    src.replaceAll("DEFAULT_TIMEOUT", "TEST_GIT_HANG_GUARD"),
+    "git/ops.rs",
+    [row],
+  );
+  assert.deepEqual(gone, []);
+  assert.deepEqual(splitStaleEntries([row], gone).failing, [row]);
+});
+
+test("check L's live allowlist is the one product-argument row", () => {
+  assert.deepEqual(
+    TEST_HANG_GUARD_ALLOWLIST.map((e) => `${e.file}::${e.fn}`),
+    ["git/ops.rs::start_with_todo"],
+  );
+  for (const e of TEST_HANG_GUARD_ALLOWLIST)
+    assert.ok(e.rationale.length > 20, e.fn);
+});
+
+test("check L fails closed on a file it cannot lex", () => {
+  for (const src of [
+    hangGuardModule(
+      '    fn helper() { let s = "never closed; DEFAULT_TIMEOUT }',
+    ),
+    hangGuardModule("    fn helper() { /* never closed DEFAULT_TIMEOUT }"),
+  ]) {
+    const hits = hangGuardHits(src, "git/fixture.rs", [
+      { file: "git/fixture.rs", fn: "<unreadable>", rationale: "fixture" },
+    ]);
+    assert.deepEqual(
+      hits.map((h) => [h.fn, h.allowlisted]),
+      [["<unreadable>", false]],
+    );
+  }
+});
+
+test("check L fails closed on a test-module token outside any fn", () => {
+  for (const item of [
+    "    const BUDGET: Duration = DEFAULT_TIMEOUT;",
+    "    static BUDGET: Duration = DEFAULT_TIMEOUT;",
+  ]) {
+    const hits = hangGuardHits(hangGuardModule(item));
+    assert.deepEqual(hangGuardSites(hits), ["<unreadable>:4"], item);
+    assert.match(hits[0].fix, /outside any function/);
+  }
+});
+
+test("check L fails closed on an attribute run it cannot read", () => {
+  for (const before of ["#[test", "test]", "x[0]"]) {
+    const src = hangGuardModule(
+      `    ${before} async fn helper() { let _ = DEFAULT_TIMEOUT; }`,
+    );
+    const hits = hangGuardHits(src);
+    assert.deepEqual(hangGuardSites(hits), ["<unreadable>:4"], before);
+    assert.equal(hits[0].allowlisted, false);
+    assert.match(hits[0].fix, /attribute run before fn helper/);
+  }
+  // The reader itself: a balanced run reads, an unbalanced one does not.
+  const masked = lexRust(
+    "#[tokio::test(x)]\n/// doc\npub async fn t() {}",
+  ).masked;
+  assert.deepEqual(fnAttributes(masked, masked.indexOf("fn")), [
+    "#[tokio::test(x)]",
+  ]);
+  const open = lexRust("{ test] fn t() {} }").masked;
+  assert.equal(fnAttributes(open, open.indexOf("fn")), null);
+});
+
+test("check L reads past a module's inner attribute to the helper after it", () => {
+  const src = [
+    "#[cfg(test)]",
+    "mod tests {",
+    "    #![allow(dead_code)]",
+    "    fn helper() { let _ = DEFAULT_TIMEOUT; }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(hangGuardSites(hangGuardHits(src)), ["helper:4"]);
+});
+
+test("check L's corpus tallies the definition and the test spans", () => {
+  const runner = [
+    "pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);",
+    hangGuardModule("    #[test] fn t() {}"),
+  ].join("\n");
+  const corpus = { definition: false, spans: 0 };
+  hangGuardHits(runner, "git/runner.rs", [], corpus);
+  assert.deepEqual(corpus, { definition: true, spans: 1 });
+  // The definition counts only in git/runner.rs, and only under its own name.
+  const elsewhere = { definition: false, spans: 0 };
+  hangGuardHits(runner, "git/other.rs", [], elsewhere);
+  assert.deepEqual(elsewhere, { definition: false, spans: 1 });
+  const renamed = { definition: false, spans: 0 };
+  hangGuardHits(
+    "pub const DEFAULT_GIT_TIMEOUT: Duration = Duration::from_secs(30);",
+    "git/runner.rs",
+    [],
+    renamed,
+  );
+  assert.deepEqual(renamed, { definition: false, spans: 0 });
+  // A commented-out definition is not one.
+  const commented = { definition: false, spans: 0 };
+  hangGuardHits(
+    "// pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);",
+    "git/runner.rs",
+    [],
+    commented,
+  );
+  assert.equal(commented.definition, false);
+});
+
+test("check L's empty corpus is a hit, never a pass", () => {
+  const empty = [];
+  reportEmptyHangGuardScope(empty, { definition: false, spans: 0 });
+  assert.deepEqual(
+    empty.map((h) => [h.file, h.fn, h.allowlisted]),
+    [
+      ["git/runner.rs", "<empty scope>", false],
+      ["**/*.rs", "<empty scope>", false],
+    ],
+  );
+  const noDefinition = [];
+  reportEmptyHangGuardScope(noDefinition, { definition: false, spans: 4 });
+  assert.match(noDefinition.map((h) => h.fix).join(), /DEFAULT_TIMEOUT/);
+  assert.equal(noDefinition.length, 1);
+  const noSpans = [];
+  reportEmptyHangGuardScope(noSpans, { definition: true, spans: 0 });
+  assert.equal(noSpans.length, 1);
+  assert.match(noSpans[0].fix, /no #\[cfg\(test\)\] module/);
+  const absent = [];
+  reportEmptyHangGuardScope(absent, undefined);
+  assert.equal(absent.length, 2);
+  const full = [];
+  reportEmptyHangGuardScope(full, { definition: true, spans: 4 });
+  assert.deepEqual(full, []);
+});
+
+test("check L's note names what it cannot see", () => {
+  for (const blind of [
+    /DEFAULT_TIMEOUT as X/,
+    /passed to a helper by name/,
+    /delegating to product code/,
+    /cfg\(all\(<x>, test\)\)/,
+    /mod tests;/,
+    /nested fn inside a `#\[cfg\(test\)\]` fn/,
+    /`#\[cfg\(test\)\] impl`/,
+    /fn outside any test module gated by a compound cfg that contains test \(`#\[cfg\(all\(test, unix\)\)\]`\)/,
+    /module gated `#\[cfg\(any\(test, unix\)\)\]`/,
+    /closure-form helpers/,
+    /test-fn bodies/,
+  ])
+    assert.match(TEST_HANG_GUARD_NOTE, blind);
 });
 
 // ----------------------------------------------------------- check-dead-surface

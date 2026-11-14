@@ -1278,7 +1278,7 @@ mod account_hosts_tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().to_str().unwrap();
         let run = |args| {
-            crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+            crate::git::runner::run_git(Some(repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
         };
         run(&["init", "-q"]).await.unwrap();
         if let Some((name, url)) = remote {

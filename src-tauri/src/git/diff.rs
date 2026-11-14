@@ -1795,6 +1795,7 @@ pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     use crate::image_sniff::{jpeg_fixture, png_fixture, stuffed_pair_jpeg};
 
     #[test]
@@ -2301,7 +2302,9 @@ mod tests {
             vec!["config", "core.excludesFile", ""],
             vec!["config", "core.attributesFile", ""],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         // An `init.templateDir` can seed both of these into every `git init`: rules in
         // `info/exclude` would join `--exclude-standard`, and `info/attributes`
@@ -2320,10 +2323,10 @@ mod tests {
         if attribute_driver {
             std::fs::write(dir.join(".gitattributes"), "*.txt diff=marker\n").unwrap();
         }
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["commit", "-qm", "seed"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let config = if attribute_driver {
@@ -2334,14 +2337,14 @@ mod tests {
         run_git(
             Some(&repo),
             &["config", config, "echo EXTDIFF-RAN"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
         std::fs::write(dir.join("tracked.txt"), "after\n").unwrap();
         std::fs::write(dir.join("untracked.txt"), "new\n").unwrap();
 
-        let control = run_git(Some(&repo), &["diff", "--no-color"], DEFAULT_TIMEOUT)
+        let control = run_git(Some(&repo), &["diff", "--no-color"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert!(control.stdout_lossy().contains("EXTDIFF-RAN"));
@@ -2351,7 +2354,7 @@ mod tests {
             let untracked_control = run_git_raw(
                 Some(&repo),
                 &["diff", "--no-index", "--", "/dev/null", "untracked.txt"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -2365,13 +2368,13 @@ mod tests {
             assert!(!diff.text.contains("EXTDIFF-RAN"), "{}", diff.text);
         }
 
-        run_git(Some(&repo), &["add", "tracked.txt"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "tracked.txt"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let staged_control = run_git(
             Some(&repo),
             &["diff", "--cached", "--no-color"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2388,14 +2391,14 @@ mod tests {
             run_git(
                 Some(&repo),
                 &["config", "diff.marker.trustExitCode", "true"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
             let control = run_git_raw(
                 Some(&repo),
                 &["diff", "--cached", "--quiet"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -2403,7 +2406,7 @@ mod tests {
             let guarded = run_git_raw(
                 Some(&repo),
                 &["diff", "--no-ext-diff", "--cached", "--quiet"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -2434,11 +2437,13 @@ mod tests {
     ) {
         let mut args = vec!["add", "-A", "--"];
         args.extend(names);
-        run_git(Some(repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(repo), &args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
         let staged = run_git(
             Some(repo),
             &["diff", "--cached", "--numstat", "-z"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -3765,12 +3770,16 @@ mod tests {
             b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"9000\" height=\"9000\"/>",
         )
         .unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "fixtures"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        run_git(
+            Some(&repo),
+            &["commit", "-qm", "fixtures"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         (tmp, dir, repo)
     }
 
@@ -4465,10 +4474,10 @@ mod tests {
     ) -> (tempfile::TempDir, std::path::PathBuf, String) {
         let (tmp, dir, repo) = init_line_stats_repo(prefix).await;
         std::fs::write(dir.join("file.txt"), "base line\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "base"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["commit", "-qm", "base"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (tmp, dir, repo)
@@ -4747,7 +4756,7 @@ mod tests {
     }
 
     async fn git_ok(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -5284,7 +5293,7 @@ mod tests {
                 "-",
             ],
             Some(patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

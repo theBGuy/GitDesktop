@@ -12494,7 +12494,7 @@ mod tests {
     }
 
     async fn origin_test_git(repo: &str, args: &[&str]) -> String {
-        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -13214,7 +13214,7 @@ mod tests {
             let _ = crate::git::runner::run_git(
                 Some(repo),
                 args,
-                crate::git::runner::DEFAULT_TIMEOUT,
+                crate::git::runner::TEST_GIT_HANG_GUARD,
             )
             .await;
         }
