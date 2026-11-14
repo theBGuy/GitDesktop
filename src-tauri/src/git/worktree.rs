@@ -3607,6 +3607,38 @@ prunable gitdir file points to non-existent location
         );
     }
 
+    /// A checkout of the branch landing between the delete's guards and its delete is
+    /// seen by the reads after it: the branch goes back at its tip and reads as spared.
+    #[tokio::test]
+    async fn delete_branch_if_unmoved_spares_a_branch_checked_out_before_the_delete() {
+        use crate::git::branches::{DeletePhase, DeletePhaseHook, DELETE_PHASE_HOOK};
+        let (_base, repo_s) = setup_repo("tip-gate-late-checkout").await;
+        run(&repo_s, &["branch", "feat-late"]).await;
+        let tip = validated_branch_tip(&repo_s, "feat-late").await.unwrap();
+        let hook: DeletePhaseHook = {
+            let repo = repo_s.clone();
+            std::sync::Arc::new(move |phase| {
+                let repo = repo.clone();
+                Box::pin(async move {
+                    if phase == DeletePhase::BeforeDelete {
+                        run(&repo, &["switch", "-q", "feat-late"]).await;
+                    }
+                })
+            })
+        };
+
+        assert_eq!(
+            DELETE_PHASE_HOOK
+                .scope(
+                    hook,
+                    delete_branch_if_unmoved(&AppState::default(), &repo_s, "feat-late", &tip)
+                )
+                .await,
+            (BranchCleanup::SparedUnreadable, None)
+        );
+        assert_eq!(validated_branch_tip(&repo_s, "feat-late").await, Some(tip));
+    }
+
     /// A branch deleted out from under the session leaves nothing to report as
     /// kept, and an unreadable name is reported as spared rather than deleted.
     #[tokio::test]

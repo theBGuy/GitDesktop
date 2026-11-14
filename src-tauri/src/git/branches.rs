@@ -1244,18 +1244,22 @@ pub(crate) enum RefDeleteAt {
 /// own domain hold, then drops its `branch.<name>` section. Ahead of the delete it
 /// refuses, deleting nothing, a branch an update marker claims, one a linked worktree
 /// holds, the current branch, and one a rebase or bisect is working on; `update-ref`
-/// itself refuses none of them.
+/// itself refuses none of them. After the delete the same reads run again, and a hit,
+/// or a read that fails, puts the branch back at the same commit (settings kept, its
+/// old reflog gone) and returns that refusal or the read's error.
 ///
 /// Closed: a move of the ref by any writer up to the delete (git's compare-and-delete),
-/// and checkouts, rebases and bisects of the branch visible when the guards run, which
-/// is after the config-write mutex is held. Out of reach: (i) any writer outside the
-/// domain the caller holds: another process; this app's worktree add of the branch when
-/// the caller holds the working-tree domain (the branch delete); this app's checkout in
-/// the repository when the caller holds only the worktree-admin domain (the worktree
-/// removal). Such a writer checking the branch out or starting a rebase on it between
-/// the guards and the delete leaves that checkout on an unborn branch, recoverable from
-/// `tip`. (ii) A branch that is a symbolic ref to a missing ref reads as not found and
-/// is never deleted here.
+/// and claims, checkouts, rebases and bisects of the branch visible when either set of
+/// reads runs; the first runs after the config-write mutex is held. No lock reaches
+/// every writer (another process; this app's switch in a sibling linked worktree, which
+/// shares no lock with either caller), so out of reach: (i) a checkout whose HEAD write
+/// lands after the second reads (git writes HEAD at the end of a switch, so a long
+/// switch can still end on the deleted name), left on an unborn branch, recoverable
+/// from `tip`; and a name re-created between the delete and the restore, where the
+/// delete stands and the settings are left in place. (ii) A branch that is a symbolic
+/// ref reads as its target: one to a missing ref reads as not found and is never
+/// deleted here, and one put back after a hit returns as a plain ref at its target's
+/// commit.
 pub(crate) async fn delete_branch_ref_at(
     state: &AppState,
     repo_path: &str,
@@ -1270,23 +1274,7 @@ pub(crate) async fn delete_branch_ref_at(
     // The guards run inside the mutex, whose wait is unbounded, so a checkout landing
     // during that wait is still seen; each is a read that takes no lock of its own.
     with_config_write_lock(repo_path, |held| async move {
-        crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, name)
-            .await?;
-        // Never swept here: a holder that registered or died since the caller's probe
-        // refuses, and a retry sweeps a dead one.
-        if let Some(path) = worktree_holding_branch_checked(repo_path, name).await? {
-            return Err(update_holder_refusal(state, repo_path, name, &path)
-                .await
-                .unwrap_or_else(|| checked_out_elsewhere(name, &path)));
-        }
-        if current_branch_name(repo_path).await?.as_deref() == Some(name) {
-            return Err(AppError::Command(format!(
-                "{name} is checked out here — switch to another branch before deleting {name}."
-            )));
-        }
-        if let Some(refusal) = branch_operation_refusal(repo_path, name, "deleting").await? {
-            return Err(AppError::Command(refusal));
-        }
+        refuse_if_branch_in_use(state, repo_path, name).await?;
         #[cfg(test)]
         delete_phase(DeletePhase::BeforeDelete).await;
         let out = run_git_raw(
@@ -1296,6 +1284,18 @@ pub(crate) async fn delete_branch_ref_at(
         )
         .await?;
         if out.code == 0 {
+            #[cfg(test)]
+            delete_phase(DeletePhase::AfterDelete).await;
+            // No lock excludes a checkout by another process or a sibling worktree, so the
+            // reads run again; a failed read counts as a hit.
+            if let Err(refusal) = refuse_if_branch_in_use(state, repo_path, name).await {
+                if restore_deleted_ref(repo_path, &full_ref, tip, &refusal).await {
+                    return Err(refusal);
+                }
+                // The name may be live again: a leftover section is the safe direction,
+                // where removing it could strip a live branch's settings.
+                return Ok(RefDeleteAt::Deleted);
+            }
             // `update-ref -d` leaves `branch.<name>.*` behind, where `branch -D` drops it.
             remove_deleted_branch_section(&held, repo_path, name).await;
             return Ok(RefDeleteAt::Deleted);
@@ -1313,13 +1313,80 @@ pub(crate) async fn delete_branch_ref_at(
     .await
 }
 
+/// [`delete_branch_ref_at`]'s guards, in order: an update marker claiming `name`, a
+/// linked worktree holding it, the current branch, a rebase or bisect working on it.
+/// Shared by the reads before and after the delete so both refuse alike; a failed read
+/// is the `Err` too. The marker read heals nothing and reads no ref.
+async fn refuse_if_branch_in_use(state: &AppState, repo_path: &str, name: &str) -> AppResult<()> {
+    crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, name).await?;
+    // Never swept here: a holder that registered or died since the caller's probe
+    // refuses, and a retry sweeps a dead one.
+    if let Some(path) = worktree_holding_branch_checked(repo_path, name).await? {
+        return Err(update_holder_refusal(state, repo_path, name, &path)
+            .await
+            .unwrap_or_else(|| checked_out_elsewhere(name, &path)));
+    }
+    if current_branch_name(repo_path).await?.as_deref() == Some(name) {
+        return Err(AppError::Command(format!(
+            "{name} is checked out here — switch to another branch before deleting {name}."
+        )));
+    }
+    if let Some(refusal) = branch_operation_refusal(repo_path, name, "deleting").await? {
+        return Err(AppError::Command(refusal));
+    }
+    Ok(())
+}
+
+/// Re-creates `full_ref` at `tip` only while no ref of that name exists: an all-zero
+/// old value is git's "must not exist" (leaving the old value out would skip the
+/// compare), so a name taken again since the delete is never overwritten. `false` is
+/// logged with the `refusal` that asked for the restore.
+async fn restore_deleted_ref(
+    repo_path: &str,
+    full_ref: &str,
+    tip: &str,
+    refusal: &AppError,
+) -> bool {
+    let absent = "0".repeat(tip.len());
+    match run_git_raw(
+        Some(repo_path),
+        &[
+            "update-ref",
+            "--no-deref",
+            "-m",
+            "restored: in use during delete",
+            full_ref,
+            tip,
+            &absent,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) if out.code == 0 => true,
+        Ok(out) => {
+            eprintln!(
+                "gitdesktop: branch restore after delete failed ({refusal}): {}",
+                out.stderr.trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("gitdesktop: branch restore after delete failed ({refusal}): {e}");
+            false
+        }
+    }
+}
+
 /// Where a branch delete can be held from a test: before the config-write mutex and
-/// the guards under it, and between those guards and the compare-and-delete.
+/// the guards under it, between those guards and the compare-and-delete, and after a
+/// delete that landed, before the reads that run again.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeletePhase {
     BeforeGuards,
     BeforeDelete,
+    AfterDelete,
 }
 
 #[cfg(test)]
@@ -9863,6 +9930,141 @@ mod tests {
         assert!(!loose.exists(), "fixture sanity: the moved ref is packed");
         assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(head));
         assert!(!branch_section(&repo, "feat").await.is_empty());
+    }
+
+    /// A sibling worktree switching onto the branch between the guards and the delete is
+    /// seen by the reads after it: the branch goes back at its tip with its settings and
+    /// a fresh reflog, and that checkout is on it again rather than unborn.
+    #[tokio::test]
+    async fn delete_branch_puts_back_a_branch_a_sibling_checked_out_before_the_delete() {
+        let (g, repo, feat, _head) = delete_fixture("del-sibling-late").await;
+        let wt = g.path().join("sibling-wt").to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "--detach", &wt, "HEAD"]).await;
+        let hook = git_at_phase(DeletePhase::BeforeDelete, &wt, &["switch", "-q", "feat"]);
+
+        let outcome = DELETE_PHASE_HOOK
+            .scope(hook, delete(&AppState::default(), &repo, "feat", None))
+            .await;
+        assert_eq!(
+            full_ref_tip(&wt, "HEAD").await,
+            Some(feat.clone()),
+            "not unborn"
+        );
+        let err = outcome.unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with("feat is checked out in the worktree at")
+                    && m.contains("sibling-wt")
+                    && m.ends_with("before deleting feat.")),
+            "{err:?}"
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
+        assert!(!branch_section(&repo, "feat").await.is_empty());
+        assert_eq!(
+            run(
+                &repo,
+                &["reflog", "show", "--format=%gs", "refs/heads/feat"]
+            )
+            .await
+            .trim(),
+            "restored: in use during delete"
+        );
+    }
+
+    /// A switch in the repository itself (a terminal's, which the app's hold does not
+    /// exclude) between the guards and the delete puts the branch back.
+    #[tokio::test]
+    async fn delete_branch_puts_back_a_branch_checked_out_here_before_the_delete() {
+        let (_g, repo, feat, _head) = delete_fixture("del-here-late").await;
+        let hook = git_at_phase(DeletePhase::BeforeDelete, &repo, &["switch", "-q", "feat"]);
+
+        let err = DELETE_PHASE_HOOK
+            .scope(hook, delete(&AppState::default(), &repo, "feat", None))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with("feat is checked out here")
+                    && m.ends_with("before deleting feat.")),
+            "{err:?}"
+        );
+        assert_eq!(
+            full_ref_tip(&repo, "refs/heads/feat").await,
+            Some(feat.clone())
+        );
+        assert_eq!(full_ref_tip(&repo, "HEAD").await, Some(feat));
+    }
+
+    /// The sibling's unborn checkout commits before the restore, re-creating the name at a
+    /// new root commit: the restore never overwrites it, the delete stands, and the
+    /// settings stay for the live branch.
+    #[tokio::test]
+    async fn delete_branch_stands_when_the_name_is_taken_again_before_the_restore() {
+        let (g, repo, feat, _head) = delete_fixture("del-retaken").await;
+        let wt = g.path().join("sibling-wt").to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "--detach", &wt, "HEAD"]).await;
+        let hook: DeletePhaseHook = {
+            let wt = wt.clone();
+            Arc::new(move |phase| {
+                let wt = wt.clone();
+                Box::pin(async move {
+                    match phase {
+                        DeletePhase::BeforeDelete => {
+                            run(&wt, &["switch", "-q", "feat"]).await;
+                        }
+                        // The unborn checkout still has feat's tree staged.
+                        DeletePhase::AfterDelete => {
+                            run(&wt, &["commit", "-qm", "retaken"]).await;
+                        }
+                        DeletePhase::BeforeGuards => {}
+                    }
+                })
+            })
+        };
+
+        let outcome = DELETE_PHASE_HOOK
+            .scope(hook, delete(&AppState::default(), &repo, "feat", None))
+            .await;
+        assert_eq!(
+            outcome.unwrap(),
+            DeleteBranchOutcome::Deleted { tip: feat.clone() }
+        );
+        let now = full_ref_tip(&repo, "refs/heads/feat")
+            .await
+            .expect("the sibling's commit re-created feat");
+        assert_ne!(now, feat);
+        let subject = run(&repo, &["log", "-1", "--format=%s", "refs/heads/feat"]).await;
+        assert_eq!(subject.trim(), "retaken");
+        assert_eq!(full_ref_tip(&wt, "HEAD").await, Some(now));
+        assert!(!branch_section(&repo, "feat").await.is_empty());
+    }
+
+    /// A bisect started on the branch between the guards and the delete, with no checkout
+    /// holding it, is seen by the operation read after the delete: the branch goes back.
+    #[tokio::test]
+    async fn delete_branch_puts_back_a_branch_an_operation_claimed_before_the_delete() {
+        let (g, repo, feat, _head) = delete_fixture("del-op-late").await;
+        let marker = g.path().join("repo/.git/BISECT_START");
+        let hook: DeletePhaseHook = Arc::new(move |phase| {
+            let marker = marker.clone();
+            Box::pin(async move {
+                if phase == DeletePhase::BeforeDelete {
+                    std::fs::write(&marker, "feat\n").unwrap();
+                }
+            })
+        });
+
+        let err = DELETE_PHASE_HOOK
+            .scope(hook, delete(&AppState::default(), &repo, "feat", None))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with("feat is being bisected here")
+                    && m.ends_with("end that bisect (git bisect reset) before deleting feat.")),
+            "{err:?}"
+        );
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, Some(feat));
     }
 
     /// A slash-named branch goes like a plain one: ref, reflog and settings, plus the

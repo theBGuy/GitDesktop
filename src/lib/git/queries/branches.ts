@@ -1110,8 +1110,8 @@ export function useListedBranchTips(
       const asked = new Set(prev.asked);
       for (const name of answer.names) {
         asked.add(name);
-        const tip = answer.tips[name];
-        if (typeof tip === "string" && !tips.has(name)) tips.set(name, tip);
+        const tip = api.tipOf(answer.tips, name);
+        if (tip !== undefined && !tips.has(name)) tips.set(name, tip);
       }
       return { ...prev, tips, asked };
     });
