@@ -151,16 +151,18 @@ fn resolve_test_store(repo: &str) -> (PathBuf, &'static str) {
 }
 
 /// The temp dir a `cfg!(test)` store falls back to, one named dir per store (the
-/// oplog, review-notes and local-PR stores each resolve theirs here). Nextest runs each test in its own process, where the stores'
-/// in-process mutexes serialize nothing, so that mode gets a per-process dir; plain
+/// oplog, review-notes and local-PR stores each resolve theirs here). Nextest runs
+/// each test in its own process and marks it with
+/// `NEXTEST_EXECUTION_MODE=process-per-test`
+/// (<https://nexte.st/docs/configuration/env-vars/>); the stores' in-process
+/// mutexes serialize nothing there, so that mode gets a per-process dir. Plain
 /// `cargo test` keeps one reused dir so local runs don't leak a dir per run.
 pub(crate) fn test_fallback_dir(name: &str) -> PathBuf {
     let mode = std::env::var("NEXTEST_EXECUTION_MODE").ok();
     test_fallback_dir_for(name, mode.as_deref(), std::process::id())
 }
 
-/// Nextest sets `NEXTEST_EXECUTION_MODE=process-per-test` in every test process
-/// (<https://nexte.st/docs/configuration/env-vars/>).
+/// The pure form of [`test_fallback_dir`], with the mode and pid passed in.
 fn test_fallback_dir_for(name: &str, execution_mode: Option<&str>, pid: u32) -> PathBuf {
     let base = std::env::temp_dir();
     match execution_mode {
