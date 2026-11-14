@@ -108,6 +108,7 @@ import {
   fnAttributes,
   GH_EXIT_ABSENCE_ALLOWLIST,
   ghExitAbsenceScope,
+  gitRunnerDeclarations,
   lexRust,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
@@ -119,6 +120,7 @@ import {
   TEST_HANG_GUARD_ALLOWLIST,
   TEST_HANG_GUARD_NOTE,
   TEST_MARKER_ALLOWLIST,
+  testAttrsOutsideTestCode,
   UNGUARDED_GIT_RUNNERS,
 } from "./check-rust-invariants.mjs";
 import {
@@ -6099,6 +6101,16 @@ test("merge guard requires every builder reference and alias to guard", () => {
   );
 });
 
+test("merge guard reads `r#use` as a binding, not an import", () => {
+  const hits = mergeGuardHits(
+    "fn caller() { let r#use = plain_merge_argv(repo, plain, flag); }",
+  );
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.allowlisted]),
+    [["caller", false]],
+  );
+});
+
 test("merge guard states its function scope and its blind spots", () => {
   const [hit] = mergeGuardHits(unguarded('run(&["merge", sha]);'));
   assert.match(hit.fix, /no dominance/);
@@ -7642,6 +7654,28 @@ test("check L fails closed on a test-module token outside any fn", () => {
     assert.deepEqual(hangGuardSites(hits), ["<unreadable>:4"], item);
     assert.match(hits[0].fix, /outside any function/);
   }
+  // A brace in a signature is read as the body, so the real body's token
+  // lands outside any fn: the same verdict, under a message that names it.
+  const braced = hangGuardHits(
+    hangGuardModule("    fn h() -> Foo<{ N }> { DEFAULT_TIMEOUT }"),
+  );
+  assert.deepEqual(hangGuardSites(braced), ["<unreadable>:4"]);
+  assert.match(braced[0].fix, /a fn whose signature holds a brace/);
+});
+
+test("check L reads `r#use` as a binding, not an import", () => {
+  const src = hangGuardModule(
+    [
+      "    async fn fixture() {",
+      "        let r#use = run_git(None, &[], DEFAULT_TIMEOUT).await;",
+      "        let reuse = run_git(None, &[], DEFAULT_TIMEOUT).await;",
+      "    }",
+    ].join("\n"),
+  );
+  assert.deepEqual(hangGuardSites(hangGuardHits(src)), [
+    "fixture:5",
+    "fixture:6",
+  ]);
 });
 
 test("check L fails closed on an attribute run it cannot read", () => {
@@ -7727,6 +7761,7 @@ const PLAIN_RUNNERS = [
   "run_git_raw_input_bytes",
   "run_git_raw_env",
   "run_git_raw_input_env",
+  "run_git_spawn",
 ];
 const WRAPPER_RUNNERS = [
   "run_git_mutating",
@@ -7737,6 +7772,11 @@ const WRAPPER_RUNNERS = [
   "run_git_config_write_held",
   "run_git_mutating_config_write",
   "run_git_worktree_admin",
+  "run_git_with_creds_once",
+  "run_git_with_creds_rechecked",
+  "run_git_mutating_with_creds",
+  "run_git_mutating_with_creds_for_branch",
+  "run_git_mutating_with_creds_checked",
 ];
 const runnerCall = (runner) =>
   hangGuardModule(
@@ -7757,29 +7797,66 @@ test("check L's runner arm reads a lock-taking or retrying wrapper as product co
     assert.deepEqual(hangGuardHits(runnerCall(runner)), [], runner);
 });
 
-test("check L's runner lists classify every run_git* fn in git/runner.rs", () => {
-  const source = readFileSync(
-    resolve(
-      dirname(fileURLToPath(import.meta.url)),
-      "..",
-      "src-tauri/src/git/runner.rs",
-    ),
-    "utf8",
-  );
-  const declared = [
-    ...lexRust(source.replace(/\r\n/g, "\n")).masked.matchAll(
-      /\bpub\s*(?:\([^)]*\)\s*)?(?:(?:const|async|unsafe)\s+)*fn\s+(run_git\w*)/g,
-    ),
-  ].map((m) => m[1]);
-  assert.ok(declared.length > 0, "no pub fn run_git* found in runner.rs");
+test("check L reads every run_git* declaration, whatever its visibility or qualifiers", () => {
+  const src = [
+    'pub extern "Rust" fn run_git_extern() {}',
+    "pub async fn r#run_git_raw_ident() {}",
+    "fn run_git_private() {}",
+    "pub(crate) const unsafe fn",
+    "    run_git_multi_line(",
+    "    timeout: Duration,",
+    ") {}",
+    "// fn run_git_commented() {}",
+    "fn not_run_git() {}",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    fn run_git_test_helper() {}",
+    "}",
+  ].join("\r\n");
+  // CRLF on purpose: the reading takes `\r` as whitespace, the multi-line
+  // signature's included, so a CR-sensitive pattern goes red here.
+  assert.deepEqual(gitRunnerDeclarations(src), [
+    "run_git_extern",
+    "run_git_raw_ident",
+    "run_git_private",
+    "run_git_multi_line",
+  ]);
+});
+
+test("check L's runner lists pin every run_git* fn declared anywhere in src-tauri/src", () => {
+  // The runner arm matches a callee by its last path segment in every file,
+  // so a runner declared in any file must be classified, not only runner.rs's.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const declared = new Map();
+  for (const entry of readdirSync(join(root, "src-tauri/src"), {
+    recursive: true,
+  })) {
+    const file = `src-tauri/src/${String(entry).split("\\").join("/")}`;
+    if (!file.endsWith(".rs")) continue;
+    for (const name of gitRunnerDeclarations(
+      readFileSync(join(root, file), "utf8"),
+    ))
+      declared.set(name, [...(declared.get(name) ?? []), file]);
+  }
+  assert.ok(declared.size > 0, "no fn run_git* found under src-tauri/src");
   const both = [...PLAIN_GIT_RUNNERS].filter((n) =>
     UNGUARDED_GIT_RUNNERS.has(n),
   );
   assert.deepEqual(both, [], "a runner sits in both lists");
+  const listed = new Set([...PLAIN_GIT_RUNNERS, ...UNGUARDED_GIT_RUNNERS]);
+  const unlisted = [...declared]
+    .filter(([name]) => !listed.has(name))
+    .map(([name, files]) => `${name} (${files.join(", ")})`);
   assert.deepEqual(
-    [...PLAIN_GIT_RUNNERS, ...UNGUARDED_GIT_RUNNERS].sort(),
-    [...new Set(declared)].sort(),
-    "classify each runner.rs runner as plain (guarded) or a wrapper (product code)",
+    unlisted,
+    [],
+    `classify each as plain (guarded) or a wrapper (product code): ${unlisted.join("; ")}`,
+  );
+  const undeclared = [...listed].filter((name) => !declared.has(name));
+  assert.deepEqual(
+    undeclared,
+    [],
+    `listed but declared nowhere under src-tauri/src: ${undeclared.join(", ")}`,
   );
 });
 
@@ -7809,7 +7886,8 @@ test("check L's runner arm reads the same rule in a cfg(test) test fn", () => {
     "#[test]",
     "fn ungated() { run_git(None, &[], DEFAULT_TIMEOUT); }",
   ].join("\n");
-  // Only the gated fn is test code; a bare #[test] outside a module is not.
+  // Check L reads only the gated fn as test code; the census test is what
+  // catches the bare #[test] fn outside a module.
   assert.deepEqual(runnerSites(hangGuardHits(src)), [
     "outside:3:runner:run_git",
   ]);
@@ -7823,7 +7901,7 @@ test("check L's runner arm leaves every other DEFAULT_TIMEOUT in a test fn alone
       "        start_planned_rebase(repo, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT).await;",
       "        ignored_files_in_the_way(repo, &[], DEFAULT_TIMEOUT).await;",
       "        crate::git::ops::rebase_with_timeouts(repo, DEFAULT_TIMEOUT);",
-      "        run_git_spawn(None, &[], DEFAULT_TIMEOUT);",
+      "        run_git_unlisted(None, &[], DEFAULT_TIMEOUT);",
       "        my_run_git(None, &[], DEFAULT_TIMEOUT);",
       "        assert_eq!(budget, DEFAULT_TIMEOUT);",
       "        assert!(matches!(e, AppError::Timeout(s) if s == DEFAULT_TIMEOUT.as_secs()));",
@@ -7937,12 +8015,119 @@ test("check L's empty corpus is a hit, never a pass", () => {
   assert.deepEqual(full, []);
 });
 
+const censusTest = "    #[test]\n    fn t() {}";
+
+for (const [shape, src] of [
+  ["a spaced gate", `#[cfg (test)]\nmod tests {\n${censusTest}\n}\n`],
+  [
+    "a nested-bracket attribute before mod",
+    `#[cfg(test)]\n#[doc = concat!["a", "b"]]\nmod tests {\n${censusTest}\n}\n`,
+  ],
+  ["a raw module name", `#[cfg(test)]\nmod r#tests {\n${censusTest}\n}\n`],
+  [
+    "a cfg(all(unix, test)) gate",
+    `#[cfg(all(unix, test))]\nmod tests {\n${censusTest}\n}\n`,
+  ],
+  [
+    "a cfg(any(test, unix)) gate",
+    `#[cfg(any(test, unix))]\nmod tests {\n${censusTest}\n}\n`,
+  ],
+  [
+    "a bare #[test] fn outside any module",
+    "use super::*;\n\n#[test]\nfn t() {}\n",
+  ],
+])
+  test(`check L's census reports the test attribute under ${shape}`, () => {
+    const { scanned, outside } = testAttrsOutsideTestCode(src);
+    const line = src.split("\n").findIndex((l) => l.includes("#[test]")) + 1;
+    assert.deepEqual([scanned, outside], [1, [line]]);
+    // The tree is CRLF on Windows checkouts and the census reads it as is:
+    // the line asserted here, past several lines, goes red if the census
+    // counts `\r` as a line break.
+    assert.deepEqual(
+      testAttrsOutsideTestCode(src.replaceAll("\n", "\r\n")).outside,
+      [line],
+    );
+  });
+
+test("check L's census counts every test attribute spelling and stays quiet on test code", () => {
+  const spellings = [
+    "#[test]",
+    "#[tokio::test]",
+    '#[tokio::test(flavor = "multi_thread")]',
+    "# [ test ]",
+    "#[ tokio :: test ]",
+    "#[::core::prelude::v1::test]",
+  ];
+  const bare = spellings.map((a) => `${a}\nfn t() {}`).join("\n");
+  assert.deepEqual(testAttrsOutsideTestCode(bare), {
+    scanned: 6,
+    outside: [1, 3, 5, 7, 9, 11],
+  });
+  const quiet = [
+    `#[cfg(test)]\nmod tests {\n${spellings.map((a) => `    ${a}\n    fn t() {}`).join("\n")}\n}`,
+    `#[cfg(all(test, unix))]\nmod tests {\n${censusTest}\n}`,
+    "#[cfg(test)]\n#[test]\nfn outside() {}",
+    "#[test]\n#[cfg(test)]\nfn reversed() {}",
+    [
+      "fn product() {",
+      '    let s = "#[test] fn t() {}";',
+      "    // #[test]",
+      "}",
+      "/// #[tokio::test]",
+      "/** #[test] */",
+      'const D: &str = r#"#[test]"#;',
+    ].join("\n"),
+  ].join("\n");
+  assert.deepEqual(testAttrsOutsideTestCode(quiet), {
+    scanned: 9,
+    outside: [],
+  });
+  // Named in the NOTE: only a last path segment `test` is counted.
+  for (const uncounted of [
+    "#[cfg_attr(not(miri), test)]",
+    "#[rstest]",
+    "#[test_case(1)]",
+    "#[my_test]",
+  ])
+    assert.deepEqual(
+      testAttrsOutsideTestCode(`${uncounted}\nfn t() {}`),
+      { scanned: 0, outside: [] },
+      uncounted,
+    );
+});
+
+test("check L's census finds every test attribute in the real tree inside test code", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const files = readdirSync(join(root, "src-tauri/src"), { recursive: true })
+    .map((entry) => `src-tauri/src/${String(entry).split("\\").join("/")}`)
+    .filter((file) => file.endsWith(".rs"));
+  let scanned = 0;
+  const outside = [];
+  for (const file of files) {
+    const census = testAttrsOutsideTestCode(
+      readFileSync(join(root, file), "utf8"),
+    );
+    scanned += census.scanned;
+    for (const line of census.outside) outside.push(`${file}:${line}`);
+  }
+  assert.deepEqual(
+    outside,
+    [],
+    `check L reads none of these test attributes as test code; put each test in a module gated \`#[cfg(test)]\`, or give its fn an exact \`#[cfg(test)]\`:\n${outside.join("\n")}`,
+  );
+  // Only proves the scan is not vacuous (a census that read nothing would pass
+  // the assertion above); the floor sits far under the tree's count so that
+  // removing tests never reds this.
+  assert.ok(scanned > 1000, `only ${scanned} test attributes scanned`);
+});
+
 test("check L's note names what it cannot see", () => {
   for (const blind of [
     /DEFAULT_TIMEOUT as X/,
     /passed to a helper by name/,
     /not a direct argument of a plain spawn runner/,
-    /lock-taking or retrying runner wrapper .*read as product code under test/,
+    /lock-taking or retrying runner wrapper \(`run_git_mutating\*`, `run_git_config_write\*`, `run_git_raw_index_retry`, `run_git_worktree_admin`, and git\/remote\.rs's credential wrappers `run_git_with_creds_\*` and `run_git_mutating_with_creds\*`\), read as product code under test/,
     /a token inside a block, if\/match, struct-literal, array or tuple argument of a runner/,
     /a turbofish or parenthesized runner call \(`run_git::<T>\(…\)`, `\(run_git\)\(…\)`\)/,
     /closure-form helpers inside test-fn bodies, except their direct runner calls/,
@@ -7952,14 +8137,19 @@ test("check L's note names what it cannot see", () => {
     /anywhere, a budget spelled other than the DEFAULT_TIMEOUT token .*`tokio::time::timeout` bound around a spawn; in a test fn,/,
     /a fn is test code only under an exact `#\[cfg\(test\)\]`, a module only under `#\[cfg\(test\)\]` or `#\[cfg\(all\(test, …\)\)\]`/,
     /delegating to product code/,
-    /cfg\(all\(<x>, test\)\)/,
-    /mod tests;/,
     /nested fn inside a `#\[cfg\(test\)\]` fn/,
     /`#\[cfg\(test\)\] impl`/,
-    /fn outside any test module gated by a compound cfg that contains test \(`#\[cfg\(all\(test, unix\)\)\]`\)/,
-    /module gated `#\[cfg\(any\(test, unix\)\)\]`/,
-    /closure-form helpers/,
-    /test-fn bodies/,
+    /and `#\[cfg\(test\)\]` consts or statics outside one \(all read as production\)/,
+    /a fn outside any test module gated by an exact `#\[cfg\(test\)\]` whose signature holds a brace \(`-> Foo<\{ N \}>`\), whose body neither check L nor the census reads/,
+    /a helper outside any test module gated by a compound cfg that contains test \(`#\[cfg\(all\(test, unix\)\)\]`\)/,
+    /a test module check L cannot read \(gated `#\[cfg\(all\(<x>, test\)\)\]` or `#\[cfg\(any\(test, unix\)\)\]`, a gate spaced as `#\[cfg \(test\)\]` or `# \[cfg\(test\)\]`, a nested-bracket attribute between the gate and `mod`, `mod r#tests`, an inner `#!\[cfg\(test\)\]` inside `mod tests \{` \(credited to the module's first fn only when that fn directly follows it\), an out-of-line `mod tests;` file\)/,
+    /fails the census test \(testAttrsOutsideTestCode\) as soon as it holds a test attribute check L does not read as test code, as does a bare `#\[test\]` fn outside any module/,
+    /what stays unseen there is a helper-only module under an unread gate \(or one whose test fns each carry their own `#\[cfg\(test\)\]`, or an inner-gated module whose single test fn comes first\)/,
+    /the census counts only an attribute whose last path segment is `test`, so a test spelled through `cfg_attr` \(`#\[cfg_attr\(not\(miri\), test\)\]`\) or by a test macro of another name \(`#\[rstest\]`, `#\[test_case\(\.\.\)\]`\) is not counted/,
+    /out of reach by design: a fn named by a raw identifier or a non-ASCII name, which check L reads under the name's leading ASCII run \(`r` for `fn r#helper`, `h` for `fn hélper`\), so no allowlist row can target it and a row for that run covers every helper read under it in the file/,
+    /such a name with no leading ASCII word character, which is `<unreadable>` directly in a test module and silent when nested in a test fn \(except a direct runner argument, read as the test fn's\) or gated `#\[cfg\(test\)\]` outside any module/,
+    /a `macro_rules!` body defined outside test code and used by tests/,
+    /one allowlist row covers every same-named helper in its file/,
   ])
     assert.match(TEST_HANG_GUARD_NOTE, blind);
 });

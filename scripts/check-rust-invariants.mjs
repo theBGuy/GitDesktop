@@ -69,17 +69,20 @@
 //      are opaque, so a patch flag in one beside an exempt flag passes.
 //      In-function growth of a literal vec via .push/.extend/.insert is not
 //      tracked: let mut a = vec!["diff", "--numstat"]; a.push("-p"); passes K.
-//   L. test helpers on the product git timeout — in test code (a
-//      `#[cfg(test)]` module, or a fn gated `#[cfg(test)]`), a non-test fn
-//      that passes `DEFAULT_TIMEOUT`, or a test fn (closures in it included)
-//      that passes it as a direct argument of a plain spawn runner (`run_git`,
-//      `run_git_raw` and their input/env variants), inherits the product's
-//      30 s spawn budget, which fails fixture steps on a loaded machine;
+//   L. test git spawns on the product timeout — in test code (a module gated
+//      `#[cfg(test)]` or `#[cfg(all(test, …))]`, or a fn gated
+//      `#[cfg(test)]`), a non-test fn that passes `DEFAULT_TIMEOUT`, or a test
+//      fn (closures in it included) that passes it as a direct argument of a
+//      plain spawn runner (`run_git`, `run_git_raw`, their input/env variants
+//      and the private `run_git_spawn`), inherits the product's 30 s spawn
+//      budget, which fails fixture steps on a loaded machine;
 //      `TEST_GIT_HANG_GUARD` (git/runner.rs, test builds only) is the hang
 //      guard. A test fn passing it to product code under test, the
-//      lock-taking or retrying runner wrappers included, is not a site, and a
-//      runner-arm site takes no allowlist row; the blind spots print as its
-//      NOTE.
+//      lock-taking, retrying or credential runner wrappers (git/runner.rs,
+//      git/remote.rs) included, is not a site, and a runner-arm site takes no
+//      allowlist row. A test attribute outside the code check L reads as test
+//      code fails the census test (testAttrsOutsideTestCode); the other blind
+//      spots print as its NOTE.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -1209,6 +1212,16 @@ export function lexRust(text) {
   return views;
 }
 
+/** `[start, end]` offsets of every `use` declaration in a masked view, shared
+ *  by checks H and L. The keyword only: `r#use` and a longer identifier ending
+ *  in `use` are bindings, and `\b` alone would read `let r#use = …;` as an
+ *  import. `use{…}` with no space is not matched, so its names read as code. */
+function useDeclarationSpans(masked) {
+  return [...masked.matchAll(/(?<![\p{ID_Continue}#])use\s[^;]*;/gu)].map(
+    (m) => [m.index, m.index + m[0].length],
+  );
+}
+
 // ------------------------------------------------------------------- check H
 
 // Rows key on (file, fn) like every other list, with two extensions. A
@@ -1633,10 +1646,7 @@ export function checkMergeIgnoredGuard(
     functions.filter((fn) => at > fn.open && at < fn.close).at(-1);
   const fnKey = (at) => functions.indexOf(innermost(at));
   const lineOf = (at) => code.slice(0, at).split("\n").length;
-  const useSpans = [...masked.matchAll(/\buse\b[^;]*;/g)].map((m) => [
-    m.index,
-    m.index + m[0].length,
-  ]);
+  const useSpans = useDeclarationSpans(masked);
   const inUse = (at) => useSpans.some(([s, e]) => at >= s && at < e);
 
   // A function's own text, nested functions blanked: another operation's guard
@@ -2836,7 +2846,7 @@ export function checkDiffExternalDrivers(
   }
 }
 
-// ------------------------------------------ L. test helpers' git spawn budget
+// ---------------------------------- L. test git spawns on the product timeout
 
 export const TEST_HANG_GUARD_ALLOWLIST = [
   {
@@ -2848,7 +2858,7 @@ export const TEST_HANG_GUARD_ALLOWLIST = [
 ];
 
 export const TEST_HANG_GUARD_NOTE =
-  "Not seen: an alias (`use … DEFAULT_TIMEOUT as X`); a value bound to DEFAULT_TIMEOUT and passed to a helper by name; a helper delegating to product code that applies the budget; `#[cfg(all(<x>, test))]` modules and out-of-line `mod tests;` files; a nested fn inside a `#[cfg(test)]` fn outside any test module, methods of a `#[cfg(test)] impl` outside one, and `#[cfg(test)]` consts or statics outside one (all read as production); a fn outside any test module gated by a compound cfg that contains test (`#[cfg(all(test, unix))]`), and a module gated `#[cfg(any(test, unix))]` (both read as production: a fn is test code only under an exact `#[cfg(test)]`, a module only under `#[cfg(test)]` or `#[cfg(all(test, …))]`); closure-form helpers inside test-fn bodies, except their direct runner calls; anywhere, a budget spelled other than the DEFAULT_TIMEOUT token (`Duration::from_secs(30)`, another constant), such as a `tokio::time::timeout` bound around a spawn; in a test fn, a DEFAULT_TIMEOUT that is not a direct argument of a plain spawn runner (product code under test keeps the product's budget on purpose), a lock-taking or retrying runner wrapper (`run_git_mutating*`, `run_git_config_write*`, `run_git_raw_index_retry`, `run_git_worktree_admin`), read as product code under test, a budget bound to a local first (`let t = DEFAULT_TIMEOUT;`) and passed by name, a token nested inside another call among a runner's arguments (`run_git(.., f(DEFAULT_TIMEOUT))`), a token inside a block, if/match, struct-literal, array or tuple argument of a runner, a turbofish or parenthesized runner call (`run_git::<T>(…)`, `(run_git)(…)`), and a runner reached through a wrapper or an alias";
+  "Not seen: an alias (`use … DEFAULT_TIMEOUT as X`); a value bound to DEFAULT_TIMEOUT and passed to a helper by name; a helper delegating to product code that applies the budget; a nested fn inside a `#[cfg(test)]` fn outside any test module, methods of a `#[cfg(test)] impl` outside one, and `#[cfg(test)]` consts or statics outside one (all read as production); a helper outside any test module gated by a compound cfg that contains test (`#[cfg(all(test, unix))]`), read as production: a fn is test code only under an exact `#[cfg(test)]`, a module only under `#[cfg(test)]` or `#[cfg(all(test, …))]`; a fn outside any test module gated by an exact `#[cfg(test)]` whose signature holds a brace (`-> Foo<{ N }>`), whose body neither check L nor the census reads; a test module check L cannot read (gated `#[cfg(all(<x>, test))]` or `#[cfg(any(test, unix))]`, a gate spaced as `#[cfg (test)]` or `# [cfg(test)]`, a nested-bracket attribute between the gate and `mod`, `mod r#tests`, an inner `#![cfg(test)]` inside `mod tests {` (credited to the module's first fn only when that fn directly follows it), an out-of-line `mod tests;` file) fails the census test (testAttrsOutsideTestCode) as soon as it holds a test attribute check L does not read as test code, as does a bare `#[test]` fn outside any module, so what stays unseen there is a helper-only module under an unread gate (or one whose test fns each carry their own `#[cfg(test)]`, or an inner-gated module whose single test fn comes first); the census counts only an attribute whose last path segment is `test`, so a test spelled through `cfg_attr` (`#[cfg_attr(not(miri), test)]`) or by a test macro of another name (`#[rstest]`, `#[test_case(..)]`) is not counted; closure-form helpers inside test-fn bodies, except their direct runner calls; anywhere, a budget spelled other than the DEFAULT_TIMEOUT token (`Duration::from_secs(30)`, another constant), such as a `tokio::time::timeout` bound around a spawn; in a test fn, a DEFAULT_TIMEOUT that is not a direct argument of a plain spawn runner (product code under test keeps the product's budget on purpose), a lock-taking or retrying runner wrapper (`run_git_mutating*`, `run_git_config_write*`, `run_git_raw_index_retry`, `run_git_worktree_admin`, and git/remote.rs's credential wrappers `run_git_with_creds_*` and `run_git_mutating_with_creds*`), read as product code under test, a budget bound to a local first (`let t = DEFAULT_TIMEOUT;`) and passed by name, a token nested inside another call among a runner's arguments (`run_git(.., f(DEFAULT_TIMEOUT))`), a token inside a block, if/match, struct-literal, array or tuple argument of a runner, a turbofish or parenthesized runner call (`run_git::<T>(…)`, `(run_git)(…)`), and a runner reached through a wrapper or an alias; and out of reach by design: a fn named by a raw identifier or a non-ASCII name, which check L reads under the name's leading ASCII run (`r` for `fn r#helper`, `h` for `fn hélper`), so no allowlist row can target it and a row for that run covers every helper read under it in the file; such a name with no leading ASCII word character, which is `<unreadable>` directly in a test module and silent when nested in a test fn (except a direct runner argument, read as the test fn's) or gated `#[cfg(test)]` outside any module; a `macro_rules!` body defined outside test code and used by tests, and one allowlist row covers every same-named helper in its file";
 
 const TEST_HANG_GUARD_FIX =
   "check L: a test helper's git spawn budget is a hang guard — pass " +
@@ -2859,11 +2869,14 @@ const TEST_RUNNER_FIX =
   "check L: a git runner called from a test passes the product's " +
   "DEFAULT_TIMEOUT — pass crate::git::runner::TEST_GIT_HANG_GUARD (test " +
   "builds only); a runner's spawn budget in a test is a hang guard";
-// Every pub/pub(crate) `fn run_git*` in git/runner.rs is in exactly one list
-// (pinned by a test that reads the file). The runner arm guards the PLAIN
-// spawn runners, which only spawn git on the caller's budget. The wrappers
-// take a lock or retry: a test calling one is testing product code, so its
-// DEFAULT_TIMEOUT stays the product's budget and is not a site.
+// Every `fn run_git*` declared outside test modules anywhere under
+// src-tauri/src (git/runner.rs and git/remote.rs today), private ones
+// included, is in exactly one list: the runner arm matches a callee by its
+// last path segment in every file, so the pin test reads every file through
+// gitRunnerDeclarations. The runner arm guards the PLAIN spawn runners, which
+// only spawn git on the caller's budget. The wrappers take a lock, retry, or
+// inject credentials and retry: a test calling one is testing product code,
+// so its DEFAULT_TIMEOUT stays the product's budget and is not a site.
 export const PLAIN_GIT_RUNNERS = new Set([
   "run_git",
   "run_git_raw",
@@ -2872,6 +2885,7 @@ export const PLAIN_GIT_RUNNERS = new Set([
   "run_git_raw_input_bytes",
   "run_git_raw_env",
   "run_git_raw_input_env",
+  "run_git_spawn",
 ]);
 export const UNGUARDED_GIT_RUNNERS = new Set([
   "run_git_mutating",
@@ -2882,7 +2896,25 @@ export const UNGUARDED_GIT_RUNNERS = new Set([
   "run_git_config_write_held",
   "run_git_mutating_config_write",
   "run_git_worktree_admin",
+  "run_git_with_creds_once",
+  "run_git_with_creds_rechecked",
+  "run_git_mutating_with_creds",
+  "run_git_mutating_with_creds_for_branch",
+  "run_git_mutating_with_creds_checked",
 ]);
+
+/** The name of every `fn run_git*` declared in `text` outside its test
+ *  modules: any visibility or qualifiers (only the `fn` keyword and the name
+ *  are read), a raw identifier read without its `r#`. It returns every such
+ *  fn it sees, trait methods, nested fns and macro bodies included, so a
+ *  non-runner it reads fails closed through the pin test, never silently. */
+export function gitRunnerDeclarations(text) {
+  const { masked } = lexRust(text);
+  const tests = testModuleSpans(masked);
+  return [...masked.matchAll(/\bfn\s+(?:r#)?(run_git\w*)/g)]
+    .filter((m) => !tests.some(([s, e]) => m.index > s && m.index < e))
+    .map((m) => m[1]);
+}
 const CLOSER_OF = { "(": ")", "[": "]", "{": "}" };
 const OPENER_OF = { ")": "(", "]": "[", "}": "{" };
 const FN_QUALIFIERS = new Set(["pub", "const", "async", "unsafe", "extern"]);
@@ -2895,6 +2927,11 @@ const CFG_TEST_RE = /^#!?\[cfg\(test\)\]$/;
  *  the run must then start at an item boundary (`{`, `}`, `;` or the file's
  *  start), or a stray token would be read as the start of the item. */
 export function fnAttributes(masked, start) {
+  return attributeRun(masked, start)?.attributes ?? null;
+}
+
+/** fnAttributes' reading, with the offset where the attribute run starts. */
+function attributeRun(masked, start) {
   let p = start;
   const skipSpace = () => {
     while (p > 0 && /\s/.test(masked[p - 1])) p--;
@@ -2937,7 +2974,9 @@ export function fnAttributes(masked, start) {
     p = hash;
   }
   skipSpace();
-  return p === 0 || "{};".includes(masked[p - 1]) ? attributes : null;
+  return p === 0 || "{};".includes(masked[p - 1])
+    ? { attributes, start: p }
+    : null;
 }
 
 /** The runner a token at `at` is a DIRECT argument of (its innermost bracket
@@ -2982,12 +3021,13 @@ export function runnerCallOf(masked, at, fn) {
   return PLAIN_GIT_RUNNERS.has(callee) ? callee : false;
 }
 
-/** In test code (a `#[cfg(test)]` module, or a fn gated `#[cfg(test)]`), a
- *  `DEFAULT_TIMEOUT` token is a site when its innermost enclosing `fn` is not
- *  a test fn (the helper arm: any token), or when it is a direct argument of a
- *  plain spawn runner inside a test fn (the runner arm). A nested fn in a test
- *  fn is a helper; a closure is read as the fn around it. `corpus` tallies
- *  what the run saw for reportEmptyHangGuardScope. */
+/** In test code (a module gated `#[cfg(test)]` or `#[cfg(all(test, …))]`, or
+ *  a fn gated `#[cfg(test)]`), a `DEFAULT_TIMEOUT` token is a site when its
+ *  innermost enclosing `fn` is not a test fn (the helper arm: any token), or
+ *  when it is a direct argument of a plain spawn runner inside a test fn (the
+ *  runner arm). A nested fn in a test fn is a helper; a closure is read as the
+ *  fn around it. `corpus` tallies what the run saw for
+ *  reportEmptyHangGuardScope. */
 export function checkTestHangGuard(
   file,
   _src,
@@ -3031,10 +3071,7 @@ export function checkTestHangGuard(
       corpus.definition = true;
   }
   const functions = rustFunctions(masked);
-  const uses = [...masked.matchAll(/\buse\s[^;]*;/g)].map((m) => [
-    m.index,
-    m.index + m[0].length,
-  ]);
+  const uses = useDeclarationSpans(masked);
   for (const { index: at } of masked.matchAll(/\bDEFAULT_TIMEOUT\b/g)) {
     if (uses.some(([s, e]) => at > s && at < e)) continue;
     const inTests = tests.some(([s, e]) => at > s && at < e);
@@ -3044,7 +3081,7 @@ export function checkTestHangGuard(
         report(
           at,
           "<unreadable>",
-          "check L: DEFAULT_TIMEOUT in a test module outside any function (a const or static initializer) — check L cannot tell which spawns it budgets",
+          "check L: DEFAULT_TIMEOUT in a test module outside any function body check L can find, such as a const or static initializer, a `macro_rules!` body, a fn whose name starts with a non-ASCII character, or a fn whose signature holds a brace (read as its body) — check L cannot tell which spawns it budgets",
           false,
         );
       continue;
@@ -3078,6 +3115,39 @@ export function checkTestHangGuard(
   }
 }
 
+// Looser than TEST_ATTR_RE on purpose: any attribute whose last path segment
+// is `test`, spaced or not, so a test fn check L misreads is still counted.
+const LOOSE_TEST_ATTR_RE = /#\s*\[\s*(?:::\s*)?(?:\w+\s*::\s*)*test\s*[\](]/g;
+
+/** The census behind check L's module contract: every attribute in `text`
+ *  whose last path segment is `test` (`scanned`; `cfg_attr` spellings and test
+ *  macros of other names are not counted), and the 1-based lines of those
+ *  outside the code check L reads as test code (`outside`), which is the same
+ *  reading checkTestHangGuard makes: testModuleSpans over the masked view,
+ *  plus a fn whose own attribute run holds an exact `#[cfg(test)]`. A test
+ *  module check L cannot read shows up here as soon as it holds a test fn
+ *  without its own `#[cfg(test)]`. CRLF text reads as is: every pattern takes
+ *  `\r` as whitespace, and lines count `\n`. */
+export function testAttrsOutsideTestCode(text) {
+  const { masked } = lexRust(text);
+  const spans = testModuleSpans(masked);
+  const gated = [];
+  for (const fn of rustFunctions(masked)) {
+    const run = attributeRun(masked, fn.start);
+    if (run?.attributes.some((a) => CFG_TEST_RE.test(a)))
+      gated.push([run.start, fn.start]);
+  }
+  let scanned = 0;
+  const outside = [];
+  for (const { index: at } of masked.matchAll(LOOSE_TEST_ATTR_RE)) {
+    scanned++;
+    if (spans.some(([s, e]) => at > s && at < e)) continue;
+    if (gated.some(([s, e]) => at >= s && at < e)) continue;
+    outside.push(masked.slice(0, at).split("\n").length);
+  }
+  return { scanned, outside };
+}
+
 /** A run whose corpus held no DEFAULT_TIMEOUT definition in git/runner.rs, or
  *  no test module at all, read nothing check L guards: a hit, never a pass. */
 export function reportEmptyHangGuardScope(hits, corpus) {
@@ -3104,7 +3174,7 @@ export function reportEmptyHangGuardScope(hits, corpus) {
 function main() {
   const hangGuardCorpus = { definition: false, spans: 0 };
   const hangGuard = {
-    name: "L. test helpers on the product git timeout",
+    name: "L. test git spawns on the product timeout",
     run: (file, src, lines, hits) =>
       checkTestHangGuard(
         file,

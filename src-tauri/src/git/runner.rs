@@ -11,9 +11,9 @@ use crate::error::{AppError, AppResult};
 use crate::state::{AppState, HolderSlot, LockDomain};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Per-spawn budget for git that tests run themselves: a hang guard, not a contract.
-/// Headroom over `DEFAULT_TIMEOUT` so ordinary machine load does not fail a fixture step;
-/// a wedged child still fails the test.
+/// Hang guard for git that tests run, as a per-spawn budget or an outer bound around
+/// product calls; not a contract. Headroom over `DEFAULT_TIMEOUT` so ordinary machine
+/// load does not fail a fixture step; a wedged child still fails the test.
 #[cfg(test)]
 pub(crate) const TEST_GIT_HANG_GUARD: Duration = Duration::from_secs(120);
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
