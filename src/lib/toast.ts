@@ -1,5 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
+import { COPY_FAILED, writeClipboard } from "@/lib/clipboard";
 import {
   composedErrorPresentation,
   type ErrorPresentation,
@@ -28,8 +29,8 @@ export function errorToastAction(presentation: ErrorPresentation) {
     : {
         label: "Copy",
         onClick: () => {
-          navigator.clipboard.writeText(presentation.fullText).catch(() => {
-            // clipboard denied — nothing useful to do
+          writeClipboard(presentation.fullText).catch(() => {
+            toast.error(COPY_FAILED);
           });
         },
       };

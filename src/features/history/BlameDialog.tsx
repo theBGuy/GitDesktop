@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -34,6 +33,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { diffLang } from "@/features/diff/diff-lang";
 import { HighlightedLine } from "@/features/diff/HighlightedLine";
+import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import { FULL_OID_RE } from "@/lib/git/oid";
 import { useBlame } from "@/lib/git/queries";
@@ -341,14 +341,7 @@ function BlameCommitCell({
             <Button
               variant="ghost"
               size="xs"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(line.hash);
-                  toast.success("Commit SHA copied");
-                } catch {
-                  toast.error("Could not copy to clipboard");
-                }
-              }}
+              onClick={() => copyText(line.hash, "Commit SHA copied")}
             >
               Copy SHA
             </Button>

@@ -178,8 +178,14 @@ Component-layer mechanics (set by the spike; extend, don't re-derive):
   (`vi.mock("@/lib/<area>/api")`), and never spell `invoke("literal")` in a
   test: the dead-surface guard pairs those with registered Rust commands. A
   module importing `@tauri-apps/api/core` or a Tauri plugin directly bypasses
-  that transport (four src files outside `src/lib/transport/` do today), so a
-  test reaching one mocks that module itself.
+  that transport (five src files outside `src/lib/transport/` import the core
+  module today), so a test reaching one mocks that module itself. Every
+  clipboard write goes through `writeClipboard` / `copyText`
+  (`src/lib/clipboard.ts`): a test asserting a Windows copy mocks
+  `@tauri-apps/plugin-clipboard-manager` and `isWindows` and stubs the
+  `isTauri` global (`vi.stubGlobal`), or it takes the web branch; the
+  `raw-clipboard-write` guard fails a direct `navigator.clipboard` use or
+  plugin import.
 - The React Compiler is ACTIVE under Vitest (vitest.config.ts merges
   vite.config.ts) — tests exercise the shipped artifact, so no render-count or
   referential-identity assertions.

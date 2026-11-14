@@ -20,6 +20,7 @@
     "updater:default",
     "process:default",
     "window-state:default",
+    "clipboard-manager:allow-write-text",
     {
       "identifier": "http:default",
       "allow": [

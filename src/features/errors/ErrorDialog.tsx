@@ -1,6 +1,7 @@
 import { ArrowSquareOutIcon, CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { COPY_FAILED, writeClipboard } from "@/lib/clipboard";
 import { useErrorDialog } from "@/lib/stores/error-dialog";
 import { useRetained } from "@/lib/use-retained";
 
@@ -59,17 +61,20 @@ export function ErrorDialog() {
     setCopied(false);
   }
 
-  function copy() {
-    navigator.clipboard
-      .writeText(fullText)
-      .then(() => {
-        setCopied(true);
-        if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {
-        // Clipboard denied — nothing useful to do.
-      });
+  async function copy() {
+    // A write can settle after close() or open(other); "Copied" belongs only to
+    // the presentation that was showing at the click.
+    const at = useErrorDialog.getState().presentation;
+    try {
+      await writeClipboard(fullText);
+    } catch {
+      toast.error(COPY_FAILED);
+      return;
+    }
+    if (useErrorDialog.getState().presentation !== at) return;
+    setCopied(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(false), 1500);
   }
 
   return (

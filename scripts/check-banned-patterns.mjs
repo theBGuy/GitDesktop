@@ -547,6 +547,14 @@ const focusableHeldRender = ({ source }, file) => {
 const RAW_COPY_ICON_BUTTON_RE =
   /<(button|Button)\b(?:=>|[^>=]|=(?!>))*>\s*(?:\{\s*\}\s*)*<CopyIcon\b(?:=>|[^>=]|=(?!>))*\/>\s*(?:\{\s*\}\s*)*<\/\1>/g;
 
+// Raw clipboard use: navigator.clipboard, execCommand copy/cut (any case, as the
+// browser reads it), plugin imports. Missed (zero today): an aliased navigator, a
+// destructured `{ clipboard }`, `navigator["clipboard"]`, a plugin specifier built
+// at runtime or a subpath import of the package, a copy/cut handler writing via
+// `clipboardData.setData`, and a raw invoke of `plugin:clipboard-manager|write_text`.
+const RAW_CLIPBOARD_RE =
+  /\bnavigator\s*\??\.\s*clipboard\b|\bexecCommand\s*\(\s*["'`](?:[cC][oO][pP][yY]|[cC][uU][tT])["'`]|["'`]@tauri-apps\/plugin-clipboard-manager["'`]/g;
+
 // A hand-rolled InfoNote: one quoted class literal holding `border-b` and
 // `bg-muted/40` (any order, neither variant-prefixed) within PAIR_GAP of the
 // identifier `InfoIcon`, either order. Missed by design: the tokens split across
@@ -5761,6 +5769,18 @@ export const CHECKS = [
     allowlist: [],
     message:
       "icon-only copy buttons use CopyIconButton (src/components/CopyIconButton.tsx) — it carries the vendored focus ring, sets aria-label and title to the same string, and stops click propagation so a copy never also activates its row; a hand-rolled button drifts on all three one site at a time (a copy control with visible text is not this idiom), and a site the component genuinely can't express needs an allowlist entry with rationale",
+  },
+  {
+    name: "raw-clipboard-write",
+    // The helper IS the idiom; tests stub the clipboard and mock the plugin.
+    appliesTo: (file) =>
+      file !== "src/lib/clipboard.ts" &&
+      !file.startsWith("src/test/") &&
+      notVendoredUi(file),
+    scan: perFile(RAW_CLIPBOARD_RE),
+    allowlist: [],
+    message:
+      "clipboard access goes through writeClipboard / copyText (src/lib/clipboard.ts), which writes through the native plugin on Windows inside Tauri because WebView2's web clipboard turns each LF into CRLF, and through the web API everywhere else — a direct navigator.clipboard read or write, execCommand(\"copy\"/\"cut\") or import of @tauri-apps/plugin-clipboard-manager bypasses that rule (CRs come back on Windows, or the plugin runs where it shouldn't), and a site the helper genuinely can't serve needs an allowlist entry with rationale",
   },
   {
     name: "hand-rolled-info-strip",
