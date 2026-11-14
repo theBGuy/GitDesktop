@@ -2073,7 +2073,7 @@ mod tests {
             Some(&repo),
             &["hash-object", "--stdin-paths"],
             Some("crlf\n"),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2221,13 +2221,15 @@ mod tests {
             vec!["config", "user.email", "t@t.local"],
             vec!["config", "user.name", "T"],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["commit", "-qm", "seed"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -2236,7 +2238,7 @@ mod tests {
         std::fs::write(dir.join("notes.md"), "root\n").unwrap();
         std::fs::write(dir.join("docs").join("notes.md"), "nested\n").unwrap();
         std::fs::write(dir.join("app.rs"), "fn main() {}\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -2475,16 +2477,16 @@ mod tests {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-test-").await;
 
         std::fs::write(dir.join("file.txt"), "a\nb\nc\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["commit", "-qm", "seed"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
         // Stage a 2-line append (index vs HEAD = +2 -0)...
         std::fs::write(dir.join("file.txt"), "a\nb\nc\nd\ne\n").unwrap();
-        run_git(Some(&repo), &["add", "file.txt"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "file.txt"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         // ...then edit further in the worktree (worktree vs index = +3 -1).
@@ -2617,15 +2619,17 @@ mod tests {
             // does. A lone `auto` would pass whether or not it clears anything.
             vec!["config", "--add", "diff.binauto.binary", "auto"],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         run_git(
             Some(&repo),
             &["commit", "-qm", "attributes"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2725,17 +2729,17 @@ mod tests {
         run_git(
             Some(&repo),
             &["config", "filter.fake.clean", "cat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         run_git(
             Some(&repo),
             &["commit", "-qm", "attributes"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3112,7 +3116,7 @@ mod tests {
         let listed = run_git(
             Some(&repo),
             &["ls-files", "--others", "--exclude-standard", "-z"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -3141,19 +3145,19 @@ mod tests {
         run_git(
             Some(&repo),
             &["config", "core.bigFileThreshold", "1k"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
 
         std::fs::write(dir.join(".gitattributes"), "*.forced diff\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         run_git(
             Some(&repo),
             &["commit", "-qm", "attributes"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3209,7 +3213,7 @@ mod tests {
         run_git(
             Some(&nested.to_string_lossy()),
             &["init", "-q"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3221,7 +3225,7 @@ mod tests {
         let listed = run_git(
             Some(&repo),
             &["ls-files", "--others", "--exclude-standard", "-z"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -3250,13 +3254,13 @@ mod tests {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-ignored-test-").await;
 
         std::fs::write(dir.join(".gitignore"), "ignored.txt\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         run_git(
             Some(&repo),
             &["commit", "-qm", "ignore rules"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3282,7 +3286,7 @@ mod tests {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-unborn-test-").await;
 
         std::fs::write(dir.join("new.txt"), "one\ntwo\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -3306,10 +3310,10 @@ mod tests {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-line-stats-conflict-test-").await;
 
         std::fs::write(dir.join("file.txt"), "a\nb\nc\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["commit", "-qm", "seed"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -3319,24 +3323,34 @@ mod tests {
             vec!["checkout", "-q", "-b", "mine"],
             vec!["checkout", "-q", "-b", "other", "mine"],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         std::fs::write(dir.join("file.txt"), "a\nOTHER\nc\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "other"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        run_git(
+            Some(&repo),
+            &["commit", "-qm", "other"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
 
-        run_git(Some(&repo), &["checkout", "-q", "mine"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        run_git(
+            Some(&repo),
+            &["checkout", "-q", "mine"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         std::fs::write(dir.join("file.txt"), "a\nMINE\nc\n").unwrap();
-        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
-        run_git(Some(&repo), &["commit", "-qm", "mine"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["commit", "-qm", "mine"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -3346,7 +3360,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "other"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3445,7 +3459,11 @@ mod tests {
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
 
         git(vec!["init"]).await;
@@ -3467,7 +3485,7 @@ mod tests {
             Some(&repo),
             &["apply", "--whitespace=nowarn", "--recount", "--cached", "-"],
             Some(&patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3495,7 +3513,11 @@ mod tests {
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
 
         git(vec!["init"]).await;
@@ -3529,7 +3551,7 @@ mod tests {
             Some(&repo),
             &["apply", "--whitespace=nowarn", "--recount", "--cached", "-"],
             Some(&patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3572,7 +3594,11 @@ mod tests {
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
 
         git(vec!["init"]).await;
@@ -3604,7 +3630,7 @@ mod tests {
             Some(&repo),
             &["apply", "--whitespace=nowarn", "--recount", "--cached", "--reverse", "-"],
             Some(&patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3650,7 +3676,11 @@ mod tests {
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
 
         git(vec!["init"]).await;
@@ -3678,7 +3708,7 @@ mod tests {
             Some(&repo),
             &["apply", "--whitespace=nowarn", "--cached", "-"],
             Some(&patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3693,7 +3723,7 @@ mod tests {
             Some(&repo),
             &["apply", "--whitespace=nowarn", "--cached", "--reverse", "-"],
             Some(&patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3715,7 +3745,11 @@ mod tests {
         let repo = dir.to_string_lossy().into_owned();
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
 
         git(vec!["init"]).await;
@@ -4221,7 +4255,7 @@ mod tests {
         let merged = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "preview-left"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -4489,7 +4523,7 @@ mod tests {
     async fn file_diff_flags_an_undecodable_staged_change() {
         let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-staged-").await;
         std::fs::write(dir.join("file.txt"), b"base line\ncaf\xFC\n").unwrap();
-        run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "--", "file.txt"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let staged = git_diff_file(repo.clone(), "file.txt".into(), true, false, None)
@@ -5133,7 +5167,7 @@ mod tests {
                 "/dev/null",
                 "u.txt",
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -5191,7 +5225,7 @@ mod tests {
                 "/dev/null",
                 "new.txt",
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -5332,7 +5366,7 @@ mod tests {
             Some(&repo),
             &["apply", "--whitespace=nowarn", "--recount", "--cached", "-"],
             Some(&patch),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

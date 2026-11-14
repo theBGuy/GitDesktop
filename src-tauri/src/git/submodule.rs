@@ -1516,7 +1516,7 @@ mod tests {
         let exists = run_git_raw(
             Some(&host),
             &["show-ref", "--exists", "refs/heads/main"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1987,7 +1987,7 @@ mod tests {
         let cfg = run_git_raw(
             Some(&host),
             &["config", "--get-regexp", r"^submodule\."],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

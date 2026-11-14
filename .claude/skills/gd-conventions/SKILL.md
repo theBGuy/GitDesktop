@@ -1510,11 +1510,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (cold-start test mode is the one exception: it aliases the store file and
   has no second writer). A NEW store module with more than one process
   writing adopts `store_lock` — don't assume last-writer-wins is acceptable.
-- **Test fixture helpers run git on `TEST_GIT_HANG_GUARD`** (`git/runner.rs`,
-  test builds only), never the product's `DEFAULT_TIMEOUT`: a helper's git
-  budget is a hang guard, not a contract, so it carries headroom for a
-  loaded machine (guard: check-rust-invariants check L; test-fn bodies are
-  not covered yet).
+- **Test code runs git on `TEST_GIT_HANG_GUARD`** (`git/runner.rs`, test
+  builds only): fixture helpers and direct calls to the plain spawn runners
+  (`PLAIN_GIT_RUNNERS` in check L's script) in tests pass it, never
+  `DEFAULT_TIMEOUT`. A budget a test passes to product code under test, the
+  lock-taking and retrying wrappers included, stays the product's (a helper
+  that does so takes an allowlist row; guard: check-rust-invariants check L).
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag

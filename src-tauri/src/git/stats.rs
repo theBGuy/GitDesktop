@@ -739,7 +739,7 @@ mod tests {
         let probe = run_git_raw(
             Some(&repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

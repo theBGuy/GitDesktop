@@ -604,7 +604,7 @@ pub(crate) mod tests {
                 }
             );
             if born {
-                let out = run_git_raw(Some(&f.repo), &["merge", "incoming"], DEFAULT_TIMEOUT)
+                let out = run_git_raw(Some(&f.repo), &["merge", "incoming"], TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap();
                 assert_ne!(out.code, 0);
@@ -789,7 +789,7 @@ pub(crate) mod tests {
             let out = run_git_raw(
                 Some(&f.repo),
                 &["merge", "--no-edit", "--no-overwrite-ignore", "incoming"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();

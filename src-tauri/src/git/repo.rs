@@ -805,7 +805,7 @@ mod path_is_dir_tests {
 mod validate_repo_tests {
     use super::{git_says_not_a_repository, validate_repo};
     use crate::error::AppError;
-    use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT, TEST_GIT_HANG_GUARD};
+    use crate::git::runner::{run_git, run_git_raw, TEST_GIT_HANG_GUARD};
     use std::path::{Path, PathBuf};
 
     /// git's own words for each shape (measured, git 2.51.1.windows.1).
@@ -924,7 +924,7 @@ mod validate_repo_tests {
         let raw = run_git_raw(
             Some(&s(&plain)),
             &["rev-parse", "--show-toplevel"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1002,7 +1002,7 @@ mod validate_repo_tests {
         let raw = run_git_raw(
             Some(&s(&sub)),
             &["rev-parse", "--show-toplevel"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1042,7 +1042,7 @@ mod validate_repo_tests {
         let raw = run_git_raw(
             Some(&s(&checkout)),
             &["rev-parse", "--show-toplevel"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

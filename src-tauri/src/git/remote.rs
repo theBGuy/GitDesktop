@@ -1988,11 +1988,13 @@ mod tests {
             .tempdir()
             .unwrap();
         let repo = dir.path().to_string_lossy().into_owned();
-        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let add = ["remote", "add", "origin", "https://fetch.example/o/r.git"];
-        run_git(Some(&repo), &add, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(&repo), &add, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
         let url = |push: bool| {
             let (repo, name) = (repo.clone(), "origin".to_string());
             async move {
@@ -2011,7 +2013,9 @@ mod tests {
             "origin",
             "https://push.example/me/r.git",
         ];
-        run_git(Some(&repo), &set, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(&repo), &set, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
         // An out-of-band write: the in-app writers evict, this one waits out the TTL.
         cache_invalidate(&repo, "origin");
         assert_eq!(url(true).await, "https://push.example/me/r.git");
@@ -2261,7 +2265,7 @@ mod tests {
         let merged = run_git(
             Some(&clone_s),
             &["merge", "--no-edit", "side"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await;
         assert!(merged.is_err(), "the fixture's merge must conflict");
@@ -2703,7 +2707,7 @@ mod tests {
             run_git(
                 Some(&clone_s),
                 &["rev-parse", "--verify", "refs/remotes/origin/main"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .is_err(),
@@ -5169,7 +5173,7 @@ mod tests {
             Some(&repo_s),
             &["config", "--get", "remote.origin.url"],
             &envs,
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -5396,7 +5400,7 @@ mod tests {
                 run_git(
                     Some(&work_s),
                     &["rev-parse", "--abbrev-ref", &spec],
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .map(|o| o.stdout_lossy().trim().to_string())
@@ -5560,7 +5564,7 @@ mod tests {
             let args: Vec<String> = args.into_iter().map(str::to_string).collect();
             async move {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                run_git_raw(Some(&work_s), &args, DEFAULT_TIMEOUT)
+                run_git_raw(Some(&work_s), &args, TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap()
             }
@@ -6119,7 +6123,7 @@ mod tests {
         let upstream = run_git(
             Some(&work_s),
             &["rev-parse", "--abbrev-ref", "pressed@{upstream}"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("the pressed branch tracks");
@@ -6206,9 +6210,13 @@ mod tests {
         let work_s = base.join("work").to_string_lossy().into_owned();
         run(&work_s, &["config", "push.default", "simple"]).await;
         for key in ["branch.feat/y.pushRemote", "remote.origin.push"] {
-            let out = run_git_raw(Some(&work_s), &["config", "--get", key], DEFAULT_TIMEOUT)
-                .await
-                .unwrap();
+            let out = run_git_raw(
+                Some(&work_s),
+                &["config", "--get", key],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
             if out.code != 1 {
                 eprintln!("skipping: {key} is set outside the fixture");
                 return;
@@ -6401,9 +6409,13 @@ mod tests {
         let work_s = base.join("work").to_string_lossy().into_owned();
         run(&work_s, &["config", "push.default", "simple"]).await;
         for key in ["branch.pr-7.pushRemote", "remote.origin.push"] {
-            let out = run_git_raw(Some(&work_s), &["config", "--get", key], DEFAULT_TIMEOUT)
-                .await
-                .unwrap();
+            let out = run_git_raw(
+                Some(&work_s),
+                &["config", "--get", key],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
             if out.code != 1 {
                 eprintln!("skipping: {key} is set outside the fixture");
                 return;
@@ -7437,7 +7449,7 @@ and the repository exists.
             run_git(
                 Some(&clone_s),
                 &["reflog", "exists", "refs/heads/main"],
-                DEFAULT_TIMEOUT
+                TEST_GIT_HANG_GUARD
             )
             .await
             .is_err(),
@@ -7741,7 +7753,7 @@ and the repository exists.
             run_git(
                 Some(&repo_s),
                 &["config", &format!("branch.{branch}.remote")],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .is_err(),
@@ -7853,7 +7865,7 @@ and the repository exists.
             run_git(
                 Some(&fork_s),
                 &["rev-parse", "refs/heads/local"],
-                DEFAULT_TIMEOUT
+                TEST_GIT_HANG_GUARD
             )
             .await
             .is_err(),
@@ -7864,7 +7876,7 @@ and the repository exists.
             run_git(
                 Some(&repo_s),
                 &["rev-parse", "--abbrev-ref", "local@{upstream}"],
-                DEFAULT_TIMEOUT
+                TEST_GIT_HANG_GUARD
             )
             .await
             .is_err(),
@@ -8164,7 +8176,7 @@ and the repository exists.
             f.snapshot().await;
             let expected = if state.blocks_merge() {
                 Some(
-                    run_git_raw(Some(&f.repo), &["pull", "--no-rebase"], DEFAULT_TIMEOUT)
+                    run_git_raw(Some(&f.repo), &["pull", "--no-rebase"], TEST_GIT_HANG_GUARD)
                         .await
                         .unwrap(),
                 )

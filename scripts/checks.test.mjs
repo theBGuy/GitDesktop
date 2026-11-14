@@ -111,6 +111,7 @@ import {
   lexRust,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
+  PLAIN_GIT_RUNNERS,
   reportEmptyGhScope,
   reportEmptyHangGuardScope,
   splitStaleEntries,
@@ -118,6 +119,7 @@ import {
   TEST_HANG_GUARD_ALLOWLIST,
   TEST_HANG_GUARD_NOTE,
   TEST_MARKER_ALLOWLIST,
+  UNGUARDED_GIT_RUNNERS,
 } from "./check-rust-invariants.mjs";
 import {
   diffTrees,
@@ -7516,7 +7518,7 @@ test("check L skips qualifiers before reading a cfg(test) fn's attributes", () =
   ]);
 });
 
-test("check L leaves test fn bodies alone, however their attributes are spelled", () => {
+test("check L reads a test fn as a test fn, however its attributes are spelled", () => {
   const src = hangGuardModule(
     [
       "    #[test]",
@@ -7532,7 +7534,7 @@ test("check L leaves test fn bodies alone, however their attributes are spelled"
       "    /** Block doc. */",
       '    #[should_panic(expected = "#[test]")]',
       "    async fn interleaved() {",
-      "        let pick = || run_git(None, &[], DEFAULT_TIMEOUT);",
+      "        let pick = || start_planned_rebase(None, DEFAULT_TIMEOUT);",
       "        pick();",
       "    }",
       "    #[test] fn one_line() { DEFAULT_TIMEOUT; }",
@@ -7674,6 +7676,210 @@ test("check L reads past a module's inner attribute to the helper after it", () 
   assert.deepEqual(hangGuardSites(hangGuardHits(src)), ["helper:4"]);
 });
 
+const runnerSites = (hits) =>
+  hits.map((h) => `${h.fn}:${h.line}:${h.arm}:${h.callee}`);
+
+test("check L's runner arm flags a direct runner argument in a test fn", () => {
+  const src = hangGuardModule(
+    [
+      "    #[test]",
+      "    fn plain() {",
+      '        block_on(run_git(Some("r"), &["status"], DEFAULT_TIMEOUT));',
+      "    }",
+      '    #[tokio::test(flavor = "multi_thread")]',
+      "    async fn wrapped() {",
+      "        let out = run_git_raw(",
+      "            Some(dir),",
+      '            &["log", "-1"],',
+      "            crate::git::runner::DEFAULT_TIMEOUT,",
+      "        )",
+      "        .await;",
+      "        crate::git::runner::run_git_input(",
+      "            None, &[], Some(input), DEFAULT_TIMEOUT * 2)",
+      "        .await;",
+      "    }",
+      "    #[tokio::test]",
+      "    async fn in_a_closure() {",
+      "        let git = |args: &[&str]| run_git_raw_env(None, args, &[], DEFAULT_TIMEOUT);",
+      '        let other = async { run_git(None, &[("a")], DEFAULT_TIMEOUT).await };',
+      "    }",
+    ].join("\n"),
+  );
+  const hits = hangGuardHits(src);
+  assert.deepEqual(runnerSites(hits), [
+    "plain:6:runner:run_git",
+    "wrapped:13:runner:run_git_raw",
+    "wrapped:17:runner:run_git_input",
+    "in_a_closure:22:runner:run_git_raw_env",
+    "in_a_closure:23:runner:run_git",
+  ]);
+  for (const h of hits) {
+    assert.equal(h.allowlisted, false);
+    assert.match(h.fix, /TEST_GIT_HANG_GUARD/);
+  }
+});
+
+const PLAIN_RUNNERS = [
+  "run_git",
+  "run_git_raw",
+  "run_git_input",
+  "run_git_raw_input",
+  "run_git_raw_input_bytes",
+  "run_git_raw_env",
+  "run_git_raw_input_env",
+];
+const WRAPPER_RUNNERS = [
+  "run_git_mutating",
+  "run_git_mutating_raw",
+  "run_git_mutating_input",
+  "run_git_raw_index_retry",
+  "run_git_config_write",
+  "run_git_config_write_held",
+  "run_git_mutating_config_write",
+  "run_git_worktree_admin",
+];
+const runnerCall = (runner) =>
+  hangGuardModule(
+    `    #[test] fn t() { ${runner}(&state, "r", &[], DEFAULT_TIMEOUT); }`,
+  );
+
+test("check L's runner arm guards every plain spawn runner", () => {
+  assert.deepEqual([...PLAIN_GIT_RUNNERS], PLAIN_RUNNERS);
+  for (const runner of PLAIN_RUNNERS)
+    assert.deepEqual(runnerSites(hangGuardHits(runnerCall(runner))), [
+      `t:4:runner:${runner}`,
+    ]);
+});
+
+test("check L's runner arm reads a lock-taking or retrying wrapper as product code", () => {
+  assert.deepEqual([...UNGUARDED_GIT_RUNNERS], WRAPPER_RUNNERS);
+  for (const runner of WRAPPER_RUNNERS)
+    assert.deepEqual(hangGuardHits(runnerCall(runner)), [], runner);
+});
+
+test("check L's runner lists classify every run_git* fn in git/runner.rs", () => {
+  const source = readFileSync(
+    resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "src-tauri/src/git/runner.rs",
+    ),
+    "utf8",
+  );
+  const declared = [
+    ...lexRust(source.replace(/\r\n/g, "\n")).masked.matchAll(
+      /\bpub\s*(?:\([^)]*\)\s*)?(?:(?:const|async|unsafe)\s+)*fn\s+(run_git\w*)/g,
+    ),
+  ].map((m) => m[1]);
+  assert.ok(declared.length > 0, "no pub fn run_git* found in runner.rs");
+  const both = [...PLAIN_GIT_RUNNERS].filter((n) =>
+    UNGUARDED_GIT_RUNNERS.has(n),
+  );
+  assert.deepEqual(both, [], "a runner sits in both lists");
+  assert.deepEqual(
+    [...PLAIN_GIT_RUNNERS, ...UNGUARDED_GIT_RUNNERS].sort(),
+    [...new Set(declared)].sort(),
+    "classify each runner.rs runner as plain (guarded) or a wrapper (product code)",
+  );
+});
+
+test("check L never allowlists a runner-arm hit", () => {
+  const src = hangGuardModule(
+    "    #[tokio::test] async fn t() { run_git(None, &[], DEFAULT_TIMEOUT).await; }",
+  );
+  const row = { file: "git/x.rs", fn: "t", rationale: "fixture" };
+  const hits = hangGuardHits(src, "git/x.rs", [row]);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.arm, h.callee, h.allowlisted]),
+    [["t", "runner", "run_git", false]],
+  );
+  // The same row still covers a helper of that name.
+  const helper = hangGuardModule("    fn t() { let _ = DEFAULT_TIMEOUT; }");
+  assert.deepEqual(
+    hangGuardHits(helper, "git/x.rs", [row]).map((h) => h.allowlisted),
+    [true],
+  );
+});
+
+test("check L's runner arm reads the same rule in a cfg(test) test fn", () => {
+  const src = [
+    "#[cfg(test)]",
+    "#[test]",
+    "fn outside() { run_git(None, &[], DEFAULT_TIMEOUT); }",
+    "#[test]",
+    "fn ungated() { run_git(None, &[], DEFAULT_TIMEOUT); }",
+  ].join("\n");
+  // Only the gated fn is test code; a bare #[test] outside a module is not.
+  assert.deepEqual(runnerSites(hangGuardHits(src)), [
+    "outside:3:runner:run_git",
+  ]);
+});
+
+test("check L's runner arm leaves every other DEFAULT_TIMEOUT in a test fn alone", () => {
+  const src = hangGuardModule(
+    [
+      "    #[tokio::test]",
+      "    async fn not_runner_arguments() {",
+      "        start_planned_rebase(repo, DEFAULT_TIMEOUT, DEFAULT_TIMEOUT).await;",
+      "        ignored_files_in_the_way(repo, &[], DEFAULT_TIMEOUT).await;",
+      "        crate::git::ops::rebase_with_timeouts(repo, DEFAULT_TIMEOUT);",
+      "        run_git_spawn(None, &[], DEFAULT_TIMEOUT);",
+      "        my_run_git(None, &[], DEFAULT_TIMEOUT);",
+      "        assert_eq!(budget, DEFAULT_TIMEOUT);",
+      "        assert!(matches!(e, AppError::Timeout(s) if s == DEFAULT_TIMEOUT.as_secs()));",
+      "        let t = DEFAULT_TIMEOUT;",
+      "        run_git(None, &[], t);",
+      "        let pair = (DEFAULT_TIMEOUT, run_git);",
+      "        let list = [DEFAULT_TIMEOUT];",
+      '        let s = "run_git(None, &[], DEFAULT_TIMEOUT)";',
+      "        // run_git(None, &[], DEFAULT_TIMEOUT)",
+      "    }",
+      "    use crate::git::runner::{run_git, DEFAULT_TIMEOUT};",
+    ].join("\n"),
+  );
+  assert.deepEqual(hangGuardHits(src), []);
+});
+
+test("check L's runner arm leaves a token nested in another call among a runner's arguments", () => {
+  // Decided: the token is the inner call's argument, and that callee may be
+  // product code, so neither a hit nor unreadable (named in the NOTE).
+  const src = hangGuardModule(
+    [
+      "    #[test]",
+      "    fn nested() {",
+      "        run_git(None, &[], budget_of(DEFAULT_TIMEOUT));",
+      "        run_git(None, &[], DEFAULT_TIMEOUT.max(other(DEFAULT_TIMEOUT)));",
+      "    }",
+    ].join("\n"),
+  );
+  assert.deepEqual(runnerSites(hangGuardHits(src)), [
+    "nested:7:runner:run_git",
+  ]);
+});
+
+test("check L's runner arm fails closed on brackets it cannot balance", () => {
+  for (const call of [
+    "run_git(None, x], DEFAULT_TIMEOUT);",
+    "run_git(None, &[], DEFAULT_TIMEOUT];",
+    "run_git(None, &[(], DEFAULT_TIMEOUT);",
+    "run_git(None, &[], DEFAULT_TIMEOUT",
+    // No opener around the token at all: the closer before it is unmatched.
+    "x]; let b = DEFAULT_TIMEOUT;",
+  ]) {
+    const hits = hangGuardHits(
+      hangGuardModule(`    #[test]\n    fn t() {\n        ${call}\n    }`),
+      "git/fixture.rs",
+      [{ file: "git/fixture.rs", fn: "<unreadable>", rationale: "fixture" }],
+    );
+    assert.deepEqual(
+      hits.map((h) => [h.fn, h.line, h.allowlisted]),
+      [["<unreadable>", 6, false]],
+      call,
+    );
+    assert.match(hits[0].fix, /cannot balance the brackets/);
+  }
+});
+
 test("check L's corpus tallies the definition and the test spans", () => {
   const runner = [
     "pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);",
@@ -7735,6 +7941,16 @@ test("check L's note names what it cannot see", () => {
   for (const blind of [
     /DEFAULT_TIMEOUT as X/,
     /passed to a helper by name/,
+    /not a direct argument of a plain spawn runner/,
+    /lock-taking or retrying runner wrapper .*read as product code under test/,
+    /a token inside a block, if\/match, struct-literal, array or tuple argument of a runner/,
+    /a turbofish or parenthesized runner call \(`run_git::<T>\(…\)`, `\(run_git\)\(…\)`\)/,
+    /closure-form helpers inside test-fn bodies, except their direct runner calls/,
+    /bound to a local first \(`let t = DEFAULT_TIMEOUT;`\) and passed by name/,
+    /nested inside another call among a runner's arguments/,
+    /runner reached through a wrapper or an alias/,
+    /anywhere, a budget spelled other than the DEFAULT_TIMEOUT token .*`tokio::time::timeout` bound around a spawn; in a test fn,/,
+    /a fn is test code only under an exact `#\[cfg\(test\)\]`, a module only under `#\[cfg\(test\)\]` or `#\[cfg\(all\(test, …\)\)\]`/,
     /delegating to product code/,
     /cfg\(all\(<x>, test\)\)/,
     /mod tests;/,

@@ -2325,7 +2325,7 @@ prunable gitdir file points to non-existent location
         let upstream = run_git(
             Some(&repo_s),
             &["rev-parse", "--abbrev-ref", "gd/session/nt@{upstream}"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .err();
@@ -3046,7 +3046,7 @@ prunable gitdir file points to non-existent location
                 run_git(
                     Some(&repo),
                     &["commit", "--allow-empty", "-m", "concurrent"],
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .expect("the queued commit must succeed once the turn releases");
@@ -3338,7 +3338,7 @@ prunable gitdir file points to non-existent location
         let section = run_git_raw(
             Some(&repo_s),
             &["config", "--get-regexp", r"^branch\.gd/session/cfg-lock\."],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3399,7 +3399,7 @@ prunable gitdir file points to non-existent location
         let added = run_git_raw(
             Some(&repo_s),
             &["worktree", "add", "-b", "shape", &wt, "origin/feat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3420,7 +3420,7 @@ prunable gitdir file points to non-existent location
         let existing = run_git_raw(
             Some(&repo_s),
             &["worktree", "add", &wt, "shape"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3475,7 +3475,7 @@ prunable gitdir file points to non-existent location
             let _ = run_git_raw(
                 Some(&repo_s),
                 &["config", "--unset-all", "branch.autoSetupMerge"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await;
             if let Some(mode) = mode {

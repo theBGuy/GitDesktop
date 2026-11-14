@@ -1457,7 +1457,7 @@ mod tests {
             &["config", "--local", "--replace-all", "user.name", "Bob"],
             &["config", "--local", "--unset-all", "user.name"],
         ] {
-            let raw = run_git_raw(Some(&repo), args, DEFAULT_TIMEOUT)
+            let raw = run_git_raw(Some(&repo), args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert_eq!(raw.code, 255, "{args:?}: {}", raw.stderr);
@@ -1479,7 +1479,7 @@ mod tests {
         let plain = run_git_raw(
             Some(&repo),
             &["config", "--local", "--unset", "user.name"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1489,7 +1489,7 @@ mod tests {
         let plain = run_git_raw(
             Some(&repo),
             &["config", "--local", "user.name", "Bob"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1695,7 +1695,7 @@ mod tests {
         let probe = run_git_raw(
             Some(&repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2944,7 +2944,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2962,7 +2962,7 @@ mod tests {
         let squash = run_git_raw(
             Some(&repo),
             &["merge", "--squash", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3001,7 +3001,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3124,9 +3124,13 @@ mod tests {
             } else {
                 "feature".to_string()
             };
-            let stopped = run_git_raw(Some(&repo), &[verb, "--no-edit", &target], DEFAULT_TIMEOUT)
-                .await
-                .unwrap();
+            let stopped = run_git_raw(
+                Some(&repo),
+                &[verb, "--no-edit", &target],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
             assert_ne!(stopped.code, 0, "fixture: the {verb} stops on its conflict");
             resolve_ours(&repo).await;
             let tip = head(&repo).await;
@@ -3161,7 +3165,7 @@ mod tests {
         run(&repo, &["switch", "-q", "--orphan", "other"]).await;
         let other = raw_commit(&dir, &repo, "a.txt", "other").await;
         run(&repo, &["switch", "-q", &start]).await;
-        let stopped = run_git_raw(Some(&repo), &["cherry-pick", &other], DEFAULT_TIMEOUT)
+        let stopped = run_git_raw(Some(&repo), &["cherry-pick", &other], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(stopped.code, 0, "fixture: the pick stops on its conflict");
@@ -3385,7 +3389,7 @@ mod tests {
         run_git(
             None,
             &["clone", "-q", "--depth", "1", &url, &clone],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("the shallow clone succeeds");

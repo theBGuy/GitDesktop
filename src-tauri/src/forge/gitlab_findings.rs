@@ -2576,9 +2576,13 @@ mod tests {
         let git = |args: &'static [&'static str]| {
             let repo = repo.clone();
             async move {
-                crate::git::runner::run_git(Some(&repo), args, crate::git::runner::DEFAULT_TIMEOUT)
-                    .await
-                    .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
+                crate::git::runner::run_git(
+                    Some(&repo),
+                    args,
+                    crate::git::runner::TEST_GIT_HANG_GUARD,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
             }
         };
         git(&["init", "-q"]).await;

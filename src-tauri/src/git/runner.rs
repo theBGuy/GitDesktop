@@ -1307,7 +1307,7 @@ mod stdin_tests {
             .tempdir()
             .expect("create temp dir");
         let repo = dir.path().to_string_lossy().into_owned();
-        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         // `*` in the repo's own `.gitignore` outranks any global excludes the
@@ -1453,7 +1453,7 @@ mod config_tests {
             .tempdir()
             .expect("create temp dir");
         let repo = dir.path().to_string_lossy().into_owned();
-        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -1468,7 +1468,7 @@ mod config_tests {
             ("diff.dstprefix", "b/"),
             ("diff.mnemonicprefix", "false"),
         ] {
-            let out = run_git(Some(&repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+            let out = run_git(Some(&repo), &["config", "--get", key], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap_or_else(|e| panic!("read {key}: {e}"));
             assert_eq!(out.stdout_lossy().trim(), want, "{key}");
@@ -1489,7 +1489,7 @@ mod config_tests {
         let git = |args: &'static [&'static str]| {
             let repo = repo.clone();
             async move {
-                run_git(Some(&repo), args, DEFAULT_TIMEOUT)
+                run_git(Some(&repo), args, TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
                     .stdout_lossy()
@@ -1732,7 +1732,9 @@ mod tree_kill_tests {
             &["config", "user.email", "t@t.local"],
             &["config", "user.name", "T"],
         ] {
-            run_git(Some(&repo), args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         let git_dir = dir.path().join(".git");
         let hook = git_dir.join("hooks").join("pre-commit");

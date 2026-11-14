@@ -5132,7 +5132,7 @@ mod tests {
     /// every attachment check (which would report the missing staged file instead).
     #[tokio::test]
     async fn an_empty_comment_with_attachments_is_refused_before_its_checks() {
-        use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+        use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
         let refs = || {
             Some(crate::attachments::AttachmentRefs {
                 session: "0123456789abcdef0123456789abcdef".into(),
@@ -5148,13 +5148,13 @@ mod tests {
                 .tempdir()
                 .expect("create temp dir");
             let repo = dir.path().to_string_lossy().into_owned();
-            run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+            run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             run_git(
                 Some(&repo),
                 &["remote", "add", "origin", origin],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -5168,7 +5168,7 @@ mod tests {
     /// An unknown lens keeps its own refusal ahead of every attachment check on GitHub.
     #[tokio::test]
     async fn an_unknown_lens_with_attachments_is_refused_before_its_checks() {
-        use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+        use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
         let refs = || {
             Some(crate::attachments::AttachmentRefs {
                 session: "0123456789abcdef0123456789abcdef".into(),
@@ -5183,13 +5183,13 @@ mod tests {
             .tempdir()
             .expect("create temp dir");
         let repo = dir.path().to_string_lossy().into_owned();
-        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         run_git(
             Some(&repo),
             &["remote", "add", "origin", "https://github.com/o/r.git"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

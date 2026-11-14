@@ -580,7 +580,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1118,7 +1118,7 @@ mod tests {
             let mut args = vec!["clone", "-q"];
             args.extend(flags);
             args.extend([url.as_str(), target_text.as_ref()]);
-            let out = run_git_raw(Some(&f.repo), &args, DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(&f.repo), &args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             if out.code != 0 {
@@ -1265,7 +1265,7 @@ mod tests {
                 &file_url(Path::new(&bare)),
                 &clone_path.to_string_lossy(),
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1343,7 +1343,7 @@ mod tests {
                     "--batch-check=%(objectname) %(objecttype) %(objectsize)",
                 ],
                 Some(&format!("{old_blob}\n")),
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
