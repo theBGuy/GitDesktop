@@ -94,22 +94,37 @@ fn swap_test_store_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
     std::mem::replace(&mut *slot, dir)
 }
 
-/// Resolve the absolute path of the `local-issues.json` the frontend store writes.
-/// Mirrors `tauri-plugin-store` v2's `BaseDirectory::AppData` resolution
-/// (`dirs::data_dir()/<identifier>`) — see the module contract and [`crate::local_prs`].
-/// Under `cfg(test)` an installed [`TEST_STORE_DIR`] wins.
+/// Pure resolution of the store's directory, in precedence order (mirroring
+/// [`crate::local_prs::resolve_store_dir`]):
+/// 1. an installed test override ([`TEST_STORE_DIR`]);
+/// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can reach the user's real
+///    store (MCP write-tool tests list it for real);
+/// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), mirroring
+///    `tauri-plugin-store` v2's `BaseDirectory::AppData` — see the module contract.
+fn resolve_store_dir(test_override: Option<PathBuf>, is_test: bool) -> AppResult<PathBuf> {
+    match test_override {
+        Some(dir) => Ok(dir),
+        None if is_test => Ok(crate::oplog::test_fallback_dir("gd-local-issues-test")),
+        None => {
+            let data = dirs::data_dir().ok_or_else(|| {
+                AppError::Command("could not resolve the app-data directory".to_string())
+            })?;
+            Ok(data.join(APP_IDENTIFIER))
+        }
+    }
+}
+
+/// Resolve the absolute path of the `local-issues.json` the frontend store writes — see
+/// [`resolve_store_dir`] for how the directory is chosen.
 pub(crate) fn store_path() -> AppResult<PathBuf> {
     #[cfg(test)]
-    if let Some(dir) = TEST_STORE_DIR
+    let test_override = TEST_STORE_DIR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
-    {
-        return Ok(dir.join(STORE_FILE));
-    }
-    let data = dirs::data_dir()
-        .ok_or_else(|| AppError::Command("could not resolve the app-data directory".to_string()))?;
-    Ok(data.join(APP_IDENTIFIER).join(STORE_FILE))
+        .clone();
+    #[cfg(not(test))]
+    let test_override = None;
+    Ok(resolve_store_dir(test_override, cfg!(test))?.join(STORE_FILE))
 }
 
 /// Read the whole store file as a JSON object. A missing file is an empty object;
@@ -472,17 +487,29 @@ mod tests {
         assert_eq!(list(repo).unwrap().len(), 1);
     }
 
+    /// With no override installed the store resolves to the temp subdir, never under the
+    /// real app-data dir, while the production arm still resolves where the store plugin
+    /// writes.
     #[test]
-    fn store_path_is_under_identifier_and_named() {
+    fn store_path_under_test_never_resolves_to_the_real_app_data_dir() {
         let _serialized = store_dir_lock();
         let path = store_path().unwrap();
-        // …/com.thebguy.gitdesktop/local-issues.json
-        assert!(path.ends_with(STORE_FILE), "path: {}", path.display());
+        assert_eq!(
+            path,
+            crate::oplog::test_fallback_dir("gd-local-issues-test").join(STORE_FILE)
+        );
+        let real_root = dirs::data_dir().expect("app-data dir");
         assert!(
-            path.to_string_lossy().contains(APP_IDENTIFIER),
-            "path: {}",
+            !path.starts_with(&real_root),
+            "{} is under the real app-data dir",
             path.display()
         );
+        assert_eq!(
+            resolve_store_dir(None, false).unwrap(),
+            real_root.join(APP_IDENTIFIER)
+        );
+        let over = PathBuf::from("C:/tmp/x");
+        assert_eq!(resolve_store_dir(Some(over.clone()), true).unwrap(), over);
     }
 
     #[test]

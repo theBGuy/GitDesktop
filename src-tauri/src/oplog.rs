@@ -150,24 +150,84 @@ fn resolve_test_store(repo: &str) -> (PathBuf, &'static str) {
     )
 }
 
-/// The temp dir a `cfg!(test)` store falls back to, one named dir per store (the
-/// oplog, review-notes and local-PR stores each resolve theirs here). Nextest runs
-/// each test in its own process and marks it with
-/// `NEXTEST_EXECUTION_MODE=process-per-test`
-/// (<https://nexte.st/docs/configuration/env-vars/>); the stores' in-process
-/// mutexes serialize nothing there, so that mode gets a per-process dir. Plain
-/// `cargo test` keeps one reused dir so local runs don't leak a dir per run.
+/// The temp dir a `cfg!(test)` store falls back to: `<temp>/<name>-<pid>`, so each
+/// test process gets its own (the oplog, review-notes, local-PR and local-issue stores
+/// each resolve theirs here). The stores' in-process mutexes can't serialize two
+/// concurrent runs, nor nextest's one process per test.
 pub(crate) fn test_fallback_dir(name: &str) -> PathBuf {
-    let mode = std::env::var("NEXTEST_EXECUTION_MODE").ok();
-    test_fallback_dir_for(name, mode.as_deref(), std::process::id())
+    let pid = std::process::id();
+    let dir = test_fallback_dir_for(name, pid);
+    #[cfg(test)]
+    sweep_fallback_dirs_once(&dir, name, pid);
+    dir
 }
 
-/// The pure form of [`test_fallback_dir`], with the mode and pid passed in.
-fn test_fallback_dir_for(name: &str, execution_mode: Option<&str>, pid: u32) -> PathBuf {
-    let base = std::env::temp_dir();
-    match execution_mode {
-        Some("process-per-test") => base.join(format!("{name}-{pid}")),
-        _ => base.join(name),
+/// The pure form of [`test_fallback_dir`], with the pid passed in.
+fn test_fallback_dir_for(name: &str, pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("{name}-{pid}"))
+}
+
+/// Sweeps `name`'s day-old per-process dirs beside `dir`, once per store name per
+/// process: store paths resolve on every read and write. Skipped under nextest's
+/// process-per-test mode (<https://nexte.st/docs/configuration/env-vars/>), where every
+/// test process would rescan a temp dir that gains one dir per process.
+#[cfg(test)]
+fn sweep_fallback_dirs_once(dir: &Path, name: &str, pid: u32) {
+    static SWEPT: Mutex<std::collections::BTreeSet<String>> =
+        Mutex::new(std::collections::BTreeSet::new());
+    if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() == Ok("process-per-test") {
+        return;
+    }
+    let first = SWEPT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(name.to_string());
+    if !first {
+        return;
+    }
+    if let Some(base) = dir.parent() {
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        sweep_stale_fallback_dirs(base, name, pid, std::time::SystemTime::now(), day);
+    }
+}
+
+/// Deletes each plain dir in `base` named `{name}-<digits>`, other than `own_pid`'s,
+/// last modified more than `max_age` before `now`. Best-effort: concurrent sweepers
+/// race harmlessly and any I/O error skips the entry. The name filter runs before any
+/// metadata call, and links, junctions and files are never followed or removed.
+#[cfg(test)]
+fn sweep_stale_fallback_dirs(
+    base: &Path,
+    name: &str,
+    own_pid: u32,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let own = own_pid.to_string();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(suffix) = file_name
+            .to_str()
+            .and_then(|f| f.strip_prefix(name))
+            .and_then(|rest| rest.strip_prefix('-'))
+        else {
+            continue;
+        };
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) || suffix == own {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > max_age) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -1012,28 +1072,63 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_dir_is_per_process_only_under_nextest() {
-        let temp = std::env::temp_dir();
-        // Plain `cargo test` (no or another mode): the fixed, reused name.
+    fn test_fallback_dir_is_suffixed_with_the_process_id() {
         assert_eq!(
-            test_fallback_dir_for("gd-x-test", None, 42),
-            temp.join("gd-x-test")
+            test_fallback_dir_for("gd-x-test", 42),
+            std::env::temp_dir().join("gd-x-test-42")
         );
-        assert_eq!(
-            test_fallback_dir_for("gd-x-test", Some("other"), 42),
-            temp.join("gd-x-test")
-        );
-        // Nextest's process-per-test mode: suffixed with the process id.
-        assert_eq!(
-            test_fallback_dir_for("gd-x-test", Some("process-per-test"), 42),
-            temp.join("gd-x-test-42")
-        );
-        // The public helper reads this process's mode and pid.
-        let mode = std::env::var("NEXTEST_EXECUTION_MODE").ok();
         assert_eq!(
             test_fallback_dir("gd-x-test"),
-            test_fallback_dir_for("gd-x-test", mode.as_deref(), std::process::id())
+            test_fallback_dir_for("gd-x-test", std::process::id())
         );
+        assert_eq!(
+            test_fallback_dir("gd-x-test"),
+            test_fallback_dir("gd-x-test")
+        );
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_digit_suffixed_dirs_of_other_processes() {
+        use std::time::{Duration, SystemTime};
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let name = "gd-sweep-test";
+        let own_pid = 777;
+        let kept_dirs = [
+            format!("{name}-{own_pid}"),
+            name.to_string(),
+            format!("{name}-abc"),
+            format!("{name}-12x"),
+            format!("{name}-"),
+            "other-123".to_string(),
+            format!("x{name}-123"),
+        ];
+        let stale = base.join(format!("{name}-123"));
+        for dir in kept_dirs
+            .iter()
+            .map(|d| base.join(d))
+            .chain([stale.clone()])
+        {
+            std::fs::create_dir(&dir).unwrap();
+        }
+        let file = base.join(format!("{name}-456"));
+        std::fs::write(&file, "not a dir").unwrap();
+        let day = Duration::from_secs(24 * 60 * 60);
+
+        // Everything was just created, so nothing is old enough yet.
+        sweep_stale_fallback_dirs(base, name, own_pid, SystemTime::now(), day);
+        assert!(stale.is_dir());
+
+        sweep_stale_fallback_dirs(base, name, own_pid, SystemTime::now() + 2 * day, day);
+        assert!(!stale.exists(), "the stale {} survived", stale.display());
+        for dir in &kept_dirs {
+            assert!(base.join(dir).is_dir(), "{dir} was swept");
+        }
+        assert!(file.is_file(), "the file {} was swept", file.display());
+
+        // A missing base, or a file in its place, is a quiet no-op.
+        sweep_stale_fallback_dirs(&base.join("missing"), name, own_pid, SystemTime::now(), day);
+        sweep_stale_fallback_dirs(&file, name, own_pid, SystemTime::now(), day);
     }
 
     #[test]
