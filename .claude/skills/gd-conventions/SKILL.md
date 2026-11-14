@@ -1404,6 +1404,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`:
   env override outranks the `cfg!(test)` temp arm; both ship in release) —
   a new store module mirrors one of these, never resolves app-data bare.
+  Its `cfg!(test)` temp arm calls `crate::oplog::test_fallback_dir`, never a
+  hand-rolled `temp_dir()` join: nextest runs each test in its own process,
+  and the helper gives each one its own dir.
   Concurrency: the MCP server is a second writing process, so both stores'
   read→modify→writes take the cross-process file lock in `store_lock.rs` (a
   `create_new` lock file beside the store, stale-evicted, fail-open) on top of

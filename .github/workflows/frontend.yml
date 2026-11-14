@@ -7,6 +7,8 @@ name: frontend
 # merged tree, since a PR green against a stale base merges stale-green (the
 # push run only detects; the PR run gates). No other PR workflow builds the
 # root toolchain — the rest cover src-tauri/**, site/, and changelog fragments.
+# The work runs in parallel jobs (`checks`, two `vitest` shards); `build` only
+# aggregates them, so the required context fails unless every one succeeded.
 
 on:
   pull_request:
@@ -39,7 +41,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  checks:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
@@ -64,9 +66,6 @@ jobs:
       # Check-only (biome ci never writes); `pnpm lint` locally is --write.
       - name: Lint and format check
         run: pnpm exec biome ci ./src/
-
-      - name: Component tests (Vitest)
-        run: pnpm test
 
       # Suites whose dependencies live in node_modules and therefore SKIP in the
       # no-install guards job: the reference detector's render oracle needs
@@ -95,3 +94,50 @@ jobs:
         env:
           GD_EXPECT_DEPS: "1"
         run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs" "scripts/focus-refetch.test.mjs" "scripts/settings-cache-seed.test.mjs" "scripts/markdown-frontmatter-highlight.test.mjs" "scripts/markdown-url-attrs-allowlist.test.mjs"
+
+  vitest:
+    strategy:
+      # Each shard is independent signal; one failing shouldn't hide the other.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.1.1
+
+      - name: Install Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Component tests (Vitest)
+        run: pnpm test --shard=${{ matrix.shard }}/2
+
+  # The required status check (context = this job id, so it takes no `name:`).
+  # always() keeps it from being skipped when a need fails, since a skipped
+  # required check reads as passing; check-needs-success.mjs then fails it on
+  # any need that did not succeed (skipped and cancelled included).
+  build:
+    needs: [checks, vitest]
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts
+
+      # The runner's preinstalled Node; the script is stdlib-only.
+      - name: Require every frontend job to succeed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/check-needs-success.mjs

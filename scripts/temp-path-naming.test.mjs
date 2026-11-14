@@ -46,25 +46,18 @@ const EXCLUDED = [
       "This fn only passes temp_dir() to sweep_review_husks_in, which deletes empty review-worktree husks; it creates nothing.",
   },
   {
-    file: "local_prs.rs",
-    fn: "resolve_store_dir",
+    file: "oplog.rs",
+    fn: "resolve_test_store",
     count: 1,
     reason:
-      "This call is the is_test arm of the store resolver, which callers take only under cfg!(test), so release builds never build this path.",
+      "This fn resolves the oplog's test-only store; its one call canonicalizes temp_dir() to check that a repo lives under it. Its only callers are store_path's cfg!(test) arm and resolve_store_base's is_test arm, which store_path calls with is_test = false, so release builds never reach it.",
   },
   {
     file: "oplog.rs",
-    fn: "resolve_test_store",
-    count: 2,
-    reason:
-      "This fn resolves the oplog's test-only store (one call canonicalizes temp_dir() to check that a repo lives under it, the other joins the fixed gd-oplog-test dir). Its only callers are store_path's cfg!(test) arm and resolve_store_base's is_test arm, which store_path calls with is_test = false, so release builds never reach it.",
-  },
-  {
-    file: "review_notes.rs",
-    fn: "resolve_store_base",
+    fn: "test_fallback_dir_for",
     count: 1,
     reason:
-      "This call is the is_test arm of the store resolver, which callers take only under cfg!(test), so release builds never build this path.",
+      "This fn joins a store's fixed cfg!(test) fallback dir (pid-suffixed under nextest); the oplog, review-notes and local-PR stores each resolve theirs through it. Its only caller is test_fallback_dir, reached only from resolve_test_store and the is_test arms of local_prs::resolve_store_dir and review_notes::resolve_store_base, which callers take only under cfg!(test), so release builds never build this path.",
   },
 ];
 
