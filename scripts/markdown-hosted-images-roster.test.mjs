@@ -635,6 +635,35 @@ test("a comparison or an arrow over the prop's name is not the prop", () => {
   }
 });
 
+test("the prop spelled with spaces around = still counts at an editor site, a body and a mentions hop", () => {
+  const files = corpus();
+  const editor = edited(
+    files,
+    "src/features/issues/CreateIssueDialog.tsx",
+    "hostedImages={descHostedImages}",
+    "hostedImages = {descHostedImages}",
+  );
+  assert.deepEqual(auditEditors(editor), auditEditors(files));
+  const file = "src/features/pulls/RemotePrView.tsx";
+  const text = files.get(file);
+  const prop = text.lastIndexOf("hostedImages=", text.indexOf("{pr.body}"));
+  const body = new Map(files);
+  body.set(
+    file,
+    `${text.slice(0, prop)}hostedImages = ${text.slice(prop + "hostedImages=".length)}`,
+  );
+  assert.deepEqual(audit(body), audit(files));
+  const hop = "src/features/issues/RemoteIssueView.tsx";
+  const hopText = files.get(hop);
+  const at = hopText.indexOf("mentions=", hopText.indexOf("<Thread"));
+  const mentions = new Map(files);
+  mentions.set(
+    hop,
+    `${hopText.slice(0, at)}mentions = ${hopText.slice(at + "mentions=".length)}`,
+  );
+  assert.deepEqual(audit(mentions), audit(files));
+});
+
 test("a new editor element fails until EDITOR_SITES names it", () => {
   const next = new Map(corpus());
   next.set(
