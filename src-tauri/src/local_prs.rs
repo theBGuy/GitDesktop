@@ -236,8 +236,10 @@ fn swap_test_store_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
     std::mem::replace(&mut *slot, dir)
 }
 
-/// Pure resolution of the store's directory, in precedence order (mirroring
-/// `review_notes::resolve_store_base`):
+/// Resolution of the store's directory, side-effect free except that the test arm's
+/// first call per process resets its own temp folder and, outside nextest's
+/// process-per-test mode, sweeps stale ones ([`crate::oplog::test_fallback_dir`]).
+/// Precedence (mirroring `review_notes::resolve_store_base`):
 /// 1. an installed test override ([`TEST_STORE_DIR`]);
 /// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can reach the user's real
 ///    store (the branch-rename migration runs for real under `cargo test`);
@@ -658,8 +660,8 @@ pub(crate) mod tests {
     use serde_json::json;
 
     // These tests exercise the pure store logic (read/mutate/write over a Value map)
-    // against a temp file, bypassing `store_path()` so they never touch the real
-    // app-data store. The public fns wrap this same logic + the fixed path.
+    // against an explicit temp file of their own, bypassing `store_path()`. The public
+    // fns wrap this same logic + the resolved path.
 
     fn tmp_store() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
@@ -881,8 +883,9 @@ pub(crate) mod tests {
     }
 
     /// Negative control for the `cfg(test)` default: with no override installed, the
-    /// store resolves to the temp subdir, never under the real app-data dir — while the
-    /// production arm still resolves exactly where the store plugin writes.
+    /// store resolves to the temp subdir, never under the app's real store dir
+    /// (`<data_dir>/<identifier>`) — while the production arm still resolves exactly where
+    /// the store plugin writes.
     #[test]
     fn store_path_under_test_never_resolves_to_the_real_app_data_dir() {
         let _serialized = store_dir_lock();
@@ -891,16 +894,13 @@ pub(crate) mod tests {
             path,
             crate::oplog::test_fallback_dir("gd-local-prs-test").join(STORE_FILE)
         );
-        let real_root = dirs::data_dir().expect("app-data dir");
+        let real_store_dir = dirs::data_dir().expect("app-data dir").join(APP_IDENTIFIER);
         assert!(
-            !path.starts_with(&real_root),
-            "{} is under the real app-data dir",
+            !path.starts_with(&real_store_dir),
+            "{} is under the app's real store dir",
             path.display()
         );
-        assert_eq!(
-            resolve_store_dir(None, false).unwrap(),
-            real_root.join(APP_IDENTIFIER)
-        );
+        assert_eq!(resolve_store_dir(None, false).unwrap(), real_store_dir);
         let over = PathBuf::from("C:/tmp/x");
         assert_eq!(resolve_store_dir(Some(over.clone()), true).unwrap(), over);
     }

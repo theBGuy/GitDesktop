@@ -3864,6 +3864,57 @@ mod tests {
         (dir, path)
     }
 
+    /// Whether a `git worktree list --porcelain` listing registers a worktree whose
+    /// folder is named `folder`. Compares the last path component: the throwaway
+    /// worktrees sit inside [`temp_base`]'s random dir, which can itself contain `folder`.
+    fn worktree_listed(porcelain: &str, folder: &str) -> bool {
+        crate::git::ops::parse_worktree_paths(porcelain)
+            .iter()
+            .any(|path| {
+                std::path::Path::new(path).file_name() == Some(std::ffi::OsStr::new(folder))
+            })
+    }
+
+    /// Asserts the listing registers the main checkout at `repo` but no worktree named
+    /// `gone`. The positive arm proves the listing parsed, so the negative one tests
+    /// something.
+    fn assert_worktree_unregistered(porcelain: &str, repo: &std::path::Path, gone: &str) {
+        let main = repo
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the main checkout has a folder name");
+        assert!(
+            worktree_listed(porcelain, main),
+            "the main checkout {main} is listed: {porcelain}"
+        );
+        assert!(
+            !worktree_listed(porcelain, gone),
+            "the throwaway worktree is unregistered: {porcelain}"
+        );
+    }
+
+    #[test]
+    fn worktree_listed_matches_the_folder_name_only() {
+        let main_only = "worktree /tmp/gd-branches-update-deleted-base-wtX3Nv/repo\n\
+                         HEAD 0123456789abcdef0123456789abcdef01234567\n\
+                         branch refs/heads/main\n\n";
+        assert!(worktree_listed(main_only, "repo"));
+        assert!(!worktree_listed(main_only, "deleted-base-wt"));
+        let with_wt = format!(
+            "{main_only}worktree /tmp/gd-branches-update-deleted-base-wtX3Nv/deleted-base-wt/\n\
+             HEAD 0123456789abcdef0123456789abcdef01234567\n\
+             detached\n\n"
+        );
+        assert!(worktree_listed(&with_wt, "deleted-base-wt"));
+        assert!(!worktree_listed(&with_wt, "base-wt"));
+        // Windows `Path` also splits on a backslash.
+        #[cfg(windows)]
+        assert!(worktree_listed(
+            "worktree C:\\t\\deleted-base-wt\n",
+            "deleted-base-wt"
+        ));
+    }
+
     async fn init_repo(repo_s: &str, seed_file: &str) {
         run(repo_s, &["init", "-q"]).await;
         run(repo_s, &["config", "user.email", "t@t.local"]).await;
@@ -7104,10 +7155,7 @@ mod tests {
             "a refused update leaves the branch exactly where it was"
         );
         let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
-        assert!(
-            !list.contains("stale-pin-wt"),
-            "the throwaway worktree is unregistered: {list}"
-        );
+        assert_worktree_unregistered(&list, &repo, "stale-pin-wt");
         assert!(!tmp.exists(), "and its directory is gone");
     }
 
@@ -7659,10 +7707,7 @@ mod tests {
             "the abort leaves the branch exactly where it was"
         );
         let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
-        assert!(
-            !list.contains("conflict-wt"),
-            "the throwaway worktree is unregistered: {list}"
-        );
+        assert_worktree_unregistered(&list, &repo, "conflict-wt");
         assert!(!tmp.exists(), "and its directory is gone");
     }
 
@@ -7745,10 +7790,7 @@ mod tests {
             "the abort leaves the branch exactly where it was"
         );
         let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
-        assert!(
-            !list.contains("declined-hook-wt"),
-            "the throwaway worktree is unregistered: {list}"
-        );
+        assert_worktree_unregistered(&list, &repo, "declined-hook-wt");
         assert!(!tmp.exists(), "and its directory is gone");
     }
 
@@ -7872,10 +7914,7 @@ mod tests {
             "a refused update leaves the branch exactly where it was"
         );
         let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
-        assert!(
-            !list.contains("moved-base-wt"),
-            "the throwaway worktree is unregistered: {list}"
-        );
+        assert_worktree_unregistered(&list, &repo, "moved-base-wt");
         assert!(!tmp.exists(), "and its directory is gone");
     }
 
@@ -7931,10 +7970,7 @@ mod tests {
             "a refused update leaves the branch exactly where it was"
         );
         let list = run(&repo_s, &["worktree", "list", "--porcelain"]).await;
-        assert!(
-            !list.contains("deleted-base-wt"),
-            "the throwaway worktree is unregistered: {list}"
-        );
+        assert_worktree_unregistered(&list, &repo, "deleted-base-wt");
         assert!(!tmp.exists(), "and its directory is gone");
     }
 

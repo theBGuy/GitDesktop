@@ -74,7 +74,11 @@ fn notes_lock() -> &'static Mutex<()> {
     NOTES_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Pure resolution of the store's base directory, in precedence order (mirroring
+/// The `cfg!(test)` fallback dir's name. It must not start with `gd-review-`: the app's
+/// startup sweep (`git::compare::sweep_review_husks_in`) removes empty temp dirs so named.
+const TEST_FALLBACK_NAME: &str = "gd-reviewnotes-test";
+
+/// Resolution of the store's base directory, in precedence order (mirroring
 /// [`crate::oplog::resolve_store_base`]):
 /// 1. a non-empty `GD_REVIEW_NOTES_DIR` override — the escape hatch for headless/test
 ///    callers. Unlike the oplog (Rust-only), this store has a GUI reader/writer that
@@ -85,11 +89,13 @@ fn notes_lock() -> &'static Mutex<()> {
 /// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), mirroring
 ///    `tauri-plugin-store` v2's `BaseDirectory::AppData` — see the module contract.
 ///
-/// No filesystem side effects — `atomic_write` creates the parent at write time.
+/// Creates nothing (`atomic_write` creates the parent at write time); the test arm's
+/// first call per process resets its own temp folder and, outside nextest's
+/// process-per-test mode, sweeps stale ones ([`crate::oplog::test_fallback_dir`]).
 fn resolve_store_base(gd_review_notes_dir: Option<&str>, is_test: bool) -> AppResult<PathBuf> {
     match gd_review_notes_dir {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ if is_test => Ok(crate::oplog::test_fallback_dir("gd-review-notes-test")),
+        _ if is_test => Ok(crate::oplog::test_fallback_dir(TEST_FALLBACK_NAME)),
         _ => {
             let data = dirs::data_dir().ok_or_else(|| {
                 AppError::Command("could not resolve the app-data directory".to_string())
@@ -323,12 +329,12 @@ mod tests {
     use serde_json::json;
 
     // These tests exercise the pure store logic (read/mutate/write over a Value map)
-    // against a temp file, bypassing `store_path()` so they never touch the real
-    // app-data store. `set` wraps this same logic + the fixed path.
+    // against an explicit temp file of their own, bypassing `store_path()`. `set` wraps
+    // this same logic + the resolved path.
 
     fn tmp_store() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
-            .prefix("gd-review-notes-test-")
+            .prefix("gd-reviewnotes-test-")
             .tempdir()
             .expect("create temp dir");
         let path = dir.path().join("store.json");
@@ -376,17 +382,27 @@ mod tests {
         // An empty override is ignored (falls through to the next arm).
         assert_eq!(
             resolve_store_base(Some(""), true).unwrap(),
-            crate::oplog::test_fallback_dir("gd-review-notes-test")
+            crate::oplog::test_fallback_dir("gd-reviewnotes-test")
         );
         // 2. No override + test → the temp subdir.
         assert_eq!(
             resolve_store_base(None, true).unwrap(),
-            crate::oplog::test_fallback_dir("gd-review-notes-test")
+            crate::oplog::test_fallback_dir("gd-reviewnotes-test")
         );
         // 3. No override + non-test → the real app-data dir, so the production path
         //    stays …/com.thebguy.gitdesktop/review-notes.json, unchanged by the seam.
         let real = resolve_store_base(None, false).unwrap();
         assert_eq!(real, dirs::data_dir().unwrap().join(APP_IDENTIFIER));
+    }
+
+    /// The app's startup sweep (`git::compare::sweep_review_husks_in`) removes empty temp
+    /// dirs whose names start with `gd-review-`, so a fallback dir in that family could
+    /// vanish between its creation and first write. The check lowercases first to also
+    /// stay clear of `is_review_worktree_temp_path`, the case-insensitive variant.
+    #[test]
+    fn test_fallback_name_is_outside_the_review_husk_family() {
+        let name = TEST_FALLBACK_NAME.to_ascii_lowercase();
+        assert!(!name.starts_with("gd-review-"), "{name}");
     }
 
     #[test]
