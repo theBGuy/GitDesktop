@@ -53,6 +53,12 @@ pnpm test                                         # Vitest component tests (jsdo
 cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests
 ```
 
+When several checkouts or agent sessions share one machine, run the full suites
+through `pnpm test:vitest:full`, `pnpm test:rust:full` or `pnpm test:all:full`
+instead: each waits for any full run another wrapper started on the machine,
+so two wrapped suites never compete for the CPU and time out each other's git
+calls.
+
 We use **Biome** for both formatting and linting the frontend — there is no
 separate Prettier/ESLint step. Run `pnpm lint` before committing.
 

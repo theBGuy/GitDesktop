@@ -27,6 +27,15 @@ paths:
   non-re-acquiring runner inside, or you deadlock.
 - Advisory probes fail SAFE toward inaction: verdict "unknown" on any failed sub-probe;
   destructive actions target the measured sha, never a re-resolved ref.
-- Verification: `cargo test` (manifest-path src-tauri) +
+- Tests: iterate SCOPED with
+  `cargo test --manifest-path src-tauri/Cargo.toml <module path>::` for each edited
+  module plus the modules that call each changed item
+  (`git grep -n "<item>" -- src-tauri/src`; several modules go after `--`). Before
+  done, run the full suite ONCE through the wrapper, `pnpm test:rust:full`
+  (`pnpm test:all:full` when the frontend changed too), in the background. A raw
+  unfiltered `cargo test` is the violation: full suites overlapping across sessions
+  time out git calls. Shared test infrastructure goes straight to the full run
+  (gd-conventions §Verification).
+- Verification: the tests above +
   `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`;
   a `///` line starting with `+`/`-`/`*` mid-sentence lints as `doc_lazy_continuation`.

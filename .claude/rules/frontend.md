@@ -43,5 +43,11 @@ paths:
   `content.ts` → `changelog.d/` fragment (never hand-edit CHANGELOG.md's Unreleased).
 - Typecheck = `pnpm exec tsc -b --noEmit` (or `pnpm build`) — plain `tsc --noEmit` is a
   NO-OP in this repo (project references) and passes without checking anything.
+- Tests: iterate SCOPED with
+  `pnpm exec vitest related --run <changed src files> <edited test files>`; before
+  done, run the full suite ONCE through the wrapper, `pnpm test:vitest:full`
+  (`pnpm test:all:full` when Rust changed too), in the background. A raw `pnpm test`
+  or `vitest run` is the violation: full suites overlapping across sessions red tests
+  that pass solo (rules + shared-infrastructure list: gd-conventions §Verification).
 - Untrusted JSON in TS derivers (CLI output, forge payloads): `typeof`-guard every
   field and try/catch per item — one malformed record must never blank the list.

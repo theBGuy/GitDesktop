@@ -159,11 +159,21 @@ change; new or edited guide sections follow it now.
 ```sh
 pnpm build      # typecheck (tsc) + bundle the frontend
 pnpm lint       # Biome (format + lint) — run before committing
-pnpm test       # Vitest component/interaction tests (jsdom)
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests
 cd site && pnpm build   # build the marketing site
 pnpm changelog:preview  # preview pending changelog.d/ fragments
+# while iterating: scoped tests
+pnpm exec vitest related --run <changed src files> <edited test files>
+cargo test --manifest-path src-tauri/Cargo.toml <module path>::
+# before done: the full suites once, through the lock wrapper
+pnpm test:vitest:full   # Vitest component/interaction tests (jsdom)
+pnpm test:rust:full     # Rust unit tests
+pnpm test:all:full      # both
 ```
+
+Run the full suites once at the end, through the wrapper and in the background
+(a full run may wait for another session's); a raw `pnpm test` or unfiltered
+`cargo test` is the violation, since two full suites overlapping across
+sessions red tests that pass solo. Scoping rules: gd-conventions §Verification.
 
 ## A few house rules (see CONTRIBUTING.md for the rest)
 
