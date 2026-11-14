@@ -1,10 +1,12 @@
 name: rust-tests
 
-# Cross-platform Rust CI: runs `cargo test` + `cargo clippy` on Windows, Linux,
-# and macOS for every change to the Tauri backend. This is the only place the
-# `#[cfg(unix)]` modules and other cfg-gated behavior get compiled and exercised
-# off Windows — local verification is Windows-only. Deliberately bare-bones: no
-# frontend test runner, no e2e, no release logic (that lives in release.yml).
+# Cross-platform Rust CI: runs the tests + `cargo clippy` on Windows, Linux, and
+# macOS for every change to the Tauri backend (`cargo test` on Linux, doctests
+# included; two nextest shards each on Windows and macOS). This is the only
+# place the `#[cfg(unix)]` modules and other cfg-gated behavior get compiled and
+# exercised off Windows — local verification is Windows-only. Deliberately
+# bare-bones: no frontend test runner, no e2e, no release logic (that lives in
+# release.yml).
 #
 # A cheap `gate` job runs first and skips the (billed 2×/10× on Windows/macOS)
 # matrix whenever the exact Rust content was ALREADY proven green — see the job
@@ -294,16 +296,32 @@ jobs:
   test:
     needs: gate
     if: ${{ needs.gate.outputs.run == 'true' }}
+    name: test (${{ matrix.platform }}${{ matrix.shard && format(' {0}/2', matrix.shard) || '' }})
     strategy:
       # Each platform is independent signal — one leg failing shouldn't cancel
       # the others; that cross-platform coverage is the whole point.
       fail-fast: false
+      # Windows and macOS split their tests into two nextest shards (their legs
+      # dominate wall time); both Linux legs keep plain `cargo test`, the only
+      # run of the doctests. One leg per platform runs clippy.
       matrix:
-        platform:
-          - windows-2025
-          - ubuntu-24.04
-          - ubuntu-26.04
-          - macos-26
+        include:
+          - platform: windows-2025
+            shard: 1
+            clippy: true
+          - platform: windows-2025
+            shard: 2
+            clippy: false
+          - platform: macos-26
+            shard: 1
+            clippy: true
+          - platform: macos-26
+            shard: 2
+            clippy: false
+          - platform: ubuntu-24.04
+            clippy: true
+          - platform: ubuntu-26.04
+            clippy: true
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
@@ -313,14 +331,25 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Experiment: macOS compiles the test binary ~2.5x slower than Windows (CI
+      # logs), and line tables alone keep backtraces readable. Set before the
+      # cache step because rust-cache hashes CARGO_* env into its key.
+      - name: Trim macOS debug info
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
           # rust-cache keys on the OS family, not the runner image: without the
           # image in the key, Linux legs share one cache and an image bump
-          # restores the previous image's build.
+          # restores the previous image's build. Shards share the platform key,
+          # so only the clippy leg saves: an exact-key hit never re-saves, and
+          # the saved cache must hold the clippy artifacts.
           key: ${{ matrix.platform }}
+          save-if: ${{ matrix.clippy }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -345,14 +374,28 @@ jobs:
         run: |
           mkdir -p dist && echo '<!doctype html>' > dist/index.html
 
+      - name: Install nextest
+        if: matrix.shard
+        uses: taiki-e/install-action@v2.90.3
+        with:
+          tool: cargo-nextest@0.9.151
+
+      # nextest runs no doctests; the Linux legs' `cargo test` covers them.
+      - name: Run tests (shard ${{ matrix.shard }}/2)
+        if: matrix.shard
+        run: cargo nextest run --manifest-path src-tauri/Cargo.toml --partition slice:${{ matrix.shard }}/2 --no-fail-fast
+
       - name: Run tests
+        if: ${{ !matrix.shard }}
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Run clippy
+        if: matrix.clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       # Release-only code (`cfg(not(debug_assertions))`: the single-instance
       # lock, the managed MCP launcher copy) never compiles in the debug-profile
       # steps above — lint it in release profile so it can't silently rot.
       - name: Run clippy (release-gated code)
+        if: matrix.clippy
         run: cargo clippy --release --manifest-path src-tauri/Cargo.toml -- -D warnings
