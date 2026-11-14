@@ -7,10 +7,16 @@
 // Holding the port IS the serialization. Two binds of 127.0.0.1:<port> refuse
 // each other (EADDRINUSE), and the OS frees the port when its holder exits,
 // however it exits. A sidecar JSON file beside it, written only by the holder,
-// names the run; a new holder waits while the previous run's child is still
-// alive (on POSIX a hard-killed wrapper can leave its child running, and the
-// child does not keep the port; on Windows libuv's kill-on-close job ends the
-// child with the wrapper), for at most MAX_HOLD_MS after that run started.
+// names the run; a new holder waits while the previous run is still alive,
+// for at most MAX_HOLD_MS after that run started. On POSIX the child runs in
+// its own process group, "alive" means any process of that group, and the
+// port is held until the group is gone, or at most about 10 s after its leader
+// exits (SIGKILL after 5 s, then released anyway): cargo does not forward
+// signals to its test binary, which a hard-killed wrapper also leaves running
+// (and no child keeps the port). kill(-pgid, 0) counts unreaped zombies, so a
+// container needs an init (`docker run --init`), or a killed run's group reads
+// alive until the cap. On Windows the kill-on-close jobs of libuv and cargo
+// end the tree with the wrapper, so "alive" means the child's pid.
 //
 // Run: node scripts/full-suite.mjs <rust|vitest|all> [extra args...]
 // Port: 27483, or GD_FULL_SUITE_PORT (machine configuration: only sessions
@@ -34,6 +40,8 @@ export const DEFAULT_PORT = 27483;
 export const MAX_HOLD_MS = 7_200_000;
 
 const PREFIX = "full-suite: ";
+const GROUP_GRACE_MS = 5000;
+const GROUP_POLL_MS = 50;
 const MAX_PID = 2 ** 31 - 1;
 const USAGE =
   "usage: node scripts/full-suite.mjs <rust|vitest|all> [extra args...] (all takes no extra args)";
@@ -128,6 +136,34 @@ export function isPidAlive(pid) {
   }
 }
 
+/**
+ * The only place a negative pid reaches process.kill. Group ids 0 and 1 are
+ * refused: kill(0) signals the wrapper's own group, kill(-1) every process
+ * the user owns.
+ */
+export function killGroup(pgid, signal) {
+  if (!Number.isInteger(pgid) || pgid <= 1 || pgid > MAX_PID) {
+    throw new RangeError(`refusing to signal process group ${pgid}`);
+  }
+  process.kill(-pgid, signal);
+}
+
+/** Any process of the group is alive; only ESRCH proves it empty. */
+export function isGroupAlive(pgid) {
+  if (!Number.isInteger(pgid) || pgid <= 1 || pgid > MAX_PID) return false;
+  try {
+    killGroup(pgid, 0);
+    return true;
+  } catch (err) {
+    return err?.code !== "ESRCH";
+  }
+}
+
+/** A run's liveness: its whole process group on POSIX, its pid on win32. */
+export function isRunAlive(pid, platform = process.platform) {
+  return platform === "win32" ? isPidAlive(pid) : isGroupAlive(pid);
+}
+
 /** The sidecar's record, or null when it is missing or not a JSON object. */
 export function readSidecar(file) {
   try {
@@ -146,14 +182,14 @@ function startedMs(record) {
 }
 
 /**
- * True while a previous run's child may still be running its suite: the
- * record names a live child and started less than maxHoldMs ago. A missing,
- * unparseable or future start never blocks, so no record can hold a run past
- * the cap.
+ * True while a previous run may still be running its suite: the record names
+ * a live run (its child's process group on POSIX) and started less than
+ * maxHoldMs ago. A missing, unparseable or future start never blocks, so no
+ * record can hold a run past the cap.
  */
 export function orphanBlocks(
   record,
-  { isAlive = isPidAlive, now = Date.now, maxHoldMs = MAX_HOLD_MS } = {},
+  { isAlive = isRunAlive, now = Date.now, maxHoldMs = MAX_HOLD_MS } = {},
 ) {
   if (record === null || typeof record !== "object") return false;
   if (!validPid(record.childPid)) return false;
@@ -227,7 +263,8 @@ export async function acquireLock({
   sidecarFile,
   record,
   bind = bindPort,
-  isAlive = isPidAlive,
+  isAlive = isRunAlive,
+  isWrapperAlive = isPidAlive,
   now = Date.now,
   sleep = defaultSleep,
   pollMs = 2000,
@@ -249,7 +286,7 @@ export async function acquireLock({
         failingSince = null;
         if (announcedAt === null || now() - announcedAt >= announceMs) {
           announcedAt = now();
-          log(waitingLine(port, waitFile, isAlive, now));
+          log(waitingLine(port, waitFile, isWrapperAlive, now));
         }
       } else if (failingSince === null) {
         failingSince = now();
@@ -318,9 +355,13 @@ export async function acquireLock({
   };
 }
 
-function waitingLine(port, file, isAlive, now) {
+function waitingLine(port, file, isWrapperAlive, now) {
   const record = readSidecar(file);
-  if (record && validPid(record.wrapperPid) && isAlive(record.wrapperPid)) {
+  if (
+    record &&
+    validPid(record.wrapperPid) &&
+    isWrapperAlive(record.wrapperPid)
+  ) {
     const { child, age } = describeRun(record, now);
     return `${PREFIX}waiting - ${record.suite} holds port ${port} (wrapper pid ${record.wrapperPid}, child pid ${child}, cwd ${record.cwd}, started ${age} ago) [sidecar ${file}]`;
   }
@@ -331,10 +372,12 @@ function waitingLine(port, file, isAlive, now) {
 /**
  * Runs `steps` in order under one hold and resolves the first non-zero exit
  * code (0 when every step passed). Every step runs even after a failure; a
- * signal stops before the next step. On a signal POSIX forwards it to the
- * running child, while win32 only waits: a kill there ends the direct child
- * and orphans cargo's own processes, and the console already delivered Ctrl+C
- * to the child.
+ * signal stops before the next step. On POSIX each child leads its own
+ * session and process group (its pid is the group id the sidecar's childPid
+ * names), a signal is forwarded to the whole group, and a step ends once the
+ * group is gone: a group still alive GROUP_GRACE_MS after its leader exits is
+ * SIGKILLed, and released after another GROUP_GRACE_MS whatever remains.
+ * Win32 only waits: the console already delivered Ctrl+C to the child.
  */
 export async function runUnderLock({
   steps,
@@ -351,14 +394,45 @@ export async function runUnderLock({
     log,
     record: { wrapperPid: process.pid, suite, cwd },
   });
-  let running = null;
+  const posix = platform !== "win32";
+  // The group to forward signals to, set from spawn until the group is gone.
+  let group = null;
   let stopped = false;
-  const onSignal = (signal) => {
-    stopped = true;
-    if (running && platform !== "win32") running.kill(signal);
+  const forward = (signal) => {
+    if (group === null) return;
+    try {
+      killGroup(group, signal);
+    } catch {}
   };
-  const signals = ["SIGINT", "SIGTERM", "SIGBREAK"];
-  for (const signal of signals) process.on(signal, onSignal);
+  const onStop = (signal) => {
+    stopped = true;
+    if (posix) forward(signal);
+  };
+  // The suite's session has no controlling terminal, so job control reaches
+  // it only through the wrapper: a terminal stop pauses the group and then the
+  // wrapper itself, and a continue resumes the group.
+  const onSuspend = () => {
+    forward("SIGSTOP");
+    process.kill(process.pid, "SIGSTOP");
+  };
+  const onResume = () => forward("SIGCONT");
+  // Win32 listens for exactly SIGINT, SIGTERM and SIGBREAK; the POSIX-only
+  // signals are never listened for there.
+  const handlers = posix
+    ? [
+        ["SIGINT", onStop],
+        ["SIGTERM", onStop],
+        ["SIGHUP", onStop],
+        ["SIGQUIT", onStop],
+        ["SIGTSTP", onSuspend],
+        ["SIGCONT", onResume],
+      ]
+    : [
+        ["SIGINT", onStop],
+        ["SIGTERM", onStop],
+        ["SIGBREAK", onStop],
+      ];
+  for (const [signal, handler] of handlers) process.on(signal, handler);
   let code = 0;
   let ran = 0;
   try {
@@ -370,21 +444,30 @@ export async function runUnderLock({
         const settle = (value) => {
           if (settled) return;
           settled = true;
-          running = null;
           done(value);
         };
         let child;
         try {
-          child = spawn(step.file, step.args, { cwd, stdio: "inherit" });
+          // detached on POSIX is setsid(): a new session with no controlling
+          // terminal, so the suite can never stop on SIGTTIN or SIGTTOU.
+          child = spawn(step.file, step.args, {
+            cwd,
+            stdio: posix ? ["ignore", "inherit", "inherit"] : "inherit",
+            detached: posix,
+          });
         } catch (err) {
           settle({ spawnError: err });
           return;
         }
-        running = child;
+        if (posix && validPid(child.pid)) group = child.pid;
         held.setChild(child.pid);
         child.once("error", (err) => settle({ spawnError: err }));
         child.once("exit", (exitCode) => settle({ exitCode: exitCode ?? 1 }));
       });
+      if (group !== null) {
+        await waitGroupGone(group, step.suite, log);
+        group = null;
+      }
       ran += 1;
       let stepCode;
       if (result.spawnError) {
@@ -400,11 +483,32 @@ export async function runUnderLock({
       if (code === 0) code = stepCode;
     }
   } finally {
-    for (const signal of signals) process.removeListener(signal, onSignal);
+    for (const [signal, handler] of handlers) {
+      process.removeListener(signal, handler);
+    }
     await held.release();
   }
   // A signal that stopped the run before every step ran never reads as a pass.
   return code === 0 && ran < steps.length ? 1 : code;
+}
+
+async function waitGroupGone(pgid, suite, log) {
+  const gone = async () => {
+    const deadline = Date.now() + GROUP_GRACE_MS;
+    while (isGroupAlive(pgid)) {
+      if (Date.now() >= deadline) return false;
+      await defaultSleep(GROUP_POLL_MS);
+    }
+    return true;
+  };
+  if (await gone()) return;
+  log(`${PREFIX}${suite} left processes in group ${pgid}; sending SIGKILL`);
+  try {
+    killGroup(pgid, "SIGKILL");
+  } catch {}
+  if (!(await gone())) {
+    log(`${PREFIX}group ${pgid} still has processes; releasing anyway`);
+  }
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {

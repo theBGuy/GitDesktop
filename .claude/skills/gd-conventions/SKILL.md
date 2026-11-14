@@ -117,8 +117,14 @@ the length of the run; its exit code is the suite's.
   run, and never set `GD_FULL_SUITE_PORT` to get past one. Don't force-stop a
   full run mid-run except deliberately: its verdict is lost. On Windows a hard
   kill of the wrapper ends cargo and its test binary with it (measured), so no
-  orphan outlives it there; the child check covers POSIX, where the recorded
-  child can outlive a killed wrapper.
+  orphan outlives it there. On POSIX cargo and its test binary run in the
+  suite's own process group (the app's git and CLI children start groups of
+  their own, which it does not cover). The wrapper forwards signals, job
+  control included, to that group and holds the port until the group is
+  empty, or about 10 s after cargo exits (SIGKILL, then released anyway); the
+  next run waits on a killed wrapper's group, so a test binary that outlives
+  cargo still blocks it. A container needs an init (`docker run --init`):
+  without one, a killed run's unreaped zombies read as alive until the 2 h cap.
 - **Not yet evidence:** a `vitest related` run that finds no test files exits
   0 and is NO coverage (say so; the end run is that file's coverage). A red in
   a scoped Rust run and a red in a full run are each re-run alone,

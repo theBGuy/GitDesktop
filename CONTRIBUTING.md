@@ -56,8 +56,10 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests
 When several checkouts or agent sessions share one machine, run the full suites
 through `pnpm test:vitest:full`, `pnpm test:rust:full` or `pnpm test:all:full`
 instead: each waits for any full run another wrapper started on the machine,
-so two wrapped suites never compete for the CPU and time out each other's git
-calls.
+so two wrapped suites don't compete for the CPU and time out each other's git
+calls. Any process holding the port makes the wrapper wait; after 30 seconds
+of consecutive bind errors other than the port being in use, it says so and
+runs the suite unserialized.
 
 We use **Biome** for both formatting and linting the frontend — there is no
 separate Prettier/ESLint step. Run `pnpm lint` before committing.
@@ -247,6 +249,9 @@ the utmost care.
 2. Keep PRs small and focused; one logical change per PR is easiest to review.
 3. Link the issue it addresses (`Closes #123`).
 4. Run `pnpm lint`, `pnpm test` and, if you touched Rust, `cargo test --manifest-path src-tauri/Cargo.toml`.
+   When other sessions or agents share the machine, run the full suites through
+   `pnpm test:all:full` instead, or a per-suite wrapper (`pnpm test:vitest:full`
+   or `pnpm test:rust:full`).
 5. Add a `changelog.d/` fragment if the change is user-facing — the required
    `fragment` check blocks merge on `src/` or `src-tauri/` changes without one
    (see the Changelog section for the escape hatches).
