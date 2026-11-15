@@ -597,13 +597,8 @@ export function CommitDetailView({
   // Identity comes from the `hash` PROP, never `commit.hash`: while the next
   // commit's details load, `details.data` is still the previous commit's
   // placeholder — copying from it would hand over the wrong SHA.
-  async function copyHash() {
-    try {
-      await navigator.clipboard.writeText(hash);
-      toast.success("Commit hash copied");
-    } catch {
-      toast.error("Could not copy to clipboard");
-    }
+  function copyHash() {
+    copyText(hash, "Commit hash copied");
   }
 
   // Each of these asks before it runs, in the same words as the History list's
