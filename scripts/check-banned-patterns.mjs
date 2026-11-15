@@ -547,6 +547,17 @@ const focusableHeldRender = ({ source }, file) => {
 const RAW_COPY_ICON_BUTTON_RE =
   /<(button|Button)\b(?:=>|[^>=]|=(?!>))*>\s*(?:\{\s*\}\s*)*<CopyIcon\b(?:=>|[^>=]|=(?!>))*\/>\s*(?:\{\s*\}\s*)*<\/\1>/g;
 
+// Raw clipboard access: navigator.clipboard, any `execCommand(` whose first
+// argument is not the literal "insertText" or "delete", a clipboard-manager
+// plugin import (subpaths included), clipboardData.setData, and the plugin's raw
+// IPC command. Out of reach (zero today): navigator or clipboardData reached
+// through an alias, a cast, a destructure or a bracket key; clipboardData.items;
+// execCommand reached through a bracket key, .call, .apply or .bind; a plugin
+// specifier or IPC command built at runtime. This rule scans strings, so a
+// string that only names one of these is flagged too.
+const RAW_CLIPBOARD_RE =
+  /\bnavigator\s*[?!]?\s*\.\s*clipboard\b|\bexecCommand\s*(?:\?\.\s*|!\s*)?\((?!\s*["'`](?:insertText|delete)["'`]\s*[,)])|["'`]@tauri-apps\/plugin-clipboard-manager(?=["'`/])|\bclipboardData\s*[?!]?\s*\.\s*setData\b|plugin:clipboard-manager\|/g;
+
 // A hand-rolled InfoNote: one quoted class literal holding `border-b` and
 // `bg-muted/40` (any order, neither variant-prefixed) within PAIR_GAP of the
 // identifier `InfoIcon`, either order. Missed by design: the tokens split across
@@ -5761,6 +5772,17 @@ export const CHECKS = [
     allowlist: [],
     message:
       "icon-only copy buttons use CopyIconButton (src/components/CopyIconButton.tsx) — it carries the vendored focus ring, sets aria-label and title to the same string, and stops click propagation so a copy never also activates its row; a hand-rolled button drifts on all three one site at a time (a copy control with visible text is not this idiom), and a site the component genuinely can't express needs an allowlist entry with rationale",
+  },
+  {
+    name: "raw-clipboard-write",
+    // The helper IS the idiom; tests stub the clipboard and mock the plugin.
+    appliesTo: (file) =>
+      file !== "src/lib/clipboard.ts" && !file.startsWith("src/test/"),
+    scan: perFile(RAW_CLIPBOARD_RE),
+    allowlist: [],
+    expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
+    message:
+      "clipboard access goes through writeClipboard / copyText (src/lib/clipboard.ts), which writes through the native plugin on Windows inside Tauri because WebView2's web clipboard turns each LF into CRLF, and through the web API everywhere else — a direct navigator.clipboard read or write, an execCommand call other than \"insertText\" / \"delete\", clipboardData.setData, or the clipboard-manager plugin reached by import or raw invoke bypasses that rule (CRs come back on Windows, or the plugin runs where it shouldn't); the helper only writes, so a navigator.clipboard read, or any other site it genuinely can't serve, needs an allowlist entry with rationale",
   },
   {
     name: "hand-rolled-info-strip",

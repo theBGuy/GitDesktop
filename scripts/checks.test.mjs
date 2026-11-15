@@ -9585,6 +9585,102 @@ test("raw-copy-icon-button exempts the component file and vendored ui only", () 
   assert.deepEqual(runCheck(check, [file], views).violations, []);
 });
 
+const rawClipboardWrite = scanner("raw-clipboard-write");
+
+test("raw-clipboard-write flags each covered raw clipboard spelling", () => {
+  for (const source of [
+    "navigator.clipboard.writeText(x);",
+    "await navigator?.clipboard?.writeText(x);",
+    "window.navigator.clipboard.readText();",
+    "navigator!.clipboard.writeText(x);",
+    'document.execCommand("copy");',
+    "document.execCommand('copy');",
+    "document.execCommand(`copy`);",
+    // The browser reads the command name case-insensitively, and cut writes too.
+    'document.execCommand("Copy");',
+    "document.execCommand('cut');",
+    'import { writeText } from "@tauri-apps/plugin-clipboard-manager";',
+    "const { writeText } = await import('@tauri-apps/plugin-clipboard-manager');",
+    // Any execCommand call but the two literal commands the app uses.
+    'document.execCommand?.("copy");',
+    "document.execCommand(cmd);",
+    'document.execCommand(isCut ? "cut" : "copy");',
+    'document.execCommand(("copy"));',
+    'document.execCommand("insertTextX");',
+    'document.execCommand!("copy");',
+    'document.execCommand("insertText" + x);',
+    'document.execCommand("delete" ? a : b);',
+    // The plugin by any import, a copy handler's setData, and the raw IPC command.
+    "const m = await import(`@tauri-apps/plugin-clipboard-manager`);",
+    'import { writeText } from "@tauri-apps/plugin-clipboard-manager/dist-js/index.js";',
+    'e.clipboardData.setData("text/plain", t);',
+    'e.clipboardData?.setData("text/plain", t);',
+    'e.clipboardData!.setData("text/plain", t);',
+    'invoke("plugin:clipboard-manager|write_text", { text });',
+  ]) {
+    assert.deepEqual(rawClipboardWrite(source), [1], source);
+  }
+  // The formatter-wrapped chain, reported on its first line.
+  const wrapped = [
+    "const x = text;",
+    "navigator",
+    "  .clipboard",
+    "  .writeText(x);",
+  ].join("\n");
+  assert.deepEqual(rawClipboardWrite(wrapped), [2]);
+});
+
+test("raw-clipboard-write leaves the helpers and near-miss tokens alone", () => {
+  for (const source of [
+    'copyText(x, "Copied");',
+    "await writeClipboard(x);",
+    // A paste read, not the clipboard API.
+    "const files = e.clipboardData.files;",
+    'document.execCommand("insertText", false, s);',
+    // The API named in a comment is not a use of it.
+    "// navigator.clipboard",
+    // A sibling plugin's specifier.
+    'import { openUrl } from "@tauri-apps/plugin-opener";',
+    'document.execCommand( "insertText" , false, s);',
+    'document.execCommand("delete", false);',
+    ["document.execCommand(", '  "insertText",', "  false,", "  s,", ");"].join(
+      "\n",
+    ),
+    'typeof document.execCommand === "function"',
+    'e.clipboardData.getData("text");',
+    'e.dataTransfer.setData("text/plain", t);',
+    "navigator.clipboardX;",
+    'import x from "@tauri-apps/plugin-clipboard-manager-foo";',
+    'e.clipboardData!.getData("text");',
+    "navigator!.platform;",
+    "if (!document.execCommand) return;",
+  ]) {
+    assert.deepEqual(rawClipboardWrite(source), [], source);
+  }
+});
+
+test("raw-clipboard-write exempts the helper file and tests only", () => {
+  const check = CHECKS.find((c) => c.name === "raw-clipboard-write");
+  assert.equal(check.appliesTo("src/lib/clipboard.ts"), false);
+  assert.equal(check.appliesTo("src/test/x.test.tsx"), false);
+  assert.equal(check.appliesTo("src/components/ui/button.tsx"), true);
+  assert.equal(check.appliesTo("src/lib/toast.ts"), true);
+  // A scope mistake that empties the corpus must fail, not print OK.
+  assert.ok(check.expectScanned.atLeast >= 500);
+  assert.match(scopePinFailure(check, 0), /SCOPE PIN FAILED/);
+  assert.equal(scopePinFailure(check, 500), null);
+  // The helper's own body IS the raw write, so appliesTo is what keeps it
+  // clean — pinned against the real file so a rename can't turn it stale.
+  const file = "src/lib/clipboard.ts";
+  const source = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", file),
+    "utf8",
+  );
+  assert.notDeepEqual(rawClipboardWrite(source), []);
+  const views = new Map([[file, view(source)]]);
+  assert.deepEqual(runCheck(check, [file], views).violations, []);
+});
+
 const infoStrip = scanner("hand-rolled-info-strip");
 
 test("hand-rolled-info-strip flags an InfoIcon beside a strip class literal", () => {

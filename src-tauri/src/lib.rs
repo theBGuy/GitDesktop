@@ -75,6 +75,9 @@ pub fn run() {
         )),
         None => builder,
     };
+    // The frontend calls it on Windows only (src/lib/clipboard.ts).
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
     builder
         .plugin(nav_guard::init())
         .plugin(tauri_plugin_opener::init())

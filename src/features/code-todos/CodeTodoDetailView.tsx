@@ -4,7 +4,6 @@ import {
   NotePencilIcon,
 } from "@phosphor-icons/react";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
-import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -24,6 +23,7 @@ import { HighlightedLine } from "@/features/diff/HighlightedLine";
 import { isNoBlameHistoryError } from "@/features/history/blame-errors";
 import { CreateLocalIssueDialog } from "@/features/issues/CreateLocalIssueDialog";
 import { useOpenFile } from "@/features/sessions/useOpenFile";
+import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import {
   useBlame,
@@ -123,13 +123,8 @@ export function CodeTodoDetailView({
     `> ${marker}${text ? `: ${text}` : ""}`,
   ].join("\n");
 
-  async function copyPathLine() {
-    try {
-      await navigator.clipboard.writeText(`${path}:${line}`);
-      toast.success("Path copied");
-    } catch {
-      toast.error("Could not copy to clipboard");
-    }
+  function copyPathLine() {
+    copyText(`${path}:${line}`, "Path copied");
   }
 
   // The excerpt window around the TODO line (clamped to the source length).
