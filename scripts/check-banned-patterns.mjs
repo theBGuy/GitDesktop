@@ -5780,6 +5780,7 @@ export const CHECKS = [
       file !== "src/lib/clipboard.ts" && !file.startsWith("src/test/"),
     scan: perFile(RAW_CLIPBOARD_RE),
     allowlist: [],
+    expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
       "clipboard access goes through writeClipboard / copyText (src/lib/clipboard.ts), which writes through the native plugin on Windows inside Tauri because WebView2's web clipboard turns each LF into CRLF, and through the web API everywhere else — a direct navigator.clipboard read or write, an execCommand call other than \"insertText\" / \"delete\", clipboardData.setData, or the clipboard-manager plugin reached by import or raw invoke bypasses that rule (CRs come back on Windows, or the plugin runs where it shouldn't); the helper only writes, so a navigator.clipboard read, or any other site it genuinely can't serve, needs an allowlist entry with rationale",
   },

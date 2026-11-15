@@ -9665,6 +9665,10 @@ test("raw-clipboard-write exempts the helper file and tests only", () => {
   assert.equal(check.appliesTo("src/test/x.test.tsx"), false);
   assert.equal(check.appliesTo("src/components/ui/button.tsx"), true);
   assert.equal(check.appliesTo("src/lib/toast.ts"), true);
+  // A scope mistake that empties the corpus must fail, not print OK.
+  assert.ok(check.expectScanned.atLeast >= 500);
+  assert.match(scopePinFailure(check, 0), /SCOPE PIN FAILED/);
+  assert.equal(scopePinFailure(check, 500), null);
   // The helper's own body IS the raw write, so appliesTo is what keeps it
   // clean — pinned against the real file so a rename can't turn it stale.
   const file = "src/lib/clipboard.ts";

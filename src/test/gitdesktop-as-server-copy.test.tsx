@@ -29,11 +29,11 @@ afterAll(() => expect(unmockedCommands).toEqual([]));
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 /** Opens the disclosure, waits for the launcher path, presses Copy. */
-async function pressCopy() {
-  const user = userEvent.setup();
+async function pressCopy(user = userEvent.setup()) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -50,7 +50,10 @@ async function pressCopy() {
   await user.click(screen.getByRole("button", { name: /^Copy$/ }));
   // Let the awaited copy settle before the caller reads the button.
   await act(() => Promise.resolve());
+  return user;
 }
+
+const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 
 describe("GitDesktopAsServer Copy", () => {
   it("shows Copied after a copy that landed", async () => {
@@ -66,5 +69,21 @@ describe("GitDesktopAsServer Copy", () => {
     expect(copyText).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: /Copied/ })).toBeNull();
     expect(screen.getByRole("button", { name: /^Copy$/ })).toBeTruthy();
+  });
+
+  it("keeps Copied for the full window after a second copy", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.mocked(copyText).mockResolvedValue(true);
+    const user = await pressCopy(
+      userEvent.setup({ advanceTimers: vi.advanceTimersByTime }),
+    );
+    await advance(1000);
+    await user.click(screen.getByRole("button", { name: /^Cop(y|ied)$/ }));
+    await act(() => Promise.resolve());
+    expect(copyText).toHaveBeenCalledTimes(2);
+    await advance(700);
+    expect(screen.queryByRole("button", { name: /Copied/ })).not.toBeNull();
+    await advance(900);
+    expect(screen.queryByRole("button", { name: /Copied/ })).toBeNull();
   });
 });
