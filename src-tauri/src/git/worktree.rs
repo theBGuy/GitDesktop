@@ -1936,6 +1936,7 @@ pub(crate) async fn checkout_pre_spawn_gate_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     // The module itself no longer calls the working-tree runner — the interleave
     // tests below drive it as an ordinary caller would.
     use crate::git::ops::parse_gitdir_pointer;
@@ -2159,7 +2160,7 @@ prunable gitdir file points to non-existent location
     }
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2324,7 +2325,7 @@ prunable gitdir file points to non-existent location
         let upstream = run_git(
             Some(&repo_s),
             &["rev-parse", "--abbrev-ref", "gd/session/nt@{upstream}"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .err();
@@ -3045,7 +3046,7 @@ prunable gitdir file points to non-existent location
                 run_git(
                     Some(&repo),
                     &["commit", "--allow-empty", "-m", "concurrent"],
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .expect("the queued commit must succeed once the turn releases");
@@ -3337,7 +3338,7 @@ prunable gitdir file points to non-existent location
         let section = run_git_raw(
             Some(&repo_s),
             &["config", "--get-regexp", r"^branch\.gd/session/cfg-lock\."],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3377,7 +3378,7 @@ prunable gitdir file points to non-existent location
         let mut got = Vec::new();
         for key in ["remote", "merge"] {
             let key = format!("branch.{branch}.{key}");
-            let out = run_git_raw(Some(repo), &["config", "--get", &key], DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), &["config", "--get", &key], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             got.push((out.code == 0).then(|| out.stdout_lossy().trim().to_string()));
@@ -3398,7 +3399,7 @@ prunable gitdir file points to non-existent location
         let added = run_git_raw(
             Some(&repo_s),
             &["worktree", "add", "-b", "shape", &wt, "origin/feat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3419,7 +3420,7 @@ prunable gitdir file points to non-existent location
         let existing = run_git_raw(
             Some(&repo_s),
             &["worktree", "add", &wt, "shape"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3474,7 +3475,7 @@ prunable gitdir file points to non-existent location
             let _ = run_git_raw(
                 Some(&repo_s),
                 &["config", "--unset-all", "branch.autoSetupMerge"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await;
             if let Some(mode) = mode {

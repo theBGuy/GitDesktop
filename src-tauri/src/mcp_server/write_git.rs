@@ -2271,7 +2271,7 @@ mod tests {
     // --- The rebase guard, end to end through the tool (temp repos, git on PATH). ---
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2713,7 +2713,7 @@ mod tests {
             let out = crate::git::runner::run_git_raw(
                 Some(repo),
                 &["config", "--get", key],
-                crate::git::runner::DEFAULT_TIMEOUT,
+                crate::git::runner::TEST_GIT_HANG_GUARD,
             )
             .await;
             if !matches!(out, Ok(out) if out.code == 1) {

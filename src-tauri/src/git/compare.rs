@@ -1247,9 +1247,10 @@ fn is_unknown_option(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1383,7 +1384,7 @@ mod tests {
         let show = |rev: &str| {
             let (repo, spec) = (repo.clone(), format!("{rev}:f.txt"));
             async move {
-                run_git_raw(Some(&repo), &["show", &spec], DEFAULT_TIMEOUT)
+                run_git_raw(Some(&repo), &["show", &spec], TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap()
                     .code
@@ -2290,9 +2291,13 @@ mod tests {
             .unwrap();
 
         assert!(std::path::Path::new(&path).exists(), "the directory survives");
-        let git_dir = run_git_raw(Some(&path), &["rev-parse", "--git-dir"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let git_dir = run_git_raw(
+            Some(&path),
+            &["rev-parse", "--git-dir"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_eq!(git_dir.code, 0, "it is still a worktree: {}", git_dir.stderr);
         assert!(
             is_registered_worktree(&repo, &path).await,

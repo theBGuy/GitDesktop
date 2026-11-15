@@ -621,15 +621,19 @@ pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
     tokio::fs::write(Path::new(repo).join(path), content)
         .await
         .unwrap();
-    run_git(Some(repo), &["add", "--", path], DEFAULT_TIMEOUT)
-        .await
-        .unwrap();
+    run_git(
+        Some(repo),
+        &["add", "--", path],
+        crate::git::runner::TEST_GIT_HANG_GUARD,
+    )
+    .await
+    .unwrap();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::run_git;
+    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
 
     #[tokio::test]
     async fn private_temp_diff_contents_concurrent_calls_stay_separate() {
@@ -870,7 +874,11 @@ mod tests {
         let (dir, repo) = temp_repo(tag);
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+            async move {
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap()
+            }
         };
         git(vec!["init"]).await;
         git(vec!["config", "user.email", "t@t"]).await;
@@ -892,7 +900,7 @@ mod tests {
         std::fs::write(&file, ours).unwrap();
         git(vec!["commit", "-am", "ours"]).await;
         // The merge is expected to conflict (non-zero exit), so run it raw.
-        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+        run_git_raw(Some(&repo), &["merge", "feature"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (dir, repo)
@@ -922,10 +930,14 @@ mod tests {
     async fn checkout_side_takes_one_side_and_clears() {
         // ours → the current branch's version, conflict cleared.
         let (_dir, repo) = conflicted_repo("ours-side", "file.txt", &[]).await;
-        run_git(Some(&repo), &["checkout", "--ours", "--", "file.txt"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
-        run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+        run_git(
+            Some(&repo),
+            &["checkout", "--ours", "--", "file.txt"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        run_git(Some(&repo), &["add", "--", "file.txt"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         // Normalize line endings: git autocrlf may rewrite \n → \r\n on checkout.
@@ -935,21 +947,31 @@ mod tests {
                 .replace("\r\n", "\n"),
             "ours\n"
         );
-        assert!(run_git(Some(&repo), &["ls-files", "-u"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap()
-            .stdout_lossy()
-            .trim()
-            .is_empty());
+        assert!(
+            run_git(Some(&repo), &["ls-files", "-u"], TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap()
+                .stdout_lossy()
+                .trim()
+                .is_empty()
+        );
 
         // theirs → the incoming version.
         let (_dir2, repo2) = conflicted_repo("theirs-side", "file.txt", &[]).await;
-        run_git(Some(&repo2), &["checkout", "--theirs", "--", "file.txt"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
-        run_git(Some(&repo2), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        run_git(
+            Some(&repo2),
+            &["checkout", "--theirs", "--", "file.txt"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        run_git(
+            Some(&repo2),
+            &["add", "--", "file.txt"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(Path::new(&repo2).join("file.txt"))
                 .unwrap()
@@ -1001,7 +1023,7 @@ mod tests {
         let staged = run_git(
             Some(&repo),
             &["diff", "--cached", "--name-only"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1013,11 +1035,13 @@ mod tests {
     }
 
     async fn git_ok(repo: &str, args: &[&str]) {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
     }
 
     async fn stdout_of(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1076,7 +1100,7 @@ mod tests {
         git_ok(&repo, &["commit", "-m", "ours"]).await;
 
         // The merge is expected to conflict (non-zero exit), so run it raw.
-        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+        run_git_raw(Some(&repo), &["merge", "feature"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (dir, repo)
@@ -1205,7 +1229,7 @@ mod tests {
             let (_dir, repo) = conflicted_repo("resolved-edits", "file.txt", &[]).await;
             let file = Path::new(&repo).join("file.txt");
             std::fs::write(&file, "resolved outside the app\n").unwrap();
-            run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+            run_git(Some(&repo), &["add", "--", "file.txt"], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert!(stdout_of(&repo, &["ls-files", "-u", "--", "file.txt"])
@@ -1251,7 +1275,7 @@ mod tests {
     async fn a_resolved_then_deleted_path_refuses_both_sides() {
         let (_dir, repo) = conflicted_repo("resolved-deleted", "file.txt", &[]).await;
         let file = Path::new(&repo).join("file.txt");
-        run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "--", "file.txt"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         std::fs::remove_file(&file).unwrap();
@@ -1521,9 +1545,13 @@ mod tests {
         // `file.txt` must flag `docs/file.txt` too — a missed depth is a leak.
         std::fs::create_dir_all(Path::new(&repo).join("docs")).unwrap();
         std::fs::write(Path::new(&repo).join("docs").join("file.txt"), "nested\n").unwrap();
-        run_git(Some(&repo), &["add", "--", "docs/file.txt"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        run_git(
+            Some(&repo),
+            &["add", "--", "docs/file.txt"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
 
         let nested = git_conflict_sides(repo.clone(), "docs/file.txt".into(), vec!["file.txt".into()])
             .await
@@ -1581,7 +1609,7 @@ mod tests {
     async fn resolve_writes_and_clears_the_conflict() {
         let (_dir, repo) = conflicted_repo("resolve", "file.txt", &[]).await;
         // Before: the path is unmerged (`ls-files -u` lists it).
-        let unmerged = run_git(Some(&repo), &["ls-files", "-u"], DEFAULT_TIMEOUT)
+        let unmerged = run_git(Some(&repo), &["ls-files", "-u"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy();
@@ -1590,17 +1618,21 @@ mod tests {
         // Resolving writes the chosen content and stages it.
         crate::git::conflict::resolve_for_test(&repo, "file.txt", "merged\n").await;
 
-        let after = run_git(Some(&repo), &["ls-files", "-u"], DEFAULT_TIMEOUT)
+        let after = run_git(Some(&repo), &["ls-files", "-u"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy();
         assert!(after.trim().is_empty(), "conflict should be cleared");
         let disk = std::fs::read_to_string(Path::new(&repo).join("file.txt")).unwrap();
         assert_eq!(disk, "merged\n");
-        let staged = run_git(Some(&repo), &["diff", "--cached", "--name-only"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap()
-            .stdout_lossy();
+        let staged = run_git(
+            Some(&repo),
+            &["diff", "--cached", "--name-only"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
         assert!(staged.contains("file.txt"));
     }
 

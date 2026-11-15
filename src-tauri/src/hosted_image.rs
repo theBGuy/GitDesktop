@@ -1170,7 +1170,7 @@ mod tests {
         crate::git::runner::run_git(
             Some(&repo_s),
             &["init", "-q"],
-            crate::git::runner::DEFAULT_TIMEOUT,
+            crate::git::runner::TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

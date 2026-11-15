@@ -11,6 +11,11 @@ use crate::error::{AppError, AppResult};
 use crate::state::{AppState, HolderSlot, LockDomain};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Hang guard for git that tests run, as a per-spawn budget or an outer bound around
+/// product calls; not a contract. Headroom over `DEFAULT_TIMEOUT` so ordinary machine
+/// load does not fail a fixture step; a wedged child still fails the test.
+#[cfg(test)]
+pub(crate) const TEST_GIT_HANG_GUARD: Duration = Duration::from_secs(120);
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Adding and removing a worktree both write or delete a whole checkout, so their
 /// cost is proportional to the tree rather than fixed. A node_modules-scale
@@ -1302,7 +1307,7 @@ mod stdin_tests {
             .tempdir()
             .expect("create temp dir");
         let repo = dir.path().to_string_lossy().into_owned();
-        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         // `*` in the repo's own `.gitignore` outranks any global excludes the
@@ -1329,7 +1334,7 @@ mod stdin_tests {
             Some(&repo),
             &["check-ignore", "--verbose", "-z", "--stdin"],
             Some(&input),
-            Duration::from_secs(30),
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("check-ignore answers inside the timeout");
@@ -1448,7 +1453,7 @@ mod config_tests {
             .tempdir()
             .expect("create temp dir");
         let repo = dir.path().to_string_lossy().into_owned();
-        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["init", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -1463,7 +1468,7 @@ mod config_tests {
             ("diff.dstprefix", "b/"),
             ("diff.mnemonicprefix", "false"),
         ] {
-            let out = run_git(Some(&repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+            let out = run_git(Some(&repo), &["config", "--get", key], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap_or_else(|e| panic!("read {key}: {e}"));
             assert_eq!(out.stdout_lossy().trim(), want, "{key}");
@@ -1484,7 +1489,7 @@ mod config_tests {
         let git = |args: &'static [&'static str]| {
             let repo = repo.clone();
             async move {
-                run_git(Some(&repo), args, DEFAULT_TIMEOUT)
+                run_git(Some(&repo), args, TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
                     .stdout_lossy()
@@ -1524,7 +1529,7 @@ mod config_write_lock_tests {
     use super::*;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?}: {e}"))
             .stdout_lossy()
@@ -1727,7 +1732,9 @@ mod tree_kill_tests {
             &["config", "user.email", "t@t.local"],
             &["config", "user.name", "T"],
         ] {
-            run_git(Some(&repo), args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         let git_dir = dir.path().join(".git");
         let hook = git_dir.join("hooks").join("pre-commit");

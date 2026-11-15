@@ -863,7 +863,7 @@ mod tests {
     use super::*;
     use crate::git::compare::git_branch_diff;
     use crate::git::diff::git_staged_diff;
-    use crate::git::runner::{run_git, run_git_input};
+    use crate::git::runner::{run_git, run_git_input, TEST_GIT_HANG_GUARD};
     use std::collections::BTreeSet;
     use std::path::Path;
 
@@ -1188,7 +1188,9 @@ mod tests {
             // PARITY platform-dependent.
             vec!["config", "core.ignorecase", "false"],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         for rel in FIXTURE {
             let path = Path::new(&repo).join(rel);
@@ -1200,7 +1202,7 @@ mod tests {
             format!("{REPO_GITIGNORE_ONLY}\n"),
         )
         .unwrap();
-        run_git(Some(&repo), &["add", "-A", "-f"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A", "-f"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         (dir, repo)
@@ -1433,7 +1435,9 @@ mod tests {
             vec!["config", "user.name", "T"],
             vec!["config", "core.ignorecase", "false"],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         (dir, repo)
     }
@@ -1468,7 +1472,7 @@ mod tests {
                 "-z",
             ],
             Some(b"a.env\0b.txt\0"),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1616,7 +1620,7 @@ mod tests {
         run_git(
             Some(&neutral),
             &["init", "-q", "--template="],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1699,7 +1703,7 @@ mod tests {
                 let argref: Vec<&str> = args.iter().map(String::as_str).collect();
                 // NOT trimmed beyond the surrounding newline: a fixture name ends
                 // in a space, and the assertions below compare names byte for byte.
-                run_git_input(Some(&repo), &argref, input.as_deref(), DEFAULT_TIMEOUT)
+                run_git_input(Some(&repo), &argref, input.as_deref(), TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap()
                     .stdout_lossy()
@@ -1854,7 +1858,7 @@ mod tests {
         run_git(
             Some(&repo),
             &["config", "core.ignorecase", "1"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1881,7 +1885,7 @@ mod tests {
         let native = run_git(
             Some(&repo),
             &["check-ignore", "--no-index", "--", REPO_GITIGNORE_ONLY],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2286,9 +2290,11 @@ mod tests {
             vec!["mv", "secrets.env", "renamed.txt"],
             vec!["commit", "-qam", "rename"],
         ] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
-        let first = run_git(Some(&repo), &["rev-parse", "HEAD~1"], DEFAULT_TIMEOUT)
+        let first = run_git(Some(&repo), &["rev-parse", "HEAD~1"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2362,7 +2368,7 @@ mod tests {
         let base = run_git(
             Some(repo),
             &["commit-tree", &empty_tree, "-m", "empty"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2372,7 +2378,7 @@ mod tests {
         let head = run_git(
             Some(repo),
             &["commit-tree", &tree, "-p", &base, "-m", "full"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2388,7 +2394,7 @@ mod tests {
             Some(repo),
             &["hash-object", "-w", "--stdin"],
             Some("x\n"),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2566,7 +2572,7 @@ mod tests {
                     args.extend(["-p".to_string(), parent]);
                 }
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                run_git(Some(&repo), &args, DEFAULT_TIMEOUT)
+                run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap()
                     .stdout_lossy()
@@ -2581,7 +2587,7 @@ mod tests {
         let all = run_git(
             Some(&repo),
             &["diff", "--numstat", "-z", &format!("{base}...{head}")],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2766,7 +2772,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("root.txt"), "ROOT_MARKER\n").unwrap();
-        run_git(Some(&repo), &["add", "-A", "-f"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A", "-f"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -2836,7 +2842,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         std::fs::write(root.join("b.rs"), "b\n").unwrap();
         std::fs::write(root.join("docs").join("c.md"), "c\n").unwrap();
-        run_git(Some(&repo), &["add", "-A", "-f"], DEFAULT_TIMEOUT)
+        run_git(Some(&repo), &["add", "-A", "-f"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
 
@@ -2990,11 +2996,15 @@ mod tests {
         let root = Path::new(&repo);
         std::fs::write(root.join("a.txt"), "a\n").unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-qm", "one"]] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-qm", "two"]] {
-            run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap();
+            run_git(Some(&repo), &args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
         }
 
         let out = git_branch_diff(

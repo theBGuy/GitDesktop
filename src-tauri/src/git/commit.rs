@@ -1262,7 +1262,7 @@ pub(crate) fn racing_git(repo: &str, steps: &[&[&str]]) -> PhaseHook {
         Box::pin(async move {
             for step in &steps {
                 let args: Vec<&str> = step.iter().map(String::as_str).collect();
-                run_git(Some(&repo), &args, DEFAULT_TIMEOUT)
+                run_git(Some(&repo), &args, crate::git::runner::TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap_or_else(|e| panic!("the racer's git {args:?} failed: {e}"));
             }
@@ -1297,7 +1297,9 @@ pub(crate) fn racing_commit(
         Box::pin(async move {
             std::fs::write(std::path::Path::new(&repo).join(&file), "racer\n").unwrap();
             for args in [&["add", "-A"][..], &["commit", "-qm", "racer"]] {
-                run_git(Some(&repo), args, DEFAULT_TIMEOUT).await.unwrap();
+                run_git(Some(&repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap();
             }
             *slot.lock().unwrap() = Some(head_hash(&repo).await.unwrap());
         })
@@ -1361,9 +1363,10 @@ mod tests {
     use crate::git::ops::branch_state_fixtures::{
         branch_state_present, stop_an_autostashed_squash, write_unguarded_branch_state,
     };
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn run(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1373,7 +1376,7 @@ mod tests {
         static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
         *SUPPORTED
             .get_or_init(|| async {
-                let version = run_git(None, &["version"], DEFAULT_TIMEOUT)
+                let version = run_git(None, &["version"], TEST_GIT_HANG_GUARD)
                     .await
                     .unwrap()
                     .stdout_lossy();
@@ -1394,7 +1397,7 @@ mod tests {
         run_git_raw(
             Some(repo),
             &["config", "--local", "--get-all", key],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1454,7 +1457,7 @@ mod tests {
             &["config", "--local", "--replace-all", "user.name", "Bob"],
             &["config", "--local", "--unset-all", "user.name"],
         ] {
-            let raw = run_git_raw(Some(&repo), args, DEFAULT_TIMEOUT)
+            let raw = run_git_raw(Some(&repo), args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert_eq!(raw.code, 255, "{args:?}: {}", raw.stderr);
@@ -1476,7 +1479,7 @@ mod tests {
         let plain = run_git_raw(
             Some(&repo),
             &["config", "--local", "--unset", "user.name"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1486,7 +1489,7 @@ mod tests {
         let plain = run_git_raw(
             Some(&repo),
             &["config", "--local", "user.name", "Bob"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1692,7 +1695,7 @@ mod tests {
         let probe = run_git_raw(
             Some(&repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1765,7 +1768,7 @@ mod tests {
         run_git_raw(
             Some(repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1954,7 +1957,7 @@ mod tests {
         run_git(
             None,
             &["clone", "-q", "--depth", "1", &url, &clone],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("the shallow clone succeeds");
@@ -1962,7 +1965,7 @@ mod tests {
             run_git_raw(
                 Some(&clone),
                 &["rev-parse", "--verify", "--quiet", "HEAD~1"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap()
@@ -2341,9 +2344,13 @@ mod tests {
         if logs.exists() {
             std::fs::remove_dir_all(logs).unwrap();
         }
-        let exists = run_git_raw(Some(repo), &["reflog", "exists", "HEAD"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let exists = run_git_raw(
+            Some(repo),
+            &["reflog", "exists", "HEAD"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_ne!(exists.code, 0, "fixture: HEAD has no reflog");
     }
 
@@ -2937,7 +2944,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2955,7 +2962,7 @@ mod tests {
         let squash = run_git_raw(
             Some(&repo),
             &["merge", "--squash", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2994,7 +3001,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -3117,9 +3124,13 @@ mod tests {
             } else {
                 "feature".to_string()
             };
-            let stopped = run_git_raw(Some(&repo), &[verb, "--no-edit", &target], DEFAULT_TIMEOUT)
-                .await
-                .unwrap();
+            let stopped = run_git_raw(
+                Some(&repo),
+                &[verb, "--no-edit", &target],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
             assert_ne!(stopped.code, 0, "fixture: the {verb} stops on its conflict");
             resolve_ours(&repo).await;
             let tip = head(&repo).await;
@@ -3154,7 +3165,7 @@ mod tests {
         run(&repo, &["switch", "-q", "--orphan", "other"]).await;
         let other = raw_commit(&dir, &repo, "a.txt", "other").await;
         run(&repo, &["switch", "-q", &start]).await;
-        let stopped = run_git_raw(Some(&repo), &["cherry-pick", &other], DEFAULT_TIMEOUT)
+        let stopped = run_git_raw(Some(&repo), &["cherry-pick", &other], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(stopped.code, 0, "fixture: the pick stops on its conflict");
@@ -3378,7 +3389,7 @@ mod tests {
         run_git(
             None,
             &["clone", "-q", "--depth", "1", &url, &clone],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("the shallow clone succeeds");

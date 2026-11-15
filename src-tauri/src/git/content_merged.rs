@@ -826,9 +826,10 @@ pub async fn git_branch_content_merged(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -911,7 +912,7 @@ mod tests {
                 "refs/heads/main",
                 &tip,
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -936,7 +937,7 @@ mod tests {
                 "refs/heads/main",
                 &tip,
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -957,7 +958,7 @@ mod tests {
                 let out = run_git_raw(
                     Some(repo),
                     &["config", "--get-regexp", "--name-only", MERGE_DRIVER_KEYS],
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .unwrap();
@@ -1874,7 +1875,7 @@ mod tests {
                 "--name-only",
                 MERGE_DRIVER_KEYS,
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2143,7 +2144,7 @@ mod tests {
         let raw = run_git_raw(
             Some(&repo),
             &["merge-tree", "--write-tree", "--name-only", &c1, &tip],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2190,7 +2191,7 @@ mod tests {
                 &candidate,
                 &tip,
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2883,14 +2884,14 @@ mod tests {
             Some(&repo),
             &["hash-object", "-w", "--stdin"],
             Some(b"x\n"),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
         .stdout_lossy()
         .trim()
         .to_string();
-        let mut entries = run_git_raw(Some(&repo), &["ls-tree", "-z", &main], DEFAULT_TIMEOUT)
+        let mut entries = run_git_raw(Some(&repo), &["ls-tree", "-z", &main], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout;
@@ -2907,7 +2908,7 @@ mod tests {
             Some(&repo),
             &["mktree", "-z"],
             Some(&entries),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2937,7 +2938,7 @@ mod tests {
                 "--not",
                 &main,
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

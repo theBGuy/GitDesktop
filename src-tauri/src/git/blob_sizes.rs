@@ -332,13 +332,15 @@ async fn incomplete_clone(repo: &str) -> AppResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::{run_git, run_git_input, run_git_raw, run_git_raw_input};
+    use crate::git::runner::{
+        run_git, run_git_input, run_git_raw, run_git_raw_input, TEST_GIT_HANG_GUARD,
+    };
     use std::path::Path;
 
     const BOGUS: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -367,7 +369,7 @@ mod tests {
         let repo = dir.to_string_lossy().into_owned();
         let mut args = vec!["init", "-q"];
         args.extend_from_slice(extra);
-        let init = run_git_raw(Some(&repo), &args, DEFAULT_TIMEOUT)
+        let init = run_git_raw(Some(&repo), &args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         if init.code != 0 {
@@ -578,7 +580,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1116,7 +1118,7 @@ mod tests {
             let mut args = vec!["clone", "-q"];
             args.extend(flags);
             args.extend([url.as_str(), target_text.as_ref()]);
-            let out = run_git_raw(Some(&f.repo), &args, DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(&f.repo), &args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             if out.code != 0 {
@@ -1203,7 +1205,7 @@ mod tests {
             &["rev-list", "--objects", "--missing=print", "--all"],
             None,
             &NO_LAZY_FETCH,
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1224,7 +1226,7 @@ mod tests {
                 "--batch-all-objects",
                 "--batch-check=%(objectname)",
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1263,7 +1265,7 @@ mod tests {
                 &file_url(Path::new(&bare)),
                 &clone_path.to_string_lossy(),
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1341,7 +1343,7 @@ mod tests {
                     "--batch-check=%(objectname) %(objecttype) %(objectsize)",
                 ],
                 Some(&format!("{old_blob}\n")),
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();

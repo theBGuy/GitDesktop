@@ -458,6 +458,7 @@ impl GitDesktopMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     use rmcp::handler::server::wrapper::Parameters;
 
     /// Table-driven gate check: with ALL flags false, EVERY local-PR write tool must
@@ -590,7 +591,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) {
-        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
     }

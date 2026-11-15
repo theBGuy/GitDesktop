@@ -749,9 +749,10 @@ fn dropped_sha(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1695,7 +1696,7 @@ mod tests {
         const REBASE_STAGED: &str = "cannot rebase: your index contains uncommitted changes";
 
         async fn refusal(repo: &str, args: &[&str]) -> String {
-            let out = run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), args, TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert_ne!(out.code, 0, "expected git to refuse {args:?}");
@@ -1851,7 +1852,7 @@ mod tests {
         write(dir.path(), "a.txt", "mine\n");
         commit_all(&repo, "local change").await;
 
-        let cherry = run_git_raw(Some(&repo), &["cherry-pick", "feat"], DEFAULT_TIMEOUT)
+        let cherry = run_git_raw(Some(&repo), &["cherry-pick", "feat"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(cherry.code, 0, "expected the cherry-pick to conflict");
@@ -1883,7 +1884,7 @@ mod tests {
         );
         git(&repo, &["cherry-pick", "--abort"]).await;
 
-        let rebase = run_git_raw(Some(&repo), &["rebase", "feat"], DEFAULT_TIMEOUT)
+        let rebase = run_git_raw(Some(&repo), &["rebase", "feat"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(rebase.code, 0, "expected the rebase to conflict");
@@ -1919,7 +1920,7 @@ mod tests {
         let cont = run_git_raw(
             Some(&repo),
             &["-c", "core.editor=true", "rebase", "--continue"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1948,7 +1949,7 @@ mod tests {
         let revert = run_git_raw(
             Some(&repo),
             &["revert", "--no-edit", "HEAD~1"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1985,7 +1986,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2020,7 +2021,7 @@ mod tests {
         write(&pull_dir.path().join("clone"), "a.txt", "mine\n");
         commit_all(&clone, "local").await;
 
-        let pull = run_git_raw(Some(&clone), &["pull", "--no-rebase"], DEFAULT_TIMEOUT)
+        let pull = run_git_raw(Some(&clone), &["pull", "--no-rebase"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(pull.code, 0, "expected the pull to conflict");
@@ -2243,7 +2244,7 @@ mod tests {
         let external = run_git(
             Some(&repo),
             &["stash", "drop", "stash@{0}"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2378,7 +2379,7 @@ mod tests {
         let out = run_git(
             Some(&repo),
             &["stash", "drop", "stash@{1}"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2686,7 +2687,7 @@ mod tests {
         run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2710,7 +2711,7 @@ mod tests {
         run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2742,7 +2743,7 @@ mod tests {
         let op = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "nope"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await;
 
@@ -2770,7 +2771,7 @@ mod tests {
         // An untracked file back in the way makes git abort the pop before merging
         // anything: the stash is kept but there is nothing conflicted to resolve.
         write(dir.path(), "u.txt", "other\n");
-        let op = run_git_raw(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await;
+        let op = run_git_raw(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD).await;
 
         let outcome = settle(&repo, "merge", true, true, op).await.unwrap();
         assert!(
@@ -3178,7 +3179,7 @@ mod tests {
         let upstream = run_git_raw(
             Some(&repo),
             &["rev-parse", "--abbrev-ref", "feat@{upstream}"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
