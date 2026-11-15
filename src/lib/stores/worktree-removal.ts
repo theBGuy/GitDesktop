@@ -33,6 +33,7 @@ import {
   type WorktreeRemoveOutcome,
 } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { useStashReapplyMarker } from "./stash-reapply-marker";
 import { claimWarmRepoShell, useUiStore } from "./ui";
@@ -546,6 +547,11 @@ async function removeWorktreeFreeingBranch(
   try {
     return await attempt();
   } catch (e) {
+    // Every `invalidArgument` rethrows: the remove path raises that kind only for
+    // its own input checks (a malformed or branchless pin), which a retry repeats.
+    // git's Windows "Invalid argument" delete failure is a transient folder hold
+    // that arrives as kind `git`, so the message match below still retries it.
+    if (isAppError(e) && e.kind === "invalidArgument") throw e;
     const msg = removalErrorText(e, path);
     if (/close any program|in use|being used|invalid argument/i.test(msg)) {
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -695,9 +701,14 @@ export type CleanupRemovalOutcome =
         | "keptMoved"
         | "keptUnreadable"
         | "keptInUse";
-      /** The deleted branch's tip; null unless `branch` is "deleted" and the
-       *  backend reported one (a branch that was already gone reports none). */
-      deletedTip: string | null;
+      /** The deleted branch's tip, Keep local mark and upstream; null unless
+       *  `branch` is "deleted" and the backend reported a tip (a branch that
+       *  was already gone reports none). */
+      deleted: {
+        tip: string;
+        keptLocal: boolean;
+        upstream: string | null;
+      } | null;
     }
   | {
       ok: false;
@@ -961,11 +972,11 @@ export async function removeWorktreeForCleanup(
       // Already archived is this row's end state too: the set is idempotent.
       case "archived":
       case "alreadyArchived":
-        return { ok: true, branch: "archived", deletedTip: null };
+        return { ok: true, branch: "archived", deleted: null };
       case "isDefault":
         return { ok: false, reason: CLEANUP_DEFAULT_BRANCH_REASON };
       case "inUse":
-        return { ok: true, branch: "keptInUse", deletedTip: null };
+        return { ok: true, branch: "keptInUse", deleted: null };
       case "failed":
         return {
           ok: false,
@@ -979,15 +990,26 @@ export async function removeWorktreeForCleanup(
   }
   switch (removal.branchCleanup) {
     case "deleted":
-      return { ok: true, branch: "deleted", deletedTip: removal.branchTip };
+      return {
+        ok: true,
+        branch: "deleted",
+        deleted:
+          typeof removal.branchTip === "string"
+            ? {
+                tip: removal.branchTip,
+                keptLocal: removal.branchKeptLocal ?? true,
+                upstream: removal.branchUpstream,
+              }
+            : null,
+      };
     // notRequested with a branch passed: the ref was already gone when the
     // delete re-read it, which is this row's end state; there is no tip.
     case "notRequested":
-      return { ok: true, branch: "deleted", deletedTip: null };
+      return { ok: true, branch: "deleted", deleted: null };
     case "sparedMoved":
-      return { ok: true, branch: "keptMoved", deletedTip: null };
+      return { ok: true, branch: "keptMoved", deleted: null };
     case "sparedUnreadable":
-      return { ok: true, branch: "keptUnreadable", deletedTip: null };
+      return { ok: true, branch: "keptUnreadable", deleted: null };
   }
 }
 

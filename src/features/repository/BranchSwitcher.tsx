@@ -64,14 +64,13 @@ import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import {
   DELETE_CONFIRM_RESTORABLE,
+  DELETE_PIN_HELD,
   DELETE_TIP_MOVED,
+  deleteDismissed,
   deletedBranchTitle,
+  switchedAndKept,
 } from "@/lib/deleted-branches/copy";
-import {
-  deletedBranchFacts,
-  deletedToastOptions,
-  readBranchRowsFresh,
-} from "@/lib/deleted-branches/restore";
+import { deletedToastOptions } from "@/lib/deleted-branches/restore";
 import {
   mintDeletedBranch,
   recordDeletedBranches,
@@ -84,6 +83,7 @@ import {
   gitRemotePushUrl,
   gitRemoteUrl,
 } from "@/lib/git/api";
+import { FULL_OID_RE } from "@/lib/git/oid";
 import { normPath } from "@/lib/git/path";
 import {
   headTrackingMatchesRow,
@@ -100,6 +100,7 @@ import {
   branchRewriteStatusOptions,
   carriesAllLocalCommits,
   forgeFeatureReady,
+  type ListedBranchTips,
   nextPushLatch,
   REMOTE_BRANCHES_STALE_TIME,
   refuseWhileBranchPushes,
@@ -121,6 +122,7 @@ import {
   useForgeStatus,
   useHardResetToCommit,
   useKeepLocalHookStatus,
+  useListedBranchTips,
   useMergeBranch,
   usePendingBranchPushes,
   usePendingBranchPushIds,
@@ -671,6 +673,19 @@ function BranchMenuList({
   );
 }
 
+/** The single delete's pin from its confirm's tips read: the tip to send, or
+ *  why there is none. A tip that isn't a full object id can't pin a delete. */
+function deletePinOf(
+  listed: ListedBranchTips,
+  name: string,
+): { tip: string } | { held: keyof typeof DELETE_PIN_HELD } {
+  if (listed.waiting.has(name)) return { held: "waiting" };
+  if (listed.failed.has(name)) return { held: "failed" };
+  const tip = listed.tips.get(name);
+  if (tip === undefined) return { held: "notListed" };
+  return FULL_OID_RE.test(tip) ? { tip } : { held: "failed" };
+}
+
 export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
   const branches = useBranches(repoPath);
@@ -730,21 +745,40 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const shownDeleteTarget = useRetained(deleteTarget);
   // The delete confirm's open session: minted by openDelete with the repo it
-  // opened in, dropped by every close. The confirm is dismissible mid-delete and
-  // this switcher outlives repo switches, so a settle closes only the confirm it
-  // was fired from, never one reopened on a same-named branch here or in another
-  // repo, and a confirm answered after a switch refuses.
+  // opened in, dropped by every close (a repo switch closes the confirm in render
+  // and leaves it inert: a press needs a target, and the next open replaces it).
+  // The confirm is dismissible mid-delete and this switcher outlives repo
+  // switches, so a settle closes only the confirm it was fired from, never one
+  // reopened on a same-named branch here or in another repo, and a confirm
+  // answered after a switch refuses.
   const deleteSessionRef = useRef<{ repo: string } | null>(null);
+  // The session's repo for render: the ref stays the press-time gate.
+  const [deleteSessionRepo, setDeleteSessionRepo] = useState<string | null>(
+    null,
+  );
   function openDelete(branch: string) {
     deleteSessionRef.current = { repo: repoPath };
+    setDeleteSessionRepo(repoPath);
     setDeleteTarget(branch);
   }
   function closeDelete() {
     deleteSessionRef.current = null;
+    setDeleteSessionRepo(null);
     setDeleteTarget(null);
   }
-  // One delete at a time: the latch is set before the first await (the fresh
-  // read, or the occupancy read when deleting the current branch), before any
+  // The delete is pinned to the tip read when its confirm opens. The hook
+  // follows this switcher's repo, so its answer pins only while that is still
+  // the session's repo; a press after a switch refuses through refuseIfSwitched.
+  const deleteTips = useListedBranchTips(
+    repoPath,
+    deleteTarget === null ? [] : [deleteTarget],
+    deleteTarget !== null,
+  );
+  const deletePin =
+    deleteTarget !== null && deleteSessionRepo === repoPath
+      ? deletePinOf(deleteTips, deleteTarget)
+      : null;
+  // One delete at a time: the latch is set before the first await, before any
   // mutation reads pending. The ref gates, since two presses can land before a
   // re-render; the state holds the confirm's button.
   const deleteRunningRef = useRef(false);
@@ -1187,7 +1221,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // This instance outlives repo switches, and a held cross-repo landing can switch
   // under an open menu: drop the old repo's snapshot and arrow cursor (both name
   // its rows) so the effect below re-snapshots the new list. The filter stays: it
-  // is the user's visible input, and the switch can land mid-keystroke.
+  // is the user's visible input, and the switch can land mid-keystroke. A delete
+  // confirm closes too: back in its repo the tips read re-mints, and its pin would
+  // no longer be the commit read when it opened.
   const [orderRepo, setOrderRepo] = useState(repoPath);
   if (orderRepo !== repoPath) {
     setOrderRepo(repoPath);
@@ -1195,6 +1231,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     setActiveBranch(null);
     setMenuTarget(null);
     setRewriteProbe(null);
+    setDeleteTarget(null);
+    setDeleteSessionRepo(null);
   }
   const snapshotOrder = () =>
     setFrozenOrder(
@@ -1879,9 +1917,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     // Outside the try, whose `.finally` cleanup would close the confirm.
     if (refuseWhileRowPushes(deleteTarget)) return;
+    // The button already holds without a pin; this backstop leaves the confirm
+    // open. The one tip read here is what the delete sends, on both routes.
+    if (deletePin === null || !("tip" in deletePin)) {
+      if (deletePin !== null) toast.info(DELETE_PIN_HELD[deletePin.held]);
+      return;
+    }
+    const expectedTip = deletePin.tip;
     // Set at the first await: nothing above it can interleave with a press.
     deleteRunningRef.current = true;
     setDeleteRunning(true);
+    // The branch a landed fallback checkout left checked out, so a failure
+    // after it says where HEAD went; a failed checkout claims no switch.
+    let switchedTo: string | undefined;
     await (async () => {
       try {
         // Between freeing its branch and checking it out, a promote leaves that
@@ -1923,6 +1971,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             )
           )
             return;
+          // A dismissal during the read cancels every step not yet started.
+          if (deleteSessionRef.current !== session) {
+            toast.info(deleteDismissed(deleteTarget));
+            return;
+          }
           // Inside the try, so the `.finally` clearTarget closes the confirm on
           // this refusal; the one before the try leaves it open.
           if (refuseWhileRowPushes(deleteTarget)) return;
@@ -1948,6 +2001,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             return;
           }
           await checkout.mutateAsync(fallback);
+          switchedTo = fallback;
           // The same for the delete, which starts only after the checkout lands.
           if (
             refuseIfSwitched(
@@ -1957,6 +2011,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             )
           )
             return;
+          // The checkout can't be recalled, but a dismissal still stops the delete.
+          if (deleteSessionRef.current !== session) {
+            toast.info(deleteDismissed(deleteTarget, fallback));
+            return;
+          }
           if (
             refuseWhileRowPushes(
               deleteTarget,
@@ -1965,65 +2024,54 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             )
           )
             return;
+          // The checkout is long enough for a promote to start and free its branch.
+          if (promotionBlocksCheckout(repoPath)) {
+            toast.info(PROMOTION_BLOCKS_CHECKOUT, {
+              description: switchedAndKept(fallback, deleteTarget),
+            });
+            return;
+          }
         }
-        // Read before the delete, which removes the branch's whole config
-        // section: what Restore re-applies.
-        const facts = deletedBranchFacts(
-          await readBranchRowsFresh(deleteIn),
-          deleteTarget,
-        );
-        if (
-          refuseIfSwitched(
-            deleteIn,
-            `${deleteTarget} was kept`,
-            "before the delete started",
-          )
-        )
-          return;
-        // A push that started during the read.
-        if (refuseWhileRowPushes(deleteTarget)) return;
-        // The read is long enough for a promote to start and free its branch.
-        if (promotionBlocksCheckout(repoPath)) {
-          toast.info(
-            PROMOTION_BLOCKS_CHECKOUT,
-            fallback === undefined
-              ? undefined
-              : {
-                  description: `Switched to ${fallback}; ${deleteTarget} was kept.`,
-                },
-          );
-          return;
-        }
-        const outcome = await deleteBranch.mutateAsync(deleteTarget);
+        const outcome = await deleteBranch.mutateAsync({
+          name: deleteTarget,
+          expectedTip,
+        });
         switch (outcome.status) {
           case "deleted": {
             // Closed before the record write, so a second press can't re-enter.
             clearTarget();
+            // Read by the delete under its own lock: what Restore re-applies.
             const entry = mintDeletedBranch({
               name: deleteTarget,
               tip: outcome.tip,
-              ...facts,
+              keptLocal: outcome.keptLocal,
+              upstream: outcome.upstream,
             });
             const recorded = await recordDeletedBranches(deleteIn, [entry]);
+            const title = deletedBranchTitle(
+              deleteTarget,
+              outcome.tip,
+              landedIn(deleteIn).away,
+            );
             toast.success(
-              deletedBranchTitle(
-                deleteTarget,
-                outcome.tip,
-                landedIn(deleteIn).away,
-              ),
+              title,
               deletedToastOptions(
                 queryClient,
                 deleteIn,
                 [entry],
                 new Set(recorded ? [] : [entry.id]),
-                true,
+                { kind: "success", title, single: true },
               ),
             );
             break;
           }
-          // Only a call pinned to an expected tip answers this; kept exhaustive.
           case "tipMoved":
-            toast.info(DELETE_TIP_MOVED(deleteTarget));
+            toast.info(
+              DELETE_TIP_MOVED(deleteTarget),
+              switchedTo === undefined
+                ? undefined
+                : { description: switchedAndKept(switchedTo, deleteTarget) },
+            );
             break;
           default: {
             const unhandled: never = outcome;
@@ -2031,7 +2079,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           }
         }
       } catch (e) {
-        onError(e);
+        if (switchedTo === undefined) onError(e);
+        else toastErrorWithNote(e, switchedAndKept(switchedTo, deleteTarget));
       }
     })().finally(() => {
       clearTarget();
@@ -5280,11 +5329,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         }
         confirmLabel="Delete"
         confirmVariant="destructive"
-        // This branch's push only: a local delete takes no network lock.
+        // This branch's push first (a local delete takes no network lock),
+        // then a missing pin.
         heldReason={
           deleteTarget !== null && branchPushing(deleteTarget)
             ? branchPushHoldReason(pushOnBranch(deleteTarget)?.paused ?? false)
-            : undefined
+            : deletePin !== null && "held" in deletePin
+              ? DELETE_PIN_HELD[deletePin.held]
+              : undefined
         }
         pending={deleteRunning || deleteBranch.isPending || checkout.isPending}
         onConfirm={doDelete}

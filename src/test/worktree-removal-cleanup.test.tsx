@@ -98,6 +98,8 @@ const outcome = (
 ): WorktreeRemoveOutcome => ({
   branchCleanup,
   branchTip: null,
+  branchKeptLocal: null,
+  branchUpstream: null,
   tipMoved: null,
 });
 
@@ -222,7 +224,7 @@ describe("removeWorktreeForCleanup refusals", () => {
     expect(await first).toEqual({
       ok: true,
       branch: "deleted",
-      deletedTip: null,
+      deleted: null,
     });
   });
 
@@ -320,7 +322,7 @@ describe("removeWorktreeForCleanup refusals", () => {
         branch: BRANCH,
         then: "delete",
       }),
-    ).toEqual({ ok: true, branch: "deleted", deletedTip: null });
+    ).toEqual({ ok: true, branch: "deleted", deleted: null });
     expect(removeWorktree).toHaveBeenCalledWith(REPO, path, BRANCH, false);
   });
 
@@ -390,7 +392,7 @@ describe("removeWorktreeForCleanup refusals", () => {
         branch: BRANCH,
         then: "delete",
       }),
-    ).toEqual({ ok: true, branch: "deleted", deletedTip: null });
+    ).toEqual({ ok: true, branch: "deleted", deleted: null });
   });
 });
 
@@ -505,7 +507,7 @@ describe("removeWorktreeForCleanup git refusals", () => {
       .mockResolvedValueOnce(outcome("deleted"));
     expect(
       await removeWorktreeForCleanup(qc, { ...args, then: "delete" }),
-    ).toEqual({ ok: true, branch: "deleted", deletedTip: null });
+    ).toEqual({ ok: true, branch: "deleted", deleted: null });
     expect(removeWorktree).toHaveBeenCalledTimes(2);
     expect(removeWorktree).toHaveBeenLastCalledWith(REPO, path, BRANCH, false);
 
@@ -518,6 +520,61 @@ describe("removeWorktreeForCleanup git refusals", () => {
       reason:
         "The folder is in use. Close any program using that folder and try again",
     });
+    expect(removeWorktree).toHaveBeenCalledTimes(2);
+    expectSilent();
+  });
+
+  it.each([
+    "invalid argument: expectedBranchTip must be a full commit id (40 or 64 hex characters)",
+    "invalid argument: expectedBranchTip needs a branch",
+  ])("never retries the app's own rejection of a pin: %s", async (message) => {
+    const path = "C:/repos/wt/bad-pin";
+    const rejection = { kind: "invalidArgument", message };
+    vi.mocked(removeWorktree).mockRejectedValueOnce(rejection);
+    const result = await removeWorktreeForCleanup(qc, {
+      repoPath: REPO,
+      path,
+      name: BRANCH,
+      branch: BRANCH,
+      then: "delete",
+      expectedTip: "1".repeat(40),
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.ok ? "" : result.reason).toContain("expectedBranchTip");
+    expect(removeWorktree).toHaveBeenCalledTimes(1);
+    expectSilent();
+  });
+
+  it.each([
+    [
+      "git's Invalid argument delete failure",
+      "git",
+      "error: failed to delete 'C:/repos/wt/held': Invalid argument",
+    ],
+    [
+      "Windows error 32",
+      "command",
+      "Couldn't remove the worktree at C:/repos/wt/held: The process cannot access the file because it is being used by another process. (os error 32). Close any program using that folder (editor, terminal, file watcher) and try again.",
+    ],
+    [
+      "Windows error 170",
+      "command",
+      "Couldn't remove the worktree at C:/repos/wt/held: The requested resource is in use. (os error 170). Close any program using that folder (editor, terminal, file watcher) and try again.",
+    ],
+  ])("still retries %s", async (_label, kind, message) => {
+    const path = "C:/repos/wt/held";
+    vi.mocked(removeWorktree)
+      .mockRejectedValueOnce({ kind, message })
+      .mockResolvedValueOnce(outcome("deleted"));
+    expect(
+      await removeWorktreeForCleanup(qc, {
+        repoPath: REPO,
+        path,
+        name: BRANCH,
+        branch: BRANCH,
+        then: "delete",
+      }),
+    ).toEqual({ ok: true, branch: "deleted", deleted: null });
     expect(removeWorktree).toHaveBeenCalledTimes(2);
     expectSilent();
   });
@@ -540,7 +597,7 @@ describe("removeWorktreeForCleanup outcomes", () => {
         branch: BRANCH,
         then: "delete",
       }),
-    ).toEqual({ ok: true, branch, deletedTip: null });
+    ).toEqual({ ok: true, branch, deleted: null });
     expect(removeWorktree).toHaveBeenCalledWith(REPO, path, BRANCH, false);
     expect(pruneWorktrees).toHaveBeenCalledWith(REPO);
     expect(gitSetBranchArchived).not.toHaveBeenCalled();
@@ -558,7 +615,7 @@ describe("removeWorktreeForCleanup outcomes", () => {
         branch: BRANCH,
         then: "archive",
       }),
-    ).toEqual({ ok: true, branch: "archived", deletedTip: null });
+    ).toEqual({ ok: true, branch: "archived", deleted: null });
     expect(removeWorktree).toHaveBeenCalledWith(REPO, path, null, false);
     expect(gitSetBranchArchived).toHaveBeenCalledWith(REPO, BRANCH, true);
     expectSilent();
@@ -576,7 +633,7 @@ describe("removeWorktreeForCleanup outcomes", () => {
         branch: BRANCH,
         then: "archive",
       }),
-    ).toEqual({ ok: true, branch: "archived", deletedTip: null });
+    ).toEqual({ ok: true, branch: "archived", deleted: null });
     expect(gitSetBranchArchived).not.toHaveBeenCalled();
     expectSilent();
   });
@@ -809,7 +866,7 @@ describe("removeWorktreeForCleanup mark and reporting", () => {
     const args = { repoPath: REPO, path, name: BRANCH, branch: BRANCH };
     expect(
       await removeWorktreeForCleanup(qc, { ...args, then: "archive" }),
-    ).toEqual({ ok: true, branch: "archived", deletedTip: null });
+    ).toEqual({ ok: true, branch: "archived", deleted: null });
     const refusal = new Error("fatal: cannot remove the main worktree");
     vi.mocked(removeWorktree).mockRejectedValueOnce(refusal);
     expect(
@@ -849,11 +906,11 @@ describe("removeWorktreeForCleanup mark and reporting", () => {
     expect(await b).toEqual({
       ok: true,
       branch: "keptMoved",
-      deletedTip: null,
+      deleted: null,
     });
     expect(Object.keys(removals()[REPO])).toEqual([pathA]);
     heldA.resolve(outcome("deleted"));
-    expect(await a).toEqual({ ok: true, branch: "deleted", deletedTip: null });
+    expect(await a).toEqual({ ok: true, branch: "deleted", deleted: null });
   });
 });
 
@@ -913,7 +970,7 @@ describe("removeWorktreeForCleanup fire-time re-check", () => {
     expect(await cleanup(path)).toEqual({
       ok: true,
       branch: "deleted",
-      deletedTip: null,
+      deleted: null,
     });
     expect(listUserWorktrees).toHaveBeenCalledWith(REPO);
     expect(gitOpState).toHaveBeenCalledWith(path);
@@ -1000,7 +1057,7 @@ describe("removeWorktreeForCleanup fire-time re-check", () => {
     expect(await cleanup(path)).toEqual({
       ok: true,
       branch: "deleted",
-      deletedTip: null,
+      deleted: null,
     });
     expect(removeWorktree).toHaveBeenCalledTimes(1);
   });
@@ -1043,7 +1100,7 @@ describe("a removal marked under another viewer's repo key", () => {
     expect(await first).toEqual({
       ok: true,
       branch: "deleted",
-      deletedTip: null,
+      deleted: null,
     });
     expect(removeWorktree).toHaveBeenCalledTimes(1);
   });
@@ -1073,7 +1130,7 @@ describe("a removal marked under another viewer's repo key", () => {
     expect(await first).toEqual({
       ok: true,
       branch: "deleted",
-      deletedTip: null,
+      deleted: null,
     });
   });
 });
@@ -1182,7 +1239,7 @@ describe("the archive step leaves a branch checked out again unarchived", () => 
         branch: BRANCH,
         then: "archive",
       }),
-    ).toEqual({ ok: true, branch: "keptInUse", deletedTip: null });
+    ).toEqual({ ok: true, branch: "keptInUse", deleted: null });
     expect(removeWorktree).toHaveBeenCalledTimes(1);
     expect(gitSetBranchArchived).not.toHaveBeenCalled();
     expectSilent();
@@ -1233,7 +1290,7 @@ describe("the archive step leaves a branch checked out again unarchived", () => 
         branch: BRANCH,
         then: "archive",
       }),
-    ).toEqual({ ok: true, branch: "archived", deletedTip: null });
+    ).toEqual({ ok: true, branch: "archived", deleted: null });
     expect(gitSetBranchArchived).toHaveBeenCalledWith(REPO, BRANCH, true);
   });
 });
@@ -1258,6 +1315,8 @@ describe("removeWorktreeForCleanup's pinned delete", () => {
       .mockResolvedValueOnce({
         branchCleanup: "deleted",
         branchTip: TIP,
+        branchKeptLocal: false,
+        branchUpstream: null,
         tipMoved: null,
       });
     expect(
@@ -1266,7 +1325,11 @@ describe("removeWorktreeForCleanup's pinned delete", () => {
         then: "delete",
         expectedTip: TIP,
       }),
-    ).toEqual({ ok: true, branch: "deleted", deletedTip: TIP });
+    ).toEqual({
+      ok: true,
+      branch: "deleted",
+      deleted: { tip: TIP, keptLocal: false, upstream: null },
+    });
     expect(vi.mocked(removeWorktree).mock.calls).toEqual([
       [REPO, path, BRANCH, false, TIP],
       [REPO, path, BRANCH, false, TIP],
@@ -1281,10 +1344,32 @@ describe("removeWorktreeForCleanup's pinned delete", () => {
         then: "archive",
         expectedTip: TIP,
       }),
-    ).toEqual({ ok: true, branch: "archived", deletedTip: null });
+    ).toEqual({ ok: true, branch: "archived", deleted: null });
     expect(vi.mocked(removeWorktree).mock.calls).toEqual([
       [REPO, archivePath, null, false],
     ]);
+  });
+
+  it("carries a deleted branch's Keep local mark and upstream from the removal", async () => {
+    const path = "C:/repos/wt/pinned-facts";
+    vi.mocked(removeWorktree).mockResolvedValueOnce({
+      branchCleanup: "deleted",
+      branchTip: TIP,
+      branchKeptLocal: true,
+      branchUpstream: "origin/x",
+      tipMoved: null,
+    });
+    expect(
+      await removeWorktreeForCleanup(qc, {
+        ...args(path),
+        then: "delete",
+        expectedTip: TIP,
+      }),
+    ).toEqual({
+      ok: true,
+      branch: "deleted",
+      deleted: { tip: TIP, keptLocal: true, upstream: "origin/x" },
+    });
   });
 
   it("a tip-moved answer removes nothing, prunes nothing and reports the measured tip", async () => {
@@ -1293,6 +1378,8 @@ describe("removeWorktreeForCleanup's pinned delete", () => {
     vi.mocked(removeWorktree).mockResolvedValueOnce({
       branchCleanup: "sparedMoved",
       branchTip: null,
+      branchKeptLocal: null,
+      branchUpstream: null,
       tipMoved: { expected: TIP, actual: MOVED },
     });
     expect(
@@ -1321,7 +1408,7 @@ describe("removeWorktreeForCleanup's pinned delete", () => {
         then: "delete",
         expectedTip: TIP,
       }),
-    ).toEqual({ ok: true, branch: "keptMoved", deletedTip: null });
+    ).toEqual({ ok: true, branch: "keptMoved", deleted: null });
     expect(pruneWorktrees).toHaveBeenCalledWith(REPO);
   });
 
@@ -1334,7 +1421,7 @@ describe("removeWorktreeForCleanup's pinned delete", () => {
         then: "delete",
         expectedTip: TIP,
       }),
-    ).toEqual({ ok: true, branch: "deleted", deletedTip: null });
+    ).toEqual({ ok: true, branch: "deleted", deleted: null });
   });
 
   it("a pinned call that rejects is a plain failure", async () => {

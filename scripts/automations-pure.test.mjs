@@ -77,6 +77,14 @@ test("a missing local head branch is not fresh", () => {
   );
 });
 
+test("a head named like an Object.prototype key never reads an inherited member as its tip", () => {
+  // A comparator that accepts anything, so only the own-key read can refuse.
+  assert.equal(
+    localRefsFresh({}, [branch()], HEAD_SHA, "main", "constructor", () => true),
+    false,
+  );
+});
+
 test("a head sha the local tip doesn't match is not fresh", () => {
   assert.equal(
     localRefsFresh(

@@ -132,12 +132,6 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
-    fn: "branch_tip_sha",
-    rationale:
-      "read-only rev-parse tip probe (never a refspec); validates with validate_branch_name at fn entry",
-  },
-  {
-    file: "git/branches.rs",
     fn: "git_default_branch",
     rationale: "interpolates only the fixed literals main/master",
   },
@@ -261,12 +255,6 @@ const REFSPEC_ALLOWLIST = [
     fn: "fill_upstream_facts",
     rationale:
       "read-only for-each-ref tracking read of HEAD's branch (never a refspec); the name is git's own status branch.head, checked with validate_ref_name first",
-  },
-  {
-    file: "git/worktree.rs",
-    fn: "read_branch_tip",
-    rationale:
-      "read-only rev-parse tip probe gating the removal's best-effort branch delete (never a refspec); validates with validate_branch_name at fn entry",
   },
   {
     file: "github/pr.rs",

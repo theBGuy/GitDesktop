@@ -18,10 +18,10 @@
 //! create_branch (name), checkout_branch, rename_branch (from AND to),
 //! push (with or without `branch`), force_push,
 //! delete_branch, delete_remote_branch — refuse `gd/session/*` in any letter case
-//! to protect Resume. Lowercase `gd/session/` names are hidden from every branch
-//! list; other casing shares real session branches' loose-ref folder on
-//! case-insensitive filesystems. merge_branch / rebase_branch only READ branch
-//! names, so they carry no such guard.
+//! to protect Resume (other casing shares real session branches' loose-ref folder on
+//! case-insensitive filesystems), and session names in any letter case are hidden
+//! from every branch list. merge_branch / rebase_branch only READ branch names, so
+//! they carry no such guard.
 //!
 //! The tools that move HEAD, a branch, or the stash list also take the promote gate
 //! (`git::promote_marker`), mirroring the set the GUI's `promotionBlocksCheckout`
@@ -1372,7 +1372,7 @@ impl GitDesktopMcp {
         .await
         .map_err(app_err)?;
         match outcome {
-            DeleteBranchOutcome::Deleted { tip } => ok_text(format!(
+            DeleteBranchOutcome::Deleted { tip, .. } => ok_text(format!(
                 "branch deleted: {name} (was {tip}) — create_branch with `from` set to that id \
                  restores it"
             )),

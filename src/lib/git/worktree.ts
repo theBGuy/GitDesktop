@@ -1,3 +1,4 @@
+import { deleteFactsOf } from "@/lib/git/api/branches";
 import { invoke } from "@/lib/tauri/invoke";
 
 /** A git worktree: an isolated branch checkout (used for agent sessions). */
@@ -117,6 +118,10 @@ export interface WorktreeRemoveOutcome {
   branchCleanup: BranchCleanup;
   /** The commit the deleted branch pointed at; non-null exactly when branchCleanup is "deleted". */
   branchTip: string | null;
+  /** The deleted branch's Keep local mark; non-null exactly when branchCleanup is "deleted". */
+  branchKeptLocal: boolean | null;
+  /** The deleted branch's upstream; null unless it was deleted with one. */
+  branchUpstream: string | null;
   /** Non-null only when `expectedBranchTip` was sent and the branch pointed elsewhere
    *  before the removal began: nothing was removed, the worktree is still there. */
   tipMoved: { expected: string; actual: string } | null;
@@ -126,20 +131,31 @@ export interface WorktreeRemoveOutcome {
  *  branch moved since. `force` is required to drop a worktree with
  *  uncommitted changes. `expectedBranchTip` (full object id, only with a
  *  non-null `branch`) pins the delete; the key is sent only when it is a
- *  string, so a caller without a pin sends no `expectedBranchTip`. */
-export const removeWorktree = (
+ *  string, so a caller without a pin sends no `expectedBranchTip`. The deleted
+ *  branch's Keep local mark is normalized like a plain delete's. */
+export const removeWorktree = async (
   repoPath: string,
   path: string,
   branch: string | null,
   force: boolean,
   expectedBranchTip?: string | null,
-) =>
-  invoke<WorktreeRemoveOutcome>(
+): Promise<WorktreeRemoveOutcome> => {
+  const out = await invoke<WorktreeRemoveOutcome>(
     "git_worktree_remove",
     typeof expectedBranchTip === "string"
       ? { repoPath, path, branch, force, expectedBranchTip }
       : { repoPath, path, branch, force },
   );
+  const facts = deleteFactsOf({
+    keptLocal: out.branchKeptLocal,
+    upstream: out.branchUpstream,
+  });
+  return {
+    ...out,
+    branchKeptLocal: out.branchCleanup === "deleted" ? facts.keptLocal : null,
+    branchUpstream: facts.upstream,
+  };
+};
 
 /** Prunes stale worktree admin entries (e.g. after a crash). */
 export const pruneWorktrees = (repoPath: string) =>

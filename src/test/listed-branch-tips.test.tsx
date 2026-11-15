@@ -185,12 +185,28 @@ describe("useListedBranchTips", () => {
     expect(state()).toEqual({ tips: {}, waiting: ["l-a"], failed: [] });
     await answer(2, { "l-a": oid("3") });
     expect(state().tips).toEqual({ "l-a": oid("3") });
-    // Epoch 0 is the closed hook's disabled key, which never fetches.
-    const opens = view.client
-      .getQueryCache()
-      .findAll({ queryKey: ["listed-tips", repoPath] })
-      .filter((q) => q.queryKey[2] !== 0 || q.state.data !== undefined);
-    expect(opens).toHaveLength(0);
+    expect(
+      view.client
+        .getQueryCache()
+        .findAll({ queryKey: ["listed-tips", repoPath] }),
+    ).toHaveLength(0);
+  });
+
+  it("keeps one closed cache entry across every repository visited while closed", async () => {
+    const view = mount({
+      repoPath: "C:/repos/lt-a",
+      names: [],
+      enabled: false,
+    });
+    await flush();
+    view.update({ repoPath: "C:/repos/lt-b", names: [], enabled: false });
+    await flush();
+    view.update({ repoPath: "C:/repos/lt-c", names: [], enabled: false });
+    await flush();
+    expect(reads).toHaveLength(0);
+    expect(
+      view.client.getQueryCache().findAll({ queryKey: ["listed-tips"] }),
+    ).toHaveLength(1);
   });
 
   it("reads a name that appears while a read is in flight with the next read, latching only the current key's answer", async () => {

@@ -30,6 +30,7 @@ import {
   getSecret,
   gitBranchDivergence,
   gitBranches,
+  gitBranchTips,
   gitCheckoutBranch,
   gitDefaultBranch,
   gitDeleteBranch,
@@ -96,6 +97,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitKeepLocalHookRemove: vi.fn(),
   gitCheckoutBranch: vi.fn(),
   gitDeleteBranch: vi.fn(),
+  gitBranchTips: vi.fn(),
   gitUpdateBranchFrom: vi.fn(),
   gitPush: pushSpy,
 }));
@@ -799,7 +801,10 @@ describe("deleting the checked-out branch while it pushes", () => {
       vi.mocked(gitDeleteBranch).mockResolvedValue({
         status: "deleted",
         tip: "a".repeat(40),
+        keptLocal: false,
+        upstream: null,
       });
+      vi.mocked(gitBranchTips).mockResolvedValue({ feat: "a".repeat(40) });
       const { user, queryClient } = renderSwitcher();
       render(
         <QueryClientProvider client={queryClient}>
@@ -815,7 +820,13 @@ describe("deleting the checked-out branch while it pushes", () => {
       await openList(user, "feat");
       await openRowMenu(user, "feat");
       await user.click(menuItem("Delete branch…"));
-      await user.click(await screen.findByRole("button", { name: "Delete" }));
+      // Delete holds until the confirm's tip read answers.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Delete" }),
+        ).not.toHaveAttribute("aria-disabled", "true"),
+      );
+      await user.click(screen.getByRole("button", { name: "Delete" }));
       await waitFor(() =>
         expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main"),
       );

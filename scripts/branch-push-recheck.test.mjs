@@ -92,10 +92,8 @@ const PINS = [
       "refuseWhileRowPushes(",
       DERIVED,
       DERIVED_ELSEWHERE,
-      "await readBranchRowsFresh(deleteIn)",
-      "if (refuseWhileRowPushes(deleteTarget)) return;",
       "promotionBlocksCheckout(repoPath)",
-      "await deleteBranch.mutateAsync(deleteTarget)",
+      "await deleteBranch.mutateAsync({",
     ],
     mutate: [
       "if (refuseWhileRowPushes(deleteTarget)) return;",

@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import {
@@ -19,8 +26,10 @@ import {
   gitHookSetEnabled,
   gitHooksList,
   gitHookWrite,
+  type HookDeleteOutcome,
 } from "@/lib/git/api";
 import type { HookEntry, HooksInfo } from "@/lib/git/types";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -126,7 +135,9 @@ beforeEach(() => {
   vi.mocked(gitHookRead).mockImplementation(async () => SCRIPT);
   vi.mocked(gitHookWrite).mockImplementation(async () => undefined);
   vi.mocked(gitHookSetEnabled).mockImplementation(async () => undefined);
-  vi.mocked(gitHookDelete).mockImplementation(async () => undefined);
+  vi.mocked(gitHookDelete).mockImplementation(async () => ({
+    status: "deleted",
+  }));
   useUiStore.setState(useUiStore.getInitialState(), true);
   useUiStore.setState({ repoPath: REPO });
   useConfirm.setState({ request: null, requestHold: null });
@@ -143,13 +154,19 @@ function renderDialog(
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  render(
+  const tree = (open: boolean) => (
     <QueryClientProvider client={client}>
-      <HooksDialog repoPath={REPO} open onOpenChange={onOpenChange} />
+      <HooksDialog repoPath={REPO} open={open} onOpenChange={onOpenChange} />
       {withHost && <ConfirmDialogHost />}
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { user: userEvent.setup(), client };
+  const { rerender } = render(tree(true));
+  return {
+    user: userEvent.setup(),
+    client,
+    /** Sets the dialog's `open` prop the way its parent would. */
+    setOpen: (open: boolean) => rerender(tree(open)),
+  };
 }
 
 /** A hook's list row; its name runs into the label and chip in jsdom, which
@@ -244,7 +261,7 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     await user.click(screen.getByRole("button", { name: "Delete…" }));
     await answer(true);
     await waitFor(() =>
-      expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push"),
+      expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push", true),
     );
     expect(gitHookDelete).toHaveBeenCalledTimes(1);
     expect(toast.success).toHaveBeenCalledWith("Deleted pre-push");
@@ -305,8 +322,8 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     let land: () => void = () => undefined;
     vi.mocked(gitHookDelete).mockImplementation(
       () =>
-        new Promise<void>((resolve) => {
-          land = resolve;
+        new Promise<HookDeleteOutcome>((resolve) => {
+          land = () => resolve({ status: "deleted" });
         }),
     );
     const { user } = renderDialog(true);
@@ -443,7 +460,7 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() =>
-      expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push"),
+      expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push", false),
     );
     expect(request()).toBeNull();
   });
@@ -472,6 +489,299 @@ describe("the managed pre-push guard in the Hooks dialog", () => {
     await user.click(screen.getByRole("button", { name: "Disable" }));
     await waitFor(() => expect(gitHookSetEnabled).toHaveBeenCalledTimes(1));
     expect(request()).toBeNull();
+    // An absent field must reach the backend as false, never as an omitted key.
+    await inlineDelete(user);
+    await waitFor(() =>
+      expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push", false),
+    );
+    expect(request()).toBeNull();
+  });
+});
+
+const NOTICE = "pre-push changed since this list loaded — nothing was deleted.";
+
+/** Holds the next delete until the test answers it. */
+function deferDelete() {
+  let land: (outcome: HookDeleteOutcome) => void = () => undefined;
+  vi.mocked(gitHookDelete).mockImplementationOnce(
+    () =>
+      new Promise<HookDeleteOutcome>((resolve) => {
+        land = resolve;
+      }),
+  );
+  return (outcome: HookDeleteOutcome) => act(async () => land(outcome));
+}
+
+/** Presses the inline swap's Delete on the selected unmanaged hook. */
+async function inlineDelete(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Delete…" }));
+  expect(screen.getByText("Recycle bin?")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Delete" }));
+}
+
+describe("held controls in the Hooks dialog", () => {
+  it("keeps focus on the toggle through its own write and flip", async () => {
+    let enabled: () => void = () => undefined;
+    vi.mocked(gitHookSetEnabled).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          enabled = resolve;
+        }),
+    );
+    vi.mocked(gitHooksList).mockImplementation(async () =>
+      vi.mocked(gitHookSetEnabled).mock.lastCall?.[2] === false
+        ? {
+            ...info(),
+            entries: info().entries.map((e) =>
+              e.name === "pre-commit"
+                ? hook("pre-commit", "disabled", false)
+                : e,
+            ),
+          }
+        : info(),
+    );
+    const { user } = renderDialog();
+    await select(user, "pre-commit");
+    const toggle = screen.getByRole("button", { name: "Disable" });
+    act(() => toggle.focus());
+    await user.keyboard("{Enter}");
+    await waitFor(() =>
+      expect(toggle).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(toggle).toHaveAccessibleDescription(
+      "A hook change is already running.",
+    );
+    expect(document.activeElement).toBe(toggle);
+    await act(async () => enabled());
+    await waitFor(() => expect(toggle).toHaveAccessibleName("Enable"));
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle).not.toHaveAttribute("aria-disabled");
+    // The Enter still held from the Disable press must not fire Enable.
+    expect(fireEvent.keyDown(toggle, { key: "Enter", repeat: true })).toBe(
+      false,
+    );
+    await act(() => Promise.resolve());
+    expect(gitHookSetEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds Save with the reason that applies", async () => {
+    let saved: () => void = () => undefined;
+    vi.mocked(gitHookWrite).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          saved = resolve;
+        }),
+    );
+    const { user } = renderDialog();
+    await select(user, "pre-commit");
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAccessibleDescription("No changes to save.");
+    const editor = screen.getByLabelText("Hook script");
+    await user.clear(editor);
+    expect(save).toHaveAccessibleDescription("The script is empty.");
+    await user.type(editor, "#!/bin/sh");
+    expect(save).not.toHaveAttribute("aria-disabled");
+    await user.click(save);
+    await waitFor(() =>
+      expect(save).toHaveAccessibleDescription("A save is already running."),
+    );
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    await act(async () => saved());
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Saved the pre-commit hook"),
+    );
+    await waitFor(() => expect(save).not.toHaveAttribute("aria-disabled"));
+    expect(fireEvent.keyDown(save, { key: "Enter", repeat: true })).toBe(false);
+    await act(() => Promise.resolve());
+    expect(gitHookWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to close while its own managed prompt is pending", async () => {
+    const onOpenChange = vi.fn();
+    const { user } = renderDialog(false, onOpenChange);
+    await select(user, "pre-push");
+    await user.click(screen.getByRole("button", { name: "Disable" }));
+    expectAsked("disable");
+    await user.keyboard("{Escape}");
+    expect(onOpenChange.mock.calls.map((c) => c[0])).not.toContain(false);
+    expectAsked("disable");
+    await answer(false);
+    await user.keyboard("{Escape}");
+    expect(onOpenChange.mock.calls.map((c) => c[0])).toContain(false);
+    expect(gitHookSetEnabled).not.toHaveBeenCalled();
+  });
+});
+
+describe("a delete whose hook changed since the list loaded", () => {
+  beforeEach(() => {
+    prePush = hook("pre-push", "active", false);
+  });
+
+  /** The first delete finds the hook turned into the guard. */
+  const turnsManaged = (): HookDeleteOutcome => {
+    prePush = hook("pre-push", "active", true);
+    return { status: "managedChanged", managed: true };
+  };
+
+  it("asks the guard's prompt, then deletes on Confirm", async () => {
+    vi.mocked(gitHookDelete).mockImplementationOnce(async () => turnsManaged());
+    const { user } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expectAsked("delete"));
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+    expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push", false);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.queryByText("Recycle bin?")).not.toBeInTheDocument();
+    await answer(true);
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Deleted pre-push"),
+    );
+    expect(gitHookDelete).toHaveBeenCalledTimes(2);
+    expect(gitHookDelete).toHaveBeenLastCalledWith(REPO, "pre-push", true);
+  });
+
+  it("deletes nothing more when that prompt is cancelled", async () => {
+    vi.mocked(gitHookDelete).mockImplementationOnce(async () => turnsManaged());
+    const { user } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expectAsked("delete"));
+    await answer(false);
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("asks only once the inline confirm has left and Delete… holds focus", async () => {
+    vi.mocked(gitHookDelete).mockImplementationOnce(async () => turnsManaged());
+    let snapshot: { inline: boolean; active: Element | null } | null = null;
+    const unsubscribe = useConfirm.subscribe((s, prev) => {
+      if (s.request !== null && prev.request === null && snapshot === null) {
+        snapshot = {
+          inline: screen.queryByText("Recycle bin?") !== null,
+          active: document.activeElement,
+        };
+      }
+    });
+    try {
+      const { user } = renderDialog();
+      await select(user, "pre-push");
+      await inlineDelete(user);
+      await waitFor(() => expect(snapshot).not.toBeNull());
+      expect(snapshot).toEqual({
+        inline: false,
+        active: screen.getByRole("button", { name: "Delete…" }),
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("says so when the confirmed guard turned into an ordinary hook", async () => {
+    prePush = hook("pre-push", "active", true);
+    vi.mocked(gitHookDelete).mockImplementationOnce(async () => {
+      prePush = hook("pre-push", "active", false);
+      return { status: "managedChanged", managed: false };
+    });
+    const { user } = renderDialog();
+    await select(user, "pre-push");
+    await user.click(screen.getByRole("button", { name: "Delete…" }));
+    expectAsked("delete");
+    await answer(true);
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(NOTICE));
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+    expect(gitHookDelete).toHaveBeenCalledWith(REPO, "pre-push", true);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(request()).toBeNull();
+    expect(row("pre-push")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByLabelText("Hook script")).toBeInTheDocument();
+  });
+
+  it("asks nothing after a repository switch, and says so once", async () => {
+    const land = deferDelete();
+    const { user } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expect(gitHookDelete).toHaveBeenCalledTimes(1));
+    act(() => useUiStore.setState({ repoPath: "C:/repos/other" }));
+    await land(turnsManaged());
+    await waitFor(() => expect(toast.info).toHaveBeenCalledTimes(1));
+    await act(() => Promise.resolve());
+    expect(vi.mocked(toast.info).mock.calls[0]?.[0]).toMatch(
+      /nothing was deleted in guarded\.$/,
+    );
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(request()).toBeNull();
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks nothing when the dialog closed before the answer", async () => {
+    const land = deferDelete();
+    const { user, setOpen } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expect(gitHookDelete).toHaveBeenCalledTimes(1));
+    setOpen(false);
+    await land(turnsManaged());
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(NOTICE));
+    await act(() => Promise.resolve());
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(request()).toBeNull();
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks nothing when the re-read finds the hook gone", async () => {
+    vi.mocked(gitHookDelete).mockImplementationOnce(async () => {
+      prePush = hook("pre-push", "inactive", false);
+      return { status: "managedChanged", managed: true };
+    });
+    const { user } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(NOTICE));
+    await act(() => Promise.resolve());
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(request()).toBeNull();
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds the guard's Delete… while the inline delete still runs", async () => {
+    const land = deferDelete();
+    const { user, client } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expect(gitHookDelete).toHaveBeenCalledTimes(1));
+    prePush = hook("pre-push", "active", true);
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["repo", REPO, "hooks"] }),
+    );
+    const guardDelete = await screen.findByRole("button", { name: "Delete…" });
+    expect(guardDelete).toHaveAttribute("aria-disabled", "true");
+    expect(guardDelete).toHaveAccessibleDescription(ACT_PENDING_REASON);
+    await user.click(guardDelete);
+    await act(() => Promise.resolve());
+    expect(request()).toBeNull();
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
+    await land({ status: "deleted" });
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Deleted pre-push"),
+    );
+  });
+
+  it("asks nothing when another hook was selected before the answer", async () => {
+    const land = deferDelete();
+    const { user } = renderDialog();
+    await select(user, "pre-push");
+    await inlineDelete(user);
+    await waitFor(() => expect(gitHookDelete).toHaveBeenCalledTimes(1));
+    await select(user, "pre-commit");
+    await land(turnsManaged());
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(NOTICE));
+    await act(() => Promise.resolve());
+    expect(toast.info).toHaveBeenCalledTimes(1);
+    expect(request()).toBeNull();
+    expect(gitHookDelete).toHaveBeenCalledTimes(1);
   });
 });
 

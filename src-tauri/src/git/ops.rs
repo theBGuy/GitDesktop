@@ -10,8 +10,8 @@ use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::runner::{
     acquire_repo_lock, holder_label, run_git, run_git_mutating, run_git_mutating_raw, run_git_raw,
     run_git_raw_env, run_git_raw_index_retry, run_git_raw_input, run_git_worktree_admin,
-    subcommand_of, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    subcommand_of, with_config_write_lock, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{
     CommitDate, FileDiff, RebaseStop, RepoOpState, RewriteStep, StashEntry, TagInfo,
@@ -1764,12 +1764,12 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // `reset --hard target_tip` in the funnel below is valid ONLY with HEAD on
         // `target`: on the user's original branch it would rewind THAT branch to the
         // target's tip. Defensive — the only path into the funnel has already
-        // switched — so any future early exit inherits the guarantee.
-        let switched = match run_git(
-            Some(repo_path),
-            &["switch", target_branch],
-            DEFAULT_TIMEOUT,
-        )
+        // switched — so any future early exit inherits the guarantee. Both switches run
+        // inside the config-write mutex, so neither HEAD write can land inside a branch
+        // delete's guarded window; the picks, `--skip`, `--abort` and reset stay outside.
+        let switched = match with_config_write_lock(repo_path, |_held| async move {
+            run_git(Some(repo_path), &["switch", target_branch], DEFAULT_TIMEOUT).await
+        })
         .await
         {
             Ok(_) => true,
@@ -1894,9 +1894,11 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             } else {
                 vec!["switch", &original_restore]
             };
-            let restore_ok = run_git(Some(repo_path), &restore_args, rollback_timeout)
-                .await
-                .is_ok();
+            let restore_ok = with_config_write_lock(repo_path, |_held| async move {
+                run_git(Some(repo_path), &restore_args, rollback_timeout).await
+            })
+            .await
+            .is_ok();
             let rolled_back = reset_ok && restore_ok;
             // The remedy has to match the damage: a failed reset can leave this
             // run's commits on `target`, while a good reset with a failed
@@ -4076,14 +4078,23 @@ pub(crate) fn parse_worktree_paths(porcelain: &str) -> Vec<String> {
 
 /// The worktree checking `branch` out, from one `worktree list --porcelain` read.
 /// Both parsers emit one entry per stanza in list order, so the zip pairs each path
-/// with its own branch; a detached stanza (our resolve worktrees) carries an empty
-/// name and never matches.
-fn worktree_holding(porcelain: &str, branch: &str) -> Option<String> {
-    parse_worktree_paths(porcelain)
+/// with its own branch; a detached stanza (our resolve worktrees) carries an empty name
+/// and never matches. This checkout is listed too, so a caller whose own checkout holds
+/// `branch` routes to that tree. A holder matches by
+/// [`holds_branch`](crate::git::branches::holds_branch).
+async fn worktree_holding(porcelain: &str, repo_path: &str, branch: &str) -> Option<String> {
+    use crate::git::branches::{eq_ignoring_case, holds_branch};
+    let candidates: Vec<(String, String)> = parse_worktree_paths(porcelain)
         .into_iter()
         .zip(parse_worktree_branches(porcelain))
-        .find(|(_, b)| b == branch)
-        .map(|(path, _)| path)
+        .filter(|(_, b)| eq_ignoring_case(b, branch))
+        .collect();
+    for (path, holder) in candidates {
+        if holds_branch(repo_path, &holder, branch).await {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Whether a worktree path is one of our resolve worktrees — its final path
@@ -4236,6 +4247,43 @@ fn merge_target_moved(base: &str) -> String {
     )
 }
 
+/// Refuses, before anything is merged, a target [`finalize_branch`]'s bare arm would
+/// refuse as a case twin: one that neither `current` nor a listed worktree holds, where
+/// refs can alias. A held twin passes, since its arm moves it through that checkout.
+async fn refuse_unheld_twin(repo_path: &str, branch: &str, current: &str) -> AppResult<()> {
+    use crate::git::branches::{branch_spelling, BranchSpelling};
+    let BranchSpelling::Twin { twin, .. } = branch_spelling(repo_path, branch, true).await? else {
+        return Ok(());
+    };
+    if is_current_branch(repo_path, current, branch).await {
+        return Ok(());
+    }
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if worktree_holding(&listed.stdout_lossy(), repo_path, branch)
+        .await
+        .is_some()
+        || !crate::git::branches::refs_can_alias(repo_path).await
+    {
+        return Ok(());
+    }
+    Err(crate::git::branches::twin_refusal(branch, &twin))
+}
+
+/// Whether the main checkout, on `current` (`"HEAD"` when detached, a sentinel that holds
+/// no branch), holds `branch` by [`holds_branch`]'s rule: every compare that picks the
+/// current-branch path or its clean-tree checks, so a spelling of HEAD's branch other
+/// than the stored one still counts.
+///
+/// [`holds_branch`]: crate::git::branches::holds_branch
+async fn is_current_branch(repo_path: &str, current: &str, branch: &str) -> bool {
+    current != "HEAD" && crate::git::branches::holds_branch(repo_path, current, branch).await
+}
+
 /// [`finalize_base`]'s mechanics for any target: a local PR's merge advances its base,
 /// its branch update advances its head. `moved` words the refusal for a target that
 /// moved, or whose checkout switched away, so each flow names its own remedy. Takes the
@@ -4249,20 +4297,28 @@ async fn finalize_branch(
     expected_tip: Option<&str>,
     moved: fn(&str) -> String,
 ) -> AppResult<()> {
-    let _current_guard = if branch == current {
+    use crate::git::branches::{current_branch_name, holds_branch};
+    // A case variant of a stored branch acts as that branch from here on. Read before the
+    // hold, as the current-branch check it feeds is: under the hold the checkout and the
+    // tip are re-read by the stored name, and the bare arm re-classifies it.
+    let stored = crate::git::branches::stored_branch_spelling(repo_path, branch).await?;
+    let branch = stored.as_str();
+    let is_current = is_current_branch(repo_path, current, branch).await;
+    let _current_guard = if is_current {
         let domain = state.working_tree_lock(repo_path).await;
         Some(acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?)
     } else {
         None
     };
     // The main checkout's hold spans the branch/pin reads through the fast-forward.
-    if branch == current
-        && crate::git::branches::current_branch_name(repo_path)
-            .await?
-            .as_deref()
-            != Some(branch)
-    {
-        return Err(AppError::Command(moved(branch)));
+    if is_current {
+        let still = match current_branch_name(repo_path).await? {
+            Some(now) => holds_branch(repo_path, &now, branch).await,
+            None => false,
+        };
+        if !still {
+            return Err(AppError::Command(moved(branch)));
+        }
     }
     let tip_now = branch_tip(repo_path, branch).await?;
     if let Some(expected) = expected_tip {
@@ -4283,7 +4339,7 @@ async fn finalize_branch(
         }
     }
 
-    if branch == current {
+    if is_current {
         // `branch` is the main repo's current branch — fast-forward its working
         // tree to the merged commit. (Guaranteed a fast-forward: `new_sha` was
         // built from its tip in the resolve worktree.)
@@ -4333,7 +4389,7 @@ async fn finalize_branch(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let mut owning_worktree = worktree_holding(&listed.stdout_lossy(), branch);
+    let mut owning_worktree = worktree_holding(&listed.stdout_lossy(), repo_path, branch).await;
 
     // An update's hidden checkout is never a fast-forward target: advancing `branch`
     // under a running update moves the branch it pinned and kills it at its pin verify.
@@ -4359,7 +4415,8 @@ async fn finalize_branch(
                     DEFAULT_TIMEOUT,
                 )
                 .await?;
-                owning_worktree = worktree_holding(&relisted.stdout_lossy(), branch);
+                owning_worktree =
+                    worktree_holding(&relisted.stdout_lossy(), repo_path, branch).await;
                 // Another update may hold `branch` by now. Same rule as above, so each
                 // message stays true: a held lock says running, a released one says
                 // interrupted, and an unprovable one routes as it always did.
@@ -4381,12 +4438,11 @@ async fn finalize_branch(
         let domain = state.working_tree_lock(&worktree).await;
         let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
         // The holder was discovered outside its lock, so verify its branch and tip again.
-        if crate::git::branches::current_branch_name(&worktree)
-            .await?
-            .as_deref()
-            != Some(branch)
-            || branch_tip(&worktree, branch).await? != tip_now
-        {
+        let still = match current_branch_name(&worktree).await? {
+            Some(now) => holds_branch(&worktree, &now, branch).await,
+            None => false,
+        };
+        if !still || branch_tip(&worktree, branch).await? != tip_now {
             return Err(AppError::Command(moved(branch)));
         }
         let paths = ignored_files_in_the_way(&worktree, new_sha, DEFAULT_TIMEOUT)
@@ -4415,9 +4471,18 @@ async fn finalize_branch(
         return Ok(());
     }
 
-    // Not checked out anywhere — move the ref directly, no working tree touched.
-    // git's own `<oldvalue>` argument closes the window between the check above
-    // and this write.
+    // `update-ref` writes by `branch`'s spelling: for a case twin where refs alias, git
+    // writes a loose file that the twin's spelling also reads, under any checkout on the
+    // twin.
+    if crate::git::branches::bare_move_tip(repo_path, branch)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::Command(moved(branch)));
+    }
+    // Not checked out anywhere — move the ref directly, no working tree touched. git's
+    // own `<oldvalue>` argument refuses a move of the tip between the check above and
+    // this write, but not a twin created at the same tip inside that window.
     run_git_mutating(
         state,
         repo_path,
@@ -4496,17 +4561,22 @@ pub(crate) async fn merge_local_pr(
 
     // Where the main tree is now, and base's tip — captured before any mutation.
     let current = current_branch_for_merge(repo_path).await?;
+    // Git and the checkout compares take base's stored spelling, as `finalize_branch`
+    // does, so its start read and its finish compare read one name; the journal and the
+    // label keep the PR's.
+    let stored_base = crate::git::branches::stored_branch_spelling(repo_path, base).await?;
     // Fully-qualified: this one read anchors the journal, the resolve worktree's
     // start point, and the rebase strategy's replay range.
-    let base_tip = branch_tip(repo_path, base).await?;
+    let base_tip = branch_tip(repo_path, &stored_base).await?;
 
     // Only advancing the CURRENT branch touches the main tree — gate that one
     // case on a clean tree (finalize_base's `merge --ff-only` would otherwise
     // fail, or clobber uncommitted work). Merging into any other branch leaves
     // the main tree alone, so no clean-tree requirement.
-    if base == current {
+    if is_current_branch(repo_path, &current, &stored_base).await {
         ensure_clean_tree(repo_path).await?;
     }
+    refuse_unheld_twin(repo_path, &stored_base, &current).await?;
 
     // Journal a pending entry AFTER the state capture, BEFORE the first mutation.
     // Best-effort: a journal failure returns None and the op proceeds unchanged.
@@ -4602,8 +4672,15 @@ pub(crate) async fn merge_local_pr(
                 .trim()
                 .to_string();
             // The tip is still in scope here — no need to recover it.
-            if let Err(err) =
-                finalize_base(state, repo_path, base, &new_sha, &current, Some(&base_tip)).await
+            if let Err(err) = finalize_base(
+                state,
+                repo_path,
+                &stored_base,
+                &new_sha,
+                &current,
+                Some(&base_tip),
+            )
+            .await
             {
                 // base couldn't be advanced (e.g. checked out elsewhere, or the
                 // ff-only failed) — clean up the worktree and surface the cause.
@@ -4768,9 +4845,11 @@ pub(crate) async fn finish_local_pr_merge(
     // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
     // into the main tree — re-guard clean HERE, since the user may have dirtied it
     // during resolution (after `git_merge_local_pr`'s upfront check). Otherwise base
-    // moves by `update-ref` and the main tree is never touched.
+    // moves by `update-ref` and the main tree is never touched. Base's stored spelling, as
+    // `merge_local_pr` compared and read it.
+    let stored_base = crate::git::branches::stored_branch_spelling(repo_path, base).await?;
     let current = current_branch_for_merge(repo_path).await?;
-    if base == current {
+    if is_current_branch(repo_path, &current, &stored_base).await {
         ensure_clean_tree(repo_path).await?;
     }
 
@@ -4826,7 +4905,7 @@ pub(crate) async fn finish_local_pr_merge(
     }
 
     // Completed with no remaining conflicts: advance base, tear down, close oplog.
-    // `current` was resolved up top (and re-guarded clean when base == current).
+    // `current` was resolved up top (and re-guarded clean when it holds base).
     let new_sha = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
         .await?
         .stdout_lossy()
@@ -4838,7 +4917,7 @@ pub(crate) async fn finish_local_pr_merge(
     finalize_base(
         state,
         repo_path,
-        base,
+        &stored_base,
         &new_sha,
         &current,
         expected_tip.as_deref(),
@@ -5195,7 +5274,7 @@ async fn refuse_session_holder(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let Some(holder) = worktree_holding(&listed.stdout_lossy(), head) else {
+    let Some(holder) = worktree_holding(&listed.stdout_lossy(), repo_path, head).await else {
         return Ok(());
     };
     let update_checkout = Path::new(&holder)
@@ -5461,11 +5540,15 @@ pub(crate) async fn update_local_pr_head(
 ) -> AppResult<LocalPrUpdateOutcome> {
     crate::git::branches::validate_branch_name(base)?;
     crate::git::branches::validate_branch_name(head)?;
-    if base == head {
+    // Git and the checkout compares take head's stored spelling, as `finalize_branch`
+    // does, so the tip journaled here and the one it compares read one name; the
+    // journal, the label and the merge subject keep the PR's.
+    let stored_head = crate::git::branches::stored_branch_spelling(repo_path, head).await?;
+    if base == stored_head {
         return Err(AppError::InvalidArgument(SAME_BRANCH_UPDATE.to_string()));
     }
     let current = current_branch_for_merge(repo_path).await?;
-    let head_tip = existing_branch_tip(repo_path, head).await?;
+    let head_tip = existing_branch_tip(repo_path, &stored_head).await?;
     let base_tip = existing_branch_tip(repo_path, base).await?;
     if is_ancestor(repo_path, &base_tip, &head_tip).await? {
         return Err(AppError::Command(format!(
@@ -5473,11 +5556,13 @@ pub(crate) async fn update_local_pr_head(
         )));
     }
     // Nothing exists yet, so every refusal up to the journal entry leaves no trace.
-    if head == current {
+    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await;
+    if head_is_current {
         ensure_clean_head_checkout(repo_path).await?;
     } else {
-        refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+        refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
     }
+    refuse_unheld_twin(repo_path, &stored_head, &current).await?;
 
     let op_id = crate::oplog::begin(
         repo_path,
@@ -5526,13 +5611,13 @@ pub(crate) async fn update_local_pr_head(
         let landed = async {
             let new_sha = worktree_head(&worktree_path).await?;
             // A session may have taken head while the merge ran.
-            if head != current {
-                refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+            if !head_is_current {
+                refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
             }
             finalize_branch(
                 state,
                 repo_path,
-                head,
+                &stored_head,
                 &new_sha,
                 &current,
                 Some(&head_tip),
@@ -5647,9 +5732,12 @@ pub(crate) async fn finish_local_pr_update(
             "not a conflict-resolution worktree of this repository: {worktree_path}"
         )));
     }
+    // Head's stored spelling, as the start journaled its tip under; the journal, the
+    // messages and the merge subject keep the PR's.
+    let stored_head = crate::git::branches::stored_branch_spelling(repo_path, head).await?;
     let journal = update_journal(repo_path, journal_repo, op_id).await;
     let landed = match journal.as_ref() {
-        Some(j) => update_already_landed(repo_path, head, j).await,
+        Some(j) => update_already_landed(repo_path, &stored_head, j).await,
         None => None,
     };
     let landed_key = journal.as_ref().map_or(journal_repo, |j| j.key.as_str());
@@ -5667,7 +5755,7 @@ pub(crate) async fn finish_local_pr_update(
         // With the worktree still there the journal alone is no proof: its HEAD must be on
         // head, or an uncommitted resolution would be deleted as landed.
         if let (Some(tip), Some(j)) = (landed, journal.as_ref()) {
-            let standing = worktree_standing(repo_path, head, worktree_path, &j.pre_op_tip);
+            let standing = worktree_standing(repo_path, &stored_head, worktree_path, &j.pre_op_tip);
             if matches!(standing.await, Ok(WorktreeStanding::Landed)) {
                 let outcome = update_landed(tip, op_id, landed_key);
                 remove_resolve_worktree(state, repo_path, worktree_path).await;
@@ -5680,12 +5768,13 @@ pub(crate) async fn finish_local_pr_update(
         )));
     };
 
-    existing_branch_tip(repo_path, head).await?;
+    existing_branch_tip(repo_path, &stored_head).await?;
     let current = current_branch_for_merge(repo_path).await?;
-    if head == current {
+    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await;
+    if head_is_current {
         ensure_clean_head_checkout(repo_path).await?;
     } else {
-        refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+        refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
     }
     if !unmerged_paths(worktree_path).await.is_empty() {
         return Err(AppError::Command(
@@ -5693,7 +5782,7 @@ pub(crate) async fn finish_local_pr_update(
         ));
     }
     // Never commit in a worktree that does not build on this update's start tip.
-    let standing = worktree_standing(repo_path, head, worktree_path, &journal.pre_op_tip);
+    let standing = worktree_standing(repo_path, &stored_head, worktree_path, &journal.pre_op_tip);
     if standing.await? == WorktreeStanding::NotThisUpdates {
         return Err(AppError::Command(format!(
             "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
@@ -5712,15 +5801,15 @@ pub(crate) async fn finish_local_pr_update(
         )));
     }
     // Head already at the result is a finish that moved it and then lost its reply.
-    if existing_branch_tip(repo_path, head).await? != new_sha {
+    if existing_branch_tip(repo_path, &stored_head).await? != new_sha {
         // A session may have taken head since the check above.
-        if head != current {
-            refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+        if !head_is_current {
+            refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
         }
         finalize_branch(
             state,
             repo_path,
-            head,
+            &stored_head,
             &new_sha,
             &current,
             Some(&journal.pre_op_tip),
@@ -16168,6 +16257,154 @@ mod tests {
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
     }
 
+    /// The switch onto the target, in a linked worktree, queues on the config-write
+    /// mutex (held here through the main checkout, which shares it) with HEAD unmoved,
+    /// then lands and the pick runs.
+    #[tokio::test]
+    async fn cherry_pick_onto_switch_waits_on_the_config_mutex_before_moving_head() {
+        use crate::git::runner::{with_config_write_lock, CONFIG_WRITE_LOCK_EVENTS};
+        let (dir, repo) = setup_repo("pick-onto-mutex").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let wt_dir = tempfile::Builder::new()
+            .prefix("gd-rewrite-pick-onto-mutex-wt-")
+            .tempdir()
+            .unwrap();
+        let wt = wt_dir.path().join("wt").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+        let head_ref = |wt: String| async move {
+            run_git_raw(
+                Some(&wt),
+                &["symbolic-ref", "-q", "HEAD"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string()
+        };
+
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let repo = repo.clone();
+            async move {
+                with_config_write_lock(&repo, |_held| async move {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.await;
+                })
+                .await
+            }
+        });
+        held_rx.await.expect("the test holds the mutex");
+
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel::<()>();
+        let waiting_tx = std::sync::Mutex::new(Some(waiting_tx));
+        let events: std::sync::Arc<dyn Fn(&'static str) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                if event == "waiting" {
+                    if let Some(tx) = waiting_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            });
+        let pick = tokio::spawn({
+            let wt = wt.clone();
+            CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                cherry_pick_onto(&AppState::default(), &wt, &[c1], "target", None).await
+            })
+        });
+        waiting_rx.await.expect("the switch reached the mutex");
+        assert_eq!(
+            head_ref(wt.clone()).await,
+            "",
+            "HEAD moved before the mutex"
+        );
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+
+        let out = tokio::time::timeout(TEST_GIT_HANG_GUARD, pick)
+            .await
+            .expect("the pick finishes once released")
+            .unwrap()
+            .unwrap();
+        assert_eq!((out.applied, out.skipped), (1, 0));
+        assert_eq!(head_ref(wt).await, "refs/heads/target");
+    }
+
+    /// A batch that fails and rolls back takes the mutex twice, once per switch, and
+    /// never across the picks: HEAD is on the original branch when the first hold
+    /// starts, on the target when it ends and when the second starts, and on the
+    /// original again when that one ends.
+    #[tokio::test]
+    async fn cherry_pick_onto_rollback_holds_the_config_mutex_per_switch() {
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        let dir = tempfile::Builder::new()
+            .prefix("gd-rewrite-pick-onto-mutex-pairs-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        // The files backend, whose `.git/HEAD` names the branch: the event hook is sync,
+        // so it reads that file rather than awaiting a git read.
+        git(&repo, &["-c", "init.defaultRefFormat=files", "init"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "v0\n", "base").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        git(&repo, &["checkout", "feature"]).await;
+
+        let head_file = dir.path().join(".git").join("HEAD");
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(&str, String)>::new()));
+        let sink = std::sync::Arc::clone(&log);
+        let events: std::sync::Arc<dyn Fn(&'static str) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                let head = std::fs::read_to_string(&head_file).unwrap();
+                let branch = head.trim().strip_prefix("ref: refs/heads/").unwrap_or("");
+                sink.lock().unwrap().push((event, branch.to_string()));
+            });
+        let state = AppState::default();
+        let result = CONFIG_WRITE_LOCK_EVENTS
+            .scope(
+                events,
+                cherry_pick_onto(&state, &repo, &[c1, c2], "target", None),
+            )
+            .await;
+        match result {
+            Err(AppError::Git { .. }) => {}
+            Err(e) => panic!("expected a rolled-back Git error, got {e:?}"),
+            Ok(_) => panic!("the conflicting batch must fail"),
+        }
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/feature"
+        );
+        let heads: Vec<(&str, String)> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(event, _)| *event != "waiting")
+            .cloned()
+            .collect();
+        let expected = [
+            ("acquired", "feature"),
+            ("freed", "target"),
+            ("acquired", "target"),
+            ("freed", "feature"),
+        ]
+        .map(|(event, branch)| (event, branch.to_string()));
+        assert_eq!(heads, expected);
+    }
+
     /// One commit that conflicts STOPS on the target instead of rolling back: the
     /// dialog is the app's only route to "send this commit to another branch", so a
     /// rollback would dead-end the user in a terminal.
@@ -26336,6 +26573,502 @@ detached
         assert_eq!(
             run(&f.repo, &["rev-parse", "refs/heads/other"]).await,
             f.head
+        );
+    }
+
+    /// A files-backend repo with `chore/x`, and `held` (`Chore/z` or `chore/z`) checked out
+    /// at `z1` in a linked worktree when `linked`, else in the main checkout, with `up` one
+    /// commit ahead of it. On a case-insensitive filesystem the ref lands in the `chore/`
+    /// folder and is listed as `chore/z`. Returns (guard, repo, checkout, z1, up), or
+    /// `None` when `Chore/z` is not aliased: a case-sensitive filesystem, or a non-files
+    /// ref backend (`GIT_DEFAULT_REF_FORMAT` beats the `-c` pin).
+    async fn aliased_finalize_fixture(
+        tag: &str,
+        linked: bool,
+        held: &str,
+    ) -> Option<(tempfile::TempDir, String, String, String, String)> {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-finalize-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().join("repo").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["-c", "init.defaultRefFormat=files", "init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit_file(&repo, Path::new(&repo), "a.txt", "v0\n", "base").await;
+        git(&repo, &["branch", "chore/x"]).await;
+        let checkout = if linked {
+            let wt = dir.path().join("alias-wt").to_string_lossy().into_owned();
+            git(&repo, &["worktree", "add", "-q", "-b", held, &wt]).await;
+            wt
+        } else {
+            git(&repo, &["switch", "-q", "-c", held]).await;
+            repo.clone()
+        };
+        commit_file(&checkout, Path::new(&checkout), "z1.txt", "z\n", "z1").await;
+        git(&checkout, &["switch", "-q", "-c", "up"]).await;
+        commit_file(&checkout, Path::new(&checkout), "z2.txt", "z\n", "z2").await;
+        git(&checkout, &["switch", "-q", held]).await;
+        let listed = git(&repo, &["for-each-ref", "refs/heads/Chore/z"]).await;
+        let shown = run_git_raw(
+            Some(&repo),
+            &["show-ref", "--verify", "--quiet", "refs/heads/Chore/z"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        if !listed.trim().is_empty() || shown.code != 0 {
+            return None;
+        }
+        let z1 = rev(&checkout, "HEAD").await;
+        let up = rev(&repo, "refs/heads/up").await;
+        Some((dir, repo, checkout, z1, up))
+    }
+
+    /// HEAD on `Chore/z` and the call naming the stored `chore/z`: the current-branch path
+    /// fast-forwards the working tree, so HEAD's commit and the tree move together. Returns
+    /// early on a case-sensitive filesystem or a non-files ref backend, as the fixture says.
+    #[tokio::test]
+    async fn finalize_moves_the_stored_spelling_of_the_current_branch_with_its_tree() {
+        let Some((_g, repo, _, z1, up)) =
+            aliased_finalize_fixture("alias-current", false, "Chore/z").await
+        else {
+            return;
+        };
+        finalize_base(
+            &AppState::default(),
+            &repo,
+            "chore/z",
+            &up,
+            "Chore/z",
+            Some(&z1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rev(&repo, "HEAD").await, up);
+        assert!(Path::new(&repo).join("z2.txt").is_file());
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
+        assert_eq!(
+            git(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/Chore/z"
+        );
+    }
+
+    /// A sibling worktree on `Chore/z` holds the stored `chore/z`: the call naming it
+    /// fast-forwards inside that worktree, as for an exact holder. Returns early on a
+    /// case-sensitive filesystem or a non-files ref backend, as the fixture says.
+    #[tokio::test]
+    async fn finalize_moves_the_stored_spelling_inside_the_sibling_that_holds_it() {
+        let Some((_g, repo, wt, z1, up)) =
+            aliased_finalize_fixture("alias-sibling", true, "Chore/z").await
+        else {
+            return;
+        };
+        let main_head = rev(&repo, "HEAD").await;
+        let current = crate::git::branches::current_branch_name(&repo)
+            .await
+            .unwrap()
+            .unwrap();
+        finalize_base(
+            &AppState::default(),
+            &repo,
+            "chore/z",
+            &up,
+            &current,
+            Some(&z1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rev(&wt, "HEAD").await, up);
+        assert!(Path::new(&wt).join("z2.txt").is_file());
+        assert_eq!(git(&wt, &["status", "--porcelain"]).await.trim(), "");
+        assert_eq!(
+            git(&wt, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/Chore/z"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, main_head);
+    }
+
+    /// The call names `Chore/z` while the branch is stored as `chore/z`: it acts on the
+    /// stored branch. Held here, the current-branch path moves HEAD, the ref, the index
+    /// and the tree together; held by a sibling, the fast-forward runs inside it; held
+    /// nowhere, the stored ref moves and no second ref appears. Returns early on a
+    /// case-sensitive filesystem or a non-files ref backend, as the fixture says.
+    #[tokio::test]
+    async fn finalize_acts_on_the_stored_spelling_of_an_aliased_target() {
+        for (linked, held) in [(false, true), (true, true), (false, false)] {
+            let Some((_g, repo, checkout, z1, up)) =
+                aliased_finalize_fixture("alias-target", linked, "chore/z").await
+            else {
+                return;
+            };
+            if !held {
+                git(&repo, &["switch", "-q", "up"]).await;
+            }
+            let main_head = rev(&repo, "HEAD").await;
+            let current = crate::git::branches::current_branch_name(&repo)
+                .await
+                .unwrap()
+                .unwrap();
+            finalize_base(
+                &AppState::default(),
+                &repo,
+                "Chore/z",
+                &up,
+                &current,
+                Some(&z1),
+            )
+            .await
+            .unwrap();
+            let case = format!("linked {linked}, held {held}");
+            let listed = git(
+                &repo,
+                &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+            )
+            .await;
+            assert!(
+                listed.lines().any(|l| l == "refs/heads/chore/z"),
+                "{case}: {listed}"
+            );
+            assert!(
+                !listed.lines().any(|l| l == "refs/heads/Chore/z"),
+                "{case}: {listed}"
+            );
+            assert_eq!(rev(&repo, "refs/heads/chore/z").await, up, "{case}");
+            if held {
+                assert_eq!(rev(&checkout, "HEAD").await, up, "{case}");
+                assert!(Path::new(&checkout).join("z2.txt").is_file(), "{case}");
+                assert_eq!(git(&checkout, &["status", "--porcelain"]).await.trim(), "");
+                assert_eq!(
+                    git(&checkout, &["symbolic-ref", "HEAD"]).await.trim(),
+                    "refs/heads/chore/z"
+                );
+            }
+            if linked || !held {
+                assert_eq!(rev(&repo, "HEAD").await, main_head, "{case}");
+            }
+        }
+    }
+
+    /// `Feat` packed at `a` and `feat` loose at its child `b`, with `up` a child of `b`: a
+    /// read by the spelling `Feat` opens `feat`'s loose file. `checkout` puts `feat` in
+    /// this checkout (`"main"`), a linked worktree (`"linked"`) or nowhere. Returns
+    /// (guard, repo, checkout, a, b, up), or `None` when raw git reads the two apart: a
+    /// case-sensitive filesystem or a non-files ref backend.
+    async fn packed_twin_finalize_fixture(
+        tag: &str,
+        checkout: &str,
+    ) -> Option<(tempfile::TempDir, String, String, String, String, String)> {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-finalize-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().join("repo").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["-c", "init.defaultRefFormat=files", "init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit_file(&repo, Path::new(&repo), "a.txt", "a\n", "a").await;
+        let a = rev(&repo, "HEAD").await;
+        git(&repo, &["update-ref", "refs/heads/Feat", &a]).await;
+        git(&repo, &["pack-refs", "--all"]).await;
+        commit_file(&repo, Path::new(&repo), "b.txt", "b\n", "b").await;
+        let b = rev(&repo, "HEAD").await;
+        git(&repo, &["update-ref", "refs/heads/feat", &b]).await;
+        commit_file(&repo, Path::new(&repo), "c.txt", "c\n", "c").await;
+        let up = rev(&repo, "HEAD").await;
+        let shown = git(
+            &repo,
+            &["show-ref", "--verify", "--hash", "refs/heads/Feat"],
+        )
+        .await;
+        let listed = git(
+            &repo,
+            &["for-each-ref", "--format=%(objectname)", "refs/heads/Feat"],
+        )
+        .await;
+        if shown.trim() != b || listed.trim() != a {
+            return None;
+        }
+        let at = match checkout {
+            "main" => {
+                git(&repo, &["switch", "-q", "feat"]).await;
+                repo.clone()
+            }
+            "linked" => {
+                let wt = dir.path().join("twin-wt").to_string_lossy().into_owned();
+                git(&repo, &["worktree", "add", "-q", &wt, "feat"]).await;
+                wt
+            }
+            _ => repo.clone(),
+        };
+        Some((dir, repo, at, a, b, up))
+    }
+
+    /// A finalize of `Feat` while `feat` beside it shares its loose file: refused as
+    /// twins whether `feat` is checked out here, in a sibling or nowhere, and here with
+    /// `core.ignorecase` set false too (the disk folds case either way), and both refs,
+    /// the checkout's HEAD, its tree and the loose file's name are unchanged. Returns
+    /// early on a case-sensitive filesystem or a non-files ref backend.
+    #[tokio::test]
+    async fn finalize_refuses_a_case_twin_target() {
+        for (checkout, ignorecase) in [
+            ("main", "false"),
+            ("main", "true"),
+            ("linked", "true"),
+            ("none", "true"),
+        ] {
+            let tag = format!("twin-{checkout}-{ignorecase}");
+            let Some((_g, repo, at, a, b, up)) = packed_twin_finalize_fixture(&tag, checkout).await
+            else {
+                return;
+            };
+            git(&repo, &["config", "core.ignorecase", ignorecase]).await;
+            let checkout = format!("{checkout}, ignorecase {ignorecase}");
+            let head_before = rev(&at, "HEAD").await;
+            let current = crate::git::branches::current_branch_name(&repo)
+                .await
+                .unwrap()
+                .unwrap();
+            let err = finalize_base(&AppState::default(), &repo, "Feat", &up, &current, Some(&b))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, AppError::Command(m) if m == "Feat and feat differ only in \
+                    letter case, which this disk can't keep apart. Rename one of them, then \
+                    try again."),
+                "{checkout}: {err:?}"
+            );
+            let refs = git(
+                &repo,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads/",
+                ],
+            )
+            .await;
+            assert!(
+                refs.contains(&format!("refs/heads/Feat {a}")),
+                "{checkout}: {refs}"
+            );
+            assert!(
+                refs.contains(&format!("refs/heads/feat {b}")),
+                "{checkout}: {refs}"
+            );
+            assert_eq!(rev(&at, "HEAD").await, head_before, "{checkout}");
+            assert_eq!(git(&at, &["status", "--porcelain"]).await.trim(), "");
+            let loose: Vec<String> = std::fs::read_dir(Path::new(&repo).join(".git/refs/heads"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(loose.contains(&"feat".to_string()), "{checkout}: {loose:?}");
+            assert!(
+                !loose.contains(&"Feat".to_string()),
+                "{checkout}: {loose:?}"
+            );
+        }
+    }
+
+    /// `"HEAD"` is the detached sentinel: with HEAD detached, a branch literally named
+    /// `head` is not the current branch, so its finalize moves the ref directly.
+    #[tokio::test]
+    async fn finalize_never_reads_a_detached_head_as_a_branch_named_head() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-finalize-head-sentinel-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().join("repo").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["-c", "init.defaultRefFormat=files", "init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit_file(&repo, Path::new(&repo), "a.txt", "v0\n", "base").await;
+        git(&repo, &["update-ref", "refs/heads/head", "HEAD"]).await;
+        let old = rev(&repo, "refs/heads/head").await;
+        commit_file(&repo, Path::new(&repo), "b.txt", "v1\n", "next").await;
+        let new = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", "-q", "--detach"]).await;
+
+        finalize_base(
+            &AppState::default(),
+            &repo,
+            "head",
+            &new,
+            "HEAD",
+            Some(&old),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rev(&repo, "refs/heads/head").await, new);
+        assert_eq!(rev(&repo, "HEAD").await, new);
+        let attached = run_git_raw(
+            Some(&repo),
+            &["symbolic-ref", "-q", "HEAD"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        assert_ne!(attached.code, 0, "still detached");
+    }
+
+    /// A start refused as twins left nothing behind: no journal entry for `op`, no resolve
+    /// worktree, and `Feat` at `a` and `feat` at `b` still.
+    async fn assert_twin_start_refused(repo: &str, op: &str, err: &AppError, a: &str, b: &str) {
+        assert!(
+            matches!(err, AppError::Command(m) if m == "Feat and feat differ only in letter \
+                case, which this disk can't keep apart. Rename one of them, then try again."),
+            "{err:?}"
+        );
+        let entries = crate::oplog::git_oplog_list(repo.to_string())
+            .await
+            .unwrap();
+        assert!(entries.iter().all(|e| e.op != op), "nothing journaled");
+        assert_eq!(resolve_worktree_count(repo).await, 0);
+        let refs = git(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/",
+            ],
+        )
+        .await;
+        assert!(refs.contains(&format!("refs/heads/Feat {a}")), "{refs}");
+        assert!(refs.contains(&format!("refs/heads/feat {b}")), "{refs}");
+    }
+
+    /// A local-PR merge into `Feat` while `feat` beside it shares its loose file and no
+    /// checkout holds either: refused as twins before anything starts. Returns early on a
+    /// case-sensitive filesystem or a non-files ref backend.
+    #[tokio::test]
+    async fn merge_local_pr_refuses_an_unheld_case_twin_base_before_starting() {
+        let Some((_g, repo, _, a, b, _up)) =
+            packed_twin_finalize_fixture("twin-merge", "none").await
+        else {
+            return;
+        };
+        let head = crate::git::branches::current_branch_name(&repo)
+            .await
+            .unwrap()
+            .unwrap();
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let merged = merge_local_pr(
+            &AppState::default(),
+            &repo,
+            "Feat",
+            &head,
+            "m",
+            "merge",
+            &root,
+        )
+        .await;
+        let Err(err) = merged else {
+            panic!("the merge started");
+        };
+        assert_twin_start_refused(&repo, MERGE_LOCAL_PR_OP, &err, &a, &b).await;
+    }
+
+    /// A local-PR update of `Feat` while `feat` beside it shares its loose file and no
+    /// checkout holds either: refused as twins before anything starts. Returns early on a
+    /// case-sensitive filesystem or a non-files ref backend.
+    #[tokio::test]
+    async fn update_local_pr_head_refuses_an_unheld_case_twin_head_before_starting() {
+        let Some((_g, repo, _, a, b, _up)) =
+            packed_twin_finalize_fixture("twin-update", "none").await
+        else {
+            return;
+        };
+        let base = crate::git::branches::current_branch_name(&repo)
+            .await
+            .unwrap()
+            .unwrap();
+        let roots = tempfile::tempdir().expect("create temp dir");
+        let managed = roots.path().join("managed");
+        let root = managed.join("root");
+        let sessions = std::collections::HashSet::new();
+        let err = update_local_pr_head(
+            &AppState::default(),
+            &repo,
+            &base,
+            "Feat",
+            &root,
+            &managed,
+            &sessions,
+        )
+        .await
+        .unwrap_err();
+        assert_twin_start_refused(&repo, UPDATE_LOCAL_PR_HEAD_OP, &err, &a, &b).await;
+    }
+
+    /// The call names `Chore/z` while `chore/z`, checked out here, is stored packed only,
+    /// which no other spelling reads: git's own failed read of `refs/heads/Chore/z`, and
+    /// the stored ref, HEAD and the tree are unchanged. Returns early on a case-sensitive
+    /// filesystem or a non-files ref backend, as the fixture says.
+    #[tokio::test]
+    async fn finalize_never_swaps_in_a_packed_only_stored_spelling() {
+        let Some((_g, repo, _, z1, up)) =
+            aliased_finalize_fixture("packed-spelling", false, "chore/z").await
+        else {
+            return;
+        };
+        git(&repo, &["pack-refs", "--all"]).await;
+        let result = finalize_base(
+            &AppState::default(),
+            &repo,
+            "Chore/z",
+            &up,
+            "chore/z",
+            Some(&z1),
+        )
+        .await;
+        assert_eq!(rev(&repo, "refs/heads/chore/z").await, z1);
+        assert_eq!(rev(&repo, "HEAD").await, z1);
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
+        assert!(matches!(&result, Err(AppError::Git { .. })), "{result:?}");
+    }
+
+    /// HEAD's symbolic ref on `Chore/z` while the branch is stored as `chore/z`, and the
+    /// record names `Chore/z`: the checkout holds the head, so a dirty tracked file answers
+    /// the dirty-checkout refusal before anything is journaled or merged. Returns early on
+    /// a case-sensitive filesystem or a non-files ref backend, as the fixture says.
+    #[tokio::test]
+    async fn local_pr_update_start_refuses_a_dirty_checkout_on_a_spelling_of_the_head() {
+        let Some((_g, repo, _, z1, _up)) =
+            aliased_finalize_fixture("dirty-alias", false, "Chore/z").await
+        else {
+            return;
+        };
+        std::fs::write(Path::new(&repo).join("a.txt"), "dirty\n").unwrap();
+        let roots = tempfile::tempdir().expect("create temp dir");
+        let managed = roots.path().join("managed");
+        let root = managed.join("root");
+        let sessions = std::collections::HashSet::new();
+        let result = update_local_pr_head(
+            &AppState::default(),
+            &repo,
+            "up",
+            "Chore/z",
+            &root,
+            &managed,
+            &sessions,
+        )
+        .await;
+        assert_eq!(rev(&repo, "refs/heads/chore/z").await, z1);
+        assert_eq!(rev(&repo, "HEAD").await, z1);
+        assert!(!Path::new(&repo).join("z2.txt").exists(), "nothing merged");
+        let Err(err) = result else {
+            panic!("the update ran");
+        };
+        assert_eq!(err.to_string(), DIRTY_HEAD_UPDATE);
+        assert_eq!(resolve_worktree_count(&repo).await, 0);
+        let entries = crate::oplog::git_oplog_list(repo.clone()).await.unwrap();
+        assert!(
+            entries.iter().all(|e| e.op != UPDATE_LOCAL_PR_HEAD_OP),
+            "nothing journaled"
         );
     }
 }

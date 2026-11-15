@@ -64,7 +64,8 @@ export function useDeleteHook(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (name: string) => api.gitHookDelete(repo, name),
+    (args: { name: string; expectedManaged?: boolean }) =>
+      api.gitHookDelete(repo, args.name, args.expectedManaged),
     {
       // Local hook write — never park it offline.
       networkMode: "always",

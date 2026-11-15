@@ -52,6 +52,7 @@ import {
 } from "@/lib/git/queries";
 import { formatBinding, isWindows } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import {
   useAiEnabled,
   useReviewConfigured,
@@ -72,7 +73,7 @@ import {
   landingOrdinal,
   PANE_SCROLL_KEYS,
 } from "./conflict-banner-state";
-import { markerStagePrompt } from "./conflict-confirms";
+import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import {
   nextConflictIndex,
   previousConflictIndex,
@@ -156,8 +157,14 @@ const CONFLICT_UNDECODABLE_NOTE =
 const AI_UNDECODABLE_REASON =
   "This file isn't UTF-8 text, so AI resolution would change its bytes.";
 
-/** The refusal strip's Mark resolved hold: a write or the click-time read. */
+/** Mark resolved's hold while the file is read: the click-time read, a mount or
+ *  show's own read, or the re-read after a failed write. */
 const MARK_BUSY_REASON = "Checking the file…";
+
+/** Both Mark resolved buttons' hold reason: a read when one runs, else the
+ *  write that holds them. */
+const markBusyReason = (reading: boolean) =>
+  reading ? MARK_BUSY_REASON : ACT_PENDING_REASON;
 
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
@@ -299,23 +306,26 @@ function ConflictFallback({
   sides,
   arm,
   busy,
+  busyReason,
   onMarkResolved,
 }: {
   path: string;
   sides: ConflictSides;
   arm: FallbackArm;
   busy: boolean;
+  busyReason: string;
   onMarkResolved: () => void;
 }) {
   const markButton = MARK_RESOLVED_ARMS.has(arm) ? (
-    <Button
+    <DisabledReasonButton
       size="xs"
       variant="outline"
       disabled={busy}
+      reason={busyReason}
       onClick={onMarkResolved}
     >
       Mark resolved
-    </Button>
+    </DisabledReasonButton>
   ) : null;
   const markersRemain = markNeedsConfirm(sides);
 
@@ -595,6 +605,7 @@ export function ConflictFileView({
     checking ||
     recovering ||
     awaitingRead;
+  const busyReason = markBusyReason(checking || recovering || awaitingRead);
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged: it offers whole-file resolution + the editor (binary
   // and too large also Mark resolved), and a path-gate refusal leaves only the
@@ -635,7 +646,7 @@ export function ConflictFileView({
   // strip carries the hover reason: the button stays the strip's direct child.
   const markHeld = useDisabledReason({
     disabled: busy,
-    reason: MARK_BUSY_REASON,
+    reason: busyReason,
   });
   const readErrorView =
     readRefusal === null ? (
@@ -911,8 +922,10 @@ export function ConflictFileView({
     try {
       const markIn = repoPath;
       // Null when the read refused a file git still lists as conflicted: its
-      // markers can't be checked, so the confirm always shows.
+      // markers can't be checked, so the confirm always shows, worded for the
+      // refusal kept in `cause`.
       let fresh: ConflictSides | null;
+      let cause: MarkerFlag["cause"];
       setChecking(true);
       try {
         fresh = await conflictSides(repoPath, path, []);
@@ -925,6 +938,7 @@ export function ConflictFileView({
           return;
         }
         fresh = null;
+        cause = readRefusalOf(err) ?? undefined;
       } finally {
         setChecking(false);
       }
@@ -937,13 +951,12 @@ export function ConflictFileView({
       )
         return;
       if (fresh === null || markNeedsConfirm(fresh)) {
-        const flag = { name: baseName(path), unchecked: fresh === null };
+        const flag = { name: baseName(path), unchecked: fresh === null, cause };
         const ok = await useConfirm
           .getState()
           .ask(markerStagePrompt([flag], false));
-        // A cancel lands on the press like every other exit: the fallback
-        // button, which the click-time hold blurred to <body>, or the strip's
-        // button, which kept focus. The landing waits out the confirm's close.
+        // A cancel lands on the press like every other exit. The landing waits
+        // out the confirm's close.
         if (!ok) {
           armLanding("header", pressed);
           return;
@@ -1287,6 +1300,7 @@ export function ConflictFileView({
             // + not-error condition `arm` was computed under.
             arm={arm as FallbackArm}
             busy={busy}
+            busyReason={busyReason}
             onMarkResolved={markResolved}
           />
         ) : (

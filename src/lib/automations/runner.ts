@@ -43,6 +43,7 @@ import {
   gitBranchTips,
   gitCommitDiff,
   readRepoInstructions,
+  tipOf,
 } from "@/lib/git/api";
 import { diffSectionStats } from "@/lib/git/diff-split";
 import { repoKeys } from "@/lib/git/queries";
@@ -1393,7 +1394,7 @@ export function runAutomationNow(
             // Local PRs carry no commit list; the branch diff is the source of truth.
             commitSubjects: [],
             commitsUnknown: false,
-            headSha: tips[pr.head] ?? "",
+            headSha: tipOf(tips, pr.head) ?? "",
           };
         }
         // The claim keys on the head: running without one forfeits cross-instance

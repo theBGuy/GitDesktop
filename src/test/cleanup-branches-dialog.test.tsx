@@ -26,6 +26,7 @@ import {
 } from "@/features/repository/CleanupBranchesDialog";
 import {
   cleanupRestorableTail,
+  cleanupStoppedBusy,
   skippedMoved,
 } from "@/lib/deleted-branches/copy";
 import {
@@ -281,6 +282,8 @@ beforeEach(() => {
   vi.mocked(gitDeleteBranch).mockImplementation(async () => ({
     status: "deleted",
     tip: "a".repeat(40),
+    keptLocal: false,
+    upstream: null,
   }));
   vi.mocked(listWorktrees).mockResolvedValue([]);
   vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
@@ -1041,7 +1044,7 @@ describe("the batch", () => {
       removalCalls[1].resolve({
         ok: true,
         branch: "keptMoved",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() =>
@@ -1543,7 +1546,7 @@ describe("across reseeds, reopens and batches", () => {
       removalCalls[0].resolve({
         ok: true,
         branch: "keptMoved",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() =>
@@ -1600,7 +1603,7 @@ describe("across reseeds, reopens and batches", () => {
       removalCalls[0].resolve({
         ok: true,
         branch: "keptInUse",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() =>
@@ -1805,7 +1808,7 @@ describe("across reseeds, reopens and batches", () => {
       removalCalls[0].resolve({
         ok: true,
         branch: "keptMoved",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() =>
@@ -1853,7 +1856,7 @@ describe("across reseeds, reopens and batches", () => {
       removalCalls[0].resolve({
         ok: true,
         branch: "keptUnreadable",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() =>
@@ -1926,7 +1929,7 @@ describe("across reseeds, reopens and batches", () => {
       removalCalls[0].resolve({
         ok: true,
         branch: "deleted",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
@@ -3093,7 +3096,7 @@ describe("after a batch", () => {
       removalCalls[0].resolve({
         ok: true,
         branch: "keptMoved",
-        deletedTip: null,
+        deleted: null,
       });
     });
     await waitFor(() =>
@@ -3284,7 +3287,12 @@ describe("a running batch", () => {
       view,
       release: () =>
         act(async () =>
-          first.resolve({ status: "deleted", tip: "a".repeat(40) }),
+          first.resolve({
+            status: "deleted",
+            tip: "a".repeat(40),
+            keptLocal: false,
+            upstream: null,
+          }),
         ),
     };
   }
@@ -4008,7 +4016,12 @@ describe("Delete pins each branch to the tip this list read", () => {
     _repo: string,
     _name: string,
     tip?: string | null,
-  ) => ({ status: "deleted" as const, tip: tip ?? "a".repeat(40) });
+  ) => ({
+    status: "deleted" as const,
+    tip: tip ?? "a".repeat(40),
+    keptLocal: false,
+    upstream: null,
+  });
 
   async function enterDelete(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole("button", { name: /^delete$/i }));
@@ -4049,7 +4062,13 @@ describe("Delete pins each branch to the tip this list read", () => {
     const repo = "C:/repos/k2-kinds";
     const head = "d".repeat(40);
     const prHead = "c".repeat(40);
-    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    // The facts a record carries come from each row's own delete outcome.
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => ({
+      ...(await deletedAtPin(r, n, tip)),
+      ...(n === "k2-head"
+        ? { keptLocal: true, upstream: "origin/k2-head" }
+        : {}),
+    }));
     const view = renderDialog({
       repoPath: repo,
       branches: [],
@@ -4293,6 +4312,363 @@ describe("Delete pins each branch to the tip this list read", () => {
     });
   });
 
+  /** Holds every plain delete until the test answers it. */
+  function holdDeletes() {
+    const held: {
+      name: string;
+      tip: string | null | undefined;
+      answer: ReturnType<
+        typeof deferred<Awaited<ReturnType<typeof gitDeleteBranch>>>
+      >;
+    }[] = [];
+    vi.mocked(gitDeleteBranch).mockImplementation((_repo, name, tip) => {
+      const answer = deferred<Awaited<ReturnType<typeof gitDeleteBranch>>>();
+      held.push({ name, tip, answer });
+      return answer.promise;
+    });
+    return held;
+  }
+
+  /** Waits until the confirm's focus return reached the running primary. */
+  async function primaryHoldsFocus() {
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(mainDialog()).getByRole("button", {
+          name: /^Deleting…/,
+          hidden: true,
+        }),
+      ),
+    );
+  }
+
+  async function moveHeld(held: ReturnType<typeof holdDeletes>, name: string) {
+    await waitFor(() => expect(held.some((h) => h.name === name)).toBe(true));
+    const call = held.find((h) => h.name === name);
+    await act(async () =>
+      call?.answer.resolve({
+        status: "tipMoved",
+        expected: call.tip ?? "",
+        actual: MOVED,
+      }),
+    );
+  }
+
+  it("lands focus on the row a batch kept when nothing is left selected", async () => {
+    const repo = "C:/repos/k8-moved-focus";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-m", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-m": "clean" });
+    await waitFor(() => expect(isChecked("lf-m")).toBe(true));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await moveHeld(held, "lf-m");
+    await waitFor(() => expect(document.activeElement).toBe(boxOf("lf-m")));
+    expect(document.activeElement).not.toBe(primary());
+    expect(isChecked("lf-m")).toBe(false);
+  });
+
+  it("lands focus on a kept worktree row", async () => {
+    const repo = "C:/repos/k8-kept-focus";
+    statusByPath.set("C:/wt/lf-w", "clean");
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-w", OLD)],
+      worktrees: { "lf-w": { path: "C:/wt/lf-w" } },
+    });
+    await enterDelete(view.user);
+    await view.user.click(optIn());
+    await landVerdicts({ "lf-w": "clean" });
+    await waitFor(() =>
+      expect(boxOf("lf-w")).not.toHaveAttribute("aria-disabled"),
+    );
+    await view.user.click(boxOf("lf-w"));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await waitFor(() => expect(removalCalls).toHaveLength(1));
+    await act(async () =>
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "keptUnreadable",
+        deleted: null,
+      }),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(boxOf("lf-w")));
+  });
+
+  it("lands focus on the leftover row, not the first row listed", async () => {
+    const repo = "C:/repos/k8-second-focus";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-first", OLD), branch("lf-second", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-first": "clean", "lf-second": "clean" });
+    await waitFor(() => expect(isChecked("lf-first")).toBe(true));
+    await waitFor(() => expect(isChecked("lf-second")).toBe(true));
+    expect(listed()).toEqual(["lf-first", "lf-second"]);
+    await view.user.click(boxOf("lf-first"));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await moveHeld(held, "lf-second");
+    await waitFor(() =>
+      expect(document.activeElement).toBe(boxOf("lf-second")),
+    );
+    expect(listed()[0]).toBe("lf-first");
+  });
+
+  it("lands focus on Cancel when the batch leaves no rows", async () => {
+    const repo = "C:/repos/k8-empty-focus";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-gone", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-gone": "clean" });
+    await waitFor(() => expect(isChecked("lf-gone")).toBe(true));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await waitFor(() => expect(held).toHaveLength(1));
+    // The branch list re-reads without it while its delete runs.
+    act(() => view.rerender({ branches: [] }));
+    await moveHeld(held, "lf-gone");
+    await waitFor(() => expect(listed()).toEqual([]));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(mainDialog()).getByRole("button", {
+          name: "Cancel",
+          hidden: true,
+        }),
+      ),
+    );
+  });
+
+  it("never takes focus the user moved elsewhere during the batch", async () => {
+    const repo = "C:/repos/k8-moved-away";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-away", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-away": "clean" });
+    await waitFor(() => expect(isChecked("lf-away")).toBe(true));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await waitFor(() => expect(held).toHaveLength(1));
+    const elsewhere = screen.getByRole("button", { name: /^archive$/i });
+    act(() => elsewhere.focus());
+    await moveHeld(held, "lf-away");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(skippedMoved("lf-away")),
+    );
+    // The batch has settled once the primary reads its count again.
+    await waitFor(() => primary());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  it("moves no focus when the repository switched during the batch", async () => {
+    const repo = "C:/repos/k8-switched";
+    const other = "C:/repos/k8-switched-other";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-sw", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-sw": "clean" });
+    await waitFor(() => expect(isChecked("lf-sw")).toBe(true));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await waitFor(() => expect(held).toHaveLength(1));
+    mergedByRepo.set(other, []);
+    act(() => {
+      useUiStore.setState({ repoPath: other });
+      view.rerender({ repoPath: other });
+    });
+    await moveHeld(held, "lf-sw");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(skippedMoved("lf-sw")),
+    );
+    await landRest(["lf-sw"], "clean");
+    await waitFor(() => expect(listed()).toEqual(["lf-sw"]));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).not.toBe(boxOf("lf-sw"));
+  });
+
+  /** Confirms the delete with animation frames held, so the confirm stays
+   *  mounted, focus inside it, until `release` lets its close finish. */
+  async function confirmDeleteHoldingClose(
+    user: ReturnType<typeof userEvent.setup>,
+  ) {
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: /^Delete branch(es)?\?$/,
+    });
+    await waitFor(() =>
+      expect(confirm.contains(document.activeElement)).toBe(true),
+    );
+    const frames: FrameRequestCallback[] = [];
+    const raf = vi
+      .spyOn(globalThis, "requestAnimationFrame")
+      .mockImplementation((cb) => frames.push(cb));
+    try {
+      await user.click(
+        within(confirm).getByRole("button", { name: /^Delete \d+ branch/ }),
+      );
+    } catch (e) {
+      raf.mockRestore();
+      throw e;
+    }
+    return {
+      confirm,
+      async release() {
+        raf.mockRestore();
+        await act(async () => {
+          for (const cb of frames.splice(0)) cb(performance.now());
+        });
+      },
+    };
+  }
+
+  it("lands on the kept row once focus comes back from a confirm the batch outran", async () => {
+    const repo = "C:/repos/k8-fast-moved";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-fast", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-fast": "clean" });
+    await waitFor(() => expect(isChecked("lf-fast")).toBe(true));
+    const closing = await confirmDeleteHoldingClose(view.user);
+    try {
+      await moveHeld(held, "lf-fast");
+      await waitFor(() =>
+        expect(toast.info).toHaveBeenCalledWith(skippedMoved("lf-fast")),
+      );
+      await waitFor(() => primary());
+      expect(closing.confirm.contains(document.activeElement)).toBe(true);
+    } finally {
+      await closing.release();
+    }
+    await waitFor(() => expect(document.activeElement).toBe(boxOf("lf-fast")));
+    expect(isChecked("lf-fast")).toBe(false);
+  });
+
+  it("lands on Cancel once focus comes back from a confirm the batch outran with no rows left", async () => {
+    const repo = "C:/repos/k8-fast-empty";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-fast-gone", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-fast-gone": "clean" });
+    await waitFor(() => expect(isChecked("lf-fast-gone")).toBe(true));
+    const closing = await confirmDeleteHoldingClose(view.user);
+    try {
+      await waitFor(() => expect(held).toHaveLength(1));
+      act(() => view.rerender({ branches: [] }));
+      await moveHeld(held, "lf-fast-gone");
+      await waitFor(() => expect(listed()).toEqual([]));
+      await waitFor(() => primary());
+      expect(closing.confirm.contains(document.activeElement)).toBe(true);
+    } finally {
+      await closing.release();
+    }
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(mainDialog()).getByRole("button", {
+          name: "Cancel",
+          hidden: true,
+        }),
+      ),
+    );
+  });
+
+  it("drops the landing when focus comes back to another control in the dialog", async () => {
+    const repo = "C:/repos/k8-fast-elsewhere";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-fast-else", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-fast-else": "clean" });
+    await waitFor(() => expect(isChecked("lf-fast-else")).toBe(true));
+    const closing = await confirmDeleteHoldingClose(view.user);
+    const elsewhere = within(mainDialog()).getByRole("button", {
+      name: CRITERION_BUTTON.merged,
+      hidden: true,
+    });
+    try {
+      await moveHeld(held, "lf-fast-else");
+      await waitFor(() =>
+        expect(toast.info).toHaveBeenCalledWith(skippedMoved("lf-fast-else")),
+      );
+      await waitFor(() => primary());
+      expect(closing.confirm.contains(document.activeElement)).toBe(true);
+      act(() => elsewhere.focus());
+    } finally {
+      await closing.release();
+    }
+    expect(document.activeElement).toBe(elsewhere);
+    act(() => primary().focus());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).toBe(primary());
+  });
+
+  it("drops the landing on a repository switch even while the other repository's skeleton shows", async () => {
+    const repo = "C:/repos/k8-skeleton-switch";
+    const other = "C:/repos/k8-skeleton-switch-other";
+    const held = holdDeletes();
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("lf-sk", OLD)],
+    });
+    await enterDelete(view.user);
+    await landVerdicts({ "lf-sk": "clean" });
+    await waitFor(() => expect(isChecked("lf-sk")).toBe(true));
+    await confirmDelete(view.user);
+    await primaryHoldsFocus();
+    await waitFor(() => expect(held).toHaveLength(1));
+    mergedByRepo.set(other, []);
+    act(() => {
+      useUiStore.setState({ repoPath: other });
+      view.rerender({ repoPath: other, rulesSettling: true });
+    });
+    await moveHeld(held, "lf-sk");
+    await waitFor(() =>
+      expect(toast.info).toHaveBeenCalledWith(skippedMoved("lf-sk")),
+    );
+    await waitFor(() => primary());
+    const before = document.activeElement;
+    act(() => {
+      useUiStore.setState({ repoPath: repo });
+      view.rerender({ repoPath: repo, rulesSettling: false });
+    });
+    await landRest(["lf-sk"], "clean");
+    await waitFor(() => expect(listed()).toEqual(["lf-sk"]));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(document.activeElement).toBe(before);
+    expect(document.activeElement).not.toBe(boxOf("lf-sk"));
+  });
+
   it("records a worktree row's deleted tip, and counts one deleted with none without offering it", async () => {
     const repo = "C:/repos/k5-worktrees";
     const tip = "4".repeat(40);
@@ -4323,7 +4699,10 @@ describe("Delete pins each branch to the tip this list read", () => {
         removalCalls[i].resolve({
           ok: true,
           branch: "deleted",
-          deletedTip: name === "wd-tip" ? tip : null,
+          deleted:
+            name === "wd-tip"
+              ? { tip, keptLocal: false, upstream: null }
+              : null,
         }),
       );
     }
@@ -4372,7 +4751,6 @@ describe("Delete pins each branch to the tip this list read", () => {
 
     // Only the second name exists again, at another commit.
     vi.mocked(gitBranches).mockClear();
-    vi.mocked(gitBranches).mockResolvedValue([branch(order[1], OLD)]);
     vi.mocked(gitBranchTips).mockClear();
     vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
       names[0] === order[1] ? { [order[1]]: "1".repeat(40) } : {},
@@ -4400,11 +4778,11 @@ describe("Delete pins each branch to the tip this list read", () => {
         },
       ),
     );
-    // Each name's pre-check reads the batch's repo, never the live one.
-    expect(vi.mocked(gitBranches).mock.calls.slice(0, order.length)).toEqual(
-      order.map(() => [repo]),
+    // Each name's one check reads the batch's repo, never the live one.
+    expect(vi.mocked(gitBranchTips).mock.calls).toEqual(
+      order.map((n) => [repo, [n]]),
     );
-    expect(vi.mocked(gitBranchTips).mock.calls).toEqual([[repo, [order[1]]]]);
+    expect(gitBranches).not.toHaveBeenCalled();
     expect(vi.mocked(gitCreateBranch).mock.calls).toEqual([
       [repo, order[0], false, tipFor(order[0]), true],
     ]);
@@ -4546,10 +4924,14 @@ describe("Delete pins each branch to the tip this list read", () => {
     expect(recordDeletedBranches).not.toHaveBeenCalled();
   });
 
-  it("reads Keep local fresh at the batch's start, over a stale listed row", async () => {
+  it("records Keep local and the upstream from each row's delete outcome, over the listed rows", async () => {
     const repo = "C:/repos/k-fresh";
     const names = ["kf-1", "kf-2"];
-    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    // Every listed row is unmarked; row 2's delete measured its mark.
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => ({
+      ...(await deletedAtPin(r, n, tip)),
+      ...(n === "kf-2" ? { keptLocal: true, upstream: "origin/kf-2" } : {}),
+    }));
     const view = renderDialog({
       repoPath: repo,
       branches: names.map((n) => branch(n, OLD)),
@@ -4557,49 +4939,193 @@ describe("Delete pins each branch to the tip this list read", () => {
     await enterDelete(view.user);
     await landRest(names, "clean");
     for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
-    // Marked in another window after the dialog was handed its rows.
-    branchRows = [
-      { ...branch("kf-1", OLD), keepLocal: true },
-      branch("kf-2", OLD),
-    ];
+    const before = vi.mocked(gitBranches).mock.calls.length;
     await confirmDelete(view.user);
     await waitFor(() => expect(recordDeletedBranches).toHaveBeenCalledTimes(2));
     expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
-      expect.objectContaining({ name: "kf-1", keptLocal: true }),
+      expect.objectContaining({
+        name: "kf-1",
+        keptLocal: false,
+        upstream: null,
+      }),
     ]);
     expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
-      expect.objectContaining({ name: "kf-2", keptLocal: false }),
+      expect.objectContaining({
+        name: "kf-2",
+        keptLocal: true,
+        upstream: "origin/kf-2",
+      }),
     ]);
-    expect(gitBranches).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(gitBranches).mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(gitDeleteBranch).mock.invocationCallOrder[0],
+    // The batch's own settle refetches the list after the loop; nothing reads
+    // it between the confirm and the first delete.
+    const firstDelete = vi.mocked(gitDeleteBranch).mock.invocationCallOrder[0];
+    const reads = vi.mocked(gitBranches).mock.invocationCallOrder.slice(before);
+    for (const order of reads) expect(order).toBeGreaterThan(firstDelete);
+  });
+
+  it("records a worktree row's Keep local mark and upstream from its removal", async () => {
+    const repo = "C:/repos/k-fresh-worktree";
+    const tip = "5".repeat(40);
+    statusByPath.set("C:/wt/wf-1", "clean");
+    const view = renderDialog({
+      repoPath: repo,
+      branches: [branch("wf-1", OLD)],
+      worktrees: { "wf-1": { path: "C:/wt/wf-1" } },
+    });
+    await enterDelete(view.user);
+    await view.user.click(optIn());
+    await landVerdicts({ "wf-1": "clean" });
+    await waitFor(() =>
+      expect(boxOf("wf-1")).not.toHaveAttribute("aria-disabled"),
+    );
+    await view.user.click(boxOf("wf-1"));
+    await confirmDelete(view.user);
+    await waitFor(() => expect(removalCalls).toHaveLength(1));
+    await act(async () =>
+      removalCalls[0].resolve({
+        ok: true,
+        branch: "deleted",
+        deleted: { tip, keptLocal: true, upstream: "origin/wf-1" },
+      }),
+    );
+    await waitFor(() =>
+      expect(vi.mocked(recordDeletedBranches).mock.calls).toEqual([
+        [
+          repo,
+          [
+            expect.objectContaining({
+              name: "wf-1",
+              tip,
+              keptLocal: true,
+              upstream: "origin/wf-1",
+            }),
+          ],
+        ],
+      ]),
     );
   });
 
-  it("records every row Keep local when the fresh read fails", async () => {
-    const repo = "C:/repos/k-fresh-failed";
-    const names = ["kff-1", "kff-2"];
-    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
-    const view = renderDialog({
-      repoPath: repo,
-      branches: names.map((n) => branch(n, OLD)),
-    });
-    await enterDelete(view.user);
-    await landRest(names, "clean");
-    for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
-    vi.mocked(gitBranches).mockRejectedValueOnce(new Error("spawn failed"));
-    await confirmDelete(view.user);
-    await waitFor(() => expect(recordDeletedBranches).toHaveBeenCalledTimes(2));
-    for (const name of names)
-      expect(recordDeletedBranches).toHaveBeenCalledWith(repo, [
-        expect.objectContaining({ name, keptLocal: true }),
+  describe("a delete that waited out a held repository", () => {
+    const BUSY = {
+      kind: "busy",
+      message:
+        "A worktree removal is still running — try again when it finishes.",
+      holder: "a worktree removal",
+    } as const;
+    const deleteButton = (count: string) =>
+      within(mainDialog()).getByRole("button", {
+        name: new RegExp(`^Delete ${count}`),
+        hidden: true,
+      });
+
+    async function startBatch(repo: string, names: string[]) {
+      const view = renderDialog({
+        repoPath: repo,
+        branches: names.map((n) => branch(n, OLD)),
+      });
+      await enterDelete(view.user);
+      await landRest(names, "clean");
+      for (const n of names)
+        await waitFor(() => expect(isChecked(n)).toBe(true));
+      await confirmDelete(view.user);
+      return view;
+    }
+
+    it("stops the batch, keeps the rows not reached selected and says so once", async () => {
+      const names = ["kb-1", "kb-2", "kb-3"];
+      vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) =>
+        n === "kb-2" ? Promise.reject(BUSY) : deletedAtPin(r, n, tip),
+      );
+      await startBatch("C:/repos/k-busy", names);
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith(
+          "Deleted 1, 1 failed",
+          expect.anything(),
+        ),
+      );
+      expect(vi.mocked(gitDeleteBranch).mock.calls.map((c) => c[1])).toEqual([
+        "kb-1",
+        "kb-2",
       ]);
-    await waitFor(() =>
-      expect(toast.success).toHaveBeenCalledWith(
-        "Deleted 2 branches",
-        withRestore(2),
-      ),
-    );
+      expect(vi.mocked(toast.info).mock.calls).toEqual([
+        [cleanupStoppedBusy("")],
+      ]);
+      expect(
+        screen.getByText(`Couldn't delete: ${BUSY.message}`),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(isChecked("kb-2")).toBe(true));
+      expect(isChecked("kb-3")).toBe(true);
+      expect(deleteButton("2 branches")).toBeInTheDocument();
+    });
+
+    it("names the batch's repository when the stop lands after a switch", async () => {
+      const names = ["kba-1", "kba-2", "kba-3"];
+      const gate = deferred<void>();
+      vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => {
+        if (n !== "kba-2") return deletedAtPin(r, n, tip);
+        await gate.promise;
+        throw BUSY;
+      });
+      await startBatch("C:/repos/k-busy-away", names);
+      await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(2));
+      act(() => useUiStore.setState({ repoPath: "C:/repos/k-busy-elsewhere" }));
+      await act(async () => gate.resolve());
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith(
+          "Deleted 1, 1 failed in k-busy-away",
+          expect.anything(),
+        ),
+      );
+      expect(vi.mocked(toast.info).mock.calls).toEqual([
+        [
+          "Stopped: another operation is still running in k-busy-away. Try again when it finishes.",
+        ],
+      ]);
+      expect(toast.info).not.toHaveBeenCalledWith(cleanupStoppedBusy(""));
+      expect(gitDeleteBranch).toHaveBeenCalledTimes(2);
+    });
+
+    it("gives no stop notice when the held delete was the batch's last row", async () => {
+      const names = ["kbl-1", "kbl-2"];
+      vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) =>
+        n === "kbl-2" ? Promise.reject(BUSY) : deletedAtPin(r, n, tip),
+      );
+      await startBatch("C:/repos/k-busy-last", names);
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith(
+          "Deleted 1, 1 failed",
+          expect.anything(),
+        ),
+      );
+      expect(toast.info).not.toHaveBeenCalled();
+      expect(
+        screen.getByText(`Couldn't delete: ${BUSY.message}`),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(isChecked("kbl-2")).toBe(true));
+      expect(deleteButton("1 branch")).toBeInTheDocument();
+    });
+
+    it.each([
+      ["an io error", { kind: "io", message: "disk full" }],
+      [
+        "a git error worded like a busy one",
+        { kind: "git", message: BUSY.message },
+      ],
+    ])("keeps going past %s", async (_label, error) => {
+      const names = ["kbn-1", "kbn-2", "kbn-3"];
+      vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) =>
+        n === "kbn-2" ? Promise.reject(error) : deletedAtPin(r, n, tip),
+      );
+      await startBatch("C:/repos/k-busy-not", names);
+      await waitFor(() =>
+        expect(toast.error).toHaveBeenCalledWith(
+          "Deleted 2, 1 failed",
+          expect.anything(),
+        ),
+      );
+      expect(gitDeleteBranch).toHaveBeenCalledTimes(3);
+      expect(toast.info).not.toHaveBeenCalled();
+    });
   });
 
   it("names the batch's repository on its Restore toast after a switch", async () => {
@@ -4706,10 +5232,14 @@ describe("Delete pins each branch to the tip this list read", () => {
     );
   }, 30_000);
 
-  it("starts one batch when a second confirm lands during the fresh read", async () => {
+  it("starts one batch when a second confirm lands before a re-render", async () => {
     const repo = "C:/repos/k-twice";
     const names = ["kt-1", "kt-2"];
-    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const held = deferred<void>();
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => {
+      await held.promise;
+      return deletedAtPin(r, n, tip);
+    });
     const view = renderDialog({
       repoPath: repo,
       branches: names.map((n) => branch(n, OLD)),
@@ -4717,8 +5247,6 @@ describe("Delete pins each branch to the tip this list read", () => {
     await enterDelete(view.user);
     await landRest(names, "clean");
     for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
-    const read = deferred<Branch[]>();
-    vi.mocked(gitBranches).mockImplementation(() => read.promise);
     await view.user.click(primary());
     const confirm = await screen.findByRole("dialog", {
       name: "Delete branches?",
@@ -4731,13 +5259,8 @@ describe("Delete pins each branch to the tip this list read", () => {
       fireEvent.click(go);
       fireEvent.click(go);
     });
-    await waitFor(() =>
-      expect(primary()).toHaveAccessibleDescription(
-        "Wait for the current batch to finish.",
-      ),
-    );
-    expect(gitDeleteBranch).not.toHaveBeenCalled();
-    await act(async () => read.resolve(names.map((n) => branch(n, OLD))));
+    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(1));
+    await act(async () => held.resolve());
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith(
         "Deleted 2 branches",
@@ -4748,10 +5271,14 @@ describe("Delete pins each branch to the tip this list read", () => {
     expect(toast.success).toHaveBeenCalledTimes(1);
   });
 
-  it("locks dismissal and every control through the batch's fresh read", async () => {
+  it("locks dismissal and every control while the batch's first delete runs", async () => {
     const repo = "C:/repos/k-read-lock";
     const names = ["krl-1", "krl-2"];
-    vi.mocked(gitDeleteBranch).mockImplementation(deletedAtPin);
+    const held = deferred<void>();
+    vi.mocked(gitDeleteBranch).mockImplementation(async (r, n, tip) => {
+      await held.promise;
+      return deletedAtPin(r, n, tip);
+    });
     const view = renderDialog({
       repoPath: repo,
       branches: names.map((n) => branch(n, OLD)),
@@ -4759,8 +5286,6 @@ describe("Delete pins each branch to the tip this list read", () => {
     await enterDelete(view.user);
     await landRest(names, "clean");
     for (const n of names) await waitFor(() => expect(isChecked(n)).toBe(true));
-    const read = deferred<Branch[]>();
-    vi.mocked(gitBranches).mockImplementation(() => read.promise);
     await confirmDelete(view.user);
     const cancel = within(mainDialog()).getByRole("button", {
       name: "Cancel",
@@ -4841,8 +5366,8 @@ describe("Delete pins each branch to the tip this list read", () => {
     await view.user.keyboard("{Escape}");
     await view.user.click(cancel);
     expect(view.props().onClose).not.toHaveBeenCalled();
-    expect(gitDeleteBranch).not.toHaveBeenCalled();
-    await act(async () => read.resolve(names.map((n) => branch(n, OLD))));
+    expect(gitDeleteBranch).toHaveBeenCalledTimes(1);
+    await act(async () => held.resolve());
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith(
         "Deleted 2 branches",

@@ -210,8 +210,20 @@ beforeEach(() => {
   vi.mocked(listUserWorktrees).mockResolvedValue([]);
   vi.mocked(gitKeepLocalHookStatus).mockResolvedValue(HOOK);
   vi.mocked(gitCheckoutBranch).mockResolvedValue(undefined);
-  vi.mocked(gitDeleteBranch).mockResolvedValue({ status: "deleted", tip: TIP });
-  vi.mocked(gitBranchTips).mockResolvedValue({});
+  vi.mocked(gitDeleteBranch).mockResolvedValue({
+    status: "deleted",
+    tip: TIP,
+    keptLocal: false,
+    upstream: null,
+  });
+  // Every listed branch reads at TIP, the tip the delete answers with.
+  vi.mocked(gitBranchTips).mockImplementation(async (_repo, names) =>
+    Object.fromEntries(
+      names
+        .filter((n) => reads.branches.some((b) => b.name === n))
+        .map((n) => [n, TIP]),
+    ),
+  );
   vi.mocked(gitObjectsPresent).mockResolvedValue(true);
   vi.mocked(gitSetBranchKeepLocal).mockResolvedValue(undefined);
   vi.mocked(gitCreateBranch).mockResolvedValue(undefined);
@@ -266,11 +278,43 @@ async function openDeleteConfirm(user: User, name: string, head = "main") {
   return screen.findByRole("dialog", { name: "Delete branch?" });
 }
 
+const confirmButton = (confirm: HTMLElement) =>
+  within(confirm).getByRole("button", { name: "Delete" });
+
+/** Waits until the confirm's tip read answered: a held button stays focusable,
+ *  so it carries aria-disabled rather than disabled. */
+async function pressable(confirm: HTMLElement) {
+  await waitFor(() =>
+    expect(confirmButton(confirm)).not.toHaveAttribute("aria-disabled", "true"),
+  );
+  return confirmButton(confirm);
+}
+
+async function pressDelete(user: User, confirm: HTMLElement) {
+  await user.click(await pressable(confirm));
+}
+
 async function deleteBranch(user: User, name: string, head = "main") {
   const confirm = await openDeleteConfirm(user, name, head);
-  await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+  await pressDelete(user, confirm);
   await waitFor(() => expect(success).toHaveBeenCalled());
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const BUSY = {
+  kind: "busy",
+  message: "A worktree removal is still running — try again when it finishes.",
+  holder: "a worktree removal",
+} as const;
 
 type ToastOptions = {
   duration: number;
@@ -294,11 +338,13 @@ const recorded = () =>
   ];
 
 describe("deleting a branch from the branch menu", () => {
-  it("sends no expected tip, records the tip and offers Restore for 15 s", async () => {
+  it("pins the delete to the tip its confirm read, records the tip and offers Restore for 15 s", async () => {
     reads.branches.push(branchRow({ name: "feat/a" }));
     const { user } = renderSwitcher();
     await deleteBranch(user, "feat/a");
-    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([[REPO, "feat/a"]]);
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      [REPO, "feat/a", TIP],
+    ]);
     const [repo, [entry]] = recorded();
     expect(repo).toBe(REPO);
     expect(entry).toMatchObject({
@@ -320,43 +366,47 @@ describe("deleting a branch from the branch menu", () => {
     );
   });
 
-  it("records Keep local and the upstream from the row read before the delete", async () => {
-    reads.branches.push(trackedRow("feat/b", { keepLocal: true }));
+  it("records Keep local and the upstream from the delete's outcome, over the listed row", async () => {
+    reads.branches.push(branchRow({ name: "feat/b", keepLocal: false }));
+    vi.mocked(gitDeleteBranch).mockResolvedValue({
+      status: "deleted",
+      tip: TIP,
+      keptLocal: true,
+      upstream: "origin/x",
+    });
     const { user } = renderSwitcher();
     await deleteBranch(user, "feat/b");
     expect(recorded()[1][0]).toMatchObject({
       name: "feat/b",
       keptLocal: true,
-      upstream: "origin/feat/b",
+      upstream: "origin/x",
     });
   });
 
-  it("reads Keep local fresh before the delete, over a stale cached row", async () => {
-    reads.branches.push(branchRow({ name: "feat/c", keepLocal: false }));
+  it("reads no branch list between the press and the delete", async () => {
+    reads.branches.push(branchRow({ name: "feat/c" }));
     const { user } = renderSwitcher();
     const confirm = await openDeleteConfirm(user, "feat/c");
-    // Marked in another window since the list was read.
-    reads.branches = reads.branches.map((b) =>
-      b.name === "feat/c" ? { ...b, keepLocal: true } : b,
-    );
+    const button = await pressable(confirm);
     const readsBefore = vi.mocked(gitBranches).mock.calls.length;
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await user.click(button);
     await waitFor(() => expect(success).toHaveBeenCalled());
-    expect(recorded()[1][0]).toMatchObject({ name: "feat/c", keptLocal: true });
-    const fresh = vi.mocked(gitBranches).mock.invocationCallOrder[readsBefore];
-    expect(fresh).toBeLessThan(
-      vi.mocked(gitDeleteBranch).mock.invocationCallOrder[0],
-    );
+    const deleted = vi.mocked(gitDeleteBranch).mock.invocationCallOrder[0];
+    for (const order of vi
+      .mocked(gitBranches)
+      .mock.invocationCallOrder.slice(readsBefore))
+      expect(order).toBeGreaterThan(deleted);
   });
 
-  it("records Keep local when the fresh branch read fails", async () => {
-    reads.branches.push(branchRow({ name: "feat/d", keepLocal: false }));
+  it("records an unmarked outcome unmarked, whatever the listed row says", async () => {
+    reads.branches.push(trackedRow("feat/d", { keepLocal: true }));
     const { user } = renderSwitcher();
-    const confirm = await openDeleteConfirm(user, "feat/d");
-    vi.mocked(gitBranches).mockRejectedValueOnce(new Error("spawn failed"));
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(success).toHaveBeenCalled());
-    expect(recorded()[1][0]).toMatchObject({ name: "feat/d", keptLocal: true });
+    await deleteBranch(user, "feat/d");
+    expect(recorded()[1][0]).toMatchObject({
+      name: "feat/d",
+      keptLocal: false,
+      upstream: null,
+    });
   });
 
   it("switches off the current branch first, then deletes and records it", async () => {
@@ -370,10 +420,15 @@ describe("deleting a branch from the branch menu", () => {
     expect(confirm).toHaveTextContent(
       "Deletes feat locally, including commits that exist only on it. You'll be switched to another branch first. The branch can be restored from Recover lost work.",
     );
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await pressDelete(user, confirm);
     await waitFor(() => expect(success).toHaveBeenCalled());
     expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main");
-    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([[REPO, "feat"]]);
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      [REPO, "feat", TIP],
+    ]);
+    expect(
+      vi.mocked(gitCheckoutBranch).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(gitDeleteBranch).mock.invocationCallOrder[0]);
     expect(deleteToast().title).toBe("Deleted feat (was abcdef0)");
   });
 
@@ -408,7 +463,7 @@ describe("deleting a branch from the branch menu", () => {
     const { user } = renderSwitcher();
     const error = vi.spyOn(toast, "error");
     const confirm = await openDeleteConfirm(user, "feat/a");
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await pressDelete(user, confirm);
     // The failure's own toast ends the handler's path.
     await waitFor(() => expect(error).toHaveBeenCalled());
     error.mockRestore();
@@ -416,26 +471,24 @@ describe("deleting a branch from the branch menu", () => {
     expect(success).not.toHaveBeenCalled();
   });
 
-  it("deletes once when a second press lands during the fresh branch read", async () => {
+  it("deletes once when a second press lands while the delete runs", async () => {
     reads.branches.push(branchRow({ name: "feat/a" }));
     const { user } = renderSwitcher();
     const confirm = await openDeleteConfirm(user, "feat/a");
-    let release!: () => void;
-    const held = new Promise<void>((r) => {
-      release = r;
-    });
-    vi.mocked(gitBranches).mockImplementation(async () => {
-      await held;
-      return reads.branches;
+    const held = deferred<void>();
+    vi.mocked(gitDeleteBranch).mockImplementation(async () => {
+      await held.promise;
+      return { status: "deleted", tip: TIP, keptLocal: false, upstream: null };
     });
     const error = vi.spyOn(toast, "error");
-    const button = within(confirm).getByRole("button", { name: "Delete" });
+    const button = await pressable(confirm);
     // Both presses land before a re-render.
     act(() => {
       fireEvent.click(button);
       fireEvent.click(button);
     });
-    await act(async () => release());
+    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(1));
+    await act(async () => held.resolve());
     await waitFor(() => expect(success).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
@@ -447,38 +500,6 @@ describe("deleting a branch from the branch menu", () => {
     error.mockRestore();
   });
 
-  it("stops the delete when a promote starts during the fresh branch read", async () => {
-    reads.branches.push(branchRow({ name: "feat/a" }));
-    const { user } = renderSwitcher();
-    const confirm = await openDeleteConfirm(user, "feat/a");
-    let release!: () => void;
-    const held = new Promise<void>((r) => {
-      release = r;
-    });
-    vi.mocked(gitBranches).mockImplementation(async () => {
-      await held;
-      return reads.branches;
-    });
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
-    promote.on = true;
-    await act(async () => release());
-    await waitFor(() =>
-      expect(info).toHaveBeenCalledWith(
-        "A worktree is being promoted to your main workspace. Try again once it finishes.",
-        undefined,
-      ),
-    );
-    expect(gitDeleteBranch).not.toHaveBeenCalled();
-    expect(recordDeletedBranches).not.toHaveBeenCalled();
-    // The confirm is released.
-    await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
-        null,
-      ),
-    );
-  });
-
   it("says where HEAD went when a promote stops a current-branch delete after its switch", async () => {
     reads.head = headOn("feat");
     reads.branches = [
@@ -487,21 +508,14 @@ describe("deleting a branch from the branch menu", () => {
     ];
     const { user } = renderSwitcher();
     const confirm = await openDeleteConfirm(user, "feat", "feat");
-    let release!: () => void;
-    const held = new Promise<void>((r) => {
-      release = r;
-    });
-    vi.mocked(gitBranches).mockImplementation(async () => {
-      await held;
-      return reads.branches;
-    });
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    const held = deferred<void>();
+    vi.mocked(gitCheckoutBranch).mockImplementation(() => held.promise);
+    await pressDelete(user, confirm);
     await waitFor(() =>
       expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main"),
     );
-    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
     promote.on = true;
-    await act(async () => release());
+    await act(async () => held.resolve());
     await waitFor(() =>
       expect(info).toHaveBeenCalledWith(
         "A worktree is being promoted to your main workspace. Try again once it finishes.",
@@ -511,7 +525,7 @@ describe("deleting a branch from the branch menu", () => {
     expect(gitDeleteBranch).not.toHaveBeenCalled();
   });
 
-  it("treats a tip-moved answer as not deleted", async () => {
+  it("keeps a branch that moved since its confirm opened and records nothing", async () => {
     vi.mocked(gitDeleteBranch).mockResolvedValue({
       status: "tipMoved",
       expected: TIP,
@@ -520,27 +534,296 @@ describe("deleting a branch from the branch menu", () => {
     reads.branches.push(branchRow({ name: "feat/a" }));
     const { user } = renderSwitcher();
     const confirm = await openDeleteConfirm(user, "feat/a");
-    await user.click(within(confirm).getByRole("button", { name: "Delete" }));
+    await pressDelete(user, confirm);
     await waitFor(() =>
       expect(info).toHaveBeenCalledWith(
-        "feat/a changed while it was being deleted — nothing was deleted.",
+        "feat/a changed before it could be deleted, so it was kept.",
+        undefined,
       ),
     );
     expect(recordDeletedBranches).not.toHaveBeenCalled();
     expect(success).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+  });
+
+  it("says where HEAD went when the current branch moved before its delete", async () => {
+    reads.head = headOn("feat");
+    reads.branches = [
+      trackedRow("feat", { isCurrent: true }),
+      trackedRow("main"),
+    ];
+    vi.mocked(gitDeleteBranch).mockResolvedValue({
+      status: "tipMoved",
+      expected: TIP,
+      actual: "1".repeat(40),
+    });
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "feat changed before it could be deleted, so it was kept.",
+        { description: "Switched to main; feat was kept." },
+      ),
+    );
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      [REPO, "feat", TIP],
+    ]);
+    expect(recordDeletedBranches).not.toHaveBeenCalled();
+  });
+});
+
+describe("the delete confirm's pin", () => {
+  it.each([
+    [
+      "while the branch's commit is read",
+      () => new Promise<Record<string, string>>(() => undefined),
+      "Checking the branch's commit…",
+    ],
+    [
+      "when that read failed",
+      () => Promise.reject({ kind: "git", message: "not a git repository" }),
+      "Couldn't read this branch's commit. Close this and open Delete again to retry.",
+    ],
+    [
+      "when Git no longer lists the branch",
+      () => Promise.resolve({}),
+      "Git no longer lists this branch.",
+    ],
+    [
+      "when the listed tip isn't a full commit id",
+      () => Promise.resolve({ "feat/a": "abc" }),
+      "Couldn't read this branch's commit. Close this and open Delete again to retry.",
+    ],
+  ])("holds Delete %s and never deletes", async (_label, answer, reason) => {
+    reads.branches.push(branchRow({ name: "feat/a" }));
+    vi.mocked(gitBranchTips).mockImplementation(answer);
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat/a");
+    const button = confirmButton(confirm);
+    await waitFor(() => expect(button).toHaveAccessibleDescription(reason));
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    act(() => fireEvent.click(button));
+    // A press that got through reaches the IPC only after the mutation's own
+    // awaits.
+    await act(() => Promise.resolve());
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Delete branch?" })).toBe(
+      confirm,
+    );
+  });
+
+  it("reads the tip again when the confirm is reopened after a failed read", async () => {
+    reads.branches.push(branchRow({ name: "feat/a" }));
+    vi.mocked(gitBranchTips).mockRejectedValueOnce({
+      kind: "git",
+      message: "not a git repository",
+    });
+    const { user } = renderSwitcher();
+    const first = await openDeleteConfirm(user, "feat/a");
+    await waitFor(() =>
+      expect(confirmButton(first)).toHaveAccessibleDescription(
+        "Couldn't read this branch's commit. Close this and open Delete again to retry.",
+      ),
+    );
+    await user.click(within(first).getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+    const tipsBefore = vi.mocked(gitBranchTips).mock.calls.length;
+    const again = await openDeleteConfirm(user, "feat/a");
+    await pressDelete(user, again);
+    await waitFor(() => expect(success).toHaveBeenCalled());
+    expect(vi.mocked(gitBranchTips).mock.calls.length).toBeGreaterThan(
+      tipsBefore,
+    );
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      [REPO, "feat/a", TIP],
+    ]);
+  });
+
+  it("closes a confirm left open across a switch, so a return never pins a fresh read", async () => {
+    reads.branches.push(branchRow({ name: "feat/a" }));
+    const { user, switchTo } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat/a");
+    await pressable(confirm);
+    await switchTo(OTHER_REPO);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+    // Back in the repo the confirm opened in, where the branch has moved since.
+    const MOVED = "1".repeat(40);
+    vi.mocked(gitBranchTips).mockResolvedValue({ "feat/a": MOVED });
+    await switchTo(REPO);
+    await act(() => Promise.resolve());
+    expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(null);
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+    // Only a reopen reads and pins the tip again.
+    const again = await openDeleteConfirm(user, "feat/a");
+    await pressDelete(user, again);
+    await waitFor(() =>
+      expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+        [REPO, "feat/a", MOVED],
+      ]),
+    );
+  });
+});
+
+describe("dismissing a current-branch delete's confirm", () => {
+  const onFeat = () => {
+    reads.head = headOn("feat");
+    reads.branches = [
+      trackedRow("feat", { isCurrent: true }),
+      trackedRow("main"),
+    ];
+  };
+
+  it("starts nothing when dismissed during the worktree read", async () => {
+    onFeat();
+    const held = deferred<Awaited<ReturnType<typeof listUserWorktrees>>>();
+    vi.mocked(listUserWorktrees).mockImplementation(() => held.promise);
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(listUserWorktrees).toHaveBeenCalled());
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+    await act(async () => held.resolve([]));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "You closed the confirmation before the delete started — feat was kept.",
+      ),
+    );
+    expect(gitCheckoutBranch).not.toHaveBeenCalled();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("lands the switch but sends no delete when dismissed during the checkout", async () => {
+    onFeat();
+    const held = deferred<void>();
+    vi.mocked(gitCheckoutBranch).mockImplementation(() => held.promise);
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() =>
+      expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main"),
+    );
+    await user.keyboard("{Escape}");
+    await act(async () => held.resolve());
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "You closed the confirmation before feat was deleted — main is checked out and feat was kept.",
+      ),
+    );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("lets a delete already sent finish and report", async () => {
+    onFeat();
+    const held = deferred<void>();
+    vi.mocked(gitDeleteBranch).mockImplementation(async () => {
+      await held.promise;
+      return { status: "deleted", tip: TIP, keptLocal: false, upstream: null };
+    });
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(gitDeleteBranch).toHaveBeenCalledTimes(1));
+    await user.keyboard("{Escape}");
+    await act(async () => held.resolve());
+    await waitFor(() => expect(success).toHaveBeenCalled());
+    expect(deleteToast().title).toBe("Deleted feat (was abcdef0)");
+    expect(recordDeletedBranches).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a delete that waited out a held repository", () => {
+  it("shows the held operation's sentence and records nothing", async () => {
+    vi.mocked(gitDeleteBranch).mockRejectedValue(BUSY);
+    reads.branches.push(branchRow({ name: "feat/a" }));
+    const error = vi.spyOn(toast, "error");
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat/a");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    const [title, options] = error.mock.calls[0] as [string, ToastOptions];
+    expect(title).toBe(BUSY.message);
+    expect(options.description).toBeUndefined();
+    error.mockRestore();
+    expect(recordDeletedBranches).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+  });
+
+  it("says where HEAD went when it fails after the switch landed", async () => {
+    reads.head = headOn("feat");
+    reads.branches = [
+      trackedRow("feat", { isCurrent: true }),
+      trackedRow("main"),
+    ];
+    vi.mocked(gitDeleteBranch).mockRejectedValue(BUSY);
+    const error = vi.spyOn(toast, "error");
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    const [title, options] = error.mock.calls[0] as [string, ToastOptions];
+    error.mockRestore();
+    expect(title).toBe(BUSY.message);
+    expect(options.description).toBe("Switched to main; feat was kept.");
+  });
+
+  it("claims no switch when the checkout itself failed", async () => {
+    reads.head = headOn("feat");
+    reads.branches = [
+      trackedRow("feat", { isCurrent: true }),
+      trackedRow("main"),
+    ];
+    vi.mocked(gitCheckoutBranch).mockRejectedValue(BUSY);
+    const error = vi.spyOn(toast, "error");
+    const { user } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    const [title, options] = error.mock.calls[0] as [string, ToastOptions];
+    error.mockRestore();
+    expect(title).toBe(BUSY.message);
+    expect(options?.description).toBeUndefined();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
   });
 });
 
 describe("the delete toast's Restore", () => {
   it("blurs its button first, then restores into the delete's repository after a switch", async () => {
     reads.branches.push(trackedRow("feat/b", { keepLocal: true }));
+    vi.mocked(gitDeleteBranch).mockResolvedValue({
+      status: "deleted",
+      tip: TIP,
+      keptLocal: true,
+      upstream: "origin/feat/b",
+    });
     const { user, switchTo } = renderSwitcher();
     await deleteBranch(user, "feat/b");
     reads.branches = reads.branches.filter((b) => b.name !== "feat/b");
     const { options } = deleteToast();
     await switchTo(OTHER_REPO);
     const blur = vi.fn();
-    const readsBefore = vi.mocked(gitBranches).mock.calls.length;
+    const tipsBefore = vi.mocked(gitBranchTips).mock.calls.length;
     act(() => {
       options.action?.onClick({
         currentTarget: { blur } as never,
@@ -554,11 +837,14 @@ describe("the delete toast's Restore", () => {
       }),
     );
     expect(blur).toHaveBeenCalledTimes(1);
-    // The press's own name check is the first branch read after it.
+    // The press's own name check is the first tips read after it.
     expect(blur.mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(gitBranches).mock.invocationCallOrder[readsBefore],
+      vi.mocked(gitBranchTips).mock.invocationCallOrder[tipsBefore],
     );
-    expect(vi.mocked(gitBranches).mock.calls[readsBefore]).toEqual([REPO]);
+    expect(vi.mocked(gitBranchTips).mock.calls[tipsBefore]).toEqual([
+      REPO,
+      ["feat/b"],
+    ]);
     expect(gitSetBranchKeepLocal).toHaveBeenCalledWith(REPO, "feat/b", true);
     expect(gitCreateBranch).toHaveBeenCalledWith(
       REPO,

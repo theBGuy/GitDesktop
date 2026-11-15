@@ -187,7 +187,7 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
         .iter_mut()
         .find(|e| e.name == "pre-push" && matches!(e.state, HookState::Active))
     {
-        pre_push.managed = listed_pre_push_is_managed(&repo_path, &hooks_dir).await;
+        pre_push.managed = hook_is_managed(&repo_path, &hooks_dir, "pre-push").await;
     }
     Ok(HooksInfo {
         hooks_path: hooks_dir.to_string_lossy().into_owned(),
@@ -207,6 +207,14 @@ async fn listed_pre_push_is_managed(repo_path: &str, listed_dir: &Path) -> bool 
     same_hooks_dir(listed_dir, &managed)
         && matches!(hooks_dir_redirected(&managed), Ok(false))
         && matches!(hook_file(&managed.join("pre-push")), Ok(HookFile::Ours))
+}
+
+/// Whether `name` in the listed hooks dir is GitDesktop's managed guard: the read that
+/// fills `HookEntry.managed`, shared with the delete's expected-state check.
+async fn hook_is_managed(repo_path: &str, hooks_dir: &Path, name: &str) -> bool {
+    name == "pre-push"
+        && hooks_dir.join(name).is_file()
+        && listed_pre_push_is_managed(repo_path, hooks_dir).await
 }
 
 /// Runs a hook manager's CLI in the repo and returns its combined output.
@@ -356,12 +364,37 @@ pub async fn git_hook_set_enabled(
     Ok(())
 }
 
+/// What a hook delete did: deleted, or nothing deleted because the hook's managed
+/// state no longer matches the caller's list, `managed` being the value read now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum HookDeleteOutcome {
+    Deleted,
+    ManagedChanged { managed: bool },
+}
+
 /// Deletes a hook (active and disabled variants) to the OS recycle bin, so a
-/// hand-written script can be recovered.
+/// hand-written script can be recovered. With an expected managed state, a hook whose
+/// managed state changed since the caller's list is left alone; the check and the
+/// delete are not atomic.
 #[tauri::command]
-pub async fn git_hook_delete(repo_path: String, name: String) -> AppResult<()> {
+pub async fn git_hook_delete(
+    repo_path: String,
+    name: String,
+    expected_managed: Option<bool>,
+) -> AppResult<HookDeleteOutcome> {
     validate_hook_name(&name)?;
     let (dir, _) = resolve_hooks_dir(&repo_path).await?;
+    if let Some(expected) = expected_managed {
+        let managed = hook_is_managed(&repo_path, &dir, &name).await;
+        if managed != expected {
+            return Ok(HookDeleteOutcome::ManagedChanged { managed });
+        }
+    }
     for path in [dir.join(&name), dir.join(format!("{name}.disabled"))] {
         if path.exists() {
             tauri::async_runtime::spawn_blocking(move || {
@@ -371,7 +404,7 @@ pub async fn git_hook_delete(repo_path: String, name: String) -> AppResult<()> {
             .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
         }
     }
-    Ok(())
+    Ok(HookDeleteOutcome::Deleted)
 }
 
 /// A `pre-push` holding a line equal to this (trailing whitespace ignored) is
@@ -1908,6 +1941,181 @@ mod tests {
             r#"{"name":"pre-push","description":"D","state":"active","hasSample":false,"managed":true}"#
         );
         assert!(!json.contains("has_sample"));
+    }
+
+    #[test]
+    fn hook_delete_outcome_serializes_to_the_pinned_wire_shape() {
+        let deleted = serde_json::to_string(&HookDeleteOutcome::Deleted).unwrap();
+        assert_eq!(deleted, r#"{"status":"deleted"}"#);
+        let changed =
+            serde_json::to_string(&HookDeleteOutcome::ManagedChanged { managed: true }).unwrap();
+        assert_eq!(changed, r#"{"status":"managedChanged","managed":true}"#);
+        let unmanaged =
+            serde_json::to_string(&HookDeleteOutcome::ManagedChanged { managed: false }).unwrap();
+        assert_eq!(unmanaged, r#"{"status":"managedChanged","managed":false}"#);
+        for json in [&deleted, &changed, &unmanaged] {
+            for rust in ["\"Deleted\"", "\"ManagedChanged\"", "\"managed_changed\""] {
+                assert!(!json.contains(rust), "{json}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_expecting_the_guard_deletes_it() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-guard").await;
+        install(&repo).await;
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::Deleted);
+        assert!(!managed_file(&repo, "pre-push").exists());
+        assert_eq!(status(&repo).await.state, Absent);
+    }
+
+    #[tokio::test]
+    async fn hook_delete_expecting_no_guard_refuses_a_guard_installed_since() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-installed-since").await;
+        install(&repo).await;
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(false))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::ManagedChanged { managed: true });
+        let file = managed_file(&repo, "pre-push");
+        assert!(file.is_file());
+        assert!(matches!(hook_file(&file), Ok(HookFile::Ours)));
+        assert_eq!(status(&repo).await.state, Installed);
+    }
+
+    #[tokio::test]
+    async fn hook_delete_expecting_the_guard_refuses_once_it_is_gone() {
+        let (_g, base, repo, _remote) = hook_repo("delete-gone").await;
+        let file = managed_file(&repo, "pre-push");
+        let foreign = b"#!/bin/sh\necho mine\n";
+        std::fs::write(&file, foreign).unwrap();
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), foreign);
+
+        std::fs::remove_file(&file).unwrap();
+        install(&repo).await;
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("pre-push"), KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        git_ok(&repo, &["config", "core.hooksPath", &slashed(&elsewhere)]).await;
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert!(file.is_file(), "managed file kept");
+        assert!(elsewhere.join("pre-push").is_file(), "repointed copy kept");
+
+        let (_g2, _base2, other, _remote2) = hook_repo("delete-gone-other").await;
+        let pre_commit = managed_file(&other, "pre-commit");
+        std::fs::write(&pre_commit, foreign).unwrap();
+        let outcome = git_hook_delete(other.clone(), "pre-commit".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert!(pre_commit.is_file());
+        let outcome = git_hook_delete(other.clone(), "pre-commit".into(), Some(false))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::Deleted);
+        assert!(!pre_commit.exists());
+    }
+
+    #[tokio::test]
+    async fn hook_delete_without_an_expected_state_deletes_as_before() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-unchecked").await;
+        let file = managed_file(&repo, "pre-push");
+        install(&repo).await;
+        assert_eq!(
+            git_hook_delete(repo.clone(), "pre-push".into(), None)
+                .await
+                .unwrap(),
+            HookDeleteOutcome::Deleted
+        );
+        assert!(!file.exists());
+
+        let twin = managed_file(&repo, "pre-push.disabled");
+        std::fs::write(&file, "#!/bin/sh\necho mine\n").unwrap();
+        std::fs::write(&twin, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        assert_eq!(
+            git_hook_delete(repo.clone(), "pre-push".into(), None)
+                .await
+                .unwrap(),
+            HookDeleteOutcome::Deleted
+        );
+        assert!(!file.exists());
+        assert!(!twin.exists());
+    }
+
+    /// A failed managed read answers false, as the list labels it, so expecting the
+    /// guard refuses and expecting none lets the delete through.
+    #[tokio::test]
+    async fn hook_delete_after_a_failed_managed_read_follows_the_list() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-unreadable").await;
+        let file = managed_file(&repo, "pre-push");
+        std::fs::write(&file, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        #[cfg(windows)]
+        let hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&file)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read(&file).is_ok() {
+                eprintln!("skipped: this user can read a mode-000 file (root)");
+                return;
+            }
+        }
+        let info = git_hooks_list(repo.clone()).await.unwrap();
+        let listed = info.entries.iter().find(|e| e.name == "pre-push").unwrap();
+        assert!(matches!(listed.state, HookState::Active), "{listed:?}");
+        assert!(!listed.managed, "{listed:?}");
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert!(file.is_file());
+
+        let result = git_hook_delete(repo.clone(), "pre-push".into(), Some(false)).await;
+        #[cfg(unix)]
+        {
+            assert!(
+                matches!(result, Ok(HookDeleteOutcome::Deleted)),
+                "{result:?}"
+            );
+            assert!(!file.exists());
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                !matches!(result, Ok(HookDeleteOutcome::ManagedChanged { .. })),
+                "{result:?}"
+            );
+            drop(hold);
+        }
     }
 
     #[tokio::test]

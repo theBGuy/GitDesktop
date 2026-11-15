@@ -7,11 +7,16 @@
  */
 
 /** A conflicted file a stage would carry markers into; `unchecked` = its sides
- *  read failed, for any cause (oversize, binary, a git error). */
+ *  read failed, for any cause (oversize, binary, a git error). `cause` names
+ *  the read's refusal when the caller knows it; without one the prompt says
+ *  only that the file couldn't be checked. */
 export interface MarkerFlag {
   name: string;
   unchecked: boolean;
+  cause?: MarkerCheckCause;
 }
+
+export type MarkerCheckCause = "binary" | "tooLarge";
 
 /** Up to three base names, else a count. */
 function flaggedNames(flags: MarkerFlag[]): string {
@@ -19,6 +24,21 @@ function flaggedNames(flags: MarkerFlag[]): string {
     ? flags.map((f) => f.name).join(", ")
     : `${flags.length} files`;
 }
+
+/** Why a caused group went unchecked; the clauses differ only before ", so". */
+const CAUSE_CLAUSE: Record<MarkerCheckCause, { one: string; many: string }> = {
+  binary: {
+    one: "looks like a binary file, so it wasn't checked for conflict markers.",
+    many: "look like binary files, so they weren't checked for conflict markers.",
+  },
+  tooLarge: {
+    one: "is too large to read here, so it wasn't checked for conflict markers.",
+    many: "are too large to read here, so they weren't checked for conflict markers.",
+  },
+};
+
+/** Caused groups in the order the prompt names them. */
+const CAUSE_ORDER: readonly MarkerCheckCause[] = ["binary", "tooLarge"];
 
 /** The stage-over-markers prompt for a non-empty `flags`. A `bulk` action never
  *  titles itself after one file, since it stages more. */
@@ -34,9 +54,18 @@ export function markerStagePrompt(flags: MarkerFlag[], bulk: boolean) {
     clauses.push(
       `${flaggedNames(marked)} still ${marked.length === 1 ? "has" : "have"} conflict markers.`,
     );
-  if (unchecked.length > 0)
+  for (const cause of CAUSE_ORDER) {
+    const group = unchecked.filter((f) => f.cause === cause);
+    if (group.length === 0) continue;
+    const clause = CAUSE_CLAUSE[cause];
     clauses.push(
-      `${flaggedNames(unchecked)} couldn't be checked for conflict markers.`,
+      `${flaggedNames(group)} ${group.length === 1 ? clause.one : clause.many}`,
+    );
+  }
+  const uncaused = unchecked.filter((f) => f.cause === undefined);
+  if (uncaused.length > 0)
+    clauses.push(
+      `${flaggedNames(uncaused)} couldn't be checked for conflict markers.`,
     );
   clauses.push(
     one

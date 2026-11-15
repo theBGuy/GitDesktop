@@ -68,26 +68,36 @@ export const gitRenameBranch = (
   });
 
 /** What a local branch delete did. `tip` is the commit the branch pointed at
- *  when it was deleted (a lowercase full id). `tipMoved` comes back only when an
- *  `expectedTip` was sent and the branch pointed elsewhere: nothing was deleted. */
+ *  when it was deleted (a lowercase full id); `keptLocal` and `upstream` are the
+ *  Keep local mark and upstream the delete removed, read under its own lock.
+ *  `tipMoved` comes back only when an `expectedTip` was sent and the branch
+ *  pointed elsewhere: nothing was deleted. */
 export type DeleteBranchOutcome =
-  | { status: "deleted"; tip: string }
+  | {
+      status: "deleted";
+      tip: string;
+      keptLocal: boolean;
+      upstream: string | null;
+    }
   | { status: "tipMoved"; expected: string; actual: string };
 
 /** Deletes a local branch. With `expectedTip` (a full object id) the delete
  *  happens only while the branch still points there. The delete also removes
- *  the branch's whole `branch.<name>` config section (Keep local, upstream), so
- *  a caller that restores those reads them before this call. */
-export const gitDeleteBranch = (
+ *  the branch's whole `branch.<name>` config section; a "deleted" answer
+ *  carries the Keep local mark and upstream it removed, normalized so a
+ *  malformed mark reads as marked. */
+export const gitDeleteBranch = async (
   repoPath: string,
   name: string,
   expectedTip?: string,
-) =>
-  invoke<DeleteBranchOutcome>("git_delete_branch", {
+): Promise<DeleteBranchOutcome> => {
+  const out = await invoke<DeleteBranchOutcome>("git_delete_branch", {
     repoPath,
     name,
     expectedTip: expectedTip ?? null,
   });
+  return out.status === "deleted" ? { ...out, ...deleteFactsOf(out) } : out;
+};
 
 /** Deletes `name` on `remote` (`git push <remote> --delete`). Idempotent when
  *  the remote ref is already gone. */
@@ -133,7 +143,7 @@ export const gitBranchDivergence = (repoPath: string, base: string) =>
   invoke<BranchDivergence[]>("git_branch_divergence", { repoPath, base });
 
 /** Whether `branch`'s upstream was rewritten under it, and what a reset to that
- *  upstream would cost. Read-only (rev-parse / rev-list only). */
+ *  upstream would cost. Read-only (ref and history reads only). */
 export const gitBranchRewriteStatus = (repoPath: string, branch: string) =>
   invoke<BranchRewriteStatus>("git_branch_rewrite_status", {
     repoPath,
@@ -199,7 +209,8 @@ export const gitUpdateBranchFrom = (
   });
 
 /** Current tip SHA of each requested local branch (one for-each-ref call).
- *  Branches that don't exist are omitted. Used to watch open local PRs' heads. */
+ *  Rejects when git fails, so an omitted name means git listed the refs without
+ *  it. */
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
 
@@ -214,6 +225,17 @@ export const tipOf = (
   const tip: unknown = Object.hasOwn(tips, name) ? tips[name] : undefined;
   return typeof tip === "string" ? tip : undefined;
 };
+
+/** A delete's Keep local mark and upstream as the wire sent them, made real
+ *  values: a mark that isn't a boolean reads as marked, since a Restore that
+ *  re-marks Keep local can't publish the branch by mistake. */
+export const deleteFactsOf = (wire: {
+  keptLocal?: unknown;
+  upstream?: unknown;
+}): { keptLocal: boolean; upstream: string | null } => ({
+  keptLocal: typeof wire.keptLocal === "boolean" ? wire.keptLocal : true,
+  upstream: typeof wire.upstream === "string" ? wire.upstream : null,
+});
 
 /** "clean": every change on the branch reached the base, at its tip or in a
  *  first-parent commit of its history, or the branch is an older version of a

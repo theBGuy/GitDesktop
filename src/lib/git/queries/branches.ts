@@ -222,7 +222,10 @@ export function useKeptLocalHead(repo: string): string | null {
 export function useDeleteBranch(repo: string) {
   return useRepoMutation(
     repo,
-    (name: string) => api.gitDeleteBranch(repo, name),
+    // The tip is required: a single delete is always pinned to the commit its
+    // confirm read, so a branch that moved since is refused, never deleted.
+    ({ name, expectedTip }: { name: string; expectedTip: string }) =>
+      api.gitDeleteBranch(repo, name, expectedTip),
     {
       // Local branch write — never park it offline.
       networkMode: "always",
@@ -1081,12 +1084,12 @@ export function useListedBranchTips(
       ? []
       : [...new Set(names)].filter((n) => !live.asked.has(n)).sort();
   const query = useQuery({
-    queryKey: [
-      "listed-tips",
-      live?.repoPath ?? repoPath,
-      live?.epoch ?? 0,
-      unread,
-    ] as const,
+    // One repo-free key while closed, so visiting repositories with the hook
+    // closed leaves a single disabled entry rather than one per repository.
+    queryKey:
+      live === null
+        ? (["listed-tips", "closed"] as const)
+        : (["listed-tips", live.repoPath, live.epoch, unread] as const),
     queryFn: async (): Promise<ListedTipsAnswer> => ({
       names: unread,
       tips: await api.gitBranchTips(repoPath, unread),

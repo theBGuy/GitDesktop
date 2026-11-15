@@ -494,8 +494,6 @@ impl ServerHandler for GitDesktopMcp {
 // ---- Shared helpers ------------------------------------------------------
 // Multi-module helpers live here (ancestor-private to the domain modules).
 
-pub(super) use crate::git::branches::SESSION_BRANCH_PREFIX;
-
 /// Maps a backend [`AppError`] to an MCP tool error.
 fn app_err(e: AppError) -> McpError {
     McpError::internal_error(e.to_string(), None)

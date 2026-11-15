@@ -586,6 +586,12 @@ pub struct WorktreeRemoveOutcome {
     /// The commit the deleted branch pointed at; `Some` exactly when `branch_cleanup` is
     /// `Deleted`.
     pub branch_tip: Option<String>,
+    /// The deleted branch's Keep local mark, read under the delete's lock (`true` when
+    /// unreadable); `Some` exactly when `branch_cleanup` is `Deleted`.
+    pub branch_kept_local: Option<bool>,
+    /// The deleted branch's upstream, display form (`origin/x`); `None` unless
+    /// `branch_cleanup` is `Deleted` and an upstream was read.
+    pub branch_upstream: Option<String>,
     /// `Some` only when a pinned branch tip missed BEFORE the removal began: nothing was
     /// removed, and `branch_cleanup` reads `SparedMoved`.
     pub tip_moved: Option<WorktreeTipMoved>,
@@ -634,7 +640,12 @@ pub(crate) async fn remove_worktree(
     let pin = expected_branch_tip
         .as_deref()
         .map(full_object_id)
-        .transpose()?;
+        .transpose()
+        .map_err(|_| {
+            AppError::InvalidArgument(
+                "expectedBranchTip must be a full commit id (40 or 64 hex characters)".into(),
+            )
+        })?;
     if pin.is_some() && branch.as_deref().is_none_or(|b| b.is_empty()) {
         return Err(AppError::InvalidArgument(
             "expectedBranchTip needs a branch".into(),
@@ -675,6 +686,8 @@ pub(crate) async fn remove_worktree(
                 return Ok(WorktreeRemoveOutcome {
                     branch_cleanup: BranchCleanup::SparedMoved,
                     branch_tip: None,
+                    branch_kept_local: None,
+                    branch_upstream: None,
                     tip_moved: Some(WorktreeTipMoved {
                         expected: pin,
                         actual: tip.clone(),
@@ -736,59 +749,54 @@ pub(crate) async fn remove_worktree(
     }
     // The branch can only be deleted once it's no longer checked out (i.e. after
     // the worktree is gone). Best-effort: a failure here shouldn't fail removal.
-    let (branch_cleanup, branch_tip) = match (branch, expected_tip) {
+    let (branch_cleanup, deleted) = match (branch, expected_tip) {
         (Some(branch), TipRead::Present(expected_tip)) => {
             delete_branch_if_unmoved(state, repo_path, branch, &expected_tip).await
         }
         (Some(_), TipRead::Unreadable) => (BranchCleanup::SparedUnreadable, None),
         _ => (BranchCleanup::NotRequested, None),
     };
+    let (branch_tip, branch_kept_local, branch_upstream) = match deleted {
+        Some(d) => (Some(d.tip), Some(d.kept_local), d.upstream),
+        None => (None, None, None),
+    };
     Ok(WorktreeRemoveOutcome {
         branch_cleanup,
         branch_tip,
+        branch_kept_local,
+        branch_upstream,
         tip_moved: None,
     })
+}
+
+/// What [`delete_branch_if_unmoved`] removed: the tip it deleted at, with the Keep local
+/// mark and upstream the delete read under its lock.
+#[derive(Debug, PartialEq, Eq)]
+struct DeletedBranch {
+    tip: String,
+    kept_local: bool,
+    upstream: Option<String>,
 }
 
 /// A branch-tip read that keeps "gone" apart from "couldn't tell".
 #[derive(Debug, PartialEq, Eq)]
 enum TipRead {
     Present(String),
-    /// `rev-parse --verify --quiet` exits 1 with no output for a missing ref.
+    /// A run that listed no ref of exactly this name: a case variant and git's
+    /// ref-search fallback read as absent too.
     Absent,
     /// An invalid name, a failed spawn, or any other git failure.
     Unreadable,
 }
 
-/// The commit `refs/heads/<branch>` points at.
-///
-/// Fully qualified: bare `rev-parse <name>` resolves a same-named TAG first, which
-/// would compare a tag's tip against a branch delete. The name is IPC-supplied and
-/// validated here, so an invalid name skips the whole delete rather than reaching
-/// this template or the `update-ref` argv downstream.
+/// The commit `refs/heads/<branch>` points at, by the delete's own exact read. The name
+/// is IPC-supplied and validated there, so an invalid name skips the whole delete
+/// rather than reaching the `update-ref` argv downstream.
 async fn read_branch_tip(repo_path: &str, branch: &str) -> TipRead {
-    if crate::git::branches::validate_branch_name(branch).is_err() {
-        return TipRead::Unreadable;
-    }
-    let Ok(out) = run_git_raw(
-        Some(repo_path),
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    else {
-        return TipRead::Unreadable;
-    };
-    let tip = out.stdout_lossy().trim().to_string();
-    match out.code {
-        0 if !tip.is_empty() => TipRead::Present(tip),
-        1 if tip.is_empty() => TipRead::Absent,
-        _ => TipRead::Unreadable,
+    match crate::git::branches::exact_branch_tip(repo_path, branch).await {
+        Ok(Some(tip)) => TipRead::Present(tip),
+        Ok(None) => TipRead::Absent,
+        Err(_) => TipRead::Unreadable,
     }
 }
 
@@ -802,17 +810,28 @@ async fn validated_branch_tip(repo_path: &str, branch: &str) -> Option<String> {
 }
 
 /// Deletes `branch` ONLY IF its tip is still `expected_tip` (git's compare-and-delete),
-/// so a commit that landed on it since is never discarded; the deleted tip rides
-/// beside `Deleted`. Never an error: a refusal must not turn a completed removal into a
-/// reported failure, so the outcome reports what happened to the branch instead.
+/// so a commit that landed on it since is never discarded; what it removed rides
+/// beside `Deleted`, and only there. Never an error: a refusal must not turn a completed
+/// removal into a reported failure, so the outcome reports what happened to the branch
+/// instead.
 async fn delete_branch_if_unmoved(
     state: &AppState,
     repo_path: &str,
     branch: &str,
     expected_tip: &str,
-) -> (BranchCleanup, Option<String>) {
+) -> (BranchCleanup, Option<DeletedBranch>) {
     match delete_branch_ref_at(state, repo_path, branch, expected_tip).await {
-        Ok(RefDeleteAt::Deleted) => (BranchCleanup::Deleted, Some(expected_tip.to_string())),
+        Ok(RefDeleteAt::Deleted {
+            kept_local,
+            upstream,
+        }) => (
+            BranchCleanup::Deleted,
+            Some(DeletedBranch {
+                tip: expected_tip.to_string(),
+                kept_local,
+                upstream,
+            }),
+        ),
         Ok(RefDeleteAt::Moved { actual: Some(_) }) => (BranchCleanup::SparedMoved, None),
         Ok(RefDeleteAt::Moved { actual: None }) => (BranchCleanup::NotRequested, None),
         // One of the delete's guards refused (checked out elsewhere, mid-rebase or
@@ -1033,7 +1052,7 @@ fn is_session_worktree(
     if session_paths.contains(&norm) {
         return true;
     }
-    if w.branch.starts_with("gd/session/") {
+    if crate::git::branches::is_session_branch_name(&w.branch) {
         return true;
     }
     if let Some(root) = app_data_root {
@@ -2102,6 +2121,22 @@ prunable gitdir file points to non-existent location
             ..Default::default()
         };
         assert!(is_session_worktree(&by_branch, &HashSet::new(), app_root));
+        let by_variant = RawWorktree {
+            path: "C:/somewhere/else".into(),
+            branch: "GD/Session/abc".into(),
+            ..Default::default()
+        };
+        assert!(is_session_worktree(&by_variant, &HashSet::new(), app_root));
+        let not_prefixed = RawWorktree {
+            path: "C:/somewhere/else".into(),
+            branch: "wip/gd/session/x".into(),
+            ..Default::default()
+        };
+        assert!(!is_session_worktree(
+            &not_prefixed,
+            &HashSet::new(),
+            app_root
+        ));
 
         // 3) under the app-data worktrees root even with a non-session branch
         let by_path = RawWorktree {
@@ -2363,7 +2398,12 @@ prunable gitdir file points to non-existent location
         let repo = base.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
-        run(&repo_s, &["init", "-q"]).await;
+        // Files backend: removal tests read loose refs, which `reftable` would not write.
+        run(
+            &repo_s,
+            &["-c", "init.defaultRefFormat=files", "init", "-q"],
+        )
+        .await;
         run(&repo_s, &["config", "user.email", "t@t.local"]).await;
         run(&repo_s, &["config", "user.name", "T"]).await;
         std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
@@ -3281,7 +3321,14 @@ prunable gitdir file points to non-existent location
         let unmoved_tip = validated_branch_tip(&repo_s, "unmoved").await.unwrap();
         assert_eq!(
             delete_branch_if_unmoved(&AppState::default(), &repo_s, "unmoved", &unmoved_tip).await,
-            (BranchCleanup::Deleted, Some(unmoved_tip.clone()))
+            (
+                BranchCleanup::Deleted,
+                Some(DeletedBranch {
+                    tip: unmoved_tip.clone(),
+                    kept_local: false,
+                    upstream: None,
+                })
+            )
         );
         assert!(
             run(&repo_s, &["branch", "--list", "unmoved"])
@@ -3329,7 +3376,14 @@ prunable gitdir file points to non-existent location
                     delete_branch_if_unmoved(&AppState::default(), &repo_s, branch, &tip)
                 )
                 .await,
-            (BranchCleanup::Deleted, Some(tip.clone()))
+            (
+                BranchCleanup::Deleted,
+                Some(DeletedBranch {
+                    tip: tip.clone(),
+                    kept_local: false,
+                    upstream: None,
+                })
+            )
         );
         assert!(
             validated_branch_tip(&repo_s, branch).await.is_none(),
@@ -3680,23 +3734,138 @@ prunable gitdir file points to non-existent location
         }
     }
 
+    #[tokio::test]
+    async fn read_branch_tip_is_unreadable_outside_a_repository() {
+        let base = tempfile::Builder::new()
+            .prefix("gd-wt-tip-no-repo-")
+            .tempdir()
+            .expect("create temp dir");
+        let dir = base.path().to_string_lossy().into_owned();
+        assert_eq!(read_branch_tip(&dir, "feat").await, TipRead::Unreadable);
+    }
+
+    /// Two branches that differ only in case coexist once one is packed: each name
+    /// reads its own tip. On a case-sensitive filesystem these are two ordinary
+    /// branches, a passing control.
+    #[tokio::test]
+    async fn read_branch_tip_reads_each_case_twin_its_own_tip() {
+        let (_base, repo_s) = setup_repo("tip-case-twins").await;
+        let seed = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["branch", "feat"]).await;
+        run(&repo_s, &["pack-refs", "--all"]).await;
+        run(&repo_s, &["commit", "-q", "--allow-empty", "-m", "next"]).await;
+        let head = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["update-ref", "refs/heads/Feat", &head]).await;
+        let listed = run(
+            &repo_s,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        )
+        .await;
+        assert!(
+            listed.contains(&format!("{} {seed}", "refs/heads/feat"))
+                && listed.contains(&format!("{} {head}", "refs/heads/Feat")),
+            "fixture sanity: {listed}"
+        );
+
+        assert_eq!(
+            read_branch_tip(&repo_s, "feat").await,
+            TipRead::Present(seed)
+        );
+        assert_eq!(
+            read_branch_tip(&repo_s, "Feat").await,
+            TipRead::Present(head)
+        );
+    }
+
+    /// A case variant of the worktree's branch names no ref of its own: pinned, nothing
+    /// is removed; unpinned, the checkout goes and the real branch stays. On a
+    /// case-sensitive filesystem this is a passing control.
+    #[tokio::test]
+    async fn worktree_remove_reads_a_case_variant_of_its_branch_as_absent() {
+        let (_base, repo_s, wt_s, tip) = pinned_removal_fixture("case-variant", "feat").await;
+        let state = AppState::default();
+        let err = remove_worktree(
+            &state,
+            &repo_s,
+            &wt_s,
+            Some("FEAT".into()),
+            false,
+            Some(tip.clone()),
+        )
+        .await
+        .expect_err("a pinned case variant refuses");
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m == "FEAT no longer exists, so nothing was removed."),
+            "{err:?}"
+        );
+        assert!(std::path::Path::new(&wt_s).exists(), "nothing was removed");
+
+        let outcome = remove_worktree(&state, &repo_s, &wt_s, Some("FEAT".into()), false, None)
+            .await
+            .expect("the removal runs");
+        assert_eq!(outcome.branch_cleanup, BranchCleanup::NotRequested);
+        assert!(!std::path::Path::new(&wt_s).exists());
+        assert_eq!(validated_branch_tip(&repo_s, "feat").await, Some(tip));
+    }
+
+    /// git's ref-search fallback would answer for `feat2`; the pinned removal reads it as
+    /// gone and removes nothing.
+    #[tokio::test]
+    async fn worktree_remove_pinned_never_reads_a_ref_search_fallback() {
+        for fallback in ["refs/heads/refs/heads/feat2", "refs/tags/refs/heads/feat2"] {
+            let (_base, repo_s, wt_s, tip) = pinned_removal_fixture("fallback", "keep").await;
+            run(&repo_s, &["update-ref", fallback, "HEAD"]).await;
+            let err = remove_worktree(
+                &AppState::default(),
+                &repo_s,
+                &wt_s,
+                Some("feat2".into()),
+                false,
+                Some(tip),
+            )
+            .await
+            .expect_err("a pinned fallback-only name refuses");
+            assert!(
+                matches!(&err, AppError::Command(m)
+                    if m == "feat2 no longer exists, so nothing was removed."),
+                "{fallback}: {err:?}"
+            );
+            assert!(std::path::Path::new(&wt_s).exists(), "nothing was removed");
+        }
+    }
+
     /// The exact JSON `removeWorktree` reads in `src/lib/git/worktree.ts`: camelCase
     /// fields and variant tags, both new keys always present, no snake_case spelling.
     #[test]
     fn worktree_remove_outcome_serializes_to_the_ts_wire_shape() {
         let (a, b) = ("a".repeat(40), "b".repeat(40));
-        let outcome = |branch_cleanup, branch_tip: Option<&String>, tip_moved| {
+        let outcome = |branch_cleanup, deleted: Option<(&String, bool, &str)>, tip_moved| {
             serde_json::to_string(&WorktreeRemoveOutcome {
                 branch_cleanup,
-                branch_tip: branch_tip.cloned(),
+                branch_tip: deleted.map(|(tip, _, _)| tip.clone()),
+                branch_kept_local: deleted.map(|(_, kept, _)| kept),
+                branch_upstream: deleted.map(|(_, _, upstream)| upstream.to_string()),
                 tip_moved,
             })
             .unwrap()
         };
         let mut wires = vec![
             (
-                outcome(BranchCleanup::Deleted, Some(&a), None),
-                format!(r#"{{"branchCleanup":"deleted","branchTip":"{a}","tipMoved":null}}"#),
+                outcome(BranchCleanup::Deleted, Some((&a, true, "origin/x")), None),
+                format!(
+                    r#"{{"branchCleanup":"deleted","branchTip":"{a}","branchKeptLocal":true,"branchUpstream":"origin/x","tipMoved":null}}"#
+                ),
             ),
             (
                 outcome(
@@ -3708,7 +3877,7 @@ prunable gitdir file points to non-existent location
                     }),
                 ),
                 format!(
-                    r#"{{"branchCleanup":"sparedMoved","branchTip":null,"tipMoved":{{"expected":"{a}","actual":"{b}"}}}}"#
+                    r#"{{"branchCleanup":"sparedMoved","branchTip":null,"branchKeptLocal":null,"branchUpstream":null,"tipMoved":{{"expected":"{a}","actual":"{b}"}}}}"#
                 ),
             ),
         ];
@@ -3719,12 +3888,20 @@ prunable gitdir file points to non-existent location
         ] {
             wires.push((
                 outcome(branch_cleanup, None, None),
-                format!(r#"{{"branchCleanup":"{tag}","branchTip":null,"tipMoved":null}}"#),
+                format!(
+                    r#"{{"branchCleanup":"{tag}","branchTip":null,"branchKeptLocal":null,"branchUpstream":null,"tipMoved":null}}"#
+                ),
             ));
         }
         for (json, expected) in wires {
             assert_eq!(json, expected);
-            for snake in ["branch_cleanup", "branch_tip", "tip_moved"] {
+            for snake in [
+                "branch_cleanup",
+                "branch_tip",
+                "branch_kept_local",
+                "branch_upstream",
+                "tip_moved",
+            ] {
                 assert!(!json.contains(snake), "{json}");
             }
         }
@@ -3765,6 +3942,8 @@ prunable gitdir file points to non-existent location
             WorktreeRemoveOutcome {
                 branch_cleanup: BranchCleanup::Deleted,
                 branch_tip: Some(tip),
+                branch_kept_local: Some(false),
+                branch_upstream: None,
                 tip_moved: None,
             }
         );
@@ -3798,6 +3977,8 @@ prunable gitdir file points to non-existent location
             WorktreeRemoveOutcome {
                 branch_cleanup: BranchCleanup::SparedMoved,
                 branch_tip: None,
+                branch_kept_local: None,
+                branch_upstream: None,
                 tip_moved: Some(WorktreeTipMoved {
                     expected: tip,
                     actual: actual.clone(),
@@ -3813,6 +3994,94 @@ prunable gitdir file points to non-existent location
             validated_branch_tip(&repo_s, "pin-stale").await,
             Some(actual)
         );
+    }
+
+    /// `branchKeptLocal` is set exactly when the branch was deleted, on every outcome a
+    /// removal produces, and a marked branch removed with its worktree reports its mark.
+    #[tokio::test]
+    async fn worktree_remove_reports_kept_local_only_for_a_deleted_branch() {
+        use crate::git::branches::{DeletePhase, DeletePhaseHook, DELETE_PHASE_HOOK};
+        let state = AppState::default();
+        let mut outcomes = Vec::new();
+
+        let (_g1, repo, wt, _tip) = pinned_removal_fixture("kl-deleted", "kl-deleted").await;
+        run(
+            &repo,
+            &["config", "branch.kl-deleted.gitdesktopLocalOnly", "true"],
+        )
+        .await;
+        let deleted = remove_worktree(&state, &repo, &wt, Some("kl-deleted".into()), false, None)
+            .await
+            .unwrap();
+        assert_eq!(deleted.branch_cleanup, BranchCleanup::Deleted);
+        assert_eq!(deleted.branch_kept_local, Some(true));
+        outcomes.push(deleted);
+
+        // The branch moves after the worktree is gone, before the delete's guards.
+        let (_g2, repo, wt, _tip) = pinned_removal_fixture("kl-moved", "kl-moved").await;
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "later"]).await;
+        let hook: DeletePhaseHook = {
+            let repo = repo.clone();
+            std::sync::Arc::new(move |phase| {
+                let repo = repo.clone();
+                Box::pin(async move {
+                    if phase == DeletePhase::BeforeGuards {
+                        run(&repo, &["branch", "-f", "kl-moved", "HEAD"]).await;
+                    }
+                })
+            })
+        };
+        let moved = DELETE_PHASE_HOOK
+            .scope(
+                hook,
+                remove_worktree(&state, &repo, &wt, Some("kl-moved".into()), false, None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved.branch_cleanup, BranchCleanup::SparedMoved);
+        outcomes.push(moved);
+
+        let (_g3, repo, wt, _tip) = pinned_removal_fixture("kl-none", "kl-none").await;
+        let none = remove_worktree(&state, &repo, &wt, None, false, None)
+            .await
+            .unwrap();
+        assert_eq!(none.branch_cleanup, BranchCleanup::NotRequested);
+        outcomes.push(none);
+
+        // The main checkout's own branch: the delete's guard refuses it.
+        let (_g4, repo, wt, _tip) = pinned_removal_fixture("kl-current", "kl-current").await;
+        let current = run(&repo, &["branch", "--show-current"])
+            .await
+            .trim()
+            .to_string();
+        let refused = remove_worktree(&state, &repo, &wt, Some(current), false, None)
+            .await
+            .unwrap();
+        assert_eq!(refused.branch_cleanup, BranchCleanup::SparedUnreadable);
+        outcomes.push(refused);
+
+        let (_g5, repo, wt, _tip) = pinned_removal_fixture("kl-pin", "kl-pin").await;
+        let pin_miss = remove_worktree(
+            &state,
+            &repo,
+            &wt,
+            Some("kl-pin".into()),
+            false,
+            Some("a".repeat(40)),
+        )
+        .await
+        .unwrap();
+        assert!(pin_miss.tip_moved.is_some(), "{pin_miss:?}");
+        outcomes.push(pin_miss);
+
+        for outcome in &outcomes {
+            let deleted = outcome.branch_cleanup == BranchCleanup::Deleted;
+            assert_eq!(outcome.branch_kept_local.is_some(), deleted, "{outcome:?}");
+            assert_eq!(outcome.branch_tip.is_some(), deleted, "{outcome:?}");
+            if !deleted {
+                assert_eq!(outcome.branch_upstream, None, "{outcome:?}");
+            }
+        }
     }
 
     /// The refusals that remove nothing: a pin without a branch, a malformed pin, and a
@@ -3838,7 +4107,10 @@ prunable gitdir file points to non-existent location
             )
             .await,
         );
-        assert!(message.contains("full commit id"), "{message}");
+        assert_eq!(
+            message,
+            "expectedBranchTip must be a full commit id (40 or 64 hex characters)"
+        );
         let err = remove_worktree(
             &state,
             &repo_s,
