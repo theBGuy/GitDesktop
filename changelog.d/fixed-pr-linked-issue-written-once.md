@@ -1,0 +1,1 @@
+- An issue reference typed at the end of a pull request description and also added as a linked-issue chip is saved once.

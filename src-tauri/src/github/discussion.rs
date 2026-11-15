@@ -1084,10 +1084,27 @@ mod tests {
         assert!(!after_run(&early), "a reader ahead of the run must flip");
         // The reader classifies through the one rule and parses nothing itself.
         let reader = crate::github::repo_meta::tests::wiring_body(source, "created_discussion_ref");
-        let one_rule =
-            |body: &str| body.matches("created_reply(").count() == 1 && !body.contains("from_str");
+        // Converting the classified value (`from_value`) is not a parse of the reply.
+        let one_rule = |body: &str| {
+            let rest = body.replace("serde_json::from_value", "");
+            body.matches("created_reply(").count() == 1
+                && ![
+                    "from_str",
+                    "from_slice",
+                    "from_reader(",
+                    ".parse::<",
+                    "serde_json::from_",
+                ]
+                .iter()
+                .any(|token| rest.contains(token))
+        };
         assert!(one_rule(&reader), "{reader}");
         assert!(!one_rule(&format!("{reader}\nserde_json::from_str(x)")));
+        assert!(!one_rule(&format!("{reader}\nfrom_slice(x)")));
+        assert!(!one_rule(&format!("{reader}\nserde_json::from_reader(x)")));
+        assert!(!one_rule(&format!("{reader}\nfrom_reader(x)")));
+        assert!(!one_rule(&format!("{reader}\nx.parse::<Value>()")));
+        assert!(one_rule(&format!("{reader}\nserde_json::from_value(x)")));
         assert!(!one_rule(&reader.replace("created_reply(", "own_parse(")));
     }
 

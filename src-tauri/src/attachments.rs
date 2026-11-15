@@ -656,21 +656,24 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
         None => fs::remove_dir_all(&dir),
         // Every name is tried; the first failure is reported after the rest. Only a name
         // listed exactly is removed: a case-insensitive file system would also open a case
-        // variant, another image. An absent or unreadable folder lists nothing.
-        Some(names) => {
-            let listed: Vec<std::ffi::OsString> = fs::read_dir(&dir)
-                .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
-                .unwrap_or_default();
-            let mut first_err = Ok(());
-            for n in names.iter().filter(|n| has_exact_entry(&listed, n)) {
-                if let Err(e) = fs::remove_file(dir.join(n)) {
-                    if e.kind() != std::io::ErrorKind::NotFound && first_err.is_ok() {
-                        first_err = Err(e);
+        // variant, another image. An absent folder lists nothing; any other listing
+        // failure is the error.
+        Some(names) => match fs::read_dir(&dir) {
+            Err(e) => Err(e),
+            Ok(entries) => {
+                let listed: Vec<std::ffi::OsString> =
+                    entries.flatten().map(|e| e.file_name()).collect();
+                let mut first_err = Ok(());
+                for n in names.iter().filter(|n| has_exact_entry(&listed, n)) {
+                    if let Err(e) = fs::remove_file(dir.join(n)) {
+                        if e.kind() != std::io::ErrorKind::NotFound && first_err.is_ok() {
+                            first_err = Err(e);
+                        }
                     }
                 }
+                first_err
             }
-            first_err
-        }
+        },
     };
     if names.is_some() {
         // Best effort: fails harmlessly while other files remain.
@@ -758,7 +761,7 @@ pub(crate) async fn checked_refs(
 
 /// Deletes every staged name not in `failed`, then the session folder once empty.
 /// Best-effort: errors are ignored, and a folder (or root) turned into a link since the
-/// checks is left alone.
+/// checks is left alone. Only a name listed exactly is deleted, as in [`discard_in`].
 fn release_in(dir: &Path, names: &[String], failed: &[String]) {
     let _guard = fs_lock();
     let root_ok = dir
@@ -767,7 +770,13 @@ fn release_in(dir: &Path, names: &[String], failed: &[String]) {
     if !root_ok || session_is_linked(dir) {
         return;
     }
-    for name in names.iter().filter(|n| !failed.contains(n)) {
+    let listed: Vec<std::ffi::OsString> = fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    for name in names
+        .iter()
+        .filter(|n| !failed.contains(n) && has_exact_entry(&listed, n))
+    {
         let _ = fs::remove_file(dir.join(name));
     }
     let _ = fs::remove_dir(dir);
@@ -1647,6 +1656,45 @@ pub(crate) mod tests {
         assert_eq!(entries(&dir), ["image-2.png"]);
         release_in(&dir, &names[1..2], &[]);
         assert!(!dir.exists());
+    }
+
+    /// A release deletes only a name listed exactly. The first row is red without the
+    /// filter only on a case-insensitive file system (Windows, macOS), so the wiring pin
+    /// below holds the filter on every leg; the `failed` conjunct is held on every leg by
+    /// `release_keeps_failed_names_and_the_nonempty_folder` (a failed, listed name stays).
+    #[test]
+    fn a_release_removes_only_the_exact_name() {
+        let root = private_root();
+        let dir = root.path().join(SID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("A.png"), b"x").unwrap();
+        release_in(&dir, &["a.png".to_string()], &[]);
+        assert_eq!(entries(&dir), ["A.png"]);
+        release_in(&dir, &["A.png".to_string()], &[]);
+        assert!(!dir.exists());
+
+        use crate::github::repo_meta::tests::wiring_body;
+        let filtered = |body: &str| {
+            body.find("has_exact_entry(")
+                .zip(body.find("remove_file("))
+                .is_some_and(|(f, r)| f < r)
+        };
+        let body = wiring_body(include_str!("attachments.rs"), "release_in");
+        assert!(filtered(&body), "{body}");
+        let dropped = body.replace("has_exact_entry(", "kept(");
+        assert!(!filtered(&dropped), "the control must flip");
+    }
+
+    /// A named discard whose session folder can't be listed for a reason other than its
+    /// absence reports that failure; a session path holding a file is one on every OS.
+    #[test]
+    fn a_named_discard_reports_an_unreadable_folder() {
+        let root = private_root();
+        let dir = root.path().join(SID);
+        fs::write(&dir, b"x").unwrap();
+        let names = ["image-1.png".to_string()];
+        assert!(discard_in(root.path(), SID, Some(&names)).is_err());
+        assert!(dir.is_file());
     }
 
     #[tokio::test]

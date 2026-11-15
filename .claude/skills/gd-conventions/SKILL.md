@@ -1011,9 +1011,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   sentence under its forge's own kind: the five readers that parse a create's
   reply (`created_ref`, `created_release_url`, `created_issue_ref`,
   `created_discussion_ref`, `created_pr_ref`) call `created_reply` before
-  reading a field; GitHub's pull request create and attached issue create
-  scrape a URL instead. Both are pinned from both sides by
-  `scripts/attached-failure-leads.test.mjs`.
+  reading a field; GitHub's pull request create, attached issue create and
+  release create (`gh_release_create`) scrape a URL instead. Both builders
+  are pinned from both sides by `scripts/attached-failure-leads.test.mjs`.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

@@ -434,6 +434,35 @@ describe("RemotePrView edit attachments", () => {
   const chipButton = (n: number) =>
     screen.queryByRole("button", { name: new RegExp(`issue ${n}:`) });
 
+  it("sends a typed reference the save turned into a chip once on the retry", async () => {
+    let stored = "Words";
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: stored,
+    }));
+    await openPrEdit({ issues: true });
+    fireEvent.change(editBox(), {
+      target: { value: "Words edited\n\nCloses #5" },
+    });
+    // The write lands but its reply times out, so the re-read confirms it.
+    vi.mocked(forgePrEdit).mockImplementationOnce(async () => {
+      stored = "Words edited\n\nCloses #5";
+      throw { kind: "timeout", message: "may have landed" };
+    });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(chipButton(5)).toBeTruthy());
+    expect(editBox().value).toBe("Words edited\n\nCloses #5");
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(sentBody(1)).toBe("Words edited\n\nCloses #5");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("keeps the chip edits made while a partial save ran, and sends them next", async () => {
     vi.mocked(forgePrView).mockImplementation(async () => ({
       ...pr(),
@@ -519,7 +548,8 @@ describe("RemotePrView edit attachments", () => {
     vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise as never);
     fireEvent.click(button("Save"));
     await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
-    expect(sentBody(0)).toBe(`${typed}\n\nCloses #3`);
+    // The typed ref and the chip's share one trailing block.
+    expect(sentBody(0)).toBe(`${typed}\nCloses #3`);
     await act(async () =>
       pending.resolve({
         failedAttachments: ["image-1.png"],

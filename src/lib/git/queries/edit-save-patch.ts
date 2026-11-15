@@ -1,7 +1,7 @@
 // The optimistic cache patch the issue and pull request Edit saves share.
 // Package-private: index.ts does not re-export this module.
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
-import { mayHaveLanded } from "@/lib/error-summary";
+import { mayHaveLanded, otherChangesSaved } from "@/lib/error-summary";
 import type { AttachmentRefs } from "../types";
 
 /** What an Edit save sends for one issue or pull request. */
@@ -47,15 +47,18 @@ export async function patchEditSave<T extends { title: string; body: string }>(
 }
 
 /** Restores each field an Edit save patched, only while the cache still holds
- *  the value that save wrote, so a newer write or read of that field survives.
- *  A failure that may have landed restores nothing: the settle's re-read decides
- *  which values the forge holds. */
+ *  the value that save wrote: a newer different value survives, while a newer
+ *  read returning the value the save wrote can't be told apart and is restored
+ *  over until the settle's re-read lands. A failure that may have landed, or
+ *  that says its other changes were saved (an image save patches only the
+ *  title, which gh saved), restores nothing: the settle's re-read decides which
+ *  values the forge holds. */
 export function rollbackEditSave<T extends { title: string; body: string }>(
   queryClient: QueryClient,
   patch: EditSavePatch | undefined,
   error: unknown,
 ) {
-  if (!patch || mayHaveLanded(error)) return;
+  if (!patch || mayHaveLanded(error) || otherChangesSaved(error)) return;
   queryClient.setQueryData<T>(patch.key, (cur) => {
     if (!cur) return cur;
     const back = patch.fields.filter((f) => cur[f.field] === f.next);

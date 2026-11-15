@@ -169,7 +169,7 @@ const EXCLUDED = {
  *  membership can lag the state change or deletion they make, and the condition
  *  that must guard every such call in it (null = scheduled on every success).
  *  Any other unit scheduling it fails the check; the helper's gate plus the
- *  ISSUE_REREAD flag pin keep pin, lock, edit, transfer and delete out, and the
+ *  ISSUE_REREAD flag pin keep pin, lock, transfer and delete out, and the
  *  merge's gate keeps a queued merge out. */
 const LIST_REREAD = {
   useMergePr: { file: `${Q}pr-actions.ts`, gate: "if (!data.queued)" },

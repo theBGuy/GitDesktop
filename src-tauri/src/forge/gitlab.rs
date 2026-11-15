@@ -4723,13 +4723,37 @@ mod attach_tests {
     fn gitlab_readers_classify_through_the_one_rule() {
         use crate::github::repo_meta::tests::wiring_body;
         let gitlab = include_str!("gitlab.rs");
-        let one_rule =
-            |body: &str| body.matches("created_reply(").count() == 1 && !body.contains("from_str");
+        // Converting the classified value (`from_value`) is not a parse of the reply.
+        let one_rule = |body: &str| {
+            let rest = body.replace("serde_json::from_value", "");
+            body.matches("created_reply(").count() == 1
+                && ![
+                    "from_str",
+                    "from_slice",
+                    "from_reader(",
+                    ".parse::<",
+                    "serde_json::from_",
+                ]
+                .iter()
+                .any(|token| rest.contains(token))
+        };
         for reader in ["created_ref", "created_release_url"] {
             let body = wiring_body(gitlab, reader);
             assert!(one_rule(&body), "{reader}\n{body}");
-            let parsed = format!("{body}\nserde_json::from_str(x)");
-            assert!(!one_rule(&parsed), "{reader}: a second parse must flip");
+            for parse in [
+                "serde_json::from_str(x)",
+                "from_slice(x)",
+                "serde_json::from_reader(x)",
+                "from_reader(x)",
+                "x.parse::<Value>()",
+            ] {
+                let parsed = format!("{body}\n{parse}");
+                assert!(!one_rule(&parsed), "{reader}: a second parse must flip");
+            }
+            assert!(
+                one_rule(&format!("{body}\nserde_json::from_value(x)")),
+                "{reader}"
+            );
             let bypassed = body.replace("created_reply(", "own_parse(");
             assert!(!one_rule(&bypassed), "{reader}: a bypassed rule must flip");
         }
@@ -4741,33 +4765,87 @@ mod attach_tests {
         use crate::github::repo_meta::tests::wiring_body;
         let gitlab = include_str!("gitlab.rs");
         let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-        let named = |body: &str, landed: &str, reader: &str| {
-            let body = flat(body);
-            body.contains(&flat(landed)) && body.contains(&flat(reader))
+        // The reader call's arguments split at top-level commas, so neither the first
+        // argument's spelling nor rustfmt's one-argument-per-line form matters.
+        // Each argument's trimmed byte span, so a control rewrites the argument the pin
+        // parsed rather than a literal spelling of the call.
+        let arg_spans = |body: &str| -> Option<Vec<(usize, usize)>> {
+            let start = body.find("created_ref(")? + "created_ref(".len();
+            let (mut depth, mut spans) = (0usize, vec![(start, start)]);
+            for (i, c) in body[start..].char_indices() {
+                let at = start + i;
+                match c {
+                    ')' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        let trimmed = spans.into_iter().map(|(a, b)| {
+                            let lead = body[a..b].len() - body[a..b].trim_start().len();
+                            (a + lead, a + lead + body[a..b].trim().len())
+                        });
+                        return Some(trimmed.filter(|(a, b)| a < b).collect());
+                    }
+                    ',' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        spans.push((at + 1, at + 1));
+                    }
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        };
+        let reader_args = |body: &str| -> Option<Vec<String>> {
+            let spans = arg_spans(body)?;
+            Some(spans.iter().map(|&(a, b)| body[a..b].to_string()).collect())
+        };
+        let with_arg = |body: &str, n: usize, to: &str| {
+            let (a, b) = arg_spans(body).expect("a created_ref( call")[n];
+            format!("{}{to}{}", &body[..a], &body[b..])
+        };
+        let named = |body: &str, landed: &str, noun: &str, pushed: &str| {
+            flat(body).contains(&flat(landed))
+                && reader_args(body).is_some_and(|a| {
+                    a.len() == 3 && a[1] == format!("\"{noun}\"") && a[2] == pushed
+                })
         };
         let mr = wiring_body(gitlab, "create_mr");
         let mr_landed = "LandedWrite::CreatedAfterPush(\"merge request\")";
-        let mr_reader = "created_ref(&out.stdout_lossy(), \"merge request\", true)";
-        assert!(named(&mr, mr_landed, mr_reader), "{mr}");
+        assert!(named(&mr, mr_landed, "merge request", "true"), "{mr}");
         let issue = wiring_body(gitlab, "create_issue_in");
         assert!(
-            named(
-                &issue,
-                "LandedWrite::Created(\"issue\")",
-                "created_ref(&out.stdout_lossy(), \"issue\", false)"
-            ),
+            named(&issue, "LandedWrite::Created(\"issue\")", "issue", "false"),
             "{issue}"
         );
-        let swapped = mr.replacen(
-            "created_ref(&out.stdout_lossy(), \"merge request\"",
-            "created_ref(&out.stdout_lossy(), \"issue\"",
-            1,
+        // rustfmt's one-argument-per-line form of the same call, built from the real body.
+        let spans = arg_spans(&mr).expect("create_mr calls created_ref(");
+        let lines = reader_args(&mr)
+            .unwrap()
+            .into_iter()
+            .map(|a| format!("\n    {a},"));
+        let (first, last) = (spans[0].0, spans[spans.len() - 1].1);
+        let respelled = format!(
+            "{}{}\n{}",
+            &mr[..first],
+            lines.collect::<String>(),
+            &mr[last..]
         );
-        assert_ne!(swapped, mr);
         assert!(
-            !named(&swapped, mr_landed, mr_reader),
-            "create_mr: a swapped noun must flip"
+            !respelled.contains("\"merge request\", true"),
+            "{respelled}"
         );
+        for body in [&mr, &respelled] {
+            assert!(named(body, mr_landed, "merge request", "true"), "{body}");
+            let swapped = with_arg(body, 1, "\"issue\"");
+            assert!(
+                !named(&swapped, mr_landed, "merge request", "true"),
+                "create_mr: a swapped noun must flip\n{swapped}"
+            );
+            let flipped = with_arg(body, 2, "false");
+            assert!(
+                !named(&flipped, mr_landed, "merge request", "true"),
+                "create_mr: a flipped pushed flag must flip\n{flipped}"
+            );
+        }
     }
 
     /// A staged file gone mid-uploads explains the failure, whatever the upload said.

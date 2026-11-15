@@ -536,65 +536,23 @@ pub async fn run_gh_input_raw(
     input: &str,
     timeout: Duration,
 ) -> AppResult<GhOutput> {
-    use tokio::io::AsyncWriteExt;
-
     let gh = gh_bin().await?;
     let gh_host = match repo_path {
         Some(repo) => gh_host_for_repo(repo).await,
         None => None,
     };
+    let host = gh_host.as_deref();
     let epoch = gh_auth_epoch();
-    run_gh_gated(
-        &gh,
-        gh_host.as_deref(),
-        args,
-        rate_gate(),
-        epoch,
-        || async {
-            let mut cmd = Command::new(&gh);
-            apply_gh_env(&mut cmd, gh_host.as_deref());
-            cmd.args(args);
-            if let Some(repo) = repo_path {
-                cmd.current_dir(repo);
-            }
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            #[cfg(windows)]
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            cmd.kill_on_drop(true);
-
-            let mut child = cmd.spawn().map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    AppError::GhNotFound
-                } else {
-                    AppError::Io(e)
-                }
-            })?;
-            // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
-            // outside it a stall hangs the caller forever instead of failing at the
-            // deadline. It still precedes the drain rather than running concurrently the
-            // way the git runner has to — one API body in, one small JSON document back —
-            // and the timeout bounds the exchange whatever a caller sends.
-            let exchange = async move {
-                // Dropping the handle after the write closes the pipe so gh reads EOF.
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(input.as_bytes()).await.map_err(AppError::Io)?;
-                    stdin.shutdown().await.ok();
-                }
-                child.wait_with_output().await.map_err(AppError::Io)
-            };
-            let output = tokio::time::timeout(timeout, exchange)
-                .await
-                .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
-
-            Ok(GhOutput {
-                stdout: output.stdout,
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                code: output.status.code().unwrap_or(-1),
-            })
-        },
-    )
+    run_gh_gated(&gh, host, args, rate_gate(), epoch, || {
+        spawn_gh_resolved(
+            &gh,
+            repo_path.map(std::path::Path::new),
+            host,
+            args,
+            Some(input),
+            timeout,
+        )
+    })
     .await
 }
 
@@ -4008,6 +3966,91 @@ mod tests {
         assert_quick(started);
         assert_eq!(out.code, 3);
         assert!(out.stderr.contains("refused"), "stderr: {}", out.stderr);
+    }
+
+    /// The stdin runner resolves the real gh, so it is pinned to the seam the stand-in
+    /// children above exercise rather than run.
+    #[test]
+    fn the_stdin_runner_exchanges_through_the_shared_seam() {
+        // Each argument's trimmed byte span in the seam call, split at top-level commas so
+        // the call's line layout doesn't matter.
+        let arg_spans = |body: &str| -> Option<Vec<(usize, usize)>> {
+            let start = body.find("spawn_gh_resolved(")? + "spawn_gh_resolved(".len();
+            let (mut depth, mut spans) = (0usize, vec![(start, start)]);
+            for (i, c) in body[start..].char_indices() {
+                let at = start + i;
+                match c {
+                    ')' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        let trimmed = spans.into_iter().map(|(a, b)| {
+                            let lead = body[a..b].len() - body[a..b].trim_start().len();
+                            (a + lead, a + lead + body[a..b].trim().len())
+                        });
+                        return Some(trimmed.filter(|(a, b)| a < b).collect());
+                    }
+                    ',' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        spans.push((at + 1, at + 1));
+                    }
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        };
+        let args = |body: &str| -> Vec<String> {
+            let spans = arg_spans(body).unwrap_or_default();
+            let text = spans.iter().map(|&(a, b)| &body[a..b]);
+            text.map(|a| a.split_whitespace().collect::<String>())
+                .collect()
+        };
+        // The repository is the working directory and its resolved host is passed on.
+        let routed = |body: &str| {
+            let a = args(body);
+            a.len() == 6
+                && a[1] == "repo_path.map(std::path::Path::new)"
+                && a[2] == "host"
+                && a[4] == "Some(input)"
+                && body.contains("let host = gh_host.as_deref();")
+                && !body.contains("write_all")
+        };
+        let with_arg = |body: &str, n: usize, to: &str| {
+            let (a, b) = arg_spans(body).expect("a spawn_gh_resolved( call")[n];
+            format!("{}{to}{}", &body[..a], &body[b..])
+        };
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("runner.rs"),
+            "run_gh_input_raw",
+        );
+        let spans = arg_spans(&body).expect("run_gh_input_raw calls spawn_gh_resolved(");
+        let (first, last) = (spans[0].0, spans[spans.len() - 1].1);
+        let one_line = format!(
+            "{}{}{}",
+            &body[..first],
+            args(&body).join(", "),
+            &body[last..]
+        );
+        assert_ne!(one_line, body);
+        for body in [&body, &one_line] {
+            assert!(routed(body), "{body}");
+            let inline = body.replace("spawn_gh_resolved(", "spawn_inline(");
+            assert!(!routed(&inline), "the control must flip");
+            let written = format!("{body}\nstdin.write_all(input.as_bytes())");
+            assert!(!routed(&written), "the control must flip");
+            assert!(
+                !routed(&with_arg(body, 1, "None")),
+                "a dropped cwd must flip"
+            );
+            assert!(
+                !routed(&with_arg(body, 2, "None")),
+                "a dropped host must flip"
+            );
+            assert!(
+                !routed(&with_arg(body, 4, "None")),
+                "a dropped input must flip"
+            );
+        }
     }
 
     #[tokio::test]

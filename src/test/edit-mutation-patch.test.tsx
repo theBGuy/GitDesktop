@@ -25,10 +25,11 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrEdit: vi.fn(),
 }));
 
-// Names the may-have-landed class by a sentinel rather than Rust's sentence;
-// every other error keeps the real answer.
-const { MAY_HAVE_LANDED } = vi.hoisted(() => ({
+// Names the may-have-landed and other-changes-saved classes by sentinels
+// rather than Rust's sentences; every other error keeps the real answer.
+const { MAY_HAVE_LANDED, OTHER_CHANGES_SAVED } = vi.hoisted(() => ({
   MAY_HAVE_LANDED: new Error("sentinel: the edit may have landed"),
+  OTHER_CHANGES_SAVED: new Error("sentinel: the other changes were saved"),
 }));
 vi.mock("@/lib/error-summary", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/error-summary")>();
@@ -36,6 +37,8 @@ vi.mock("@/lib/error-summary", async (importOriginal) => {
     ...actual,
     mayHaveLanded: (e: unknown) =>
       e === MAY_HAVE_LANDED || actual.mayHaveLanded(e),
+    otherChangesSaved: (e: unknown) =>
+      e === OTHER_CHANGES_SAVED || actual.otherChangesSaved(e),
   };
 });
 
@@ -214,6 +217,34 @@ describe.each(HOOKS)("$name optimistic patch", (hook) => {
         true,
       ),
     );
+  });
+
+  const IMAGE_SAVE = {
+    body: "See ![a](a.png)",
+    attachments: { session: "s1", names: ["a.png"] },
+  };
+
+  it("keeps an image save's title when the rejection says its other changes were saved", async () => {
+    client.setQueryData(hook.key("origin"), OLD);
+    const { write, settled } = save(IMAGE_SAVE);
+    await waitFor(() => expect(read()?.title).toBe("New title"));
+    write.reject(OTHER_CHANGES_SAVED);
+    expect(await settled).toBe("err");
+    expect(read()).toEqual({ ...OLD, title: "New title" });
+    await waitFor(() =>
+      expect(client.getQueryState(hook.key("origin"))?.isInvalidated).toBe(
+        true,
+      ),
+    );
+  });
+
+  it("restores an image save's title on an ordinary rejection", async () => {
+    client.setQueryData(hook.key("origin"), OLD);
+    const { write, settled } = save(IMAGE_SAVE);
+    await waitFor(() => expect(read()?.title).toBe("New title"));
+    write.reject(new Error("boom"));
+    expect(await settled).toBe("err");
+    expect(read()).toEqual(OLD);
   });
 
   it("leaves a newer value of a patched field alone on rejection", async () => {

@@ -1846,9 +1846,9 @@ use **Attach image**. An image posted to GitLab shows here as its alt text with 
 it can't load in this view; GitLab shows the picture itself. On GitHub.com and GitHub
 Enterprise Cloud, an attached image that GitHub hosts at a \`user-attachments\` link loads
 through your GitHub CLI sign-in, so it shows in a private repository too. That covers issue
-and pull request descriptions, comments, review threads, discussions and release notes. One
-the app can't load that way shows a short reason, with an **Open on GitHub** link unless
-the image is itself a link.
+and pull request descriptions, comments, review threads, discussions and release notes, both
+once posted and in Preview while you write. One the app can't load that way shows a short
+reason, with an **Open on GitHub** link unless the image is itself a link.
 
 Those references are links once a body is rendered. On **GitHub** and **GitLab**, a
 **#123** in a description, comment, review thread,{{ai}} AI review,{{/ai}} or release note opens that
