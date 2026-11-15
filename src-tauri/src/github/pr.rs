@@ -5481,7 +5481,7 @@ pub(crate) async fn run_gh_api_json(
 }
 
 /// [`run_gh_api_json`] read as a write: both streams on failure.
-async fn run_gh_api_write_json(
+pub(crate) async fn run_gh_api_write_json(
     repo_path: &str,
     method: &str,
     endpoint: &str,

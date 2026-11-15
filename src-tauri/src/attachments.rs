@@ -656,8 +656,8 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
         None => fs::remove_dir_all(&dir),
         // Every name is tried; the first failure is reported after the rest. Only a name
         // listed exactly is removed: a case-insensitive file system would also open a case
-        // variant, another image. An absent folder lists nothing; any other listing
-        // failure is the error.
+        // variant, another image. An absent folder's `NotFound` is Ok below; any other
+        // listing failure is the error.
         Some(names) => match fs::read_dir(&dir) {
             Err(e) => Err(e),
             Ok(entries) => {

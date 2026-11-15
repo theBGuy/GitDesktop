@@ -12,6 +12,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CREATE_PENDING_GENERATE_REASON } from "@/features/conversations/useAiStream";
 import { CreateLocalIssueDialog } from "@/features/issues/CreateLocalIssueDialog";
 import { createLocalIssue } from "@/lib/issues/local";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
@@ -114,6 +115,25 @@ const titleBox = () => screen.getByRole("textbox", { name: "Title" });
 const form = () => titleBox().closest("form") as HTMLFormElement;
 const tick = () => act(() => new Promise((r) => setTimeout(r, 20)));
 
+/** Held with its reason: focusable, so never natively disabled. */
+function expectCreateHeld() {
+  const button = createButton();
+  expect(button).toHaveAttribute("aria-disabled", "true");
+  expect(button).not.toHaveAttribute("disabled");
+  expect(button).toHaveAccessibleDescription(ACT_PENDING_REASON);
+  expect(within(button).getByRole("status")).toBeInTheDocument();
+}
+
+/** Click, focused Enter and a native submit on the held button. */
+function pressHeldCreate() {
+  const button = createButton();
+  act(() => button.focus());
+  expect(button).toHaveFocus();
+  fireEvent.keyDown(button, { key: "Enter" });
+  fireEvent.click(button);
+  fireEvent.submit(form());
+}
+
 async function fillTitle(text: string) {
   fireEvent.change(titleBox(), { target: { value: text } });
   await waitFor(() => expect(createButton()).toBeEnabled());
@@ -141,18 +161,18 @@ async function twoCreatesRunning() {
 }
 
 describe("New local issue: one create per draft", () => {
-  it("starts nothing from a native submit while its create runs (T19)", async () => {
+  it("holds Create with its reason and starts nothing more while its create runs (T19)", async () => {
     const a = deferred();
     vi.mocked(createLocalIssue).mockReturnValueOnce(a.promise);
     mount();
     await fillTitle("A title");
     fireEvent.click(createButton());
     await waitFor(() => expect(createLocalIssue).toHaveBeenCalledTimes(1));
-    fireEvent.submit(form());
+    expectCreateHeld();
+    pressHeldCreate();
     await tick();
     expect(createLocalIssue).toHaveBeenCalledTimes(1);
-    expect(createButton()).toBeDisabled();
-    expect(within(createButton()).getByRole("status")).toBeInTheDocument();
+    expectCreateHeld();
     await act(async () => a.resolve(issue("i-1", "A title")));
   });
 
@@ -160,15 +180,14 @@ describe("New local issue: one create per draft", () => {
     const { a, b } = await twoCreatesRunning();
     await act(async () => a.resolve(issue("i-1", "A title")));
     await tick();
-    expect(createButton()).toBeDisabled();
-    expect(within(createButton()).getByRole("status")).toBeInTheDocument();
+    // Form-core's own flag cleared with the older settle: only the hold holds.
+    expectCreateHeld();
     const draftWithAi = screen.getByRole("button", { name: /Draft with AI/ });
     expect(draftWithAi).toHaveAttribute("aria-disabled", "true");
     expect(draftWithAi).toHaveAccessibleDescription(
       new RegExp(CREATE_PENDING_GENERATE_REASON),
     );
-    fireEvent.click(createButton());
-    fireEvent.submit(form());
+    pressHeldCreate();
     await tick();
     expect(createLocalIssue).toHaveBeenCalledTimes(2);
     await act(async () => b.resolve(issue("i-2", "B title")));
@@ -179,12 +198,17 @@ describe("New local issue: one create per draft", () => {
     const { a, b } = await twoCreatesRunning();
     await act(async () => a.reject(new Error("create refused")));
     await tick();
-    expect(createButton()).toBeDisabled();
+    expectCreateHeld();
     fireEvent.submit(form());
     await tick();
     expect(createLocalIssue).toHaveBeenCalledTimes(2);
     await act(async () => b.reject(new Error("create refused")));
-    await waitFor(() => expect(createButton()).toBeEnabled());
+    // A held button is never natively disabled, so the release shows on aria-disabled.
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled"),
+    );
+    expect(createButton()).toBeEnabled();
+    expect(createButton()).not.toHaveAccessibleDescription();
     expect(titleBox()).toHaveValue("B title");
   });
 });

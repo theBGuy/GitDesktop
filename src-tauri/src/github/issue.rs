@@ -8,7 +8,7 @@ use crate::github::gh_unreadable;
 use crate::github::pr::{PrAuthor, PrListLabel, PrRef, PrThreadOut, RepoLabel};
 use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{
-    gh_output_ok, run_gh, run_gh_cached_get, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+    run_gh, run_gh_cached_get, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -1052,10 +1052,10 @@ pub async fn gh_issue_edit(
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
     let payload = serde_json::json!({ "title": title, "body": body }).to_string();
-    let run = crate::github::pr::run_gh_api_json(&repo_path, "PATCH", &endpoint, &payload).await;
+    let run =
+        crate::github::pr::run_gh_api_write_json(&repo_path, "PATCH", &endpoint, &payload).await;
     let landed = crate::forge::LandedWrite::Saved("issue");
-    let out = run.map_err(|e| crate::forge::timed_out_write(e, "GitHub", landed))?;
-    gh_output_ok(out)?;
+    run.map_err(|e| crate::forge::timed_out_write(e, "GitHub", landed))?;
     Ok(())
 }
 
@@ -2362,8 +2362,8 @@ mod tests {
         assert!(!body.contains("\"--jq\""));
     }
 
-    /// The REST issue edit sends its text in a JSON body on stdin and keeps `run_gh`'s
-    /// stderr-only error.
+    /// The REST issue edit sends its text in a JSON body on stdin and reads its result
+    /// as a write, so a rejection's reason in the response body reaches the error.
     #[test]
     fn the_rest_issue_edit_sends_its_text_as_a_json_body() {
         let body =
@@ -2373,8 +2373,13 @@ mod tests {
         assert!(no_argv_text(&edit), "{edit}");
         let restored = edit.replacen("let payload", "let f = [\"-f\"]; let payload", 1);
         assert!(!no_argv_text(&restored), "the control must flip");
-        assert!(edit.contains("run_gh_api_json("), "{edit}");
-        assert!(edit.contains("gh_output_ok("), "{edit}");
+        let reads_as_write =
+            |body: &str| body.contains("run_gh_api_write_json(") && !body.contains("gh_output_ok(");
+        assert!(reads_as_write(&edit), "{edit}");
+        let stderr_only = edit
+            .replacen("run_gh_api_write_json(", "run_gh_api_json(", 1)
+            .replacen("Ok(())", "gh_output_ok(out)?; Ok(())", 1);
+        assert!(!reads_as_write(&stderr_only), "the control must flip");
     }
 
     /// The two REST issue writes map a timeout once, after their write and (create)
@@ -2393,7 +2398,7 @@ mod tests {
         let rows = [
             (
                 "gh_issue_edit",
-                "run_gh_api_json(",
+                "run_gh_api_write_json(",
                 None,
                 "LandedWrite::Saved(\"issue\")",
             ),

@@ -20,10 +20,15 @@ import {
 import { required, useAppForm } from "@/lib/form";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useCreateLocalIssue } from "@/lib/issues/queries";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useDraftCreateHold } from "@/lib/use-draft-create-hold";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -173,6 +178,13 @@ export function CreateLocalIssueDialog({
   // The one submit gate, shared by the button and the form's native submit:
   // Enter must submit exactly when the button would.
   const submitBlocked = generating;
+  // A running create holds Create with its reason, as in CreateLocalPrDialog, so
+  // the held button stays focusable and says why; a generating hold stays plain.
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({
+      disabled: submitBlocked || isSubmitting,
+      reason: isSubmitting ? ACT_PENDING_REASON : null,
+    });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -268,12 +280,28 @@ export function CreateLocalIssueDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton
-                disabled={submitBlocked || isSubmitting}
-                pending={isSubmitting}
+              <span
+                className={cn(
+                  "inline-flex",
+                  blockedReason && "cursor-not-allowed",
+                )}
+                title={wrapperTitle}
               >
-                Create local issue
-              </form.SubmitButton>
+                <form.SubmitButton
+                  focusableWhenDisabled={!!blockedReason}
+                  disabled={submitBlocked || isSubmitting}
+                  pending={isSubmitting}
+                  aria-describedby={describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  Create local issue
+                </form.SubmitButton>
+                {blockedReason ? (
+                  <span id={reasonId} className="sr-only">
+                    {blockedReason}
+                  </span>
+                ) : null}
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>
