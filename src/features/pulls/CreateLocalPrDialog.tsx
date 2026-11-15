@@ -1,7 +1,7 @@
 import { SparkleIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent, useRef } from "react";
+import { useEffectEvent, useLayoutEffect, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -46,6 +46,7 @@ import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
+import { useDraftCreateHold } from "@/lib/use-draft-create-hold";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -101,13 +102,17 @@ export function CreateLocalPrDialog({
   const selectPr = useUiStore((s) => s.selectPr);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const queryClient = useQueryClient();
-  // Which draft the form holds, bumped only where the seed actually reseeds. A
-  // repo check can't tell drafts apart within one repo: closing and reopening
-  // mid-create puts a fresh draft behind the same path.
-  const seedGenRef = useRef(0);
   // Which repo's draft the form holds, stamped on every open: the dialog is
   // hoisted in RepositoryView and outlives a repository switch.
   const draftRepoRef = useRef(repoPath);
+  // The live `open` for the create's settle, whose closure holds the submit-time one.
+  const openRef = useRef(open);
+  useLayoutEffect(() => {
+    openRef.current = open;
+  }, [open]);
+  // Set when this dialog's own draft failed to create while it was closed, so the
+  // next open shows it again; that open consumes it.
+  const failedWhileClosedRef = useRef(false);
 
   const currentName = status.data?.branch?.name ?? null;
   // Retained on `open`, not on the values: an unseeded next open must resync to
@@ -134,7 +139,8 @@ export function CreateLocalPrDialog({
         value.head === value.base ? "Pick two different branches." : undefined,
     },
     onSubmit: async ({ value }) => {
-      const submitGen = seedGenRef.current;
+      const run = createHold.begin();
+      let created = false;
       try {
         // Append the linked-issue chips as their exact keyword lines via the
         // shared composer (the single ref-block composition every create/edit
@@ -147,6 +153,7 @@ export function CreateLocalPrDialog({
           base: value.base,
           head: value.head,
         });
+        created = true;
         const notes = value.notes.trim();
         // Reviewer notes are an AI-only surface (the field renders only when AI
         // is enabled), so append + consume are gated on `aiEnabled` — Hide-AI
@@ -203,7 +210,7 @@ export function CreateLocalPrDialog({
           selectPr({ kind: "local", id: pr.id });
           // The generation pins the DRAFT: a close+reopen in this same repo
           // reseeds the form, and this settle must not close that new draft.
-          if (seedGenRef.current === submitGen) onOpenChange(false);
+          if (createHold.holds(run.gen)) onOpenChange(false);
         }
         // Local PRs have no draft concept — always fire. The event carries the
         // notes (the runner's marker-comment fetchers are remote-only, so for a
@@ -222,30 +229,50 @@ export function CreateLocalPrDialog({
           reviewNotes: notes || undefined,
         });
       } catch (e) {
+        // Only the create call's own rejection keeps the draft: past it the PR
+        // exists and a retry would be a duplicate. A local create writes app data
+        // only, so nothing can have landed behind its failure.
+        if (
+          !created &&
+          !openRef.current &&
+          draftRepoRef.current === repoPath &&
+          createHold.holds(run.gen)
+        )
+          failedWhileClosedRef.current = true;
         // Read at the failure, not before it: a create that fails after a repo
         // switch has to name the repo it belongs to, same as the success arm.
         const originNote = originNoteFor(repoPath);
         if (originNote) toastErrorWithNote(e, originNote);
         else toastError(e);
+      } finally {
+        run.end();
       }
     },
   });
+  // Which draft the form holds and whether its own create runs: a repo check
+  // can't tell drafts apart within one repo, since closing and reopening
+  // mid-create puts a fresh draft behind the same path.
+  const createHold = useDraftCreateHold(form);
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded head/base back to empty (untouched form).
   const seedOnOpen = useEffectEvent(() => {
-    // A create still running in this repo keeps its draft with Create held; a
-    // request naming a head or base still replaces it, and another repo resets.
+    // A create still running in this repo keeps its draft with Create held, and
+    // one that failed while closed keeps it to retry; a request naming a head or
+    // base still replaces it, and another repo resets.
     const sameRepoInFlight =
-      form.state.isSubmitting && draftRepoRef.current === repoPath;
+      createHold.isRunning() && draftRepoRef.current === repoPath;
+    const keptFailure =
+      failedWhileClosedRef.current && draftRepoRef.current === repoPath;
+    failedWhileClosedRef.current = false;
     draftRepoRef.current = repoPath;
     const isNewRequest = defaultHead !== undefined || defaultBase !== undefined;
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the whole draft in form state, which this reset would blank
     // on reopen.
     if (surface.shouldSkipSeed(generating)) return;
-    if (sameRepoInFlight && !isNewRequest) return;
-    seedGenRef.current += 1;
+    if ((sameRepoInFlight || keptFailure) && !isNewRequest) return;
+    createHold.nextDraft();
     // Reset the linked-issue chips (and their dismissed/probed refs) to empty —
     // the dialog opens with no seeded body refs; extraction/AI seeding then
     // repopulates from the head branch + commits.
@@ -349,7 +376,7 @@ export function CreateLocalPrDialog({
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
   // the chord falls through instead of being swallowed for nothing. A running
   // create holds it like the button: the draft it would revise has been sent.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const isSubmitting = createHold.running;
   const generateChord = useGenerateChord({
     enabled:
       !generating && !(sameBranch || ahead.length === 0) && !isSubmitting,
@@ -409,8 +436,8 @@ export function CreateLocalPrDialog({
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
             // Form-core doesn't refuse a submit while one runs, and the render-time
-            // flag lags a fast second press, so the live store value decides.
-            if (!e.repeat && !submitBlocked && !form.state.isSubmitting)
+            // flag lags a fast second press, so the hold's live read decides.
+            if (!e.repeat && !submitBlocked && !createHold.isRunning())
               form.handleSubmit();
             return;
           }
@@ -430,7 +457,7 @@ export function CreateLocalPrDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (submitBlocked || form.state.isSubmitting) return;
+            if (submitBlocked || createHold.isRunning()) return;
             form.handleSubmit();
           }}
         >
@@ -636,7 +663,8 @@ export function CreateLocalPrDialog({
               >
                 <form.SubmitButton
                   focusableWhenDisabled={!!blockedReason}
-                  disabled={submitBlocked}
+                  disabled={submitBlocked || isSubmitting}
+                  pending={isSubmitting}
                   aria-describedby={describedBy}
                   className={ARIA_DISABLED_CLASS}
                 >

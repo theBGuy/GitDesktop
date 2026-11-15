@@ -7,7 +7,13 @@
 // number. Stdlib only. Out of reach: JSX nested in an attribute expression of
 // the opening tag (`footer={<X hostedImages={h} />}`) reads as passing the prop,
 // as does a default parameter or an assignment inside an attribute's arrow
-// (`({ mentions = m }) =>`, `() => (mentions = m)`).
+// (`({ mentions = m }) =>`, `() => (mentions = m)`). The editor scan also
+// can't see:
+// - an editor imported under an alias (`MarkdownEditor as Ed`, then `<Ed`);
+// - a `.MarkdownField` bound to a name other than `field` (`<f.MarkdownField`);
+// - any file outside src/features and src/components (src/lib, src/App.tsx);
+// - the hosts of a new forwarder component: its inner editor element is
+//   flagged, its host elements stay unpinned until its tag joins EDITOR_TAGS.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -34,7 +40,8 @@ function passesProp(masked, start, tagClose, name) {
   );
 }
 
-/** Bodies a forge (GitHub included) authored, which load hosted images. */
+/** Bodies that load hosted images: what a forge (GitHub included) authored,
+ *  and drafts shown as they will post. */
 const GETS = [
   { file: "src/features/issues/RemoteIssueView.tsx", snippet: "{issue.body}" },
   { file: "src/features/pulls/RemotePrView.tsx", snippet: "{pr.body}" },
@@ -42,6 +49,10 @@ const GETS = [
   { file: "src/features/pulls/ReviewThreads.tsx", snippet: "{seg.text}" },
   { file: "src/features/discussions/DiscussionView.tsx", snippet: "{d.body}" },
   { file: "src/features/tags/TagDetailView.tsx", snippet: "{rel.body}" },
+  // A placed commit line comment's in-diff render.
+  { file: "src/features/pulls/CommitComments.tsx", snippet: "{c.body}" },
+  // A pending review comment, rendered as it will post.
+  { file: "src/features/pulls/PendingReviewBar.tsx", snippet: "{draft.body}" },
   // The composer Preview: a draft's hosted URLs load when its editor site
   // passes a source (EDITOR_SITES below).
   { file: "src/components/markdown-editor.tsx", snippet: "stagedImages=" },
@@ -49,17 +60,6 @@ const GETS = [
 
 /** Every other body, with why it doesn't load hosted images. */
 const EXCLUDED = [
-  {
-    file: "src/features/pulls/CommitComments.tsx",
-    snippet: "{c.body}",
-    reason:
-      "inline diff anchor; its hook takes refs only (its Thread rows are covered)",
-  },
-  {
-    file: "src/features/pulls/PendingReviewBar.tsx",
-    snippet: "{draft.body}",
-    reason: "the app's local draft store, not a forge body",
-  },
   {
     file: "src/features/pulls/PrReviewPanel.tsx",
     snippet: "{text}",
@@ -280,10 +280,11 @@ const EDITOR_TAGS = [
   "CommentComposer",
   "CommentEditor",
   "EditTitleBodyDialog",
+  "ReviewerNotesField",
 ];
 
 const FORWARDER = "a forwarder: carries its own prop down";
-const OUTSIDE = "outside the attachment routes' scope; behaves as before";
+const PROJECTS = "Projects: the posted body doesn't load hosted images either";
 
 /** Every editor site: whether its Preview loads hosted images, else why not. */
 const EDITOR_SITES = [
@@ -377,66 +378,49 @@ const EDITOR_SITES = [
     tag: "field.MarkdownField",
     without: "Jira",
   },
-  {
-    file: "src/features/pulls/PendingReviewBar.tsx",
-    tag: "CommentEditor",
-    without: "the app's local draft store",
-  },
+  { file: "src/features/pulls/PendingReviewBar.tsx", tag: "CommentEditor" },
   {
     file: "src/features/pulls/ReviewerNotesField.tsx",
     tag: "field.MarkdownField",
-    without: "the app's own note store",
+    why: FORWARDER,
   },
+  { file: "src/features/pulls/CreatePrDialog.tsx", tag: "ReviewerNotesField" },
   {
-    file: "src/features/pulls/CommitComments.tsx",
-    tag: "CommentComposer",
-    without: "its hook takes refs only",
+    file: "src/features/pulls/CreateLocalPrDialog.tsx",
+    tag: "ReviewerNotesField",
+    without: "a local item",
   },
-  {
-    file: "src/features/pulls/CommitComments.tsx",
-    tag: "MarkdownEditor",
-    without: "its hook takes refs only",
-  },
+  { file: "src/features/pulls/CommitComments.tsx", tag: "CommentComposer" },
+  { file: "src/features/pulls/CommitComments.tsx", tag: "MarkdownEditor" },
   {
     file: "src/features/projects/BoardAddDialogs.tsx",
     tag: "field.MarkdownField",
-    without: OUTSIDE,
+    without: PROJECTS,
   },
   {
     file: "src/features/projects/BoardDraftEditDialog.tsx",
     tag: "field.MarkdownField",
-    without: OUTSIDE,
+    without: PROJECTS,
   },
   {
     file: "src/features/projects/ProjectStatusStrip.tsx",
     tag: "field.MarkdownField",
-    without: OUTSIDE,
+    without: PROJECTS,
   },
   {
     file: "src/features/discussions/CreateDiscussionDialog.tsx",
     tag: "field.MarkdownField",
-    without: OUTSIDE,
   },
   {
     file: "src/features/discussions/DiscussionView.tsx",
     tag: "MarkdownEditor",
-    without: OUTSIDE,
   },
   {
     file: "src/features/discussions/DiscussionView.tsx",
     tag: "CommentComposer",
-    without: OUTSIDE,
   },
-  {
-    file: "src/features/tags/CreateReleaseDialog.tsx",
-    tag: "MarkdownEditor",
-    without: OUTSIDE,
-  },
-  {
-    file: "src/features/tags/TagDetailView.tsx",
-    tag: "MarkdownEditor",
-    without: OUTSIDE,
-  },
+  { file: "src/features/tags/CreateReleaseDialog.tsx", tag: "MarkdownEditor" },
+  { file: "src/features/tags/TagDetailView.tsx", tag: "MarkdownEditor" },
 ];
 
 /** Every problem the editor sites show; empty when EDITOR_SITES holds. */
@@ -689,6 +673,82 @@ test("a 'without' editor site that starts passing hostedImages= fails", () => {
   assert.match(
     auditEditors(next).join("\n"),
     /LocalIssueView.*"without" <EditTitleBodyDialog passes hostedImages=/,
+  );
+});
+
+/** The corpus with the first `hostedImages=` at or after `anchor` in `file`
+ *  renamed to `data-x=`; the anchor must exist. */
+function droppedAfter(files, file, anchor) {
+  const text = files.get(file);
+  const at = text.indexOf(anchor);
+  assert.notEqual(at, -1, `${file}: ${anchor}`);
+  const prop = text.indexOf("hostedImages=", at);
+  assert.notEqual(prop, -1, `${file}: hostedImages= after ${anchor}`);
+  const next = new Map(files);
+  next.set(
+    file,
+    `${text.slice(0, prop)}data-x=${text.slice(prop + "hostedImages=".length)}`,
+  );
+  return next;
+}
+
+test("the Create pull request notes host that drops hostedImages= fails", () => {
+  const next = droppedAfter(
+    corpus(),
+    "src/features/pulls/CreatePrDialog.tsx",
+    "<ReviewerNotesField",
+  );
+  assert.match(
+    auditEditors(next).join("\n"),
+    /CreatePrDialog.*ReviewerNotesField without hostedImages=/,
+  );
+});
+
+test("the local Create pull request notes host that passes hostedImages= fails", () => {
+  const files = corpus();
+  const file = "src/features/pulls/CreateLocalPrDialog.tsx";
+  const text = files.get(file);
+  const at = text.indexOf("<ReviewerNotesField");
+  assert.notEqual(at, -1, `${file}: <ReviewerNotesField`);
+  const next = new Map(files);
+  next.set(
+    file,
+    `${text.slice(0, at)}<ReviewerNotesField hostedImages={h}${text.slice(at + "<ReviewerNotesField".length)}`,
+  );
+  assert.match(
+    auditEditors(next).join("\n"),
+    /"without" <ReviewerNotesField passes hostedImages=/,
+  );
+});
+
+test("the discussion composer that drops hostedImages= fails", () => {
+  const next = droppedAfter(
+    corpus(),
+    "src/features/discussions/DiscussionView.tsx",
+    "<CommentComposer",
+  );
+  assert.match(
+    auditEditors(next).join("\n"),
+    /DiscussionView.*CommentComposer without hostedImages=/,
+  );
+});
+
+test("the pending review comment's resting render that drops hostedImages= fails", () => {
+  const files = corpus();
+  const file = "src/features/pulls/PendingReviewBar.tsx";
+  const text = files.get(file);
+  const site = text.indexOf("{draft.body}");
+  assert.notEqual(site, -1, `${file}: {draft.body}`);
+  const prop = text.lastIndexOf("hostedImages=", site);
+  assert.notEqual(prop, -1, `${file}: hostedImages= before {draft.body}`);
+  const next = new Map(files);
+  next.set(
+    file,
+    `${text.slice(0, prop)}data-x=${text.slice(prop + "hostedImages=".length)}`,
+  );
+  assert.match(
+    audit(next).join("\n"),
+    /PendingReviewBar.*without hostedImages=/,
   );
 });
 

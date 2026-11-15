@@ -20,8 +20,8 @@ export function partialCommentNotice(failed: readonly string[]): string {
     : `Comment posted, but ${failed.length} images didn't upload. They're still attached here, so you can post them in a follow-up comment.`;
 }
 
-/** What a create or edit wrote. The wording doesn't follow `prNoun`: GitLab is
- *  all or nothing, so its outcomes never carry a warning. */
+/** What a create or edit wrote. The default nouns are GitHub's; a caller whose
+ *  forge names the item differently passes its own noun to `createdWarning`. */
 export type ItemKind = "issue" | "pr";
 
 const ITEM_NOUN: Record<ItemKind, string> = {
@@ -47,14 +47,39 @@ function didntUpload(failed: readonly string[]): string {
     : `${failed.length} images didn't upload. Edit the description to add them again.`;
 }
 
+/** A step a create skipped because the created item's number couldn't be read. */
+export type SkippedFollowup =
+  | "project"
+  | "projects"
+  | "sub-issue"
+  | "reviewer-notes";
+
+const SKIPPED_STEP: Record<SkippedFollowup, string> = {
+  project: "it wasn't added to the project",
+  projects: "it wasn't added to the projects",
+  "sub-issue": "it wasn't linked to its parent issue",
+  "reviewer-notes": "your notes for reviewers weren't posted",
+};
+
 /** The warning that replaces a create's success toast; null when the create
  *  left nothing to warn about. A follow-up failure leads, so the sentence
- *  never opens with a file name. */
+ *  never opens with a file name. `noun` is the item's lower-case noun, used
+ *  only when a step was skipped. */
 export function createdWarning(
   kind: ItemKind,
   failed: readonly string[],
   followupError: string | null,
+  opts?: { skipped?: readonly SkippedFollowup[]; noun?: string },
 ): string | null {
+  const skipped = opts?.skipped ?? [];
+  if (skipped.length > 0) {
+    const noun = opts?.noun ?? ITEM_NOUN[kind].toLowerCase();
+    const steps = skipped.map((s) => SKIPPED_STEP[s]).join(" and ");
+    let text = `Opened ${noun}, but its number couldn't be read, so ${steps}. Finish that from the ${noun}.`;
+    if (followupError !== null) text += ` ${FOLLOWUP_HEADING[kind]}.`;
+    if (failed.length > 0) text += ` Also, ${didntUpload(failed)}`;
+    return text;
+  }
   if (followupError !== null)
     return failed.length > 0
       ? `${FOLLOWUP_WARNING[kind]} Also, ${didntUpload(failed)}`

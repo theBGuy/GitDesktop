@@ -44,7 +44,10 @@ import { keptLocalPrReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
-import { createdWarning } from "@/lib/attachments/comment-post";
+import {
+  createdWarning,
+  type SkippedFollowup,
+} from "@/lib/attachments/comment-post";
 import { toastCreatedWarning } from "@/lib/attachments/created-warning";
 import {
   ATTACHING_REASON,
@@ -65,7 +68,7 @@ import {
   useDraftAttachments,
 } from "@/lib/attachments/use-draft-attachments";
 import { triggerAutomations } from "@/lib/automations/runner";
-import { presentError } from "@/lib/error-summary";
+import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import { required, useAppForm } from "@/lib/form";
 import * as api from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
@@ -714,7 +717,13 @@ export function CreatePrDialog({
         const view = url
           ? { label: "View", url, onClick: () => openUrl(url) }
           : undefined;
-        const warning = createdWarning("pr", failedImages, followupError);
+        // Typed notes a missing number left unposted, named in the warning.
+        const skipped: SkippedFollowup[] =
+          aiEnabled && number === null && notes ? ["reviewer-notes"] : [];
+        const warning = createdWarning("pr", failedImages, followupError, {
+          skipped,
+          noun: prNoun,
+        });
         if (warning !== null)
           toastCreatedWarning({
             kind: "pr",
@@ -765,21 +774,27 @@ export function CreatePrDialog({
         }
       } catch (e) {
         // Name the branch when the CREATE is what failed: two creates can be
-        // stacked, and a bare forge error doesn't say which one died. A throw
-        // from a step after the PR exists keeps the bare toast — that PR was
-        // created, whatever followed it. Unconditional, guard or no guard: the
+        // stacked, and a bare forge error doesn't say which one died. No note when
+        // the write may have landed (the error says to check), nor for a throw
+        // from a step after the PR exists — that PR was created, whatever
+        // followed it. Unconditional, guard or no guard: the
         // failure happened, so a landing in another repo names the one it
         // belongs to rather than going unsaid.
         const awayRepo = landedIn(repoPath).live
           ? null
           : repoNameFromPath(repoPath);
         if (outcome === "error") {
-          toastErrorWithNote(
-            e,
-            awayRepo
-              ? `In ${awayRepo}, the ${prNoun} for ${value.head} wasn't created.`
-              : `The ${prNoun} for ${value.head} wasn't created.`,
-          );
+          if (mayHaveLanded(e)) {
+            if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
+            else toastError(e);
+          } else {
+            toastErrorWithNote(
+              e,
+              awayRepo
+                ? `In ${awayRepo}, the ${prNoun} for ${value.head} wasn't created.`
+                : `The ${prNoun} for ${value.head} wasn't created.`,
+            );
+          }
           // The toast fades in seconds; this outlives it for a user who moved on.
           notifyPrCreateFailed({
             repoPath,
@@ -1756,6 +1771,7 @@ export function CreatePrDialog({
                     repoPath={repoPath}
                     head={head || null}
                     field={field}
+                    hostedImages={descHostedImages}
                   />
                 )}
               </form.AppField>

@@ -24,6 +24,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import { useDraftCreateHold } from "@/lib/use-draft-create-hold";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateIssueDraft } from "./useGenerateIssueDraft";
@@ -61,15 +62,11 @@ export function CreateLocalIssueDialog({
    *  never re-seeds, so this still reads the submit's repo and the settle's close
    *  is the right one. */
   const draftRepoRef = useRef(repoPath);
-  /** Which draft the form holds, bumped only where the seed actually reseeds. A
-   *  repo check can't tell drafts apart within one repo: closing and reopening
-   *  mid-create puts a fresh draft behind the same path. */
-  const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: { title: "", body: "" },
     onSubmit: async ({ value }) => {
-      const submitGen = seedGenRef.current;
+      const run = createHold.begin();
       try {
         const issue = await createIssue.mutateAsync({
           title: value.title.trim(),
@@ -86,10 +83,7 @@ export function CreateLocalIssueDialog({
         // Both axes of "still THIS submit's draft": the repo, since a seed under
         // another one already replaced it, and the generation, since a close and
         // reopen in this same repo reseeds a fresh draft behind the same path.
-        if (
-          draftRepoRef.current === repoPath &&
-          seedGenRef.current === submitGen
-        )
+        if (draftRepoRef.current === repoPath && createHold.holds(run.gen))
           onOpenChange(false);
         if (stillHere) selectIssue({ kind: "local", id: issue.id });
       } catch (e) {
@@ -98,9 +92,15 @@ export function CreateLocalIssueDialog({
         const originNote = originNoteFor(repoPath);
         if (originNote) toastErrorWithNote(e, originNote);
         else toastError(e);
+      } finally {
+        run.end();
       }
     },
   });
+  /** Which draft the form holds and whether its own create runs. A repo check
+   *  can't tell drafts apart within one repo: closing and reopening mid-create
+   *  puts a fresh draft behind the same path. */
+  const createHold = useDraftCreateHold(form);
 
   // Live title/body drive the AI drafter's input and its enabled state.
   const titleVal = useSelector(form.store, (s) => s.values.title);
@@ -127,7 +127,7 @@ export function CreateLocalIssueDialog({
       // blank on reopen.
       return;
     }
-    seedGenRef.current += 1;
+    createHold.nextDraft();
     form.reset(
       { title: initialDraft?.title ?? "", body: initialDraft?.body ?? "" },
       { keepDefaultValues: true },
@@ -165,7 +165,7 @@ export function CreateLocalIssueDialog({
   // can't run behind the dialog; while generating it swallows but DOESN'T
   // cancel. A running create holds it like the button: the draft it would
   // revise has already been sent.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const isSubmitting = createHold.running;
   const generateChord = useGenerateChord({
     enabled: aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,
     run: runGenerate,
@@ -184,7 +184,8 @@ export function CreateLocalIssueDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (submitBlocked) return;
+            // Form-core doesn't refuse a submit while one runs.
+            if (submitBlocked || createHold.isRunning()) return;
             form.handleSubmit();
           }}
         >
@@ -267,7 +268,10 @@ export function CreateLocalIssueDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={submitBlocked}>
+              <form.SubmitButton
+                disabled={submitBlocked || isSubmitting}
+                pending={isSubmitting}
+              >
                 Create local issue
               </form.SubmitButton>
             </form.AppForm>

@@ -733,6 +733,16 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   carve-out: data-arrival seeds (`[open, thatQuery.data]`) and `onOpenChange`
   seeds stay bare, and each must be idempotent — never stomping a user's pick.
   The `seed-effect-on-open` guard allowlists the recorded ones.
+- A create dialog whose form a reopen can reseed while its create runs holds
+  through `useDraftCreateHold` (`src/lib/use-draft-create-hold.ts`): form-core
+  keeps ONE `isSubmitting` per form, which a reseed clears and an older draft's
+  settle clears again under a newer draft's create. The hook owns the draft
+  generation (`nextDraft` where the form takes another draft, `begin`/`end`
+  around the submit, `holds` at the settle); every submit path asks
+  `isRunning()`, and the dialog's `form.SubmitButton` takes `disabled` and
+  `pending` from `running`. A dialog whose duplicate guard lives where a reset
+  can't clear it (a store lane, a mutation-cache read) takes an allowlist entry
+  in the `draft-create-hold` guard instead.
 - Zustand + view transitions: navigators (`openRepo`, `openPr`, `closeRepo`,
   `openSettings`, …) apply their set through `startViewTransition`, which runs
   it in a later task wherever the View Transitions API is available (at once
@@ -980,6 +990,22 @@ one grep away on the named symbol. Grows via Conventions-sync.
   reads its `stderr`, which carries no lead. Model:
   `src/features/history/blame-errors.ts`, pinned over serialized payloads by
   `scripts/blame-errors.test.mjs`.
+- **Writes that may have landed** — a frontend arm asks
+  `mayHaveLanded(error)` (`@/lib/error-summary`) before it says an item
+  wasn't created, saved or posted, and never matches the sentence itself. Two
+  Rust builders in forge/mod.rs feed it. A timed-out write returns
+  `AppError::WriteTimedOut` (kind `timeout`), built only by
+  `write_timed_out`: `glab_write_fields` and the GitHub REST edits and issue
+  create map through `timed_out_write`, `run_gh_maybe_attached` through
+  `gh_write_error` (github/pr.rs). Only writes through those choke points
+  hedge; any other forge write keeps the bare timeout. A create whose exit-0
+  or 2xx reply is neither empty nor JSON returns `created_reply_unreadable`'s
+  sentence under its forge's own kind: the five readers that parse a create's
+  reply (`created_ref`, `created_release_url`, `created_issue_ref`,
+  `created_discussion_ref`, `created_pr_ref`) call `created_reply` before
+  reading a field; GitHub's pull request create and attached issue create
+  scrape a URL instead. Both are pinned from both sides by
+  `scripts/attached-failure-leads.test.mjs`.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

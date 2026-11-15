@@ -453,6 +453,51 @@ fn pr_create_result(outcome: crate::attachments::PrCreateOutcome) -> serde_json:
     result
 }
 
+/// The `created_warning` of a create whose reply lacked the item's number or link: the item
+/// exists, so an agent looks for it instead of creating a duplicate. None when the id is known.
+fn created_warning(noun: &str, id_known: bool) -> Option<String> {
+    if id_known {
+        return None;
+    }
+    Some(match noun {
+        "release" => "Created the release, but its link couldn't be read. Find it on the \
+                      releases page before creating another."
+            .to_string(),
+        _ => format!(
+            "Created the {noun}, but its number couldn't be read. Find it in the list before \
+             creating another."
+        ),
+    })
+}
+
+/// `result` with `created_warning` added when there is one, else unchanged.
+fn with_created_warning(
+    mut result: serde_json::Value,
+    warning: Option<String>,
+) -> serde_json::Value {
+    if let Some(warning) = warning {
+        result["created_warning"] = serde_json::Value::String(warning);
+    }
+    result
+}
+
+/// The provider's word for a pull request (`detect_non_github`'s None is GitHub).
+fn mcp_pr_noun(provider: Option<crate::forge::model::Provider>) -> &'static str {
+    match provider {
+        Some(crate::forge::model::Provider::GitLab) => "merge request",
+        _ => "pull request",
+    }
+}
+
+/// [`created_warning`] for a created pull request; a known number detects nothing.
+async fn created_pr_warning(repo: &str, number: u64) -> Option<String> {
+    if number != 0 {
+        return None;
+    }
+    let provider = crate::forge::detect_non_github(repo).await.map(|(p, _)| p);
+    created_warning(mcp_pr_noun(provider), false)
+}
+
 /// `detect_non_github` returning None is forge's resilient GitHub default.
 async fn on_github(repo: &str) -> bool {
     crate::forge::detect_non_github(repo).await.is_none()
@@ -555,8 +600,9 @@ impl GitDesktopMcp {
                        deprecated; for a repo with a linked Jira project, use create_jira_issue \
                        instead), under the authenticated forge user. NOT reversible without \
                        deleting it. Optional labels/assignees are applied by name/login (must \
-                       already exist). Returns the created issue ref (number + URL) as JSON. \
-                       Requires --allow-remote-write.",
+                       already exist). Returns the created issue ref (number + URL) as JSON, \
+                       plus `created_warning` when the issue was created but its number couldn't \
+                       be read. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_issue(
@@ -578,7 +624,10 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        json_result(&outcome.pr)
+        let pr = outcome.pr;
+        let warning = created_warning("issue", pr.number != 0);
+        let result = serde_json::json!({ "number": pr.number, "url": pr.url });
+        json_result(&with_created_warning(result, warning))
     }
 
     #[tool(
@@ -677,7 +726,9 @@ impl GitDesktopMcp {
                        letter case) or a `head` marked Keep local in GitDesktop, and refuses when \
                        pushing `head` would go to a remote configured as a mirror. Returns the \
                        created PR ref (number + URL) as JSON, plus `followup_warning` when the PR \
-                       was created but its labels/assignees couldn't be applied. Requires BOTH \
+                       was created but its labels/assignees couldn't be applied, and \
+                       `created_warning` when it was created but its number couldn't be read. \
+                       Requires BOTH \
                        --allow-remote-write AND --allow-git-write, because it pushes `head` to \
                        origin first.",
         annotations(read_only_hint = false, destructive_hint = false)
@@ -710,7 +761,8 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(super::write_git::push_refusal_err)?;
-        json_result(&pr_create_result(outcome))
+        let warning = created_pr_warning(&self.repo, outcome.pr.number).await;
+        json_result(&with_created_warning(pr_create_result(outcome), warning))
     }
 
     #[tool(
@@ -1252,7 +1304,8 @@ impl GitDesktopMcp {
         description = "Publish a release in the bound repository's forge (GitHub or GitLab, per its \
                        remote; Bitbucket releases aren't supported). Creates the `tag` if needed. \
                        `draft`/`prerelease` are GitHub-only (GitLab ignores them). Returns the new \
-                       release's web URL as JSON. Requires --allow-remote-write.",
+                       release's web URL as JSON, plus `created_warning` when the release was \
+                       created but its link couldn't be read. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_release(
@@ -1274,7 +1327,9 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        json_result(&serde_json::json!({ "tag": args.tag, "url": url }))
+        let warning = created_warning("release", !url.is_empty());
+        let result = serde_json::json!({ "tag": args.tag, "url": url });
+        json_result(&with_created_warning(result, warning))
     }
 
     #[tool(
@@ -1567,7 +1622,8 @@ impl GitDesktopMcp {
                        have no discussions; the tool errors on those remotes), under the \
                        authenticated forge user. `category` is a category NAME (see \
                        list_discussion_categories) — required. Returns the created discussion's \
-                       number + URL as JSON. Requires --allow-remote-write.",
+                       number + URL as JSON, plus `created_warning` when the discussion was \
+                       created but its number couldn't be read. Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_discussion(
@@ -1609,7 +1665,9 @@ impl GitDesktopMcp {
         )
         .await
         .map_err(app_err)?;
-        json_result(&pr_ref)
+        let warning = created_warning("discussion", pr_ref.number != 0);
+        let result = serde_json::json!({ "number": pr_ref.number, "url": pr_ref.url });
+        json_result(&with_created_warning(result, warning))
     }
 
     #[tool(
@@ -1862,6 +1920,136 @@ mod tests {
              could not add label: 'x' not found"
         );
         assert_eq!(warned.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn created_warning_names_what_could_not_be_read() {
+        for noun in ["pull request", "merge request", "issue", "discussion"] {
+            assert_eq!(
+                created_warning(noun, false).as_deref(),
+                Some(
+                    format!(
+                        "Created the {noun}, but its number couldn't be read. Find it in the \
+                         list before creating another."
+                    )
+                    .as_str()
+                ),
+            );
+        }
+        assert_eq!(
+            created_warning("release", false).as_deref(),
+            Some(
+                "Created the release, but its link couldn't be read. Find it on the releases \
+                 page before creating another."
+            ),
+        );
+        for noun in [
+            "pull request",
+            "merge request",
+            "issue",
+            "discussion",
+            "release",
+        ] {
+            assert_eq!(created_warning(noun, true), None, "{noun}");
+        }
+
+        let json = serde_json::json!({ "number": 7, "url": "u" });
+        assert_eq!(with_created_warning(json.clone(), None), json);
+        let warned = with_created_warning(json.clone(), Some("w".into()));
+        assert_eq!(warned["created_warning"], "w");
+        assert_eq!(warned["number"], 7);
+        assert_eq!(warned["url"], "u");
+        assert_eq!(warned.as_object().unwrap().len(), 3);
+
+        let unknown = pr_create_result(crate::attachments::PrCreateOutcome {
+            pr: crate::github::pr::PrRef {
+                number: 0,
+                url: String::new(),
+            },
+            failed_attachments: Vec::new(),
+            followup_error: Some("cause".into()),
+        });
+        let both = with_created_warning(unknown, created_warning("pull request", false));
+        assert!(both.get("followup_warning").is_some(), "{both}");
+        assert!(both.get("created_warning").is_some(), "{both}");
+
+        use crate::forge::model::Provider;
+        assert_eq!(mcp_pr_noun(Some(Provider::GitLab)), "merge request");
+        assert_eq!(mcp_pr_noun(Some(Provider::Bitbucket)), "pull request");
+        assert_eq!(mcp_pr_noun(None), "pull request");
+    }
+
+    /// The `impl` method `name` in LF-normalized `source`, from its `fn` to its own closing
+    /// brace: the first line that is exactly four spaces and `}`. rustfmt indents a method
+    /// body eight or more, so braces in strings or nested blocks never end it early;
+    /// `wiring_body`'s column-0 cut would run on to the end of the `impl`.
+    fn method_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source.find(&format!("fn {name}(")).expect(name);
+        let line = &source[source[..start].rfind('\n').map_or(0, |i| i + 1)..start];
+        assert!(
+            line.starts_with("    ") && !line[4..].starts_with(char::is_whitespace),
+            "{name} is not an impl method: {line:?}"
+        );
+        let end = source[start..].find("\n    }\n").expect(name) + "\n    }".len();
+        &source[start..start + end]
+    }
+
+    /// A known number returns before any provider detection; the noun comes from the
+    /// provider; every create tool attaches the warning.
+    #[test]
+    fn created_warnings_are_wired_into_every_create_tool() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("write_forge.rs");
+        let early = |body: &str| {
+            body.find("return None")
+                .zip(body.find("detect_non_github("))
+                .is_some_and(|(r, d)| r < d)
+                && body.contains("mcp_pr_noun(")
+        };
+        let body = wiring_body(source, "created_pr_warning");
+        assert!(early(&body), "{body}");
+        let swapped = body
+            .replacen("return None", "@@", 1)
+            .replacen("detect_non_github(", "return None", 1)
+            .replacen("@@", "detect_non_github(", 1);
+        assert!(!early(&swapped), "the order control must flip");
+        let literal = body.replace("mcp_pr_noun(provider)", "\"pull request\"");
+        assert!(!early(&literal), "the noun control must flip");
+        let tools = [
+            "create_pull_request",
+            "create_issue",
+            "create_discussion",
+            "create_release",
+        ];
+        let source = source.replace("\r\n", "\n");
+        let wired = |source: &str, name: &str| {
+            method_body(source, name)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .any(|line| line.contains("with_created_warning("))
+        };
+        for name in tools {
+            let body = method_body(&source, name);
+            assert!(wired(&source, name), "{name}\n{body}");
+            for other in tools.iter().filter(|&&other| other != name) {
+                assert!(
+                    !body.contains(&format!("fn {other}(")),
+                    "{name}'s body runs into {other}"
+                );
+            }
+            let mutant = source.replacen(
+                body,
+                &body.replace("with_created_warning(", "json_result("),
+                1,
+            );
+            for other in tools {
+                assert_eq!(
+                    wired(&mutant, other),
+                    other != name,
+                    "dropping {name}'s warning: {other}"
+                );
+            }
+        }
     }
 
     #[test]

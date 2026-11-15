@@ -901,6 +901,10 @@ export function TagDetailView({
                     // sizing.
                     textareaClassName="min-h-24 font-mono"
                     mentions={mentions}
+                    hostedImages={hostedImagesFor(
+                      mentions.refs?.repoPath,
+                      mentions.ghHost,
+                    )}
                   />
                 </div>
                 {/* GitLab has neither pre-release nor a per-release latest flag. */}

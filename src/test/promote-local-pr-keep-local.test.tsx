@@ -17,6 +17,7 @@ import {
 } from "vitest";
 import { PromoteLocalPrDialog } from "@/features/pulls/PromoteLocalPrDialog";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
+import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import { forgePrComment, forgeStatus, gitBranches } from "@/lib/git/api";
 import { prChecksRecheck, repoKeys } from "@/lib/git/queries";
 import { recheckRunsAfterPush } from "@/lib/git/queries/push-writes";
@@ -38,7 +39,19 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
   forgePrCreate,
   forgePrComment: vi.fn(async () => ({ failedAttachments: [] })),
+  pathIsDir: vi.fn(async () => true),
 }));
+// A failed create's notification keys its mute on the repo's identity.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+  repoIdentity: async (repo: string) => repo,
+}));
+// Spied through; a case overrides the predicate by identity, so no Rust sentence
+// is spelled here (its meaning is pinned where it is defined).
+vi.mock("@/lib/error-summary", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/error-summary")>();
+  return { ...real, mayHaveLanded: vi.fn(real.mayHaveLanded) };
+});
 // Spied through to the real arm, so the call's PR checks reads can be read.
 vi.mock("@/lib/git/queries/push-writes", async (importOriginal) => {
   const real =
@@ -255,4 +268,45 @@ describe("PromoteLocalPrDialog over a PR whose number couldn't be read", () => {
       });
     },
   );
+});
+
+describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", () => {
+  const rejection = { kind: "timeout", message: "may have landed" };
+  const REOPEN = "The local PR couldn't be reopened — reopen it from its view.";
+
+  /** The close lands, the forge create rejects, the reopen rejects too. */
+  async function failBoth() {
+    vi.mocked(gitBranches).mockResolvedValue([
+      row("main", false),
+      row("feat", false),
+    ]);
+    vi.mocked(updateLocalPr)
+      .mockResolvedValueOnce({ ...PR, status: "closed" })
+      .mockRejectedValueOnce(new Error("reopen refused"));
+    forgePrCreate.mockRejectedValueOnce(rejection);
+    const error = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const user = userEvent.setup();
+    renderDialog();
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    await user.click(publishButton());
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(updateLocalPr).toHaveBeenCalledTimes(2);
+    return error.mock.calls[0] as [string, { description?: string }];
+  }
+
+  it("titles the toast with the error alone when the write may have landed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation((e) => e === rejection);
+    const [title, options] = await failBoth();
+    expect(title).toBe(presentError(rejection).summary);
+    expect(options.description).toBe(REOPEN);
+  });
+
+  it("says the pull request wasn't created when the write can't have landed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    const [title, options] = await failBoth();
+    expect(title).toBe(
+      `Couldn't create the pull request: ${presentError(rejection).summary}`,
+    );
+    expect(options.description).toBe(REOPEN);
+  });
 });

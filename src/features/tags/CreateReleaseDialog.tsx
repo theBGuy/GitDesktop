@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
@@ -94,6 +95,7 @@ import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
+import { useDraftCreateHold } from "@/lib/use-draft-create-hold";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateReleaseNotes } from "./useGenerateReleaseNotes";
@@ -191,11 +193,6 @@ export function CreateReleaseDialog({
       onOpenChange(true);
     },
   });
-  // Which draft the form holds, bumped only where the seed actually reseeds and
-  // on a tag switch (the draft on screen was the previous tag's). The repo stamp
-  // (`draftRepoRef`) can't tell drafts apart within one repo: an A→B→A round
-  // trip restores the same path behind different content.
-  const seedGenRef = useRef(0);
   const tagSwitchAbortRef = useRef(false);
   useCancelOnIdentityChange(tagIdentity, () => {
     void surface.consumeSkipSeed();
@@ -204,7 +201,7 @@ export function CreateReleaseDialog({
     // The draft on screen was the previous tag's, so a create still in flight for
     // it must not close whatever this dialog shows next. The close itself belongs
     // to the host's tag-switch reset.
-    seedGenRef.current += 1;
+    createHold.nextDraft();
   });
   // The From-GitHub run's identity while it is in flight; nothing cancels it.
   const ghRunIdentityRef = useRef<{ repo: string; tag: string } | null>(null);
@@ -264,11 +261,11 @@ export function CreateReleaseDialog({
   const form = useAppForm({
     defaultValues: RELEASE_DEFAULTS,
     onSubmit: async ({ value }) => {
-      const submitGen = seedGenRef.current;
       const submitTag = initialTag;
       const tag = value.tag.trim();
       if (!tag || refuseWhileOffline()) return;
       const hasTarget = !initialTag && isNewTagName(tag, tagNames);
+      const run = createHold.begin();
       try {
         const url = await createRelease.mutateAsync({
           tag,
@@ -284,15 +281,22 @@ export function CreateReleaseDialog({
         // draft's. The toast fires either way, naming where it came from.
         const originNote = originNoteFor(repoPath);
         const stillHere = originNote === undefined;
+        // An empty URL is a release created with its link unknown: the toast
+        // carries only the parts that exist, and no View that opens nothing.
+        const description =
+          [originNote, url].filter(Boolean).join(" · ") || undefined;
         toast.success(value.draft ? "Draft saved" : `Released ${tag}`, {
-          description: originNote ? `${originNote} · ${url}` : url,
-          action: { label: "View", onClick: () => openUrl(url) },
+          description,
+          action:
+            url === ""
+              ? undefined
+              : { label: "View", onClick: () => openUrl(url) },
         });
         // Closed whenever the form still holds THIS submit's draft — leaving an
         // already-released draft open is a duplicate factory. Adopting the tag
         // is a global write, so it takes the live-repo guard instead.
         const ourDraft =
-          draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
+          draftRepoRef.current === repoPath && createHold.holds(run.gen);
         // The tag host's subject is its selected tag: once another is selected
         // (a host showing that tag's release unmounts this dialog, so its refs
         // can't see the switch) neither the close nor the selection is ours.
@@ -307,9 +311,16 @@ export function CreateReleaseDialog({
         const originNote = originNoteFor(repoPath);
         if (originNote) toastErrorWithNote(e, originNote);
         else toastError(e);
+      } finally {
+        run.end();
       }
     },
   });
+  // Which draft the form holds, moved on where the seed actually reseeds and on
+  // a tag switch (the draft on screen was the previous tag's). The repo stamp
+  // (`draftRepoRef`) can't tell drafts apart within one repo: an A→B→A round
+  // trip restores the same path behind different content.
+  const createHold = useDraftCreateHold(form);
 
   const tag = useSelector(form.store, (s) => s.values.tag);
   const target = useSelector(form.store, (s) => s.values.target);
@@ -354,7 +365,7 @@ export function CreateReleaseDialog({
       (githubNotes.isPending && ghRunIsForThisIdentity())
     )
       return;
-    seedGenRef.current += 1;
+    createHold.nextDraft();
     form.reset(
       {
         ...RELEASE_DEFAULTS,
@@ -488,7 +499,7 @@ export function CreateReleaseDialog({
   // so the global generate-commit-message action can't run behind the dialog;
   // while generating it swallows but DOESN'T cancel. A running create holds it
   // like the menu: the draft it would revise has already been sent.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const isSubmitting = createHold.running;
   const generateChord = useGenerateChord({
     enabled:
       aiEnabled && Boolean(tagTrimmed) && !busyGenerating && !isSubmitting,
@@ -541,7 +552,8 @@ export function CreateReleaseDialog({
           className="flex min-h-0 flex-1 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (submitBlocked) return;
+            // Form-core doesn't refuse a submit while one runs.
+            if (submitBlocked || createHold.isRunning()) return;
             form.handleSubmit();
           }}
         >
@@ -748,6 +760,10 @@ export function CreateReleaseDialog({
                 // `flex-1` set the height, and a manual drag fights the flex sizing.
                 textareaClassName="min-h-32 font-mono"
                 mentions={mentions}
+                hostedImages={hostedImagesFor(
+                  mentions.refs?.repoPath,
+                  mentions.ghHost,
+                )}
                 actions={
                   // GitLab's only generator is the AI one — with AI hidden the
                   // menu would hold a single disabled item, so hide it entirely.
@@ -860,7 +876,8 @@ export function CreateReleaseDialog({
               >
                 <form.SubmitButton
                   focusableWhenDisabled={!!offlineSubmit.blockedReason}
-                  disabled={submitBlocked}
+                  disabled={submitBlocked || isSubmitting}
+                  pending={isSubmitting}
                   aria-describedby={offlineSubmit.describedBy}
                   className={ARIA_DISABLED_CLASS}
                 >

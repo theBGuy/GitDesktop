@@ -28,6 +28,11 @@ import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import { attachmentStoreSizes } from "@/lib/attachments/store";
 import { triggerAutomations } from "@/lib/automations/runner";
 import {
+  BRANCH_PUSHED_DISCLOSURE,
+  mayHaveLanded,
+  presentError,
+} from "@/lib/error-summary";
+import {
   forgePrComment,
   forgeStatus,
   gitBranchAhead,
@@ -140,6 +145,15 @@ vi.mock("@/lib/notifications/pr-create-failed", async (importOriginal) => {
     >();
   return { ...real, notifyPrCreateFailed: vi.fn(real.notifyPrCreateFailed) };
 });
+// Spied through; a case overrides the predicate by identity, so no Rust sentence
+// is spelled here (its meaning is pinned where it is defined).
+vi.mock("@/lib/error-summary", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/error-summary")>();
+  return { ...real, mayHaveLanded: vi.fn(real.mayHaveLanded) };
+});
+const { mayHaveLanded: realMayHaveLanded } = await vi.importActual<
+  typeof import("@/lib/error-summary")
+>("@/lib/error-summary");
 
 const REPO = "C:/repo";
 const ORIGIN_REF = "refs/remotes/origin/feature-x";
@@ -1799,7 +1813,9 @@ describe("CreatePrDialog created with a warning", () => {
       string,
       { description?: string; action?: { label: string }; cancel?: unknown },
     ];
-    expect(title).toBe(PR_FOLLOWUP);
+    expect(title).toBe(
+      "Opened pull request, but its number couldn't be read, so your notes for reviewers weren't posted. Finish that from the pull request. Its labels and assignees weren't applied.",
+    );
     expect(options.description).toBeUndefined();
     // No View without a URL; Details takes the action slot.
     expect(options.action?.label).toBe("Details");
@@ -1812,6 +1828,25 @@ describe("CreatePrDialog created with a warning", () => {
     expect(triggerAutomations).not.toHaveBeenCalled();
     expect(armPrCreateHandOff).not.toHaveBeenCalled();
     expect(notifyPrCreateFailed).not.toHaveBeenCalled();
+  });
+
+  it("names the reviewer notes a numberless create couldn't post (T24)", async () => {
+    const { onOpenChange } = await ready({ notes: true });
+    forgePrCreate.mockResolvedValueOnce({
+      number: 0,
+      url: "",
+      failedAttachments: [],
+      followupError: null,
+    } as never);
+    create();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(warning.mock.calls[0][0]).toBe(
+      "Opened pull request, but its number couldn't be read, so your notes for reviewers weren't posted. Finish that from the pull request.",
+    );
+    expect(success).not.toHaveBeenCalled();
+    expect(forgePrComment).not.toHaveBeenCalled();
+    await waitFor(() => expect(usePrCreateStore.getState().byRepo).toEqual({}));
   });
 
   it("says only that it opened a PR whose number couldn't be read and nothing failed", async () => {
@@ -1846,5 +1881,60 @@ describe("CreatePrDialog created with a warning", () => {
     expect(success).toHaveBeenCalledTimes(1);
     expect(success.mock.calls[0][0]).toBe("Opened pull request #7");
     expect(warning).not.toHaveBeenCalled();
+  });
+
+  describe("a create that may have reached the forge", () => {
+    const rejection = { kind: "timeout", message: "may have landed" };
+    const NOTE = "The pull request for feat wasn't created.";
+    afterEach(() => {
+      vi.mocked(mayHaveLanded).mockImplementation(realMayHaveLanded);
+    });
+
+    /** Rejects the create with `e` and waits for its one error toast. */
+    async function failWith(e: unknown) {
+      await ready({ image: true });
+      forgePrCreate.mockRejectedValueOnce(e);
+      create();
+      await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+      return error.mock.calls[0] as [string, { description?: string }];
+    }
+
+    it("claims nothing about the create when its write may have landed", async () => {
+      vi.mocked(mayHaveLanded).mockImplementation((e) => e === rejection);
+      const [title, options] = await failWith(rejection);
+      expect(title).toBe(presentError(rejection).summary);
+      expect(options.description).toBeUndefined();
+      expect(notifyPrCreateFailed).toHaveBeenCalledTimes(1);
+      expect(notifyPrCreateFailed).toHaveBeenCalledWith({
+        repoPath: REPO,
+        head: "feat",
+        noun: "pull request",
+        error: rejection,
+      });
+      expect(
+        screen.getByRole("button", { name: "Remove image-1.png" }),
+      ).toBeInTheDocument();
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Create pull request" }),
+        ).not.toHaveAttribute("aria-disabled", "true"),
+      );
+    });
+
+    it("names the branch whose create failed when it can't have landed", async () => {
+      vi.mocked(mayHaveLanded).mockImplementation(() => false);
+      const [, options] = await failWith(rejection);
+      expect(options.description).toBe(NOTE);
+    });
+
+    it("keeps the note under a pushed branch's headline", async () => {
+      const pushed = {
+        kind: "gh",
+        message: `${BRANCH_PUSHED_DISCLOSURE}the upload failed.`,
+      };
+      const [title, options] = await failWith(pushed);
+      expect(title).toBe(presentError(pushed).summary);
+      expect(options.description).toBe(NOTE);
+    });
   });
 });

@@ -5,11 +5,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { CREATE_PENDING_GENERATE_REASON } from "@/features/conversations/useAiStream";
 import { CreateLocalPrDialog } from "@/features/pulls/CreateLocalPrDialog";
+import { triggerAutomations } from "@/lib/automations/runner";
 import { gitBranchAhead, gitBranches } from "@/lib/git/api";
 import type { Branch, CommitSummary } from "@/lib/git/types";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
@@ -437,7 +440,9 @@ describe("Create local PR: a reopen during a create", () => {
     vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
   });
 
-  async function createThenClose() {
+  async function createThenClose(
+    fill?: (user: ReturnType<typeof userEvent.setup>) => Promise<void>,
+  ) {
     const pending: {
       resolve: (v: Awaited<ReturnType<typeof createLocalPr>>) => void;
       reject: (e: unknown) => void;
@@ -459,6 +464,7 @@ describe("Create local PR: a reopen during a create", () => {
       </QueryClientProvider>,
     );
     const title = await fillTitle(user);
+    await fill?.(user);
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
     title.focus();
     await user.keyboard("{Control>}{Enter}{/Control}");
@@ -543,5 +549,234 @@ describe("Create local PR: a reopen during a create", () => {
     expect(await screen.findByLabelText("Title")).toHaveValue("");
     expect(createButton()).not.toHaveAccessibleDescription(ACT_PENDING_REASON);
     await act(async () => pending.resolve(created));
+  });
+
+  /** The next create stays pending until the test settles it. */
+  function deferNextCreate() {
+    const next: {
+      resolve: (v: Awaited<ReturnType<typeof createLocalPr>>) => void;
+      reject: (e: unknown) => void;
+    } = { resolve: () => undefined, reject: () => undefined };
+    vi.mocked(createLocalPr).mockImplementationOnce(
+      () =>
+        new Promise((resolve, reject) => {
+          next.resolve = resolve;
+          next.reject = reject;
+        }),
+    );
+    return next;
+  }
+
+  /** Draft A's create runs; a requested pair reseeds draft B, whose create starts too. */
+  async function twoCreatesRunning() {
+    const { user, pending: a } = await createThenClose();
+    const b = deferNextCreate();
+    reopen({ defaultHead: "dev", defaultBase: "main" });
+    const title = await screen.findByLabelText("Title");
+    expect(title).toHaveValue("");
+    await user.type(title, "B title");
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    title.focus();
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(2));
+    return { user, a, b };
+  }
+
+  const chord = (user: ReturnType<typeof userEvent.setup>) => {
+    screen.getByLabelText("Title").focus();
+    return user.keyboard("{Control>}{Enter}{/Control}");
+  };
+
+  it("holds a newer draft's Create after the older create settles (T1)", async () => {
+    const { user, a, b } = await twoCreatesRunning();
+    await act(async () => a.resolve(created));
+    await waitFor(() => expectHeld(ACT_PENDING_REASON));
+    expect(within(createButton()).getByRole("status")).toBeInTheDocument();
+    const generate = screen.getByRole("button", { name: /Generate/ });
+    expect(generate).toHaveAttribute("aria-disabled", "true");
+    expect(generate).toHaveAccessibleDescription(
+      new RegExp(CREATE_PENDING_GENERATE_REASON),
+    );
+    await chord(user);
+    fireEvent.submit(
+      screen.getByLabelText("Title").closest("form") as HTMLFormElement,
+    );
+    fireEvent.click(createButton());
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(createLocalPr).toHaveBeenCalledTimes(2);
+    await act(async () => b.resolve({ ...created, id: "pr-2" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps the newer running draft held on a plain reopen after the older settled (T2)", async () => {
+    const { a, b } = await twoCreatesRunning();
+    act(() => control.setOpen(false));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => a.resolve(created));
+    reopen();
+    expect(await screen.findByLabelText("Title")).toHaveValue("B title");
+    expectHeld(ACT_PENDING_REASON);
+    await act(async () => b.resolve({ ...created, id: "pr-2" }));
+  });
+
+  it("keeps the newer draft held when the older create fails, and re-arms on its own failure (T3)", async () => {
+    const { user, a, b } = await twoCreatesRunning();
+    await act(async () => a.reject(new Error("refused")));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expectHeld(ACT_PENDING_REASON);
+    await chord(user);
+    fireEvent.submit(
+      screen.getByLabelText("Title").closest("form") as HTMLFormElement,
+    );
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(createLocalPr).toHaveBeenCalledTimes(2);
+    await act(async () => b.reject(new Error("refused")));
+    await waitFor(expectLive);
+    expect(screen.getByLabelText("Title")).toHaveValue("B title");
+    await chord(user);
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(3));
+  });
+
+  it("closes once when the newer create settles first, and the older settle starts nothing (T4)", async () => {
+    const { a, b } = await twoCreatesRunning();
+    await act(async () => b.resolve({ ...created, id: "pr-2" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await act(async () => a.resolve(created));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(createLocalPr).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts one create from two submit events in one task (T4b)", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+    const title = await fillTitle(user);
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    expectLive();
+    act(() => {
+      fireEvent.click(createButton());
+      fireEvent.submit(title.closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(createLocalPr).toHaveBeenCalled());
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(createLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  describe("Create local PR: a create that fails while closed", () => {
+    const NOTES_PLACEHOLDER =
+      "Deliberate calls, tradeoffs, and context reviewers should ground against…";
+    const notesToggle = () =>
+      screen.getByRole("button", { name: "Notes for reviewers" });
+    const pause = () => act(() => new Promise((r) => setTimeout(r, 20)));
+
+    async function closeDialog() {
+      act(() => control.setOpen(false));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+
+    it("shows the failed draft again on the first reopen, and a retry creates it (T8)", async () => {
+      const { user, pending } = await createThenClose(async (u) => {
+        await u.type(screen.getByLabelText("Description"), "A description");
+        fireEvent.click(notesToggle());
+        await u.type(screen.getByPlaceholderText(NOTES_PLACEHOLDER), "A note");
+      });
+      await act(async () => pending.reject(new Error("refused")));
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+      expect(screen.getByLabelText("Description")).toHaveValue("A description");
+      expect(screen.getByRole("combobox", { name: "Merge" })).toHaveTextContent(
+        "feat",
+      );
+      expect(screen.getByRole("combobox", { name: "Base" })).toHaveTextContent(
+        "main",
+      );
+      expect(notesToggle()).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(notesToggle());
+      expect(screen.getByPlaceholderText(NOTES_PLACEHOLDER)).toHaveValue(
+        "A note",
+      );
+      await waitFor(expectLive);
+      await chord(user);
+      await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(createLocalPr).mock.calls[1]?.[1]).toMatchObject({
+        title: "A title",
+        head: "feat",
+        base: "main",
+      });
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
+
+    it("lets a requested pair consume the kept draft (T9)", async () => {
+      const { user, pending } = await createThenClose();
+      await act(async () => pending.reject(new Error("refused")));
+      reopen({ defaultHead: "dev", defaultBase: "main" });
+      const title = await screen.findByLabelText("Title");
+      expect(title).toHaveValue("");
+      await waitFor(() =>
+        expect(
+          screen.getByRole("combobox", { name: "Merge" }),
+        ).toHaveTextContent("dev"),
+      );
+      await user.type(title, "Requested");
+      await closeDialog();
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
+
+    it("never carries the kept draft across repositories (T10)", async () => {
+      const { pending } = await createThenClose();
+      await act(async () => pending.reject(new Error("refused")));
+      const other = "C:/other";
+      act(() => {
+        useUiStore.setState({ repoPath: other });
+        control.setRepo(other);
+      });
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+      await closeDialog();
+      act(() => {
+        useUiStore.setState({ repoPath: REPO });
+        control.setRepo(REPO);
+      });
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
+
+    it("keeps nothing for a failure seen while open (T11a)", async () => {
+      const { pending } = await createThenClose();
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+      await act(async () => pending.reject(new Error("refused")));
+      await waitFor(expectLive);
+      await closeDialog();
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
+
+    it("keeps nothing when a step after the create throws (T11b)", async () => {
+      vi.mocked(triggerAutomations).mockImplementationOnce(() => {
+        throw new Error("automation boom");
+      });
+      const { pending } = await createThenClose();
+      await act(async () => pending.resolve(created));
+      await pause();
+      expect(triggerAutomations).toHaveBeenCalled();
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
+
+    it("keeps nothing when a reseed replaced the draft before the failure (T11c)", async () => {
+      const { user, pending } = await createThenClose();
+      reopen({ defaultHead: "dev", defaultBase: "main" });
+      const title = await screen.findByLabelText("Title");
+      expect(title).toHaveValue("");
+      await user.type(title, "Second");
+      await closeDialog();
+      await act(async () => pending.reject(new Error("refused")));
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
   });
 });

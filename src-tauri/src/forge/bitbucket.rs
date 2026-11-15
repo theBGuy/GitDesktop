@@ -3924,17 +3924,48 @@ pub async fn create_pr(
     let repo = repo_base(repo_path).await?;
     let path = format!("{repo}/pullrequests");
     let payload = build_create_body(base, head, title, body, draft, reviewers);
-    let created: BbCreatedPr = http::bb_post_json(&creds, &path, &payload, "created pull request")
-        .await
+    let sent =
+        http::bb_send_request_split(&creds, reqwest::Method::POST, &path, Some(&payload)).await;
+    let reply = sent
+        .and_then(|(status, _, body)| created_pr_response(status, body))
         .map_err(|e| {
             // The branch is already on the remote; disclose that partial state so the
             // user knows a retry needn't re-push (and the branch isn't orphaned silently).
-            AppError::Bitbucket(format!("The branch was pushed, but creating the pull request failed: {e}"))
+            AppError::Bitbucket(format!(
+                "The branch was pushed, but creating the pull request failed: {e}"
+            ))
         })?;
-    Ok(PrRef {
-        number: created.id,
-        url: html_href(&created.links),
+    // Outside the wrap: an accepted create whose reply isn't JSON may exist, so its error
+    // never says the create failed.
+    created_pr_ref(&reply)
+}
+
+/// A created pull request's id and web link, or (0, "") when an empty or JSON body doesn't
+/// carry them; a body that isn't JSON is the `created_reply` error, since the pull request
+/// may exist but nothing proves it.
+fn created_pr_ref(body: &str) -> AppResult<PrRef> {
+    let reply = crate::forge::created_reply(body, Provider::Bitbucket, "pull request", true)?;
+    Ok(match serde_json::from_value::<BbCreatedPr>(reply) {
+        Ok(created) => PrRef {
+            number: created.id,
+            url: html_href(&created.links),
+        },
+        Err(_) => PrRef {
+            number: 0,
+            url: String::new(),
+        },
     })
+}
+
+/// Only a received 2xx establishes the create, and gives its body to classify ("" when the
+/// body couldn't be read: created, number unknown); a non-2xx keeps its error.
+fn created_pr_response(status: u16, body: AppResult<String>) -> AppResult<String> {
+    match body {
+        Ok(body) if !(200..300).contains(&status) => Err(http::http_error(status, &body)),
+        Err(error) if !(200..300).contains(&status) => Err(error),
+        Ok(body) => Ok(body),
+        Err(_) => Ok(String::new()),
+    }
 }
 
 /// Approve a pull request (`POST …/pullrequests/{n}/approve`, no body). The author CAN
@@ -6575,7 +6606,6 @@ mod tests {
             ("branch restriction", "the branch restriction"),
             ("comment", "the comment"),
             ("commit comment", "the commit comment"),
-            ("created pull request", "the created pull request"),
             ("created task", "the created task"),
             ("default reviewer", "the default reviewer"),
             ("fork", "the fork"),
@@ -9087,6 +9117,121 @@ definitions:
                 .err()
                 .unwrap();
             assert_eq!(actual.to_string(), expected.to_string());
+        }
+    }
+
+    #[test]
+    fn created_pr_ref_reads_a_reply_or_gives_number_unknown() {
+        let link = "https://bitbucket.org/w/r/pull-requests/12";
+        let full = format!(r#"{{"id":12,"links":{{"html":{{"href":"{link}"}}}}}}"#);
+        let got = created_pr_ref(&full).unwrap();
+        assert_eq!((got.number, got.url.as_str()), (12, link));
+        for body in ["{}", "", "null", "[]", "\"x\"", r#"{"id":"12"}"#] {
+            let got = created_pr_ref(body).unwrap();
+            assert_eq!((got.number, got.url.as_str()), (0, ""), "{body:?}");
+        }
+        let hedge = "The branch was pushed. Bitbucket accepted the request but its reply couldn't be read, so the pull request may already exist. Check before creating it again.";
+        for body in ["<html>", "{\"id\":12,\"links\":{\"ht"] {
+            let got = created_pr_ref(body).map(|_| ()).map_err(|e| e.to_string());
+            assert_eq!(got, Err(hedge.to_string()), "{body:?}");
+        }
+        // The reader classifies through the one rule and parses nothing itself.
+        let reader = crate::github::repo_meta::tests::wiring_body(
+            include_str!("bitbucket.rs"),
+            "created_pr_ref",
+        );
+        let one_rule =
+            |body: &str| body.matches("created_reply(").count() == 1 && !body.contains("from_str");
+        assert!(one_rule(&reader), "{reader}");
+        assert!(!one_rule(&format!("{reader}\nserde_json::from_str(x)")));
+        assert!(!one_rule(&reader.replace("created_reply(", "own_parse(")));
+    }
+
+    /// A received 2xx establishes the create; its body is then classified (an unread body is
+    /// created, number unknown; a non-JSON one is the hedge). A non-2xx keeps its error.
+    #[test]
+    fn a_created_pull_request_classifies_its_reply_after_the_status() {
+        let link = "https://bitbucket.org/w/r/pull-requests/12";
+        let full = format!(r#"{{"id":12,"links":{{"html":{{"href":"{link}"}}}}}}"#);
+        let read_error = || AppError::Bitbucket("could not read the response body".into());
+        let envelope = r#"{"type":"error","error":{"message":"source branch not found"}}"#;
+        let hedge =
+            crate::forge::created_reply_unreadable(Provider::Bitbucket, "pull request", true)
+                .to_string();
+        let bad_gateway = "<html>Bad Gateway</html>";
+        type Expected = Result<(u64, String), String>;
+        let created = |number: u64, url: &str| Ok((number, url.to_string()));
+        let rows: Vec<(u16, AppResult<String>, Expected)> = vec![
+            (201, Ok(full.clone()), created(12, link)),
+            (201, Ok("{}".into()), created(0, "")),
+            (200, Ok(String::new()), created(0, "")),
+            (201, Ok("null".into()), created(0, "")),
+            (201, Ok(r#"{"id":"12"}"#.into()), created(0, "")),
+            (201, Err(read_error()), created(0, "")),
+            (201, Ok("<html>".into()), Err(hedge.clone())),
+            (201, Ok("{\"id\":12,\"links\":{".into()), Err(hedge.clone())),
+            (
+                400,
+                Ok(envelope.into()),
+                Err(http::http_error(400, envelope).to_string()),
+            ),
+            (
+                502,
+                Ok(bad_gateway.into()),
+                Err(http::http_error(502, bad_gateway).to_string()),
+            ),
+            (502, Err(read_error()), Err(read_error().to_string())),
+        ];
+        let outcome = |got: AppResult<PrRef>| -> Expected {
+            got.map(|pr| (pr.number, pr.url)).map_err(|e| e.to_string())
+        };
+        for (i, (status, body, expected)) in rows.into_iter().enumerate() {
+            // Control: classifying before the status reads the 502 page as the hedge.
+            let early = outcome(clone_body(&body).and_then(|b| created_pr_ref(&b)));
+            let got = outcome(created_pr_response(status, body).and_then(|r| created_pr_ref(&r)));
+            assert_eq!(got, expected, "row {i}");
+            if i == 9 {
+                assert_eq!(early, Err(hedge.clone()), "the control must flip");
+                assert_ne!(early, got);
+            }
+        }
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("bitbucket.rs"), "create_pr");
+        let wrap = "The branch was pushed, but creating the pull request failed";
+        let split = |body: &str| {
+            body.contains("bb_send_request_split(")
+                && body.contains("created_pr_response(")
+                && !body.contains("bb_post_json(")
+                && !body.contains("bb_send(")
+                && body.contains(wrap)
+        };
+        assert!(split(&body), "{body}");
+        assert!(
+            !split(&format!("{body}\nbb_post_json(x)")),
+            "bb_post_json control"
+        );
+        let plain = body.replace("bb_send_request_split(", "bb_send(");
+        assert!(!split(&plain), "bb_send control");
+        // The reply is classified outside the wrap, so the hedge never says the create failed.
+        let outside = |body: &str| {
+            body.find(wrap)
+                .zip(body.find("created_pr_ref("))
+                .is_some_and(|(w, r)| w < r)
+        };
+        assert!(outside(&body), "{body}");
+        let inside = body.replacen("created_pr_ref(&reply)", "", 1).replacen(
+            wrap,
+            &format!("created_pr_ref(x); {wrap}"),
+            1,
+        );
+        assert_ne!(inside, body);
+        assert!(!outside(&inside), "a reader inside the wrap must flip");
+    }
+
+    fn clone_body(body: &AppResult<String>) -> AppResult<String> {
+        match body {
+            Ok(text) => Ok(text.clone()),
+            Err(e) => Err(AppError::Bitbucket(e.to_string())),
         }
     }
 

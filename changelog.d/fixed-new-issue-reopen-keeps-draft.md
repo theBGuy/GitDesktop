@@ -2,4 +2,5 @@
   created: reopening it in the same repository shows the draft with
   Create held until the create finishes, and if the create fails, the
   text and images are there to retry, including when the dialog was
-  closed at the time.
+  closed at the time. Each draft creates one issue: Create stays held on a
+  draft until its own create has finished.

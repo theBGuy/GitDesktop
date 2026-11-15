@@ -12,6 +12,7 @@ import {
   vi,
 } from "vitest";
 import { PromoteLocalIssueDialog } from "@/features/issues/PromoteLocalIssueDialog";
+import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import {
   forgeIssueComment,
   forgeIssueCreate,
@@ -32,6 +33,12 @@ vi.mock("@/lib/issues/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/issues/local")>()),
   updateLocalIssue: vi.fn(),
 }));
+// Spied through; a case overrides the predicate by identity, so no Rust sentence
+// is spelled here (its meaning is pinned where it is defined).
+vi.mock("@/lib/error-summary", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/error-summary")>();
+  return { ...real, mayHaveLanded: vi.fn(real.mayHaveLanded) };
+});
 vi.mock("@/lib/jira/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/jira/store")>()),
   getJiraLink: vi.fn(async () => null),
@@ -129,4 +136,54 @@ describe("PromoteLocalIssueDialog over an issue whose number couldn't be read", 
       });
     },
   );
+});
+
+describe("PromoteLocalIssueDialog when the create and the reopen both fail (T30)", () => {
+  const rejection = { kind: "timeout", message: "may have landed" };
+  const REOPEN =
+    "The local issue couldn't be reopened — reopen it from its view.";
+
+  /** The close lands, the forge create rejects, the reopen rejects too. */
+  async function failBoth() {
+    vi.mocked(updateLocalIssue)
+      .mockResolvedValueOnce({ ...ISSUE, status: "closed" })
+      .mockRejectedValueOnce(new Error("reopen refused"));
+    vi.mocked(forgeIssueCreate).mockRejectedValueOnce(rejection);
+    const error = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <PromoteLocalIssueDialog
+          repoPath={REPO}
+          issue={ISSUE}
+          open
+          onOpenChange={() => undefined}
+        />
+      </QueryClientProvider>,
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: /Publish to / }));
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(updateLocalIssue).toHaveBeenCalledTimes(2);
+    return error.mock.calls[0] as [string, { description?: string }];
+  }
+
+  it("titles the toast with the error alone when the write may have landed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation((e) => e === rejection);
+    const [title, options] = await failBoth();
+    expect(title).toBe(presentError(rejection).summary);
+    expect(options.description).toBe(REOPEN);
+  });
+
+  it("says the issue wasn't created when the write can't have landed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    const [title, options] = await failBoth();
+    expect(title).toBe(
+      `Couldn't create the GitHub issue: ${presentError(rejection).summary}`,
+    );
+    expect(options.description).toBe(REOPEN);
+  });
 });

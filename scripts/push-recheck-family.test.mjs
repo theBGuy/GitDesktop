@@ -948,8 +948,8 @@ test("any other issue lifecycle write passing the re-read flag fails the check",
         callArgs(stripComments(body), helper).length > 0,
     )
     .map(([name]) => name);
-  // Pin, lock, unlock, edit, transfer and delete at the time of writing.
-  assert.ok(others.length >= 6, JSON.stringify(others));
+  // Pin, lock, unlock, transfer and delete at the time of writing.
+  assert.ok(others.length >= 5, JSON.stringify(others));
   for (const name of others) {
     const mutant = mutateUnit(sources, file, name, (body) => {
       const bare = stripComments(body);

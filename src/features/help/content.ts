@@ -1817,8 +1817,7 @@ request's or merge request's title and description. Paste one from the clipboard
 files with **Attach image**, the image button at the end of the formatting toolbar (the
 command palette's **Attach image** opens the same picker). PNG, JPEG, GIF and WebP work,
 up to 10 MB and 40 megapixels each, 10 per draft; when a draft is full, attaching another
-discards the images whose reference you deleted, to make room. On Windows, text longer
-than about 30,000 characters can't be sent with images: shorten it, or add them separately.
+discards the images whose reference you deleted, to make room.
 Each image adds a Markdown reference at the cursor (\`![image](image-1.png)\` for a paste;
 a picked file's name, minus its extension, becomes the alt text), so you edit the alt text
 in the text itself. A chip under the editor shows each image's thumbnail, name and size:
@@ -1830,8 +1829,9 @@ the draft when you fold the box or switch away and come back, and go when it's p
 cleared. If GitHub takes the comment but an image fails to upload, the comment posts and
 the failed images stay attached for a follow-up comment. A new issue or pull request is
 still created when a later image fails, and a warning says to edit the description to add
-it again; if the first image fails, nothing is created and the dialog keeps your text and
-images. On GitHub, the **Edit** dialog saves the description with the images that uploaded
+it again; if the first image fails, no issue or pull request is created (on GitHub, a new
+pull request's branch is still pushed) and the dialog keeps your text and images. On
+GitHub, the **Edit** dialog saves the description with the images that uploaded
 and stays open with the failed ones still attached, so pressing **Save** again adds them
 (when the saved description can't be read back, it closes with a warning instead); if the
 first image fails, the description isn't saved (your other changes, such as the title,

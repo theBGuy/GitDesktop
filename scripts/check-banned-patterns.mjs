@@ -5717,7 +5717,51 @@ export const CHECKS = [
       "src/features/conversations/EditTitleBodyDialog.tsx",
     ],
     message:
-      "a dialog's generate chord holds while its own form submits — add `!isSubmitting` (read via `useSelector(form.store, (s) => s.isSubmitting)`) as an `&&` conjunct of the chord's `enabled` and hold the visible Generate with a reason (DisabledReasonButton): the draft has already been sent, and its settle closes the dialog holding it; a surface whose submit can't strand a revision needs an allowlist entry with rationale",
+      "a dialog's generate chord holds while its own form submits — add `!isSubmitting` (read via `useSelector(form.store, (s) => s.isSubmitting)`, or in a create dialog that adopts the hook bound to `useDraftCreateHold(...).running`) as an `&&` conjunct of the chord's `enabled` and hold the visible Generate with a reason (DisabledReasonButton): the draft has already been sent, and its settle closes the dialog holding it; a surface whose submit can't strand a revision needs an allowlist entry with rationale",
+  },
+  {
+    // A form-core form keeps ONE submit flag, which a reseed clears and an older
+    // draft's settle clears again under a newer draft's create, so a create
+    // dialog that reseeds holds through the per-draft hook. Membership is read on
+    // ts-mask's masked text, so a comment or string can neither make nor unmake
+    // a member; a file the mask can't lex throws rather than passing unread.
+    name: "draft-create-hold",
+    appliesTo: (file) => file.endsWith(".tsx") && notVendoredUi(file),
+    scan: ({ source }, file) => {
+      let masked;
+      try {
+        masked = maskNonCode(source, true);
+      } catch (e) {
+        if (e instanceof ScanError)
+          throw new Error(
+            `draft-create-hold: cannot lex ${file ?? "<input>"}: ${e.message}`,
+          );
+        throw e;
+      }
+      const form = /\buseAppForm\s*\(/.exec(masked);
+      const member =
+        form !== null &&
+        /\buseSeedOnOpen\s*\(/.test(masked) &&
+        /\b[\w$]*orm\s*\.\s*reset\s*\(/.test(masked) &&
+        /\bmutateAsync\s*\(/.test(masked);
+      if (!member || /\buseDraftCreateHold\s*\(/.test(masked)) return [];
+      return [lineOf(source, form.index)];
+    },
+    allowlist: [
+      // The per-(repo, head) lane store refuses a second create at fire time,
+      // and no form reset can clear it.
+      "src/features/pulls/CreatePrDialog.tsx",
+      // Holds on the pending-publish cache read, not on the form's flag.
+      "src/features/repository/PublishDialog.tsx",
+      // Its seed and its hold read the create mutation's `isPending`.
+      "src/features/issues/CreateJiraIssueDialog.tsx",
+      // Holds on its host's `pending` prop.
+      "src/features/projects/ProjectStatusStrip.tsx",
+      // Creates a named ref, which git refuses to create twice.
+      "src/features/repository/CreateBranchDialog.tsx",
+    ],
+    message:
+      "a create dialog whose form a reopen can reseed while its create runs holds through useDraftCreateHold (src/lib/use-draft-create-hold.ts): form-core keeps one `isSubmitting` per form, which a reseed clears and an older draft's settle clears again, so a newer draft's Create goes live mid-create and a press creates it twice. Call the hook, bump `nextDraft()` where the form takes another draft, wrap the submit in `begin()`/`end()`, ask `isRunning()` on every submit path, and pass `running` to the submit button's `disabled` and `pending`; a dialog whose duplicate guard lives where a reset can't clear it needs an allowlist entry with rationale. A member is a .tsx calling `useAppForm(`, `useSeedOnOpen(`, `<…orm>.reset(` and `mutateAsync(`; the scan can't see a form built by `withForm(` or by a generic call spelled `useAppForm<…>(`, a reset through a destructured `reset`, or a create not spelled `mutateAsync` (a callback prop, a direct api call); it looks for the hook call anywhere in the file, so a file holding several form components passes on one call",
   },
   {
     name: "hand-rolled-diff-stat",

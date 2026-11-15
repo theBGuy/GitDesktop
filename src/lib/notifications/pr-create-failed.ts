@@ -1,4 +1,4 @@
-import { presentError } from "@/lib/error-summary";
+import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { emitNotification } from "./emit";
 
@@ -23,7 +23,11 @@ export function notifyPrCreateFailed(input: {
   // a failed create outlives the toast.
   const presented = presentError(error);
   const reason = presented.summary;
-  const title = `The ${noun} for ${head} wasn't created`;
+  // A create that may have landed (timed out, or accepted with an unreadable
+  // reply) may exist on the forge, so the title doesn't deny it.
+  const title = mayHaveLanded(error)
+    ? `The ${noun} for ${head} may have been created`
+    : `The ${noun} for ${head} wasn't created`;
   emitNotification({
     source: "prCreate",
     row: {

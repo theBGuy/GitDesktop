@@ -1,6 +1,7 @@
 import { CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
+import type { MarkdownHostedImages } from "@/components/markdown/markdown-images";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { useReviewNote } from "@/lib/review-notes/queries";
@@ -16,6 +17,7 @@ interface NotesField {
     placeholder?: string;
     rows?: number;
     textareaClassName?: string;
+    hostedImages?: MarkdownHostedImages;
   }) => ReactNode;
   state: { value: string };
   handleChange: (value: string) => void;
@@ -39,12 +41,15 @@ export function ReviewerNotesField({
   repoPath,
   head,
   field,
+  hostedImages,
 }: {
   repoPath: string;
   /** The live head branch the PR merges — keys the note deposit lookup. */
   head: string | null;
   /** The form's bound `notes` field (from `<form.AppField name="notes">`). */
   field: NotesField;
+  /** Passed only for a forge pull request: a local PR's notes post as a local comment. */
+  hostedImages?: MarkdownHostedImages;
 }) {
   const [open, setOpen] = useState(false);
   const regionId = useId();
@@ -136,6 +141,7 @@ export function ReviewerNotesField({
       {open && (
         <div id={regionId} className="mt-2 space-y-1.5">
           <field.MarkdownField
+            hostedImages={hostedImages}
             placeholder={PLACEHOLDER}
             rows={4}
             textareaClassName="ph-no-capture max-h-48 min-h-20 resize-y font-mono"

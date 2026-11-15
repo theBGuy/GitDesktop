@@ -6,10 +6,12 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CREATE_PENDING_GENERATE_REASON } from "@/features/conversations/useAiStream";
 import {
   CreateIssueDialog,
   type CreateIssueHost,
@@ -490,6 +492,29 @@ describe("Create issue attachments", () => {
     expect(client.getQueryData<IssueInfo[]>(LIST_KEY)).toEqual([]);
   });
 
+  it("names the sub-issue link a numberless create skipped (T23)", async () => {
+    mount([{ host: "sub-issue", subIssueParentId: "I_parent" }]);
+    vi.mocked(forgeIssueCreate).mockResolvedValue({
+      number: 0,
+      url: "",
+      failedAttachments: [],
+      followupError: null,
+    });
+    fireEvent.change(title(), { target: { value: "A new issue" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create sub-issue" }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(toast.warning).mock.calls[0]?.[0]).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't linked to its parent issue. Finish that from the issue.",
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toastCount()).toBe(1);
+    expect(ghIssueAddSubIssue).not.toHaveBeenCalled();
+    const all = [toast, toast.success, toast.error, toast.info, toast.warning]
+      .flatMap((t) => vi.mocked(t).mock.calls)
+      .map((c) => JSON.stringify(c[0]) + JSON.stringify(c[1] ?? {}));
+    expect(all.some((s) => s.includes("#0"))).toBe(false);
+  });
+
   it("warns once with no number when an unknown-number create carries a follow-up reason (AC29)", async () => {
     const { client } = mount();
     vi.mocked(forgeIssueCreate).mockResolvedValue({
@@ -813,5 +838,103 @@ describe("Create issue reopen during a create", () => {
     await act(async () => create.resolve({ number: 12, url: URL_12 }));
     await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
     expect(dialogOpen()).toBe(true);
+  });
+
+  // The running create's spinner joins the button's name.
+  const heldCreate = () =>
+    screen.getByRole("button", { name: /Create issue$/ });
+
+  /** Draft A's create runs; an explicit request reseeds draft B, whose create starts too. */
+  async function twoCreatesRunning(stageOnB = false) {
+    const harness = await createThenReopen();
+    harness.reopenWith({ title: "Duplicate of #3", body: "Copied body" });
+    await waitFor(() => expect(desc().value).toBe("Copied body"));
+    if (stageOnB) {
+      sessionSeq += 1;
+      SESSION = sessionSeq.toString(16).padStart(32, "0");
+      await stageImages(1);
+    }
+    const second = deferred<{ number: number; url: string }>();
+    vi.mocked(forgeIssueCreate).mockReturnValue(second.promise);
+    expectCreateLive();
+    fireEvent.click(createButton());
+    await waitFor(() => expect(forgeIssueCreate).toHaveBeenCalledTimes(2));
+    return { ...harness, a: harness.create, b: second };
+  }
+
+  it("holds a newer draft's Create after the older create settles (T5)", async () => {
+    const { a, b } = await twoCreatesRunning();
+    await act(async () => a.resolve({ number: 12, url: URL_12 }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    const held = heldCreate();
+    expect(held).toHaveAttribute("aria-disabled", "true");
+    expect(reasonOf(held)).toContain(ACT_PENDING_REASON);
+    expect(within(held).getByRole("status")).toBeInTheDocument();
+    const draftWithAi = screen.getByRole("button", { name: /Draft with AI/ });
+    expect(draftWithAi).toHaveAttribute("aria-disabled", "true");
+    expect(reasonOf(draftWithAi)).toContain(CREATE_PENDING_GENERATE_REASON);
+    fireEvent.click(held);
+    fireEvent.submit(title().closest("form") as HTMLFormElement);
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(forgeIssueCreate).toHaveBeenCalledTimes(2);
+    await act(async () => b.resolve({ number: 13, url: URL_12 }));
+    await waitFor(() => expect(dialogOpen()).toBe(false));
+    expect(toast.success).toHaveBeenCalledTimes(2);
+  });
+
+  it("holds Attach on the newer running draft and keeps it across a plain reopen (T6)", async () => {
+    const { a, b, setOpen, reopenPlain } = await twoCreatesRunning();
+    await act(async () => a.resolve({ number: 12, url: URL_12 }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    const attach = screen.getByRole("button", { name: "Attach image" });
+    expect(reasonOf(attach)).toContain(ACT_PENDING_REASON);
+    setOpen(false);
+    reopenPlain();
+    await waitFor(() => expect(desc().value).toBe("Copied body"));
+    expect(heldCreate()).toHaveAttribute("aria-disabled", "true");
+    await act(async () => b.resolve({ number: 13, url: URL_12 }));
+  });
+
+  it("keeps the newer draft's images through a close after the older settled, when its create then fails (T6b)", async () => {
+    const { a, b, setOpen, reopenPlain } = await twoCreatesRunning(true);
+    const bSession = SESSION;
+    await act(async () => a.resolve({ number: 12, url: URL_12 }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    setOpen(false);
+    await act(async () => b.reject(new Error("create refused")));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(attachmentDiscard).not.toHaveBeenCalledWith(bSession, null);
+    reopenPlain();
+    await waitFor(() => expect(desc().value).toContain("Copied body"));
+    expect(desc().value).toContain("](image-1.png)");
+    expect(stagedNames().some((s) => s.includes("image-1.png"))).toBe(true);
+  });
+
+  it("keeps the newer draft held when the older create fails, and re-arms on its own failure (T7)", async () => {
+    const { a, b } = await twoCreatesRunning();
+    await act(async () => a.reject(new Error("create refused")));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(heldCreate()).toHaveAttribute("aria-disabled", "true");
+    fireEvent.submit(title().closest("form") as HTMLFormElement);
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(forgeIssueCreate).toHaveBeenCalledTimes(2);
+    await act(async () => b.reject(new Error("create refused")));
+    await waitFor(expectCreateLive);
+    expect(dialogOpen()).toBe(true);
+    expect(desc().value).toBe("Copied body");
+  });
+
+  it("starts one create from two submit events in one task (T7b)", async () => {
+    mount();
+    vi.mocked(forgeIssueCreate).mockResolvedValue({ number: 12, url: URL_12 });
+    await fillTitle();
+    expectCreateLive();
+    act(() => {
+      fireEvent.click(createButton());
+      fireEvent.submit(title().closest("form") as HTMLFormElement);
+    });
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(forgeIssueCreate).toHaveBeenCalledTimes(1);
   });
 });

@@ -8,8 +8,13 @@ import { createdNumberOf } from "@/lib/attachments/references";
 import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 import * as api from "../api";
-import type { AttachmentRefs, RemoteLens } from "../types";
-import { repoKeys } from "./core";
+import type { AttachmentRefs, PrDetails, RemoteLens } from "../types";
+import { invalidateRepoAfterWrite, repoKeys } from "./core";
+import {
+  type EditSaveArgs,
+  patchEditSave,
+  rollbackEditSave,
+} from "./edit-save-patch";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { prChecksRecheck } from "./pr-actions";
 import {
@@ -18,21 +23,20 @@ import {
   pendingMutationEntries,
   prWriteKey,
 } from "./pr-writes";
+import { prDetailsOptions } from "./prs";
 import { recheckRunsAfterPush } from "./push-writes";
 
+type EditPrArgs = EditSaveArgs & {
+  /** Retarget the PR onto this base branch. Omit to leave the base alone —
+   *  a no-op retarget is still a forge write, and GitHub rejects one on a
+   *  stacked PR. */
+  base?: string;
+};
+
 export function useEditPr(repo: string, lens: RemoteLens) {
-  return useRepoMutation(
-    repo,
-    (args: {
-      number: number;
-      title: string;
-      body: string;
-      /** Retarget the PR onto this base branch. Omit to leave the base alone —
-       *  a no-op retarget is still a forge write, and GitHub rejects one on a
-       *  stacked PR. */
-      base?: string;
-      attachments?: AttachmentRefs;
-    }) =>
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: EditPrArgs) =>
       api.forgePrEdit(
         repo,
         args.number,
@@ -42,7 +46,18 @@ export function useEditPr(repo: string, lens: RemoteLens) {
         args.base,
         args.attachments,
       ),
-  );
+    // The base is never patched: the item's re-read settles it.
+    onMutate: (args: EditPrArgs) =>
+      patchEditSave<PrDetails>(
+        queryClient,
+        prDetailsOptions(repo, args.number, lens).queryKey,
+        args,
+      ),
+    // No toast: the Edit dialog's catch arm reports every failed save.
+    onError: (e, _args, patch) =>
+      rollbackEditSave<PrDetails>(queryClient, patch, e),
+    onSettled: () => void invalidateRepoAfterWrite(queryClient, repo),
+  });
 }
 
 /** Stack a chain of open PRs (bottom→top) into a new stack. Takes the default

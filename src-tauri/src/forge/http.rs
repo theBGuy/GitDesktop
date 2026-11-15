@@ -23,7 +23,6 @@ pub(crate) fn bb_unreadable(what: &str, detail: String) -> AppError {
         "branch restriction" => "the branch restriction",
         "comment" => "the comment",
         "commit comment" => "the commit comment",
-        "created pull request" => "the created pull request",
         "created task" => "the created task",
         "default reviewer" => "the default reviewer",
         "fork" => "the fork",

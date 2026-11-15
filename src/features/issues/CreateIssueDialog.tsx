@@ -44,6 +44,7 @@ import {
 import {
   createdWarning,
   FOLLOWUP_HEADING,
+  type SkippedFollowup,
 } from "@/lib/attachments/comment-post";
 import { toastCreatedWarning } from "@/lib/attachments/created-warning";
 import {
@@ -106,6 +107,7 @@ import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
+import { useDraftCreateHold } from "@/lib/use-draft-create-hold";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import {
@@ -211,10 +213,6 @@ export function CreateIssueDialog({
   // repo's). A dialog left open across a repo switch never re-seeds, so this
   // still reads the submit's repo and the settle's close is the right one.
   const draftRepoRef = useRef(repoPath);
-  // Which draft the form holds, bumped only where the seed actually reseeds. The
-  // repo stamp can't tell drafts apart within one repo: an A→B→A round trip
-  // restores the same path behind different content.
-  const seedGenRef = useRef(0);
   // The live `open` for the create's settle, whose closure holds the submit-time one.
   const openRef = useRef(open);
   useLayoutEffect(() => {
@@ -302,187 +300,201 @@ export function CreateIssueDialog({
     defaultValues: { title: "", body: "" },
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
-      const submitGen = seedGenRef.current;
-      // Begun after every early return, so a refusal leaves the chips as they were.
-      const ticket = beginAttachmentPost(attachDraftKey, value.body, false);
-      let created: CreatedRef;
+      const run = createHold.begin();
       try {
-        created = await createIssue.mutateAsync({
-          title: value.title.trim(),
-          body: value.body,
-          labels: [...labels],
-          assignees: assignees.map((a) => a.id),
-          milestone,
-          type: issueType?.name ?? null,
-          attachments: ticket?.refs,
-        });
-      } catch (e) {
-        // Rust keeps every staged file on any Err, so the chips still hold.
-        if (ticket) settleAttachmentPost(ticket, { posted: false, failed: [] });
-        if (
-          !openRef.current &&
-          draftRepoRef.current === repoPath &&
-          seedGenRef.current === submitGen
-        )
-          failedWhileClosedRef.current = true;
-        // The create itself failed — nothing exists yet, so retrying is correct
-        // and the dialog stays open holding the draft. This is the ONLY arm that
-        // re-arms the submit; past it the issue is real and a second submit would
-        // open a duplicate. The note names the repo when the failure lands after
-        // a switch, matching the success arm.
-        const originNote = originNoteFor(repoPath);
-        if (originNote) toastErrorWithNote(e, originNote);
-        else toastError(e);
-        return;
-      }
-      const { url } = created;
-      // Null when the issue exists but its number couldn't be read: nothing below
-      // may print, link or open issue 0.
-      const number = createdNumberOf(created);
-      const numberSuffix = number === null ? "" : ` #${number}`;
-      const failedImages = failedAttachmentsOf(created);
-      const followupError = followupErrorOf(created);
-      // Failed images can't follow the issue: the toast names the one image, or
-      // counts several, and the whole session goes with the draft. Without a
-      // ticket a reseed may already own the key, so only this submit's draft ends.
-      if (ticket)
-        settleAttachmentPost(ticket, {
-          posted: true,
-          failed: failedImages,
-          discardFailed: true,
-        });
-      else if (
-        draftRepoRef.current === repoPath &&
-        seedGenRef.current === submitGen
-      )
-        endDraftAttachments(attachDraftKey);
-      const view = url
-        ? {
-            label: forgeViewLabel ?? "View",
-            url,
-            onClick: () => openUrl(url),
+        // Begun after every early return, so a refusal leaves the chips as they were.
+        const ticket = beginAttachmentPost(attachDraftKey, value.body, false);
+        let created: CreatedRef;
+        try {
+          created = await createIssue.mutateAsync({
+            title: value.title.trim(),
+            body: value.body,
+            labels: [...labels],
+            assignees: assignees.map((a) => a.id),
+            milestone,
+            type: issueType?.name ?? null,
+            attachments: ticket?.refs,
+          });
+        } catch (e) {
+          // Rust keeps every staged file on any Err, so the chips still hold.
+          if (ticket)
+            settleAttachmentPost(ticket, { posted: false, failed: [] });
+          if (
+            !openRef.current &&
+            draftRepoRef.current === repoPath &&
+            createHold.holds(run.gen)
+          )
+            failedWhileClosedRef.current = true;
+          // The create call itself rejected, so the dialog stays open holding the
+          // draft either way; when the write may have landed, the error's own
+          // sentence says to check before retrying. This is the ONLY arm that
+          // re-arms the submit; past it the issue is real and a second submit would
+          // open a duplicate. The note names the repo when the failure lands after
+          // a switch, matching the success arm.
+          const originNote = originNoteFor(repoPath);
+          if (originNote) toastErrorWithNote(e, originNote);
+          else toastError(e);
+          return;
+        }
+        const { url } = created;
+        // Null when the issue exists but its number couldn't be read: nothing below
+        // may print, link or open issue 0.
+        const number = createdNumberOf(created);
+        const numberSuffix = number === null ? "" : ` #${number}`;
+        const failedImages = failedAttachmentsOf(created);
+        const followupError = followupErrorOf(created);
+        // Failed images can't follow the issue: the toast names the one image, or
+        // counts several, and the whole session goes with the draft. Without a
+        // ticket a reseed may already own the key, so only this submit's draft ends.
+        if (ticket)
+          settleAttachmentPost(ticket, {
+            posted: true,
+            failed: failedImages,
+            discardFailed: true,
+          });
+        else if (draftRepoRef.current === repoPath && createHold.holds(run.gen))
+          endDraftAttachments(attachDraftKey);
+        const view = url
+          ? {
+              label: forgeViewLabel ?? "View",
+              url,
+              onClick: () => openUrl(url),
+            }
+          : undefined;
+        const action = view && { label: view.label, onClick: view.onClick };
+        /** Open the new issue — but only if the app is still where it was created.
+         *  Every path below sits after at least one await, and this dialog doesn't
+         *  register the modal gate, so a chord can switch repos inside that window.
+         *  `selectIssue` carries NO repo identity, so it would select this NUMBER in
+         *  whatever repo is active now — somewhere else that is an unrelated issue,
+         *  or a missing-issue view. The guard is the continuation rule's own shape,
+         *  and the same one `CreateDiscussionDialog` puts on its post-create
+         *  navigate.
+         *
+         *  The TOAST stays unconditional wherever the user ended up: it names the
+         *  issue and carries its URL, which are true from any repo. */
+        function openCreatedIssue() {
+          if (number === null) return;
+          if (useUiStore.getState().repoPath !== repoPath) return;
+          selectIssue({ kind: "remote", id: String(number) });
+        }
+        // The post-create links are INDEPENDENT of each other: a board refusing the
+        // issue says nothing about whether its parent will take it, so each runs on
+        // its own and reports into `failures` rather than throwing past the other.
+        // A shared try/catch let the first failure cancel the second link silently.
+        // A known number guards both — a forge that answered without one names no
+        // issue to link.
+        const failures: { heading: string; error: unknown }[] = [];
+        // The links a missing number skips, named in the warning below.
+        const skipped: SkippedFollowup[] = [];
+        const addProjectIds = pickedProjects.map((p) => p.id);
+        if (showProjects && addProjectIds.length > 0 && number === null)
+          skipped.push(addProjectIds.length === 1 ? "project" : "projects");
+        if (subIssueParentId && number === null) skipped.push("sub-issue");
+        if (showProjects && addProjectIds.length > 0 && number !== null) {
+          try {
+            await addToProjects.mutateAsync({
+              repo: repoPath,
+              number,
+              addProjectIds,
+              lens,
+            });
+          } catch (e) {
+            const key = addProjectIds.length === 1 ? "project" : "projects";
+            failures.push({ heading: LINK_FAILED[key], error: e });
           }
-        : undefined;
-      const action = view && { label: view.label, onClick: view.onClick };
-      /** Open the new issue — but only if the app is still where it was created.
-       *  Every path below sits after at least one await, and this dialog doesn't
-       *  register the modal gate, so a chord can switch repos inside that window.
-       *  `selectIssue` carries NO repo identity, so it would select this NUMBER in
-       *  whatever repo is active now — somewhere else that is an unrelated issue,
-       *  or a missing-issue view. The guard is the continuation rule's own shape,
-       *  and the same one `CreateDiscussionDialog` puts on its post-create
-       *  navigate.
-       *
-       *  The TOAST stays unconditional wherever the user ended up: it names the
-       *  issue and carries its URL, which are true from any repo. */
-      function openCreatedIssue() {
-        if (number === null) return;
-        if (useUiStore.getState().repoPath !== repoPath) return;
-        selectIssue({ kind: "remote", id: String(number) });
-      }
-      // The post-create links are INDEPENDENT of each other: a board refusing the
-      // issue says nothing about whether its parent will take it, so each runs on
-      // its own and reports into `failures` rather than throwing past the other.
-      // A shared try/catch let the first failure cancel the second link silently.
-      // A known number guards both — a forge that answered without one names no
-      // issue to link.
-      const failures: { heading: string; error: unknown }[] = [];
-      const addProjectIds = pickedProjects.map((p) => p.id);
-      if (showProjects && addProjectIds.length > 0 && number !== null) {
-        try {
-          await addToProjects.mutateAsync({
-            repo: repoPath,
-            number,
-            addProjectIds,
-            lens,
+        }
+        let subIssueLinked = false;
+        if (subIssueParentId && number !== null) {
+          try {
+            await addSubIssue.mutateAsync({
+              repo: repoPath,
+              parentId: subIssueParentId,
+              subNumber: number,
+              lens,
+            });
+            subIssueLinked = true;
+          } catch (e) {
+            failures.push({ heading: LINK_FAILED["sub-issue"], error: e });
+          }
+        }
+        // The toasts below name the origin repo when this settles elsewhere;
+        // `openCreatedIssue` makes the live-repo check for the navigation itself.
+        const originNote = originNoteFor(repoPath);
+        // Closed whenever the form still holds THIS submit's draft: the issue
+        // exists, and leaving that draft open is a duplicate factory. A later seed
+        // has replaced it with one that isn't ours to close.
+        const ourDraft =
+          draftRepoRef.current === repoPath && createHold.holds(run.gen);
+        if (ourDraft) onOpenChange(false);
+        // One toast per create: a follow-up or image warning rides whichever
+        // toast this outcome shows rather than adding its own.
+        const warning = createdWarning("issue", failedImages, followupError, {
+          skipped,
+        });
+        const description =
+          [originNote, url].filter(Boolean).join(" · ") || undefined;
+        if (failures.length > 0) {
+          // Every failure in one message, so a run that lost both links doesn't
+          // report one and hide the other. The title keeps each step mid-sentence
+          // lowercase; Details capitalizes it, since there it heads a section.
+          const reasons = failures.map(
+            (f) => `${f.heading}: ${presentError(f.error).summary}`,
+          );
+          const errors: unknown[] = failures.map((f) => f.error);
+          const headings = failures.map(
+            (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
+          );
+          if (followupError !== null) {
+            errors.push(followupError);
+            headings.push(FOLLOWUP_HEADING.issue);
+          }
+          toastComposedError({
+            title: `Created issue${numberSuffix}, but ${reasons.join("; ")}`,
+            errors,
+            headings,
+            description:
+              [originNote, warning].filter(Boolean).join(" · ") || undefined,
+            view: url ? { url, label: forgeViewLabel } : undefined,
+            duration: 10000,
           });
-        } catch (e) {
-          const key = addProjectIds.length === 1 ? "project" : "projects";
-          failures.push({ heading: LINK_FAILED[key], error: e });
+          // The issue EXISTS whatever the links did, so it still opens — the same
+          // navigate the clean path makes, under the same gate. A sub-issue keeps
+          // its parent on screen either way (GitHub's own behavior).
+          if (!subIssueParentId) openCreatedIssue();
+          return;
         }
-      }
-      let subIssueLinked = false;
-      if (subIssueParentId && number !== null) {
-        try {
-          await addSubIssue.mutateAsync({
-            repo: repoPath,
-            parentId: subIssueParentId,
-            subNumber: number,
-            lens,
+        if (warning !== null) {
+          toastCreatedWarning({
+            kind: "issue",
+            title: warning,
+            followupError,
+            description,
+            view,
           });
-          subIssueLinked = true;
-        } catch (e) {
-          failures.push({ heading: LINK_FAILED["sub-issue"], error: e });
+          if (!subIssueLinked) openCreatedIssue();
+          return;
         }
-      }
-      // The toasts below name the origin repo when this settles elsewhere;
-      // `openCreatedIssue` makes the live-repo check for the navigation itself.
-      const originNote = originNoteFor(repoPath);
-      // Closed whenever the form still holds THIS submit's draft: the issue
-      // exists, and leaving that draft open is a duplicate factory. A later seed
-      // has replaced it with one that isn't ours to close.
-      const ourDraft =
-        draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
-      if (ourDraft) onOpenChange(false);
-      // One toast per create: a follow-up or image warning rides whichever
-      // toast this outcome shows rather than adding its own.
-      const warning = createdWarning("issue", failedImages, followupError);
-      const description =
-        [originNote, url].filter(Boolean).join(" · ") || undefined;
-      if (failures.length > 0) {
-        // Every failure in one message, so a run that lost both links doesn't
-        // report one and hide the other. The title keeps each step mid-sentence
-        // lowercase; Details capitalizes it, since there it heads a section.
-        const reasons = failures.map(
-          (f) => `${f.heading}: ${presentError(f.error).summary}`,
-        );
-        const errors: unknown[] = failures.map((f) => f.error);
-        const headings = failures.map(
-          (f) => f.heading.charAt(0).toUpperCase() + f.heading.slice(1),
-        );
-        if (followupError !== null) {
-          errors.push(followupError);
-          headings.push(FOLLOWUP_HEADING.issue);
+        if (subIssueLinked) {
+          // Stay on the parent so the new issue appears in its sub-issue list
+          // (GitHub's own behavior) — no navigate.
+          toast.success(`Created sub-issue${numberSuffix}`, {
+            description,
+            action,
+          });
+          return;
         }
-        toastComposedError({
-          title: `Created issue${numberSuffix}, but ${reasons.join("; ")}`,
-          errors,
-          headings,
-          description:
-            [originNote, warning].filter(Boolean).join(" · ") || undefined,
-          view: url ? { url, label: forgeViewLabel } : undefined,
-          duration: 10000,
-        });
-        // The issue EXISTS whatever the links did, so it still opens — the same
-        // navigate the clean path makes, under the same gate. A sub-issue keeps
-        // its parent on screen either way (GitHub's own behavior).
-        if (!subIssueParentId) openCreatedIssue();
-        return;
+        toast.success(`Opened issue${numberSuffix}`, { description, action });
+        openCreatedIssue();
+      } finally {
+        run.end();
       }
-      if (warning !== null) {
-        toastCreatedWarning({
-          kind: "issue",
-          title: warning,
-          followupError,
-          description,
-          view,
-        });
-        if (!subIssueLinked) openCreatedIssue();
-        return;
-      }
-      if (subIssueLinked) {
-        // Stay on the parent so the new issue appears in its sub-issue list
-        // (GitHub's own behavior) — no navigate.
-        toast.success(`Created sub-issue${numberSuffix}`, {
-          description,
-          action,
-        });
-        return;
-      }
-      toast.success(`Opened issue${numberSuffix}`, { description, action });
-      openCreatedIssue();
     },
   });
+  // Which draft the form holds and whether its own create runs. The repo stamp
+  // can't tell drafts apart within one repo: an A→B→A round trip restores the
+  // same path behind different content.
+  const createHold = useDraftCreateHold(form);
 
   // Live title/body drive the AI drafter's input and its enabled state.
   const titleVal = useSelector(form.store, (s) => s.values.title);
@@ -495,7 +507,7 @@ export function CreateIssueDialog({
     // A create still running in this repo keeps its draft, so a failed create
     // leaves it to retry; another repo's draft resets, or a retry would land there.
     const sameRepoInFlight =
-      form.state.isSubmitting && draftRepoRef.current === repoPath;
+      createHold.isRunning() && draftRepoRef.current === repoPath;
     const keptFailure =
       failedWhileClosedRef.current && draftRepoRef.current === repoPath;
     failedWhileClosedRef.current = false;
@@ -529,7 +541,7 @@ export function CreateIssueDialog({
       }
       return;
     }
-    seedGenRef.current += 1;
+    createHold.nextDraft();
     // The images belong to the text this reset replaces.
     endDraftAttachments(attachDraftKey);
     form.reset(
@@ -550,7 +562,7 @@ export function CreateIssueDialog({
   // failed one leaves them with the draft). Edge only: an `<Activity>` replay ends nothing.
   const wasOpenRef = useRef(open);
   const endDiscardedAttachments = useEffectEvent(() => {
-    if (generating || form.state.isSubmitting) return;
+    if (generating || createHold.isRunning()) return;
     endDraftAttachments(attachDraftKey);
   });
   useEffect(() => {
@@ -664,7 +676,7 @@ export function CreateIssueDialog({
   // can't run behind the dialog; while generating it swallows but DOESN'T
   // cancel. A running create holds it like the button: the draft it would
   // revise has already been sent.
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const isSubmitting = createHold.running;
   const generateChord = useGenerateChord({
     enabled: aiEnabled && !generating && notes.trim() !== "" && !isSubmitting,
     run: runGenerate,
@@ -740,7 +752,7 @@ export function CreateIssueDialog({
           onSubmit={(e) => {
             e.preventDefault();
             // Form-core doesn't refuse a submit while one runs.
-            if (form.state.isSubmitting) return;
+            if (createHold.isRunning()) return;
             if (!submitBlocked) form.handleSubmit();
             else draftAttachments.noteSubmitHeld();
           }}
@@ -971,7 +983,8 @@ export function CreateIssueDialog({
               >
                 <form.SubmitButton
                   focusableWhenDisabled={!!offlineSubmit.blockedReason}
-                  disabled={submitBlocked}
+                  disabled={submitBlocked || isSubmitting}
+                  pending={isSubmitting}
                   aria-describedby={offlineSubmit.describedBy}
                   className={ARIA_DISABLED_CLASS}
                 >

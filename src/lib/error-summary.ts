@@ -727,15 +727,62 @@ export const NOTHING_EXISTS_DISCLOSURES = [
   "Nothing was posted because ",
 ] as const;
 
+/** New pull request pushes its branch before gh uploads, so its first-image
+ *  failure leads with this instead (`attached_run_failure`, github/pr.rs). Same
+ *  rank as the leads above. */
+export const BRANCH_PUSHED_DISCLOSURE =
+  "The branch was pushed, but the pull request wasn't created because ";
+
 function nothingExistsDisclosure(
   kind: AppError["kind"],
   message: string,
 ): string | null {
   if (kind !== "gh") return null;
   const headline = firstMeaningfulLine(message);
-  return NOTHING_EXISTS_DISCLOSURES.some((lead) => headline.startsWith(lead))
+  return NOTHING_EXISTS_DISCLOSURES.some((lead) => headline.startsWith(lead)) ||
+    headline.startsWith(BRANCH_PUSHED_DISCLOSURE)
     ? headline
     : null;
+}
+
+/** Rust's `created_reply_unreadable` sentence after its host, and the lead a
+ *  create that pushed its branch first puts before it. Module-private: callers
+ *  ask `mayHaveLanded`, never match the text. */
+const UNREAD_REPLY_LEAD =
+  " accepted the request but its reply couldn't be read, so the ";
+const UNREAD_REPLY_PUSHED = "The branch was pushed. ";
+
+/** The forge kinds whose creates can answer with an unreadable reply. */
+const UNREAD_REPLY_HOSTS: Partial<Record<AppError["kind"], string>> = {
+  gh: FORGE_KIND_HOSTS.gh,
+  glab: FORGE_KIND_HOSTS.glab,
+  bitbucket: FORGE_KIND_HOSTS.bitbucket,
+};
+
+/** Whether an error's forge write may have reached the forge: a GitHub or
+ *  GitLab create, edit or comment write that timed out (`AppError::WriteTimedOut`
+ *  from `write_timed_out`, kind `timeout`, told from a bare timeout by the bare
+ *  one's Rust lead), or a GitHub, GitLab or Bitbucket create the forge accepted
+ *  whose reply couldn't be read (`created_reply_unreadable`, under that forge's
+ *  own kind and host). False for every other error, a bare timeout included.
+ *  Both producers are pinned by scripts/attached-failure-leads.test.mjs. */
+export function mayHaveLanded(error: unknown): boolean {
+  if (!isAppError(error)) return false;
+  const message = error.message ?? "";
+  if (error.kind === "timeout") {
+    const leads = DISPLAY_LEADS.timeout ?? [];
+    return (
+      message.trim() !== "" &&
+      leads.length > 0 &&
+      !leads.some((lead) => message.startsWith(lead))
+    );
+  }
+  const host = UNREAD_REPLY_HOSTS[error.kind];
+  if (host === undefined) return false;
+  const sentence = message.startsWith(UNREAD_REPLY_PUSHED)
+    ? message.slice(UNREAD_REPLY_PUSHED.length)
+    : message;
+  return sentence.startsWith(`${host}${UNREAD_REPLY_LEAD}`);
 }
 
 /** Whether a failed edit still saved its title and base: the one reader of the

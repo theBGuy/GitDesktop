@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
@@ -1052,8 +1051,9 @@ fn apply_explicit_env(cmd: &mut Command, repo: Option<&RepoHost>, envs: &[(&str,
 /// treating a non-zero exit as an error (like `run_glab`). The additive variant
 /// backing two needs the base `run_glab` signature can't serve without churning
 /// every call site:
-///  - `input` feeds a nested-JSON body to `glab api --input -` (flat `-f
-///    position[x]=y` is SILENTLY IGNORED by GitLab — the known nested-JSON trap).
+///  - `input` feeds a JSON body to `glab api --input -`: a nested one (flat `-f
+///    position[x]=y` is SILENTLY IGNORED by GitLab — the known nested-JSON trap), or a
+///    write's flat fields, kept off argv so long or multi-line text sends whole.
 ///  - `envs` carries a bot `GITLAB_TOKEN` (+ `GITLAB_HOST`) so a note is authored by
 ///    the project bot rather than the signed-in user (env overrides glab's config,
 ///    probe-proven). NEVER logged.
@@ -1084,6 +1084,28 @@ pub async fn run_glab_ex(
     }
     configure_child_env(&mut cmd, strip);
     apply_explicit_env(&mut cmd, host.as_ref(), envs);
+    let out = glab_exchange(cmd, input, timeout).await?;
+    if out.code != 0 {
+        let msg = out.stderr.trim();
+        return Err(AppError::Glab(if msg.is_empty() {
+            format!("glab exited with code {}", out.code)
+        } else {
+            msg.to_string()
+        }));
+    }
+    Ok(out)
+}
+
+/// Spawns `cmd` and runs its stdin exchange (the shared
+/// [`crate::github::runner::exchange_with_stdin`]) inside the one `timeout`, returning
+/// the raw output. Once glab is reaped its exit code and stderr are the result,
+/// whatever the stdin write returned, so a glab that exits before reading reports its
+/// own error rather than a broken pipe.
+async fn glab_exchange(
+    mut cmd: Command,
+    input: Option<&str>,
+    timeout: Duration,
+) -> AppResult<GlabOutput> {
     cmd.stdin(if input.is_some() {
         Stdio::piped()
     } else {
@@ -1095,48 +1117,65 @@ pub async fn run_glab_ex(
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.kill_on_drop(true);
 
-    let mut child = cmd.spawn().map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::GlabNotFound
         } else {
             AppError::Io(e)
         }
     })?;
-    // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
-    // outside it a stall hangs the caller forever instead of failing at the
-    // deadline. It still precedes the drain rather than running concurrently the
-    // way the git runner has to — one API body in, one small JSON document back —
-    // and the timeout now bounds the exchange whatever a caller sends.
-    let exchange = async move {
-        if let Some(body) = input {
-            // Dropping the handle after the write closes the pipe so glab reads EOF.
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(body.as_bytes())
-                    .await
-                    .map_err(AppError::Io)?;
-                stdin.shutdown().await.ok();
-            }
-        }
-        child.wait_with_output().await.map_err(AppError::Io)
-    };
+    let exchange = crate::github::runner::exchange_with_stdin(child, input.map(str::as_bytes));
     let output = tokio::time::timeout(timeout, exchange)
         .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
-    let out = GlabOutput {
+        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
+        .map_err(AppError::Io)?;
+    Ok(GlabOutput {
         stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code().unwrap_or(-1),
-    };
-    if out.code != 0 {
-        let msg = out.stderr.trim();
-        return Err(AppError::Glab(if msg.is_empty() {
-            format!("glab exited with code {}", out.code)
-        } else {
-            msg.to_string()
-        }));
+    })
+}
+
+#[cfg(test)]
+mod exchange_tests {
+    use std::time::{Duration, Instant};
+
+    use tokio::process::Command;
+
+    use super::glab_exchange;
+
+    /// A child that prints `refused` to stderr and exits 3 without reading stdin.
+    #[cfg(unix)]
+    fn refusing_child(_dir: &std::path::Path) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo refused >&2; exit 3"]);
+        cmd
     }
-    Ok(out)
+
+    #[cfg(windows)]
+    fn refusing_child(dir: &std::path::Path) -> Command {
+        let path = dir.join("refuse.cmd");
+        std::fs::write(&path, "@echo refused 1>&2\r\n@exit /b 3\r\n").unwrap();
+        Command::new(path)
+    }
+
+    /// The body is over 4 MiB, past tokio's 2 MiB Windows staging buffer and any unix
+    /// pipe buffer, so the write to a child that never reads really fails.
+    #[tokio::test]
+    async fn a_glab_that_exits_unread_reports_its_own_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("{}\n", "x".repeat(100));
+        let text = line.repeat((4 << 20) / line.len() + 1);
+        let started = Instant::now();
+        let budget = Duration::from_secs(30);
+        let out = glab_exchange(refusing_child(dir.path()), Some(&text), budget)
+            .await
+            .expect("a reaped child is Ok whatever the write returned");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert_eq!(out.code, 3);
+        assert!(out.stderr.contains("refused"), "stderr: {}", out.stderr);
+    }
 }
 
 #[cfg(test)]

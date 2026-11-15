@@ -38,6 +38,11 @@ import {
   repoKeys,
 } from "./core";
 import {
+  type EditSaveArgs,
+  patchEditSave,
+  rollbackEditSave,
+} from "./edit-save-patch";
+import {
   invalidateProjectBoards,
   useMutationCacheSnapshot,
   useOptimisticCacheMutation,
@@ -850,7 +855,7 @@ type IssueRefile = {
 };
 
 /**
- * An issue-lifecycle write (close/reopen/edit/pin/lock/transfer/delete) that reconciles
+ * An issue-lifecycle write (close/reopen/pin/lock/transfer/delete) that reconciles
  * NARROWLY instead of whole-repo: the one issue's detail subtree (prefix-matched, so its
  * reactions/relations/dependencies/development sub-queries refresh too) plus every
  * issue-list state variant (row fields change, and transfer/delete change list
@@ -865,8 +870,8 @@ function useIssueLifecycleMutation<TArgs, TData>(
   mutationFn: (args: TArgs) => Promise<TData>,
   numberOf: (args: TArgs) => number,
   /** Whether this write changes what a Projects BOARD card draws. Declared per
-   *  call site, not assumed for the helper: close/reopen/edit/transfer/delete all
-   *  change a card's state glyph, title, or presence, while pin and lock/unlock
+   *  call site, not assumed for the helper: close/reopen/transfer/delete all
+   *  change a card's state glyph or presence, while pin and lock/unlock
    *  change nothing a card shows. */
   boardCards = false,
   /** Files the write under {@link issueWriteKey} for a menu that reads its
@@ -1114,15 +1119,9 @@ export function useReopenIssue(repo: string, lens: RemoteLens) {
 }
 
 export function useEditIssue(repo: string, lens: RemoteLens) {
-  return useIssueLifecycleMutation(
-    repo,
-    lens,
-    (args: {
-      number: number;
-      title: string;
-      body: string;
-      attachments?: AttachmentRefs;
-    }) =>
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: EditSaveArgs) =>
       api.forgeIssueEdit(
         repo,
         args.number,
@@ -1131,10 +1130,28 @@ export function useEditIssue(repo: string, lens: RemoteLens) {
         lens,
         args.attachments,
       ),
-    (args) => args.number,
-    // The title is the card.
-    true,
-  );
+    onMutate: (args: EditSaveArgs) =>
+      patchEditSave<IssueDetails>(
+        queryClient,
+        issueDetailsOptions(repo, args.number, lens).queryKey,
+        args,
+      ),
+    // No toast: the Edit dialog's catch arm reports every failed save.
+    onError: (e, _args, patch) =>
+      rollbackEditSave<IssueDetails>(queryClient, patch, e),
+    // The title is the card, so boards refresh with the lens's lists and the item.
+    onSettled: (_d, _e, args) => {
+      invalidateProjectBoards(queryClient, repo);
+      return void Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: [...repoKeys.issueList(repo), lens],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: issueDetailsOptions(repo, args.number, lens).queryKey,
+        }),
+      ]);
+    },
+  });
 }
 
 export function useTransferIssue(repo: string, lens: RemoteLens) {

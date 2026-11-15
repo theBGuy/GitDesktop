@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { createdNumberOf } from "@/lib/attachments/references";
-import { presentError } from "@/lib/error-summary";
+import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import { forgeIssueComment } from "@/lib/git/api";
 import {
   forgeFeatureReady,
@@ -293,7 +293,8 @@ export function PromoteLocalIssueDialog({
       }
     } catch (e) {
       if (created === null) {
-        // Nothing remote exists, so retrying is correct: keep the dialog open.
+        // The create call rejected and no remote issue is known to exist: keep
+        // the dialog open either way (a may-have-landed error says to check).
         await failBeforeCreate(e, closedAt, prior, `${remoteLabel} issue`);
         return;
       }
@@ -399,7 +400,8 @@ export function PromoteLocalIssueDialog({
     });
   }
 
-  /** The failure path of a create that produced nothing remote: undoes
+  /** The failure path of a create call that rejected, with no remote item known
+   *  to exist (the dialog stays open either way): undoes
    *  {@link closeLocal} BEFORE toasting, so the retry-capable dialog sits over a
    *  record that reads open again. The undo touches only status/closedAt, and
    *  only while the record still carries this flow's close: anything else
@@ -422,7 +424,9 @@ export function PromoteLocalIssueDialog({
         });
       } catch (reopenError) {
         toastComposedError({
-          title: `Couldn't create the ${noun}: ${presentError(e).summary}`,
+          title: mayHaveLanded(e)
+            ? presentError(e).summary
+            : `Couldn't create the ${noun}: ${presentError(e).summary}`,
           description:
             "The local issue couldn't be reopened — reopen it from its view.",
           errors: [e, reopenError],

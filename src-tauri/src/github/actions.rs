@@ -3143,7 +3143,7 @@ mod tests {
     }
 
     /// `--failed` appends only when asked; the plain rerun must stay byte-identical
-    /// to the base positional+flag shape, mirroring `pr_edit_args_append_base_only_when_given`.
+    /// to the base positional+flag shape, mirroring `pr_edit_payload_carries_base_only_when_given`.
     #[test]
     fn run_rerun_args_appends_failed_only_when_asked() {
         let plain = run_rerun_args("o/r", "42", false);
