@@ -1399,7 +1399,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   -d` at a measured tip, its guards run under the config-write mutex), never a
   new `branch -D`: that deletes whatever the ref points at when git runs. Any
   other local branch ref delete (the root-commit undo, PR checkout's
-  stray-branch cleanup) stays old-value guarded (`update-ref -d <ref> <oid>`).
+  stray-branch cleanup) stays old-value guarded (`update-ref -d <ref> <oid>`)
+  wherever a tip was read to compare (the undo's `-d HEAD` runs only when HEAD
+  did not resolve)
+  (guard: check-rust-invariants check M, which reads an `update-ref` delete's
+  ref as its first operand wherever `-d` sits, and also fails one whose ref
+  it cannot resolve to a non-branch ref).
 - **Cached GitHub reads stay true:** gh REST GETs that adopt runner.rs's
   conditional layer (`run_gh_cached_get`/`run_gh_cached_get_raw`) key on
   (repo_path, host, argv) with the auth epoch in the value, detect a 304

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for twelve Rust invariants that have each cost this repo a fix
+// Static gate for thirteen Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -83,6 +83,38 @@
 //      allowlist row. A test attribute outside the code check L reads as test
 //      code fails the census test (testAttrsOutsideTestCode); the other blind
 //      spots print as its NOTE.
+//   M. local branch ref delete outside the primitive — `branch -d/-D/--delete`
+//      (or a --delete prefix such as --del) or an `update-ref` delete (-d, alone
+//      or in a short cluster such as -dm) on a branch ref skips the in-use
+//      guards and the old-value compare of `git::branches::delete_branch_ref_at`.
+//      git permutes options, so update-ref's ref is its first operand after the
+//      verb, wherever -d sits. Only the exact literal HEAD, without --no-deref,
+//      counts as a branch ref (git deletes the branch HEAD names). An
+//      `update-ref` delete ref the check cannot resolve to a ref outside
+//      refs/heads/ fails too (allowlistable): a non-literal operand that no
+//      trusted `let` resolves, an unknown `-`-led literal before the operand,
+//      a format! with any other method chained on, and a binding it cannot
+//      trust (a `let mut`, a `let` whose block closes before the use, or one a
+//      reassignment, `for`/`let` pattern, closure parameter or match arm of
+//      the same name shadows in between). The check fails when it cannot find
+//      the primitive's own delete in git/branches.rs. Allowlist rows are per
+//      function, so a second delete in an allowlisted function is not
+//      reported. A `#[cfg(test)] fn` outside a test module reads as
+//      production (reported, never missed), and the branch scan reads option
+//      values as flags (["branch", "--sort", "-committerdate"] is reported).
+//      Not seen: a delete flag held in a variable or format! (["branch", &flag,
+//      …]); an update-ref verb or -d held in a variable; argv assembled across
+//      functions or grown by .push/.extend (commit.rs swap_inner, which never
+//      deletes); builder chains (Command::new("git").arg(…)); a command spelled
+//      inside one string; update-ref --stdin `delete` instructions (commit.rs
+//      reattach, the one --stdin site, only verifies and updates); an
+//      update-ref <ref> <all-zero oid>, which deletes (measured, git 2.51.1;
+//      the only all-zero value in production is restore_deleted_ref's OLD
+//      value); a symbolic ref other than the literal HEAD
+//      (main-worktree/HEAD) deleted without --no-deref; a binding shadowed by
+//      a macro, or by a closure parameter list or pattern split across lines;
+//      renames (branch -m/-M), push . :refs/heads/x, and removing a loose ref
+//      file from disk.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -128,7 +160,7 @@ const REFSPEC_ALLOWLIST = [
     file: "git/branches.rs",
     fn: "branch_full_ref",
     rationale:
-      "validates with validate_branch_name at fn entry; the full ref is a rev-parse tip probe and update-ref's compare-and-delete target, never a refspec",
+      "validates with validate_branch_name at fn entry; the full ref is a for-each-ref pattern (the exact tip read and the deleted branch's upstream read), a show-ref --verify tip read, and update-ref's compare-and-delete and put-back target, never a refspec",
   },
   {
     file: "git/branches.rs",
@@ -989,7 +1021,7 @@ const REV_TEMPLATE_RE =
 const REV_ARGV_RE =
   /\[\s*"(merge-base|rev-list|rev-parse|merge|log|diff|rebase|reset|merge-tree|show|cherry|revert|ls-tree|fetch)"/g;
 const REV_SAFE_INIT_RE =
-  /\b(?:branch_first_rev|local_branch_revs|branch_tip\w*)\s*\(/;
+  /\b(?:branch_first_rev|local_branch_revs|(?:exact_)?branch_tip\w*)\s*\(/;
 const BARE_REV_FIX =
   "a bare branch name in a rev position resolves to a same-named TAG first " +
   "(gitrevisions) — resolve it via git::branches::branch_first_rev, read the " +
@@ -3157,6 +3189,326 @@ export function reportEmptyHangGuardScope(hits, corpus) {
     });
 }
 
+// -------------------------------------------------- M. local branch deletes
+
+// Check M. Each row is the primitive itself, or deletes a branch ref or a ref
+// the check cannot read for a reason the primitive does not cover — verified by
+// reading each site.
+export const LOCAL_BRANCH_DELETE_ALLOWLIST = [
+  {
+    file: "git/branches.rs",
+    fn: "delete_branch_ref_at",
+    rationale:
+      "the guarded primitive itself: `update-ref --no-deref -d` at the measured tip, inside the config-write lock after refuse_if_branch_in_use, with a read-after-delete put-back (restore_deleted_ref)",
+  },
+  {
+    file: "git/commit.rs",
+    fn: "delete_root_ref",
+    rationale:
+      "root-commit undo: deletes the ref HEAD named under the undo's hold, old-value guarded by the root oid, leaving that branch unborn by design",
+  },
+  {
+    file: "git/commit.rs",
+    fn: "git_undo_commit_core",
+    rationale:
+      "its `update-ref -d HEAD` runs only in the unborn arm (target None), where HEAD did not resolve under the undo's hold; the attached arm goes through delete_root_ref",
+  },
+  {
+    file: "git/commit.rs",
+    fn: "roll_back",
+    rationale:
+      "the ref is the CasRef being swapped (a branch or HEAD); with old None it deletes, --no-deref and old-value guarded by current, exactly the ref the swap from None created, so it undoes its own write",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "clear_branch_state",
+    rationale:
+      "name iterates the pseudo-refs AUTO_MERGE, CHERRY_PICK_HEAD and REVERT_HEAD under --no-deref; no branch ref is reachable",
+  },
+  {
+    file: "git/pr_checkout.rs",
+    fn: "fetch_pr_tip",
+    rationale:
+      "pin is pin_ref(number) = refs/gitdesktop/pr-checkout/<number>-<pid>, the fetch's own temporary pin ref, never under refs/heads/",
+  },
+  {
+    file: "git/pr_checkout.rs",
+    fn: "worktree_add",
+    rationale:
+      "rolls back the branch git's own `worktree add -b` minted before refusing the folder, old-value guarded by pr_tip so a branch moved since is kept; git refused the add, so no checkout holds it",
+  },
+];
+const LOCAL_BRANCH_DELETE_FIX =
+  "check M: a local branch ref delete goes only through " +
+  "git::branches::delete_branch_ref_at (old-value compare-and-delete under the " +
+  "config-write lock, after the in-use guards); a bare `branch -d/-D` or " +
+  "`update-ref -d` on a branch ref skips them — call the primitive; a " +
+  "deliberate delete is allowlisted with its rationale";
+const OPAQUE_DELETE_REF_FIX =
+  "check M cannot resolve this `update-ref -d` ref to a ref outside " +
+  "refs/heads/ — spell a non-branch ref as a literal or a fixed `refs/<ns>/` " +
+  "template, route a branch delete through delete_branch_ref_at, or allowlist " +
+  "with a rationale naming what the ref is and why the primitive does not apply";
+const BRANCH_DELETE_SCOPE_FIX =
+  "check M saw no `update-ref -d` in git/branches.rs fn delete_branch_ref_at — " +
+  "update check M to the primitive's new name or home (never remove its " +
+  "allowlist row to silence this)";
+// git branch's delete flags: --delete or a prefix of it git accepts (--d at
+// least), or a short cluster holding -d or -D.
+const BRANCH_DELETE_CLUSTER_RE = /^-[A-Za-z]*[dD][A-Za-z]*$/;
+const isBranchDeleteFlag = (value) =>
+  value !== undefined &&
+  ((value.length >= 3 && "--delete".startsWith(value)) ||
+    BRANCH_DELETE_CLUSTER_RE.test(value));
+// update-ref's delete flag: -d, alone or in a short cluster (-dm).
+const SHORT_CLUSTER_RE = /^-[A-Za-z]+$/;
+const isRefDeleteFlag = (value) =>
+  value !== undefined && SHORT_CLUSTER_RE.test(value) && value.includes("d");
+// update-ref options that take no value; -m and a cluster ending in m take the next element.
+const UPDATE_REF_FLAGS = new Set(["--no-deref", "--create-reflog", "--stdin", "-z"]);
+const REF_TAIL_RE = /\.\s*(?:as_str|as_ref|clone|to_string|to_owned)\s*\(\s*\)$/;
+const FORMAT_TEMPLATE_RE = /^format!\s*\(\s*r?#*"((?:[^"\\]|\\.)*)"/;
+
+/** `&x`, `x.as_str()` and their kin name the same ref as `x`. */
+function deleteRefText(text) {
+  let ref = text.trim().replace(/^&\s*/, "");
+  while (REF_TAIL_RE.test(ref)) ref = ref.replace(REF_TAIL_RE, "").trim();
+  return ref;
+}
+
+/** The ref operand of an `update-ref` argv tail (the elements after the verb)
+ *  and whether --no-deref precedes it. git permutes options, so the operand is
+ *  the first element that is neither an option nor -m's value, wherever -d
+ *  sits; after `--` it is the next element. A `-`-led literal the check does
+ *  not know, before the operand, leaves the operand undefined (opaque). */
+function updateRefOperand(elements, values) {
+  let noDeref = false;
+  for (let k = 0; k < values.length; k++) {
+    const value = values[k];
+    if (value === "--") return { ref: elements[k + 1], noDeref };
+    if (value === undefined || !value.startsWith("-"))
+      return { ref: elements[k], noDeref };
+    if (value === "--no-deref") noDeref = true;
+    if (UPDATE_REF_FLAGS.has(value)) continue;
+    if (!SHORT_CLUSTER_RE.test(value)) return { ref: undefined, noDeref };
+    if (value.endsWith("m")) k++;
+  }
+  return { ref: undefined, noDeref };
+}
+
+/** Whether the nearest `let <name> =` above line `fromIdx` (the one
+ *  bindingInitializer reads) is a binding the check cannot trust there: a
+ *  `let mut`, a `let` whose block closes before the use, or one a
+ *  reassignment, `for` or `let` pattern, closure parameter or match-arm
+ *  binding of the same name shadows in between. Rebinds read the masked
+ *  lines, so a string cannot spell one. */
+function untrustedBinding(lines, maskedLines, fromIdx, name) {
+  const decl = new RegExp(`\\blet\\s+(mut\\s+)?${name}\\s*(?::[^=]*)?=`);
+  const rebind = new RegExp(
+    [
+      `(?<![\\w.])${name}\\s*(?:[-+*/%^&|]|<<|>>)?=(?!=)`,
+      `\\b(?:for|let)\\b[^=;]*?(?<![\\w.:])${name}\\b`,
+      `\\|[^|]*?(?<![\\w.:])${name}\\b[^|]*\\|`,
+      `(?<![\\w.:])${name}\\b[^;=]*=>`,
+    ].join("|"),
+  );
+  for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
+    if (FN_RE.test(lines[i])) return false;
+    const m = decl.exec(lines[i]);
+    if (m) {
+      if (m[1] !== undefined) return true;
+      let depth = 0;
+      const after = maskedLines[i].slice(m.index + m[0].length);
+      for (const text of [after, ...maskedLines.slice(i + 1, fromIdx)]) {
+        for (const ch of text) {
+          if (ch === "{") depth++;
+          else if (ch === "}" && --depth < 0) return true;
+        }
+      }
+      return false;
+    }
+    if (rebind.test(maskedLines[i])) return true;
+  }
+  return false;
+}
+
+/** The fix a literal or `format!` ref earns, null for a ref outside
+ *  refs/heads/, undefined when `ref` is neither. A literal HEAD deletes the
+ *  branch it names unless --no-deref; a template is outside refs/heads/ only
+ *  when its fixed lead names a literal namespace. */
+function spelledRefFix(ref, noDeref) {
+  const value = diffArgLiteral(ref);
+  if (value !== undefined) {
+    if (value.startsWith("refs/heads/")) return LOCAL_BRANCH_DELETE_FIX;
+    if (value === "HEAD" && !noDeref) return LOCAL_BRANCH_DELETE_FIX;
+    return null;
+  }
+  // A method chained onto format!(…) beyond the stripped tails can rewrite it.
+  const open = /^format!\s*\(/.exec(ref)?.[0].length;
+  if (open !== undefined && open + bracketBody(ref, open - 1).length + 1 !== ref.length)
+    return OPAQUE_DELETE_REF_FIX;
+  const template = FORMAT_TEMPLATE_RE.exec(ref)?.[1];
+  if (template === undefined) return undefined;
+  if (template.includes("refs/heads/")) return LOCAL_BRANCH_DELETE_FIX;
+  return /^refs\/[^/{}]+\//.test(template.split("{")[0])
+    ? null
+    : OPAQUE_DELETE_REF_FIX;
+}
+
+/** The fix the ref element of an `update-ref -d` group earns, null when it
+ *  names a ref outside refs/heads/. A bare identifier resolves through its
+ *  nearest `let` when untrustedBinding passes it and its value is no option;
+ *  every other shape, and a missing ref, fails closed. */
+function deleteRefFix(element, codeLines, maskedLines, lineIdx, noDeref) {
+  const ref = element === undefined ? "" : deleteRefText(element.text);
+  const spelled = spelledRefFix(ref, noDeref);
+  if (spelled !== undefined) return spelled;
+  if (
+    /^[A-Za-z_]\w*$/.test(ref) &&
+    !untrustedBinding(codeLines, maskedLines, lineIdx, ref)
+  ) {
+    const init = bindingInitializer(codeLines, lineIdx, ref);
+    const text = init === null ? "" : deleteRefText(init.split(";")[0]);
+    const bound =
+      init === null || diffArgLiteral(text)?.startsWith("-")
+        ? undefined
+        : spelledRefFix(text, noDeref);
+    return bound === undefined ? OPAQUE_DELETE_REF_FIX : bound;
+  }
+  return OPAQUE_DELETE_REF_FIX;
+}
+
+/** Check M over one file. `corpus.primitive` turns true on reading the
+ *  primitive's own `update-ref -d` group (git/branches.rs, fn
+ *  delete_branch_ref_at), which reportEmptyBranchDeleteScope requires. */
+export function checkLocalBranchDeletes(
+  file,
+  _src,
+  lines,
+  hits,
+  allowlist = LOCAL_BRANCH_DELETE_ALLOWLIST,
+  corpus = undefined,
+) {
+  const { code, masked, unterminated } = lexRust(lines.join("\n"));
+  const codeLines = code.split("\n");
+  const maskedLines = masked.split("\n");
+  const lineOf = (at) => code.slice(0, at).split("\n").length;
+  const report = (at, fn, fix, failClosed = false) =>
+    hits.push({
+      file,
+      line: lineOf(at),
+      fn,
+      allowlisted:
+        !failClosed && allowlist.some((e) => e.file === file && e.fn === fn),
+      fix,
+      ...(failClosed ? { failClosed } : {}),
+    });
+  if (unterminated >= 0) {
+    report(
+      unterminated,
+      "<unreadable>",
+      "check M: a literal or comment opening here never closes — fix the source, or the lexer in scripts/check-rust-invariants.mjs",
+      true,
+    );
+  }
+  const tests = testModuleSpans(masked);
+  const functions = rustFunctions(masked);
+  const opens = new Set([...masked.matchAll(/\[/g)].map((m) => m.index));
+  for (const m of masked.matchAll(/\bvec\s*!\s*[({]/g)) {
+    opens.add(m.index + m[0].length - 1);
+  }
+  for (const at of opens) {
+    if (tests.some(([s, e]) => at > s && at < e)) continue;
+    const body = bracketBody(code, at);
+    const end = at + body.length + 1;
+    const elements = argvElements(body);
+    const values = elements.map((e) => diffArgLiteral(e.text));
+    if (!values.includes("branch") && !values.includes("update-ref")) continue;
+    const fn = functions.filter((f) => at > f.open && at < f.close).at(-1);
+    const name = fn?.name ?? "<top level>";
+    const stack = [];
+    let bounded = code[end] === ")]}"["([{".indexOf(masked[at])];
+    for (let k = at; k <= end && bounded; k++) {
+      const ch = masked[k];
+      if ("([{".includes(ch)) stack.push(ch);
+      else if (")]}".includes(ch)) {
+        if (stack.pop() !== "([{"[")]}".indexOf(ch)]) bounded = false;
+      }
+    }
+    if (!bounded || stack.length) {
+      report(
+        at,
+        name,
+        "check M: cannot bound this git argv group — fix its delimiters or extend the parser",
+        true,
+      );
+      continue;
+    }
+    let verb;
+    for (let k = 0; k < values.length; k++) {
+      const value = values[k];
+      if (value === undefined) break;
+      if (!value.startsWith("-")) {
+        verb = k;
+        break;
+      }
+      if (GIT_VALUE_OPTIONS.has(value)) k++;
+    }
+    const flags = verb === undefined ? values : values.slice(verb + 1);
+    const branchFlag = flags.some(isBranchDeleteFlag);
+    const refDelete = flags.some(isRefDeleteFlag);
+    if (verb === undefined) {
+      if (
+        (values.includes("branch") && branchFlag) ||
+        (values.includes("update-ref") && refDelete)
+      )
+        report(
+          at,
+          name,
+          "check M: cannot resolve the verb of this group holding a branch or update-ref delete flag — use a literal git verb or extend the parser",
+          true,
+        );
+      continue;
+    }
+    if (values[verb] === "branch") {
+      if (branchFlag) report(at, name, LOCAL_BRANCH_DELETE_FIX);
+    } else if (values[verb] === "update-ref" && refDelete) {
+      if (corpus && file === "git/branches.rs" && name === "delete_branch_ref_at")
+        corpus.primitive = true;
+      const { ref, noDeref } = updateRefOperand(
+        elements.slice(verb + 1),
+        values.slice(verb + 1),
+      );
+      const refAt =
+        ref === undefined
+          ? at
+          : at + 1 + ref.at + ref.text.length - ref.text.trimStart().length;
+      const fix = deleteRefFix(
+        ref,
+        codeLines,
+        maskedLines,
+        lineOf(refAt) - 1,
+        noDeref,
+      );
+      if (fix) report(at, name, fix);
+    }
+  }
+}
+
+/** A run whose corpus never held the primitive's own `update-ref -d` read
+ *  nothing check M exists for: a hit, never a pass. */
+export function reportEmptyBranchDeleteScope(hits, corpus) {
+  if (corpus?.primitive !== true)
+    hits.push({
+      file: "git/branches.rs",
+      line: 0,
+      fn: "<empty scope>",
+      allowlisted: false,
+      failClosed: true,
+      fix: BRANCH_DELETE_SCOPE_FIX,
+    });
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -3174,6 +3526,21 @@ function main() {
       ),
     allowlist: TEST_HANG_GUARD_ALLOWLIST,
     note: TEST_HANG_GUARD_NOTE,
+    hits: [],
+  };
+  const branchDeleteCorpus = { primitive: false };
+  const branchDelete = {
+    name: "M. local branch ref delete outside the primitive",
+    run: (file, src, lines, hits) =>
+      checkLocalBranchDeletes(
+        file,
+        src,
+        lines,
+        hits,
+        LOCAL_BRANCH_DELETE_ALLOWLIST,
+        branchDeleteCorpus,
+      ),
+    allowlist: LOCAL_BRANCH_DELETE_ALLOWLIST,
     hits: [],
   };
   const CHECKS = [
@@ -3245,6 +3612,7 @@ function main() {
       hits: [],
     },
     hangGuard,
+    branchDelete,
   ];
 
   const files = rustFiles(SRC);
@@ -3263,6 +3631,7 @@ function main() {
     for (const check of CHECKS) check.run(rel, src, lines, check.hits);
   }
   reportEmptyHangGuardScope(hangGuard.hits, hangGuardCorpus);
+  reportEmptyBranchDeleteScope(branchDelete.hits, branchDeleteCorpus);
 
   let failed = false;
   for (const check of CHECKS) {

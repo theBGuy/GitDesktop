@@ -4437,12 +4437,16 @@ async fn finalize_branch(
     if let Some(worktree) = owning_worktree {
         let domain = state.working_tree_lock(&worktree).await;
         let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
-        // The holder was discovered outside its lock, so verify its branch and tip again.
+        // The holder was discovered outside its lock, so verify its branch and tip again,
+        // and that its HEAD, which the fast-forward moves, is at that tip.
         let still = match current_branch_name(&worktree).await? {
             Some(now) => holds_branch(&worktree, &now, branch).await,
             None => false,
         };
-        if !still || branch_tip(&worktree, branch).await? != tip_now {
+        if !still
+            || branch_tip(&worktree, branch).await? != tip_now
+            || !crate::git::branches::head_at_tip(&worktree, &tip_now).await?
+        {
             return Err(AppError::Command(moved(branch)));
         }
         let paths = ignored_files_in_the_way(&worktree, new_sha, DEFAULT_TIMEOUT)
@@ -27029,6 +27033,60 @@ detached
         assert_eq!(rev(&repo, "HEAD").await, z1);
         assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
         assert!(matches!(&result, Err(AppError::Git { .. })), "{result:?}");
+    }
+
+    /// A sibling on the unborn `Chore/z` beside the packed-only `chore/z` holds it where
+    /// refs can alias, but its HEAD is not the pinned tip, so finalize refuses as moved and
+    /// merges nothing there. Returns early on a case-sensitive filesystem or a non-files
+    /// ref backend, as the fixture says.
+    #[tokio::test]
+    async fn finalize_never_merges_into_an_unborn_case_variant_sibling() {
+        let Some((g, repo, _, z1, up)) =
+            aliased_finalize_fixture("unborn-variant", false, "chore/z").await
+        else {
+            return;
+        };
+        git(&repo, &["switch", "-q", "up"]).await;
+        git(&repo, &["pack-refs", "--all"]).await;
+        let wt = g.path().join("unborn-wt").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+        git(&wt, &["symbolic-ref", "HEAD", "refs/heads/Chore/z"]).await;
+        git(&wt, &["rm", "-rfq", "."]).await;
+        let head_read = |at: String| async move {
+            run_git_raw(
+                Some(&at),
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap()
+            .code
+        };
+        assert_ne!(head_read(wt.clone()).await, 0, "fixture sanity: unborn");
+        assert!(crate::git::branches::refs_can_alias(&repo).await);
+
+        let result =
+            finalize_base(&AppState::default(), &repo, "chore/z", &up, "up", Some(&z1)).await;
+        assert!(
+            matches!(&result, Err(AppError::Command(m)) if *m == merge_target_moved("chore/z")),
+            "{result:?}"
+        );
+        assert_eq!(rev(&repo, "refs/heads/chore/z").await, z1);
+        assert_eq!(
+            git(&repo, &["for-each-ref", "refs/heads/Chore/z"])
+                .await
+                .trim(),
+            ""
+        );
+        assert_ne!(
+            head_read(wt.clone()).await,
+            0,
+            "the sibling is still unborn"
+        );
+        assert_eq!(
+            git(&wt, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/Chore/z"
+        );
     }
 
     /// HEAD's symbolic ref on `Chore/z` while the branch is stored as `chore/z`, and the
