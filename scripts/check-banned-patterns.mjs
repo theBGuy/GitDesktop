@@ -547,13 +547,16 @@ const focusableHeldRender = ({ source }, file) => {
 const RAW_COPY_ICON_BUTTON_RE =
   /<(button|Button)\b(?:=>|[^>=]|=(?!>))*>\s*(?:\{\s*\}\s*)*<CopyIcon\b(?:=>|[^>=]|=(?!>))*\/>\s*(?:\{\s*\}\s*)*<\/\1>/g;
 
-// Raw clipboard use: navigator.clipboard, execCommand copy/cut (any case, as the
-// browser reads it), plugin imports. Missed (zero today): an aliased navigator, a
-// destructured `{ clipboard }`, `navigator["clipboard"]`, a plugin specifier built
-// at runtime or a subpath import of the package, a copy/cut handler writing via
-// `clipboardData.setData`, and a raw invoke of `plugin:clipboard-manager|write_text`.
+// Raw clipboard access: navigator.clipboard, any `execCommand(` whose first
+// argument is not the literal "insertText" or "delete", a clipboard-manager
+// plugin import (subpaths included), clipboardData.setData, and the plugin's raw
+// IPC command. Out of reach (zero today): navigator or clipboardData reached
+// through an alias, a cast, a destructure or a bracket key; clipboardData.items;
+// execCommand reached through a bracket key, .call, .apply or .bind; a plugin
+// specifier or IPC command built at runtime. This rule scans strings, so a
+// string that only names one of these is flagged too.
 const RAW_CLIPBOARD_RE =
-  /\bnavigator\s*\??\.\s*clipboard\b|\bexecCommand\s*\(\s*["'`](?:[cC][oO][pP][yY]|[cC][uU][tT])["'`]|["'`]@tauri-apps\/plugin-clipboard-manager["'`]/g;
+  /\bnavigator\s*[?!]?\s*\.\s*clipboard\b|\bexecCommand\s*(?:\?\.\s*|!\s*)?\((?!\s*["'`](?:insertText|delete)["'`]\s*[,)])|["'`]@tauri-apps\/plugin-clipboard-manager(?=["'`/])|\bclipboardData\s*[?!]?\s*\.\s*setData\b|plugin:clipboard-manager\|/g;
 
 // A hand-rolled InfoNote: one quoted class literal holding `border-b` and
 // `bg-muted/40` (any order, neither variant-prefixed) within PAIR_GAP of the
@@ -5774,13 +5777,11 @@ export const CHECKS = [
     name: "raw-clipboard-write",
     // The helper IS the idiom; tests stub the clipboard and mock the plugin.
     appliesTo: (file) =>
-      file !== "src/lib/clipboard.ts" &&
-      !file.startsWith("src/test/") &&
-      notVendoredUi(file),
+      file !== "src/lib/clipboard.ts" && !file.startsWith("src/test/"),
     scan: perFile(RAW_CLIPBOARD_RE),
     allowlist: [],
     message:
-      "clipboard access goes through writeClipboard / copyText (src/lib/clipboard.ts), which writes through the native plugin on Windows inside Tauri because WebView2's web clipboard turns each LF into CRLF, and through the web API everywhere else — a direct navigator.clipboard read or write, execCommand(\"copy\"/\"cut\") or import of @tauri-apps/plugin-clipboard-manager bypasses that rule (CRs come back on Windows, or the plugin runs where it shouldn't), and a site the helper genuinely can't serve needs an allowlist entry with rationale",
+      "clipboard access goes through writeClipboard / copyText (src/lib/clipboard.ts), which writes through the native plugin on Windows inside Tauri because WebView2's web clipboard turns each LF into CRLF, and through the web API everywhere else — a direct navigator.clipboard read or write, an execCommand call other than \"insertText\" / \"delete\", clipboardData.setData, or the clipboard-manager plugin reached by import or raw invoke bypasses that rule (CRs come back on Windows, or the plugin runs where it shouldn't); the helper only writes, so a navigator.clipboard read, or any other site it genuinely can't serve, needs an allowlist entry with rationale",
   },
   {
     name: "hand-rolled-info-strip",

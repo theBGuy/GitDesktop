@@ -88,7 +88,6 @@ describe("writeClipboard on Windows inside Tauri", () => {
       await writeClipboard(input);
       expect(pluginWrite).toHaveBeenCalledTimes(1);
       expect(pluginWrite).toHaveBeenCalledWith(input);
-      expect(pluginWrite.mock.calls[0][0] === input).toBe(true);
       expect(webWrite).not.toHaveBeenCalled();
     });
   }
@@ -105,7 +104,7 @@ describe("writeClipboard outside Tauri", () => {
     const input = INPUTS["multi-line LF with a trailing newline"];
     await writeClipboard(input);
     expect(webWrite).toHaveBeenCalledTimes(1);
-    expect(webWrite.mock.calls[0][0] === input).toBe(true);
+    expect(webWrite).toHaveBeenCalledWith(input);
     expect(pluginWrite).not.toHaveBeenCalled();
   });
 });
@@ -116,7 +115,7 @@ describe("copyText", () => {
   });
 
   it("toasts its message on success only", async () => {
-    await copyText("abc", "Path copied");
+    expect(await copyText("abc", "Path copied")).toBe(true);
     expect(pluginWrite).toHaveBeenCalledWith("abc");
     expect(toast.success).toHaveBeenCalledWith("Path copied");
     expect(toast.error).not.toHaveBeenCalled();
@@ -124,7 +123,7 @@ describe("copyText", () => {
 
   it("toasts the copy failure on a rejected write only", async () => {
     pluginWrite.mockRejectedValueOnce(new Error("denied"));
-    await copyText("abc", "Path copied");
+    expect(await copyText("abc", "Path copied")).toBe(false);
     expect(toast.error).toHaveBeenCalledWith(COPY_FAILED);
     expect(toast.success).not.toHaveBeenCalled();
   });
@@ -182,13 +181,14 @@ describe("ErrorDialog Copy", () => {
     expect(copiedButton()).toBeNull();
   });
 
-  it("drops a write that settles after the dialog closed", async () => {
+  it("drops a write that settles after a close and a reopen of the same error", async () => {
     const settle = heldPluginWrite();
     openOn();
     fireEvent.click(screen.getByRole("button", { name: /^Copy$/ }));
     act(() => useErrorDialog.getState().close());
+    act(() => useErrorDialog.getState().open(first));
     await act(async () => settle());
-    act(() => useErrorDialog.getState().open(other));
+    expect(screen.getByRole("dialog").textContent).toContain("first failure");
     expect(copiedButton()).toBeNull();
   });
 });

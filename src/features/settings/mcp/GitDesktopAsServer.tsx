@@ -212,7 +212,7 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     : "Read-only · stdio · exposes git & forge tools (status, log, diff, blame, PRs, issues, CI, project boards).";
 
   async function copy() {
-    await copyText(snippet);
+    if (!(await copyText(snippet))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }

@@ -75,6 +75,9 @@ pub fn run() {
         )),
         None => builder,
     };
+    // The frontend calls it on Windows only (src/lib/clipboard.ts).
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
     builder
         .plugin(nav_guard::init())
         .plugin(tauri_plugin_opener::init())
@@ -83,7 +86,6 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
         // Remembers the window's position, size, and maximized state across
         // launches (and validates saved coords against the current monitors, so
         // an unplugged display can't strand the window off-screen). We persist

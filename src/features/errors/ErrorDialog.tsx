@@ -30,14 +30,17 @@ export function ErrorDialog() {
   // Copy → Close → reopen → Copy sequence lets the first dialog's orphaned
   // timer fire mid-window and prematurely hide the new "Copied" feedback.
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionRef = useRef(0);
   const closeRef = useRef<HTMLButtonElement>(null);
 
   // Reset copy feedback when the presentation identity changes — open() called
   // while the dialog is already open swaps `presentation` without ever passing
   // through handleClose(), so a prior Copy's "Copied" state and live timer would
-  // otherwise bleed into the new error's session. (Also fires harmlessly on close.)
+  // otherwise bleed into the new error's session. (Also fires on close.) Each run
+  // also advances the session that copy() checks.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `presentation` is the reset trigger, not read in the body.
   useEffect(() => {
+    sessionRef.current += 1;
     setCopied(false);
     if (timerRef.current) {
       clearTimeout(timerRef.current);
@@ -62,16 +65,16 @@ export function ErrorDialog() {
   }
 
   async function copy() {
-    // A write can settle after close() or open(other); "Copied" belongs only to
-    // the presentation that was showing at the click.
-    const at = useErrorDialog.getState().presentation;
+    // The write can settle after the dialog closed or showed something else;
+    // "Copied" belongs only to the session the click happened in.
+    const session = sessionRef.current;
     try {
       await writeClipboard(fullText);
     } catch {
       toast.error(COPY_FAILED);
       return;
     }
-    if (useErrorDialog.getState().presentation !== at) return;
+    if (sessionRef.current !== session) return;
     setCopied(true);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setCopied(false), 1500);

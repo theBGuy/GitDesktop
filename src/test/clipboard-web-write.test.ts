@@ -38,12 +38,12 @@ describe("writeClipboard inside Tauri off Windows", () => {
     const input = "#!/bin/sh\nset -e\n\nexit 0\n";
     await writeClipboard(input);
     expect(webWrite).toHaveBeenCalledTimes(1);
-    expect(webWrite.mock.calls[0][0] === input).toBe(true);
+    expect(webWrite).toHaveBeenCalledWith(input);
     expect(pluginWrite).not.toHaveBeenCalled();
   });
 
   it("copyText toasts its message on success", async () => {
-    await copyText("abc", "Commit hash copied");
+    expect(await copyText("abc", "Commit hash copied")).toBe(true);
     expect(webWrite).toHaveBeenCalledWith("abc");
     expect(pluginWrite).not.toHaveBeenCalled();
     expect(toast.success).toHaveBeenCalledWith("Commit hash copied");
@@ -52,7 +52,7 @@ describe("writeClipboard inside Tauri off Windows", () => {
 
   it("copyText toasts the copy failure when the web write rejects", async () => {
     webWrite.mockRejectedValueOnce(new Error("denied"));
-    await copyText("abc", "Commit hash copied");
+    expect(await copyText("abc", "Commit hash copied")).toBe(false);
     expect(pluginWrite).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith(COPY_FAILED);
     expect(toast.success).not.toHaveBeenCalled();
