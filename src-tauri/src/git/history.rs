@@ -1105,6 +1105,7 @@ pub async fn git_commit_file_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     use std::path::Path;
 
     #[tokio::test]
@@ -1142,7 +1143,7 @@ mod tests {
         std::fs::write(dir.path().join("content"), b"changed\0content").unwrap();
         git(&repo, &["add", "content"]).await;
         git(&repo, &["commit", "-qm", "changes"]).await;
-        let sha = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let sha = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1160,10 +1161,14 @@ mod tests {
             assert!(row.is_binary);
             assert_eq!(row.binary_kind, kind, "{path}");
         }
-        let raw = run_git(Some(&repo), &["cat-file", "commit", &sha], DEFAULT_TIMEOUT)
-            .await
-            .unwrap()
-            .stdout_lossy();
+        let raw = run_git(
+            Some(&repo),
+            &["cat-file", "commit", &sha],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
         let (headers, message) = raw.split_once("\n\n").unwrap();
         let signed = format!(
             "{headers}\ngpgsig -----BEGIN PGP SIGNATURE-----\n invalid\n -----END PGP SIGNATURE-----\n\n{message}"
@@ -1172,7 +1177,7 @@ mod tests {
             Some(&repo),
             &["hash-object", "-t", "commit", "-w", "--stdin"],
             Some(&signed),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1197,11 +1202,13 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap();
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
     }
 
     async fn git_out(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1348,7 +1355,7 @@ mod tests {
         /// Picks `commit` onto a HEAD that already holds its change, so git stops
         /// with the pick empty.
         async fn empty_pick_stop(repo: &str, commit: &str) {
-            let out = run_git_raw(Some(repo), &["cherry-pick", commit], DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), &["cherry-pick", commit], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             assert_ne!(out.code, 0, "the pick stops");
@@ -1507,7 +1514,7 @@ mod tests {
         let branched = stamp().await.unwrap();
         assert_ne!(branched, idle, "a branch create");
 
-        let out = run_git_raw(Some(&repo), &["cherry-pick", &pick], DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(&repo), &["cherry-pick", &pick], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(out.code, 0, "the pick stops empty");
@@ -1524,7 +1531,7 @@ mod tests {
         let init = run_git_raw(
             Some(&repo),
             &["init", "-q", "--ref-format=reftable"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1650,7 +1657,7 @@ mod tests {
                 ("GIT_AUTHOR_DATE", AUTHORED),
                 ("GIT_COMMITTER_DATE", AUTHORED),
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -1661,13 +1668,13 @@ mod tests {
             Some(&repo),
             &["commit", "-q", "--amend", "--no-edit"],
             &[("GIT_COMMITTER_DATE", REWRITTEN)],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
         .exit_verdict()
         .unwrap();
-        let sha = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let sha = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1727,7 +1734,7 @@ mod tests {
         std::fs::write(&file, "first\n").unwrap();
         git(&repo, &["add", "."]).await;
         git(&repo, &["commit", "-m", "one"]).await;
-        let first = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let first = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1735,7 +1742,7 @@ mod tests {
             .to_string();
         std::fs::write(&file, "first\nsecond\n").unwrap();
         git(&repo, &["commit", "-am", "two"]).await;
-        let second = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let second = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1808,7 +1815,7 @@ mod tests {
         std::fs::write(root.join("plain.txt"), "one\ntwo\n").unwrap();
         std::fs::write(root.join("[slug]").join("a.txt"), "one\ntwo\n").unwrap();
         git(&repo, &["commit", "-am", "change both"]).await;
-        let hash = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        let hash = run_git(Some(&repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1963,7 +1970,7 @@ mod tests {
     #[tokio::test]
     async fn unborn_head_errs_on_a_corrupt_branch_ref() {
         let (dir, repo, first, _second) = two_commit_repo("corrupt-ref").await;
-        let branch = run_git(Some(&repo), &["symbolic-ref", "HEAD"], DEFAULT_TIMEOUT)
+        let branch = run_git(Some(&repo), &["symbolic-ref", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1976,7 +1983,7 @@ mod tests {
         let probe = run_git_raw(
             Some(&repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -1986,7 +1993,7 @@ mod tests {
         let exists = run_git_raw(
             Some(&repo),
             &["show-ref", "--exists", &branch],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2038,7 +2045,7 @@ mod tests {
     }
 
     async fn head_sha(repo: &str) -> String {
-        run_git(Some(repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+        run_git(Some(repo), &["rev-parse", "HEAD"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2072,7 +2079,7 @@ mod tests {
         run_git(
             Some(repo),
             &["log", "--follow", "--format=%H", "--", &spec],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2277,7 +2284,7 @@ mod tests {
         let main = run_git(
             Some(&repo),
             &["symbolic-ref", "--short", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2302,7 +2309,7 @@ mod tests {
         let merged = run_git_raw(
             Some(&repo),
             &["merge", "-q", "-m", "merge side2", "side2"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2410,7 +2417,7 @@ mod tests {
         let init = run_git_raw(
             Some(&repo),
             &["init", "-q", "--object-format=sha256"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2514,7 +2521,7 @@ mod tests {
         let init = run_git_raw(
             Some(&repo),
             &["init", "-q", "--object-format=sha256"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2563,7 +2570,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2583,7 +2590,7 @@ mod tests {
                 "--batch-all-objects",
                 "--batch-check=%(objectname) %(objecttype)",
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2606,7 +2613,7 @@ mod tests {
         run_git(
             Some(repo),
             &["log", "-1", "--format=%s", id],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()
@@ -2764,7 +2771,7 @@ mod tests {
     }
 
     async fn head_sha_of(repo: &str, rev: &str) -> String {
-        run_git(Some(repo), &["rev-parse", rev], DEFAULT_TIMEOUT)
+        run_git(Some(repo), &["rev-parse", rev], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2906,7 +2913,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2976,7 +2983,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -2987,7 +2994,7 @@ mod tests {
         let walked = run_git(
             Some(&repo),
             &["rev-list", &x, "--not", "HEAD", "--"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap()

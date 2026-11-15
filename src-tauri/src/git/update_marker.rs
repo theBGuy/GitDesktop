@@ -944,7 +944,7 @@ fn stem_age(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::run_git;
+    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
 
     fn temp_root(tag: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::Builder::new()
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -1383,10 +1383,14 @@ mod tests {
         .await;
         write_released_marker(&root, "gd-update-crashed", "feature");
         assert!(
-            run_git_raw(Some(&repo_s), &["branch", "-D", "feature"], DEFAULT_TIMEOUT)
-                .await
-                .unwrap()
-                .code
+            run_git_raw(
+                Some(&repo_s),
+                &["branch", "-D", "feature"],
+                TEST_GIT_HANG_GUARD
+            )
+            .await
+            .unwrap()
+            .code
                 != 0,
             "the fixture must reproduce the branch hold"
         );
@@ -1429,10 +1433,14 @@ mod tests {
             "and its admin entry is pruned"
         );
         assert_eq!(
-            run_git_raw(Some(&repo_s), &["branch", "-D", "feature"], DEFAULT_TIMEOUT)
-                .await
-                .unwrap()
-                .code,
+            run_git_raw(
+                Some(&repo_s),
+                &["branch", "-D", "feature"],
+                TEST_GIT_HANG_GUARD
+            )
+            .await
+            .unwrap()
+            .code,
             0,
             "the branch the orphan was holding is free again"
         );

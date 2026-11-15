@@ -1448,9 +1448,10 @@ async fn decided_autostash_run(repo: &str, decided: &Decided) -> AppResult<Autos
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -2968,7 +2969,7 @@ mod tests {
         let refused = run_git_raw(
             Some(&clone),
             &["fetch", "--prune", "--no-prune-tags", "origin"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("git ran");
@@ -2998,7 +2999,7 @@ mod tests {
         let pruned = run_git_raw(
             Some(&clone),
             &["fetch", "--prune", "--no-prune-tags", "origin"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .expect("git ran");

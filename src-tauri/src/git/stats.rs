@@ -612,9 +612,10 @@ pub async fn git_punch_card(repo_path: String, weeks: u32) -> AppResult<Vec<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -738,7 +739,7 @@ mod tests {
         let probe = run_git_raw(
             Some(&repo),
             &["rev-parse", "--verify", "--quiet", "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();

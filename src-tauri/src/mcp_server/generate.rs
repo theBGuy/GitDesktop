@@ -3711,7 +3711,7 @@ mod tests {
     // ---- branch-name committed-work fallback helpers ------------------------
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        crate::git::runner::run_git_raw(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+        crate::git::runner::run_git_raw(Some(repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()

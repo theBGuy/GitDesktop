@@ -620,7 +620,7 @@ fn submodule_change(field: &str, mw: &str) -> Option<SubmoduleChange> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::run_git_raw;
+    use crate::git::runner::{run_git_raw, TEST_GIT_HANG_GUARD};
 
     fn z(parts: &[&str]) -> String {
         parts.join("\0")
@@ -1465,7 +1465,7 @@ mod tests {
     // --- Real-repo tests: the predicate pinned against git's own verdict. ---
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap_or_else(|e| panic!("git {args:?} in {repo}: {e}"))
             .stdout_lossy()
@@ -1535,7 +1535,7 @@ mod tests {
     /// a value in.
     async fn all_unset(repo: &str, what: &str, keys: &[&str]) -> bool {
         for key in keys {
-            let out = run_git_raw(Some(repo), &["config", "--get", key], DEFAULT_TIMEOUT)
+            let out = run_git_raw(Some(repo), &["config", "--get", key], TEST_GIT_HANG_GUARD)
                 .await
                 .unwrap();
             if out.code != 1 {
@@ -1548,7 +1548,7 @@ mod tests {
 
     /// A bare `git push`'s verdict: whether git refused it for the name mismatch.
     async fn bare_push_refused_by_git(repo: &str) -> bool {
-        let out = run_git_raw(Some(repo), &["push", "-q"], DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(repo), &["push", "-q"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let collapsed = out.stderr.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1692,7 +1692,7 @@ mod tests {
         for (_, bare) in remotes {
             before.push(remote_heads(&dir.join(bare).to_string_lossy()).await);
         }
-        let out = run_git_raw(Some(work), args, DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(work), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let mut landed = Vec::new();
@@ -2287,7 +2287,7 @@ mod tests {
         let _ = run_git_raw(
             Some(&work),
             &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await;
         if head {

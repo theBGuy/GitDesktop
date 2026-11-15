@@ -599,6 +599,7 @@ pub(crate) async fn clear_branch_state(repo: &str) {
 #[cfg(test)]
 pub(crate) mod branch_state_fixtures {
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
 
     /// Which branch-state names exist in `repo` now, as files or as refs. Test-only: the
     /// parity pins compare it across git's own reset and the compare-and-swap ones.
@@ -639,7 +640,7 @@ pub(crate) mod branch_state_fixtures {
         run_git(
             Some(repo),
             &["update-ref", "AUTO_MERGE", oid],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -651,7 +652,9 @@ pub(crate) mod branch_state_fixtures {
     pub(crate) async fn stop_an_autostashed_squash(repo: &str) -> String {
         let dir = Path::new(repo);
         let git = |args: &'static [&'static str]| async move {
-            run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap()
+            run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap()
         };
         let start = crate::git::branches::current_branch_name(repo)
             .await
@@ -664,7 +667,7 @@ pub(crate) mod branch_state_fixtures {
         git(&["switch", "-qc", "autostash-feature"]).await;
         std::fs::write(dir.join("auto.txt"), "theirs\n").unwrap();
         git(&["commit", "-qam", "autostash theirs"]).await;
-        run_git(Some(repo), &["switch", "-q", &start], DEFAULT_TIMEOUT)
+        run_git(Some(repo), &["switch", "-q", &start], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         std::fs::write(dir.join("auto.txt"), "mine\n").unwrap();
@@ -673,7 +676,7 @@ pub(crate) mod branch_state_fixtures {
         let squash = run_git_raw(
             Some(repo),
             &["merge", "--squash", "--autostash", "autostash-feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -8835,6 +8838,7 @@ mod tests {
         branch_state_present, stop_an_autostashed_squash, write_unguarded_branch_state,
     };
     use super::*;
+    use crate::git::runner::TEST_GIT_HANG_GUARD;
     // Test-only: the interleave control queues on the lock WITHOUT a wait bound.
     use crate::git::runner::acquire_repo_lock_unbounded;
 
@@ -8961,7 +8965,7 @@ mod tests {
     }
 
     async fn git(repo: &str, args: &[&str]) -> String {
-        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+        run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout_lossy()
@@ -9265,7 +9269,7 @@ mod tests {
         let _ = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await;
         assert!(
@@ -10223,7 +10227,7 @@ mod tests {
             let squash = run_git_raw(
                 Some(&repo),
                 &["merge", "--squash", "feature"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -10681,7 +10685,7 @@ mod tests {
                 Some(repo),
                 &["hash-object", "-t", "commit", "-w", "--stdin"],
                 Some(&object),
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -10890,7 +10894,7 @@ mod tests {
             Some(&repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -11145,7 +11149,7 @@ mod tests {
                 Some(&repo),
                 &["commit", "-m", "old"],
                 &[("GIT_AUTHOR_DATE", when)],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -11592,7 +11596,7 @@ mod tests {
                 run_git(
                     Some(&repo),
                     &["commit", "--allow-empty", "-m", "concurrent"],
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .expect("the queued commit must succeed once the compound releases");
@@ -11839,7 +11843,7 @@ mod tests {
         let resumed = run_git_raw(
             Some(&repo),
             &["-c", "core.editor=true", "rebase", "--continue"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -12071,7 +12075,7 @@ mod tests {
                 ("GIT_SEQUENCE_EDITOR", editor.as_str()),
                 ("GIT_EDITOR", "true"),
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -12919,7 +12923,7 @@ mod tests {
                 "-i",
                 &c1,
             ],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -13304,7 +13308,7 @@ mod tests {
                     Some(&repo),
                     &REBASE_CONTINUE_ARGS,
                     &CONTINUE_EDITOR_ENV,
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .unwrap();
@@ -13342,7 +13346,7 @@ mod tests {
                 Some(&repo),
                 &REBASE_CONTINUE_ARGS,
                 &CONTINUE_EDITOR_ENV,
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -13387,7 +13391,7 @@ mod tests {
             Some(&repo),
             &REBASE_CONTINUE_ARGS,
             &CONTINUE_EDITOR_ENV,
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -13540,7 +13544,7 @@ mod tests {
                 Some(&repo),
                 &REBASE_CONTINUE_ARGS,
                 &CONTINUE_EDITOR_ENV,
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -13624,7 +13628,7 @@ mod tests {
             run_git_raw(
                 Some(&repo),
                 &["diff-tree", "--quiet", "HEAD^", "HEAD"],
-                DEFAULT_TIMEOUT
+                TEST_GIT_HANG_GUARD
             )
             .await
             .unwrap()
@@ -14342,7 +14346,7 @@ mod tests {
             Some(repo),
             &args,
             &[("GIT_COMMITTER_DATE", committer)],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -15043,7 +15047,7 @@ mod tests {
                 FIXTURE_AUTHOR,
             ],
             &[("GIT_COMMITTER_DATE", FIXTURE_COMMITTER)],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -15176,9 +15180,13 @@ mod tests {
         git(&repo, &["switch", "-c", "side", &base]).await;
         commit_file(&repo, dir.path(), "a.txt", "side\n", "side").await;
         git(&repo, &["switch", &branch]).await;
-        let squash = run_git_raw(Some(&repo), &["merge", "--squash", "side"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let squash = run_git_raw(
+            Some(&repo),
+            &["merge", "--squash", "side"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_ne!(squash.code, 0, "fixture: the squash stops on its conflict");
         assert!(
             !op_state(&repo).await.unwrap().mid_op(),
@@ -15191,7 +15199,7 @@ mod tests {
         git(&repo, &["reset", "--hard"]).await;
 
         // A stopped cherry-pick.
-        let pick = run_git_raw(Some(&repo), &["cherry-pick", "side"], DEFAULT_TIMEOUT)
+        let pick = run_git_raw(Some(&repo), &["cherry-pick", "side"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(pick.code, 0, "fixture: the pick stops");
@@ -15230,7 +15238,7 @@ mod tests {
             let probe = run_git_raw(
                 Some(&unborn),
                 &["rev-parse", "--verify", "-q", "HEAD"],
-                DEFAULT_TIMEOUT,
+                TEST_GIT_HANG_GUARD,
             )
             .await
             .unwrap();
@@ -15703,7 +15711,7 @@ mod tests {
         .await
         .unwrap();
         assert!(rebasing(&repo).await, "stopped on the conflict");
-        let skip = run_git_raw(Some(&repo), &["rebase", "--skip"], DEFAULT_TIMEOUT)
+        let skip = run_git_raw(Some(&repo), &["rebase", "--skip"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         let text = skip.full_failure_text();
@@ -15786,7 +15794,7 @@ mod tests {
         let out = run_git_raw(
             Some(&repo),
             &["commit", "--allow-empty", "--allow-empty-message", "-m", ""],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -15818,7 +15826,7 @@ mod tests {
     /// A commit object's raw bytes, split into its headers (through the last header's
     /// newline) and its message.
     async fn raw_object_parts(repo: &str, r: &str) -> (Vec<u8>, Vec<u8>) {
-        let object = run_git(Some(repo), &["cat-file", "commit", r], DEFAULT_TIMEOUT)
+        let object = run_git(Some(repo), &["cat-file", "commit", r], TEST_GIT_HANG_GUARD)
             .await
             .unwrap()
             .stdout;
@@ -15850,7 +15858,7 @@ mod tests {
                 let out = run_git_raw(
                     Some(&repo),
                     &["commit", "--cleanup=verbatim", "-F", &file],
-                    DEFAULT_TIMEOUT,
+                    TEST_GIT_HANG_GUARD,
                 )
                 .await
                 .unwrap();
@@ -15945,7 +15953,7 @@ mod tests {
                 "--date=@1700000400 -0030",
             ],
             &[("GIT_COMMITTER_DATE", "@1700000500 +0000")],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -16010,7 +16018,7 @@ mod tests {
                 "--stdin",
             ],
             Some(&object),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -16707,7 +16715,7 @@ mod tests {
         let attempt = run_git_raw(
             Some(&repo),
             &["cherry-pick", "-n", &f1, &f2],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -16754,7 +16762,7 @@ mod tests {
         let revert = run_git_raw(
             Some(&repo),
             &["revert", "--no-edit", &target],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -16899,7 +16907,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&link),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -16943,7 +16951,7 @@ mod tests {
             "nothing is picking in the fresh worktree"
         );
 
-        let pick = run_git_raw(Some(&link), &["cherry-pick", &c1], DEFAULT_TIMEOUT)
+        let pick = run_git_raw(Some(&link), &["cherry-pick", &c1], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(pick.code, 0, "the pick inside the worktree should conflict");
@@ -17049,7 +17057,9 @@ mod tests {
             let mut argv = vec!["rebase"];
             argv.extend(backend.iter().copied());
             argv.push(&base);
-            let out = run_git_raw(Some(&repo), &argv, DEFAULT_TIMEOUT).await.unwrap();
+            let out = run_git_raw(Some(&repo), &argv, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap();
             assert_ne!(out.code, 0, "the rebase should conflict: {argv:?}");
             assert!(
                 rebase_marker_present(&repo),
@@ -17088,7 +17098,7 @@ mod tests {
             "nothing is rebasing in the fresh worktree"
         );
 
-        let out = run_git_raw(Some(&link), &["rebase", &tip], DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(&link), &["rebase", &tip], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(out.code, 0, "the rebase inside the worktree should conflict");
@@ -17611,7 +17621,7 @@ mod tests {
             Some(repo),
             &["fast-import", "--quiet"],
             Some(&stream),
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -17889,7 +17899,7 @@ mod tests {
         let merge = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "side"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -17939,9 +17949,13 @@ mod tests {
             tokio::spawn(async move { git_rebase_core(&state, repo, "feature".into()).await })
         };
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let merge = run_git_raw(Some(&repo), &["merge", "--no-edit", "feature"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_eq!(merge.code, 1);
         assert_eq!(unmerged_paths(&repo).await, vec!["a.txt"]);
         drop(guard);
@@ -17966,9 +17980,13 @@ mod tests {
             tokio::spawn(async move { rebase_onto(&state, &repo, "feature", &base).await })
         };
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let merge = run_git_raw(Some(&repo), &["merge", "--no-edit", "feature"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_eq!(merge.code, 1);
         assert_eq!(unmerged_paths(&repo).await, vec!["a.txt"]);
         drop(guard);
@@ -18000,7 +18018,7 @@ mod tests {
         let ancestor = run_git_raw(
             Some(&repo),
             &["merge-base", "--is-ancestor", &branch_tip, "HEAD"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -18200,7 +18218,7 @@ mod tests {
         let merged = run_git_raw(
             Some(&repo),
             &["merge", "--no-ff", "-m", "m", "feat"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -19852,7 +19870,7 @@ detached
         let merged = run_git_raw(
             Some(&wt),
             &["merge", "--no-ff", "-m", "Merge base into feature", &base_tip],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -19958,7 +19976,7 @@ detached
         commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
 
         // Conflict, then resolve + stage exactly as the conflict editor does.
-        let merged = run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+        let merged = run_git_raw(Some(&repo), &["merge", "feature"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(merged.code, 0, "the merge must conflict for this to be real");
@@ -20003,9 +20021,13 @@ detached
         commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
         let before = rev(&repo, "HEAD").await;
 
-        let squashed = run_git_raw(Some(&repo), &["merge", "--squash", "feature"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let squashed = run_git_raw(
+            Some(&repo),
+            &["merge", "--squash", "feature"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_ne!(squashed.code, 0, "the squash must conflict for this to be real");
         // Squash leaves no MERGE_HEAD — only SQUASH_MSG carries the comment block.
         let merge_head = git(&repo, &["rev-parse", "--git-path", "MERGE_HEAD"])
@@ -20568,7 +20590,7 @@ detached
         let mismatch = run_git_raw(
             Some(&repo),
             &["update-ref", "refs/heads/target", &tip, &tip],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -20584,7 +20606,7 @@ detached
         let other = run_git_raw(
             Some(&repo),
             &["update-ref", "refs/heads/absent", &tip, &tip],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -20936,7 +20958,7 @@ detached
         let (dir, repo) = setup_repo("commit-streams").await;
 
         // Clean tree, nothing staged.
-        let clean = run_git_raw(Some(&repo), &["commit", "-m", "x"], DEFAULT_TIMEOUT)
+        let clean = run_git_raw(Some(&repo), &["commit", "-m", "x"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(clean.code, 0, "a commit with nothing staged must refuse");
@@ -20955,7 +20977,7 @@ detached
         // and the one neither `already` allow-list substring matches, so it is the
         // shape that reaches the error build rather than being swallowed.
         std::fs::write(dir.path().join("untracked.txt"), "u\n").unwrap();
-        let untracked = run_git_raw(Some(&repo), &["commit", "-m", "x"], DEFAULT_TIMEOUT)
+        let untracked = run_git_raw(Some(&repo), &["commit", "-m", "x"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(
@@ -21413,9 +21435,13 @@ detached
             head_before,
             "the worktree starts at head's tip"
         );
-        let symbolic = run_git_raw(Some(wt), &["symbolic-ref", "-q", "HEAD"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let symbolic = run_git_raw(
+            Some(wt),
+            &["symbolic-ref", "-q", "HEAD"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_ne!(symbolic.code, 0, "the worktree is detached");
         assert_eq!(rev(&f.repo, "feature").await, head_before);
         assert_eq!(rev(&f.repo, &f.base).await, base_before);
@@ -21454,7 +21480,7 @@ detached
         let contained = run_git_raw(
             Some(&f.repo),
             &["merge-base", "--is-ancestor", &f.base, "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -24282,7 +24308,7 @@ detached
         let _ = run_git_raw(
             Some(&repo),
             &["merge", "--no-edit", "feature"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await;
         assert!(
@@ -24442,7 +24468,7 @@ detached
         let status = run_git(
             Some(&repo),
             &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -24740,7 +24766,7 @@ detached
         let status = run_git(
             Some(&repo),
             &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -25529,7 +25555,7 @@ detached
         // Conflicting merge leaves an unmerged index (merge in progress). Use
         // run_git_raw — a conflicting `git merge` exits non-zero, which run_git
         // would surface as an Err.
-        let merge = run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+        let merge = run_git_raw(Some(&repo), &["merge", "other"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(merge.code, 0, "merge should conflict");
@@ -25576,7 +25602,7 @@ detached
         git(&repo, &["switch", &base]).await;
         commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
         // run_git_raw: a conflicting merge exits non-zero.
-        let merge = run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+        let merge = run_git_raw(Some(&repo), &["merge", "other"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(merge.code, 0, "merge should conflict");
@@ -25637,7 +25663,7 @@ detached
         git(&repo, &["switch", &base]).await;
         commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
         git(&repo, &["switch", "feature"]).await;
-        let rebase = run_git_raw(Some(&repo), &["rebase", &base], DEFAULT_TIMEOUT)
+        let rebase = run_git_raw(Some(&repo), &["rebase", &base], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         assert_ne!(rebase.code, 0, "rebase should conflict");
@@ -25667,9 +25693,13 @@ detached
         let pick_sha = rev(&repo, "HEAD").await;
         git(&repo, &["switch", &base]).await;
         commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
-        let picked = run_git_raw(Some(&repo), &["cherry-pick", &pick_sha], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
+        let picked = run_git_raw(
+            Some(&repo),
+            &["cherry-pick", &pick_sha],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
         assert_ne!(picked.code, 0, "cherry-pick should conflict");
         std::fs::write(dir.path().join("x"), "resolved\n").unwrap();
         git(&repo, &["add", "x"]).await;
@@ -25717,7 +25747,7 @@ detached
         commit_file(&repo, dir.path(), "x", "other\n", "other edit").await;
         git(&repo, &["switch", &base]).await;
         commit_file(&repo, dir.path(), "x", "main\n", "main edit").await;
-        run_git_raw(Some(&repo), &["merge", "other"], DEFAULT_TIMEOUT)
+        run_git_raw(Some(&repo), &["merge", "other"], TEST_GIT_HANG_GUARD)
             .await
             .unwrap();
         fn message(err: AppError) -> String {
@@ -26117,7 +26147,7 @@ detached
         let native = run_git_raw(
             Some(&f.repo),
             &["merge", "--no-edit", "--no-overwrite-ignore", "incoming"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
@@ -26207,7 +26237,7 @@ detached
                     run_git_raw(
                         Some(&f.repo),
                         &["merge", "--no-overwrite-ignore", "--no-edit", "incoming"],
-                        DEFAULT_TIMEOUT,
+                        TEST_GIT_HANG_GUARD,
                     )
                     .await
                     .unwrap(),
@@ -26247,7 +26277,7 @@ detached
         let expected = run_git_raw(
             Some(&f.repo),
             &["merge", "--no-overwrite-ignore", "--no-edit", "incoming"],
-            DEFAULT_TIMEOUT,
+            TEST_GIT_HANG_GUARD,
         )
         .await
         .unwrap();
