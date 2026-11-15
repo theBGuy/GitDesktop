@@ -1,6 +1,6 @@
 import { CaretRightIcon, CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -71,6 +71,14 @@ function tierLabel(installedFlags: string[]): string {
 export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // A second copy restarts the 1.5 s window, never inherits the first one's deadline.
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
   // Checkboxes shape the emitted config: Shareable (portable env-var paths a teammate can
   // commit) vs Personal (absolute machine paths), plus the orthogonal write opt-ins below.
   const [shareable, setShareable] = useState(false);
@@ -212,9 +220,10 @@ export function GitDesktopAsServer({ repoPath }: { repoPath: string | null }) {
     : "Read-only · stdio · exposes git & forge tools (status, log, diff, blame, PRs, issues, CI, project boards).";
 
   async function copy() {
-    await copyText(snippet);
+    if (!(await copyText(snippet))) return;
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
   }
 
   // The `--allow-*` flags the current selection wants, in ladder order. Single source of
