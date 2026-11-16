@@ -191,6 +191,7 @@ export function useEditRelease(repo: string) {
         args.prerelease,
         args.draft,
         args.latest,
+        args.clearNotes,
       ),
     {
       identity: releaseWriteKey("edit-release", repo),

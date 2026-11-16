@@ -163,6 +163,17 @@ export function toggleIssueKeyword(
   };
 }
 
+/** Whether a probed item's web URL is a GitHub pull request's (`/pull/N`),
+ *  which gh's `issue view` answers by number like an issue. GitLab's issue and
+ *  merge request URLs (`/-/issues/N`, `/-/merge_requests/N`) never match. */
+export function isPullRequestUrl(url: string): boolean {
+  try {
+    return /\/pull\/\d+\/?$/.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** An extraction seed joins only when the number is neither present nor
  *  dismissed in this target. */
 export function addExtractedIssue(

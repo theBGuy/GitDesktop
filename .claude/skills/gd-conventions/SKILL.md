@@ -1033,8 +1033,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   glab passes through unwrapped), a timeout or an unreadable reply keeps its
   own after-push sentence. Every step after the push sits inside that wrap,
   so no create returns a `git`-kind error once the branch is pushed, and the
-  summary composes the lead with the network sentence. The builders are
-  pinned from both sides by `scripts/attached-failure-leads.test.mjs`.
+  summary composes the lead with the network sentence. A push that itself
+  times out is recognised only by its exact message
+  (`GIT_PUSH_TIMEOUT_MESSAGE`, read by `createTimedOutAtPush` in
+  `@/lib/notifications/pr-create-failed`, tied to `NETWORK_TIMEOUT` in
+  git/runner.rs). The Bitbucket and GitLab compound review wraps keep their
+  partial-state line ahead of the network rewrite through
+  `PARTIAL_STATE_WRAPS` (`@/lib/error-summary`): a new wrap literal in
+  `review_submit`, `request_changes_pr` or `request_changes_mr` joins that
+  table. The builders and both contracts are pinned from both sides by
+  `scripts/attached-failure-leads.test.mjs`.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

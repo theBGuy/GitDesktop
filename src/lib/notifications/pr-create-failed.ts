@@ -1,4 +1,8 @@
-import { mayHaveLanded, presentError } from "@/lib/error-summary";
+import {
+  GIT_PUSH_TIMEOUT_MESSAGE,
+  mayHaveLanded,
+  presentError,
+} from "@/lib/error-summary";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { isAppError } from "@/lib/tauri/invoke";
 import { emitNotification } from "./emit";
@@ -13,15 +17,31 @@ export function createFailedAtPush(error: unknown): boolean {
   return isAppError(error) && error.kind === "git";
 }
 
+/**
+ * Whether a create timed out pushing its head branch: a bare git timeout after
+ * the push's own budget. Every gh or glab call and git read runs under a
+ * shorter budget, so a timeout before the push never matches, and a timed-out
+ * write (`mayHaveLanded`) never carries the bare lead.
+ */
+export function createTimedOutAtPush(error: unknown): boolean {
+  return (
+    isAppError(error) &&
+    error.kind === "timeout" &&
+    error.message === GIT_PUSH_TIMEOUT_MESSAGE
+  );
+}
+
 /** The sentence a failed create's toast note and notification title share. */
 export function prCreateFailedSentence(
   noun: string,
   head: string,
   error: unknown,
 ): string {
-  return createFailedAtPush(error)
-    ? `Pushing ${head} failed, so the ${noun} wasn't created`
-    : `The ${noun} for ${head} wasn't created`;
+  if (createFailedAtPush(error))
+    return `Pushing ${head} failed, so the ${noun} wasn't created`;
+  if (createTimedOutAtPush(error))
+    return `Pushing ${head} timed out, so the ${noun} wasn't created`;
+  return `The ${noun} for ${head} wasn't created`;
 }
 
 /**

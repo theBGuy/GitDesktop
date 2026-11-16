@@ -3015,8 +3015,40 @@ pub async fn forge_release_create(
 }
 
 /// Edit a release's title/notes (GitHub also its draft/prerelease/latest state),
-/// behind the abstraction. The GitLab arm drops the GitHub-only toggles.
+/// behind the abstraction. The GitLab arm drops the GitHub-only toggles. Empty
+/// notes keep the release's notes unless `clear_notes` is `Some(true)`, which
+/// empties them; with non-empty notes it is ignored.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn forge_release_save(
+    repo_path: String,
+    tag: String,
+    title: String,
+    notes: String,
+    prerelease: bool,
+    draft: bool,
+    latest: Option<bool>,
+    clear_notes: Option<bool>,
+) -> AppResult<()> {
+    let clear = clear_notes.unwrap_or(false);
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            gitlab::edit_release(&repo_path, &tag, &title, &notes, clear).await
+        }
+        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
+            "Bitbucket releases aren't supported yet.".into(),
+        )),
+        _ => {
+            github::edit_release(
+                &repo_path, &tag, &title, &notes, prerelease, draft, latest, clear,
+            )
+            .await
+        }
+    }
+}
+
+/// [`forge_release_save`] without the clear signal, for the MCP server, whose
+/// `update_release` reads empty notes as "leave them unchanged".
 pub async fn forge_release_edit(
     repo_path: String,
     tag: String,
@@ -3026,13 +3058,7 @@ pub async fn forge_release_edit(
     draft: bool,
     latest: Option<bool>,
 ) -> AppResult<()> {
-    match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::edit_release(&repo_path, &tag, &title, &notes).await,
-        Some((Provider::Bitbucket, _)) => Err(AppError::InvalidArgument(
-            "Bitbucket releases aren't supported yet.".into(),
-        )),
-        _ => github::edit_release(&repo_path, &tag, &title, &notes, prerelease, draft, latest).await,
-    }
+    forge_release_save(repo_path, tag, title, notes, prerelease, draft, latest, None).await
 }
 
 /// Sync a release's `latest.json` updater manifest to the edited notes. GitHub-only —
@@ -5172,6 +5198,58 @@ pub(crate) async fn forge_pr_create_with_attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MCP-facing edit is the save without the clear signal, so `update_release`
+    /// with empty notes keeps them; only the save is a Tauri command.
+    #[test]
+    fn release_edit_is_the_save_without_a_clear() {
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
+        let src = src.split("\nmod tests {").next().unwrap();
+        let wrapper = |src: &str| {
+            let body = crate::github::repo_meta::tests::wiring_body(src, "forge_release_edit");
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains(
+                "forge_release_save(repo_path, tag, title, notes, prerelease, draft, latest, None)",
+            )
+        };
+        assert!(wrapper(src));
+        let cleared = src.replacen("draft, latest, None)", "draft, latest, Some(true))", 1);
+        assert!(!wrapper(&cleared), "a wrapper that clears must flip");
+        let head = |name: &str| {
+            let at = src.find(&format!("pub async fn {name}(")).unwrap();
+            src[..at].rsplit("\n\n").next().unwrap().to_string()
+        };
+        assert!(head("forge_release_save").contains("#[tauri::command]"));
+        assert!(!head("forge_release_edit").contains("#[tauri::command]"));
+    }
+
+    /// An absent flag keeps the notes, and both forge arms get the save's own flag:
+    /// a default of "clear" would let the MCP edit's empty notes wipe them.
+    #[test]
+    fn release_save_keeps_notes_unless_asked_and_hands_both_arms_the_flag() {
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
+        let src = src.split("\nmod tests {").next().unwrap();
+        let pinned = |src: &str| {
+            let body = crate::github::repo_meta::tests::wiring_body(src, "forge_release_save");
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains("let clear = clear_notes.unwrap_or(false);")
+                && flat.contains("gitlab::edit_release(&repo_path, &tag, &title, &notes, clear)")
+                && flat.contains(
+                    "github::edit_release( &repo_path, &tag, &title, &notes, prerelease, draft, latest, clear, )",
+                )
+        };
+        assert!(pinned(src));
+        let at = src.find("pub async fn forge_release_save(").unwrap();
+        for (from, to) in [
+            ("unwrap_or(false)", "unwrap_or(true)"),
+            ("&notes, clear)", "&notes, false)"),
+            ("latest, clear,", "latest, false,"),
+        ] {
+            let mutant = format!("{}{}", &src[..at], src[at..].replacen(from, to, 1));
+            assert_ne!(mutant, src, "{from}");
+            assert!(!pinned(&mutant), "mutant passed: {from} -> {to}");
+        }
+    }
 
     /// Runs the walker over canned page sizes; returns its result and the pages asked for.
     async fn walk_canned(

@@ -23,6 +23,8 @@ after(() => hooks.deregister());
 const {
   BRANCH_PUSHED_DISCLOSURE,
   BRANCH_PUSHED_FAILED_LEAD,
+  GIT_NETWORK_TIMEOUT_SECS,
+  GIT_PUSH_TIMEOUT_MESSAGE,
   isTransportError,
   mayHaveLanded,
   NOTHING_EXISTS_DISCLOSURES,
@@ -955,38 +957,71 @@ function parenFill(literal, e) {
   return literal.replace("({first}){rest}", () => `(${first})${rest}`);
 }
 
-/** `[wrap, noun]` per compound wrap, each filling its Rust literal the way the
- *  wrap embeds the error (noun: the create a reply hedge names, null for the
- *  verdict), or the reason the source can't be read. */
-function bbWraps(src) {
-  const changes = fnBody(src, "request_changes_pr");
-  const review = fnBody(src, "review_submit");
-  if (changes === null || review === null) return "a wrap fn not found exactly once";
-  const rows = [
-    [changes, "Changes were requested, but posting the comment failed", "{e}", "comment"],
-    [review, "The review summary couldn't be posted", "{e}", "review summary"],
-    [review, "review comments before the failure", "({first}){rest}", "review comment"],
-    [review, "The review was posted, but the {action} step failed", "({first}){rest}", null],
-  ];
-  const landed = wrapLiteral(review, "were already posted successfully");
+/** Each forge's compound review wraps: the fns holding them, and per wrap its
+ *  fn, a marker naming its literal, how the literal embeds the error, and the
+ *  create noun a reply hedge names (null for the verdict). */
+const WRAP_SOURCES = {
+  bitbucket: {
+    fns: ["request_changes_pr", "review_submit"],
+    rows: [
+      [0, "Changes were requested, but posting the comment failed", "{e}", "comment"],
+      [1, "The review summary couldn't be posted", "{e}", "review summary"],
+      [1, "review comments before the failure", "({first}){rest}", "review comment"],
+      [1, "The review was posted, but the {action} step failed", "({first}){rest}", null],
+    ],
+  },
+  glab: {
+    fns: ["request_changes_mr", "review_submit"],
+    rows: [
+      [0, "Changes were requested, but posting the comment failed", "{e}", "comment"],
+      [1, "The review summary couldn't be saved as a draft", "{e}", "review summary"],
+      [1, "review comments as drafts before the failure", "({e})", "review comment"],
+      [1, "draft notes couldn't be published", "({e})", "review"],
+      [1, "The review was posted, but the {action} step failed", "({e})", null],
+    ],
+  },
+};
+
+/** `[wrap, noun, token]` per compound wrap of `kind`, each filling its Rust
+ *  literal the way the wrap embeds the error (the verdict wrap twice: approve
+ *  with what landed, request changes with nothing), or the reason the source
+ *  can't be read. */
+function forgeWraps(src, kind) {
+  const { fns, rows } = WRAP_SOURCES[kind];
+  const bodies = fns.map((name) => fnBody(src, name));
+  if (bodies.includes(null)) return "a wrap fn not found exactly once";
+  const landed = wrapLiteral(bodies[1], "were already posted successfully");
   if (landed === null) return "no landed literal";
   const wraps = [];
-  for (const [body, marker, token, noun] of rows) {
-    const literal = wrapLiteral(body, marker);
+  for (const [fn, marker, token, noun] of rows) {
+    const literal = wrapLiteral(bodies[fn], marker);
     if (literal === null) return `no single literal holding ${marker}`;
     if (literal.split(token).length !== 2) return `${marker}: want one ${token}`;
-    const filled = literal
-      .replace("Posted {} of {}", "Posted 2 of 3")
-      .replaceAll("{action}", "approve")
-      .replace("{landed}", () => landed.replace("{n}", "3"));
-    const wrap = (e) =>
-      token === "{e}" ? filled.replace(token, () => e) : parenFill(filled, e);
-    if (/[{}\\]/.test(wrap("x")))
-      return `${marker}: a placeholder or escape this pin can't fill`;
-    wraps.push([wrap, noun]);
+    const fills =
+      noun === null
+        ? [
+            ["approve", landed.replace("{n}", "3")],
+            ["request changes", ""],
+          ]
+        : [["approve", ""]];
+    for (const [action, landedText] of fills) {
+      const filled = literal
+        .replace("{} of {}", "2 of 3")
+        .replaceAll("{action}", action)
+        .replace("{landed}", () => landedText);
+      const wrap = (e) =>
+        token === "({first}){rest}"
+          ? parenFill(filled, e)
+          : filled.replace(token, () => token.replace("{e}", e));
+      if (/[{}\\]/.test(wrap("x")))
+        return `${marker}: a placeholder or escape this pin can't fill`;
+      wraps.push([wrap, noun, token]);
+    }
   }
   return wraps;
 }
+
+const bbWraps = (src) => forgeWraps(src, "bitbucket");
 
 /** Whether every `(` in `line` closes on it. */
 function balanced(line) {
@@ -1034,11 +1069,194 @@ test("Bitbucket's compound review wraps keep their partial-state line as the sum
     assert.notEqual(mutant, src, label);
     assert.notEqual(bbWrapMismatch(mutant), null, `mutant passed: ${label}`);
   }
-  // The rewrite this guards against is live for a one-line transport cause.
+  // A one-line transport cause keeps the partial-state line, with the network
+  // sentence in the error's place.
   const [wrap] = wraps[0];
   const raw = BB_TIMED_OUT.split("\n")[1];
   assert.equal(
     presentError({ kind: "bitbucket", message: wrap(raw) }).summary,
-    "Couldn't reach Bitbucket — check your network connection.",
+    "Changes were requested, but posting the comment failed: Couldn't reach Bitbucket — check your network connection.",
   );
+});
+
+// The same wraps over a ONE-line transport cause: the summary keeps the
+// partial-state text up to where the error was set (its parenthesis dropped)
+// and ends with the network sentence, which flags Details.
+const REACH = {
+  bitbucket: "Couldn't reach Bitbucket — check your network connection.",
+  glab: "Couldn't reach GitLab — check your network connection.",
+};
+const ONE_LINE_CAUSE = {
+  bitbucket: BB_TIMED_OUT.split("\n")[1],
+  glab: 'Post "https://gitlab.com/api/v4/projects/1/merge_requests/1/notes": dial tcp 140.82.112.6:443: i/o timeout',
+};
+/** Non-transport causes per kind; each wrap's summary stays its line one. */
+const PLAIN_CAUSES = {
+  bitbucket: ["Bitbucket API error (500): boom", BB_TIMED_OUT],
+  glab: [
+    "GitLab API error (500): boom",
+    "GitLab didn't answer in time, so your comment may still have been posted. Check the conversation before posting again.\nGitLab CLI timed out after 120s.",
+  ],
+};
+
+/** The summary a wrap's network failure should read as: the wrap up to where
+ *  its error starts (an opening parenthesis dropped), then the network line. */
+function composedNetwork(wrap, token, network) {
+  const sentinel = "\u0001";
+  const message = wrap(sentinel);
+  const at = message.indexOf(token === "{e}" ? sentinel : `(${sentinel}`);
+  return `${message.slice(0, at)}${network}`;
+}
+
+/** Null when every wrap of `kind` composes its network failure and keeps line
+ *  one for a non-transport cause; otherwise the reason the pin fails. */
+function networkWrapMismatch(src, kind) {
+  const wraps = forgeWraps(src, kind);
+  if (typeof wraps === "string") return wraps;
+  for (const [wrap, , token] of wraps) {
+    const message = wrap(ONE_LINE_CAUSE[kind]);
+    const want = composedNetwork(wrap, token, REACH[kind]);
+    const p = presentError({ kind, message });
+    if (p.summary !== want) return `summary ${JSON.stringify(p.summary)} for ${message}`;
+    if (!p.long) return `no Details for ${message}`;
+    if (p.fullText !== message) return `fullText rewritten for ${message}`;
+    for (const e of PLAIN_CAUSES[kind]) {
+      const plain = wrap(e);
+      const summary = presentError({ kind, message: plain }).summary;
+      if (summary !== plain.split("\n")[0])
+        return `summary ${JSON.stringify(summary)} for ${plain}`;
+    }
+  }
+  return null;
+}
+
+test("a compound review failure over a network cause keeps what already posted", () => {
+  const bb = read(BITBUCKET);
+  const gl = read(GITLAB);
+  assert.equal(networkWrapMismatch(bb, "bitbucket"), null);
+  assert.equal(networkWrapMismatch(gl, "glab"), null);
+  const bbAll = forgeWraps(bb, "bitbucket");
+  const glAll = forgeWraps(gl, "glab");
+  assert.equal(bbAll.length, 5);
+  assert.equal(glAll.length, 6);
+  // The copy as it ships.
+  const summary = (kind, wrap) =>
+    presentError({ kind, message: wrap(ONE_LINE_CAUSE[kind]) }).summary;
+  assert.equal(
+    summary("bitbucket", bbAll[2][0]),
+    "Posted 2 of 3 review comments before the failure; the review was not submitted. Check the pull request on Bitbucket before retrying. Couldn't reach Bitbucket — check your network connection.",
+  );
+  assert.equal(
+    summary("bitbucket", bbAll[3][0]),
+    "The review was posted, but the approve step failed: the 3 review comment(s) were already posted successfully — do NOT resubmit them; only re-run the approve action on Bitbucket. Couldn't reach Bitbucket — check your network connection.",
+  );
+  assert.equal(
+    summary("bitbucket", bbAll[4][0]),
+    "The review was posted, but the request changes step failed: only re-run the request changes action on Bitbucket. Couldn't reach Bitbucket — check your network connection.",
+  );
+  assert.equal(
+    summary("glab", glAll[4][0]),
+    "The review was posted, but the approve step failed: the 3 review note(s) were already posted successfully — do NOT resubmit them; only re-run the approve action on GitLab. Couldn't reach GitLab — check your network connection.",
+  );
+  // Controls: each a reworded Rust lead that the composition no longer reads.
+  const mutants = [
+    ["bitbucket", bb, "W3 reworded", ["retrying. ({first}){rest}", "trying again. ({first}){rest}"]],
+    ["bitbucket", bb, "W1 reworded", ["posting the comment failed: {e}", "posting the comment failed; {e}"]],
+    ["glab", gl, "summary draft reworded", ["couldn't be saved as a draft, so the review was not", "couldn't be saved as a draft, so nothing was"]],
+    ["glab", gl, "publish reworded", ["draft notes couldn't be published, so the review was not", "draft notes couldn't be published, so the review wasn't"]],
+  ];
+  for (const [kind, src, label, [from, to]] of mutants) {
+    const mutant = src.replace(from, to);
+    assert.notEqual(mutant, src, label);
+    assert.notEqual(networkWrapMismatch(mutant, kind), null, `mutant passed: ${label}`);
+  }
+});
+
+// A create whose push used git's whole network budget says the push timed out
+// (src/lib/notifications/pr-create-failed.ts keys on GIT_PUSH_TIMEOUT_MESSAGE).
+// The budget is the only field telling that timeout from a gh or glab call's,
+// so each create route's push must pass NETWORK_TIMEOUT and no gh, glab or
+// default budget may equal it. git's WORKTREE_OP_TIMEOUT shares its 600 s, so no
+// create body may reference it.
+const GIT_RUNNER = new URL("../src-tauri/src/git/runner.rs", import.meta.url);
+const GH_RUNNER = new URL("../src-tauri/src/github/runner.rs", import.meta.url);
+const GLAB = new URL("../src-tauri/src/forge/glab.rs", import.meta.url);
+const PUSH_CALL = "run_git_mutating_with_creds_for_branch(";
+
+/** Seconds of `const <name>: Duration = Duration::from_secs(N);`, or null. */
+function constSecs(src, name) {
+  const m = src.match(
+    new RegExp(`\\bconst ${name}: Duration = Duration::from_secs\\((\\d+)\\);`),
+  );
+  return m ? Number(m[1]) : null;
+}
+
+/** Null when the budgets and the four create pushes hold the timeout key's
+ *  premise; otherwise the reason. */
+function pushTimeoutMismatch({ runner, gh, glab, pr, gitlab, bitbucket }) {
+  const network = constSecs(runner, "NETWORK_TIMEOUT");
+  if (network !== GIT_NETWORK_TIMEOUT_SECS)
+    return `NETWORK_TIMEOUT is ${network}s, the frontend keys on ${GIT_NETWORK_TIMEOUT_SECS}s`;
+  for (const [src, name] of [
+    [runner, "DEFAULT_TIMEOUT"],
+    [gh, "GH_TIMEOUT"],
+    [gh, "GH_NETWORK_TIMEOUT"],
+    [glab, "GLAB_TIMEOUT"],
+    [glab, "GLAB_NETWORK_TIMEOUT"],
+  ]) {
+    const secs = constSecs(src, name);
+    if (secs === null) return `${name} not found`;
+    if (secs === network) return `${name} shares the push budget`;
+  }
+  for (const [src, fn, calls] of [
+    [pr, "gh_pr_create_core", 2],
+    [gitlab, "create_mr", 1],
+    [bitbucket, "create_pr", 1],
+  ]) {
+    const body = fnBody(src, fn);
+    if (body === null) return `${fn} not found exactly once`;
+    if (body.includes("WORKTREE_OP_TIMEOUT"))
+      return `${fn} references WORKTREE_OP_TIMEOUT`;
+    const pushes = body.split(PUSH_CALL).slice(1);
+    if (pushes.length !== calls) return `${fn}: ${pushes.length} pushes, want ${calls}`;
+    for (const push of pushes) {
+      const args = push.slice(0, push.indexOf(".await"));
+      if (!/(?:^|\s|::)NETWORK_TIMEOUT,/.test(args))
+        return `${fn}: a push without NETWORK_TIMEOUT`;
+      if (/::NETWORK_TIMEOUT,/.test(args) && !args.includes("crate::git::runner::NETWORK_TIMEOUT,"))
+        return `${fn}: a push on another module's NETWORK_TIMEOUT`;
+    }
+  }
+  if (!/^use crate::git::runner::\{[^}]*\bNETWORK_TIMEOUT\b/m.test(pr))
+    return "pr.rs's NETWORK_TIMEOUT isn't git's";
+  return null;
+}
+
+test("a create's push is the one step that times out under git's network budget", () => {
+  const srcs = {
+    runner: read(GIT_RUNNER),
+    gh: read(GH_RUNNER),
+    glab: read(GLAB),
+    pr: read(RUST),
+    gitlab: read(GITLAB),
+    bitbucket: read(BITBUCKET),
+  };
+  assert.equal(pushTimeoutMismatch(srcs), null);
+  assert.equal(GIT_PUSH_TIMEOUT_MESSAGE, "git operation timed out after 600s");
+  // error.rs's Display for the bare timeout, which the message mirrors.
+  assert.match(read(ERROR), /#\[error\("git operation timed out after \{0\}s"\)\]/);
+  const swap = (key, from, to) => {
+    const mutant = { ...srcs, [key]: srcs[key].replace(from, to) };
+    assert.notEqual(mutant[key], srcs[key], `${key}: ${from}`);
+    return mutant;
+  };
+  const mutants = [
+    ["a longer push budget", swap("runner", "NETWORK_TIMEOUT: Duration = Duration::from_secs(600)", "NETWORK_TIMEOUT: Duration = Duration::from_secs(900)")],
+    ["a create push on DEFAULT_TIMEOUT", swap("bitbucket", /(fn create_pr\([\s\S]*?)crate::git::runner::NETWORK_TIMEOUT,/, "$1crate::git::runner::DEFAULT_TIMEOUT,")],
+    ["glab sharing the budget", swap("glab", "GLAB_NETWORK_TIMEOUT: Duration = Duration::from_secs(120)", "GLAB_NETWORK_TIMEOUT: Duration = Duration::from_secs(600)")],
+  ];
+  for (const [label, mutant] of mutants)
+    assert.notEqual(pushTimeoutMismatch(mutant), null, `mutant passed: ${label}`);
+  const worktreeBudget = swap("gitlab", /(fn create_mr\([\s\S]*?)crate::git::runner::NETWORK_TIMEOUT,/, "$1crate::git::runner::WORKTREE_OP_TIMEOUT,");
+  assert.equal(pushTimeoutMismatch(worktreeBudget), "create_mr references WORKTREE_OP_TIMEOUT");
 });

@@ -176,6 +176,9 @@ export function TagDetailView({
   const editSessionRef = useLatestRef(editSession);
   const [editTitle, setEditTitle] = useState("");
   const [editNotes, setEditNotes] = useState("");
+  // The notes the open editor was seeded from: a save clears only notes the user
+  // saw and emptied, never ones a refetch brought in after the dialog opened.
+  const [editSeededNotes, setEditSeededNotes] = useState("");
   const [editPrerelease, setEditPrerelease] = useState(false);
   const [editLatest, setEditLatest] = useState(false);
   const [editSyncUpdater, setEditSyncUpdater] = useState(true);
@@ -205,6 +208,7 @@ export function TagDetailView({
     setEditSession(null);
     setEditTitle("");
     setEditNotes("");
+    setEditSeededNotes("");
     setEditPrerelease(false);
     setEditLatest(false);
     setEditSyncUpdater(true);
@@ -507,6 +511,7 @@ export function TagDetailView({
           // is structurally false — sending it here was the bug that stripped
           // Latest on publish.
           latest: undefined,
+          clearNotes: false,
         });
       } catch (e) {
         onError(e);
@@ -519,8 +524,8 @@ export function TagDetailView({
       // `draft`/`latest` below are read off the rendered release at submit
       // time, so an older answer behind the open dialog holds the save.
       if (relStale || refuseWhileOffline()) return;
-      // Empty notes leave the body untouched (the edit skips `--notes`), so
-      // there's nothing to carry into the manifest either.
+      // Emptied notes clear the body only when the release had notes; either
+      // way there's nothing to carry into the manifest, which keeps its notes.
       const syncManifest =
         canSyncUpdater && editSyncUpdater && !!editNotes.trim();
       setSyncArmed(syncManifest);
@@ -550,6 +555,8 @@ export function TagDetailView({
           // an eligible release). A draft can't be Latest, so omit the flag and
           // let GitHub decide on publish.
           latest: rel.isDraft ? undefined : editLatest,
+          // Compared with the seeded notes, not the live release body.
+          clearNotes: editSeededNotes.trim() !== "" && editNotes.trim() === "",
         });
       } catch (e) {
         // The capture dies with the save it was taken for — phase 1 failing
@@ -658,6 +665,7 @@ export function TagDetailView({
                     if (relStale) return;
                     setEditTitle(rel.name);
                     setEditNotes(rel.body);
+                    setEditSeededNotes(rel.body);
                     setEditPrerelease(rel.isPrerelease);
                     setEditLatest(isLatest);
                     setEditSyncUpdater(true);

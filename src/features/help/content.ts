@@ -2133,7 +2133,9 @@ your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, v
 against your actual issues), and you can add more by hand with **Link issue**. Each chip
 starts as **Relates to** and a click — or Enter on the focused chip — flips it to
 **Closes**, which asks the forge to close that issue when the PR merges; the chips become
-\`Closes #N\` / \`Relates to #N\` lines appended to the description on create. The row is
+\`Closes #N\` / \`Relates to #N\` lines appended to the description on create. A chip adds no
+line when the description already says as much on a line of its own, and a closing line
+you typed is kept. The row is
 keyboard-operable: **← / →** move between chips, Enter or Space toggles Closes / Relates,
 and Delete removes a chip. The **same row is on the Edit dialog** and on **local PRs**
 (create and edit, wherever the repo's forge has an issue tracker): opening Edit peels any
@@ -3301,7 +3303,8 @@ provider differences).
 - **Edit a release** — revise its title and notes any time, in an editor that fills the
   dialog. When a **GitHub** release carries a \`latest.json\` updater manifest, the dialog
   offers to update the manifest's notes in the same save, so the "what's new" that
-  installed apps show on update matches the release page.
+  installed apps show on update matches the release page. Emptying the notes clears
+  them on the release; the manifest's notes stay as they were.
 {{ai}}- **Generate release notes with AI** — draft the notes from the commits and
   changelog between this tag and the previous one, then edit before publishing.{{/ai}}
 

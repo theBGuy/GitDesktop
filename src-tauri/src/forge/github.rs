@@ -524,6 +524,7 @@ pub async fn create_release(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn edit_release(
     repo_path: &str,
     tag: &str,
@@ -532,6 +533,7 @@ pub async fn edit_release(
     prerelease: bool,
     draft: bool,
     latest: Option<bool>,
+    clear_notes: bool,
 ) -> AppResult<()> {
     crate::github::release::gh_release_edit(
         repo_path.to_string(),
@@ -541,6 +543,7 @@ pub async fn edit_release(
         prerelease,
         draft,
         latest,
+        clear_notes,
     )
     .await
 }

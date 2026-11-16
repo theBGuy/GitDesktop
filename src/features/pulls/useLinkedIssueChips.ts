@@ -16,6 +16,7 @@ import {
   dismissIssue,
   fillIssueMeta,
   INITIAL_LINKED_ISSUE_BUCKETS,
+  isPullRequestUrl,
   type LinkedIssueBucket,
   type LinkedIssueBuckets,
   type LinkedIssueTargetSig,
@@ -180,42 +181,135 @@ function appendRefLines(text: string, refLines: string[]): string {
 const nativeRefLine = (r: BodyRef) =>
   r.keyword === "closes" ? `Closes #${r.number}` : `Relates to #${r.number}`;
 
+/** The keywords a reference line written in the text may use: GitHub's closing
+ *  family, then "relates to", which only mentions. */
+const CLOSING_KEYWORDS =
+  "close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved";
+const WRITTEN_REF_LINE = new RegExp(
+  `^(?:(${CLOSING_KEYWORDS})|relates\\s+to)\\s+(#\\d+|[A-Z][A-Z0-9_]*-\\d+)$`,
+  "i",
+);
+// One optional list marker before a reference: `-`, `*`, `+`, `1.` or `1)`.
+const LIST_MARKER = /^(?:[-*+]|\d+[.)])\s+/;
+// A fenced code block's opening run (three or more backticks or tildes), and an
+// indented code line (four spaces or a tab before the text).
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+const INDENTED_CODE = /^(?: {4}|\t)/;
+
+/** Each issue the text references on a whole line of its own, by its strongest
+ *  keyword there. Keyed `#N` for a number and by the upper-cased key for Jira.
+ *  A line counts only when, trimmed and stripped of one list marker, it is
+ *  exactly a keyword and one reference: a ref inside a sentence, after
+ *  punctuation, in a quote or task item, or beside a second ref never does, and
+ *  neither does a line a forge renders as code or hides as an HTML comment. */
+function writtenRefs(text: string): Map<string, BodyRef["keyword"]> {
+  const refs = new Map<string, BodyRef["keyword"]>();
+  // The closing run a fence needs: its own character, at least as long.
+  let fence: RegExp | null = null;
+  let inComment = false;
+  for (const raw of text.split("\n")) {
+    if (fence) {
+      if (fence.test(raw.trim())) fence = null;
+      continue;
+    }
+    if (inComment) {
+      if (raw.includes("-->")) inComment = false;
+      continue;
+    }
+    const open = FENCE_OPEN.exec(raw);
+    if (open) {
+      fence = new RegExp(`^${open[1][0]}{${open[1].length},}$`);
+      continue;
+    }
+    const comment = raw.lastIndexOf("<!--");
+    if (comment !== -1 && !raw.slice(comment).includes("-->")) {
+      inComment = true;
+      continue;
+    }
+    if (INDENTED_CODE.test(raw)) continue;
+    const m = WRITTEN_REF_LINE.exec(raw.trim().replace(LIST_MARKER, ""));
+    if (!m) continue;
+    const target = m[2].toUpperCase();
+    if (m[1] !== undefined) refs.set(target, "closes");
+    else if (!refs.has(target)) refs.set(target, "relates");
+  }
+  return refs;
+}
+
+/** Whether a written reference already says what a chip's line would: a
+ *  closing line covers either chip, a relates line only a relates chip. */
+function covers(
+  written: BodyRef["keyword"] | undefined,
+  chip: BodyRef["keyword"],
+): boolean {
+  return written === "closes" || (written === "relates" && chip === "relates");
+}
+
+/** The numbers a `Closes #N` line in the trailing block names. The splitter
+ *  keeps a repeated number's last keyword, so a merge restores these. */
+function blockCloses(text: string): Set<number> {
+  const closes = new Set<number>();
+  for (const line of text.split("\n").reverse()) {
+    if (line.trim() === "" || JIRA_REF_LINE.test(line)) continue;
+    const m = REF_LINE.exec(line);
+    if (!m) break;
+    if (m[1].toLowerCase() === "closes") closes.add(Number.parseInt(m[2], 10));
+  }
+  return closes;
+}
+
 /**
- * Compose the final body: text + the chips' ref lines (`Closes #N` /
- * `Relates to #N`). The single composition used by ALL create/edit save paths.
- * No chips returns `text` untouched: a save with no chip never rewrites a body.
- * Otherwise the result is the form a reopen re-splits to: the text's own trailing
- * refs merge with the chips through {@link splitBodyRefBlock} (typed order first,
- * a repeated number takes the chip's keyword), so no reference is written twice.
+ * Compose the final body: text + the chips' `Closes #N` / `Relates to #N`
+ * lines, for every create and edit save. A chip writes no line when a counting
+ * line anywhere in the text ({@link writtenRefs}) already references its issue
+ * at least as strongly ({@link covers}); no chip left returns `text` untouched.
+ * The rest merge with the trailing block through {@link splitBodyRefBlock}, so
+ * a reopen re-splits to the same chips and a typed Closes is never weakened.
  */
 export function composeBodyWithRefs(
   text: string,
   chips: LinkedIssueChip[],
 ): string {
-  if (chips.length === 0) return text;
+  const written = writtenRefs(text);
+  const kept = chips.filter(
+    (c) => !covers(written.get(`#${c.number}`), c.keyword),
+  );
+  if (kept.length === 0) return text;
+  const typedCloses = blockCloses(text);
   const { text: rest, refs } = splitBodyRefBlock(
-    appendRefLines(text, chips.map(nativeRefLine)),
+    appendRefLines(text, kept.map(nativeRefLine)),
     "native",
   );
-  return appendRefLines(rest, refs.map(nativeRefLine));
+  return appendRefLines(
+    rest,
+    refs.map((r) =>
+      nativeRefLine(
+        typedCloses.has(r.number) ? { ...r, keyword: "closes" } : r,
+      ),
+    ),
+  );
 }
 
 /**
  * The Jira-mention twin of {@link composeBodyWithRefs}: text + the chips'
- * `Relates to KEY` lines, the same no-chips and merge rules (a key typed and
- * chipped is written once). Only `Relates to` is emitted — there is no close
- * form for Jira.
+ * `Relates to KEY` lines, the same no-chips, written-reference and merge rules
+ * (a key typed and chipped is written once). Only `Relates to` is emitted —
+ * there is no close form for Jira — so any written reference line covers it.
  */
 export function composeBodyWithJiraRefs(
   text: string,
   chips: JiraMentionChip[],
 ): string {
-  if (chips.length === 0) return text;
+  const written = writtenRefs(text);
+  const kept = chips.filter(
+    (c) => !covers(written.get(c.key.toUpperCase()), "relates"),
+  );
+  if (kept.length === 0) return text;
   const line = (key: string) => `Relates to ${key}`;
   const { text: rest, jiraRefs } = splitBodyRefBlock(
     appendRefLines(
       text,
-      chips.map((c) => line(c.key)),
+      kept.map((c) => line(c.key)),
     ),
     "jira",
   );
@@ -483,11 +577,14 @@ export function useLinkedIssueChips(opts: {
         // `gen` was read at fire time: a reset before this settles makes the
         // seed stale.
         probed.add(n);
+        // gh's `issue view` answers a pull request's number too; that answer
+        // stays probed and adds no chip.
         queryClient
           .fetchQuery(issueDetailsOptions(repoPath, n, lens))
-          .then((issue) =>
-            route(key, gen, (b) => addExtractedIssue(b, extractedChip(issue))),
-          )
+          .then((issue) => {
+            if (isPullRequestUrl(issue.url)) return;
+            route(key, gen, (b) => addExtractedIssue(b, extractedChip(issue)));
+          })
           .catch(() => undefined);
       }
     },

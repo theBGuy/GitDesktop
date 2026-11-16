@@ -69,6 +69,15 @@ const DISPLAY_LEADS: Partial<
   timeout: ["git operation timed out", "Git operation timed out"],
 };
 
+/** `NETWORK_TIMEOUT` in src-tauri/src/git/runner.rs: the budget every create
+ *  route's push runs under, longer than any gh or glab call's or git read's
+ *  (pinned by scripts/attached-failure-leads.test.mjs). */
+export const GIT_NETWORK_TIMEOUT_SECS = 600;
+
+/** The bare `Timeout` a git network op gives after its whole budget, which only
+ *  a create route's push can produce among a create's steps. */
+export const GIT_PUSH_TIMEOUT_MESSAGE = `${DISPLAY_LEADS.timeout?.[0]} after ${GIT_NETWORK_TIMEOUT_SECS}s`;
+
 /** The words app-written detail opens with — the only leads a stripped summary
  *  capitalizes. Some producers open with an interpolated branch name, SHA or path
  *  (`main has no upstream…`), whose case is part of the name, so an unlisted lead
@@ -777,6 +786,74 @@ function branchPushedFailure(
     : `${headline.slice(0, cause + BRANCH_PUSHED_FAILED_CAUSE.length)}${network}`;
 }
 
+/** The compound review wraps that put a step's error after a partial-state line
+ *  (`request_changes_pr` + `review_submit` in forge/bitbucket.rs,
+ *  `request_changes_mr` + `review_submit` in forge/gitlab.rs; tied to those
+ *  `format!` literals by scripts/attached-failure-leads.test.mjs). Each `lead`
+ *  matches line one up to where the error starts; a lead ending in `(` sets the
+ *  error in parentheses, which the network rewrite drops with the error. */
+const PARTIAL_STATE_WRAPS: readonly {
+  kind: AppError["kind"];
+  lead: RegExp;
+}[] = [
+  {
+    kind: "bitbucket",
+    lead: /^Changes were requested, but posting the comment failed: /,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^The review summary couldn't be posted, so the review was not submitted: /,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^Posted \d+ of \d+ review comments before the failure; the review was not submitted\. Check the pull request on Bitbucket before retrying\. \(/,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on Bitbucket\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^Changes were requested, but posting the comment failed: /,
+  },
+  {
+    kind: "glab",
+    lead: /^The review summary couldn't be saved as a draft, so the review was not submitted: /,
+  },
+  {
+    kind: "glab",
+    lead: /^Saved \d+ of \d+ review comments as drafts before the failure; the review was not submitted\. Check the merge request on GitLab before retrying\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^The review's draft notes couldn't be published, so the review was not submitted\. Check the merge request on GitLab before retrying\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on GitLab\. \(/,
+  },
+];
+
+/** Line one of a compound review failure, or null for any other message. What
+ *  already posted decides the retry, so the line outranks the network rewrite,
+ *  which instead replaces only the embedded error. */
+function partialStateWrap(
+  kind: AppError["kind"],
+  message: string,
+  network: string | null,
+): string | null {
+  const headline = firstMeaningfulLine(message);
+  for (const wrap of PARTIAL_STATE_WRAPS) {
+    if (wrap.kind !== kind) continue;
+    const lead = wrap.lead.exec(headline);
+    if (lead === null) continue;
+    if (network === null) return headline;
+    const kept = lead[0].endsWith("(") ? lead[0].slice(0, -1) : lead[0];
+    return `${kept}${network}`;
+  }
+  return null;
+}
+
 /** Rust's unread-reply sentence after its host (`UNREAD_REPLY_LEAD` in
  *  forge/mod.rs), and the lead a create that pushed its branch first puts before
  *  it. Module-private: callers ask `mayHaveLanded`, never match the text. */
@@ -1080,6 +1157,7 @@ export function presentError(e: unknown): ErrorPresentation {
       savedDisclosure(e.kind, message) ??
       nothingExistsDisclosure(e.kind, message) ??
       branchPushedFailure(e.kind, message, network) ??
+      partialStateWrap(e.kind, message, network) ??
       longPathSummary(combined) ??
       (isConflict
         ? conflictSummary(combined)

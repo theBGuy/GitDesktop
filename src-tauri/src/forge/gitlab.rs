@@ -4085,14 +4085,17 @@ fn create_mr_fields(
 }
 
 /// A release edit's fields: `name` trimmed and `description` untrimmed, each only when
-/// it has text, so an empty one leaves the release's value unchanged.
-fn release_edit_fields(title: &str, notes: &str) -> Vec<(&'static str, String)> {
+/// it has text, so an empty one leaves the release's value unchanged; `clear_notes`
+/// with empty notes sends an empty `description`, which empties the release's notes.
+fn release_edit_fields(title: &str, notes: &str, clear_notes: bool) -> Vec<(&'static str, String)> {
     let mut fields = Vec::new();
     if !title.trim().is_empty() {
         fields.push(("name", title.trim().to_string()));
     }
     if !notes.trim().is_empty() {
         fields.push(("description", notes.to_string()));
+    } else if clear_notes {
+        fields.push(("description", String::new()));
     }
     fields
 }
@@ -4109,7 +4112,7 @@ fn release_create_fields(
     if !target.trim().is_empty() {
         fields.push(("ref", target.trim().to_string()));
     }
-    fields.extend(release_edit_fields(title, notes));
+    fields.extend(release_edit_fields(title, notes, false));
     fields
 }
 
@@ -5158,11 +5161,33 @@ mod attach_tests {
             1,
         );
         assert!(!untrimmed(&trimmed), "a trimmed description must flip");
-        assert!(release_edit_fields("", " \n ").is_empty());
-        assert_eq!(release_edit_fields(" T ", ""), own(&[("name", "T")]));
+        assert!(release_edit_fields("", " \n ", false).is_empty());
+        assert_eq!(release_edit_fields(" T ", "", false), own(&[("name", "T")]));
         assert_eq!(
-            release_edit_fields("", " N "),
+            release_edit_fields("", " N ", false),
             own(&[("description", " N ")])
+        );
+        // The clear signal sends an empty description, and only for empty notes.
+        assert_eq!(
+            release_edit_fields("", "", true),
+            own(&[("description", "")])
+        );
+        assert_eq!(
+            release_edit_fields("", "  ", true),
+            own(&[("description", "")])
+        );
+        assert!(release_edit_fields("", "", false).is_empty());
+        assert_eq!(
+            release_edit_fields("T", " n ", true),
+            own(&[("name", "T"), ("description", " n ")])
+        );
+        assert_eq!(
+            release_edit_fields(" T ", "", true),
+            own(&[("name", "T"), ("description", "")])
+        );
+        assert_eq!(
+            glab_fields_json(&release_edit_fields("", "", true)),
+            r#"{"description":""}"#
         );
 
         let input =
@@ -10200,10 +10225,16 @@ fn created_release_url(stdout: &str) -> AppResult<String> {
         .to_string())
 }
 
-/// Edit a release's title and/or notes. Empty fields are left unchanged (the gh
-/// path likewise only passes non-empty `--title`/`--notes-file`); when both are empty
-/// there's nothing to send, so it's a no-op.
-pub async fn edit_release(repo_path: &str, tag: &str, title: &str, notes: &str) -> AppResult<()> {
+/// Edit a release's title and/or notes. Empty fields are left unchanged, except that
+/// `clear_notes` with empty notes empties them (as on the gh path); with nothing to
+/// send it's a no-op.
+pub async fn edit_release(
+    repo_path: &str,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    clear_notes: bool,
+) -> AppResult<()> {
     if tag.is_empty() {
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
@@ -10211,7 +10242,7 @@ pub async fn edit_release(repo_path: &str, tag: &str, title: &str, notes: &str) 
     let enc = encode_project(&project_path(repo_path).await?);
     let enc_tag = encode_query_value(tag);
     let endpoint = format!("projects/{enc}/releases/{enc_tag}");
-    let fields = release_edit_fields(title, notes);
+    let fields = release_edit_fields(title, notes, clear_notes);
     if fields.is_empty() {
         return Ok(());
     }

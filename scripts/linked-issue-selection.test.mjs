@@ -18,6 +18,7 @@ import {
   EMPTY_LINKED_ISSUE_BUCKET,
   fillIssueMeta,
   INITIAL_LINKED_ISSUE_BUCKETS,
+  isPullRequestUrl,
   linkedIssueTargetKey,
   pickIssue,
   routeBucketUpdate,
@@ -336,4 +337,22 @@ test("a write stamped with the just-advanced generation lands on the fresh seed"
     addExtractedIssue(b, chip(12)),
   );
   assert.equal(stale, reseeded);
+});
+
+test("isPullRequestUrl accepts a pull request page only", () => {
+  for (const url of [
+    "https://github.com/o/r/pull/85",
+    "https://github.com/o/r/pull/85/",
+    "https://ghe.example.com/o/r/pull/85",
+  ])
+    assert.equal(isPullRequestUrl(url), true, url);
+  for (const url of [
+    "https://github.com/o/r/issues/85",
+    "https://gitlab.com/g/p/-/issues/85",
+    "https://gitlab.com/g/p/-/merge_requests/85",
+    "https://github.com/o/r/pull/85/files",
+    "",
+    "not a url",
+  ])
+    assert.equal(isPullRequestUrl(url), false, url);
 });

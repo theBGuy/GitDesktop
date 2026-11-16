@@ -7,15 +7,30 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::pr::run_gh_text_write;
-use crate::github::runner::{run_gh, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
-/// gh emits `null` for absent strings (a draft's `publishedAt`, an empty body);
-/// fold those into "" so the frontend sees a plain string.
+/// gh emits `null` for absent strings (an empty body, a missing target); fold
+/// those into "" so the frontend sees a plain string.
 fn de_null_string<'de, D>(d: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+/// A gh timestamp: null and Go's zero time both mean "none" and fold to "".
+/// `release list` decodes `publishedAt` into a non-pointer `time.Time`, so an
+/// unpublished draft arrives as `0001-01-01T00:00:00Z`, which parses as a date.
+fn de_gh_time<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let time = Option::<String>::deserialize(d)?.unwrap_or_default();
+    Ok(if time.starts_with("0001-01-01") {
+        String::new()
+    } else {
+        time
+    })
 }
 
 /// Every tag-taking `gh_release_*` entry point runs this before assembling argv,
@@ -39,7 +54,7 @@ pub struct ReleaseInfo {
     pub is_prerelease: bool,
     #[serde(default)]
     pub is_latest: bool,
-    #[serde(default, deserialize_with = "de_null_string")]
+    #[serde(default, deserialize_with = "de_gh_time")]
     pub published_at: String,
 }
 
@@ -125,7 +140,7 @@ struct RawRelease {
     #[serde(default, deserialize_with = "de_null_string")]
     body: String,
     author: Option<RawAuthor>,
-    #[serde(default, deserialize_with = "de_null_string")]
+    #[serde(default, deserialize_with = "de_gh_time")]
     published_at: String,
     #[serde(default)]
     is_draft: bool,
@@ -272,8 +287,8 @@ pub async fn gh_release_create(
 /// draft-publish (`None` folded to `false`) was the v0.4.0 bug: it overrode
 /// GitHub's own default of marking a newly published stable release Latest, so
 /// publishing a draft silently stripped Latest. Pure, so the shape — and that
-/// history — is pinned without a spawn. The notes ride stdin ([`run_gh_text_write`]),
-/// and empty notes send no flag, which keeps the release's notes.
+/// history — is pinned without a spawn. The notes ride stdin, planned by
+/// [`release_notes_write`].
 fn release_edit_args(
     slug: &str,
     tag: &str,
@@ -301,7 +316,31 @@ fn release_edit_args(
     args
 }
 
+/// What a release edit does with the notes.
+#[derive(Debug, PartialEq, Eq)]
+enum NotesWrite<'a> {
+    /// Empty notes and no clear: no notes flag, so the release keeps its notes.
+    Keep,
+    /// Non-empty notes replace the release's notes.
+    Send(&'a str),
+    /// Empty notes with the clear signal: an empty notes file empties them.
+    Clear,
+}
+
+/// Plans the notes half of a release edit from the TRIMMED notes. `clear` acts only
+/// on empty notes, since empty notes alone mean "leave them" to the MCP caller.
+fn release_notes_write(notes: &str, clear: bool) -> NotesWrite<'_> {
+    match (notes.is_empty(), clear) {
+        (false, _) => NotesWrite::Send(notes),
+        (true, false) => NotesWrite::Keep,
+        (true, true) => NotesWrite::Clear,
+    }
+}
+
 /// Edits a release's title/notes/flags. `draft=false` on a draft publishes it.
+/// `clear_notes` with empty notes empties the release's notes (gh sends an empty
+/// `body` for an empty `--notes-file`).
+#[allow(clippy::too_many_arguments)]
 pub async fn gh_release_edit(
     repo_path: String,
     tag: String,
@@ -310,6 +349,7 @@ pub async fn gh_release_edit(
     prerelease: bool,
     draft: bool,
     latest: Option<bool>,
+    clear_notes: bool,
 ) -> AppResult<()> {
     validate_tag(&tag)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
@@ -322,7 +362,18 @@ pub async fn gh_release_edit(
         latest,
     );
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_gh_text_write(&repo_path, &arg_refs, "--notes-file", notes.trim()).await?;
+    match release_notes_write(notes.trim(), clear_notes) {
+        NotesWrite::Clear => {
+            let clear = [arg_refs.as_slice(), &["--notes-file", "-"]].concat();
+            run_gh_input(Some(&repo_path), &clear, "", GH_NETWORK_TIMEOUT).await?;
+        }
+        NotesWrite::Keep => {
+            run_gh_text_write(&repo_path, &arg_refs, "--notes-file", notes.trim()).await?;
+        }
+        NotesWrite::Send(text) => {
+            run_gh_text_write(&repo_path, &arg_refs, "--notes-file", text).await?;
+        }
+    }
     Ok(())
 }
 
@@ -688,6 +739,82 @@ mod tests {
             let mapped = format!("{body}\n.map_err(|e| timed_out_write(e, \"GitHub\", landed))");
             assert!(!on_stdin(&mapped), "{name}: a timeout map must flip");
         }
+    }
+
+    /// The clear signal acts only on empty notes; everything else behaves as before.
+    #[test]
+    fn release_notes_write_clears_only_empty_notes_on_request() {
+        assert_eq!(release_notes_write("", true), NotesWrite::Clear);
+        assert_eq!(release_notes_write("", false), NotesWrite::Keep);
+        assert_eq!(release_notes_write("x", true), NotesWrite::Send("x"));
+        assert_eq!(release_notes_write("x", false), NotesWrite::Send("x"));
+    }
+
+    /// The edit plans its notes in one place: a clear runs gh on an empty stdin
+    /// with `--notes-file -`, every other plan takes the shared text write, and a
+    /// send writes the planner's own text.
+    #[test]
+    fn release_edit_clears_notes_through_an_empty_notes_file() {
+        let src = include_str!("release.rs");
+        let src = src.split("\nmod tests {").next().unwrap();
+        let body = crate::github::repo_meta::tests::wiring_body(src, "gh_release_edit");
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let wired = |flat: &str| {
+            flat.contains("match release_notes_write(notes.trim(), clear_notes) {")
+                && flat.contains(
+                    "run_gh_text_write(&repo_path, &arg_refs, \"--notes-file\", notes.trim())",
+                )
+                && flat.contains("&[\"--notes-file\", \"-\"]")
+                && flat.contains("run_gh_input(Some(&repo_path), &clear, \"\", GH_NETWORK_TIMEOUT)")
+                && flat.contains(
+                    "NotesWrite::Send(text) => { run_gh_text_write(&repo_path, &arg_refs, \"--notes-file\", text)",
+                )
+                && !flat.contains("\"--notes\"")
+        };
+        assert!(wired(&flat), "{flat}");
+        let start = flat.find("NotesWrite::Clear =>").unwrap();
+        let end = flat.find("NotesWrite::Keep =>").unwrap();
+        let no_clear = format!("{}{}", &flat[..start], &flat[end..]);
+        assert!(!wired(&no_clear), "dropping the clear arm must flip");
+        let argv = format!("{flat} args.push(\"--notes\".into());");
+        assert!(!wired(&argv), "a notes argv flag must flip");
+        let resend = flat.replacen(
+            "\"--notes-file\", text)",
+            "\"--notes-file\", notes.trim())",
+            1,
+        );
+        assert_ne!(resend, flat);
+        assert!(!wired(&resend), "a send that re-reads the notes must flip");
+    }
+
+    /// `gh release list` decodes `publishedAt` into a non-pointer Go time, so a
+    /// draft's null arrives as the zero time; both reads fold it, and null, to "".
+    #[test]
+    fn release_reads_drop_the_go_zero_publish_time() {
+        const ZERO: &str = "0001-01-01T00:00:00Z";
+        const REAL: &str = "2026-06-30T07:06:16Z";
+        let row = |published: &str| format!(r#"{{"tagName":"v1","publishedAt":{published}}}"#);
+        let cases = [
+            (format!("\"{ZERO}\""), ""),
+            ("null".to_string(), ""),
+            (format!("\"{REAL}\""), REAL),
+        ];
+        for (published, want) in &cases {
+            let info: ReleaseInfo = serde_json::from_str(&row(published)).unwrap();
+            assert_eq!(info.published_at, *want, "ReleaseInfo {published}");
+            let raw: RawRelease = serde_json::from_str(&row(published)).unwrap();
+            assert_eq!(raw.published_at, *want, "RawRelease {published}");
+        }
+        let absent: ReleaseInfo = serde_json::from_str(r#"{"tagName":"v1"}"#).unwrap();
+        assert_eq!(absent.published_at, "");
+        let absent: RawRelease = serde_json::from_str(r#"{"tagName":"v1"}"#).unwrap();
+        assert_eq!(absent.published_at, "");
+
+        let text = format!(r#"{{"tagName":"v1","name":"{ZERO}","body":"{ZERO}"}}"#);
+        let info: ReleaseInfo = serde_json::from_str(&text).unwrap();
+        assert_eq!(info.name, ZERO, "a name is not a timestamp");
+        let raw: RawRelease = serde_json::from_str(&text).unwrap();
+        assert_eq!((raw.name.as_str(), raw.body.as_str()), (ZERO, ZERO));
     }
 
     #[test]
