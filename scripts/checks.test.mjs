@@ -92,6 +92,7 @@ import {
   verdict as reusedViewVerdict,
 } from "./check-reused-view-pending.mjs";
 import {
+  bindingInitializer,
   checkBareBranchRevs,
   checkCompareEndpoints,
   checkDiffExternalDrivers,
@@ -5500,8 +5501,122 @@ test("marker branches accept unique direct and bound names with same-function re
       "branch",
       'TestRootOverride::set(&root);\n let branch = "held";\n switch(branch);',
     ],
+    [
+      "branch",
+      'TestRootOverride::set(&root);\n let branch =\n "held";\n switch(branch);',
+    ],
   ]) {
     assert.deepEqual(markerBranchHits(markerHolder(arg, setup)), []);
+  }
+});
+
+test("marker branches: check I's declaration search has the contract block's shared gaps", () => {
+  // These rows pin the shared gaps bindingInitializer's contract names for
+  // check I: each passes today, reading "uniq" where the binding in scope is the
+  // shared name. A row that starts failing means its gap closed, and the block
+  // changes with it.
+  const holder = (...body) =>
+    [
+      "#[cfg(test)] mod tests {",
+      "    fn holder() {",
+      "        TestRootOverride::set(&root);",
+      ...body,
+      "    }",
+      "}",
+    ].join("\n");
+  const call = '        UpdateMarker::create_for(&root.join("live"), branch);';
+  const victim = 'fn victim() { switch("shared"); }';
+  for (const [gap, src] of [
+    [
+      "inner block closed before the site",
+      holder(
+        '        let branch = "shared";',
+        '        { let branch = "uniq"; keep(branch); }',
+        call,
+      ),
+    ],
+    [
+      "tuple pattern",
+      holder(
+        '        let branch = "uniq";',
+        '        let (_x, branch) = (1, "shared");',
+        call,
+      ),
+    ],
+    [
+      "let-else pattern",
+      holder(
+        '        let branch = "uniq";',
+        '        let Some(branch) = Some("shared") else { return };',
+        call,
+      ),
+    ],
+    [
+      "if let pattern",
+      holder(
+        '        let branch = "uniq";',
+        '        if let Some(branch) = Some("shared") {',
+        "    " + call,
+        "        }",
+      ),
+    ],
+    [
+      "for binding",
+      holder(
+        '        let branch = "uniq";',
+        '        for branch in ["shared"] {',
+        "    " + call,
+        "        }",
+      ),
+    ],
+    [
+      "closure parameter",
+      holder(
+        '        let branch = "uniq";',
+        '        ["shared"].iter().for_each(|branch| {',
+        "    " + call,
+        "        });",
+      ),
+    ],
+    [
+      "match-arm binding",
+      holder(
+        '        let branch = "uniq";',
+        '        match Some("shared") {',
+        "            Some(branch) => {",
+        "        " + call,
+        "            }",
+        "            None => {}",
+        "        }",
+      ),
+    ],
+    [
+      "let mut reassigned",
+      holder(
+        '        let mut branch = "uniq";',
+        '        branch = "shared";',
+        call,
+      ),
+    ],
+    [
+      "cfg-gated alternatives",
+      holder(
+        "        #[cfg(windows)]",
+        '        let branch = "shared";',
+        "        #[cfg(not(windows))]",
+        '        let branch = "uniq";',
+        call,
+      ),
+    ],
+  ]) {
+    assert.deepEqual(markerBranchHits(src, victim), [], gap);
+    // With every binding the shared name, the same fixture reports.
+    const shared = markerBranchHits(
+      src.replaceAll('"uniq"', '"shared"'),
+      victim,
+    );
+    assert.equal(shared.length, 1, gap);
+    assert.match(shared[0].fix, /unique/, gap);
   }
 });
 
@@ -6909,6 +7024,24 @@ test("bare-rev check fails closed on a binding it cannot resolve as safe", () =>
     "    let base = branch_first_rev(repo, name).await; let base = name;",
     '    run(&["merge-base", "HEAD", base]);',
     "}",
+    // A declaration after the use on its line, or initializer text after it,
+    // does not answer for it.
+    "async fn later_let(repo: &str, branch: &str) {",
+    '    let r = format!("{branch}..HEAD"); let branch = branch_first_rev(repo, branch).await;',
+    "}",
+    "async fn later_argv(repo: &str, branch: &str) {",
+    '    run(&["merge-base", branch, "HEAD"]); let branch = branch_first_rev(repo, branch).await;',
+    "}",
+    "async fn wrapped_init(repo: &str, name: &str) {",
+    "    let base =",
+    '        name; run(&["merge-base", "HEAD", base]); let _t = branch_first_rev(repo, name);',
+    "}",
+    "async fn self_init(repo: &str, base: &str) {",
+    "    let base = pick(",
+    '        run(&["merge-base", "HEAD", base]),',
+    "        branch_first_rev(repo, base).await,",
+    "    );",
+    "}",
   ].join("\n");
   const hits = [];
   checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
@@ -6916,8 +7049,12 @@ test("bare-rev check fails closed on a binding it cannot resolve as safe", () =>
     hits.map((h) => [h.fn, h.line]),
     [
       ["rebinds", 3],
+      ["later_let", 59],
       ["far", 52],
       ["same_line", 56],
+      ["later_argv", 62],
+      ["wrapped_init", 66],
+      ["self_init", 70],
     ],
   );
 });
@@ -6975,6 +7112,478 @@ test("bare-rev check reads an exact_branch_tip binding as safe", () => {
     hits.map((h) => [h.fn, h.line]),
     [["exact", 7]],
   );
+});
+
+test("binding lookup: check G passes each known gap its contract block names", () => {
+  // These rows pin bindingInitializer's known gaps: each passes today. A row
+  // that starts failing means its gap closed, and the block changes with it.
+  const fn = (...body) =>
+    ["async fn f(branch: &str, repo: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  const use = '    run(&["merge-base", branch, "HEAD"]);';
+  const safe = "    let branch = branch_first_rev(repo, branch).await;";
+  const hitsOf = (src) => {
+    const hits = [];
+    checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+    return hits;
+  };
+  for (const [gap, src] of [
+    [
+      "inner block closed before the use",
+      fn("    if x {", "    " + safe, "        keep(branch);", "    }", use),
+    ],
+    [
+      "if let used after its block",
+      fn(
+        "    if let Some(branch) = branch_first_rev(repo, branch).await {",
+        "        keep(branch);",
+        "    }",
+        use,
+      ),
+    ],
+    [
+      "while let used after its block",
+      fn(
+        "    while let Some(branch) = branch_first_rev(repo, branch).await {",
+        "        keep(branch);",
+        "    }",
+        use,
+      ),
+    ],
+    ["for binding", fn(safe, "    for branch in xs {", "    " + use, "    }")],
+    [
+      "closure parameter",
+      fn(safe, "    xs.iter().for_each(|branch| {", "    " + use, "    });"),
+    ],
+    [
+      "match-arm binding",
+      fn(
+        safe,
+        "    match pick(xs) {",
+        "        Some(branch) => {",
+        "        " + use,
+        "        }",
+        "        None => {}",
+        "    }",
+      ),
+    ],
+    [
+      "let mut reassigned",
+      fn(
+        "    let mut branch = branch_first_rev(repo, branch).await;",
+        "    branch = xs[0];",
+        use,
+      ),
+    ],
+    [
+      "cfg-gated alternatives",
+      fn(
+        "    #[cfg(not(windows))]",
+        "    let branch = xs[0];",
+        "    #[cfg(windows)]",
+        safe,
+        use,
+      ),
+    ],
+    [
+      "use inside its own initializer",
+      fn(
+        "    let branch = match branch_first_rev(repo, branch).await {",
+        "        Ok(rev) => rev,",
+        '        Err(_) => run(&["merge-base", branch, "HEAD"]),',
+        "    };",
+      ),
+    ],
+    [
+      "struct pattern renaming the field",
+      fn("    let Tips { branch: tip, .. } = branch_tips(repo).await;", use),
+    ],
+  ]) {
+    assert.deepEqual(hitsOf(src), [], gap);
+    // Without the resolver call the same fixture reports, so the row is live.
+    const open = src.replace(/\b(?:branch_first_rev|branch_tips)\(/g, "pick(");
+    assert.ok(hitsOf(open).length > 0, gap);
+  }
+});
+
+test("binding lookup: check D passes each known gap its contract block names", () => {
+  // These rows pin bindingInitializer's known gaps for check D, which reads no
+  // pattern binding: each passes today. A row that starts failing means its gap
+  // closed, and the block changes with it.
+  const fn = (...body) =>
+    [
+      "fn f(report: String, out: Out, xs: Vec<Out>) -> AppError {",
+      ...body,
+      "}",
+    ].join("\n");
+  const ctor = (pad = "    ") => [
+    pad + "AppError::Git {",
+    pad + "    code: 1,",
+    pad + "    stderr: report,",
+    pad + "}",
+  ];
+  const shaped = "    let report = out.full_failure_text();";
+  const hitsOf = (src) => {
+    const hits = [];
+    checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+    return hits;
+  };
+  for (const [gap, src] of [
+    [
+      "inner block closed before the use",
+      fn(
+        "    if x {",
+        "    " + shaped,
+        "        keep(report);",
+        "    }",
+        ...ctor(),
+      ),
+    ],
+    [
+      "for binding",
+      fn(
+        shaped,
+        "    for report in xs {",
+        "        return AppError::Git {",
+        "            code: 1,",
+        "            stderr: report,",
+        "        };",
+        "    }",
+        "    todo!()",
+      ),
+    ],
+    [
+      "match-arm binding",
+      fn(
+        shaped,
+        "    match pick(xs) {",
+        "        Some(report) => AppError::Git {",
+        "            code: 1,",
+        "            stderr: report,",
+        "        },",
+        "        None => todo!(),",
+        "    }",
+      ),
+    ],
+    [
+      "let mut reassigned",
+      fn(
+        "    let mut report = out.full_failure_text();",
+        "    report = out.stderr;",
+        ...ctor(),
+      ),
+    ],
+    [
+      "cfg-gated alternatives",
+      fn(
+        "    #[cfg(not(windows))]",
+        "    let report = out.stderr;",
+        "    #[cfg(windows)]",
+        shaped,
+        ...ctor(),
+      ),
+    ],
+    [
+      "let-else pattern",
+      fn(
+        shaped,
+        "    let Some(report) = pick(out.stderr.clone()) else { todo!() };",
+        ...ctor(),
+      ),
+    ],
+    [
+      "tuple pattern",
+      fn(
+        shaped,
+        "    let (code, report) = (1, out.stderr.clone());",
+        ...ctor(),
+      ),
+    ],
+    [
+      "if let pattern",
+      fn(
+        shaped,
+        "    if let Some(report) = pick(out.stderr.clone()) {",
+        "        return AppError::Git {",
+        "            code: 1,",
+        "            stderr: report,",
+        "        };",
+        "    }",
+        "    todo!()",
+      ),
+    ],
+  ]) {
+    assert.deepEqual(hitsOf(src), [], gap);
+    // Shaped from stderr alone, the same fixture reports, so the row is live.
+    const open = src.replace(/out\.full_failure_text\(\)/g, "out.stderr");
+    assert.ok(hitsOf(open).length > 0, gap);
+  }
+});
+
+test("binding lookup: the verdict-design passes of checks D and G hold", () => {
+  // These rows pin the contract block's verdict-design paragraph: each passes
+  // today, and its twin, one spelling away, reports. A row that starts failing
+  // means the verdict changed, and the block changes with it.
+  const gfn = (...body) =>
+    ["async fn f(branch: &str, repo: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  const dfn = (...body) =>
+    [
+      "fn f(report: String, out: Out, xs: Vec<Out>) -> AppError {",
+      ...body,
+      "}",
+    ].join("\n");
+  const ctor = (value) => [
+    "    AppError::Git {",
+    "        code: 1,",
+    "        stderr: " + value + ",",
+    "    }",
+  ];
+  const G = (src) => {
+    const hits = [];
+    checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const D = (src) => {
+    const hits = [];
+    checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const arms = (first) =>
+    gfn(
+      "    let branch = match pick {",
+      "        true => " + first + ",",
+      "        false => branch.to_string(),",
+      "    };",
+      '    run(&["merge-base", branch, "HEAD"]);',
+    );
+  for (const [label, run, src, twin, twinLines] of [
+    [
+      "G: a resolver call in one match arm",
+      G,
+      arms("branch_first_rev(repo, branch).await"),
+      arms("pick(branch)"),
+      [6],
+    ],
+    [
+      "D: a value that is not a plain identifier",
+      D,
+      dfn("    let report = out.stderr;", ...ctor("report.clone()")),
+      dfn("    let report = out.stderr;", ...ctor("report")),
+      [3],
+    ],
+    [
+      "D: an alias hop that is not a plain identifier",
+      D,
+      dfn("    let report = shape(&out);", ...ctor("report")),
+      dfn("    let report = shape(&out.stderr);", ...ctor("report")),
+      [3],
+    ],
+    [
+      "D: full_failure_text( in one match arm",
+      D,
+      dfn(
+        "    let report = match x {",
+        "        A => out.stderr,",
+        "        B => out.full_failure_text(),",
+        "    };",
+        ...ctor("report"),
+      ),
+      dfn(
+        "    let report = match x {",
+        "        A => out.stderr,",
+        "    };",
+        ...ctor("report"),
+      ),
+      [5],
+    ],
+    [
+      "D: a call's .stderr",
+      D,
+      dfn(...ctor("output().stderr")),
+      dfn(...ctor("out.stderr")),
+      [2],
+    ],
+    [
+      "D: a ?'s .stderr",
+      D,
+      dfn(...ctor("run(x).await?.stderr")),
+      dfn(...ctor("run(x).await.stderr")),
+      [2],
+    ],
+  ]) {
+    assert.deepEqual(run(src), [], label);
+    assert.deepEqual(run(twin), twinLines, label);
+  }
+});
+
+test("binding lookup: its bounds hold as the contract block states them", () => {
+  const gfn = (...body) =>
+    ["async fn f(branch: &str, repo: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  const dfn = (...body) =>
+    [
+      "fn f(report: String, out: Out, xs: Vec<Out>) -> AppError {",
+      ...body,
+      "}",
+    ].join("\n");
+  const G = (src) => {
+    const hits = [];
+    checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const D = (src) => {
+    const hits = [];
+    checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const use = '    run(&["merge-base", branch, "HEAD"]);';
+  const safe = "    let branch = branch_first_rev(repo, branch).await;";
+  const filler = (n) =>
+    Array.from({ length: n }, (_, i) => "    keep(" + i + ");");
+  const ctor = [
+    "    AppError::Git {",
+    "        code: 1,",
+    "        stderr: report,",
+    "    }",
+  ];
+  const block = (kind, second) =>
+    gfn(
+      "    " + kind + " let Some(branch) = pick(xs) {",
+      "        let t = " + second + ";",
+      "    " + use,
+      "    }",
+    );
+  for (const [label, run, src, lines] of [
+    [
+      "a declaration 39 lines above the use is read",
+      G,
+      gfn(safe, ...filler(38), use),
+      [],
+    ],
+    ["one 40 lines above is not", G, gfn(safe, ...filler(39), use), [42]],
+    [
+      "the walk stops at a nested fn line",
+      G,
+      gfn(safe, "    fn inner() {", "        keep(1);", "    }", use),
+      [6],
+    ],
+    [
+      "the text runs over five further lines",
+      G,
+      gfn(
+        "    let branch = pick(",
+        "        a,",
+        "        b,",
+        "        c,",
+        "        d,",
+        "    ).or(branch_first_rev(repo, branch).await);",
+        use,
+      ),
+      [],
+    ],
+    [
+      "but not a sixth",
+      G,
+      gfn(
+        "    let branch = pick(",
+        "        a,",
+        "        b,",
+        "        c,",
+        "        d,",
+        "        e,",
+        "    ).or(branch_first_rev(repo, branch).await);",
+        use,
+      ),
+      [9],
+    ],
+    [
+      "a ; inside a string ends the text",
+      G,
+      gfn(
+        '    let branch = pick("a;",',
+        "        branch_first_rev(repo, branch).await);",
+        use,
+      ),
+      [4],
+    ],
+    [
+      "the rest of the ; line is read (G)",
+      G,
+      gfn(
+        "    let branch = xs[0]; keep(branch_first_rev(repo, x).await);",
+        use,
+      ),
+      [],
+    ],
+    [
+      "the same line without the call reports",
+      G,
+      gfn("    let branch = xs[0]; keep(x);", use),
+      [3],
+    ],
+    [
+      "the rest of the ; line is read (D)",
+      D,
+      dfn(
+        "    let report = out.stderr; keep(out.full_failure_text());",
+        ...ctor,
+      ),
+      [],
+    ],
+    [
+      "the same line without the call reports (D)",
+      D,
+      dfn("    let report = out.stderr; keep(1);", ...ctor),
+      [3],
+    ],
+    [
+      "an if let's block is read",
+      G,
+      block("if", "branch_first_rev(repo, other).await"),
+      [],
+    ],
+    ["the same block without the call reports", G, block("if", "other"), [4]],
+    [
+      "a while let's block is read",
+      G,
+      block("while", "branch_first_rev(repo, other).await"),
+      [],
+    ],
+    [
+      "a second declaration after the use on its line is not read",
+      G,
+      gfn(
+        "    let branch = branch_first_rev(repo, branch).await;" +
+          use.slice(3) +
+          " let branch = xs[0];",
+      ),
+      [],
+    ],
+    [
+      "one before the use on its line leaves no answer",
+      G,
+      gfn(
+        "    let branch = branch_first_rev(repo, branch).await; let branch = xs[0];" +
+          use.slice(3),
+      ),
+      [2],
+    ],
+  ]) {
+    assert.deepEqual(run(src), lines, label);
+  }
+  // `where` receives the declaration's line and the column of its `let`.
+  const where = {};
+  const text = bindingInitializer(["    if let Some(r) = x {"], 0, "r", {
+    patterns: true,
+    before: Infinity,
+    where,
+  });
+  assert.equal(text, "x {");
+  assert.deepEqual(where, { line: 0, col: 7 });
 });
 
 function branchDeleteHits(src, allowlist = [], file = "git/fixture.rs", corpus) {
@@ -7154,14 +7763,17 @@ test("branch-delete check flags update-ref -d on a branch ref", () => {
     assert.equal("failClosed" in h, false);
     assert.match(h.fix, /delete_branch_ref_at/);
   }
-  // Spelled branch refs earn the branch fix; the opaque binding the opaque one.
-  assert.match(hits[0].fix, /a local branch ref delete goes only through/);
-  assert.match(hits[2].fix, /cannot resolve this `update-ref -d` ref/);
-  // `full.as_str()` resolves through `full`'s branch template, past its tail.
-  assert.match(hits[6].fix, /a local branch ref delete goes only through/);
+  // Spelled branch refs earn the branch fix; a variable is opaque, even one
+  // bound to a branch literal or template.
+  for (const i of [0, 1, 3, 4]) {
+    assert.match(hits[i].fix, /a local branch ref delete goes only through/);
+  }
+  for (const i of [2, 5, 6]) {
+    assert.match(hits[i].fix, /cannot resolve this `update-ref -d` ref/);
+  }
 });
 
-test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any case", () => {
+test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any ASCII case", () => {
   // A template's escapes and line continuations cook before format! reads it,
   // and a case-folding disk deletes the loose branch through refs/HEADS/<name>.
   const src = (...body) => ["fn f(n: &str) {", ...body, "}"].join("\n");
@@ -7172,7 +7784,6 @@ test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any case"
     [use(String.raw`&format!("refs/\u{68}eads/{n}")`)],
     ['    run(&["update-ref", "-d", &format!("refs/\\', '        heads/{n}")]);'],
     [use(String.raw`format!("refs/\x68eads/{n}").as_str()`)],
-    [String.raw`    let r = format!("refs/h\x65ads/{n}");`, use("&r")],
     [use('"refs/HEADS/x"')],
     [use('&format!("refs/Heads/{n}")')],
     [use('&format!["refs/heads/{n}"]')],
@@ -7185,12 +7796,14 @@ test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any case"
     assert.match(hits[0].fix, /a local branch ref delete goes only through/, label);
   }
   // A raw template keeps its backslash at run time, so it names no branch; a
-  // continuation keeps a no-break space, so the namespace is not refs/heads/.
+  // continuation keeps a no-break space, so the namespace is not refs/heads/;
+  // only ASCII letters fold, so a long s (U+017F) spells no refs/heads/.
   for (const body of [
     [use(String.raw`&format!(r"refs/\x68eads/{n}")`)],
     [use(String.raw`&format!(r#"refs/\x68eads/{n}"#)`)],
     [use('&format!{"refs/tags/{n}"}')],
     ['    run(&["update-ref", "-d", "refs/\\', `${String.fromCharCode(0xa0)}heads/x"]);`],
+    [use(`"refs/head${String.fromCharCode(0x17f)}/x"`)],
   ]) {
     assert.deepEqual(branchDeleteHits(src(...body)), [], body.join("\n"));
   }
@@ -7200,6 +7813,7 @@ test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any case"
     [use('&format!["refs/tags/{n}"].replace("tags", "heads")')],
     [use('&format!{"refs/tags/{n}"}.to_lowercase()')],
     [use('&format ! ("refs/tags/{n}").replace("tags", "heads")')],
+    [use('&format!("refs/remotes/o/{n}").replace("remotes/o", "heads")')],
     [use(String.raw`&format!("refs/\u{110000}eads/{n}")`)],
     [use(String.raw`"refs/\u{110000}eads/x"`)],
     [use(String.raw`"refs/\u{_}heads/x"`)],
@@ -7207,6 +7821,7 @@ test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any case"
     [use(String.raw`"refs/\u{0000068}eads/x"`)],
     [use(String.raw`"refs/\u{}heads/x"`)],
     [String.raw`    let r = "refs/\u{110000}eads/x";`, use("r")],
+    [String.raw`    let r = format!("refs/h\x65ads/{n}");`, use("&r")],
   ]) {
     const label = body.join("\n");
     const hits = branchDeleteHits(src(...body));
@@ -7262,11 +7877,13 @@ test("branch-delete check finds an update-ref delete in any option order", () =>
   }
 });
 
-test("branch-delete check fails closed on a ref binding it cannot trust", () => {
+test("branch-delete check reads every variable ref as opaque, whatever binds it", () => {
   const fn = (...body) => ["fn f(r: &str, n: &str, xs: &[&str]) {", ...body, "}"].join("\n");
+  // No declaration is resolved: a `let` of a tag, remote or branch literal or
+  // template, one on the use's own line, a mutable, shadowed or block-scoped
+  // binding, a `for`, closure, pattern or match-arm binding, a parameter.
   for (const src of [
     fn('    let r = format!("refs/remotes/o/{n}").replace("remotes/o", "heads");', '    run(&["update-ref", "-d", &r]);'),
-    fn('    run(&["update-ref", "-d", &format!("refs/remotes/o/{n}").replace("remotes/o", "heads")]);'),
     fn('    let mut r = "refs/tags/x".to_string();', '    r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]);'),
     fn('    let mut r = String::from("refs/tags/x");', '    run(&["update-ref", "-d", &r]);'),
     fn('    let q = "refs/tags/x";', '    let r = q;', "    r += n;", '    run(&["update-ref", "-d", r]);'),
@@ -7277,29 +7894,18 @@ test("branch-delete check fails closed on a ref binding it cannot trust", () => 
     fn('    let r = "refs/tags/x";', '    match branch_ref(n) { Some(r) => run(&["update-ref", "-d", r]), None => {} }'),
     fn("    {", '        let r = "refs/tags/x";', "        keep(r);", "    }", '    run(&["update-ref", "-d", r]);'),
     fn('    let r = "-m";', '    run(&["update-ref", "-d", r, "refs/heads/x"]);'),
-    // A string spelling a declaration declares nothing: `r` stays the parameter.
     fn('    let note = r#"let r = "refs/tags/x";"#;', '    run(&["update-ref", "-d", r]);'),
     fn('    let note = r#"', '        let r = "refs/tags/x";', '    "#;', '    run(&["update-ref", "-d", r]);'),
     fn('    let r = "refs/tags/x";', "    for r in xs {", '        let note = r#"let r = "refs/tags/x";"#;', '        run(&["update-ref", "-d", r]);', "    }"),
-    // A shadow on the declaration's own line hides it as one below does.
     fn('    let r = "refs/tags/x"; let r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]);'),
     fn('    let r = "refs/tags/x"; let r = r.replace("tags", "heads");', '    run(&["update-ref", "-d", &r]);'),
     fn('    let r = "refs/tags/x"; xs.iter().for_each(|r| run(&["update-ref", "-d", r]));'),
-  ]) {
-    const hits = branchDeleteHits(src);
-    assert.equal(hits.length, 1, src);
-    assert.equal("failClosed" in hits[0], false, src);
-    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, src);
-  }
-  // Nor does it hide the real declaration above it.
-  const hidden = branchDeleteHits(
+    fn('    run(&["update-ref", "-d", r]); let r = "refs/tags/x";'),
+    fn("    run(&[", '        "update-ref", "-d",', '        r]); let r = "refs/tags/x";'),
+    fn('    let r = "refs/tags/x";', '    for r in xs { run(&["update-ref", "-d", r]); } let r = "refs/tags/y";'),
+    fn("    {", '        let r = "refs/tags/x";', '    } run(&["update-ref", "-d", r]);'),
     fn('    let r = format!("refs/heads/{n}");', '    let note = r#"let r = "refs/tags/x";"#;', '    run(&["update-ref", "-d", &r]);'),
-  );
-  assert.equal(hidden.length, 1);
-  assert.match(hidden[0].fix, /a local branch ref delete goes only through/);
-  // A trusted binding still resolves: comparisons, strings and nested blocks
-  // that close before the use rebind nothing.
-  for (const src of [
+    fn('    let r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]); let r = "refs/tags/x";'),
     fn('    let r = "refs/tags/x";', '    if r == "x" { keep(r); }', '    let s = "r = 1 | r |";', '    run(&["update-ref", "-d", r]);'),
     fn('    let r = "refs/tags/x";', "    {", "        keep(r);", "    }", '    run(&["update-ref", "-d", r]);'),
     fn('    let p = "refs/remotes/o/x".to_string();', '    run(&["update-ref", "-d", p.as_str()]);'),
@@ -7309,12 +7915,19 @@ test("branch-delete check fails closed on a ref binding it cannot trust", () => 
     fn('    let r = format!("refs/remotes/o/{n}");', '    run(&["update-ref", "-d", &r]);'),
     fn('    let note = "let r = 1;"; let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
     fn('    let r = "refs/tags/x"; run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]); xs.iter().for_each(|r| keep(r));'),
+    fn('    let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]); for r in xs { keep(r); }'),
+    fn('    let r = "refs/tags/x"; run(&["update-ref", "-d", r]); let r = "refs/tags/y";'),
+    fn('    let p = "refs/remotes/origin/x";', '    run(&["update-ref", "-d", &p]);'),
   ]) {
-    assert.deepEqual(branchDeleteHits(src), [], src);
+    const hits = branchDeleteHits(src);
+    assert.equal(hits.length, 1, src);
+    assert.equal("failClosed" in hits[0], false, src);
+    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, src);
   }
 });
 
-test("branch-delete check tells a closure parameter from a `||` operator", () => {
+test("branch-delete check reads a ref bound beside closures and `||` as opaque", () => {
   const fn = (ns, between) =>
     [
       "fn f(n: &str, xs: &[&str], a: bool, b: bool, x: bool, y: bool) {",
@@ -7323,8 +7936,8 @@ test("branch-delete check tells a closure parameter from a `||` operator", () =>
       '    run(&["update-ref", "-d", &pin]);',
       "}",
     ].join("\n");
-  // An operator between the `let` and the use leaves the binding readable: a
-  // branch template is still a branch delete, a non-branch one passes.
+  // Whatever sits between the `let` and the use, an operator or a closure
+  // parameter of the same name, the variable is opaque in either namespace.
   for (const between of [
     "    if a || pin.is_empty() || b { return; }",
     "    if x || pin.is_empty() { return; }",
@@ -7351,13 +7964,16 @@ test("branch-delete check tells a closure parameter from a `||` operator", () =>
     "    let c = || pin.len();",
     "    let c = move || pin.len();",
   ]) {
-    assert.deepEqual(branchDeleteHits(fn("gitdesktop", between)), [], between);
-    const hits = branchDeleteHits(fn("heads", between));
-    assert.equal(hits.length, 1, between);
-    assert.match(hits[0].fix, /a local branch ref delete goes only through/, between);
+    for (const ns of ["gitdesktop", "heads"]) {
+      const hits = branchDeleteHits(fn(ns, between));
+      assert.equal(hits.length, 1, between);
+      assert.match(
+        hits[0].fix,
+        /cannot resolve this `update-ref -d` ref/,
+        between,
+      );
+    }
   }
-  // A closure parameter of the same name shadows it, however the bars around
-  // its list are spaced; a single-bar expression reads as one too.
   for (const between of [
     "    xs.iter().for_each(|pin| keep(pin));",
     "    xs.iter().for_each(|a, pin| keep(pin));",
@@ -7378,9 +7994,15 @@ test("branch-delete check tells a closure parameter from a `||` operator", () =>
     "    let g = || |pin: &str| run(pin);",
     "    let g = |(Err(e)|Ok(pin))|keep(pin);",
   ]) {
-    const hits = branchDeleteHits(fn("gitdesktop", between));
-    assert.equal(hits.length, 1, between);
-    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, between);
+    for (const ns of ["gitdesktop", "heads"]) {
+      const hits = branchDeleteHits(fn(ns, between));
+      assert.equal(hits.length, 1, between);
+      assert.match(
+        hits[0].fix,
+        /cannot resolve this `update-ref -d` ref/,
+        between,
+      );
+    }
   }
 });
 
@@ -7404,20 +8026,112 @@ test("branch-delete check passes non-delete and non-branch argv", () => {
   ]) {
     assert.deepEqual(branchDeleteHits(`fn keep() { run(&${argv}); }`), [], argv);
   }
-  const bound = [
-    "fn keep() {",
-    '    let p = "refs/remotes/origin/x";',
-    '    run(&["update-ref", "-d", &p]);',
-    "}",
-  ].join("\n");
-  assert.deepEqual(branchDeleteHits(bound), []);
-  const tail = [
-    "fn keep() {",
-    '    let p = "refs/remotes/o/x".to_string();',
-    '    run(&["update-ref", "-d", p.as_str()]);',
-    "}",
-  ].join("\n");
-  assert.deepEqual(branchDeleteHits(tail), []);
+});
+
+test("branch-delete check: each kind of site its header lists as not seen gives no hit", () => {
+  // These rows pin check M's "Not seen" list: each gives no hit today. A row
+  // that starts reporting means the check now sees it, and the header changes
+  // with it.
+  const fn = (...body) =>
+    ["fn f(n: &str, flag: &str, verb: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  for (const [kind, body] of [
+    ["a delete flag held in a variable", ['    run(&["branch", flag, n]);']],
+    [
+      "a delete flag held in a format!",
+      ['    run(&["branch", &format!("-{flag}"), n]);'],
+    ],
+    ["a branch verb held in a variable", ['    run(&[verb, "-D", n]);']],
+    [
+      "an update-ref verb held in a variable",
+      ['    run(&[verb, "-d", "refs/heads/x"]);'],
+    ],
+    [
+      "update-ref's -d held in a variable",
+      ['    run(&["update-ref", flag, "refs/heads/x"]);'],
+    ],
+    [
+      "a git program element before branch",
+      ['    run(&["git", "branch", "-D", n]);'],
+    ],
+    [
+      "a git program element before update-ref",
+      ['    run(&["git", "update-ref", "-d", "refs/heads/x"]);'],
+    ],
+    [
+      "a cmd /C git argv",
+      ['    run(&["/C", "git", "update-ref", "-d", "refs/heads/x"]);'],
+    ],
+    [
+      "argv assembled across statements",
+      [
+        '    let del = ["-D", n];',
+        '    run(&[&["branch"][..], &del[..]].concat());',
+      ],
+    ],
+    [
+      "argv assembled across functions",
+      ['    run(&[&["branch"][..], &delete_flags(n)[..]].concat());'],
+    ],
+    [
+      "argv grown by .push",
+      [
+        '    let mut a = vec!["branch"];',
+        '    a.push("-D");',
+        "    a.push(n);",
+        "    run(&a);",
+      ],
+    ],
+    [
+      "argv grown by .extend",
+      [
+        '    let mut a = vec!["update-ref"];',
+        '    a.extend(["-d", "refs/heads/x"]);',
+        "    run(&a);",
+      ],
+    ],
+    [
+      "a builder chain",
+      ['    Command::new("git").arg("branch").arg("-D").arg(n);'],
+    ],
+    ["a command inside one string", ['    sh("git branch -D x");']],
+    [
+      "an update-ref --stdin delete instruction",
+      ['    run_input(&["update-ref", "--stdin"], "delete refs/heads/x");'],
+    ],
+    [
+      "an update-ref to the all-zero oid",
+      [
+        '    run(&["update-ref", "refs/heads/x", "0000000000000000000000000000000000000000"]);',
+      ],
+    ],
+    [
+      "a symbolic ref other than HEAD",
+      ['    run(&["update-ref", "-d", "main-worktree/HEAD"]);'],
+    ],
+    ["symbolic-ref -d", ['    run(&["symbolic-ref", "-d", "refs/heads/x"]);']],
+    [
+      "symbolic-ref --delete",
+      ['    run(&["symbolic-ref", "--delete", "refs/heads/x"]);'],
+    ],
+    ["a rename with -m", ['    run(&["branch", "-m", n, "y"]);']],
+    ["a rename with -M", ['    run(&["branch", "-M", n, "y"]);']],
+    ["push . --delete <name>", ['    run(&["push", ".", "--delete", n]);']],
+    ["push . :<name>", ['    run(&["push", ".", &format!(":{n}")]);']],
+    ["push . :refs/heads/x", ['    run(&["push", ".", ":refs/heads/x"]);']],
+    [
+      "a loose ref file removed from disk",
+      ['    std::fs::remove_file(git_dir.join("refs/heads/x"))?;'],
+    ],
+  ]) {
+    assert.deepEqual(branchDeleteHits(fn(...body)), [], kind);
+  }
+  // The same fixture with a delete the check sees reports.
+  assert.equal(
+    branchDeleteHits(fn('    run(&["branch", "-D", n]);')).length,
+    1,
+  );
 });
 
 test("branch-delete check ignores comments and test modules", () => {
@@ -7790,6 +8504,22 @@ test("an unresolvable stderr binding fails closed", () => {
     ["shadowed"],
   );
   assert.match(same[0].fix, /cannot resolve/);
+  // Nor does a declaration after the field on its line answer for it.
+  const later = [
+    "async fn later(out: GitOutput, report: String) -> AppError {",
+    "    let e = AppError::Git { code: out.code, stderr: report }; let report = out.full_failure_text();",
+    "    e",
+    "}",
+  ].join("\n");
+  const after = [];
+  checkStderrOnlyGitError("fixture.rs", later, later.split("\n"), after);
+  assert.deepEqual(
+    after.map((h) => h.fn),
+    ["later"],
+  );
+  assert.match(after[0].fix, /cannot resolve/);
+  // A lookup without the use's column answers nothing.
+  assert.equal(bindingInitializer(['    let r = "x"; use(r);'], 0, "r"), null);
 });
 
 test("a string spelling a stderr binding's declaration declares nothing", () => {
@@ -7880,14 +8610,27 @@ test("a chain of stderr aliases is followed to its shaping", () => {
     "        stderr: report,",
     "    }",
     "}",
+    // Each hop is read before the previous hop's declaration, so a later
+    // redeclaration of `raw` is not the value `report` took.
+    "async fn rebound_hop(out: GitOutput) -> AppError {",
+    "    let raw = out.stderr.clone();",
+    "    let report = raw;",
+    "    let raw = out.full_failure_text();",
+    "    keep(raw);",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
   ].join("\n");
   const hits = [];
   checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
   assert.deepEqual(
     hits.map((h) => h.fn),
-    ["chained_bad"],
+    ["chained_bad", "rebound_hop"],
   );
   assert.match(hits[0].fix, /full_failure_text/);
+  assert.match(hits[1].fix, /report on STDOUT/);
 });
 
 test("a cycle of stderr aliases fails closed", () => {

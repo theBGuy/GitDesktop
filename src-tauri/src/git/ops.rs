@@ -1718,19 +1718,17 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             .to_string(),
     };
 
-    // The target's tip before we touch it, so we can roll back cleanly. Read as the
-    // branch the switch below lands on: the rollback resets `target` to this, so a
-    // same-named tag's commit would discard the target's own work.
-    let target_rev = crate::git::branches::branch_first_rev(repo_path, target_branch).await;
-    let target_tip = run_git(
-        Some(repo_path),
-        &["rev-parse", &target_rev],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
+    // The target's tip before we touch it, for the rollback's `reset --hard`: the branch by
+    // its exact name, never a tag or git's ref search, though two branches whose names
+    // differ only in letter case are beyond what it tells apart. `branch_tip_sha`, not
+    // `exact_branch_tip`, because the read must answer for the spelling `git switch` opens,
+    // a loose ref under another letter case included.
+    let Some(target_tip) = crate::git::branches::branch_tip_sha(repo_path, target_branch).await?
+    else {
+        return Err(AppError::InvalidArgument(format!(
+            "unknown branch: {target_branch}"
+        )));
+    };
 
     // Journal a pending entry AFTER the guards + state capture, BEFORE the first
     // mutation. Best-effort: a journal failure returns None and the op proceeds.
@@ -1761,25 +1759,17 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
     .await;
 
     let result: AppResult<CherryPickRangeResult> = async {
-        // `reset --hard target_tip` in the funnel below is valid ONLY with HEAD on
-        // `target`: on the user's original branch it would rewind THAT branch to the
-        // target's tip. Defensive — the only path into the funnel has already
-        // switched — so any future early exit inherits the guarantee. Both switches run
-        // inside the config-write mutex, so neither HEAD write can land inside a branch
-        // delete's guarded window; the picks, `--skip`, `--abort` and reset stay outside.
-        // The mutex wait is unbounded and the rollback resets `target` to `target_tip`, so
-        // the target is re-read under it, as it was captured, and a moved or deleted one is
-        // refused before the switch; a read that can't run is the error.
-        let (rev, tip) = (target_rev.as_str(), target_tip.as_str());
+        // The funnel's `reset --hard target_tip` is valid only with HEAD on `target`, so it
+        // runs only once `switched`. Both switches hold the config-write mutex, so no HEAD
+        // write lands in a branch delete's guarded window; the picks, `--skip`, `--abort`
+        // and reset don't. The wait is unbounded, so the switch first re-reads the exact
+        // branch ref it lands on, never a tag or git's ref search, and refuses unless it
+        // still reads `target_tip`; a read that can't run is the error.
+        let tip = target_tip.as_str();
         let switched = match with_config_write_lock(repo_path, |_held| async move {
-            let tip_now = run_git_raw(
-                Some(repo_path),
-                &["rev-parse", "--verify", "-q", rev],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
-            if tip_now.code != 0 || tip_now.stdout_lossy().trim() != tip {
-                return Err(AppError::InvalidArgument(format!(
+            let tip_now = crate::git::branches::branch_tip_sha(repo_path, target_branch).await?;
+            if tip_now.as_deref() != Some(tip) {
+                return Err(AppError::Command(format!(
                     "{target_branch} changed while this cherry-pick was waiting to start, so \
                      nothing was picked. Try again."
                 )));
@@ -16462,23 +16452,36 @@ mod tests {
         assert_eq!(head_ref(wt).await, "refs/heads/target");
     }
 
-    /// A target moved or deleted while the switch waits on the config-write mutex is
-    /// refused before the switch, with one sentence for both, so a batch that would fail
-    /// never resets the target to the tip captured before the change.
+    /// How the target changes while the switch waits on the config-write mutex.
+    #[derive(Clone, Copy, PartialEq)]
+    enum TargetChange {
+        Moved,
+        Deleted,
+        /// Moved, with a lightweight tag of its name left at the captured tip.
+        Shadowed,
+    }
+
+    /// A target moved, deleted or moved under a same-named tag at its old tip while the
+    /// switch waits on the config-write mutex is refused before the switch as a command
+    /// failure, journaled under the bare sentence, so a batch that would fail never resets
+    /// the target to the tip captured before the change.
     #[tokio::test]
-    async fn cherry_pick_onto_refuses_a_target_moved_or_deleted_while_waiting_on_the_config_mutex()
-    {
-        for deleted in [false, true] {
-            pick_onto_with_the_target_changed_while_waiting(deleted).await;
+    async fn cherry_pick_onto_refuses_a_target_that_changed_while_waiting_on_the_config_mutex() {
+        for change in [
+            TargetChange::Moved,
+            TargetChange::Deleted,
+            TargetChange::Shadowed,
+        ] {
+            pick_onto_with_the_target_changed_while_waiting(change).await;
         }
     }
 
-    async fn pick_onto_with_the_target_changed_while_waiting(deleted: bool) {
+    async fn pick_onto_with_the_target_changed_while_waiting(change: TargetChange) {
         use crate::git::runner::{with_config_write_lock, CONFIG_WRITE_LOCK_EVENTS};
-        let name = if deleted {
-            "pick-onto-mutex-deleted"
-        } else {
-            "pick-onto-mutex-moved"
+        let name = match change {
+            TargetChange::Moved => "pick-onto-mutex-moved",
+            TargetChange::Deleted => "pick-onto-mutex-deleted",
+            TargetChange::Shadowed => "pick-onto-mutex-shadowed",
         };
         let (dir, repo) = setup_repo(name).await;
         git(&repo, &["branch", "target"]).await;
@@ -16529,7 +16532,10 @@ mod tests {
             })
         });
         waiting_rx.await.expect("the switch reached the mutex");
-        if deleted {
+        if change == TargetChange::Shadowed {
+            git(&repo, &["tag", "target", &old_tip]).await;
+        }
+        if change == TargetChange::Deleted {
             git(&repo, &["update-ref", "-d", "refs/heads/target", &old_tip]).await;
         } else {
             git(
@@ -16552,18 +16558,35 @@ mod tests {
         )
         .await
         .unwrap();
-        let want = if deleted { "" } else { new_tip.as_str() };
+        let want = if change == TargetChange::Deleted {
+            ""
+        } else {
+            new_tip.as_str()
+        };
         assert_eq!(
             target_now.stdout_lossy().trim(),
             want,
             "{name}: the change stays on the target"
         );
+        let refusal = "target changed while this cherry-pick was waiting to start, so nothing \
+            was picked. Try again.";
         assert!(
-            matches!(&result, Err(AppError::InvalidArgument(m)) if m == "target changed while \
-                this cherry-pick was waiting to start, so nothing was picked. Try again."),
+            matches!(&result, Err(AppError::Command(m)) if m == refusal),
             "{name}: {:?}",
             result.as_ref().err()
         );
+        let newest = crate::oplog::git_oplog_list(wt.clone())
+            .await
+            .expect("the journal must be readable")
+            .into_iter()
+            .next()
+            .expect("the pick must be journaled");
+        assert_eq!(
+            (newest.op.as_str(), newest.status.as_str()),
+            ("cherry_pick_onto", "failed"),
+            "{name}"
+        );
+        assert_eq!(newest.error.as_deref(), Some(refusal), "{name}");
         let head_ref = run_git_raw(
             Some(&wt),
             &["symbolic-ref", "-q", "HEAD"],
@@ -21026,13 +21049,87 @@ detached
         git(&repo, &["checkout", "feature"]).await;
 
         let state = AppState::default();
+        let result = cherry_pick_onto(&state, &repo, &[c1, c2], "target", None).await;
         assert!(
-            cherry_pick_onto(&state, &repo, &[c1, c2], "target", None)
-                .await
-                .is_err(),
-            "the conflicting batch fails and rolls back"
+            matches!(&result, Err(AppError::Git { stderr, .. })
+                if stderr.starts_with("The cherry-pick was rolled back")),
+            "the conflicting batch runs and rolls back rather than refusing: {:?}",
+            result.as_ref().err()
         );
         assert_eq!(rev(&repo, "refs/heads/target").await, target_tip);
+        assert_eq!(head_ref(&repo).await, "refs/heads/feature");
+    }
+
+    /// A target spelled `refs/heads/target` is the branch `git switch` lands on for it,
+    /// `refs/heads/refs/heads/target`, so its failed batch rolls THAT branch back to its own
+    /// tip; the plain `target` beside it picks onto `refs/heads/target`.
+    #[tokio::test]
+    async fn cherry_pick_onto_reads_the_branch_each_spelling_switches_to() {
+        let (dir, repo) = setup_repo("pick-onto-full-ref-name").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-q", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "-q", "-b", "other", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "other\n", "other edit").await;
+        let other_tip = rev(&repo, "HEAD").await;
+        git(
+            &repo,
+            &["update-ref", "refs/heads/refs/heads/target", &other_tip],
+        )
+        .await;
+        git(&repo, &["checkout", "-q", "feature"]).await;
+        let state = AppState::default();
+        let hashes = [c1, c2];
+
+        let result = cherry_pick_onto(&state, &repo, &hashes, "refs/heads/target", None).await;
+        assert!(
+            matches!(&result, Err(AppError::Git { stderr, .. })
+                if stderr.starts_with("The cherry-pick was rolled back")),
+            "the conflicting batch rolls back rather than refusing: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(rev(&repo, "refs/heads/refs/heads/target").await, other_tip);
+        assert_eq!(rev(&repo, "refs/heads/target").await, base);
+        assert_eq!(head_ref(&repo).await, "refs/heads/feature");
+
+        let out = cherry_pick_onto(&state, &repo, &hashes, "target", None)
+            .await
+            .expect("the batch applies onto the plain branch");
+        assert_eq!((out.applied, out.skipped), (2, 0));
+        assert_eq!(head_ref(&repo).await, "refs/heads/target");
+        assert_eq!(rev(&repo, "refs/heads/refs/heads/target").await, other_tip);
+    }
+
+    /// A target with no branch of its name is refused before anything is journaled or
+    /// switched, a same-named tag included.
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_a_target_that_is_not_a_branch() {
+        let (dir, repo) = setup_repo("pick-onto-not-a-branch").await;
+        git(&repo, &["tag", "target"]).await;
+        git(&repo, &["checkout", "-q", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+        for name in ["target", "nope"] {
+            let result =
+                cherry_pick_onto(&state, &repo, std::slice::from_ref(&c1), name, None).await;
+            assert!(
+                matches!(&result, Err(AppError::InvalidArgument(m))
+                    if *m == format!("unknown branch: {name}")),
+                "{name}: {:?}",
+                result.as_ref().err()
+            );
+        }
+        assert_eq!(head_ref(&repo).await, "refs/heads/feature");
+        assert_eq!(rev(&repo, "HEAD").await, c1);
+        assert!(crate::oplog::git_oplog_list(repo.clone())
+            .await
+            .expect("the journal must be readable")
+            .is_empty());
     }
 
     /// A local-PR merge merges the head BRANCH, not a same-named tag.

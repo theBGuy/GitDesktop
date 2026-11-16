@@ -17,6 +17,7 @@
 //      `GitOutput::full_failure_text()` is the shaping that carries both halves.
 //      Scoped to `AppError::Git` constructions on purpose: the `Gh`/`Glab`
 //      variants are tuple-shaped and their CLIs do not split a report this way.
+//      A bound value is judged as bindingInitializer's contract states.
 //   E. compare basehead — a forge-sourced ref interpolated into a
 //      `…/compare/<base>...<head>` path. `gh api` expands `{…}` as its own
 //      placeholders and a URL parser truncates at `#`/`?`, so an unvalidated
@@ -31,10 +32,12 @@
 //      rev-taking argv) resolves to a same-named tag first. A branch-first
 //      resolver (`git::branches::branch_first_rev`) or the measured tip sha
 //      (`git::branches::branch_tip_sha`) is the replacement.
+//      A bound ident is judged as bindingInitializer's contract states.
 //   H. merge into a checkout without the ignored-file guard — merge-ort ignores
 //      --no-overwrite-ignore on 3-way merges, so checkout merges check first.
 //   I. test-held update-marker branch names — process-wide root overrides
 //      require holder names no other test uses.
+//      A bound holder name is read as bindingInitializer's contract states.
 //   J. gh exit read as absence — a GitHub read in github/ or forge/github.rs
 //      that turns a non-zero gh exit into "none" (false, an empty list, a
 //      default) answers a rate limit or a network failure with a false claim.
@@ -88,51 +91,46 @@
 //      or in a short cluster such as -dm) on a branch ref skips the in-use
 //      guards and the old-value compare of `git::branches::delete_branch_ref_at`.
 //      git permutes options, so update-ref's ref is its first operand after the
-//      verb, wherever -d sits. Only the exact literal HEAD, without --no-deref,
-//      counts as a branch ref (git deletes the branch HEAD names). An
-//      `update-ref` delete ref the check cannot resolve to a ref outside
-//      refs/heads/ fails too (allowlistable): a non-literal operand that no
-//      trusted `let` resolves, an unknown `-`-led literal before the operand,
-//      a format! with any other method chained on, and a binding it cannot
-//      trust (a `let mut`, a `let` whose block closes before the use, or one a
-//      reassignment, `for`/`let` pattern, closure parameter or match arm of
-//      the same name shadows in between). Declarations and rebinds are both
-//      located on the literal-blanked text, so a string cannot spell either;
-//      a ref literal or format! template is read as Rust cooks it, and
-//      refs/heads/ matches in any letter case. The check fails when it cannot
-//      find the primitive's own delete in git/branches.rs. Allowlist rows are
-//      per function, so a second delete in an allowlisted function is not
-//      reported. A `#[cfg(test)] fn` outside a test module reads as
-//      production (reported, never missed). A name between two bars on its
-//      line (for example `a | r | b`) reads as a closure parameter, so its
-//      binding is opaque (reported), except where the bars are a `||` written
-//      with a token and whitespace on each side or the shape is one of those
-//      under Not seen. The branch scan skips the separate
-//      value of --sort, --format, --points-at, --set-upstream-to and -u
-//      only while every element before it after the
+//      verb, wherever -d sits. The ref is read only when it is a string literal
+//      or an inline format! template at the call, as Rust cooks it, through a
+//      leading & and trailing .as_str(), .as_ref(), .clone(), .to_string() and
+//      .to_owned(), and a literal also through .into() and String::from(…).
+//      refs/heads/ counts in any ASCII letter case, and the exact literal HEAD
+//      without --no-deref counts as a branch ref (git deletes the branch HEAD
+//      names); a template is outside refs/heads/ only when its fixed lead
+//      names a literal refs/<ns>/ namespace. Every other ref fails too
+//      (allowlistable): a variable, field or call, whatever binds it; a
+//      template whose lead names no namespace; a literal or template with an
+//      escape Rust refuses or any other method chained on; an operand after a
+//      `-`-led literal other than --, --no-deref, --create-reflog, --stdin or
+//      a cluster of letters (--deref and -0 refuse, -Q is read past); a missing
+//      operand. The check fails when it cannot find the primitive's own delete
+//      in git/branches.rs. Allowlist rows are per function, so a second delete
+//      in an allowlisted function is not reported. A `#[cfg(test)] fn` outside
+//      a test module reads as production (reported, never missed). The branch
+//      scan skips the separate value of --sort, --format, --points-at,
+//      --set-upstream-to and -u only while every element before it after the
 //      verb is a plain literal, a stuck --x=v, a short cluster not ending in u
 //      or such a skipped pair; from the first non-literal, other bare long
-//      option (--, --verbose or an abbreviation such as --so) or cluster
-//      ending in u on, nothing is skipped, so an unknown option before --sort
-//      makes its value read as a flag (reported), as does every value when the
-//      verb is unresolved.
+//      option (--, --verbose or an abbreviation such as --so) or cluster ending
+//      in u on, nothing is skipped, so an unknown option before --sort makes
+//      its value read as a flag (reported), as does every value when the verb
+//      is unresolved.
 //      Not seen: a delete flag held in a variable or format! (["branch", &flag,
-//      …]); an update-ref verb or -d held in a variable; argv assembled across
-//      functions or grown by .push/.extend (commit.rs swap_inner, which never
-//      deletes); builder chains (Command::new("git").arg(…)); a command spelled
-//      inside one string; update-ref --stdin `delete` instructions (commit.rs
-//      reattach, the one --stdin site, only verifies and updates); an
-//      update-ref <ref> <all-zero oid>, which deletes (measured, git 2.51.1;
-//      the only all-zero value in production is restore_deleted_ref's OLD
-//      value); a symbolic ref other than the literal HEAD
-//      (main-worktree/HEAD) deleted without --no-deref; a binding shadowed by
-//      a macro, or by a closure parameter list or pattern split across lines
-//      (or joined by spaced `||`s, directly or through further lists, to a list
-//      that is split across lines); a struct-pattern field bound without a
-//      space after its colon (`S{x:name}`) in a closure parameter, `let`, `for`
-//      or match arm; a match arm whose `=>` sits on the line after its pattern;
-//      renames (branch -m/-M), push . :refs/heads/x, and removing a loose ref
-//      file from disk.
+//      …]); a branch or update-ref verb, or update-ref's -d, held in a variable
+//      ([verb, "-D", name]); a program element before the verb (["git",
+//      "branch", "-D", name], a cmd /C git … argv); argv assembled across
+//      statements or functions, or grown by .push/.extend (commit.rs
+//      swap_inner, which never deletes); builder chains
+//      (Command::new("git").arg(…)); a command spelled inside one string;
+//      update-ref --stdin `delete` instructions (commit.rs reattach, the one
+//      --stdin site, only verifies and updates); an update-ref <ref> <all-zero
+//      oid>, which deletes (measured, git 2.51.1; the only all-zero value in
+//      production is restore_deleted_ref's OLD value); a symbolic ref other
+//      than the literal HEAD (main-worktree/HEAD) deleted without --no-deref;
+//      symbolic-ref -d/--delete; renames (branch -m/-M); push . with --delete
+//      <name>, :<name> or :refs/heads/x; and removing a loose ref file from
+//      disk.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -507,7 +505,7 @@ const BARE_REV_ALLOWLIST = [
     file: "git/ops.rs",
     fn: "cherry_pick_onto_with_timeouts",
     rationale:
-      "`target_tip` is the sha rev-parsed from branch_first_rev(target_branch) at fn entry, beyond the checker's binding window",
+      "`target_tip` is the tip sha the let-else after the lock and the pre-flight guards, before the picks, binds from branch_tip_sha(repo_path, target_branch), beyond the checker's binding window",
   },
   {
     file: "git/ops.rs",
@@ -904,23 +902,72 @@ export function stderrFieldValue(body) {
   return out.trim();
 }
 
-/** The initializer of the nearest preceding `let <name> = …`, bounded by the
- *  enclosing signature so a same-named binding in another function can't answer.
- *  null when there is none — a parameter, or (unless `patterns`) a pattern's
- *  binding — and when another declaration of the name follows on that line:
- *  a later statement there shadows it and a pattern inside its initializer
- *  does not, so the line names no one value. With `patterns`, a destructuring
- *  `let (a, <name>) = …` or `let Some(<name>) = …` answers too. With `masked`
- *  (the literal-blanked view of `lines`), the `let` is located there, so a
- *  string cannot spell one, and its initializer is read from `lines` at that
- *  offset (null when it does not read there); `readMasked` returns the masked
- *  text of that initializer instead, for a verdict no string may satisfy. */
+/** The binding lookup of checks D and G, and check I's initializer read.
+ *
+ *  It answers with the text after the `=` of the nearest declaration of
+ *  `name` above the use in text order. The walk starts on the use's line
+ *  `fromIdx`, read only before the use's column `before`, so no declaration
+ *  at or after the use answers; it covers that line and the 39 above it and
+ *  stops at the first line FN_RE reads as a `fn` signature, a nested fn's
+ *  included. A declaration is `let <name> =`, `mut` and a type annotation
+ *  allowed; with `patterns` (check G) it is any `let` whose pattern names
+ *  `name` before its `=`, an `if let` or `while let` included. With
+ *  `masked` (the literal-blanked view of `lines`) the declaration is located
+ *  there, so a string cannot spell one, and its text is read from `lines` at
+ *  that offset, or from `masked` with `readMasked`, so no string can satisfy
+ *  a verdict. The text runs from the `=` to the end of the first line that
+ *  holds a `;` (one inside a string included), over at most five further
+ *  lines, never past the use. It is more than the initializer: the rest of
+ *  the `;` line, and for an `if let` or `while let` the first lines of its
+ *  block, are read with it, so a call there counts for a verdict. `where`
+ *  receives the declaration's line and the column of its `let`. The answer is
+ *  null when no declaration is in reach (a parameter, one beyond the window
+ *  or the fn line), when the declaration's line holds a second declaration of
+ *  the name (on the use's own line, in the text before the use), when the
+ *  code line reads no declaration at the masked offset, and when `before` is
+ *  missing or `fromIdx` is past `lines`; checks D, G and I report a null.
+ *
+ *  It is a drift guard for ordinary code, not a scope analysis: it does not
+ *  know Rust's scopes, so a nearer declaration that is not the binding in
+ *  scope at the use is taken for it. Known gaps, each passing where the
+ *  binding in scope would fail: a declaration in an inner block that has
+ *  closed before the use; an `if let` or `while let` binding used after its
+ *  block; a `for`, closure-parameter or match-arm binding that shadows it; a
+ *  `let mut` reassigned before the use; `cfg`-gated alternatives, where the
+ *  one nearer the use is taken; a use inside the name's own initializer,
+ *  which reads that initializer; without `patterns` (check D), a pattern
+ *  binding of the name (a tuple, a let-else, an `if let`), which is no
+ *  declaration, so an outer plain `let` answers past it; and, with
+ *  `patterns`, a struct pattern that renames a field spelled as the name
+ *  (`S { <name>: other, .. }`).
+ *
+ *  By verdict design, not through the lookup: check G passes an initializer
+ *  holding a resolver call (REV_SAFE_INIT_RE) anywhere in it, and check D
+ *  passes an initializer holding `full_failure_text(` anywhere in it and
+ *  judges a value or alias hop that is not a plain identifier by its own text
+ *  alone, passing it unless it holds an identifier followed by `.stderr`
+ *  (`output().stderr` and `run(x).await?.stderr` pass) or calls the
+ *  substituting `failure_text(`.
+ *
+ *  Check I finds the declaration itself (the last `let <name>` before the
+ *  site in the function's masked text, outside nested fns, its `;` before the
+ *  site) and passes only that declaration's lines here, with
+ *  `before: Infinity` (the use follows every line given). That search has
+ *  the gaps above of a closed inner block, a `for`, closure-parameter or
+ *  match-arm binding, a reassigned `let mut` and `cfg`-gated alternatives,
+ *  and reads no pattern binding (a tuple, a let-else, an `if let`), so an
+ *  earlier plain `let` answers past one.
+ *
+ *  scripts/checks.test.mjs pins each known gap and verdict-design pass above
+ *  as a passing row; a row that starts failing means its gap closed, and this
+ *  block changes with it. */
 export function bindingInitializer(
   lines,
   fromIdx,
   name,
-  { patterns, masked, readMasked } = {},
+  { patterns, masked, readMasked, before, where } = {},
 ) {
+  if (before === undefined || lines[fromIdx] === undefined) return null;
   const decl = patterns
     ? new RegExp(
         `\\blet\\s+(?:mut\\s+)?(?=[^=]*?(?<![\\w.:])${name}\\b)[^=]*?=(?!=)\\s*(.*)$`,
@@ -928,28 +975,37 @@ export function bindingInitializer(
     : new RegExp(`\\blet\\s+(?:mut\\s+)?${name}\\s*(?::[^=]*)?=\\s*(.*)$`);
   const view = masked ?? lines;
   const out = readMasked ? masked : lines;
+  const upTo = (rows, j) =>
+    j === fromIdx ? rows[j].slice(0, before) : rows[j];
+  const last = before === Infinity ? lines.length - 1 : fromIdx;
   for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
     if (FN_RE.test(lines[i])) return null;
-    const m = decl.exec(view[i]);
+    const row = upTo(view, i);
+    const m = decl.exec(row);
     if (!m) continue;
-    if (decl.test(view[i].slice(m.index + "let".length))) return null;
+    if (decl.test(row.slice(m.index + "let".length))) return null;
     // The masked capture skips a leading literal's blanks as whitespace, so the
     // initializer is re-read on the code line from the `let` itself.
-    const at = decl.exec(lines[i].slice(m.index));
+    const at = decl.exec(upTo(lines, i).slice(m.index));
     if (at?.index !== 0) return null;
     let init = at[1];
-    let text = out[i].slice(m.index + at[0].length - at[1].length);
-    for (
-      let j = i + 1;
-      !init.includes(";") && j < i + 6 && j < lines.length;
-      j++
-    ) {
-      init += lines[j];
-      text += out[j];
+    let text = upTo(out, i).slice(m.index + at[0].length - at[1].length);
+    for (let j = i + 1; !init.includes(";") && j < i + 6 && j <= last; j++) {
+      init += upTo(lines, j);
+      text += upTo(out, j);
+    }
+    if (where) {
+      where.line = i;
+      where.col = m.index;
     }
     return text;
   }
   return null;
+}
+
+/** The column of offset `at` in `text`, the `before` bindingInitializer takes. */
+function columnAt(text, at) {
+  return at - (text.lastIndexOf("\n", at - 1) + 1);
 }
 
 /** The fix a stderr field value earns, or null when it is correctly shaped.
@@ -958,9 +1014,12 @@ export function bindingInitializer(
  *  stderr; … stderr: report`), because stopping after one hop lands on a value
  *  none of the shaping tests match — which reads as correctly shaped. The
  *  seen-set bounds the walk and makes a mutually-recursive pair fail closed,
- *  like every other step the checker cannot resolve. */
-function stderrValueVerdict(value, lines, masked, ctorIdx) {
+ *  like every other step the checker cannot resolve. Each hop is looked up
+ *  before the previous hop's declaration, the first before the field itself. */
+function stderrValueVerdict(value, lines, masked, fieldIdx, fieldCol) {
   const seen = new Set();
+  let at = fieldIdx;
+  let before = fieldCol;
   for (let expr = value; ; ) {
     if (FULL_FAILURE_TEXT_RE.test(expr)) return null;
     if (SUBSTITUTING_RE.test(expr)) return SUBSTITUTION_FIX;
@@ -968,16 +1027,20 @@ function stderrValueVerdict(value, lines, masked, ctorIdx) {
     if (!BARE_IDENT_RE.test(expr)) return null;
     if (seen.has(expr)) return UNRESOLVED_FIX;
     seen.add(expr);
-    const init = bindingInitializer(lines, ctorIdx, expr, { masked });
+    const where = {};
+    const init = bindingInitializer(lines, at, expr, { masked, before, where });
     if (init === null) return UNRESOLVED_FIX;
     // Judge the WHOLE initializer. The split below truncates at the first `;`,
     // including one inside a string (`format!("a; {}", out.stderr)`), so it is
     // only ever good enough to name the next alias — never to decide a verdict.
     // The passing verdict reads the masked text, so no string can earn it.
-    const shape = bindingInitializer(lines, ctorIdx, expr, {
+    const shape = bindingInitializer(lines, at, expr, {
       masked,
       readMasked: true,
+      before,
     });
+    at = where.line;
+    before = where.col;
     if (FULL_FAILURE_TEXT_RE.test(shape)) return null;
     if (SUBSTITUTING_RE.test(init)) return SUBSTITUTION_FIX;
     if (STDERR_READ_RE.test(init)) return STDERR_ONLY_FIX;
@@ -995,9 +1058,17 @@ export function checkStderrOnlyGitError(file, _src, lines, hits) {
     if (spans.some(([s, e]) => m.index > s && m.index < e)) continue;
     const line = codeSrc.slice(0, m.index).split("\n").length;
     const open = m.index + m[0].length - 1;
-    const value = stderrFieldValue(braceBody(codeSrc, open));
+    const body = braceBody(codeSrc, open);
+    const value = stderrFieldValue(body);
     if (value === null) continue;
-    const fix = stderrValueVerdict(value, code, maskedLines, line - 1);
+    const field = open + 1 + stderrFieldStart(body);
+    const fix = stderrValueVerdict(
+      value,
+      code,
+      maskedLines,
+      codeSrc.slice(0, field).split("\n").length - 1,
+      columnAt(codeSrc, field),
+    );
     if (fix === null) continue;
     const fn = enclosingFn(lines, line - 1);
     hits.push({
@@ -1120,6 +1191,7 @@ export function checkBareBranchRevs(file, _src, lines, hits) {
     const line = codeSrc.slice(0, idx).split("\n").length;
     // Read masked, so a string in or after the initializer cannot make it safe.
     const init = bindingInitializer(code, line - 1, name, {
+      before: columnAt(codeSrc, idx),
       patterns: true,
       masked: maskedLines,
       readMasked: true,
@@ -1185,7 +1257,7 @@ const WORD = /[\p{ID_Continue}]/u;
  *  it — and a lifetime read as an open quote revives the comment after it.
  *  `unterminated` is the offset of a literal or comment that runs off the end
  *  (everything after it is unreadable), or -1. Callers only read the views,
- *  so checks D, F, G, H, I, J, K and L share one lexing of each file. */
+ *  so checks D, F, G, H, I, J, K, L and M share one lexing of each file. */
 let lexed = { text: null, views: null };
 export function lexRust(text) {
   if (lexed.text === text) return lexed.views;
@@ -2585,7 +2657,7 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
         end >= 0 && end < site.index
           ? code.slice(init, end + 1).split("\n")
           : [];
-      branch = bindingInitializer(declaration, 0, branch)
+      branch = bindingInitializer(declaration, 0, branch, { before: Infinity })
         ?.replace(/;\s*$/, "")
         .trim();
     }
@@ -3374,10 +3446,6 @@ const isRefDeleteFlag = (value) =>
 // update-ref options that take no value; -m and a cluster ending in m take the next element.
 const UPDATE_REF_FLAGS = new Set(["--no-deref", "--create-reflog", "--stdin", "-z"]);
 const REF_TAIL_RE = /\.\s*(?:as_str|as_ref|clone|to_string|to_owned)\s*\(\s*\)$/;
-// The `||` operator as rustfmt spaces it inside a line: a token and whitespace
-// on each side. Every other `||` (unspaced, or starting or ending a line, where
-// a closure's split bars can sit) reads as two bars.
-const SPACED_OR_RE = /(?<=\S\s+)\|\|(?=\s+\S)/g;
 
 /** `&x`, `x.as_str()` and their kin name the same ref as `x`. */
 function deleteRefText(text) {
@@ -3406,58 +3474,13 @@ function updateRefOperand(elements, values) {
   return { ref: undefined, noDeref };
 }
 
-/** Whether the nearest `let <name> =` above line `fromIdx` (the one
- *  bindingInitializer reads) is a binding the check cannot trust there: a
- *  `let mut`, a `let` whose block closes before the use, or one a
- *  reassignment, `for` or `let` pattern, closure parameter or match-arm
- *  binding of the same name shadows in between. The declaration and every
- *  rebind are read on the masked lines, so a string cannot spell either. */
-function untrustedBinding(lines, maskedLines, fromIdx, name) {
-  const decl = new RegExp(`\\blet\\s+(mut\\s+)?${name}\\s*(?::[^=]*)?=`);
-  const rebind = new RegExp(
-    [
-      `(?<![\\w.])${name}\\s*(?:[-+*/%^&|]|<<|>>)?=(?!=)`,
-      `\\b(?:for|let)\\b[^=;]*?(?<![\\w.:])${name}\\b`,
-      `(?<![\\w.:])${name}\\b[^;=]*=>`,
-    ].join("|"),
-  );
-  // A closure's parameter bars, read on the line with its operator `||`s blanked.
-  const closureParam = new RegExp(`\\|[^|]*?(?<![\\w.:])${name}\\b[^|]*\\|`);
-  for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
-    if (FN_RE.test(lines[i])) return false;
-    const m = decl.exec(maskedLines[i]);
-    if (m) {
-      if (m[1] !== undefined) return true;
-      let depth = 0;
-      const after = maskedLines[i].slice(m.index + m[0].length);
-      // A rebind or closure parameter later on the declaration's own line
-      // shadows it as one on a later line does.
-      if (
-        rebind.test(after) ||
-        closureParam.test(after.replace(SPACED_OR_RE, "  "))
-      )
-        return true;
-      for (const text of [after, ...maskedLines.slice(i + 1, fromIdx)]) {
-        for (const ch of text) {
-          if (ch === "{") depth++;
-          else if (ch === "}" && --depth < 0) return true;
-        }
-      }
-      return false;
-    }
-    if (rebind.test(maskedLines[i])) return true;
-    if (closureParam.test(maskedLines[i].replace(SPACED_OR_RE, "  ")))
-      return true;
-  }
-  return false;
-}
-
 /** The fix a literal or `format!` ref earns, null for a ref outside
  *  refs/heads/, undefined when `ref` is neither. A literal HEAD deletes the
  *  branch it names unless --no-deref; a template is outside refs/heads/ only
  *  when its fixed lead names a literal namespace. Both read the value as Rust
- *  cooks it, and refs/heads/ in any letter case: a case-folding disk deletes
- *  the loose branch through refs/HEADS/<name> (measured, git 2.51.1, NTFS). */
+ *  cooks it, and refs/heads/ in any ASCII letter case: a case-folding disk
+ *  deletes the loose branch through refs/HEADS/<name> (measured, git 2.51.1,
+ *  NTFS). */
 function spelledRefFix(ref, noDeref) {
   const value = diffArgLiteral(ref);
   if (value !== undefined) {
@@ -3479,28 +3502,11 @@ function spelledRefFix(ref, noDeref) {
 }
 
 /** The fix the ref element of an `update-ref -d` group earns, null when it
- *  names a ref outside refs/heads/. A bare identifier resolves through its
- *  nearest `let` when untrustedBinding passes it and its value is no option;
- *  every other shape, and a missing ref, fails closed. */
-function deleteRefFix(element, codeLines, maskedLines, lineIdx, noDeref) {
+ *  names a ref outside refs/heads/. What it reads is check M's header. */
+function deleteRefFix(element, noDeref) {
   const ref = element === undefined ? "" : deleteRefText(element.text);
   const spelled = spelledRefFix(ref, noDeref);
-  if (spelled !== undefined) return spelled;
-  if (
-    /^[A-Za-z_]\w*$/.test(ref) &&
-    !untrustedBinding(codeLines, maskedLines, lineIdx, ref)
-  ) {
-    const init = bindingInitializer(codeLines, lineIdx, ref, {
-      masked: maskedLines,
-    });
-    const text = init === null ? "" : deleteRefText(init.split(";")[0]);
-    const bound =
-      init === null || diffArgLiteral(text)?.startsWith("-")
-        ? undefined
-        : spelledRefFix(text, noDeref);
-    return bound === undefined ? OPAQUE_DELETE_REF_FIX : bound;
-  }
-  return OPAQUE_DELETE_REF_FIX;
+  return spelled === undefined ? OPAQUE_DELETE_REF_FIX : spelled;
 }
 
 /** Check M over one file. `corpus.primitive` turns true on reading the
@@ -3515,8 +3521,6 @@ export function checkLocalBranchDeletes(
   corpus = undefined,
 ) {
   const { code, masked, unterminated } = lexRust(lines.join("\n"));
-  const codeLines = code.split("\n");
-  const maskedLines = masked.split("\n");
   const lineOf = (at) => code.slice(0, at).split("\n").length;
   const report = (at, fn, fix, failClosed = false) =>
     hits.push({
@@ -3605,17 +3609,7 @@ export function checkLocalBranchDeletes(
         elements.slice(verb + 1),
         values.slice(verb + 1),
       );
-      const refAt =
-        ref === undefined
-          ? at
-          : at + 1 + ref.at + ref.text.length - ref.text.trimStart().length;
-      const fix = deleteRefFix(
-        ref,
-        codeLines,
-        maskedLines,
-        lineOf(refAt) - 1,
-        noDeref,
-      );
+      const fix = deleteRefFix(ref, noDeref);
       if (fix) report(at, name, fix);
     }
   }
