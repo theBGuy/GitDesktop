@@ -203,12 +203,13 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
 /// labels a file the guard dialog calls blocked. A name other than `pre-push`, no such
 /// file (a hooks path through a file included), a directory or symlink in its place,
 /// another hooks dir, a redirected one or a file without the marker is `false`; a read
-/// that fails on what exists, or a failed common-dir read, is the `Err`.
+/// that fails on what exists, or a failed common-dir read, is the `Err`. The entry is
+/// read itself, never followed, so a symlink is `false` whatever it points at.
 async fn hook_managed_state(repo_path: &str, hooks_dir: &Path, name: &str) -> AppResult<bool> {
     if name != "pre-push" {
         return Ok(false);
     }
-    match std::fs::metadata(hooks_dir.join(name)) {
+    match std::fs::symlink_metadata(hooks_dir.join(name)) {
         Ok(meta) if meta.is_file() => {}
         Ok(_) => return Ok(false),
         Err(e)
@@ -2151,6 +2152,74 @@ mod tests {
         std::fs::write(&not_a_dir, "plain\n").unwrap();
         assert!(matches!(
             hook_managed_state(&repo, &not_a_dir, "pre-push").await,
+            Ok(false)
+        ));
+    }
+
+    /// A `pre-push` symlink is no managed hook, whatever it points at: a loop, which a
+    /// followed read fails on, and a regular file carrying the managed marker. Unix only,
+    /// since creating a symlink on Windows needs a privilege.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_managed_state_reads_a_pre_push_symlink_as_unmanaged() {
+        let (_g, base, repo, _remote) = hook_repo("managed-symlink").await;
+        let file = managed_file(&repo, "pre-push");
+        let hooks_dir = file.parent().unwrap().to_path_buf();
+        assert_status(&install(&repo).await, Installed, None, None);
+        let marked = base.join("marked-pre-push");
+        std::fs::copy(&file, &marked).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&marked, &file).unwrap();
+        assert_eq!(
+            hook_file(&marked).unwrap(),
+            HookFile::Ours,
+            "fixture sanity"
+        );
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&file, &file).unwrap();
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
+    }
+
+    /// The Windows twin of the test above, with file symlinks: it returns, with the reason
+    /// printed, where a link cannot be created (for example, a privilege this process
+    /// lacks).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn hook_managed_state_reads_a_pre_push_symlink_as_unmanaged_on_windows() {
+        let (_g, base, repo, _remote) = hook_repo("managed-symlink-win").await;
+        let file = managed_file(&repo, "pre-push");
+        let hooks_dir = file.parent().unwrap().to_path_buf();
+        assert_status(&install(&repo).await, Installed, None, None);
+        let marked = base.join("marked-pre-push");
+        std::fs::copy(&file, &marked).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        if try_symlink_file(&marked, &file).is_none() {
+            return;
+        }
+        assert_eq!(
+            hook_file(&marked).unwrap(),
+            HookFile::Ours,
+            "fixture sanity"
+        );
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
+        std::fs::remove_file(&file).unwrap();
+        try_symlink_file(&file, &file).expect("a second link is made where the first was");
+        assert!(
+            std::fs::metadata(&file).is_err(),
+            "fixture sanity: a followed read fails on the loop"
+        );
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
             Ok(false)
         ));
     }

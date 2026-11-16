@@ -100,8 +100,19 @@
 //      the primitive's own delete in git/branches.rs. Allowlist rows are per
 //      function, so a second delete in an allowlisted function is not
 //      reported. A `#[cfg(test)] fn` outside a test module reads as
-//      production (reported, never missed), and the branch scan reads option
-//      values as flags (["branch", "--sort", "-committerdate"] is reported).
+//      production (reported, never missed). A name between two bars on its
+//      line (for example `a | r | b`) reads as a closure parameter, so its
+//      binding is opaque (reported), except where the bars are a `||` written
+//      with a token and whitespace on each side or the shape is one of those
+//      under Not seen. The branch scan skips the separate
+//      value of --sort, --format, --points-at, --set-upstream-to and -u
+//      only while every element before it after the
+//      verb is a plain literal, a stuck --x=v, a short cluster not ending in u
+//      or such a skipped pair; from the first non-literal, other bare long
+//      option (--, --verbose or an abbreviation such as --so) or cluster
+//      ending in u on, nothing is skipped, so an unknown option before --sort
+//      makes its value read as a flag (reported), as does every value when the
+//      verb is unresolved.
 //      Not seen: a delete flag held in a variable or format! (["branch", &flag,
 //      …]); an update-ref verb or -d held in a variable; argv assembled across
 //      functions or grown by .push/.extend (commit.rs swap_inner, which never
@@ -112,7 +123,12 @@
 //      the only all-zero value in production is restore_deleted_ref's OLD
 //      value); a symbolic ref other than the literal HEAD
 //      (main-worktree/HEAD) deleted without --no-deref; a binding shadowed by
-//      a macro, or by a closure parameter list or pattern split across lines;
+//      a macro, or by a closure parameter list or pattern split across lines
+//      (or joined by spaced `||`s, directly or through further lists, to a list
+//      that is split across lines); a struct-pattern field bound without a
+//      space after its colon (`S{x:name}`) in a closure parameter, `let`, `for`
+//      or match arm; a match arm whose `=>` sits on the line after its pattern;
+//      a rebinding on the same line as the `let` it shadows;
 //      renames (branch -m/-M), push . :refs/heads/x, and removing a loose ref
 //      file from disk.
 //
@@ -3260,6 +3276,38 @@ const isBranchDeleteFlag = (value) =>
   value !== undefined &&
   ((value.length >= 3 && "--delete".startsWith(value)) ||
     BRANCH_DELETE_CLUSTER_RE.test(value));
+// git branch options whose value is required: given as its own element, git
+// reads that element as the value, never as a flag (measured, git 2.51.1).
+const BRANCH_VALUE_OPTIONS = new Set([
+  "--sort",
+  "--format",
+  "--points-at",
+  "--set-upstream-to",
+  "-u",
+]);
+// An element git may read as taking the next one as its value: a non-literal,
+// a bare long option (abbreviations included) or a cluster ending in u. `--`
+// takes no value: everything after it is positional, so skipping stops there.
+const mayTakeBranchValue = (value) =>
+  value === undefined ||
+  (value.startsWith("--") && !value.includes("=")) ||
+  /^-[A-Za-z]*u$/.test(value);
+/** Whether a git branch argv tail holds a delete flag. A value option's
+ *  separate value is skipped only while `trusted`: the first element that may
+ *  take a value ends skipping for the rest of the tail, since git may then read
+ *  a value option as another option's value. */
+function hasBranchDeleteFlag(flags, trusted) {
+  for (let k = 0; k < flags.length; k++) {
+    const value = flags[k];
+    if (trusted && BRANCH_VALUE_OPTIONS.has(value)) {
+      k++;
+      continue;
+    }
+    if (isBranchDeleteFlag(value)) return true;
+    if (mayTakeBranchValue(value)) trusted = false;
+  }
+  return false;
+}
 // update-ref's delete flag: -d, alone or in a short cluster (-dm).
 const SHORT_CLUSTER_RE = /^-[A-Za-z]+$/;
 const isRefDeleteFlag = (value) =>
@@ -3268,6 +3316,10 @@ const isRefDeleteFlag = (value) =>
 const UPDATE_REF_FLAGS = new Set(["--no-deref", "--create-reflog", "--stdin", "-z"]);
 const REF_TAIL_RE = /\.\s*(?:as_str|as_ref|clone|to_string|to_owned)\s*\(\s*\)$/;
 const FORMAT_TEMPLATE_RE = /^format!\s*\(\s*r?#*"((?:[^"\\]|\\.)*)"/;
+// The `||` operator as rustfmt spaces it inside a line: a token and whitespace
+// on each side. Every other `||` (unspaced, or starting or ending a line, where
+// a closure's split bars can sit) reads as two bars.
+const SPACED_OR_RE = /(?<=\S\s+)\|\|(?=\s+\S)/g;
 
 /** `&x`, `x.as_str()` and their kin name the same ref as `x`. */
 function deleteRefText(text) {
@@ -3308,10 +3360,11 @@ function untrustedBinding(lines, maskedLines, fromIdx, name) {
     [
       `(?<![\\w.])${name}\\s*(?:[-+*/%^&|]|<<|>>)?=(?!=)`,
       `\\b(?:for|let)\\b[^=;]*?(?<![\\w.:])${name}\\b`,
-      `\\|[^|]*?(?<![\\w.:])${name}\\b[^|]*\\|`,
       `(?<![\\w.:])${name}\\b[^;=]*=>`,
     ].join("|"),
   );
+  // A closure's parameter bars, read on the line with its operator `||`s blanked.
+  const closureParam = new RegExp(`\\|[^|]*?(?<![\\w.:])${name}\\b[^|]*\\|`);
   for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
     if (FN_RE.test(lines[i])) return false;
     const m = decl.exec(lines[i]);
@@ -3328,6 +3381,8 @@ function untrustedBinding(lines, maskedLines, fromIdx, name) {
       return false;
     }
     if (rebind.test(maskedLines[i])) return true;
+    if (closureParam.test(maskedLines[i].replace(SPACED_OR_RE, "  ")))
+      return true;
   }
   return false;
 }
@@ -3455,7 +3510,8 @@ export function checkLocalBranchDeletes(
       if (GIT_VALUE_OPTIONS.has(value)) k++;
     }
     const flags = verb === undefined ? values : values.slice(verb + 1);
-    const branchFlag = flags.some(isBranchDeleteFlag);
+    // Without a resolved verb, git branch's options are not known to apply: no skip.
+    const branchFlag = hasBranchDeleteFlag(flags, verb !== undefined);
     const refDelete = flags.some(isRefDeleteFlag);
     if (verb === undefined) {
       if (

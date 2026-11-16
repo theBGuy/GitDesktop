@@ -6974,6 +6974,121 @@ test("branch-delete check flags branch delete flags in production code", () => {
   }
 });
 
+test("branch-delete check reads a required option value as a value, never a flag", () => {
+  const hitsOf = (argv) => branchDeleteHits(`fn f(name: &str, key: &str) { run(&${argv}); }`);
+  // git takes each `-`-led element here as the option's value and deletes nothing.
+  for (const argv of [
+    '["branch", "--sort", "-committerdate"]',
+    '["branch", "--sort", "-creatordate"]',
+    '["branch", "--sort", "-authordate"]',
+    '["branch", "--sort", "-taggerdate"]',
+    '["branch", "--format", "-d"]',
+    '["branch", "--points-at", "-D"]',
+    '["branch", "--set-upstream-to", "-d", name]',
+    '["branch", "-u", "-D", name]',
+    '["branch", "--sort", key]',
+  ]) {
+    assert.deepEqual(hitsOf(argv), [], argv);
+  }
+  // Each of these is reported: the flag sits outside the value, the value is stuck
+  // to its option, the option's value is optional, or a value option is itself
+  // another's value. An abbreviated option is not known, so its value is read.
+  for (const argv of [
+    '["branch", "--sort", "-committerdate", "-D", name]',
+    '["branch", "-D", "--sort", "-committerdate", name]',
+    '["branch", "--sort=-committerdate", "-d", name]',
+    '["branch", "--sort", key, "-D", name]',
+    '["branch", "--sort", "--sort", "-d", name]',
+    '["branch", "--format", "--points-at", "-d", name]',
+    '["branch", "--color", "-d", name]',
+    '["branch", "--column", "-d", name]',
+    '["branch", "--abbrev", "-d", name]',
+    '["branch", "--so", "-committerdate"]',
+  ]) {
+    const hits = hitsOf(argv);
+    assert.deepEqual(hits.map((h) => [h.fn, h.line]), [["f", 1]], argv);
+    assert.match(hits[0].fix, /a local branch ref delete goes only through/, argv);
+  }
+});
+
+test("branch-delete check skips an option value only where it can trust the position", () => {
+  const U = undefined;
+  const hitsOf = (elems) =>
+    branchDeleteHits(
+      `fn f(name: &str) { run(&[${elems.map((v) => (v === U ? "name" : JSON.stringify(v))).join(", ")}]); }`,
+    );
+  // [reported, the elements after "branch"]; U is a non-literal.
+  const rows = [
+    // Only known elements precede the value option, so its value is skipped.
+    [false, ["--sort", "-committerdate"]],
+    [false, ["--sort", "-creatordate"]],
+    [false, ["--format", "-d"]],
+    [false, ["--points-at", "-D"]],
+    [false, ["--set-upstream-to", "-d", U]],
+    [false, ["-u", "-D", U]],
+    // Pins only the over-broad direction: a non-literal is never a flag.
+    [false, ["--sort", U]],
+    [false, ["--sort", "-committerdate", "--format", "-D", U]],
+    [false, ["-a", "--sort", "-committerdate"]],
+    [false, ["--sort", "-committerdate", "--format", U]],
+    [false, ["--format=%(refname)", "--sort", "-committerdate"]],
+    [false, ["-t", "--sort", "-D", U]],
+    [false, ["-u", "y", "--sort", "-D", U]],
+    // A delete flag outside any value.
+    [true, ["--sort", "-committerdate", "-D", U]],
+    [true, ["-D", "--sort", "-committerdate", U]],
+    [true, ["--sort=-committerdate", "-d", U]],
+    [true, ["--sort", U, "-D", U]],
+    [true, ["--sort", "--sort", "-d", U]],
+    [true, ["--format", "--points-at", "-d", U]],
+    [true, ["--color", "-d", U]],
+    [true, ["--column", "-d", U]],
+    [true, ["--abbrev", "-d", U]],
+    // git reads the value option as an earlier element's value and deletes x.
+    [true, ["--so", "--sort", "-D", U]],
+    [true, ["--form", "-u", "-D", U]],
+    [true, [U, "-u", "-D", U]],
+    [true, ["-fu", "--sort", "-D", "--no-set-upstream-to", U]],
+    [true, ["-vu", "-u", "-D", "--no-set-upstream-to", U]],
+    [true, ["--force", "--sort", "--sort", "-D", U]],
+    [true, ["--verbose", "--sort", "--sort", "-D", U]],
+    [true, [U, "--sort", "--sort", "-D", U]],
+    // Reported, though git keeps x: git reads the delete-shaped element as an
+    // option's value.
+    [true, ["--so", "-committerdate"]],
+    [true, ["-fu", "-u", "-u", "-D", "--no-set-upstream-to", U]],
+    // After an element that may take a value, nothing is skipped.
+    [true, ["--verbose", "--sort", "-committerdate"]],
+    [true, ["--", "--sort", "-D", U]],
+  ];
+  for (const [reported, tail] of rows) {
+    const label = JSON.stringify(["branch", ...tail]);
+    const hits = hitsOf(["branch", ...tail]);
+    assert.equal(hits.length, reported ? 1 : 0, label);
+    if (reported) {
+      assert.equal("failClosed" in hits[0], false, label);
+      assert.match(
+        hits[0].fix,
+        /a local branch ref delete goes only through/,
+        label,
+      );
+    }
+  }
+  // Without a resolved verb nothing is skipped either, and the hit fails closed.
+  for (const elems of [
+    [U, "branch", "--so", "--sort", "-D", U],
+    [U, "branch", "--sort", "-D", U],
+    ["-C", "branch", U, "--sort", "-D", U],
+    ["-C", "branch", "--sort", "-D", U],
+  ]) {
+    const hits = hitsOf(elems);
+    const label = JSON.stringify(elems);
+    assert.equal(hits.length, 1, label);
+    assert.equal(hits[0].failClosed, true, label);
+    assert.match(hits[0].fix, /cannot resolve the verb/, label);
+  }
+});
+
 test("branch-delete check flags update-ref -d on a branch ref", () => {
   const src = [
     "async fn deletes(repo: &str, n: &str, tip: &str, msg: &str) {",
@@ -7082,6 +7197,76 @@ test("branch-delete check fails closed on a ref binding it cannot trust", () => 
     fn('    let p = "refs/remotes/o/x".to_string();', '    run(&["update-ref", "-d", p.as_str()]);'),
   ]) {
     assert.deepEqual(branchDeleteHits(src), [], src);
+  }
+});
+
+test("branch-delete check tells a closure parameter from a `||` operator", () => {
+  const fn = (ns, between) =>
+    [
+      "fn f(n: &str, xs: &[&str], a: bool, b: bool, x: bool, y: bool) {",
+      `    let pin = format!("refs/${ns}/x/{n}");`,
+      between,
+      '    run(&["update-ref", "-d", &pin]);',
+      "}",
+    ].join("\n");
+  // An operator between the `let` and the use leaves the binding readable: a
+  // branch template is still a branch delete, a non-branch one passes.
+  for (const between of [
+    "    if a || pin.is_empty() || b { return; }",
+    "    if x || pin.is_empty() { return; }",
+    "    if pin.is_empty() || y { return; }",
+    "    let m = a || pin.len() | 1;",
+    "    let m = 1 | pin.len() || b;",
+    // rustfmt's wrapped condition: the operator starts a continuation line.
+    [
+      "    if a",
+      "        || pin.is_empty()",
+      "        || b",
+      "    {",
+      "        return;",
+      "    }",
+    ].join("\n"),
+    [
+      "    if a || pin.is_empty() ||",
+      "        b",
+      "    {",
+      "        return;",
+      "    }",
+    ].join("\n"),
+    // A zero-parameter closure binds nothing.
+    "    let c = || pin.len();",
+    "    let c = move || pin.len();",
+  ]) {
+    assert.deepEqual(branchDeleteHits(fn("gitdesktop", between)), [], between);
+    const hits = branchDeleteHits(fn("heads", between));
+    assert.equal(hits.length, 1, between);
+    assert.match(hits[0].fix, /a local branch ref delete goes only through/, between);
+  }
+  // A closure parameter of the same name shadows it, however the bars around
+  // its list are spaced; a single-bar expression reads as one too.
+  for (const between of [
+    "    xs.iter().for_each(|pin| keep(pin));",
+    "    xs.iter().for_each(|a, pin| keep(pin));",
+    "    let g = move |pin: &str| keep(pin);",
+    "    xs.iter().for_each(|(pin, _)| keep(pin));",
+    "    let g = |pin| a || b;",
+    "    let g = a | pin | b;",
+    "    let g = |pin: &'static str||| run(pin);",
+    "    let g = |_x: u8||pin: &str| run(pin);",
+    "    let g = |pin: &'static str||x: u8| run(pin);",
+    "    let g = |pin: &'static str|| x: u8| run(pin);",
+    "    let g = |pin: u8||| true;",
+    "    let g = |pin||x| x;",
+    "    let g = |pin: &'static str| || run(pin);",
+    "    let g = |pin: &'static str || x: u8| run(pin);",
+    "    let g = |pin: &'static str ||\n        x: u8| run(pin);",
+    "    let g = |_a: u8\n        || pin: &str| run(pin);",
+    "    let g = || |pin: &str| run(pin);",
+    "    let g = |(Err(e)|Ok(pin))|keep(pin);",
+  ]) {
+    const hits = branchDeleteHits(fn("gitdesktop", between));
+    assert.equal(hits.length, 1, between);
+    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, between);
   }
 });
 

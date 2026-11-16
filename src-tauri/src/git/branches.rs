@@ -953,7 +953,9 @@ pub(crate) fn eq_ignoring_case(a: &str, b: &str) -> bool {
 /// its loose read (`show-ref --verify`). A failed spawn of either read counts as holding;
 /// a `show-ref` that exits non-zero reads no ref. Every compare that decides whether a
 /// ref may be deleted or moved without its checkout uses this rule, never a plain
-/// equality; a write through a holder's checkout also needs its HEAD at the pinned tip.
+/// equality; a write through a holder's checkout also needs its HEAD at the branch's tip
+/// read under that checkout's hold, and a spelling [`writes_through_another_spelling`]
+/// accepts.
 pub(crate) async fn holds_branch(repo_path: &str, holder: &str, target: &str) -> bool {
     if holder == target {
         return true;
@@ -988,12 +990,13 @@ fn holder_spelling_holds(
 }
 
 /// The refusal for a checkout, this one included, whose rebase or bisect is working on
-/// `branch`, or whose `rebase --update-refs` will move it. Such a checkout reads as
-/// detached in `worktree list`, and `update-ref` moves the ref under it where
-/// `branch -f` refuses, so every admin dir under the common dir is read the way git's
+/// `branch`, or whose `rebase --update-refs` will move it. Such a checkout usually reads
+/// as detached in `worktree list` (a bisect before its first good commit, or started with
+/// `--no-checkout`, still lists on the branch), and `update-ref` moves the ref under it
+/// where `branch -f` refuses, so every admin dir under the common dir is read the way git's
 /// own checked-out test reads them. Fails closed: a marker that exists but can't be read
 /// is an `Err`. `verb` ends the sentence ("before {verb} {branch}.").
-async fn branch_operation_refusal(
+pub(crate) async fn branch_operation_refusal(
     repo_path: &str,
     branch: &str,
     verb: &str,
@@ -3034,17 +3037,42 @@ async fn commit_oid(repo_path: &str, rev: &str) -> Option<String> {
     (out.code == 0 && !oid.is_empty()).then_some(oid)
 }
 
-/// Whether the checkout at `checkout` has its HEAD at the commit `tip`; an unborn or
-/// unresolvable HEAD is `false`, a failed spawn the `Err`. A holder arm merges into that
-/// HEAD, so it acts only when HEAD is the pinned tip of the branch it was asked to move.
-pub(crate) async fn head_at_tip(checkout: &str, tip: &str) -> AppResult<bool> {
+/// The commit HEAD resolves to in the checkout at `checkout`; `None` for an unborn or
+/// unresolvable HEAD, a failed spawn the `Err`. A holder arm merges into that HEAD, so it
+/// acts only when this is the tip of the branch it was asked to move, read under its hold.
+pub(crate) async fn head_commit(checkout: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
         Some(checkout),
         &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(out.code == 0 && out.stdout_lossy().trim() == tip)
+    let oid = out.stdout_lossy().trim().to_string();
+    Ok((out.code == 0 && !oid.is_empty()).then_some(oid))
+}
+
+/// Whether a write through the HEAD of a checkout on `now`, which holds the stored
+/// `branch`, must be refused. A write there goes to `now`'s ref file, so a different leaf
+/// (compared byte for byte) renames or twins `branch`, while a folder-only difference
+/// writes the stored leaf in place; a HEAD that resolves to no commit (`head_resolves`
+/// false) under any other spelling is refused too, since git can't read it there.
+pub(crate) fn writes_through_another_spelling(
+    now: &str,
+    branch: &str,
+    head_resolves: bool,
+) -> bool {
+    let leaf = |name: &str| name.rsplit('/').next().map(str::to_owned);
+    leaf(now) != leaf(branch) || (!head_resolves && now != branch)
+}
+
+/// The refusal for a checkout that [`writes_through_another_spelling`] stops: a retry
+/// refuses alike until that checkout names the branch exactly.
+pub(crate) fn other_spelling_message(holder: &str, now: &str, branch: &str) -> String {
+    format!(
+        "The checkout at {holder} is on {now}, a different capitalization of {branch}, so \
+         nothing was updated there. Check out {branch} by its exact name there, then try \
+         again. {branch} is unchanged."
+    )
 }
 
 /// The in-place arm's outcome, read from what the merge did rather than a pre-probe:
@@ -3116,6 +3144,14 @@ pub(crate) async fn update_branch_from(
         Some(current) => holds_branch(repo_path, current, branch).await,
         None => false,
     };
+    if let Some(current) = current.as_deref().filter(|_| in_place) {
+        // HEAD resolves: an unborn one was refused above, under this hold.
+        if writes_through_another_spelling(current, branch, true) {
+            return Err(AppError::Command(other_spelling_message(
+                repo_path, current, branch,
+            )));
+        }
+    }
     if in_place {
         let already_unmerged = crate::git::ops::unmerged_paths(repo_path).await;
         // A fetch can't change git's own refusal verdict, so a blocked merge skips the
@@ -3169,7 +3205,7 @@ pub(crate) async fn update_branch_from(
         )));
     }
 
-    // Read under THIS hold: the holder and diverged arms below pin it too.
+    // Read under THIS hold: the diverged arm below pins it too.
     let Some(branch_tip) = branch_tip_sha(repo_path, branch).await? else {
         return Err(AppError::InvalidArgument(format!(
             "unknown branch: {branch}"
@@ -3196,8 +3232,9 @@ pub(crate) async fn update_branch_from(
     .await?;
     let fast_forward = ff.code == 0;
 
-    // Both ends are pinned under THIS hold, because the holder and diverged arms below
-    // release it: either ref can move meanwhile.
+    // Pinned under THIS hold, because the holder and diverged arms below release it: the
+    // base for both, the branch's tip for the diverged arm, which a holder re-reads under
+    // its own hold.
     let base_out = run_git_raw(
         Some(repo_path),
         &[
@@ -3255,18 +3292,16 @@ pub(crate) async fn update_branch_from(
         let marker = crate::git::update_marker::UpdateMarker::create_for(&tmp, branch)?;
         // No task takes two locks of one domain: release this checkout's first.
         drop(guard);
-        let result = update_in_holder(
-            state,
-            &holder,
-            branch,
-            base,
-            &pins.base_sha,
-            &pins.branch_tip,
-            merge,
-        )
-        .await;
+        let result = update_in_holder(state, &holder, branch, base, &pins.base_sha, merge).await;
         settle_marker(Some(marker), &tmp.to_string_lossy());
         return result;
+    }
+
+    // A rebase or bisect working on `branch` usually lists its checkout as detached, so no
+    // holder took it above. git's own refusal in either bare arm is keyed on spelling, so
+    // an operation recorded on a case variant would let the ref move under it.
+    if let Some(refusal) = branch_operation_refusal(repo_path, branch, "updating").await? {
+        return Err(AppError::Command(refusal));
     }
 
     // Both bare arms below write the ref by `branch`'s spelling: for a case twin where refs
@@ -3280,8 +3315,9 @@ pub(crate) async fn update_branch_from(
 
     // `fetch .` refuses a branch checked out under its own spelling, so it runs only for
     // an UNHELD one: the current branch took the in-place arm, every held one the holder
-    // arm, and a twin was refused above. Its SOURCE resolves tag-first like any rev; the
-    // destination is spelled in full so it can only ever name the branch.
+    // arm, and a twin was refused above where refs can alias. Its SOURCE resolves
+    // tag-first like any rev; the destination is spelled in full so it can only ever name
+    // the branch.
     if fast_forward {
         run_git(
             Some(repo_path),
@@ -3367,15 +3403,15 @@ enum HolderMerge {
 ///
 /// The merge takes `base_sha`, the base PINNED under the first hold, so a base that
 /// moved after the pin cannot change what lands, and runs only while the holder's HEAD
-/// is `branch_tip`, the branch's tip pinned there. A branch that already contains the pin
-/// by the time the hold is taken answers `"up-to-date"` without merging.
+/// is the branch's tip read under the holder's own hold, which may be past the first
+/// read's. A branch that already contains the pin by the time the hold is taken answers
+/// `"up-to-date"` without merging.
 async fn update_in_holder(
     state: &AppState,
     holder: &str,
     branch: &str,
     base: &str,
     base_sha: &str,
-    branch_tip: &str,
     merge: HolderMerge,
 ) -> AppResult<UpdateBranchOutcome> {
     validate_branch_name(branch)?;
@@ -3393,13 +3429,32 @@ async fn update_in_holder(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a branch update").await?;
 
     // Re-checked under the hold, in order: the holder was found before it was taken.
-    // Everything below acts on the holder's HEAD, never on `branch`'s spelling, so that
-    // HEAD must be the pinned tip: an unborn one would take the merge as its first commit.
-    let still = match current_branch_name(holder).await? {
-        Some(now) => holds_branch(holder, &now, branch).await,
+    // Everything below acts on the holder's HEAD, never on `branch`'s spelling, so the
+    // checkout must still hold the branch under a spelling a write there keeps, and HEAD
+    // must be the branch's tip as read under this hold. In the merge arm a commit made
+    // there since the first read is merged into (the fast-forward arm fails on it), and
+    // an unborn HEAD, which would take the merge as its first commit, is refused.
+    let now = current_branch_name(holder).await?;
+    let still = match now.as_deref() {
+        Some(now) => holds_branch(holder, now, branch).await,
         None => false,
     };
-    if !still || !head_at_tip(holder, branch_tip).await? {
+    let head = if still {
+        head_commit(holder).await?
+    } else {
+        None
+    };
+    if let Some(now) = now.as_deref().filter(|_| still) {
+        if writes_through_another_spelling(now, branch, head.is_some()) {
+            let message = other_spelling_message(holder, now, branch);
+            return Err(branch_held("moved", holder, branch, message));
+        }
+    }
+    let at_tip = match head.as_deref() {
+        Some(head) => branch_tip_sha(holder, branch).await?.as_deref() == Some(head),
+        None => false,
+    };
+    if !at_tip {
         return Err(branch_held(
             "moved",
             holder,
@@ -3659,7 +3714,8 @@ async fn update_worktree_path(repo_path: &str) -> AppResult<std::path::PathBuf> 
 }
 
 /// The two refs an update is planned against, resolved under the first working-tree
-/// hold so nothing that moves afterwards can change what lands on the branch.
+/// hold so nothing that moves afterwards can change what lands on the branch. Only the
+/// diverged arm's [`verify_pin_and_merge`] reads `branch_tip`.
 struct UpdatePins {
     branch_tip: String,
     base_sha: String,
@@ -3750,13 +3806,29 @@ pub(crate) async fn stored_branch_spelling(repo_path: &str, name: &str) -> AppRe
 
 /// Whether this repository's ref names can alias one another, read from the disk rather
 /// than `core.ignorecase`, which a user may set false on a disk that still folds case. A
-/// common dir that can't be resolved counts as aliasing, toward refusing; so does a
-/// reftable repository on such a disk, which is accepted.
+/// reftable repository, recognized by [`is_reftable_store`], never aliases, since its ref
+/// names are table keys rather than file names; any other answers by its disk. A common
+/// dir that can't be resolved counts as aliasing, toward refusing.
 pub(crate) async fn refs_can_alias(repo_path: &str) -> bool {
     match crate::git::worktree::git_common_dir(repo_path).await {
-        Ok(common) => refs_dir_folds_case(std::path::Path::new(&common)),
+        Ok(common) => refs_can_alias_at(std::path::Path::new(&common)),
         Err(_) => true,
     }
+}
+
+/// [`refs_can_alias`] over a resolved common dir: false for a reftable store, else
+/// [`refs_dir_folds_case`].
+fn refs_can_alias_at(common: &std::path::Path) -> bool {
+    !is_reftable_store(common) && refs_dir_folds_case(common)
+}
+
+/// Whether `common` holds a reftable ref store: `reftable/tables.list` beside a
+/// `refs/heads` that is a FILE, the stub `git init --ref-format=reftable` leaves (git
+/// 2.51.1). A files repository keeps its branches in a `refs/heads` directory, so a stray
+/// `reftable` folder beside one never reads as reftable.
+fn is_reftable_store(common: &std::path::Path) -> bool {
+    common.join("refs").join("heads").is_file()
+        && common.join("reftable").join("tables.list").is_file()
 }
 
 /// Whether `<common>/refs` exists and its upper-cased spelling `REFS` resolves too; a
@@ -9039,7 +9111,7 @@ mod tests {
         assert!(!is_session_holder("C:/x", "topic", &none, root));
     }
 
-    /// A branch that took in the base between the first read and the holder's lock says
+    /// A holder that merged the base and committed between the first read and its lock says
     /// "up-to-date", not git's no-op dressed as an update. Driven through the holder arm
     /// directly, since the outer read would already answer it.
     #[tokio::test]
@@ -9057,21 +9129,51 @@ mod tests {
             HolderMerge::FastForward,
             HolderMerge::Merge { subject: None },
         ] {
-            let outcome = update_in_holder(
-                &state,
-                &porcelain,
-                "held-current",
-                &main,
-                &base_sha,
-                &held_tip,
-                merge,
-            )
-            .await
-            .expect("a holder already containing the base is not an error");
+            let outcome =
+                update_in_holder(&state, &porcelain, "held-current", &main, &base_sha, merge)
+                    .await
+                    .expect("a holder already containing the base is not an error");
             assert_eq!(outcome.outcome, "up-to-date");
             assert_eq!(outcome.holder.as_deref(), Some(porcelain.as_str()));
         }
         assert_eq!(tip(&repo_s, "held-current").await, held_tip);
+    }
+
+    /// A holder that committed between the first read and its lock takes the merge into
+    /// its HEAD as it now stands, so that commit is kept under the result. Driven through
+    /// the holder arm directly, as the first read's tip is not passed down.
+    #[tokio::test]
+    async fn a_holder_that_committed_after_the_first_read_takes_the_merge() {
+        let (_guard, repo_s, main, holder, porcelain) =
+            held_branch_repo("held-committed", "held-committed").await;
+        commit_file(&repo_s, "base.txt", "base\n").await;
+        let base_sha = tip(&repo_s, &main).await;
+        commit_file(&holder, "later.txt", "later\n").await;
+        let committed = tip(&repo_s, "held-committed").await;
+
+        let outcome = update_in_holder(
+            &AppState::default(),
+            &porcelain,
+            "held-committed",
+            &main,
+            &base_sha,
+            HolderMerge::Merge { subject: None },
+        )
+        .await
+        .expect("a holder that moved on its own branch is merged into");
+        assert_eq!(outcome.outcome, "merge");
+        let merged = tip(&repo_s, "held-committed").await;
+        for kept in [&committed, &base_sha] {
+            let ancestor = run_git_raw(
+                Some(&repo_s),
+                &["merge-base", "--is-ancestor", kept, &merged],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap();
+            assert_eq!(ancestor.code, 0, "{kept} is under the result {merged}");
+        }
+        assert_eq!(run(&holder, &["rev-parse", "HEAD"]).await.trim(), merged);
     }
 
     /// A holder paused mid-merge is refused by name and left paused.
@@ -9519,12 +9621,15 @@ mod tests {
             "held-moved",
             &main,
             &base_sha,
-            &held_tip,
             HolderMerge::FastForward,
         )
         .await
         .unwrap_err();
-        expect_branch_held(&err, "moved", &porcelain, "held-moved");
+        let message = expect_branch_held(&err, "moved", &porcelain, "held-moved");
+        assert!(
+            message.contains("switched away from held-moved"),
+            "{message}"
+        );
         assert_eq!(tip(&repo_s, "held-moved").await, held_tip);
         assert_eq!(
             run(&holder, &["symbolic-ref", "HEAD"]).await.trim(),
@@ -11172,7 +11277,12 @@ mod tests {
                 run(&repo, &["switch", "-q", "up"]).await;
             }
             let main_head = full_ref_tip(&repo, "HEAD").await;
-            let _marker = linked.then(|| holder_marker_root(&repo));
+            // Unpacked into two bindings: held as one tuple, the lock would drop before
+            // the override it serializes.
+            let (_serialized, _override) = linked
+                .then(|| holder_marker_root(&repo))
+                .map(|(lock, installed, _)| (lock, installed))
+                .unzip();
             let outcome = update_branch_from(
                 &AppState::default(),
                 &repo,
@@ -11676,8 +11786,10 @@ mod tests {
 
     /// A sibling on the unborn `HOLLOW` (index emptied, so no other guard stops a merge
     /// there) beside the packed-only `hollow`: where refs can alias it holds `hollow`, and
-    /// its HEAD is not the pinned tip, so the update refuses and `hollow` stays at its
-    /// seed; where they can't, it is independent and the bare fast-forward moves `hollow`.
+    /// its leaf differs from `hollow`'s, so the update refuses with the other-spelling
+    /// sentence by the leaf clause and `hollow` stays at its seed; where they can't, it is
+    /// independent and the bare fast-forward moves `hollow`. The unreadable-HEAD clause is
+    /// pinned by the folder-variant test below.
     /// Either way no `HOLLOW` ref is made and the sibling stays unborn. The holder arm
     /// mints a marker under the process-wide root override, so the branch is one no other
     /// test uses.
@@ -11732,9 +11844,17 @@ mod tests {
             "refs/heads/HOLLOW"
         );
         if can_alias {
-            assert!(
-                matches!(&outcome, Err(AppError::BranchHeld { reason, .. }) if reason == "moved"),
-                "{outcome:?}"
+            let Err(err) = &outcome else {
+                panic!("{outcome:?}");
+            };
+            let holder = super::worktree_holding_branch_checked(&repo, "hollow")
+                .await
+                .unwrap()
+                .unwrap();
+            let message = expect_branch_held(err, "moved", &holder, "hollow");
+            assert_eq!(
+                message,
+                super::other_spelling_message(&holder, "HOLLOW", "hollow")
             );
             assert_eq!(exact_branch_tip(&repo, "hollow").await.unwrap(), Some(seed));
         } else {
@@ -11744,6 +11864,454 @@ mod tests {
             );
             assert_eq!(exact_branch_tip(&repo, "hollow").await.unwrap(), Some(head));
         }
+    }
+
+    /// A sibling on `Hollow/x`, checked out over a `hollow/x` that was packed afterwards
+    /// while a loose `hollow/y` keeps the folder, differs only in a folder, so the leaf
+    /// clause passes it, but its HEAD resolves to no commit there: the update refuses with
+    /// the other-spelling sentence by the unreadable-HEAD clause and writes nothing. Returns
+    /// early where refs can't alias (a case-sensitive filesystem, or a non-files ref
+    /// backend), where the sibling does not hold `hollow/x`. The holder arm mints a marker
+    /// under the process-wide root override, so the branch is one no other test uses.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_branch_from_never_merges_into_an_unreadable_folder_variant_sibling() {
+        let (g, repo, seed, head) = delete_fixture("update-unreadable-folder").await;
+        run(&repo, &["branch", "hollow/x", &seed]).await;
+        run(&repo, &["branch", "hollow/x-base", &head]).await;
+        let wt = g.path().join("folder-wt").to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+        run(&wt, &["symbolic-ref", "HEAD", "refs/heads/Hollow/x"]).await;
+        run(&repo, &["pack-refs", "--all"]).await;
+        run(&repo, &["update-ref", "refs/heads/hollow/y", &seed]).await;
+        run(&wt, &["rm", "-rfq", "."]).await;
+        assert_eq!(
+            full_ref_tip(&wt, "HEAD").await,
+            None,
+            "fixture sanity: unreadable"
+        );
+        if !super::refs_can_alias(&repo).await {
+            return;
+        }
+        let holder = super::worktree_holding_branch_checked(&repo, "hollow/x")
+            .await
+            .unwrap()
+            .expect("fixture sanity: the sibling holds hollow/x");
+
+        let (_serialized, _override, _root) = holder_marker_root(&repo);
+        let outcome = update_branch_from(
+            &AppState::default(),
+            &repo,
+            "hollow/x",
+            "hollow/x-base",
+            &HashSet::new(),
+            None,
+        )
+        .await;
+        let Err(err) = &outcome else {
+            panic!("{outcome:?}");
+        };
+        let message = expect_branch_held(err, "moved", &holder, "hollow/x");
+        assert_eq!(
+            message,
+            super::other_spelling_message(&holder, "Hollow/x", "hollow/x")
+        );
+        assert_eq!(
+            exact_branch_tip(&repo, "hollow/x").await.unwrap(),
+            Some(seed)
+        );
+        assert_eq!(exact_branch_tip(&repo, "Hollow/x").await.unwrap(), None);
+        assert_eq!(full_ref_tip(&wt, "HEAD").await, None, "still unreadable");
+        assert_eq!(
+            run(&wt, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/Hollow/x"
+        );
+    }
+
+    /// `delete_fixture`'s repo with `branch` (a name no other test uses) at feat's tip and
+    /// carrying an upstream, `<branch>-base` past it, and a checkout on `variant`, which
+    /// differs from `branch` in its leaf's case: a linked worktree when `linked`, else the
+    /// main checkout. With `packed`, `branch` is packed at that commit and loose one commit
+    /// later. Returns (guard, repo, checkout, branch's tip), or `None` where `variant` does
+    /// not read `branch`'s loose file (a case-sensitive filesystem, or a non-files ref
+    /// backend).
+    async fn leaf_variant_fixture(
+        tag: &str,
+        branch: &str,
+        variant: &str,
+        linked: bool,
+        packed: bool,
+    ) -> Option<(tempfile::TempDir, String, String, String)> {
+        let (g, repo, seed, head) = delete_fixture(tag).await;
+        let full = super::branch_full_ref(branch).unwrap();
+        run(&repo, &["branch", branch, &seed]).await;
+        for (key, value) in [("remote", "origin"), ("merge", full.as_str())] {
+            run(&repo, &["config", &format!("branch.{branch}.{key}"), value]).await;
+        }
+        let tip = if packed {
+            run(&repo, &["pack-refs", "--all"]).await;
+            run(&repo, &["update-ref", &full, &head]).await;
+            head
+        } else {
+            seed
+        };
+        commit_file(&repo, "leaf.txt", "base\n").await;
+        run(&repo, &["branch", &format!("{branch}-base")]).await;
+        let checkout = if linked {
+            let wt = g.path().join("leaf-wt").to_string_lossy().into_owned();
+            run(&repo, &["worktree", "add", "-q", "--detach", &wt, &full]).await;
+            wt
+        } else {
+            run(&repo, &["switch", "-q", "--detach", &full]).await;
+            repo.clone()
+        };
+        let variant_ref = super::branch_full_ref(variant).unwrap();
+        run(&checkout, &["symbolic-ref", "HEAD", &variant_ref]).await;
+        if !is_aliased(&repo, variant).await {
+            return None;
+        }
+        Some((g, repo, checkout, tip))
+    }
+
+    /// Asserts nothing was written through `variant`: `branch` is still listed by its own
+    /// spelling, at `tip`, with its upstream config, and no `variant` ref is listed.
+    async fn assert_leaf_variant_untouched(
+        repo: &str,
+        branch: &str,
+        variant: &str,
+        tip: &str,
+        outcome: &str,
+    ) {
+        let listed = run(
+            repo,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await;
+        let full = super::branch_full_ref(branch).unwrap();
+        assert!(listed.lines().any(|l| l == full), "{listed}\n{outcome}");
+        assert_eq!(
+            exact_branch_tip(repo, branch).await.unwrap().as_deref(),
+            Some(tip),
+            "{outcome}"
+        );
+        assert_eq!(
+            exact_branch_tip(repo, variant).await.unwrap(),
+            None,
+            "{outcome}"
+        );
+        for (key, value) in [("remote", "origin"), ("merge", full.as_str())] {
+            let got = run(
+                repo,
+                &["config", "--get", &format!("branch.{branch}.{key}")],
+            )
+            .await;
+            assert_eq!(got.trim(), value, "{outcome}");
+        }
+    }
+
+    /// A linked worktree on `Leafheld` holds the stored `leafheld` and its HEAD is at the
+    /// tip, but a merge there would write `refs/heads/Leafheld`: renaming a loose-only
+    /// `leafheld`, or leaving a packed one behind beside a new twin. The update refuses with
+    /// the other-spelling sentence. Returns early on a case-sensitive filesystem or a
+    /// non-files ref backend. The holder arm mints a marker under the process-wide root
+    /// override, so the branch is one no other test uses.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_branch_from_never_merges_through_a_leaf_variant_holder() {
+        for packed in [false, true] {
+            let Some((_g, repo, wt, tip)) = leaf_variant_fixture(
+                &format!("leaf-holder-{packed}"),
+                "leafheld",
+                "Leafheld",
+                true,
+                packed,
+            )
+            .await
+            else {
+                return;
+            };
+            let (_serialized, _override, _root) = holder_marker_root(&repo);
+            let outcome = update_branch_from(
+                &AppState::default(),
+                &repo,
+                "leafheld",
+                "leafheld-base",
+                &HashSet::new(),
+                None,
+            )
+            .await;
+            let shown = format!("packed {packed}: {outcome:?}");
+            assert_leaf_variant_untouched(&repo, "leafheld", "Leafheld", &tip, &shown).await;
+            let Err(err) = &outcome else {
+                panic!("{shown}");
+            };
+            let holder = super::worktree_holding_branch_checked(&repo, "leafheld")
+                .await
+                .unwrap()
+                .unwrap();
+            let message = expect_branch_held(err, "moved", &holder, "leafheld");
+            assert_eq!(
+                message,
+                super::other_spelling_message(&holder, "Leafheld", "leafheld")
+            );
+            assert_eq!(full_ref_tip(&wt, "HEAD").await, Some(tip), "{shown}");
+        }
+    }
+
+    /// The main checkout on `Leafhere` holds the stored `leafhere`, so the update would
+    /// merge in place and write `refs/heads/Leafhere`, renaming the branch: it refuses
+    /// with the other-spelling sentence instead. Returns early on a case-sensitive
+    /// filesystem or a non-files ref backend.
+    #[tokio::test]
+    async fn update_branch_from_never_merges_in_place_through_a_leaf_variant() {
+        let Some((_g, repo, _, tip)) =
+            leaf_variant_fixture("leaf-in-place", "leafhere", "Leafhere", false, false).await
+        else {
+            return;
+        };
+        let outcome = update_branch_from(
+            &AppState::default(),
+            &repo,
+            "leafhere",
+            "leafhere-base",
+            &HashSet::new(),
+            None,
+        )
+        .await;
+        let shown = format!("{outcome:?}");
+        assert_leaf_variant_untouched(&repo, "leafhere", "Leafhere", &tip, &shown).await;
+        let expected = super::other_spelling_message(&repo, "Leafhere", "leafhere");
+        assert!(
+            matches!(&outcome, Err(AppError::Command(m)) if *m == expected),
+            "{shown}"
+        );
+        assert_eq!(full_ref_tip(&repo, "HEAD").await, Some(tip));
+        assert_eq!(run(&repo, &["status", "--porcelain"]).await.trim(), "");
+    }
+
+    /// The stored loose `feat`, with a linked worktree on its case variant `Feat` stopped
+    /// mid-rebase onto the main branch, so the rebase records `refs/heads/Feat` and the
+    /// worktree lists as detached. `ahead` descends from `feat`; `aside` has diverged from
+    /// it. Returns (guard, repo, worktree, feat's tip), or `None` where `Feat` does not
+    /// read `feat`'s loose file (a case-sensitive filesystem, or a non-files ref backend).
+    async fn variant_rebase_fixture(
+        tag: &str,
+    ) -> Option<(tempfile::TempDir, String, String, String)> {
+        let (g, repo, seed, _head) = delete_fixture(tag).await;
+        if !is_aliased(&repo, "Feat").await {
+            return None;
+        }
+        let main = run(&repo, &["symbolic-ref", "--short", "HEAD"]).await;
+        let main = main.trim();
+        for (branch, from, file, body) in [
+            ("feat", "feat", "a.txt", "feat\n"),
+            ("ahead", "feat", "b.txt", "ahead\n"),
+            ("aside", seed.as_str(), "c.txt", "aside\n"),
+        ] {
+            if branch == from {
+                run(&repo, &["switch", "-q", branch]).await;
+            } else {
+                run(&repo, &["switch", "-q", "-c", branch, from]).await;
+            }
+            commit_file(&repo, file, body).await;
+        }
+        run(&repo, &["switch", "-q", main]).await;
+        let feat = tip(&repo, "feat").await;
+        let wt = g.path().join("rebase-wt").to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "--detach", &wt, "feat"]).await;
+        run(&wt, &["symbolic-ref", "HEAD", "refs/heads/Feat"]).await;
+        let rebase = run_git_raw(Some(&wt), &["rebase", main], TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+        assert_ne!(
+            rebase.code, 0,
+            "fixture sanity: the rebase stops on a conflict"
+        );
+        let head_name = run(&wt, &["rev-parse", "--git-path", "rebase-merge/head-name"]).await;
+        let head_name = std::path::Path::new(&wt).join(head_name.trim());
+        assert_eq!(
+            std::fs::read_to_string(head_name).unwrap().trim(),
+            "refs/heads/Feat",
+            "fixture sanity: the rebase records the variant"
+        );
+        Some((g, repo, wt, feat))
+    }
+
+    /// Asserts the update was refused by the rebase recorded on `Feat`, `feat` is where it
+    /// was, and the rebase is still stopped.
+    async fn assert_refused_by_variant_rebase(
+        outcome: crate::error::AppResult<UpdateBranchOutcome>,
+        repo: &str,
+        wt: &str,
+        feat: &str,
+    ) {
+        assert!(
+            matches!(&outcome, Err(AppError::Command(m)) if m.starts_with("feat is being rebased in the worktree at ")
+                && m.ends_with(" — finish or abort that rebase before updating feat.")),
+            "{outcome:?}"
+        );
+        assert_eq!(tip(repo, "feat").await, feat, "the ref is unmoved");
+        assert!(crate::git::ops::op_state(wt).await.unwrap().rebasing);
+    }
+
+    /// A fast-forward of `feat` while a rebase is stopped on its case variant `Feat`:
+    /// git's own `fetch` test is keyed on spelling and would move the ref, so the update
+    /// refuses first. Returns early on a case-sensitive filesystem or a non-files ref
+    /// backend.
+    #[tokio::test]
+    async fn update_branch_from_refuses_a_fast_forward_under_a_variant_rebase() {
+        let Some((_g, repo, wt, feat)) = variant_rebase_fixture("update-ff-variant").await else {
+            return;
+        };
+        let outcome = update_branch_from(
+            &AppState::default(),
+            &repo,
+            "feat",
+            "ahead",
+            &HashSet::new(),
+            None,
+        )
+        .await;
+        assert_refused_by_variant_rebase(outcome, &repo, &wt, &feat).await;
+    }
+
+    /// The diverged twin: the throwaway checkout's merge would move `feat` under the
+    /// rebase stopped on `Feat`, so the update refuses before the `worktree add`. The
+    /// marker root is overridden in case the arm runs. Returns early on a case-sensitive
+    /// filesystem or a non-files ref backend.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_branch_from_refuses_a_diverged_merge_under_a_variant_rebase() {
+        let Some((_g, repo, wt, feat)) = variant_rebase_fixture("update-merge-variant").await
+        else {
+            return;
+        };
+        let (_serialized, _override, _root) = holder_marker_root(&repo);
+        let outcome = update_branch_from(
+            &AppState::default(),
+            &repo,
+            "feat",
+            "aside",
+            &HashSet::new(),
+            None,
+        )
+        .await;
+        assert_refused_by_variant_rebase(outcome, &repo, &wt, &feat).await;
+    }
+
+    /// The reftable arm over each layout: only git's reftable layout (a `refs/heads` stub
+    /// file beside a `reftable/tables.list` file) reads as reftable and never aliases;
+    /// every near miss, a missing `refs` included, answers as the disk folds (true on a
+    /// case-insensitive one, and for a missing `refs` on any).
+    #[test]
+    fn refs_can_alias_at_reads_reftable_only_from_its_layout() {
+        use super::{is_reftable_store, refs_can_alias_at, refs_dir_folds_case};
+        // `heads`: "file", "dir" or "" (no `refs` at all); `tables`: "file", "dir" (a
+        // `tables.list` directory), "empty" (a bare `reftable` folder) or "".
+        let (_g, base) = temp_base("reftable-layout");
+        let layout = |name: &str, heads: &str, tables: &str| {
+            let common = base.join(name);
+            std::fs::create_dir_all(&common).unwrap();
+            let refs = common.join("refs");
+            match heads {
+                "file" => {
+                    std::fs::create_dir_all(&refs).unwrap();
+                    std::fs::write(refs.join("heads"), "stub\n").unwrap();
+                }
+                "dir" => std::fs::create_dir_all(refs.join("heads")).unwrap(),
+                _ => {}
+            }
+            let reftable = common.join("reftable");
+            match tables {
+                "file" => {
+                    std::fs::create_dir_all(&reftable).unwrap();
+                    std::fs::write(reftable.join("tables.list"), "").unwrap();
+                }
+                "dir" => std::fs::create_dir_all(reftable.join("tables.list")).unwrap(),
+                "empty" => std::fs::create_dir_all(&reftable).unwrap(),
+                _ => {}
+            }
+            common
+        };
+        let common = layout("reftable", "file", "file");
+        assert!(is_reftable_store(&common));
+        assert!(!refs_can_alias_at(&common));
+        for (name, heads, tables) in [
+            ("stray-tables", "dir", "file"),
+            ("stub-only", "file", ""),
+            ("files", "dir", ""),
+            ("empty-reftable", "dir", "empty"),
+            ("stub-empty-reftable", "file", "empty"),
+            ("tables-dir", "file", "dir"),
+            ("no-refs", "", "file"),
+        ] {
+            let common = layout(name, heads, tables);
+            assert!(!is_reftable_store(&common), "{name}");
+            assert_eq!(
+                refs_can_alias_at(&common),
+                refs_dir_folds_case(&common),
+                "{name}"
+            );
+        }
+        assert!(refs_can_alias_at(&base.join("no-refs")));
+    }
+
+    /// A reftable repository never aliases ref names, on any disk: an unborn checkout on
+    /// `Feat` does not hold the stored `feat`, and the case twin `Topic` beside `topic`
+    /// passes the bare-move gate at its own tip. Returns early when this git can't create
+    /// a reftable repository.
+    #[tokio::test]
+    async fn a_reftable_repository_never_aliases_ref_names() {
+        let (_g, base) = temp_base("reftable-alias");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.to_string_lossy().into_owned();
+        let init = run_git_raw(
+            Some(&repo),
+            &["init", "-q", "--ref-format=reftable"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        if init.code != 0 {
+            eprintln!("note: this git can't create a reftable repo; skipping");
+            return;
+        }
+        run(&repo, &["config", "user.email", "t@t.local"]).await;
+        run(&repo, &["config", "user.name", "T"]).await;
+        commit_file(&repo, "a.txt", "seed\n").await;
+        let seed = full_ref_tip(&repo, "HEAD").await.unwrap();
+        run(&repo, &["branch", "feat"]).await;
+        assert!(!super::refs_can_alias(&repo).await);
+
+        let wt = base.join("unborn-wt").to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+        run(&wt, &["symbolic-ref", "HEAD", "refs/heads/Feat"]).await;
+        assert!(!super::refs_can_alias(&wt).await);
+        assert!(!super::holds_branch(&repo, "Feat", "feat").await);
+        assert_eq!(
+            super::worktree_holding_branch_checked(&repo, "feat")
+                .await
+                .unwrap(),
+            None
+        );
+
+        run(&repo, &["branch", "topic"]).await;
+        commit_file(&repo, "b.txt", "next\n").await;
+        let next = full_ref_tip(&repo, "HEAD").await.unwrap();
+        run(&repo, &["branch", "Topic"]).await;
+        assert!(matches!(
+            super::branch_spelling(&repo, "Topic", true).await.unwrap(),
+            super::BranchSpelling::Twin { .. }
+        ));
+        assert_eq!(
+            super::bare_move_tip(&repo, "Topic").await.unwrap(),
+            Some(next)
+        );
+        assert_eq!(
+            super::bare_move_tip(&repo, "topic").await.unwrap(),
+            Some(seed)
+        );
     }
 
     /// The update names `Chore/z` while `chore/z`, checked out here, is stored packed only,
@@ -13626,7 +14194,6 @@ mod tests {
             "local",
             "incoming",
             &f.target,
-            &f.head,
             HolderMerge::Merge { subject: None },
         )
         .await
@@ -13650,7 +14217,6 @@ mod tests {
             "local",
             "incoming",
             &f.target,
-            &f.head,
             HolderMerge::Merge { subject: None },
         )
         .await
