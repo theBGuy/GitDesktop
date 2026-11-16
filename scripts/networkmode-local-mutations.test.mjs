@@ -119,6 +119,7 @@ const LOCAL_CALLEES = [
   "gitUndoCommit",
   "resolveConflict",
   "checkoutConflictSide",
+  "gitAcceptSubmoduleConflictSide",
   // History rewrites, resets and in-progress operations.
   "gitReset",
   "gitRevert",

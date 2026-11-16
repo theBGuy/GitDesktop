@@ -94,8 +94,8 @@ const selectAmendBranch = (s: RepoStatus) => ({
 /**
  * Whether rewriting HEAD means force-pushing it (an upstream exists, isn't gone,
  * and HEAD isn't ahead of it), and why such a rewrite can't run right now.
- * Amend and Edit dates both gate on this one hook, so the two can't disagree on
- * what "already pushed" means.
+ * Amend and Edit dates share it for the force-push arm; a branch with no
+ * upstream is outside it (Edit dates reads Undo's remotes count for that).
  */
 export function useForcePushGate(repoPath: string) {
   const branch = useQuery({

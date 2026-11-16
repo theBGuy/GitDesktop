@@ -135,6 +135,7 @@ const logRow = (hash: string, isMerge = false): CommitSummary => ({
   author: "Ann",
   authorEmail: "ann@example.com",
   date: "2026-11-07T20:00:00+01:00",
+  committerDate: "2026-11-07T20:00:00+01:00",
   tags: [],
   isMerge,
 });

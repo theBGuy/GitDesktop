@@ -143,6 +143,20 @@ export function useCommitFileDiff(
   });
 }
 
+/** One commit file's diff with whitespace SHOWN, whatever the setting: for a reader that
+ *  compares the two modes. No placeholder, so `data` is always this key's own answer. */
+export function useCommitFilePlainDiff(
+  repo: string,
+  hash: string | null,
+  file: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    ...commitFileDiffOptions(repo, hash ?? "", file ?? "", false),
+    enabled: enabled && hash !== null && file !== null,
+  });
+}
+
 /** Warms a commit's detail view (header + files + the first file's diff) on row
  *  hover; prefetchQuery skips any read still fresh in the cache. `withOnRemote`
  *  also warms the local on-remote verdict; callers pass the comment surface's own

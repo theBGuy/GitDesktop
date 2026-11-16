@@ -472,10 +472,9 @@ export function PushedCommitsRow({
 }) {
   const [open, setOpen] = useState(false);
   const n = commits.length;
-  // The feed is sorted oldest→newest and the run preserves that order, so the
-  // newest commit (the run's timestamp) is the last one. This is the AUTHORED
-  // date — no push time exists in the PR payload — so a rebased/cherry-picked
-  // batch can read older than its position in the feed.
+  // The run's last commit is its newest. Local PRs pass the committer date; the
+  // remote feed passes the authored date (its payload has no push time), so a
+  // rebased batch there can read older than its place in the feed.
   const headerDate = commits[n - 1]?.date;
 
   // Arrow keys walk the sublist; Enter/Space activate the focused row — both

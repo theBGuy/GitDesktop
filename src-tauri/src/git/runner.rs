@@ -856,11 +856,12 @@ pub(crate) async fn run_git_config_write(
 type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
 /// One mutex per repository for this process's `.git/config` writers: held across short
-/// writes' spawns, across only the repair leg of long ones (`push -u`, submodule
-/// add/update/deinit, `worktree add -b`), and across the app's plain switches onto an
-/// existing branch for their HEAD move, so none lands inside a branch delete's guarded
-/// window; PR checkout's two switches skip it and are excluded by the worktree-admin hold
-/// every delete caller takes. The long commands' unheld first runs, and other processes,
+/// writes' spawns; across only the repair leg of long ones (`push -u`, submodule
+/// add/update/deinit, `worktree add -b`, whose case-twin check takes its own short hold
+/// before the add); across the checkout of tracking switches and of checked-out creates;
+/// and across the app's plain switches onto an existing branch for their HEAD move, so
+/// none lands inside a branch delete's guarded window. PR checkout's two switches skip it
+/// and are excluded by the worktree-admin hold every delete caller takes. The long commands' unheld first runs, and other processes,
 /// can still collide, which the retry and repairs cover. A LEAF lock: taken after any
 /// domain lock, never before one.
 static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
@@ -891,10 +892,11 @@ pub(crate) struct ConfigWriteHeld(());
 
 /// Runs `body` holding `repo_path`'s config-write mutex. The wait is unbounded and a
 /// hold lasts as long as its git work: a tracking switch, a plain switch onto an existing
-/// branch, or a checked-out create without --no-track keeps it across the whole checkout
-/// (filters, hooks) plus its repairs. A waiter keeps the domains it holds meanwhile: a
-/// rename's, switch's or plain delete's working-tree domain, and any branch delete's
-/// worktree-admin domain, so commands in those domains can report Busy.
+/// branch, or any checked-out create keeps it across the whole checkout (filters, hooks)
+/// plus its repairs. A waiter keeps the domains it holds meanwhile, among them any
+/// create's, rename's, switch's or plain delete's working-tree domain, and the
+/// worktree-admin domain of a branch delete or a new-branch worktree add, so commands in
+/// those domains can report Busy.
 pub(crate) async fn with_config_write_lock<F, Fut, T>(repo_path: &str, body: F) -> T
 where
     F: FnOnce(ConfigWriteHeld) -> Fut,

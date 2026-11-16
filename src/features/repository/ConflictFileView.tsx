@@ -22,7 +22,12 @@ import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { awaitFocusRelease } from "@/lib/await-focus-release";
 import { appErrorDetail, presentError } from "@/lib/error-summary";
-import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
+import {
+  gitStatus,
+  isSubmoduleConflictRefusal,
+  openWithDefault,
+  openWithProgram,
+} from "@/lib/git/api";
 import {
   type ConflictSides,
   changedOnDiskCopy,
@@ -45,11 +50,17 @@ import { sidesRefusal } from "@/lib/git/conflict-prefilter";
 import {
   refreshConflictFile,
   repoKeys,
+  useAcceptSubmoduleConflictSide,
   useCheckoutConflictSide,
-  useConflictFile,
+  useHeldConflictFile,
   useMarkConflictResolved,
   useResolveConflict,
+  useSubmoduleConflict,
 } from "@/lib/git/queries";
+import type {
+  SubmoduleAcceptCheckout,
+  SubmoduleCheckoutLeft,
+} from "@/lib/git/types";
 import { formatBinding, isWindows } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
@@ -79,6 +90,7 @@ import {
   previousConflictIndex,
   shouldLandOnOpen,
 } from "./conflict-jump";
+import { SubmoduleConflictPane } from "./SubmoduleConflictPane";
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 const baseName = (path: string) => path.split("/").pop() || path;
@@ -218,12 +230,12 @@ const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
 const LINKED_LEAF_REASON = "it's a symbolic link";
 const LINKED_LEAF_TAIL = ` — ${LINKED_LEAF_REASON}. Nothing was changed.`;
 
-/** `io` covers a lock, a permission change, or a directory at the path (a
- *  conflicted submodule), none promised to pass. The two read refusals and the
+/** `io` covers a lock, a permission change, or a directory at the path, none
+ *  promised to pass. The two read refusals, the submodule refusal and the
  *  path-gate refusals render their own copy; every other error takes the
  *  fallback. */
 const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
-  io: "Couldn't read this file. It may be locked, its permissions may have changed, or a folder (such as a conflicted submodule) may sit at this path. Open it in your editor to resolve the conflict, or try again if it becomes readable.",
+  io: "Couldn't read this file. It may be locked, its permissions may have changed, or a folder may sit at this path. Open it in your editor to resolve the conflict, or try again if it becomes readable.",
 };
 const READ_ERROR_FALLBACK =
   "Couldn't read this file, so it can't be shown here. Resolve the conflict in your editor.";
@@ -261,6 +273,42 @@ const READ_REFUSAL_TAIL = (
  *  conflicted at the click. */
 const notConflictedCopy = (name: string) =>
   `${name} is no longer conflicted — nothing was changed.`;
+
+/** What a submodule side's accept did to the submodule's own checkout, after
+ *  the lead naming the side taken; the footer said the same up front. */
+const SUBMODULE_ACCEPT_TAIL: Record<
+  Exclude<SubmoduleAcceptCheckout["kind"], "left"> | SubmoduleCheckoutLeft,
+  (name: string, reason: string | null) => string
+> = {
+  checkedOut: (name) => ` and checked it out in ${name}.`,
+  alreadyThere: (name) => `. ${name} was already on that commit.`,
+  dirty: (name) => `. ${name} has local changes, so its checkout stays as is.`,
+  notInitialized: (name) =>
+    `. ${name} isn't checked out here, so there was no checkout to move.`,
+  unusable: (name) =>
+    `. ${name}'s folder couldn't be read as a submodule, so its checkout stays as is.`,
+  detachedElsewhere: (name) =>
+    `. ${name} is on a commit of its own, so its checkout stays as is.`,
+  notFetched: (name) =>
+    `. That commit isn't fetched in ${name} yet, so its checkout stays as is.`,
+  failed: (name, reason) =>
+    `. Couldn't check it out in ${name}, so its checkout stays as is${reason ? `: ${reason}` : "."}`,
+};
+
+const submoduleAcceptedCopy = (
+  name: string,
+  side: "ours" | "theirs",
+  checkout: SubmoduleAcceptCheckout,
+) => {
+  const tail =
+    checkout.kind === "left"
+      ? SUBMODULE_ACCEPT_TAIL[checkout.why](name, checkout.reason)
+      : SUBMODULE_ACCEPT_TAIL[checkout.kind](name, null);
+  return `Resolved ${name} — took ${ACCEPT_ALL_COPY[side].side}${tail}`;
+};
+
+const submoduleChangedCopy = (name: string) =>
+  `The submodule conflict in ${name} changed after it was read — nothing was staged.`;
 
 const REREAD_FAILED_TOAST =
   "Couldn't re-read the file — nothing was marked resolved.";
@@ -460,10 +508,13 @@ export function ConflictFileView({
    *  the pane once the file stops being conflicted. */
   focusSink?: RefObject<HTMLElement | null>;
 }) {
-  const file = useConflictFile(repoPath, path);
+  // Every read of the file's pending / error state goes through the held read:
+  // a failing file re-reads every tick and must not flash its spinner.
+  const file = useHeldConflictFile(repoPath, path);
   const resolve = useResolveConflict(repoPath);
   const checkoutSide = useCheckoutConflictSide(repoPath);
   const markResolve = useMarkConflictResolved(repoPath);
+  const acceptSubmodule = useAcceptSubmoduleConflictSide(repoPath);
   // Whether the view moved to another repo, or went away, while a prompt was
   // open or Mark resolved's re-read ran. A prompt never reaches the closed arm
   // (the confirm store cancels a repo-scoped prompt on a close); the re-read can.
@@ -577,6 +628,42 @@ export function ConflictFileView({
   const awaitingRead =
     freshFor?.repoPath !== repoPath || freshFor.path !== path;
 
+  // A gitlink conflict: the file read refuses it, and the submodule pane reads
+  // both commits instead, under the same fresh-on-show hold as the file's.
+  const submoduleArm = file.isError && isSubmoduleConflictRefusal(file.error);
+  const submodule = useSubmoduleConflict(repoPath, path, submoduleArm);
+  const refetchSubmodule = submodule.refetch;
+  const [submoduleFreshFor, setSubmoduleFreshFor] = useState<{
+    repoPath: string;
+    path: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!panelActive || !submoduleArm) return;
+    let current = true;
+    void refetchSubmodule({ cancelRefetch: false }).then(() => {
+      if (current) setSubmoduleFreshFor({ repoPath, path });
+    });
+    return () => {
+      current = false;
+      setSubmoduleFreshFor(null);
+    };
+  }, [panelActive, submoduleArm, refetchSubmodule, repoPath, path]);
+  const awaitingSubmoduleRead =
+    submoduleFreshFor?.repoPath !== repoPath || submoduleFreshFor.path !== path;
+  // An outside resolve of the gitlink shows only here: the refused file read
+  // no longer polls.
+  const submoduleData = submodule.isError ? undefined : submodule.data;
+  const submoduleResolved =
+    submoduleArm &&
+    submoduleData !== undefined &&
+    submoduleData.base === null &&
+    submoduleData.ours === null &&
+    submoduleData.theirs === null;
+  // The pane draws its sides, and their Accepts: what SubmoduleConflictPane
+  // renders past its pending and error arms, short of a resolved read.
+  const submoduleSides =
+    submoduleArm && submoduleData !== undefined && !submoduleResolved;
+
   // A read with no index stages renders the no-longer-conflicted line whatever
   // the text holds, so no region offers an Accept on a path git calls merged.
   const segments = useMemo(
@@ -602,10 +689,14 @@ export function ConflictFileView({
     resolve.isPending ||
     checkoutSide.isPending ||
     markResolve.isPending ||
+    acceptSubmodule.isPending ||
     checking ||
     recovering ||
     awaitingRead;
   const busyReason = markBusyReason(checking || recovering || awaitingRead);
+  const submoduleBusy = busy || awaitingSubmoduleRead;
+  const submoduleReading =
+    checking || recovering || awaitingRead || awaitingSubmoduleRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged: it offers whole-file resolution + the editor (binary
   // and too large also Mark resolved), and a path-gate refusal leaves only the
@@ -648,10 +739,30 @@ export function ConflictFileView({
     disabled: busy,
     reason: busyReason,
   });
-  const readErrorView =
-    readRefusal === null ? (
-      <p className="p-4 text-xs text-muted-foreground">{readErrorBody}</p>
-    ) : (
+  const readErrorView = (() => {
+    switch (true) {
+      case submoduleResolved:
+        return (
+          <p className="p-4 text-xs text-muted-foreground">
+            {NOT_CONFLICTED_COPY}
+          </p>
+        );
+      case submoduleArm:
+        return (
+          <SubmoduleConflictPane
+            name={baseName(path)}
+            read={submodule}
+            busy={submoduleBusy}
+            reading={submoduleReading}
+            onAccept={acceptSubmoduleSide}
+          />
+        );
+      case readRefusal === null:
+        return (
+          <p className="p-4 text-xs text-muted-foreground">{readErrorBody}</p>
+        );
+    }
+    return (
       <div
         className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground"
         title={markHeld.wrapperTitle}
@@ -679,6 +790,7 @@ export function ConflictFileView({
         ) : null}
       </div>
     );
+  })();
   // The working file alone: per-region accepts rebuild from it, so a clean
   // working file over a non-UTF-8 stage blob stays lossless for them. The AI
   // button holds on it too, but deliberately leaves that blob-only case to
@@ -865,14 +977,62 @@ export function ConflictFileView({
     }
   }
 
+  // Stages the side's commit the pane shows, compared against the read's stage
+  // shas and its checkout promise for that side, so nothing moves on a stale
+  // read: the backend answers `changed` and the awaited re-read repaints.
+  async function acceptSubmoduleSide(side: "ours" | "theirs") {
+    if (inFlightRef.current || !submoduleData) return;
+    const pressed = capturePress();
+    const name = baseName(path);
+    const expected = {
+      base: submoduleData.base,
+      ours: submoduleData.ours?.sha ?? null,
+      theirs: submoduleData.theirs?.sha ?? null,
+    };
+    const expectCheckout = submoduleData[side]?.plan === "checkOut";
+    inFlightRef.current = true;
+    try {
+      const outcome = await acceptSubmodule.mutateAsync({
+        path,
+        side,
+        expected,
+        expectCheckout,
+      });
+      if (outcome.kind === "changed") {
+        toast.info(submoduleChangedCopy(name));
+        armLanding("header", pressed);
+        return;
+      }
+      toast.success(submoduleAcceptedCopy(name, side, outcome.checkout));
+      armLanding("header", pressed);
+    } catch (e) {
+      // The backend's stage check refuses a path git already calls merged.
+      if (
+        isAppError(e) &&
+        e.kind === "invalidArgument" &&
+        appErrorDetail(e.kind, e.message) === NOT_CONFLICTED_COPY
+      ) {
+        toast.info(notConflictedCopy(name));
+      } else {
+        toastError(e);
+      }
+      await refreshAfterError();
+      armLanding("header", pressed);
+    } finally {
+      inFlightRef.current = false;
+    }
+  }
+
   // Which fallback state is on screen, and so whether Mark resolved is offered.
   // Gated on !isError as well as data: a refetch that errors (the file became
   // unreadable, binary, oversized, or refused by the path gate) keeps the last
-  // data while the pane shows the error copy.
-  const arm =
+  // data while the pane shows the error copy. A submodule read with no stages
+  // left is the same verdict for a gitlink.
+  const fileArm =
     file.data && !file.isError && segments === null
       ? fallbackArm(file.data)
       : null;
+  const arm: FallbackArm | null = submoduleResolved ? "notConflicted" : fileArm;
   const canMarkResolved =
     (arm !== null && MARK_RESOLVED_ARMS.has(arm)) || readRefusal !== null;
 
@@ -1170,6 +1330,11 @@ export function ConflictFileView({
   // The strip's buttons leave with the region view (an outside resolve, or
   // the last accept settling): focus lands on the view's sink, never <body>.
   useFocusOnControlsSwap(regionView, focusSinkRef);
+  // The header's actions leave as the submodule arm lands: the same rescue.
+  useFocusOnControlsSwap(submoduleArm, focusSinkRef);
+  // The pane's Accepts leave with its sides, which the submodule read alone can
+  // swap out while the arm stays (an outside resolve, a failed read).
+  useFocusOnControlsSwap(submoduleSides, focusSinkRef);
 
   return (
     <div
@@ -1189,51 +1354,60 @@ export function ConflictFileView({
           takes its own row and the actions wrap under it, right-aligned. */}
       <div className="@container/conflict-toolbar border-b">
         <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 py-1.5 @min-[700px]/conflict-toolbar:flex-nowrap">
-          <PathText
-            path={path}
-            className="basis-full font-mono text-xs text-muted-foreground @min-[700px]/conflict-toolbar:basis-auto"
-          />
-          <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5 @min-[700px]/conflict-toolbar:shrink-0">
-            <Button size="xs" variant="ghost" onClick={openInEditor}>
-              Open in editor
-            </Button>
-            {/* Held on a path git calls merged: Accept all re-checks the file out
+          {submoduleArm ? (
+            <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+              <PathText path={path} className="font-mono" />
+              <span className="shrink-0">· submodule conflict</span>
+            </span>
+          ) : (
+            <>
+              <PathText
+                path={path}
+                className="basis-full font-mono text-xs text-muted-foreground @min-[700px]/conflict-toolbar:basis-auto"
+              />
+              <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5 @min-[700px]/conflict-toolbar:shrink-0">
+                <Button size="xs" variant="ghost" onClick={openInEditor}>
+                  Open in editor
+                </Button>
+                {/* Held on a path git calls merged: Accept all re-checks the file out
                 from the index, over any edits made after an outside `git add`. Side
                 checkout shares the path gate and refuses a linked ancestor or Windows
                 folder link, but git replaces or removes any other leaf link itself, so
                 that refusal alone leaves both on. */}
-            <DisabledReasonButton
-              size="xs"
-              variant="outline"
-              disabled={busy || notConflicted || sideRefusal !== null}
-              reason={notConflicted ? NOT_CONFLICTED_COPY : sideRefusal}
-              onClick={() => acceptAll("ours")}
-            >
-              Accept all current
-            </DisabledReasonButton>
-            <DisabledReasonButton
-              size="xs"
-              variant="outline"
-              disabled={busy || notConflicted || sideRefusal !== null}
-              reason={notConflicted ? NOT_CONFLICTED_COPY : sideRefusal}
-              onClick={() => acceptAll("theirs")}
-            >
-              Accept all incoming
-            </DisabledReasonButton>
-            {offersAi && (
-              // This view's OWN repoPath scopes the walk — the main repo on the
-              // Changes tab, the hidden worktree in a PR takeover.
-              <DisabledReasonButton
-                size="xs"
-                disabled={busy || notConflicted || workingUndecodable}
-                reason={aiHeldReason}
-                onClick={() => startResolveAi(path, repoPath)}
-              >
-                <SparkleIcon data-icon="inline-start" />
-                Resolve with AI
-              </DisabledReasonButton>
-            )}
-          </span>
+                <DisabledReasonButton
+                  size="xs"
+                  variant="outline"
+                  disabled={busy || notConflicted || sideRefusal !== null}
+                  reason={notConflicted ? NOT_CONFLICTED_COPY : sideRefusal}
+                  onClick={() => acceptAll("ours")}
+                >
+                  Accept all current
+                </DisabledReasonButton>
+                <DisabledReasonButton
+                  size="xs"
+                  variant="outline"
+                  disabled={busy || notConflicted || sideRefusal !== null}
+                  reason={notConflicted ? NOT_CONFLICTED_COPY : sideRefusal}
+                  onClick={() => acceptAll("theirs")}
+                >
+                  Accept all incoming
+                </DisabledReasonButton>
+                {offersAi && (
+                  // This view's OWN repoPath scopes the walk — the main repo on the
+                  // Changes tab, the hidden worktree in a PR takeover.
+                  <DisabledReasonButton
+                    size="xs"
+                    disabled={busy || notConflicted || workingUndecodable}
+                    reason={aiHeldReason}
+                    onClick={() => startResolveAi(path, repoPath)}
+                  >
+                    <SparkleIcon data-icon="inline-start" />
+                    Resolve with AI
+                  </DisabledReasonButton>
+                )}
+              </span>
+            </>
+          )}
         </div>
       </div>
 
@@ -1295,9 +1469,10 @@ export function ConflictFileView({
         ) : segments === null ? (
           <ConflictFallback
             path={path}
-            sides={file.data}
-            // Non-null on this branch: it's the same data + `segments === null`
-            // + not-error condition `arm` was computed under.
+            // Both non-null on this branch: a held read that is neither pending
+            // nor failed has landed data, and it's the same data +
+            // `segments === null` + not-error condition `arm` was computed under.
+            sides={file.data as ConflictSides}
             arm={arm as FallbackArm}
             busy={busy}
             busyReason={busyReason}

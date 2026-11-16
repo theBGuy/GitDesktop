@@ -55,7 +55,6 @@ const BITBUCKET_STATUS_LABELS: Record<string, string> = {
   PAUSED: "Paused",
   HALTED: "Halted",
   BUILDING: "Building",
-  ERROR: "Error",
   PASSED: "Passed",
   FAILED: "Failed",
   STOPPED: "Stopped",

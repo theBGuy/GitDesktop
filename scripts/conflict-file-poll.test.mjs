@@ -34,6 +34,7 @@ const CONFLICT_HOOKS = [
   "useResolveConflict",
   "useCheckoutConflictSide",
   "useMarkConflictResolved",
+  "useAcceptSubmoduleConflictSide",
 ];
 
 function load(file) {
@@ -275,7 +276,12 @@ test("every conflict write handler holds a synchronous in-flight guard", () => {
     /\bconst\s+inFlightRef\s*=\s*useRef\s*\(\s*false\s*\)\s*;/,
     "ConflictFileView's `const inFlightRef = useRef(false)` is gone",
   );
-  for (const name of ["acceptRegion", "acceptAll", "markResolved"]) {
+  for (const name of [
+    "acceptRegion",
+    "acceptAll",
+    "markResolved",
+    "acceptSubmoduleSide",
+  ]) {
     const { open, close } = functionBody(src, name);
     const body = src.masked.slice(open + 1, close);
     assert.match(
@@ -302,7 +308,12 @@ test("every conflict write handler holds a synchronous in-flight guard", () => {
 
 test("every conflict write handler re-reads the file when its write fails", () => {
   const src = load(VIEW);
-  for (const name of ["acceptRegion", "acceptAll", "markResolved"]) {
+  for (const name of [
+    "acceptRegion",
+    "acceptAll",
+    "markResolved",
+    "acceptSubmoduleSide",
+  ]) {
     const { open, close } = functionBody(src, name);
     const catches = [
       ...src.masked.slice(open, close).matchAll(/\bcatch\s*\(\s*e\s*\)\s*\{/g),

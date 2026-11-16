@@ -229,6 +229,9 @@ pub struct CommitSummary {
     /// no-reply login or Gravatar); empty when git records no author email.
     pub author_email: String,
     pub date: String,
+    /// Committer date (%cI): when this commit object was made, which a rewrite
+    /// restamps. `date` is the author date.
+    pub committer_date: String,
     /// Tags pointing at this commit (from %D decorations).
     pub tags: Vec<String>,
     /// More than one parent — history rewriting must not cross it.

@@ -1,10 +1,14 @@
 import {
   type QueryClient,
   queryOptions,
+  type UseQueryResult,
   useQuery,
+  useQueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { usePanelActive } from "@/components/panel-portal";
 import { ignoreLines } from "@/lib/ai/ignore";
+import { appErrorDetail } from "@/lib/error-summary";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
 import {
   REPO_SHELL_GC_TIME,
@@ -14,12 +18,19 @@ import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import {
+  type ConflictSides,
   checkoutConflictSide,
   conflictSides,
   resolveConflict,
 } from "../conflict";
 import { literalPathspec } from "../glob";
-import type { RemoteLens, RepoOp, UnignoreRule } from "../types";
+import type {
+  RemoteLens,
+  RepoOp,
+  SubmoduleConflict,
+  SubmoduleConflictStages,
+  UnignoreRule,
+} from "../types";
 import { readViewDiff } from "../whitespace-diff";
 import { repoKeys } from "./core";
 import { useRepoMutation, workingTreeKeys } from "./internal";
@@ -234,8 +245,160 @@ export function useConflictFile(repo: string, path: string) {
   });
 }
 
+/** A polled read with its last settled error held while a DATALESS re-read is
+ *  in flight: react-query resets such a query to `pending` with no error on
+ *  every fetch, so a read that keeps failing would flip spinner → error each
+ *  tick. Narrow on purpose: a spread of the query result would subscribe the
+ *  caller to `isFetching` and re-render it on every poll tick. */
+export interface HeldRead<T> {
+  data: T | undefined;
+  /** True only before the first settle of this (repo, path): never while an
+   *  error is held. */
+  isPending: boolean;
+  isError: boolean;
+  error: unknown;
+  /** The query's own refetch, same identity. */
+  refetch: UseQueryResult<T>["refetch"];
+}
+
+/** One slot per view: the last error a (repo, path) read settled on, cleared
+ *  by that read's success. Adjusted during render, so the frame a re-read
+ *  starts in already shows the held error; a slot of another (repo, path) is
+ *  never shown. An arrow, since scripts/conflict-file-poll.test.mjs reads
+ *  `function` declarations by name and a generic one fails its parse. */
+const useHeldRead = <T>(
+  query: UseQueryResult<T>,
+  repo: string,
+  path: string,
+): HeldRead<T> => {
+  const [slot, setSlot] = useState<{
+    repo: string;
+    path: string;
+    error: unknown;
+  } | null>(null);
+  const mine = slot !== null && slot.repo === repo && slot.path === path;
+  if (query.isError) {
+    if (!mine || slot.error !== query.error)
+      setSlot({ repo, path, error: query.error });
+  } else if (query.isSuccess && mine) {
+    setSlot(null);
+  }
+  const holding = query.isPending && mine;
+  let error: unknown = null;
+  if (query.isError) error = query.error;
+  else if (holding) error = slot?.error;
+  return {
+    data: query.data,
+    isPending: query.isPending && !holding,
+    isError: query.isError || holding,
+    error,
+    refetch: query.refetch,
+  };
+};
+
+/** {@link useConflictFile} with its read error held across re-reads. */
+export function useHeldConflictFile(
+  repo: string,
+  path: string,
+): HeldRead<ConflictSides> {
+  return useHeldRead(useConflictFile(repo, path), repo, path);
+}
+
 const conflictFileKey = (repo: string) =>
   ["repo", repo, "conflict-file"] as const;
+
+/** How often an open submodule conflict re-reads; useSubmoduleChanges' cadence,
+ *  since each tick spawns git inside the submodule too. */
+const SUBMODULE_CONFLICT_POLL_MS = 5000;
+
+/** The submodule read's refusal once the path's conflict holds no gitlink
+ *  (`git_submodule_conflict_core`, git/submodule.rs). */
+const NOT_SUBMODULE_CONFLICT = "not a submodule conflict";
+
+/**
+ * Both commits of a conflicted submodule, for the conflict editor's submodule
+ * pane; idle until `enabled` (the file read refused the path as a gitlink).
+ * Keyed under the conflict-file prefix, so the conflict writes and
+ * {@link refreshConflictFile} re-read it too. Polls while its panel shows: the
+ * conflict can be resolved, and the submodule's checkout moved, outside the
+ * app. Every failure re-polls but `invalidArgument`, which can't clear by
+ * itself; the held read keeps its error on screen across those re-reads.
+ */
+export function useSubmoduleConflict(
+  repo: string,
+  path: string,
+  enabled: boolean,
+): HeldRead<SubmoduleConflict> {
+  const panelActive = usePanelActive();
+  const read = useQuery({
+    queryKey: [...conflictFileKey(repo), path, "submodule"] as const,
+    queryFn: () => api.gitSubmoduleConflict(repo, path),
+    enabled,
+    retry: false,
+    refetchInterval: (query) =>
+      panelActive &&
+      !(
+        isAppError(query.state.error) &&
+        query.state.error.kind === "invalidArgument"
+      )
+        ? SUBMODULE_CONFLICT_POLL_MS
+        : false,
+    refetchIntervalInBackground: false,
+    networkMode: "always",
+  });
+  // The conflict became a file conflict outside the app. The refused file read
+  // no longer polls, so this answer re-reads it once and the text view takes
+  // over. Keyed on the answer: a file read still refusing keeps this arm and
+  // asks nothing new of the submodule read, so the two never ping-pong.
+  const queryClient = useQueryClient();
+  const notSubmodule =
+    read.isError &&
+    isAppError(read.error) &&
+    read.error.kind === "invalidArgument" &&
+    appErrorDetail(read.error.kind, read.error.message) ===
+      NOT_SUBMODULE_CONFLICT
+      ? read.error
+      : null;
+  useEffect(() => {
+    if (notSubmodule === null) return;
+    void queryClient.refetchQueries(
+      { queryKey: [...conflictFileKey(repo), path], exact: true },
+      { cancelRefetch: false },
+    );
+  }, [notSubmodule, queryClient, repo, path]);
+  return useHeldRead(read, repo, path);
+}
+
+/** Stages one side's commit for a conflicted submodule, checking it out there
+ *  when the read promised so (`expectCheckout`). `expected` is the read's stage
+ *  shas: a moved stage, or a checkout the read said would stay, answers
+ *  `changed` with nothing staged. Re-reads the conflict editor before
+ *  `isPending` drops, like its three siblings. */
+export function useAcceptSubmoduleConflictSide(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: {
+      path: string;
+      side: "ours" | "theirs";
+      expected: SubmoduleConflictStages;
+      expectCheckout: boolean;
+    }) =>
+      api.gitAcceptSubmoduleConflictSide(
+        repo,
+        args.path,
+        args.side,
+        args.expected,
+        args.expectCheckout,
+      ),
+    {
+      invalidate: [conflictFileKey(repo)],
+      invalidateAfter: workingTreeKeys(repo),
+      refetchBeforeSuccess: true,
+      // Local conflict write — never park it offline.
+      networkMode: "always",
+    },
+  );
+}
 
 /** Re-reads the conflict editor (awaited) and fires the working-tree keys
  *  alongside it, where the conflict mutations fire them after; shared with the

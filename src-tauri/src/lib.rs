@@ -775,6 +775,8 @@ pub fn run() {
             git::submodule::git_submodule_set_url,
             git::submodule::git_submodule_set_branch,
             git::submodule::git_submodule_changes,
+            git::submodule::git_submodule_conflict,
+            git::submodule::git_accept_submodule_conflict_side,
             secrets::set_secret,
             secrets::get_secret,
             secrets::delete_secret,

@@ -1489,7 +1489,17 @@ export const BUILT_IN_KEYS: {
     keys: "↑ / ↓",
     what: "Move through lists (files, commits, PRs, repositories)",
   },
-  { keys: "Shift+↑ / Shift+↓", what: "Extend the selection in History" },
+  {
+    keys: "Shift+↑ / Shift+↓",
+    what: "Extend the selection in History and Edit history",
+  },
+  { keys: "Shift+click", what: "Select a range of commits in Edit history" },
+  {
+    keys: "Ctrl+click",
+    what: "Add or remove a commit from the selection in Edit history",
+    binding: "mod+click",
+  },
+  { keys: "D", what: "Open the focused commit's date editor in Edit history" },
   { keys: "Enter", what: "Open or select the highlighted item" },
   { keys: "Space", what: "Stage or unstage the focused file in Changes" },
   { keys: "Esc", what: "Close dialogs, menus, and settings" },

@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { failedSinceLastSuccess } from "@/features/conversations/remote-section-state";
 import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitleFromText } from "@/lib/clip-title";
@@ -28,6 +29,7 @@ import {
   useCommitRecordsParent,
   useLog,
   useOpState,
+  useUnpushedCount,
 } from "@/lib/git/queries";
 import type { CommitDate, RepoStatus } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -58,6 +60,7 @@ import {
   sameCommitDate,
   sameUnreachableNote,
 } from "./commit-date";
+import { isNoUpstream, undoPushedHold } from "./editable-set";
 import { useForcePushGate } from "./useAmendCommit";
 
 /** The commit an Edit dates dialog acts on, and the HEAD and branch its host
@@ -74,11 +77,21 @@ const BRANCH_SWITCHED_HOLD =
   "The checked-out branch changed while this was open. Close and reopen to edit the new one.";
 const HEAD_MOVED_HOLD =
   "The latest commit changed while this was open. Close and reopen to edit the new one.";
+const PUBLISHED_ELSEWHERE_WARNING =
+  "This commit is already on a remote branch. Changing its dates rewrites it on this branch only: the remote branch keeps the original, and the two will differ.";
+const PUBLISHED_UNCHECKED_NOTE =
+  "Couldn't check whether a remote branch has this commit.";
 
-/** Only status's HEAD and its branch pin, so working-tree polls don't
- *  re-render the dialog. */
+/** Only status's HEAD, its branch pin and whether it lacks an upstream, so
+ *  working-tree polls don't re-render the dialog. */
 const selectHeadPin = (s: RepoStatus) =>
-  s.branch ? { oid: s.branch.oid, pin: headBranchPin(s.branch) } : null;
+  s.branch
+    ? {
+        oid: s.branch.oid,
+        pin: headBranchPin(s.branch),
+        noUpstream: isNoUpstream(s.branch),
+      }
+    : null;
 
 /** Unmerged entries with no operation stopped (a stash pop that conflicted):
  *  the backend refuses the change. */
@@ -87,6 +100,9 @@ const selectUnresolved = (s: RepoStatus) => s.entries.some(isConflictedEntry);
 const UNRESOLVED_REASON = "Resolve the conflicts first.";
 
 const PRIMARY_LABEL = "Change dates";
+
+/** Which line the dialog shows about where HEAD already is. */
+type PushedArm = "none" | "plain" | "unchecked" | "warning";
 
 /**
  * Changes HEAD's author and committer dates and nothing else. Its host
@@ -230,6 +246,24 @@ function EditDatesForm({
       select: selectUnresolved,
     }).data === true;
   const gate = useForcePushGate(repoPath);
+  // With no upstream, Undo's basis says whether a remote branch already has
+  // HEAD, believed only while it was counted from the HEAD status reports now.
+  const noUpstream = statusHead?.noUpstream === true;
+  const unpushed = useUnpushedCount(repoPath, noUpstream);
+  const publishedElsewhere = noUpstream
+    ? undoPushedHold({
+        noUpstream: true,
+        ahead: 0,
+        countLoaded: unpushed.data !== undefined,
+        countFailed: failedSinceLastSuccess(unpushed),
+        basis: unpushed.data?.basis ?? null,
+        count: unpushed.data?.count ?? 0,
+        agreed:
+          !unpushed.isError &&
+          statusHead != null &&
+          unpushed.data?.headOid === statusHead.oid,
+      })
+    : null;
   // run() reads the gate after awaiting a prompt, when the press's render is stale.
   const liveGate = useLatestRef(gate);
   const amendDates = useAmendCommitDates(repoPath);
@@ -544,27 +578,52 @@ function EditDatesForm({
   })();
 
   // A pushed HEAD warns inline; a protected one says the branch rule
-  // instead, and the button holds with that same sentence. Until status reads,
-  // whether HEAD is pushed is unknown, so neither line shows.
+  // instead, and the button holds with that same sentence. With no upstream, a
+  // remote branch holding HEAD warns without a hold. An unread status, or an
+  // unread or disagreeing count, shows no line.
+  const plainLine = (
+    <p className="text-xs text-muted-foreground">
+      Rewrites this commit; its id changes.
+    </p>
+  );
+  const liveArm = ((): PushedArm => {
+    if (statusHead === undefined) return "none";
+    if (!gate.needsForcePush) {
+      if (publishedElsewhere === "refreshing") return "none";
+      if (publishedElsewhere === "unpushed-unchecked") return "unchecked";
+      if (publishedElsewhere !== "already-pushed") return "plain";
+    }
+    return "warning";
+  })();
+  const liveWarning = (() => {
+    if (liveArm !== "warning") return null;
+    if (!gate.needsForcePush) return PUBLISHED_ELSEWHERE_WARNING;
+    if (gate.protectedBranch && refusal !== null) return refusal;
+    return `This commit is already on ${gate.upstream}. Changing its dates rewrites it, so the branch will need a force push. Anyone who has pulled it will have to reconcile.`;
+  })();
+  // Frozen through the close fade: a change's own refresh moves status's HEAD
+  // and then the count, which would re-lay the closing dialog twice.
+  const shownArm = useRetained(liveArm, open);
+  const shownWarning = useRetained(liveWarning, open);
   const pushedBlock = (() => {
-    if (statusHead === undefined) return null;
-    if (!gate.needsForcePush)
+    if (shownArm === "none") return null;
+    if (shownArm === "unchecked")
       return (
-        <p className="text-xs text-muted-foreground">
-          Rewrites this commit; its id changes.
-        </p>
+        <div className="grid gap-1">
+          {plainLine}
+          <p className="text-xs text-muted-foreground">
+            {PUBLISHED_UNCHECKED_NOTE}
+          </p>
+        </div>
       );
-    const text =
-      gate.protectedBranch && refusal !== null
-        ? refusal
-        : `This commit is already on ${gate.upstream}. Changing its dates rewrites it, so the branch will need a force push. Anyone who has pulled it will have to reconcile.`;
+    if (shownArm === "plain") return plainLine;
     return (
       <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 p-2 text-xs">
         <WarningIcon
           aria-hidden
           className="mt-0.5 size-3.5 shrink-0 text-warning"
         />
-        <p>{text}</p>
+        <p>{shownWarning}</p>
       </div>
     );
   })();

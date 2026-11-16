@@ -7,10 +7,9 @@ use crate::git::ignored_guard::{self, ignored_files_in_the_way, name_paths};
 use crate::git::runner::{
     acquire_repo_lock, acquire_repo_lock_unbounded, config_lock_busy, holder_label,
     is_config_lock_contention, run_git, run_git_config_write, run_git_config_write_held,
-    run_git_mutating, run_git_mutating_config_write, run_git_raw, run_git_raw_index_retry,
-    run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock, ConfigWriteHeld,
-    GitOutput, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
-    WORKTREE_OP_TIMEOUT,
+    run_git_raw, run_git_raw_index_retry, run_git_worktree_admin, subcommand_of,
+    try_acquire_repo_lock, with_config_write_lock, ConfigWriteHeld, GitOutput, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{Branch, BranchDivergence, RemoteBranch};
 use crate::state::AppState;
@@ -782,11 +781,12 @@ pub(crate) async fn git_rename_branch_core(
     rename_phase(RenamePhase::BeforeGit).await;
     let repo = repo_path.as_str();
     let (old_section, new_section) = (format!("branch.{old_name}"), format!("branch.{new_name}"));
-    run_git_mutating_config_write(
+    let renamed = run_minting_write(
         state,
         repo,
         &["branch", "-m", "--", &old_name, &new_name],
-        DEFAULT_TIMEOUT,
+        &new_name,
+        Some(&old_name),
         |out, held| async move {
             if out.code == 0 || !out.stderr.contains(RENAMED_CONFIG_LEFT_BEHIND) {
                 return Ok(out);
@@ -799,6 +799,7 @@ pub(crate) async fn git_rename_branch_core(
         },
     )
     .await?;
+    full_failure_verdict(renamed)?;
     #[cfg(test)]
     rename_phase(RenamePhase::BeforeMoves).await;
     // Carry the branch's reviewer note over to the new name, keyed by the same identity
@@ -2168,11 +2169,12 @@ pub(crate) async fn git_checkout_remote_branch_core(
     // ambiguous, and git refuses to start from it.
     let start = format!("refs/remotes/{remote}/{name}");
     let (repo, local, start_s) = (repo_path.as_str(), name.as_str(), start.as_str());
-    run_git_mutating_config_write(
+    let out = run_minting_write(
         state,
         repo,
         &["switch", "--track", start_s],
-        DEFAULT_TIMEOUT,
+        local,
+        None,
         |out, held| async move {
             let by = TrackedBy::ExplicitTrack;
             let finished = finish_tracking_setup(&held, repo, out, local, start_s, by, true).await;
@@ -2180,6 +2182,7 @@ pub(crate) async fn git_checkout_remote_branch_core(
         },
     )
     .await?;
+    full_failure_verdict(out)?;
     Ok(())
 }
 
@@ -2249,20 +2252,26 @@ pub(crate) async fn git_create_branch_core(
     }
     let args = build_create_branch_args(&name, checkout, start_point.as_deref(), no_track);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (repo, local) = (repo_path.as_str(), name.as_str());
     // Any create but `--no-track` can set tracking up, the one leg that writes the
     // config: with no start point git starts from HEAD, where `always` tracks that
     // local branch and `inherit` copies its upstream (measured, git 2.51.1).
     if no_track {
-        run_git_mutating(state, &repo_path, &arg_refs, DEFAULT_TIMEOUT).await?;
+        // Writes no config, so a lost config lock has nothing to repair.
+        run_minting_write(state, repo, &arg_refs, local, None, |out, _| async move {
+            Ok(out)
+        })
+        .await?
+        .exit_verdict()?;
         return Ok(());
     }
     let start = start_point.as_deref().unwrap_or("HEAD");
-    let (repo, local) = (repo_path.as_str(), name.as_str());
-    run_git_mutating_config_write(
+    let out = run_minting_write(
         state,
         repo,
         &arg_refs,
-        DEFAULT_TIMEOUT,
+        local,
+        None,
         |out, held| async move {
             let by = TrackedBy::AutoSetupMerge;
             let finished =
@@ -2271,7 +2280,56 @@ pub(crate) async fn git_create_branch_core(
         },
     )
     .await?;
+    full_failure_verdict(out)?;
     Ok(())
+}
+
+/// A write that mints the branch `name` (`replaces` is the branch a rename moves off):
+/// the working-tree domain, then the config-write mutex, each taken ONCE and both held
+/// through git, with [`refuse_new_name_twin`] inside the mutex, so a twin another creator
+/// in any checkout mints during the wait is still seen. A lost config lock hands the raw
+/// output and the held mutex to `repair`, as [`run_git_mutating_config_write`] does; the
+/// raw output comes back for the caller's verdict.
+///
+/// [`run_git_mutating_config_write`]: crate::git::runner::run_git_mutating_config_write
+async fn run_minting_write<F, Fut>(
+    state: &AppState,
+    repo_path: &str,
+    args: &[&str],
+    name: &str,
+    replaces: Option<&str>,
+    repair: F,
+) -> AppResult<GitOutput>
+where
+    F: FnOnce(GitOutput, ConfigWriteHeld) -> Fut,
+    Fut: std::future::Future<Output = AppResult<GitOutput>>,
+{
+    let domain = state.working_tree_lock(repo_path).await;
+    let label = holder_label(subcommand_of(args));
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, label).await?;
+    with_config_write_lock(repo_path, |held| async move {
+        refuse_new_name_twin(repo_path, name, replaces).await?;
+        let out = run_git_raw_index_retry(repo_path, args, DEFAULT_TIMEOUT).await?;
+        if is_config_lock_contention(&out.stderr) {
+            return repair(out, held).await;
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// [`run_git_mutating_config_write`]'s verdict: a non-zero exit is [`AppError::Git`]
+/// with [`GitOutput::full_failure_text`].
+///
+/// [`run_git_mutating_config_write`]: crate::git::runner::run_git_mutating_config_write
+fn full_failure_verdict(out: GitOutput) -> AppResult<GitOutput> {
+    if out.code != 0 {
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
+    Ok(out)
 }
 
 #[derive(serde::Deserialize)]
@@ -3943,6 +4001,50 @@ pub(crate) fn twin_refusal(branch: &str, twin: &str) -> AppError {
     ))
 }
 
+/// The refusal for minting `name` beside `twin`, a stored name that differs from it only
+/// in letter case.
+fn new_name_twin_refusal(name: &str, twin: &str) -> AppError {
+    AppError::Command(format!(
+        "{name} differs from the existing branch {twin} only in letter case, which this \
+         disk can't keep apart. Use a different name, or rename {twin} first."
+    ))
+}
+
+/// The stored name that a new branch `name` would be a case twin of, folded as
+/// [`branch_spelling`] folds. `None` when `name` itself is stored, so git's own "already
+/// exists" answers, and `replaces` (the branch a rename moves off) never counts.
+fn case_twin_of<'a>(stored: &'a [String], name: &str, replaces: Option<&str>) -> Option<&'a str> {
+    if stored.iter().any(|stored| stored == name) {
+        return None;
+    }
+    stored
+        .iter()
+        .map(String::as_str)
+        .find(|stored| Some(*stored) != replaces && eq_ignoring_case(stored, name))
+}
+
+/// The twin check shared by the routes that mint a branch name here (create, rename,
+/// remote checkout, the autostash tracking arm, new-branch worktree add): refuses `name`
+/// when a stored name other than `replaces` equals it ignoring case and refs can alias
+/// ([`refs_can_alias`]), since git refuses only a twin of a LOOSE ref. Takes no lock: each
+/// caller supplies its hold, and only a call inside the config-write mutex held through
+/// the write makes check-then-create atomic. A failed listing is the `Err`; the disk is
+/// probed only when a stored name folds to `name`.
+pub(crate) async fn refuse_new_name_twin(
+    repo_path: &str,
+    name: &str,
+    replaces: Option<&str>,
+) -> AppResult<()> {
+    let stored = stored_branch_names(repo_path).await?;
+    let Some(twin) = case_twin_of(&stored, name, replaces) else {
+        return Ok(());
+    };
+    if refs_can_alias(repo_path).await {
+        return Err(new_name_twin_refusal(name, twin));
+    }
+    Ok(())
+}
+
 /// The tip a bare move of `branch` (a ref write no checkout's HEAD goes through) compares
 /// against: the exact tip of a branch with its own ref, a twin's included where refs
 /// can't alias; `None` without an exact ref. A twin where refs can alias is the
@@ -4400,7 +4502,7 @@ fn unique_suffix() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::branch_reset_to_upstream_within;
     use super::git_delete_branch_within;
     use super::git_delete_remote_branch_core;
@@ -10842,7 +10944,7 @@ mod tests {
     /// Whether `name` is aliased in `repo`: `for-each-ref` lists no ref of that exact
     /// spelling, yet `show-ref --verify` answers, as it does on a case-insensitive
     /// filesystem that resolves the spelling to another name's loose file.
-    async fn is_aliased(repo: &str, name: &str) -> bool {
+    pub(crate) async fn is_aliased(repo: &str, name: &str) -> bool {
         let full_ref = super::branch_full_ref(name).unwrap();
         let listed = run(repo, &["for-each-ref", "--format=%(refname)", &full_ref]).await;
         let shown = run_git_raw(
@@ -13634,7 +13736,7 @@ mod tests {
     }
 
     /// Holds `repo`'s config-write mutex from another task until the sender fires.
-    async fn hold_config_mutex(
+    pub(crate) async fn hold_config_mutex(
         repo: &str,
     ) -> (
         tokio::task::JoinHandle<()>,
@@ -13656,7 +13758,7 @@ mod tests {
 
     /// A [`CONFIG_WRITE_LOCK_EVENTS`] hook that fires the receiver at the first
     /// "waiting"; dropped unfired, the receiver errs instead of hanging.
-    fn on_first_waiting() -> (
+    pub(crate) fn on_first_waiting() -> (
         Arc<dyn Fn(&'static str) + Send + Sync>,
         tokio::sync::oneshot::Receiver<()>,
     ) {
@@ -15414,5 +15516,494 @@ mod tests {
         let only = git_branches(bare_s).await.unwrap();
         assert_eq!(only.len(), 1);
         assert!(!only[0].upstream_is_remote_default && !only[0].keep_local);
+    }
+
+    /// The new-name refusal for `Feat` beside the stored `feat`.
+    const NEW_NAME_TWIN_REFUSAL: &str = "Feat differs from the existing branch feat only in \
+        letter case, which this disk can't keep apart. Use a different name, or rename feat \
+        first.";
+
+    /// Whether `repo`'s refs alias, read by git alone: a fresh LOOSE `oracle-loose` read as
+    /// `ORACLE-LOOSE` (a packed-only twin under test can't be read that way), asserted equal
+    /// to [`super::refs_can_alias`] before a test branches on it. Call it after any
+    /// `pack-refs` the fixture runs and before any the test runs later.
+    async fn case_twin_alias_oracle(repo: &str) -> bool {
+        run(repo, &["branch", "oracle-loose"]).await;
+        let observed = is_aliased(repo, "ORACLE-LOOSE").await;
+        assert_eq!(
+            super::refs_can_alias(repo).await,
+            observed,
+            "the alias verdict matches git's own reads"
+        );
+        observed
+    }
+
+    /// Every stored branch name, read with raw git.
+    async fn case_twin_listed(repo: &str) -> Vec<String> {
+        run(
+            repo,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await
+        .lines()
+        .filter_map(|line| line.strip_prefix("refs/heads/"))
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// HEAD's symbolic ref (or detached sha) and the local config, which a refused mint
+    /// must leave as they were.
+    async fn case_twin_snapshot(repo: &str) -> (Option<String>, Option<String>, String) {
+        let config = run(repo, &["config", "--list", "--local"]).await;
+        (
+            symbolic_head(repo).await,
+            full_ref_tip(repo, "HEAD").await,
+            config,
+        )
+    }
+
+    #[test]
+    fn case_twin_of_skips_the_exact_name_and_the_renamed_branch() {
+        // Stored names, the new name, the branch a rename moves off, the expected twin.
+        type Row<'a> = (&'a [&'a str], &'a str, Option<&'a str>, Option<&'a str>);
+        let rows: [Row; 9] = [
+            (&["feat"], "feat", None, None),
+            (&["main", "feat"], "Feat", None, Some("feat")),
+            (&["feat"], "Feat", Some("feat"), None),
+            (&["feat", "FEAT"], "Feat", Some("feat"), Some("FEAT")),
+            (&["chore/z"], "Chore/z", None, Some("chore/z")),
+            (&["é/z"], "É/z", None, Some("é/z")),
+            (&["aσ"], "AΣ", None, Some("aσ")),
+            (&["feat", "aς"], "fear", None, None),
+            (&["feat", "Feat"], "Feat", None, None),
+        ];
+        for (stored, name, replaces, twin) in rows {
+            let stored: Vec<String> = stored.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                super::case_twin_of(&stored, name, replaces),
+                twin,
+                "{stored:?} {name} {replaces:?}"
+            );
+        }
+        let refusal = super::new_name_twin_refusal("Feat", "feat");
+        assert!(
+            matches!(&refusal, AppError::Command(m) if m == NEW_NAME_TWIN_REFUSAL),
+            "{refusal:?}"
+        );
+    }
+
+    /// How a test stores the twin `feat`.
+    #[derive(Clone, Copy, Debug)]
+    enum TwinStorage {
+        PackedOnly,
+        Loose,
+        LooseAndPacked,
+    }
+
+    /// A repository on the files backend holding `feat` stored as `storage`, and the
+    /// alias oracle's verdict.
+    async fn case_twin_fixture(
+        tag: &str,
+        storage: TwinStorage,
+    ) -> (tempfile::TempDir, String, bool) {
+        let (g, base) = temp_base(tag);
+        let base = base.join("repo");
+        std::fs::create_dir_all(&base).unwrap();
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        run(&repo, &["branch", "feat"]).await;
+        match storage {
+            TwinStorage::PackedOnly => {
+                run(&repo, &["pack-refs", "--all"]).await;
+            }
+            TwinStorage::Loose => {}
+            TwinStorage::LooseAndPacked => {
+                run(&repo, &["pack-refs", "--all"]).await;
+                // A moved tip, since git skips writing a loose ref that already has its value.
+                commit_file(&repo, "s.txt", "second\n").await;
+                run(&repo, &["update-ref", "refs/heads/feat", "HEAD"]).await;
+                let loose = base.join(".git").join("refs").join("heads").join("feat");
+                assert!(loose.is_file(), "fixture sanity: feat is loose too");
+            }
+        }
+        let aliases = case_twin_alias_oracle(&repo).await;
+        (g, repo, aliases)
+    }
+
+    /// Creating `Feat` beside `feat` in each `(checkout, no_track)` arm: refused before git
+    /// where refs alias, leaving HEAD, the branches and the config as they were; created
+    /// beside `feat` where they don't.
+    async fn create_beside_case_twin(storage: TwinStorage) {
+        for (checkout, no_track) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (_g, repo, aliases) = case_twin_fixture("create-case-twin", storage).await;
+            let before = case_twin_snapshot(&repo).await;
+            let row = format!("{storage:?} checkout={checkout} no_track={no_track}");
+            let result = git_create_branch_core(
+                &AppState::default(),
+                repo.clone(),
+                "Feat".into(),
+                checkout,
+                None,
+                no_track,
+            )
+            .await;
+            let listed = case_twin_listed(&repo).await;
+            if aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert!(listed.iter().any(|b| b == "feat"), "{row}: {listed:?}");
+                assert_eq!(case_twin_snapshot(&repo).await, before, "{row}");
+            } else {
+                result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert!(listed.iter().any(|b| b == "feat"), "{row}: {listed:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_case_twin_of_a_packed_only_branch() {
+        create_beside_case_twin(TwinStorage::PackedOnly).await;
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_case_twin_of_a_loose_branch() {
+        create_beside_case_twin(TwinStorage::Loose).await;
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_case_twin_of_a_loose_and_packed_branch() {
+        create_beside_case_twin(TwinStorage::LooseAndPacked).await;
+    }
+
+    /// A name stored byte-exactly keeps git's own "already exists", alone and in a
+    /// repository that already holds its twin, on every disk.
+    #[tokio::test]
+    async fn create_of_an_existing_name_keeps_gits_answer_beside_a_case_twin() {
+        for twin_too in [false, true] {
+            for no_track in [false, true] {
+                let (_g, base) = temp_base("create-existing-case-twin");
+                let repo = base.to_string_lossy().into_owned();
+                init_repo(&repo, "r.txt").await;
+                let name = if twin_too {
+                    run(&repo, &["branch", "feat"]).await;
+                    run(&repo, &["pack-refs", "--all"]).await;
+                    // Beside a packed-only `feat` git mints the twin itself.
+                    run(&repo, &["branch", "Feat"]).await;
+                    "Feat"
+                } else {
+                    run(&repo, &["branch", "feat"]).await;
+                    "feat"
+                };
+                let row = format!("twin_too={twin_too} no_track={no_track}");
+                let result = git_create_branch_core(
+                    &AppState::default(),
+                    repo.clone(),
+                    name.into(),
+                    false,
+                    None,
+                    no_track,
+                )
+                .await;
+                assert!(
+                    matches!(&result, Err(AppError::Git { stderr, .. })
+                        if stderr.contains("already exists") && !stderr.contains("letter case")),
+                    "{row}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// A reftable repository keeps `Feat` and `feat` apart on any disk, so the create
+    /// succeeds. Returns early when this git can't create a reftable repository.
+    #[tokio::test]
+    async fn create_beside_a_case_twin_in_a_reftable_repository_succeeds() {
+        let (_g, base) = temp_base("reftable-case-twin");
+        let repo = base.to_string_lossy().into_owned();
+        let init = run_git_raw(
+            Some(&repo),
+            &["init", "-q", "--ref-format=reftable"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        if init.code != 0 {
+            eprintln!("note: this git can't create a reftable repo; skipping");
+            return;
+        }
+        run(&repo, &["config", "user.email", "t@t.local"]).await;
+        run(&repo, &["config", "user.name", "T"]).await;
+        commit_file(&repo, "a.txt", "seed\n").await;
+        run(&repo, &["branch", "feat"]).await;
+        assert!(!super::refs_can_alias(&repo).await);
+        git_create_branch_core(
+            &AppState::default(),
+            repo.clone(),
+            "Feat".into(),
+            false,
+            None,
+            false,
+        )
+        .await
+        .expect("the reftable create succeeds");
+        let listed = case_twin_listed(&repo).await;
+        assert!(listed.iter().any(|b| b == "Feat"), "{listed:?}");
+        assert!(listed.iter().any(|b| b == "feat"), "{listed:?}");
+    }
+
+    /// A twin minted while a create waits on the config-write mutex is refused there; the
+    /// `--no-track` arm waits on the mutex too.
+    #[tokio::test]
+    async fn create_refuses_a_case_twin_minted_during_the_mutex_wait() {
+        for no_track in [true, false] {
+            let (_g, base) = temp_base("create-case-twin-mutex");
+            let repo = base.to_string_lossy().into_owned();
+            init_repo(&repo, "r.txt").await;
+            let aliases = case_twin_alias_oracle(&repo).await;
+            let (holder, release) = hold_config_mutex(&repo).await;
+            let (events, waiting) = on_first_waiting();
+            let create = tokio::spawn({
+                let repo = repo.clone();
+                CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                    git_create_branch_core(
+                        &AppState::default(),
+                        repo,
+                        "Feat".into(),
+                        false,
+                        None,
+                        no_track,
+                    )
+                    .await
+                })
+            });
+            waiting
+                .await
+                .unwrap_or_else(|_| panic!("no_track={no_track}: the create reached the mutex"));
+            run(&repo, &["branch", "feat"]).await;
+            run(&repo, &["pack-refs", "--all"]).await;
+            release.send(()).unwrap();
+            holder.await.unwrap();
+            let result = tokio::time::timeout(TEST_GIT_HANG_GUARD, create)
+                .await
+                .expect("the create finishes once released")
+                .unwrap();
+            let listed = case_twin_listed(&repo).await;
+            if aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "no_track={no_track}: {result:?}"
+                );
+                assert!(!listed.iter().any(|b| b == "Feat"), "{listed:?}");
+            } else {
+                result.unwrap_or_else(|e| panic!("no_track={no_track}: {e:?}"));
+                assert!(listed.iter().any(|b| b == "Feat"), "{listed:?}");
+            }
+        }
+    }
+
+    /// Renaming `ctw-src` onto `CTW-dst` beside the packed-only `ctw-dst`, the twin minted
+    /// up front or while the rename waits on the config-write mutex: refused where refs
+    /// alias with both branches where they were, renamed where they don't.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn rename_refuses_a_case_twin_of_another_branch() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let expected = "CTW-dst differs from the existing branch ctw-dst only in letter case, \
+            which this disk can't keep apart. Use a different name, or rename ctw-dst first.";
+        for during_wait in [false, true] {
+            let (_g, base) = temp_base("rename-case-twin");
+            let repo = base.to_string_lossy().into_owned();
+            init_repo(&repo, "r.txt").await;
+            // Branch names no other test uses: the marker root override is process-wide.
+            run(&repo, &["branch", "ctw-src"]).await;
+            let mint = |repo: String| async move {
+                run(&repo, &["branch", "ctw-dst"]).await;
+                run(&repo, &["pack-refs", "--all"]).await;
+            };
+            if !during_wait {
+                mint(repo.clone()).await;
+            }
+            let aliases = case_twin_alias_oracle(&repo).await;
+            let rename = |repo: String| async move {
+                git_rename_branch_core(
+                    &AppState::default(),
+                    repo,
+                    "ctw-src".into(),
+                    "CTW-dst".into(),
+                )
+                .await
+            };
+            let result = if during_wait {
+                let (holder, release) = hold_config_mutex(&repo).await;
+                let (events, waiting) = on_first_waiting();
+                let task =
+                    tokio::spawn(CONFIG_WRITE_LOCK_EVENTS.scope(events, rename(repo.clone())));
+                waiting.await.expect("the rename reached the mutex");
+                mint(repo.clone()).await;
+                release.send(()).unwrap();
+                holder.await.unwrap();
+                tokio::time::timeout(TEST_GIT_HANG_GUARD, task)
+                    .await
+                    .expect("the rename finishes once released")
+                    .unwrap()
+            } else {
+                rename(repo.clone()).await
+            };
+            let listed = case_twin_listed(&repo).await;
+            let row = format!("during_wait={during_wait}: {listed:?}");
+            assert!(listed.iter().any(|b| b == "ctw-dst"), "{row}");
+            if aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == expected),
+                    "{row}: {result:?}"
+                );
+                assert!(listed.iter().any(|b| b == "ctw-src"), "{row}");
+                assert!(!listed.iter().any(|b| b == "CTW-dst"), "{row}");
+            } else {
+                result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(!listed.iter().any(|b| b == "ctw-src"), "{row}");
+                assert!(listed.iter().any(|b| b == "CTW-dst"), "{row}");
+            }
+        }
+    }
+
+    /// Renaming a branch to its own case variant is never a twin refusal: git answers, and
+    /// afterwards exactly one of the two spellings is stored (the new one on success).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn rename_to_its_own_case_variant_is_not_a_case_twin() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        for packed in [true, false] {
+            for checked_out in [false, true] {
+                let (_g, base) = temp_base("rename-own-case-twin");
+                let repo = base.to_string_lossy().into_owned();
+                init_repo(&repo, "r.txt").await;
+                // Branch names no other test uses: the marker root override is process-wide.
+                run(&repo, &["branch", "ctself-a"]).await;
+                if packed {
+                    run(&repo, &["pack-refs", "--all"]).await;
+                }
+                if checked_out {
+                    run(&repo, &["switch", "-q", "ctself-a"]).await;
+                }
+                let result = git_rename_branch_core(
+                    &AppState::default(),
+                    repo.clone(),
+                    "ctself-a".into(),
+                    "CTSELF-a".into(),
+                )
+                .await;
+                let listed = case_twin_listed(&repo).await;
+                let ours: Vec<&str> = listed
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|b| *b == "ctself-a" || *b == "CTSELF-a")
+                    .collect();
+                let row =
+                    format!("packed={packed} checked_out={checked_out}: {result:?} {listed:?}");
+                let kept = match &result {
+                    Ok(_) => "CTSELF-a",
+                    Err(AppError::Git { stderr, .. }) if !stderr.contains("letter case") => {
+                        "ctself-a"
+                    }
+                    Err(_) => panic!("{row}"),
+                };
+                assert_eq!(ours, vec![kept], "{row}");
+                if checked_out {
+                    let head = symbolic_head(&repo).await;
+                    let on = head.as_deref().and_then(|h| h.strip_prefix("refs/heads/"));
+                    assert_eq!(on, Some(kept), "{row}");
+                }
+            }
+        }
+    }
+
+    /// A create through a LINKED worktree beside a packed-only twin in the common store:
+    /// the listing, the disk probe and the mutex all key on the common dir.
+    #[tokio::test]
+    async fn create_through_a_linked_worktree_refuses_a_case_twin() {
+        for (checkout, no_track) in [(true, false), (false, true)] {
+            let (g, repo, aliases) =
+                case_twin_fixture("linked-case-twin", TwinStorage::PackedOnly).await;
+            let wt = g.path().join("wt").to_string_lossy().into_owned();
+            run(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+            assert_eq!(super::refs_can_alias(&wt).await, aliases, "{wt}");
+            let before = case_twin_snapshot(&wt).await;
+            let row = format!("checkout={checkout} no_track={no_track}");
+            let result = git_create_branch_core(
+                &AppState::default(),
+                wt.clone(),
+                "Feat".into(),
+                checkout,
+                None,
+                no_track,
+            )
+            .await;
+            let listed = case_twin_listed(&repo).await;
+            if aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(case_twin_snapshot(&wt).await, before, "{row}");
+            } else {
+                result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert!(listed.iter().any(|b| b == "feat"), "{row}: {listed:?}");
+            }
+        }
+    }
+
+    /// Checking out `origin/Feat` beside the packed-only `feat`: refused before the switch
+    /// where refs alias, leaving HEAD, the branches and the config as they were; a new
+    /// `Feat` tracking `origin/Feat` where they don't.
+    #[tokio::test]
+    async fn remote_checkout_refuses_a_case_twin() {
+        let (_g, repo, aliases) =
+            case_twin_fixture("remote-case-twin", TwinStorage::PackedOnly).await;
+        run(&repo, &["remote", "add", "origin", &repo]).await;
+        run(&repo, &["update-ref", "refs/remotes/origin/Feat", "HEAD"]).await;
+        let feat = full_ref_tip(&repo, "refs/heads/feat").await;
+        let before = case_twin_snapshot(&repo).await;
+        let result = git_checkout_remote_branch_core(
+            &AppState::default(),
+            repo.clone(),
+            "origin".into(),
+            "Feat".into(),
+        )
+        .await;
+        let listed = case_twin_listed(&repo).await;
+        if aliases {
+            assert!(
+                matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                "{result:?}"
+            );
+            assert!(!listed.iter().any(|b| b == "Feat"), "{listed:?}");
+            assert!(listed.iter().any(|b| b == "feat"), "{listed:?}");
+            assert_eq!(case_twin_snapshot(&repo).await, before);
+            assert_eq!(branch_section(&repo, "Feat").await, "");
+        } else {
+            result.unwrap_or_else(|e| panic!("{e:?}"));
+            assert!(listed.iter().any(|b| b == "Feat"), "{listed:?}");
+            assert_eq!(
+                symbolic_head(&repo).await.as_deref(),
+                Some("refs/heads/Feat")
+            );
+            assert_eq!(
+                run(&repo, &["config", "--get", "branch.Feat.merge"])
+                    .await
+                    .trim(),
+                "refs/heads/Feat"
+            );
+        }
+        assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, feat);
     }
 }
