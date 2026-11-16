@@ -4,6 +4,7 @@ import {
   cleanup,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
@@ -20,6 +21,13 @@ import {
   vi,
 } from "vitest";
 import { StashesDialog } from "@/features/repository/StashesDialog";
+import { NAME_CHECK_FAILED_NOTE } from "@/lib/deleted-branches/copy";
+import {
+  claimDeletedBranchFlight,
+  DELETED_BRANCHES_KEY,
+  useDeletedBranches,
+  useDeletedBranchFlights,
+} from "@/lib/deleted-branches/queries";
 import {
   type DeletedBranchEntry,
   forgetDeletedBranch,
@@ -36,6 +44,8 @@ import {
   gitStashList,
   gitStatus,
 } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
+import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import type { Branch, RepoStatus } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
@@ -123,15 +133,21 @@ let pruned: Set<string>;
 let unreadable: Set<string>;
 let success: ReturnType<typeof vi.spyOn>;
 let error: ReturnType<typeof vi.spyOn>;
+let info: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // A never-settling press in an earlier case would hold every later list.
+  useDeletedBranchFlights.setState({ flights: new Map() });
+  // A case that switched repositories leaves the live repo moved.
+  useUiStore.setState({ repoPath: REPO });
   identity.strict = (path) => Promise.resolve(`${path}/.git`);
   disk = [];
   pruned = new Set();
   unreadable = new Set();
   success = vi.spyOn(toast, "success");
   error = vi.spyOn(toast, "error");
+  info = vi.spyOn(toast, "info");
   vi.mocked(loadDeletedBranches).mockImplementation(async () => [...disk]);
   vi.mocked(forgetDeletedBranch).mockImplementation(async (_repo, id) => {
     disk = disk.filter((e) => e.id !== id);
@@ -164,10 +180,11 @@ beforeEach(() => {
   );
 });
 
-function mount() {
-  const client = new QueryClient({
+function mount(
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
-  });
+  }),
+) {
   const view = (repo: string) => (
     <QueryClientProvider client={client}>
       <StashesDialog
@@ -200,6 +217,27 @@ const footer = () =>
     .getAllByRole("button")
     .find((b) => !b.hasAttribute("data-deleted-branch")) as HTMLElement;
 const held = (b: HTMLElement) => b.getAttribute("aria-disabled") === "true";
+/** The text a button's aria-describedby points at. */
+const description = (b: HTMLElement) =>
+  (b.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" ")
+    .trim();
+/** A deferred `gitCreateBranch`; `finish` lets it resolve. */
+function deferCreate() {
+  let finish: () => void = () => undefined;
+  vi.mocked(gitCreateBranch).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = () =>
+        resolve(
+          undefined as unknown as Awaited<ReturnType<typeof gitCreateBranch>>,
+        );
+    }),
+  );
+  return () => finish();
+}
+const RESTORE_RUNNING = "A restore is already running.";
 const PRUNED = "Can't be restored — Git has removed this commit.";
 /** The name-tips read for a list whose only taken name is feat/a. */
 const NAME_TIPS_KEY = ["repo", REPO, "deleted-name-tips", ["feat/a"]];
@@ -223,7 +261,7 @@ describe("Recover lost work: deleted branches", () => {
     expect(row("feat/x").textContent).toContain("a1b2c3d");
     expect(row("feat/x").textContent).toContain("deleted");
     expect(row("feat/x").textContent).toContain("Keep local");
-    expect(loadDeletedBranches).toHaveBeenCalledWith(`${REPO}/.git`);
+    expect(loadDeletedBranches).toHaveBeenCalledWith(`${REPO}/.git`, REPO);
   });
 
   it("shows the empty line only from a read that answered none, and the lost-stash empty line", async () => {
@@ -280,7 +318,7 @@ describe("Recover lost work: deleted branches", () => {
     identity.strict = (path) => Promise.resolve(`${path}/.git`);
     await user.click(within(section()).getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(row("feat/x")).toBeTruthy());
-    expect(loadDeletedBranches).toHaveBeenCalledWith(`${REPO}/.git`);
+    expect(loadDeletedBranches).toHaveBeenCalledWith(`${REPO}/.git`, REPO);
   });
 
   it("walks the rows with the arrow keys", async () => {
@@ -311,6 +349,10 @@ describe("Recover lost work: deleted branches", () => {
     await waitFor(() => expect(row("feat/b")).toBeTruthy());
     const button = footer();
     expect(button.textContent).toBe("Restore branch");
+    // The name carries the row it acts on.
+    expect(
+      within(section()).getByRole("button", { name: "Restore branch: feat/a" }),
+    ).toBe(button);
     expect(held(button)).toBe(false);
     await user.click(button);
     await waitFor(() => expect(held(footer())).toBe(true));
@@ -361,6 +403,11 @@ describe("Recover lost work: deleted branches", () => {
     );
     const button = footer();
     expect(button.textContent).toBe("Remove from list");
+    expect(
+      within(section()).getByRole("button", {
+        name: "Remove from list: feat/gone",
+      }),
+    ).toBe(button);
     expect(held(button)).toBe(false);
     await user.click(row("feat/b"));
     expect(footer()).toBe(button);
@@ -452,35 +499,56 @@ describe("Recover lost work: deleted branches", () => {
     expect(footer()).toBe(button);
   });
 
-  it("keeps a taken name held when its tip read fails or is still pending", async () => {
-    disk = [entry("1", "feat/a", TIP_A)];
+  it("leaves a taken name pressable under the failed-check note when its tip read fails, and the press creates nothing", async () => {
+    disk = [entry("1", "feat/a", TIP_A, { keptLocal: true })];
     vi.mocked(gitBranches).mockResolvedValue([branchRow("feat/a")]);
     vi.mocked(gitBranchTips).mockRejectedValue(new Error("spawn failed"));
-    const failed = mount();
-    const reason =
-      "A branch named feat/a exists again. Rename or delete it to restore this one.";
-    // Settled into its error, not just started: the reason shows while pending too.
+    const { client, user } = mount();
     await waitFor(() =>
-      expect(failed.client.getQueryState(NAME_TIPS_KEY)?.status).toBe("error"),
+      expect(client.getQueryState(NAME_TIPS_KEY)?.status).toBe("error"),
     );
-    expect(within(section()).getByText(reason)).toBeTruthy();
-    expect(held(footer())).toBe(true);
+    await waitFor(() =>
+      expect(within(section()).getByText(NAME_CHECK_FAILED_NOTE)).toBeTruthy(),
+    );
+    expect(within(section()).queryByText(/exists again/)).toBeNull();
     expect(within(section()).queryByText(/already at this commit/)).toBeNull();
-    await failed.user.click(footer());
+    expect(footer().textContent).toBe("Restore branch");
+    expect(held(footer())).toBe(false);
+    // The press's own name check fails too: a failure report, nothing written.
+    await user.click(footer());
+    await waitFor(() => expect(error).toHaveBeenCalled());
+    expect(info).not.toHaveBeenCalled();
+    expect(success).not.toHaveBeenCalled();
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+    expect(gitSetBranchKeepLocal).not.toHaveBeenCalled();
     expect(forgetDeletedBranch).not.toHaveBeenCalled();
-    cleanup();
-
-    vi.mocked(gitBranchTips).mockReturnValue(new Promise(() => undefined));
-    mount();
-    await waitFor(() =>
-      expect(within(section()).getByText(reason)).toBeTruthy(),
-    );
-    await waitFor(() => expect(gitBranchTips).toHaveBeenCalledTimes(2));
-    expect(held(footer())).toBe(true);
-    expect(within(section()).queryByText(/already at this commit/)).toBeNull();
+    expect(row("feat/a")).toBeTruthy();
+    expect(held(footer())).toBe(false);
   });
 
-  it("holds an already-back row again when a later tip read fails", async () => {
+  it("keeps a taken name held while its tip read is still pending", async () => {
+    disk = [entry("1", "feat/a", TIP_A)];
+    vi.mocked(gitBranches).mockResolvedValue([branchRow("feat/a")]);
+    vi.mocked(gitBranchTips).mockReturnValue(new Promise(() => undefined));
+    const { user } = mount();
+    await waitFor(() =>
+      expect(
+        within(section()).getByText(
+          "A branch named feat/a exists again. Rename or delete it to restore this one.",
+        ),
+      ).toBeTruthy(),
+    );
+    await waitFor(() => expect(gitBranchTips).toHaveBeenCalledTimes(1));
+    expect(held(footer())).toBe(true);
+    expect(within(section()).queryByText(NAME_CHECK_FAILED_NOTE)).toBeNull();
+    expect(within(section()).queryByText(/already at this commit/)).toBeNull();
+    await user.click(footer());
+    await act(() => Promise.resolve());
+    expect(gitBranchTips).toHaveBeenCalledTimes(1);
+    expect(forgetDeletedBranch).not.toHaveBeenCalled();
+  });
+
+  it("turns an already-back row into the failed-check note when a later tip read fails", async () => {
     disk = [entry("1", "feat/a", TIP_A)];
     vi.mocked(gitBranches).mockResolvedValue([branchRow("feat/a")]);
     vi.mocked(gitBranchTips).mockResolvedValue({ "feat/a": TIP_A });
@@ -498,13 +566,31 @@ describe("Recover lost work: deleted branches", () => {
     await waitFor(() =>
       expect(client.getQueryState(NAME_TIPS_KEY)?.status).toBe("error"),
     );
-    await waitFor(() => expect(held(footer())).toBe(true));
+    await waitFor(() =>
+      expect(within(section()).getByText(NAME_CHECK_FAILED_NOTE)).toBeTruthy(),
+    );
     expect(within(section()).queryByText(/already at this commit/)).toBeNull();
-    expect(
-      within(section()).getByText(
-        "A branch named feat/a exists again. Rename or delete it to restore this one.",
-      ),
-    ).toBeTruthy();
+    expect(within(section()).queryByText(/exists again/)).toBeNull();
+    expect(held(footer())).toBe(false);
+  });
+
+  it("clears a failed-check row whose press finds the name at the recorded commit", async () => {
+    disk = [entry("1", "feat/a", TIP_A)];
+    vi.mocked(gitBranches).mockResolvedValue([branchRow("feat/a")]);
+    vi.mocked(gitBranchTips)
+      .mockRejectedValueOnce(new Error("spawn failed"))
+      .mockResolvedValue({ "feat/a": TIP_A });
+    const { user } = mount();
+    await waitFor(() =>
+      expect(within(section()).getByText(NAME_CHECK_FAILED_NOTE)).toBeTruthy(),
+    );
+    await user.click(footer());
+    await waitFor(() =>
+      expect(within(section()).queryByText("feat/a")).toBeNull(),
+    );
+    expect(gitCreateBranch).not.toHaveBeenCalled();
+    expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "1");
+    expect(success).toHaveBeenCalledWith("Restored feat/a", undefined);
   });
 
   it.each(["constructor", "toString", "__proto__"])(
@@ -751,5 +837,236 @@ describe("Recover lost work: deleted branches", () => {
     expect(fireEvent.keyDown(footer(), { key: "Enter" })).toBe(true);
     expect(forgetDeletedBranch).not.toHaveBeenCalled();
     expect(gitCreateBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe("Recover lost work: one press per repository", () => {
+  it("holds another checkout of the same repository while a restore runs there", async () => {
+    const OTHER = "C:/repos/recover-linked";
+    identity.strict = () => Promise.resolve("C:/repos/shared/.git");
+    disk = [entry("1", "feat/a", TIP_A)];
+    deferCreate();
+    const { user, switchTo } = mount();
+    await waitFor(() => expect(row("feat/a")).toBeTruthy());
+    await user.click(footer());
+    await waitFor(() => expect(held(footer())).toBe(true));
+    switchTo(OTHER);
+    await waitFor(() => expect(loadDeletedBranches).toHaveBeenCalledTimes(2));
+    expect(row("feat/a")).toBeTruthy();
+    expect(held(footer())).toBe(true);
+    expect(within(section()).getByText(RESTORE_RUNNING)).toBeTruthy();
+  });
+
+  it("holds a dialog mounted while another instance's restore runs, until it settles", async () => {
+    disk = [entry("1", "feat/a", TIP_A), entry("2", "feat/b", TIP_B)];
+    const finish = deferCreate();
+    const first = mount();
+    await waitFor(() => expect(row("feat/b")).toBeTruthy());
+    await first.user.click(footer());
+    await waitFor(() => expect(held(footer())).toBe(true));
+    cleanup();
+
+    mount();
+    await waitFor(() => expect(row("feat/b")).toBeTruthy());
+    expect(held(footer())).toBe(true);
+    expect(within(section()).getByText(RESTORE_RUNNING)).toBeTruthy();
+    await act(async () => finish());
+    await waitFor(() => expect(held(footer())).toBe(false));
+    expect(within(section()).queryByText(RESTORE_RUNNING)).toBeNull();
+  });
+
+  it("keeps a selection made in another repository when this repository's restore settles", async () => {
+    const OTHER = "C:/repos/other";
+    disk = [entry("1", "feat/a", TIP_A), entry("2", "feat/b", TIP_B)];
+    vi.mocked(loadDeletedBranches).mockImplementation(async (key) =>
+      key === `${OTHER}/.git`
+        ? [entry("9", "feat/z", TIP_C), entry("1", "feat/y", TIP_C)]
+        : [...disk],
+    );
+    const finish = deferCreate();
+    const { user, switchTo } = mount();
+    await waitFor(() => expect(row("feat/b")).toBeTruthy());
+    await user.click(footer());
+    await waitFor(() => expect(held(footer())).toBe(true));
+    switchTo(OTHER);
+    await waitFor(() => expect(row("feat/y")).toBeTruthy());
+    await user.click(row("feat/y"));
+    expect(row("feat/y").getAttribute("aria-current")).toBe("true");
+    await act(async () => finish());
+    await waitFor(() => expect(forgetDeletedBranch).toHaveBeenCalled());
+    await act(() => Promise.resolve());
+    expect(row("feat/y").getAttribute("aria-current")).toBe("true");
+    expect(row("feat/z").getAttribute("aria-current")).toBeNull();
+  });
+
+  it("keeps holding a press made before the identity resolved, and moves the selection when it settles", async () => {
+    let calls = 0;
+    // The identity read fails; the list's own strict lookup then answers.
+    identity.strict = (path) =>
+      calls++ === 0
+        ? Promise.reject(new Error("ipc down"))
+        : Promise.resolve(`${path}/.git`);
+    disk = [
+      entry("1", "feat/a", TIP_A),
+      entry("2", "feat/b", TIP_B),
+      entry("3", "feat/c", TIP_C),
+    ];
+    const finish = deferCreate();
+    const { user, client } = mount();
+    await waitFor(() => expect(row("feat/c")).toBeTruthy());
+    await user.click(row("feat/b"));
+    await user.click(footer());
+    await waitFor(() => expect(held(footer())).toBe(true));
+    act(() => {
+      client.setQueryData(
+        repoIdentityQueryOptions(REPO).queryKey,
+        `${REPO}/.git`,
+      );
+    });
+    await waitFor(() =>
+      expect(loadDeletedBranches).toHaveBeenLastCalledWith(
+        `${REPO}/.git`,
+        REPO,
+      ),
+    );
+    await waitFor(() => expect(row("feat/c")).toBeTruthy());
+    expect(held(footer())).toBe(true);
+    expect(within(section()).getByText(RESTORE_RUNNING)).toBeTruthy();
+    expect(
+      claimDeletedBranchFlight(`${REPO}/.git`, "restoring", normPath(REPO)),
+    ).toBeNull();
+    await user.click(footer());
+    await act(() => Promise.resolve());
+    expect(gitCreateBranch).toHaveBeenCalledTimes(1);
+    await act(async () => finish());
+    await waitFor(() => expect(held(footer())).toBe(false));
+    await waitFor(() =>
+      expect(row("feat/c").getAttribute("aria-current")).toBe("true"),
+    );
+    expect(row("feat/a").getAttribute("aria-current")).toBeNull();
+  });
+
+  it("keeps a restored row whose record couldn't be removed listed and selected", async () => {
+    disk = [entry("1", "feat/a", TIP_A), entry("2", "feat/b", TIP_B)];
+    vi.mocked(forgetDeletedBranch).mockResolvedValueOnce(false);
+    const { user } = mount();
+    await waitFor(() => expect(row("feat/b")).toBeTruthy());
+    await user.click(footer());
+    await waitFor(() => expect(success).toHaveBeenCalled());
+    expect(success.mock.calls[0]?.[0]).toBe("Restored feat/a");
+    await waitFor(() => expect(held(footer())).toBe(false));
+    expect(row("feat/a")).toBeTruthy();
+    expect(row("feat/a").getAttribute("aria-current")).toBe("true");
+    expect(row("feat/b").getAttribute("aria-current")).toBeNull();
+  });
+});
+
+describe("Recover lost work: one list per checkout", () => {
+  it("caches two checkouts of one repository apart, and a family invalidation re-reads both", async () => {
+    const LINKED = "C:/repos/recover-linked";
+    const SHARED = "C:/repos/shared/.git";
+    identity.strict = () => Promise.resolve(SHARED);
+    // The read merges entries still stored under each checkout's raw path.
+    vi.mocked(loadDeletedBranches).mockImplementation(async (_id, path) =>
+      path === LINKED
+        ? [entry("2", "feat/linked", TIP_B)]
+        : [entry("1", "feat/main", TIP_A)],
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(
+      () => ({
+        main: useDeletedBranches(REPO, true),
+        linked: useDeletedBranches(LINKED, true),
+      }),
+      {
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    await waitFor(() => {
+      expect(result.current.main.data?.map((e) => e.name)).toEqual([
+        "feat/main",
+      ]);
+      expect(result.current.linked.data?.map((e) => e.name)).toEqual([
+        "feat/linked",
+      ]);
+    });
+    // The keys an identity resolved, beside the disabled pre-resolution ones.
+    expect(
+      client
+        .getQueryCache()
+        .findAll({ queryKey: [...DELETED_BRANCHES_KEY, SHARED] })
+        .map((q) => q.queryKey),
+    ).toEqual([
+      [...DELETED_BRANCHES_KEY, SHARED, REPO],
+      [...DELETED_BRANCHES_KEY, SHARED, LINKED],
+    ]);
+    vi.mocked(loadDeletedBranches).mockClear();
+    await act(() =>
+      client.invalidateQueries({ queryKey: DELETED_BRANCHES_KEY }),
+    );
+    expect(
+      vi
+        .mocked(loadDeletedBranches)
+        .mock.calls.map((c) => c[1])
+        .sort(),
+    ).toEqual([LINKED, REPO].sort());
+  });
+});
+
+describe("Recover lost work: pruned commits", () => {
+  it("reads the tips again when the dialog reopens", async () => {
+    disk = [entry("1", "feat/a", TIP_A)];
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    mount(client);
+    await waitFor(() => expect(gitObjectsPresent).toHaveBeenCalled());
+    await waitFor(() => expect(footer().textContent).toBe("Restore branch"));
+    const reads = vi.mocked(gitObjectsPresent).mock.calls.length;
+    cleanup();
+
+    pruned.add(TIP_A);
+    mount(client);
+    await waitFor(() => expect(footer().textContent).toBe("Remove from list"));
+    expect(vi.mocked(gitObjectsPresent).mock.calls.length).toBeGreaterThan(
+      reads,
+    );
+  });
+
+  it("holds Remove from list while a pruned verdict comes from the previous list's read", async () => {
+    disk = [entry("1", "feat/gone", TIP_A)];
+    pruned.add(TIP_A);
+    const { user, client } = mount();
+    await waitFor(() => expect(footer().textContent).toBe("Remove from list"));
+    let answer: (present: boolean) => void = () => undefined;
+    vi.mocked(gitObjectsPresent).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    disk = [entry("1", "feat/gone", TIP_A), entry("2", "feat/b", TIP_B)];
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["deleted-branches"] }),
+    );
+    await waitFor(() => expect(row("feat/b")).toBeTruthy());
+    expect(within(section()).getByText(PRUNED)).toBeTruthy();
+    expect(footer().textContent).toBe("Remove from list");
+    expect(held(footer())).toBe(true);
+    expect(description(footer())).toBe("Checking this commit again…");
+    await user.click(footer());
+    await act(() => Promise.resolve());
+    expect(forgetDeletedBranch).not.toHaveBeenCalled();
+
+    await act(async () => answer(false));
+    await waitFor(() => expect(held(footer())).toBe(false));
+    await user.click(footer());
+    await waitFor(() =>
+      expect(forgetDeletedBranch).toHaveBeenCalledWith(REPO, "1"),
+    );
   });
 });

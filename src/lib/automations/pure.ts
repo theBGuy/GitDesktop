@@ -26,8 +26,10 @@ export function localRefsFresh(
   sameSha: (a: string, b: string) => boolean,
 ): boolean {
   if (!headSha) return false;
-  const tip = tips[head];
-  if (!tip || !sameSha(tip, headSha)) return false;
+  // Own keys only: a head named like an `Object.prototype` key must not read an
+  // inherited member as its tip.
+  const tip: unknown = Object.hasOwn(tips, head) ? tips[head] : undefined;
+  if (typeof tip !== "string" || !tip || !sameSha(tip, headSha)) return false;
   const baseBranch = branches.find((b) => b.name === base);
   return (
     baseBranch !== undefined &&

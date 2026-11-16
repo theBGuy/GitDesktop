@@ -476,6 +476,8 @@ async fn run_git_spawn(
     if timeout.is_zero() {
         return Err(AppError::Timeout(0));
     }
+    #[cfg(test)]
+    let _ = GIT_SPAWN_LOG.try_with(|log| log(args));
     let git = git_bin().await?;
     let mut cmd = Command::new(&git);
     // Also covers the credential helpers git spawns in turn, and puts the login-shell
@@ -853,19 +855,21 @@ pub(crate) async fn run_git_config_write(
 
 type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-/// One mutex per repository for this process's `.git/config` writers: held across the
-/// spawn of short writes (branch, remote, identity, archive flag, submodule set-url),
-/// and only across the repair leg of commands too long to hold it through (`push -u`,
-/// submodule add/update/deinit, `worktree add -b`). Held legs never collide; those first
-/// runs and other processes can, which the retry and repairs cover. Outside it: gh-run
-/// writers (`gh repo create --push`, `fork --remote`, `set-default`), whose git is gh's
-/// own, and `--global` writers, which lock another file. A LEAF lock: taken after any
+/// One mutex per repository for this process's `.git/config` writers: held across short
+/// writes' spawns, across only the repair leg of long ones (`push -u`, submodule
+/// add/update/deinit, `worktree add -b`), and across the app's plain switches onto an
+/// existing branch for their HEAD move, so none lands inside a branch delete's guarded
+/// window; PR checkout's two switches skip it and are excluded by the worktree-admin hold
+/// every delete caller takes. The long commands' unheld first runs, and other processes,
+/// can still collide, which the retry and repairs cover. A LEAF lock: taken after any
 /// domain lock, never before one.
 static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
 
 /// The config-write mutex for `repo_path`, keyed by the common git dir because every
 /// checkout of a repository writes the same `.git/config`. An unresolvable identity
-/// falls back to the raw spelling, which can only under-serialize onto the retry.
+/// falls back to the raw spelling, which can only under-serialize onto the retry; it
+/// also loses the switch-versus-delete exclusion, leaving the delete's second guard pass
+/// as the backstop.
 async fn config_write_lock(repo_path: &str) -> Arc<tokio::sync::Mutex<()>> {
     let identity = crate::git::repo::repo_identity(repo_path)
         .await
@@ -886,11 +890,11 @@ async fn config_write_lock(repo_path: &str) -> Arc<tokio::sync::Mutex<()>> {
 pub(crate) struct ConfigWriteHeld(());
 
 /// Runs `body` holding `repo_path`'s config-write mutex. The wait is unbounded and a
-/// hold lasts as long as its git work: a tracking switch, or any checked-out create
-/// without --no-track, keeps it across the whole checkout (smudge filters,
-/// post-checkout hooks) plus its repairs, up to `DEFAULT_TIMEOUT` per spawn, and a
-/// linked worktree's rename or delete queued behind it keeps ITS working-tree domain
-/// meanwhile, so staging there can report Busy.
+/// hold lasts as long as its git work: a tracking switch, a plain switch onto an existing
+/// branch, or a checked-out create without --no-track keeps it across the whole checkout
+/// (filters, hooks) plus its repairs. A waiter keeps the domains it holds meanwhile: a
+/// rename's, switch's or plain delete's working-tree domain, and any branch delete's
+/// worktree-admin domain, so commands in those domains can report Busy.
 pub(crate) async fn with_config_write_lock<F, Fut, T>(repo_path: &str, body: F) -> T
 where
     F: FnOnce(ConfigWriteHeld) -> Fut,
@@ -919,6 +923,10 @@ tokio::task_local! {
     /// it is held and "freed" once released, so a test can order a parked writer
     /// against its own release, and a long command against the hold.
     pub(crate) static CONFIG_WRITE_LOCK_EVENTS: Arc<dyn Fn(&'static str) + Send + Sync>;
+
+    /// Told each git argv (without the runner's own `-c` pairs) just before it spawns,
+    /// so a test can count and order the reads one operation makes.
+    pub(crate) static GIT_SPAWN_LOG: Arc<dyn Fn(&[&str]) + Send + Sync>;
 }
 
 /// A [`CONFIG_WRITE_ATTEMPT_HOOK`] that deletes `lock` just before held attempt

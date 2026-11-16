@@ -15,7 +15,41 @@ export const deletedBranchTitle = (name: string, tip: string, away: string) =>
   `Deleted ${name} (was ${shortTip(tip)})${away}`;
 
 export const DELETE_TIP_MOVED = (name: string) =>
-  `${name} changed while it was being deleted — nothing was deleted.`;
+  `${name} changed before it could be deleted, so it was kept.`;
+
+/** Why the branch menu's confirm holds Delete: it deletes only at the commit
+ *  read when the confirm opened, so with no such commit there is nothing to pin. */
+export const DELETE_PIN_HELD: Record<
+  "waiting" | "failed" | "notListed",
+  string
+> = {
+  waiting: "Checking the branch's commit…",
+  failed:
+    "Couldn't read this branch's commit. Close this and open Delete again to retry.",
+  notListed: "Git no longer lists this branch.",
+};
+
+/** The second line when a current-branch delete stopped after its switch landed. */
+export const switchedAndKept = (other: string, name: string) =>
+  `Switched to ${other}; ${name} was kept.`;
+
+/** The confirm was dismissed before the delete started; `switchedTo` is the
+ *  branch a landed switch left checked out. */
+export const deleteDismissed = (name: string, switchedTo?: string) =>
+  switchedTo === undefined
+    ? `You closed the confirmation before the delete started — ${name} was kept.`
+    : `You closed the confirmation before ${name} was deleted — ${switchedTo} is checked out and ${name} was kept.`;
+
+/** A delete-mode Clean up batch stopped on a held repository. Away from the
+ *  batch's repository the selection has re-seeded, so that sentence drops. */
+export const cleanupStoppedBusy = (away: string) =>
+  away === ""
+    ? "Stopped: another operation is still running in this repository. The branches not reached are still selected. Try again when it finishes."
+    : `Stopped: another operation is still running${away}. Try again when it finishes.`;
+
+/** A Recover lost work row whose name check (the tips read) failed. */
+export const NAME_CHECK_FAILED_NOTE =
+  "A branch of this name exists, but its commit couldn't be read. Restore branch checks again and overwrites nothing.";
 
 /** The note a delete toast carries when its record couldn't be written. The
  *  single delete's title names the commit; a batch's doesn't. */
@@ -48,6 +82,15 @@ export const restoredDescription = (
     parts.push(`Its upstream link to ${upstream} wasn't restored.`);
   return parts.length > 0 ? parts.join(" ") : undefined;
 };
+
+/** A restored entry whose record removal failed, so the list's state is unknown. */
+export const RECORD_KEPT_NOTE =
+  "Recover lost work couldn't be updated, so it may still list this branch.";
+
+export const recordKeptNote = (k: number) =>
+  k === 1
+    ? "Recover lost work couldn't be updated, so it may still list one of them."
+    : `Recover lost work couldn't be updated, so it may still list ${k} of them.`;
 
 export const couldntRestoreTitle = (name: string, away: string) =>
   `Couldn't restore ${name}${away}`;

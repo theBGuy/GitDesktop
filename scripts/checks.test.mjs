@@ -92,10 +92,12 @@ import {
   verdict as reusedViewVerdict,
 } from "./check-reused-view-pending.mjs";
 import {
+  bindingInitializer,
   checkBareBranchRevs,
   checkCompareEndpoints,
   checkDiffExternalDrivers,
   checkGhExitAbsence,
+  checkLocalBranchDeletes,
   checkMergeIgnoredGuard,
   checkRefspecTemplates,
   checkSecretArgv,
@@ -110,9 +112,11 @@ import {
   ghExitAbsenceScope,
   gitRunnerDeclarations,
   lexRust,
+  LOCAL_BRANCH_DELETE_ALLOWLIST,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
   PLAIN_GIT_RUNNERS,
+  reportEmptyBranchDeleteScope,
   reportEmptyGhScope,
   reportEmptyHangGuardScope,
   splitStaleEntries,
@@ -5621,8 +5625,122 @@ test("marker branches accept unique direct and bound names with same-function re
       "branch",
       'TestRootOverride::set(&root);\n let branch = "held";\n switch(branch);',
     ],
+    [
+      "branch",
+      'TestRootOverride::set(&root);\n let branch =\n "held";\n switch(branch);',
+    ],
   ]) {
     assert.deepEqual(markerBranchHits(markerHolder(arg, setup)), []);
+  }
+});
+
+test("marker branches: check I's declaration search has the contract block's shared gaps", () => {
+  // These rows pin the shared gaps bindingInitializer's contract names for
+  // check I: each passes today, reading "uniq" where the binding in scope is the
+  // shared name. A row that starts failing means its gap closed, and the block
+  // changes with it.
+  const holder = (...body) =>
+    [
+      "#[cfg(test)] mod tests {",
+      "    fn holder() {",
+      "        TestRootOverride::set(&root);",
+      ...body,
+      "    }",
+      "}",
+    ].join("\n");
+  const call = '        UpdateMarker::create_for(&root.join("live"), branch);';
+  const victim = 'fn victim() { switch("shared"); }';
+  for (const [gap, src] of [
+    [
+      "inner block closed before the site",
+      holder(
+        '        let branch = "shared";',
+        '        { let branch = "uniq"; keep(branch); }',
+        call,
+      ),
+    ],
+    [
+      "tuple pattern",
+      holder(
+        '        let branch = "uniq";',
+        '        let (_x, branch) = (1, "shared");',
+        call,
+      ),
+    ],
+    [
+      "let-else pattern",
+      holder(
+        '        let branch = "uniq";',
+        '        let Some(branch) = Some("shared") else { return };',
+        call,
+      ),
+    ],
+    [
+      "if let pattern",
+      holder(
+        '        let branch = "uniq";',
+        '        if let Some(branch) = Some("shared") {',
+        "    " + call,
+        "        }",
+      ),
+    ],
+    [
+      "for binding",
+      holder(
+        '        let branch = "uniq";',
+        '        for branch in ["shared"] {',
+        "    " + call,
+        "        }",
+      ),
+    ],
+    [
+      "closure parameter",
+      holder(
+        '        let branch = "uniq";',
+        '        ["shared"].iter().for_each(|branch| {',
+        "    " + call,
+        "        });",
+      ),
+    ],
+    [
+      "match-arm binding",
+      holder(
+        '        let branch = "uniq";',
+        '        match Some("shared") {',
+        "            Some(branch) => {",
+        "        " + call,
+        "            }",
+        "            None => {}",
+        "        }",
+      ),
+    ],
+    [
+      "let mut reassigned",
+      holder(
+        '        let mut branch = "uniq";',
+        '        branch = "shared";',
+        call,
+      ),
+    ],
+    [
+      "cfg-gated alternatives",
+      holder(
+        "        #[cfg(windows)]",
+        '        let branch = "shared";',
+        "        #[cfg(not(windows))]",
+        '        let branch = "uniq";',
+        call,
+      ),
+    ],
+  ]) {
+    assert.deepEqual(markerBranchHits(src, victim), [], gap);
+    // With every binding the shared name, the same fixture reports.
+    const shared = markerBranchHits(
+      src.replaceAll('"uniq"', '"shared"'),
+      victim,
+    );
+    assert.equal(shared.length, 1, gap);
+    assert.match(shared[0].fix, /unique/, gap);
   }
 });
 
@@ -7026,6 +7144,28 @@ test("bare-rev check fails closed on a binding it cannot resolve as safe", () =>
     ...Array.from({ length: 45 }, () => "    noop();"),
     '    run(&["rev-list", branch]);',
     "}",
+    "async fn same_line(repo: &str, name: &str) {",
+    "    let base = branch_first_rev(repo, name).await; let base = name;",
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    // A declaration after the use on its line, or initializer text after it,
+    // does not answer for it.
+    "async fn later_let(repo: &str, branch: &str) {",
+    '    let r = format!("{branch}..HEAD"); let branch = branch_first_rev(repo, branch).await;',
+    "}",
+    "async fn later_argv(repo: &str, branch: &str) {",
+    '    run(&["merge-base", branch, "HEAD"]); let branch = branch_first_rev(repo, branch).await;',
+    "}",
+    "async fn wrapped_init(repo: &str, name: &str) {",
+    "    let base =",
+    '        name; run(&["merge-base", "HEAD", base]); let _t = branch_first_rev(repo, name);',
+    "}",
+    "async fn self_init(repo: &str, base: &str) {",
+    "    let base = pick(",
+    '        run(&["merge-base", "HEAD", base]),',
+    "        branch_first_rev(repo, base).await,",
+    "    );",
+    "}",
   ].join("\n");
   const hits = [];
   checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
@@ -7033,9 +7173,1284 @@ test("bare-rev check fails closed on a binding it cannot resolve as safe", () =>
     hits.map((h) => [h.fn, h.line]),
     [
       ["rebinds", 3],
+      ["later_let", 59],
       ["far", 52],
+      ["same_line", 56],
+      ["later_argv", 62],
+      ["wrapped_init", 66],
+      ["self_init", 70],
     ],
   );
+});
+
+test("bare-rev check reads no binding out of a string literal", () => {
+  // A string spelling a safe `let` declares nothing: `base` stays the parameter.
+  // The pattern's own `let` is read where it starts, never at a string's, and
+  // no string makes a real initializer safe, inside it or after it.
+  const src = [
+    "async fn spelled(repo: &str, base: &str) {",
+    '    let note = "let base = branch_first_rev(repo, x);";',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    "async fn pattern(repo: &str, pair: (&str, &str)) {",
+    '    let ("a=b", base) = pair else { return }; let _s = "let base = branch_first_rev(x)";',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    "async fn after_pattern(repo: &str, pair: (&str, &str)) {",
+    '    let ("a=b", base) = pair else { return }; let _s = "let base = "; let _t = branch_first_rev(x);',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    "async fn argument(repo: &str, base: &str) {",
+    '    let base = pick(base, "branch_first_rev(");',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["spelled", 3],
+      ["pattern", 7],
+      ["after_pattern", 11],
+      ["argument", 15],
+    ],
+  );
+});
+
+test("bare-rev check reads an exact_branch_tip binding as safe", () => {
+  // The exact tip read is a resolver; a name that only contains it is not.
+  const src = [
+    "async fn exact(repo: &str, branch: &str) {",
+    "    let Some(head) = exact_branch_tip(repo, branch).await? else {",
+    "        return;",
+    "    };",
+    '    run(&["merge-base", "--is-ancestor", &head, "HEAD"]);',
+    "    let target = not_exact_branch_tip(repo, branch).await;",
+    '    run(&["rev-list", &target]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [["exact", 7]],
+  );
+});
+
+test("binding lookup: check G passes each known gap its contract block names", () => {
+  // These rows pin bindingInitializer's known gaps: each passes today. A row
+  // that starts failing means its gap closed, and the block changes with it.
+  const fn = (...body) =>
+    ["async fn f(branch: &str, repo: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  const use = '    run(&["merge-base", branch, "HEAD"]);';
+  const safe = "    let branch = branch_first_rev(repo, branch).await;";
+  const hitsOf = (src) => {
+    const hits = [];
+    checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+    return hits;
+  };
+  for (const [gap, src] of [
+    [
+      "inner block closed before the use",
+      fn("    if x {", "    " + safe, "        keep(branch);", "    }", use),
+    ],
+    [
+      "if let used after its block",
+      fn(
+        "    if let Some(branch) = branch_first_rev(repo, branch).await {",
+        "        keep(branch);",
+        "    }",
+        use,
+      ),
+    ],
+    [
+      "while let used after its block",
+      fn(
+        "    while let Some(branch) = branch_first_rev(repo, branch).await {",
+        "        keep(branch);",
+        "    }",
+        use,
+      ),
+    ],
+    ["for binding", fn(safe, "    for branch in xs {", "    " + use, "    }")],
+    [
+      "closure parameter",
+      fn(safe, "    xs.iter().for_each(|branch| {", "    " + use, "    });"),
+    ],
+    [
+      "match-arm binding",
+      fn(
+        safe,
+        "    match pick(xs) {",
+        "        Some(branch) => {",
+        "        " + use,
+        "        }",
+        "        None => {}",
+        "    }",
+      ),
+    ],
+    [
+      "let mut reassigned",
+      fn(
+        "    let mut branch = branch_first_rev(repo, branch).await;",
+        "    branch = xs[0];",
+        use,
+      ),
+    ],
+    [
+      "cfg-gated alternatives",
+      fn(
+        "    #[cfg(not(windows))]",
+        "    let branch = xs[0];",
+        "    #[cfg(windows)]",
+        safe,
+        use,
+      ),
+    ],
+    [
+      "use inside its own initializer",
+      fn(
+        "    let branch = match branch_first_rev(repo, branch).await {",
+        "        Ok(rev) => rev,",
+        '        Err(_) => run(&["merge-base", branch, "HEAD"]),',
+        "    };",
+      ),
+    ],
+    [
+      "struct pattern renaming the field",
+      fn("    let Tips { branch: tip, .. } = branch_tips(repo).await;", use),
+    ],
+  ]) {
+    assert.deepEqual(hitsOf(src), [], gap);
+    // Without the resolver call the same fixture reports, so the row is live.
+    const open = src.replace(/\b(?:branch_first_rev|branch_tips)\(/g, "pick(");
+    assert.ok(hitsOf(open).length > 0, gap);
+  }
+});
+
+test("binding lookup: check D passes each known gap its contract block names", () => {
+  // These rows pin bindingInitializer's known gaps for check D, which reads no
+  // pattern binding: each passes today. A row that starts failing means its gap
+  // closed, and the block changes with it.
+  const fn = (...body) =>
+    [
+      "fn f(report: String, out: Out, xs: Vec<Out>) -> AppError {",
+      ...body,
+      "}",
+    ].join("\n");
+  const ctor = (pad = "    ") => [
+    pad + "AppError::Git {",
+    pad + "    code: 1,",
+    pad + "    stderr: report,",
+    pad + "}",
+  ];
+  const shaped = "    let report = out.full_failure_text();";
+  const hitsOf = (src) => {
+    const hits = [];
+    checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+    return hits;
+  };
+  for (const [gap, src] of [
+    [
+      "inner block closed before the use",
+      fn(
+        "    if x {",
+        "    " + shaped,
+        "        keep(report);",
+        "    }",
+        ...ctor(),
+      ),
+    ],
+    [
+      "for binding",
+      fn(
+        shaped,
+        "    for report in xs {",
+        "        return AppError::Git {",
+        "            code: 1,",
+        "            stderr: report,",
+        "        };",
+        "    }",
+        "    todo!()",
+      ),
+    ],
+    [
+      "match-arm binding",
+      fn(
+        shaped,
+        "    match pick(xs) {",
+        "        Some(report) => AppError::Git {",
+        "            code: 1,",
+        "            stderr: report,",
+        "        },",
+        "        None => todo!(),",
+        "    }",
+      ),
+    ],
+    [
+      "let mut reassigned",
+      fn(
+        "    let mut report = out.full_failure_text();",
+        "    report = out.stderr;",
+        ...ctor(),
+      ),
+    ],
+    [
+      "cfg-gated alternatives",
+      fn(
+        "    #[cfg(not(windows))]",
+        "    let report = out.stderr;",
+        "    #[cfg(windows)]",
+        shaped,
+        ...ctor(),
+      ),
+    ],
+    [
+      "let-else pattern",
+      fn(
+        shaped,
+        "    let Some(report) = pick(out.stderr.clone()) else { todo!() };",
+        ...ctor(),
+      ),
+    ],
+    [
+      "tuple pattern",
+      fn(
+        shaped,
+        "    let (code, report) = (1, out.stderr.clone());",
+        ...ctor(),
+      ),
+    ],
+    [
+      "if let pattern",
+      fn(
+        shaped,
+        "    if let Some(report) = pick(out.stderr.clone()) {",
+        "        return AppError::Git {",
+        "            code: 1,",
+        "            stderr: report,",
+        "        };",
+        "    }",
+        "    todo!()",
+      ),
+    ],
+  ]) {
+    assert.deepEqual(hitsOf(src), [], gap);
+    // Shaped from stderr alone, the same fixture reports, so the row is live.
+    const open = src.replace(/out\.full_failure_text\(\)/g, "out.stderr");
+    assert.ok(hitsOf(open).length > 0, gap);
+  }
+});
+
+test("binding lookup: the verdict-design passes of checks D and G hold", () => {
+  // These rows pin the contract block's verdict-design paragraph: each passes
+  // today, and its twin, one spelling away, reports. A row that starts failing
+  // means the verdict changed, and the block changes with it.
+  const gfn = (...body) =>
+    ["async fn f(branch: &str, repo: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  const dfn = (...body) =>
+    [
+      "fn f(report: String, out: Out, xs: Vec<Out>) -> AppError {",
+      ...body,
+      "}",
+    ].join("\n");
+  const ctor = (value) => [
+    "    AppError::Git {",
+    "        code: 1,",
+    "        stderr: " + value + ",",
+    "    }",
+  ];
+  const G = (src) => {
+    const hits = [];
+    checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const D = (src) => {
+    const hits = [];
+    checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const arms = (first) =>
+    gfn(
+      "    let branch = match pick {",
+      "        true => " + first + ",",
+      "        false => branch.to_string(),",
+      "    };",
+      '    run(&["merge-base", branch, "HEAD"]);',
+    );
+  for (const [label, run, src, twin, twinLines] of [
+    [
+      "G: a resolver call in one match arm",
+      G,
+      arms("branch_first_rev(repo, branch).await"),
+      arms("pick(branch)"),
+      [6],
+    ],
+    [
+      "D: a value that is not a plain identifier",
+      D,
+      dfn("    let report = out.stderr;", ...ctor("report.clone()")),
+      dfn("    let report = out.stderr;", ...ctor("report")),
+      [3],
+    ],
+    [
+      "D: an alias hop that is not a plain identifier",
+      D,
+      dfn("    let report = shape(&out);", ...ctor("report")),
+      dfn("    let report = shape(&out.stderr);", ...ctor("report")),
+      [3],
+    ],
+    [
+      "D: full_failure_text( in one match arm",
+      D,
+      dfn(
+        "    let report = match x {",
+        "        A => out.stderr,",
+        "        B => out.full_failure_text(),",
+        "    };",
+        ...ctor("report"),
+      ),
+      dfn(
+        "    let report = match x {",
+        "        A => out.stderr,",
+        "    };",
+        ...ctor("report"),
+      ),
+      [5],
+    ],
+    [
+      "D: a call's .stderr",
+      D,
+      dfn(...ctor("output().stderr")),
+      dfn(...ctor("out.stderr")),
+      [2],
+    ],
+    [
+      "D: a ?'s .stderr",
+      D,
+      dfn(...ctor("run(x).await?.stderr")),
+      dfn(...ctor("run(x).await.stderr")),
+      [2],
+    ],
+  ]) {
+    assert.deepEqual(run(src), [], label);
+    assert.deepEqual(run(twin), twinLines, label);
+  }
+});
+
+test("binding lookup: its bounds hold as the contract block states them", () => {
+  const gfn = (...body) =>
+    ["async fn f(branch: &str, repo: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  const dfn = (...body) =>
+    [
+      "fn f(report: String, out: Out, xs: Vec<Out>) -> AppError {",
+      ...body,
+      "}",
+    ].join("\n");
+  const G = (src) => {
+    const hits = [];
+    checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const D = (src) => {
+    const hits = [];
+    checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+    return hits.map((h) => h.line);
+  };
+  const use = '    run(&["merge-base", branch, "HEAD"]);';
+  const safe = "    let branch = branch_first_rev(repo, branch).await;";
+  const filler = (n) =>
+    Array.from({ length: n }, (_, i) => "    keep(" + i + ");");
+  const ctor = [
+    "    AppError::Git {",
+    "        code: 1,",
+    "        stderr: report,",
+    "    }",
+  ];
+  const block = (kind, second) =>
+    gfn(
+      "    " + kind + " let Some(branch) = pick(xs) {",
+      "        let t = " + second + ";",
+      "    " + use,
+      "    }",
+    );
+  for (const [label, run, src, lines] of [
+    [
+      "a declaration 39 lines above the use is read",
+      G,
+      gfn(safe, ...filler(38), use),
+      [],
+    ],
+    ["one 40 lines above is not", G, gfn(safe, ...filler(39), use), [42]],
+    [
+      "the walk stops at a nested fn line",
+      G,
+      gfn(safe, "    fn inner() {", "        keep(1);", "    }", use),
+      [6],
+    ],
+    [
+      "the text runs over five further lines",
+      G,
+      gfn(
+        "    let branch = pick(",
+        "        a,",
+        "        b,",
+        "        c,",
+        "        d,",
+        "    ).or(branch_first_rev(repo, branch).await);",
+        use,
+      ),
+      [],
+    ],
+    [
+      "but not a sixth",
+      G,
+      gfn(
+        "    let branch = pick(",
+        "        a,",
+        "        b,",
+        "        c,",
+        "        d,",
+        "        e,",
+        "    ).or(branch_first_rev(repo, branch).await);",
+        use,
+      ),
+      [9],
+    ],
+    [
+      "a ; inside a string ends the text",
+      G,
+      gfn(
+        '    let branch = pick("a;",',
+        "        branch_first_rev(repo, branch).await);",
+        use,
+      ),
+      [4],
+    ],
+    [
+      "the rest of the ; line is read (G)",
+      G,
+      gfn(
+        "    let branch = xs[0]; keep(branch_first_rev(repo, x).await);",
+        use,
+      ),
+      [],
+    ],
+    [
+      "the same line without the call reports",
+      G,
+      gfn("    let branch = xs[0]; keep(x);", use),
+      [3],
+    ],
+    [
+      "the rest of the ; line is read (D)",
+      D,
+      dfn(
+        "    let report = out.stderr; keep(out.full_failure_text());",
+        ...ctor,
+      ),
+      [],
+    ],
+    [
+      "the same line without the call reports (D)",
+      D,
+      dfn("    let report = out.stderr; keep(1);", ...ctor),
+      [3],
+    ],
+    [
+      "an if let's block is read",
+      G,
+      block("if", "branch_first_rev(repo, other).await"),
+      [],
+    ],
+    ["the same block without the call reports", G, block("if", "other"), [4]],
+    [
+      "a while let's block is read",
+      G,
+      block("while", "branch_first_rev(repo, other).await"),
+      [],
+    ],
+    [
+      "a second declaration after the use on its line is not read",
+      G,
+      gfn(
+        "    let branch = branch_first_rev(repo, branch).await;" +
+          use.slice(3) +
+          " let branch = xs[0];",
+      ),
+      [],
+    ],
+    [
+      "one before the use on its line leaves no answer",
+      G,
+      gfn(
+        "    let branch = branch_first_rev(repo, branch).await; let branch = xs[0];" +
+          use.slice(3),
+      ),
+      [2],
+    ],
+  ]) {
+    assert.deepEqual(run(src), lines, label);
+  }
+  // `where` receives the declaration's line and the column of its `let`.
+  const where = {};
+  const text = bindingInitializer(["    if let Some(r) = x {"], 0, "r", {
+    patterns: true,
+    before: Infinity,
+    where,
+  });
+  assert.equal(text, "x {");
+  assert.deepEqual(where, { line: 0, col: 7 });
+});
+
+function branchDeleteHits(src, allowlist = [], file = "git/fixture.rs", corpus) {
+  const hits = [];
+  checkLocalBranchDeletes(file, src, src.split("\n"), hits, allowlist, corpus);
+  return hits;
+}
+
+test("branch-delete check flags branch delete flags in production code", () => {
+  const src = [
+    "async fn deletes(repo: &str, name: &str) {",
+    '    run(&["branch", "-D", "--", name]);',
+    '    run(&["branch", "-d", name]);',
+    '    run(&["branch", "--delete", name]);',
+    '    run(&["branch", "-qD", name]);',
+    '    run(&["branch", "-df", name]);',
+    '    run(&vec!["-C", repo, "branch", "-D", name]);',
+    "    run(&[",
+    '        "branch",',
+    '        "-D",',
+    "        name,",
+    "    ]);",
+    '    run(&vec!["branch".to_string(), "-D".into(), name]);',
+    '    run(&["branch", "--del", name]);',
+    '    run(&["branch", "--d", name]);',
+    "}",
+  ].join("\n");
+  const hits = branchDeleteHits(src);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [2, 3, 4, 5, 6, 7, 8, 13, 14, 15].map((line) => ["deletes", line]),
+  );
+  for (const h of hits) {
+    assert.equal(h.allowlisted, false);
+    assert.equal("failClosed" in h, false);
+    assert.match(h.fix, /check M: a local branch ref delete goes only through git::branches::delete_branch_ref_at/);
+  }
+});
+
+test("branch-delete check reads a required option value as a value, never a flag", () => {
+  const hitsOf = (argv) => branchDeleteHits(`fn f(name: &str, key: &str) { run(&${argv}); }`);
+  // git takes each `-`-led element here as the option's value and deletes nothing.
+  for (const argv of [
+    '["branch", "--sort", "-committerdate"]',
+    '["branch", "--sort", "-creatordate"]',
+    '["branch", "--sort", "-authordate"]',
+    '["branch", "--sort", "-taggerdate"]',
+    '["branch", "--format", "-d"]',
+    '["branch", "--points-at", "-D"]',
+    '["branch", "--set-upstream-to", "-d", name]',
+    '["branch", "-u", "-D", name]',
+    '["branch", "--sort", key]',
+  ]) {
+    assert.deepEqual(hitsOf(argv), [], argv);
+  }
+  // Each of these is reported: the flag sits outside the value, the value is stuck
+  // to its option, the option's value is optional, or a value option is itself
+  // another's value. An abbreviated option is not known, so its value is read.
+  for (const argv of [
+    '["branch", "--sort", "-committerdate", "-D", name]',
+    '["branch", "-D", "--sort", "-committerdate", name]',
+    '["branch", "--sort=-committerdate", "-d", name]',
+    '["branch", "--sort", key, "-D", name]',
+    '["branch", "--sort", "--sort", "-d", name]',
+    '["branch", "--format", "--points-at", "-d", name]',
+    '["branch", "--color", "-d", name]',
+    '["branch", "--column", "-d", name]',
+    '["branch", "--abbrev", "-d", name]',
+    '["branch", "--so", "-committerdate"]',
+  ]) {
+    const hits = hitsOf(argv);
+    assert.deepEqual(hits.map((h) => [h.fn, h.line]), [["f", 1]], argv);
+    assert.match(hits[0].fix, /a local branch ref delete goes only through/, argv);
+  }
+});
+
+test("branch-delete check skips an option value only where it can trust the position", () => {
+  const U = undefined;
+  const hitsOf = (elems) =>
+    branchDeleteHits(
+      `fn f(name: &str) { run(&[${elems.map((v) => (v === U ? "name" : JSON.stringify(v))).join(", ")}]); }`,
+    );
+  // [reported, the elements after "branch"]; U is a non-literal.
+  const rows = [
+    // Only known elements precede the value option, so its value is skipped.
+    [false, ["--sort", "-committerdate"]],
+    [false, ["--sort", "-creatordate"]],
+    [false, ["--format", "-d"]],
+    [false, ["--points-at", "-D"]],
+    [false, ["--set-upstream-to", "-d", U]],
+    [false, ["-u", "-D", U]],
+    // Pins only the over-broad direction: a non-literal is never a flag.
+    [false, ["--sort", U]],
+    [false, ["--sort", "-committerdate", "--format", "-D", U]],
+    [false, ["-a", "--sort", "-committerdate"]],
+    [false, ["--sort", "-committerdate", "--format", U]],
+    [false, ["--format=%(refname)", "--sort", "-committerdate"]],
+    [false, ["-t", "--sort", "-D", U]],
+    [false, ["-u", "y", "--sort", "-D", U]],
+    // A delete flag outside any value.
+    [true, ["--sort", "-committerdate", "-D", U]],
+    [true, ["-D", "--sort", "-committerdate", U]],
+    [true, ["--sort=-committerdate", "-d", U]],
+    [true, ["--sort", U, "-D", U]],
+    [true, ["--sort", "--sort", "-d", U]],
+    [true, ["--format", "--points-at", "-d", U]],
+    [true, ["--color", "-d", U]],
+    [true, ["--column", "-d", U]],
+    [true, ["--abbrev", "-d", U]],
+    // git reads the value option as an earlier element's value and deletes x.
+    [true, ["--so", "--sort", "-D", U]],
+    [true, ["--form", "-u", "-D", U]],
+    [true, [U, "-u", "-D", U]],
+    [true, ["-fu", "--sort", "-D", "--no-set-upstream-to", U]],
+    [true, ["-vu", "-u", "-D", "--no-set-upstream-to", U]],
+    [true, ["--force", "--sort", "--sort", "-D", U]],
+    [true, ["--verbose", "--sort", "--sort", "-D", U]],
+    [true, [U, "--sort", "--sort", "-D", U]],
+    // Reported, though git keeps x: git reads the delete-shaped element as an
+    // option's value.
+    [true, ["--so", "-committerdate"]],
+    [true, ["-fu", "-u", "-u", "-D", "--no-set-upstream-to", U]],
+    // After an element that may take a value, nothing is skipped.
+    [true, ["--verbose", "--sort", "-committerdate"]],
+    [true, ["--", "--sort", "-D", U]],
+  ];
+  for (const [reported, tail] of rows) {
+    const label = JSON.stringify(["branch", ...tail]);
+    const hits = hitsOf(["branch", ...tail]);
+    assert.equal(hits.length, reported ? 1 : 0, label);
+    if (reported) {
+      assert.equal("failClosed" in hits[0], false, label);
+      assert.match(
+        hits[0].fix,
+        /a local branch ref delete goes only through/,
+        label,
+      );
+    }
+  }
+  // Without a resolved verb nothing is skipped either, and the hit fails closed.
+  for (const elems of [
+    [U, "branch", "--so", "--sort", "-D", U],
+    [U, "branch", "--sort", "-D", U],
+    ["-C", "branch", U, "--sort", "-D", U],
+    ["-C", "branch", "--sort", "-D", U],
+  ]) {
+    const hits = hitsOf(elems);
+    const label = JSON.stringify(elems);
+    assert.equal(hits.length, 1, label);
+    assert.equal(hits[0].failClosed, true, label);
+    assert.match(hits[0].fix, /cannot resolve the verb/, label);
+  }
+});
+
+test("branch-delete check flags update-ref -d on a branch ref", () => {
+  const src = [
+    "async fn deletes(repo: &str, n: &str, tip: &str, msg: &str) {",
+    '    run(&["update-ref", "-d", "refs/heads/x"]);',
+    '    run(&["update-ref", "-d", &format!("refs/heads/{n}")]);',
+    "    let full_ref = branch_full_ref(n)?;",
+    '    run(&["update-ref", "--no-deref", "-d", &full_ref, tip]);',
+    '    run(&["update-ref", "-m", msg, "-d", "refs/heads/x"]);',
+    '    run(&["update-ref", "-d", "HEAD"]);',
+    '    let r = "refs/heads/x";',
+    '    run(&["update-ref", "-d", r]);',
+    '    let full = format!("refs/heads/{n}");',
+    '    run(&["update-ref", "-d", full.as_str(), tip]);',
+    "}",
+  ].join("\n");
+  const hits = branchDeleteHits(src);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [2, 3, 5, 6, 7, 9, 11].map((line) => ["deletes", line]),
+  );
+  for (const h of hits) {
+    assert.equal(h.allowlisted, false);
+    assert.equal("failClosed" in h, false);
+    assert.match(h.fix, /delete_branch_ref_at/);
+  }
+  // Spelled branch refs earn the branch fix; a variable is opaque, even one
+  // bound to a branch literal or template.
+  for (const i of [0, 1, 3, 4]) {
+    assert.match(hits[i].fix, /a local branch ref delete goes only through/);
+  }
+  for (const i of [2, 5, 6]) {
+    assert.match(hits[i].fix, /cannot resolve this `update-ref -d` ref/);
+  }
+});
+
+test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any ASCII case", () => {
+  // A template's escapes and line continuations cook before format! reads it,
+  // and a case-folding disk deletes the loose branch through refs/HEADS/<name>.
+  const src = (...body) => ["fn f(n: &str) {", ...body, "}"].join("\n");
+  const use = (ref) => `    run(&["update-ref", "-d", ${ref}]);`;
+  for (const body of [
+    [use(String.raw`&format!("refs/\x68eads/{n}")`)],
+    [use(String.raw`&format!("refs/h\u{65}ads/{n}")`)],
+    [use(String.raw`&format!("refs/\u{68}eads/{n}")`)],
+    ['    run(&["update-ref", "-d", &format!("refs/\\', '        heads/{n}")]);'],
+    [use(String.raw`format!("refs/\x68eads/{n}").as_str()`)],
+    [use('"refs/HEADS/x"')],
+    [use('&format!("refs/Heads/{n}")')],
+    [use('&format!["refs/heads/{n}"]')],
+    ['    run(&["update-ref", "-d", "refs/\\', '\t heads/x"]);'],
+  ]) {
+    const hits = branchDeleteHits(src(...body));
+    const label = body.join("\n");
+    assert.equal(hits.length, 1, label);
+    assert.equal("failClosed" in hits[0], false, label);
+    assert.match(hits[0].fix, /a local branch ref delete goes only through/, label);
+  }
+  // A raw template keeps its backslash at run time, so it names no branch; a
+  // continuation keeps a no-break space, so the namespace is not refs/heads/;
+  // only ASCII letters fold, so a long s (U+017F) spells no refs/heads/.
+  for (const body of [
+    [use(String.raw`&format!(r"refs/\x68eads/{n}")`)],
+    [use(String.raw`&format!(r#"refs/\x68eads/{n}"#)`)],
+    [use('&format!{"refs/tags/{n}"}')],
+    ['    run(&["update-ref", "-d", "refs/\\', `${String.fromCharCode(0xa0)}heads/x"]);`],
+    [use(`"refs/head${String.fromCharCode(0x17f)}/x"`)],
+  ]) {
+    assert.deepEqual(branchDeleteHits(src(...body)), [], body.join("\n"));
+  }
+  // A method chained onto any spelling of format! can rewrite it, and an
+  // escape Rust refuses leaves the literal unread: both are opaque.
+  for (const body of [
+    [use('&format!["refs/tags/{n}"].replace("tags", "heads")')],
+    [use('&format!{"refs/tags/{n}"}.to_lowercase()')],
+    [use('&format ! ("refs/tags/{n}").replace("tags", "heads")')],
+    [use('&format!("refs/remotes/o/{n}").replace("remotes/o", "heads")')],
+    [use(String.raw`&format!("refs/\u{110000}eads/{n}")`)],
+    [use(String.raw`"refs/\u{110000}eads/x"`)],
+    [use(String.raw`"refs/\u{_}heads/x"`)],
+    [use(String.raw`"refs/\u{d800}heads/x"`)],
+    [use(String.raw`"refs/\u{0000068}eads/x"`)],
+    [use(String.raw`"refs/\u{}heads/x"`)],
+    [String.raw`    let r = "refs/\u{110000}eads/x";`, use("r")],
+    [String.raw`    let r = format!("refs/h\x65ads/{n}");`, use("&r")],
+  ]) {
+    const label = body.join("\n");
+    const hits = branchDeleteHits(src(...body));
+    assert.equal(hits.length, 1, label);
+    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, label);
+  }
+});
+
+test("branch-delete check finds an update-ref delete in any option order", () => {
+  // git permutes update-ref's options: each of these deletes the branch.
+  const orders = (ref) => [
+    `["update-ref", "-d", "--no-deref", ${ref}]`,
+    `["update-ref", "-d", "-m", "msg", ${ref}]`,
+    `["update-ref", ${ref}, "-d"]`,
+    `["update-ref", "--no-deref", "-d", ${ref}, oid]`,
+    `["update-ref", "-dm", msg, ${ref}]`,
+    `["update-ref", "-d", "--", ${ref}]`,
+  ];
+  const src = (argv) =>
+    [
+      "fn f(n: &str, oid: &str, msg: &str) {",
+      "    let full_ref = branch_full_ref(n)?;",
+      `    run(&${argv});`,
+      "}",
+    ].join("\n");
+  for (const [ref, fix] of [
+    ['"refs/heads/x"', /a local branch ref delete goes only through/],
+    ["&full_ref", /cannot resolve this `update-ref -d` ref/],
+  ]) {
+    for (const argv of orders(ref)) {
+      const hits = branchDeleteHits(src(argv));
+      assert.deepEqual(hits.map((h) => [h.fn, h.line]), [["f", 3]], argv);
+      assert.equal("failClosed" in hits[0], false, argv);
+      assert.match(hits[0].fix, fix, argv);
+    }
+  }
+  for (const argv of [
+    '["update-ref", "-d", "--no-deref", "refs/tags/x"]',
+    '["update-ref", "-d", "-m", "msg", "refs/remotes/o/x"]',
+    '["update-ref", "-dm", msg, "refs/remotes/o/x", oid]',
+    '["update-ref", "-d", "--", "refs/tags/x"]',
+  ]) {
+    assert.deepEqual(branchDeleteHits(src(argv)), [], argv);
+  }
+  // An option the check does not know, before the ref, leaves the ref unread.
+  for (const argv of [
+    '["update-ref", "-d", "--deref", "refs/tags/x"]',
+    '["update-ref", "-0", "-d", "refs/tags/x"]',
+  ]) {
+    const hits = branchDeleteHits(src(argv));
+    assert.deepEqual(hits.map((h) => [h.fn, h.line]), [["f", 3]], argv);
+    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, argv);
+  }
+});
+
+test("branch-delete check reads every variable ref as opaque, whatever binds it", () => {
+  const fn = (...body) => ["fn f(r: &str, n: &str, xs: &[&str]) {", ...body, "}"].join("\n");
+  // No declaration is resolved: a `let` of a tag, remote or branch literal or
+  // template, one on the use's own line, a mutable, shadowed or block-scoped
+  // binding, a `for`, closure, pattern or match-arm binding, a parameter.
+  for (const src of [
+    fn('    let r = format!("refs/remotes/o/{n}").replace("remotes/o", "heads");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let mut r = "refs/tags/x".to_string();', '    r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let mut r = String::from("refs/tags/x");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let q = "refs/tags/x";', '    let r = q;', "    r += n;", '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/remotes/o/x";', '    for r in xs { run(&["update-ref", "-d", r]); }'),
+    fn('    let r = "refs/remotes/o/x";', '    xs.iter().for_each(|r| { run(&["update-ref", "-d", r]); });'),
+    fn('    let r = "refs/remotes/o/x";', "    xs.iter().for_each(|x| {", "        let (_, r) = split(x);", '        run(&["update-ref", "-d", r]);', "    });"),
+    fn('    let r = "refs/tags/x";', '    if let Some(r) = branch_ref(n) { run(&["update-ref", "-d", r]); }'),
+    fn('    let r = "refs/tags/x";', '    match branch_ref(n) { Some(r) => run(&["update-ref", "-d", r]), None => {} }'),
+    fn("    {", '        let r = "refs/tags/x";', "        keep(r);", "    }", '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "-m";', '    run(&["update-ref", "-d", r, "refs/heads/x"]);'),
+    fn('    let note = r#"let r = "refs/tags/x";"#;', '    run(&["update-ref", "-d", r]);'),
+    fn('    let note = r#"', '        let r = "refs/tags/x";', '    "#;', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x";', "    for r in xs {", '        let note = r#"let r = "refs/tags/x";"#;', '        run(&["update-ref", "-d", r]);', "    }"),
+    fn('    let r = "refs/tags/x"; let r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let r = "refs/tags/x"; let r = r.replace("tags", "heads");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let r = "refs/tags/x"; xs.iter().for_each(|r| run(&["update-ref", "-d", r]));'),
+    fn('    run(&["update-ref", "-d", r]); let r = "refs/tags/x";'),
+    fn("    run(&[", '        "update-ref", "-d",', '        r]); let r = "refs/tags/x";'),
+    fn('    let r = "refs/tags/x";', '    for r in xs { run(&["update-ref", "-d", r]); } let r = "refs/tags/y";'),
+    fn("    {", '        let r = "refs/tags/x";', '    } run(&["update-ref", "-d", r]);'),
+    fn('    let r = format!("refs/heads/{n}");', '    let note = r#"let r = "refs/tags/x";"#;', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]); let r = "refs/tags/x";'),
+    fn('    let r = "refs/tags/x";', '    if r == "x" { keep(r); }', '    let s = "r = 1 | r |";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x";', "    {", "        keep(r);", "    }", '    run(&["update-ref", "-d", r]);'),
+    fn('    let p = "refs/remotes/o/x".to_string();', '    run(&["update-ref", "-d", p.as_str()]);'),
+    fn('    let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r: &str = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn("    let r =", '        "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = format!("refs/remotes/o/{n}");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let note = "let r = 1;"; let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x"; run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]); xs.iter().for_each(|r| keep(r));'),
+    fn('    let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]); for r in xs { keep(r); }'),
+    fn('    let r = "refs/tags/x"; run(&["update-ref", "-d", r]); let r = "refs/tags/y";'),
+    fn('    let p = "refs/remotes/origin/x";', '    run(&["update-ref", "-d", &p]);'),
+  ]) {
+    const hits = branchDeleteHits(src);
+    assert.equal(hits.length, 1, src);
+    assert.equal("failClosed" in hits[0], false, src);
+    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, src);
+  }
+});
+
+test("branch-delete check reads a ref bound beside closures and `||` as opaque", () => {
+  const fn = (ns, between) =>
+    [
+      "fn f(n: &str, xs: &[&str], a: bool, b: bool, x: bool, y: bool) {",
+      `    let pin = format!("refs/${ns}/x/{n}");`,
+      between,
+      '    run(&["update-ref", "-d", &pin]);',
+      "}",
+    ].join("\n");
+  // Whatever sits between the `let` and the use, an operator or a closure
+  // parameter of the same name, the variable is opaque in either namespace.
+  for (const between of [
+    "    if a || pin.is_empty() || b { return; }",
+    "    if x || pin.is_empty() { return; }",
+    "    if pin.is_empty() || y { return; }",
+    "    let m = a || pin.len() | 1;",
+    "    let m = 1 | pin.len() || b;",
+    // rustfmt's wrapped condition: the operator starts a continuation line.
+    [
+      "    if a",
+      "        || pin.is_empty()",
+      "        || b",
+      "    {",
+      "        return;",
+      "    }",
+    ].join("\n"),
+    [
+      "    if a || pin.is_empty() ||",
+      "        b",
+      "    {",
+      "        return;",
+      "    }",
+    ].join("\n"),
+    // A zero-parameter closure binds nothing.
+    "    let c = || pin.len();",
+    "    let c = move || pin.len();",
+  ]) {
+    for (const ns of ["gitdesktop", "heads"]) {
+      const hits = branchDeleteHits(fn(ns, between));
+      assert.equal(hits.length, 1, between);
+      assert.match(
+        hits[0].fix,
+        /cannot resolve this `update-ref -d` ref/,
+        between,
+      );
+    }
+  }
+  for (const between of [
+    "    xs.iter().for_each(|pin| keep(pin));",
+    "    xs.iter().for_each(|a, pin| keep(pin));",
+    "    let g = move |pin: &str| keep(pin);",
+    "    xs.iter().for_each(|(pin, _)| keep(pin));",
+    "    let g = |pin| a || b;",
+    "    let g = a | pin | b;",
+    "    let g = |pin: &'static str||| run(pin);",
+    "    let g = |_x: u8||pin: &str| run(pin);",
+    "    let g = |pin: &'static str||x: u8| run(pin);",
+    "    let g = |pin: &'static str|| x: u8| run(pin);",
+    "    let g = |pin: u8||| true;",
+    "    let g = |pin||x| x;",
+    "    let g = |pin: &'static str| || run(pin);",
+    "    let g = |pin: &'static str || x: u8| run(pin);",
+    "    let g = |pin: &'static str ||\n        x: u8| run(pin);",
+    "    let g = |_a: u8\n        || pin: &str| run(pin);",
+    "    let g = || |pin: &str| run(pin);",
+    "    let g = |(Err(e)|Ok(pin))|keep(pin);",
+  ]) {
+    for (const ns of ["gitdesktop", "heads"]) {
+      const hits = branchDeleteHits(fn(ns, between));
+      assert.equal(hits.length, 1, between);
+      assert.match(
+        hits[0].fix,
+        /cannot resolve this `update-ref -d` ref/,
+        between,
+      );
+    }
+  }
+});
+
+test("branch-delete check passes non-delete and non-branch argv", () => {
+  for (const argv of [
+    '["branch", "-f", n, "HEAD"]',
+    '["branch", "--force", n]',
+    '["branch", "-m", "--", a, b]',
+    '["branch", &flag, "--", b]',
+    '["branch", "--no-delete", "--", b]',
+    '["update-ref", "--no-deref", "-d", "HEAD"]',
+    '["update-ref", "-d", &format!("refs/remotes/{r}/{n}")]',
+    '["update-ref", "--no-deref", "-d", "MERGE_AUTOSTASH", &stash]',
+    '["update-ref", "-d", "refs/gitdesktop/pin"]',
+    '["update-ref", "refs/heads/x", sha]',
+    '["update-ref", "--no-deref", "-m", "restored", full_ref, tip, &absent]',
+    '["tag", "-d", name]',
+    '["push", "origin", "--delete", "x"]',
+    '["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]',
+    '["pick", "drop", "update-ref", "-d"]',
+  ]) {
+    assert.deepEqual(branchDeleteHits(`fn keep() { run(&${argv}); }`), [], argv);
+  }
+});
+
+test("branch-delete check: each kind of site its header lists as not seen gives no hit", () => {
+  // These rows pin check M's "Not seen" list: each gives no hit today. A row
+  // that starts reporting means the check now sees it, and the header changes
+  // with it.
+  const fn = (...body) =>
+    ["fn f(n: &str, flag: &str, verb: &str, xs: &[&str]) {", ...body, "}"].join(
+      "\n",
+    );
+  for (const [kind, body] of [
+    ["a delete flag held in a variable", ['    run(&["branch", flag, n]);']],
+    [
+      "a delete flag held in a format!",
+      ['    run(&["branch", &format!("-{flag}"), n]);'],
+    ],
+    ["a branch verb held in a variable", ['    run(&[verb, "-D", n]);']],
+    [
+      "an update-ref verb held in a variable",
+      ['    run(&[verb, "-d", "refs/heads/x"]);'],
+    ],
+    [
+      "update-ref's -d held in a variable",
+      ['    run(&["update-ref", flag, "refs/heads/x"]);'],
+    ],
+    [
+      "a git program element before branch",
+      ['    run(&["git", "branch", "-D", n]);'],
+    ],
+    [
+      "a git program element before update-ref",
+      ['    run(&["git", "update-ref", "-d", "refs/heads/x"]);'],
+    ],
+    [
+      "a cmd /C git argv",
+      ['    run(&["/C", "git", "update-ref", "-d", "refs/heads/x"]);'],
+    ],
+    [
+      "argv assembled across statements",
+      [
+        '    let del = ["-D", n];',
+        '    run(&[&["branch"][..], &del[..]].concat());',
+      ],
+    ],
+    [
+      "argv assembled across functions",
+      ['    run(&[&["branch"][..], &delete_flags(n)[..]].concat());'],
+    ],
+    [
+      "argv grown by .push",
+      [
+        '    let mut a = vec!["branch"];',
+        '    a.push("-D");',
+        "    a.push(n);",
+        "    run(&a);",
+      ],
+    ],
+    [
+      "argv grown by .extend",
+      [
+        '    let mut a = vec!["update-ref"];',
+        '    a.extend(["-d", "refs/heads/x"]);',
+        "    run(&a);",
+      ],
+    ],
+    [
+      "a builder chain",
+      ['    Command::new("git").arg("branch").arg("-D").arg(n);'],
+    ],
+    ["a command inside one string", ['    sh("git branch -D x");']],
+    [
+      "an update-ref --stdin delete instruction",
+      ['    run_input(&["update-ref", "--stdin"], "delete refs/heads/x");'],
+    ],
+    [
+      "an update-ref to the all-zero oid",
+      [
+        '    run(&["update-ref", "refs/heads/x", "0000000000000000000000000000000000000000"]);',
+      ],
+    ],
+    [
+      "a symbolic ref other than HEAD",
+      ['    run(&["update-ref", "-d", "main-worktree/HEAD"]);'],
+    ],
+    ["symbolic-ref -d", ['    run(&["symbolic-ref", "-d", "refs/heads/x"]);']],
+    [
+      "symbolic-ref --delete",
+      ['    run(&["symbolic-ref", "--delete", "refs/heads/x"]);'],
+    ],
+    ["a rename with -m", ['    run(&["branch", "-m", n, "y"]);']],
+    ["a rename with -M", ['    run(&["branch", "-M", n, "y"]);']],
+    ["push . --delete <name>", ['    run(&["push", ".", "--delete", n]);']],
+    ["push . :<name>", ['    run(&["push", ".", &format!(":{n}")]);']],
+    ["push . :refs/heads/x", ['    run(&["push", ".", ":refs/heads/x"]);']],
+    [
+      "a loose ref file removed from disk",
+      ['    std::fs::remove_file(git_dir.join("refs/heads/x"))?;'],
+    ],
+  ]) {
+    assert.deepEqual(branchDeleteHits(fn(...body)), [], kind);
+  }
+  // The same fixture with a delete the check sees reports.
+  assert.equal(
+    branchDeleteHits(fn('    run(&["branch", "-D", n]);')).length,
+    1,
+  );
+});
+
+test("branch-delete check ignores comments and test modules", () => {
+  for (const argv of [
+    '["branch", "-D", "--", name]',
+    '["update-ref", "-d", "refs/heads/x"]',
+    '["update-ref", "-d", "HEAD"]',
+  ]) {
+    // The same argv in production code is a hit, so each case below is live.
+    assert.equal(branchDeleteHits(`fn f() { run(&${argv}); }`).length, 1, argv);
+    for (const src of [
+      ["fn f() {", `    // run(&${argv});`, "}"],
+      ["fn f() {", `    /// run(&${argv});`, "}"],
+      ["fn f() {", `    /* run(&${argv}); */`, "}"],
+      ["#[cfg(test)]", "mod tests {", `    fn helper() { run(&${argv}); }`, "}"],
+      ["#[cfg(test)] #[allow(dead_code)] mod t {", `    fn helper() { run(&${argv}); }`, "}"],
+    ]) {
+      assert.deepEqual(branchDeleteHits(src.join("\n")), [], src.join(" / "));
+    }
+  }
+});
+
+test("branch-delete check honours its allowlist by file and fn", () => {
+  const src = [
+    "fn primitive() {",
+    '    run(&["update-ref", "-d", "refs/heads/x"]);',
+    "}",
+    "fn other() {",
+    '    run(&["update-ref", "-d", "refs/heads/x"]);',
+    "}",
+  ].join("\n");
+  const verdicts = (list) =>
+    branchDeleteHits(src, list, "git/branches.rs").map((h) => [h.fn, h.allowlisted]);
+  const row = (file) => [{ file, fn: "primitive", rationale: "r" }];
+  assert.deepEqual(
+    branchDeleteHits(src, [], "git/branches.rs").map((h) => [h.fn, h.line]),
+    [
+      ["primitive", 2],
+      ["other", 5],
+    ],
+  );
+  assert.deepEqual(verdicts(row("git/branches.rs")), [
+    ["primitive", true],
+    ["other", false],
+  ]);
+  assert.deepEqual(verdicts(row("git/ops.rs")), [
+    ["primitive", false],
+    ["other", false],
+  ]);
+  assert.deepEqual(verdicts([]), [
+    ["primitive", false],
+    ["other", false],
+  ]);
+});
+
+test("branch-delete check fails closed on unreadable input", () => {
+  for (const [src, reason, fn] of [
+    ['fn f() { let s = "unterminated', /never closes/, "<unreadable>"],
+    ['fn f() { run(&["branch", "-D", x', /cannot bound/, "f"],
+    ['fn f() { run(&["update-ref", "-d", x', /cannot bound/, "f"],
+    ['fn f() { run(&[x, "branch", "-D", y]); }', /cannot resolve the verb/, "f"],
+    ['fn f() { run(&[x, "update-ref", "-d", y]); }', /cannot resolve the verb/, "f"],
+  ]) {
+    // Even a row naming the reported fn leaves these hits unallowlisted.
+    const hits = branchDeleteHits(src, [{ file: "git/fixture.rs", fn, rationale: "r" }]);
+    assert.deepEqual(hits.map((h) => [h.fn, h.line]), [[fn, 1]], src);
+    assert.equal(hits[0].allowlisted, false, src);
+    assert.equal(hits[0].failClosed, true, src);
+    assert.match(hits[0].fix, reason);
+  }
+});
+
+test("branch-delete check: allowlist rows each carry a rationale", () => {
+  assert.ok(LOCAL_BRANCH_DELETE_ALLOWLIST.length > 0);
+  const seen = new Set();
+  for (const row of LOCAL_BRANCH_DELETE_ALLOWLIST) {
+    assert.equal(typeof row.file, "string");
+    assert.equal(typeof row.fn, "string");
+    assert.equal(typeof row.rationale, "string", `${row.file} ${row.fn}`);
+    assert.ok(row.rationale.trim().length > 0, `${row.file} ${row.fn}`);
+    const key = `${row.file} fn ${row.fn}`;
+    assert.ok(!seen.has(key), `duplicate row ${key}`);
+    seen.add(key);
+  }
+});
+
+test("branch-delete check fails closed on an opaque update-ref ref", () => {
+  const opaque = (body) => ["fn opaque(&self, ref_param: &str) {", body, "}"].join("\n");
+  for (const body of [
+    '    run(&["update-ref", "--no-deref", "-d", self.name(), cur]);',
+    '    run(&["update-ref", "-d", ref_param]);',
+    '    run(&["update-ref", "-d", &self.target]);',
+    '    run(&["update-ref", "-d", &pin_ref(n)]);',
+    '    for name in ["AUTO_MERGE"] { run(&["update-ref", "--no-deref", "-d", name]); }',
+    '    run(&["update-ref", "-d", &format!("{prefix}{n}")]);',
+    '    run(&["update-ref", "-d"]);',
+  ]) {
+    const hits = branchDeleteHits(opaque(body));
+    assert.deepEqual(hits.map((h) => [h.fn, h.line]), [["opaque", 2]], body);
+    assert.equal(hits[0].allowlisted, false, body);
+    assert.equal("failClosed" in hits[0], false, body);
+    assert.match(hits[0].fix, /cannot resolve/, body);
+    assert.match(hits[0].fix, /delete_branch_ref_at/, body);
+  }
+  // Unlike the unreadable-input arms, an opaque ref is allowlistable.
+  const listed = branchDeleteHits(
+    opaque('    run(&["update-ref", "--no-deref", "-d", self.name(), cur]);'),
+    [{ file: "git/fixture.rs", fn: "opaque", rationale: "r" }],
+  );
+  assert.deepEqual(listed.map((h) => [h.fn, h.allowlisted]), [["opaque", true]]);
+  for (const body of [
+    '    run(&["update-ref", "--no-deref", "-d", "CHERRY_PICK_HEAD"]);',
+    '    run(&["update-ref", "-d", "refs/gitdesktop/pr-checkout/1-2"]);',
+  ]) {
+    assert.deepEqual(branchDeleteHits(opaque(body)), [], body);
+  }
+});
+
+test("branch-delete check's corpus records the primitive's own delete", () => {
+  const group = 'run(&["update-ref", "--no-deref", "-d", &full_ref, tip]);';
+  const primitive = (name = "delete_branch_ref_at", body = group) =>
+    [`async fn ${name}(repo: &str, full_ref: &str, tip: &str) {`, `    ${body}`, "}"].join("\n");
+  const corpusOf = (src, file = "git/branches.rs", corpus = { primitive: false }) => {
+    branchDeleteHits(src, [], file, corpus);
+    return corpus;
+  };
+  assert.deepEqual(corpusOf(primitive()), { primitive: true });
+  assert.deepEqual(corpusOf(primitive(), "git/other.rs"), { primitive: false });
+  assert.deepEqual(corpusOf(primitive("delete_branch_ref_moved")), { primitive: false });
+  assert.deepEqual(corpusOf(primitive(undefined, `// ${group}`)), { primitive: false });
+  assert.deepEqual(
+    corpusOf(["#[cfg(test)]", "mod tests {", primitive(), "}"].join("\n")),
+    { primitive: false },
+  );
+  assert.deepEqual(
+    corpusOf(primitive(undefined, 'run(&["branch", "-D", n]);')),
+    { primitive: false },
+  );
+  // A later file without the primitive never clears what an earlier one set.
+  assert.deepEqual(corpusOf("fn x() {}", "git/ops.rs", { primitive: true }), {
+    primitive: true,
+  });
+});
+
+test("branch-delete check's empty corpus is a hit, never a pass", () => {
+  for (const corpus of [{ primitive: false }, undefined]) {
+    const hits = [];
+    reportEmptyBranchDeleteScope(hits, corpus);
+    assert.deepEqual(
+      hits.map((h) => [h.file, h.fn, h.allowlisted]),
+      [["git/branches.rs", "<empty scope>", false]],
+    );
+    assert.equal(hits[0].line, 0);
+    assert.equal(hits[0].failClosed, true);
+    assert.match(hits[0].fix, /delete_branch_ref_at/);
+  }
+  const hits = [];
+  reportEmptyBranchDeleteScope(hits, { primitive: true });
+  assert.deepEqual(hits, []);
+});
+
+test("branch-delete check goes red on an in-memory mutation of the real primitive", () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const src = readFileSync(join(root, "src-tauri/src/git/branches.rs"), "utf8")
+    .split("\r\n")
+    .join("\n");
+  const run = (text) => {
+    const corpus = { primitive: false };
+    const hits = branchDeleteHits(text, LOCAL_BRANCH_DELETE_ALLOWLIST, "git/branches.rs", corpus);
+    return { pairs: hits.map((h) => [h.fn, h.allowlisted]), primitive: corpus.primitive };
+  };
+  assert.deepEqual(run(src), {
+    pairs: [["delete_branch_ref_at", true]],
+    primitive: true,
+  });
+  const moved = src.replace(/\bfn delete_branch_ref_at\(/, "fn delete_branch_ref_moved(");
+  assert.notEqual(moved, src);
+  assert.deepEqual(run(moved), {
+    pairs: [["delete_branch_ref_moved", false]],
+    primitive: false,
+  });
+  const smuggled = [
+    src,
+    "async fn smuggled(repo: &str, name: &str) {",
+    '    let _ = run_git_raw(Some(repo), &["branch", "-D", "--", name], DEFAULT_TIMEOUT).await;',
+    "}",
+    "",
+  ].join("\n");
+  assert.deepEqual(run(smuggled), {
+    pairs: [
+      ["delete_branch_ref_at", true],
+      ["smuggled", false],
+    ],
+    primitive: true,
+  });
 });
 
 test("a retiring allowlist entry with no match notes, a plain one fails", () => {
@@ -7196,6 +8611,74 @@ test("an unresolvable stderr binding fails closed", () => {
   assert.equal(hits.length, 1);
   assert.equal(hits[0].fn, "passthrough");
   assert.match(hits[0].fix, /cannot resolve/);
+  // A second declaration on the binding's line leaves no one initializer.
+  const shadowed = [
+    "async fn shadowed(out: GitOutput) -> AppError {",
+    "    let report = out.full_failure_text(); let report = out.stderr;",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const same = [];
+  checkStderrOnlyGitError("fixture.rs", shadowed, shadowed.split("\n"), same);
+  assert.deepEqual(
+    same.map((h) => h.fn),
+    ["shadowed"],
+  );
+  assert.match(same[0].fix, /cannot resolve/);
+  // Nor does a declaration after the field on its line answer for it.
+  const later = [
+    "async fn later(out: GitOutput, report: String) -> AppError {",
+    "    let e = AppError::Git { code: out.code, stderr: report }; let report = out.full_failure_text();",
+    "    e",
+    "}",
+  ].join("\n");
+  const after = [];
+  checkStderrOnlyGitError("fixture.rs", later, later.split("\n"), after);
+  assert.deepEqual(
+    after.map((h) => h.fn),
+    ["later"],
+  );
+  assert.match(after[0].fix, /cannot resolve/);
+  // A lookup without the use's column answers nothing.
+  assert.equal(bindingInitializer(['    let r = "x"; use(r);'], 0, "r"), null);
+});
+
+test("a string spelling a stderr binding's declaration declares nothing", () => {
+  // The `let` is located outside literals, so `report` stays the parameter.
+  const src = [
+    "async fn spelled(code: i32, report: String) -> AppError {",
+    '    let note = "let report = full_failure_text(o);";',
+    "    AppError::Git {",
+    "        code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "spelled");
+  assert.match(hits[0].fix, /cannot resolve/);
+  // Nor does a string after a real initializer shape it.
+  const trailing = [
+    "async fn trailing(out: GitOutput) -> AppError {",
+    '    let report = String::from_utf8_lossy(&out.stderr).into_owned(); let _m = "full_failure_text(";',
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const shaped = [];
+  checkStderrOnlyGitError("fixture.rs", trailing, trailing.split("\n"), shaped);
+  assert.deepEqual(
+    shaped.map((h) => h.fn),
+    ["trailing"],
+  );
+  assert.match(shaped[0].fix, /full_failure_text/);
 });
 
 test("failure_text() substitution is caught apart from the combining helper", () => {
@@ -7251,14 +8734,27 @@ test("a chain of stderr aliases is followed to its shaping", () => {
     "        stderr: report,",
     "    }",
     "}",
+    // Each hop is read before the previous hop's declaration, so a later
+    // redeclaration of `raw` is not the value `report` took.
+    "async fn rebound_hop(out: GitOutput) -> AppError {",
+    "    let raw = out.stderr.clone();",
+    "    let report = raw;",
+    "    let raw = out.full_failure_text();",
+    "    keep(raw);",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
   ].join("\n");
   const hits = [];
   checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
   assert.deepEqual(
     hits.map((h) => h.fn),
-    ["chained_bad"],
+    ["chained_bad", "rebound_hop"],
   );
   assert.match(hits[0].fix, /full_failure_text/);
+  assert.match(hits[1].fix, /report on STDOUT/);
 });
 
 test("a cycle of stderr aliases fails closed", () => {

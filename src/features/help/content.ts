@@ -948,11 +948,12 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   Renaming changes only the local name: a branch already on a remote keeps its name there
   (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
   for agent sessions.
-  Deleting asks first, and the notice that follows names the commit the branch pointed
-  at (**Deleted _name_ (was _abc1234_)**) with a **Restore** button for about 15 seconds
-  (when the delete couldn't be added to **Recover lost work**, the notice stays open, so a
-  failed Restore can be retried from it, until you close it or the branch is restored or
-  can no longer be).
+  Deleting asks first and removes the branch only at the commit it had when the
+  confirmation opened; a branch that changed since is kept. The notice that follows names
+  the commit the branch pointed at (**Deleted _name_ (was _abc1234_)**) with a **Restore**
+  button for about 15 seconds (when the delete couldn't be added to **Recover lost work**,
+  the notice stays open, so a failed Restore can be retried from it, until you close it or
+  the branch is restored or can no longer be).
   Restore re-creates the branch at that commit without checking it out, marks it **Keep
   local** again if it was, and doesn't restore its upstream link; if a branch of that name
   exists again, nothing is overwritten. Once the notice is gone, restore it from **Recover
@@ -1169,7 +1170,9 @@ selected one at that commit without checking it out. A row whose commit Git has 
 says it can't be restored and offers **Remove from list**. A row whose name is in use
 again is held until you rename or delete that branch; when that branch already sits at
 the recorded commit the row says so, and **Restore branch** just clears the entry
-(turning **Keep local** back on if it was). The list keeps the newest 50
+(turning **Keep local** back on if it was). If that branch's commit couldn't be read,
+the row says so and **Restore branch** stays available: it checks again and overwrites
+nothing. The list keeps the newest 50
 deletes per repository, and only branches deleted from the branch switcher or **Clean up
 branches**: a branch deleted in a terminal{{ai}} or by an MCP client{{/ai}} isn't listed.
 

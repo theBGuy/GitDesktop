@@ -302,9 +302,9 @@ export async function migrateRepoData(
 ): Promise<void> {
   try {
     // A fallback (raw-path) new key still proceeds. Stores that fold legacy keys
-    // re-home it onto the true identity later; stores with no folding
-    // (deleted-branches, last-checkout) keep it under the raw path, which their
-    // identity-keyed reads never consult.
+    // re-home it onto the true identity later; deleted-branches reads a raw key
+    // beside its identity key and folds it on its next write. last-checkout does
+    // not fold: its record names the old folder, which no reader matches anyway.
     const newKey = await repoIdentity(newPath);
     for (const desc of IDENTITY_STORES) {
       try {

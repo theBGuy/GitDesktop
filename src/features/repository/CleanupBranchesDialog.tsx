@@ -38,17 +38,14 @@ import { useRetryFocusRescue } from "@/features/conversations/ConversationListPa
 import { clipTitleFromText } from "@/lib/clip-title";
 import {
   cleanupRestorableTail,
+  cleanupStoppedBusy,
   NOT_LISTED_REASON,
   skippedMoved,
   TIPS_READ_FAILED_HELD,
   TIPS_READ_FAILED_STATUS,
   UNREADABLE_LISTED_TIP_REASON,
 } from "@/lib/deleted-branches/copy";
-import {
-  deletedBranchFacts,
-  deletedToastOptions,
-  readBranchRowsFresh,
-} from "@/lib/deleted-branches/restore";
+import { deletedToastOptions } from "@/lib/deleted-branches/restore";
 import {
   DELETED_BRANCHES_CAP,
   type DeletedBranchEntry,
@@ -83,6 +80,7 @@ import {
   promotionBlocksCheckout,
   removeWorktreeForCleanup,
 } from "@/lib/stores/worktree-removal";
+import { isAppError } from "@/lib/tauri/invoke";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -1012,14 +1010,22 @@ export function CleanupBranchesDialog({
     baseRef: string;
   } | null>(null);
   const running = progress !== null;
-  // One batch at a time: delete mode's fresh read is awaited before progress
-  // is set. The ref gates, since two confirms can land before a re-render; the
-  // state holds the primary through that read.
+  // One batch at a time. The ref gates, since two confirms can land before a
+  // re-render; the state holds the primary until the batch sets its progress.
   const batchRunningRef = useRef(false);
   const [batchStarted, setBatchStarted] = useState(false);
   // The run-wide lock: dismissals, controls and rows hold from the batch's
-  // start, its fresh read included; `running` alone starts at its progress.
+  // start; `running` alone starts at its progress.
   const locked = running || batchStarted;
+  // A batch that leaves the dialog open with nothing selected hands focus to
+  // the rows it left, once the live list paints; consumed or dropped once.
+  const landingRef = useRef<{
+    repo: string;
+    names: ReadonlySet<string>;
+  } | null>(null);
+  const rowsHostRef = useRef<HTMLDivElement>(null);
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   // One reason node serves every locked control; the raw buttons take its
   // aria-disabled form, so they keep their tab stops while the lock holds.
   const lock = useDisabledReason({
@@ -1630,6 +1636,59 @@ export function CleanupBranchesDialog({
     };
   });
 
+  // Consumed on the first commit that paints the live list after the batch.
+  // Dropped at once on a close or a repo switch, and, moving nothing, when
+  // rows are still selected (the primary has work) or the user moved focus.
+  useLayoutEffect(() => {
+    const pending = landingRef.current;
+    if (pending === null) return;
+    if (!open || repoPath !== pending.repo) {
+      landingRef.current = null;
+      return;
+    }
+    if (locked || shownFrozen !== null || showSkeleton) return;
+    if (selectedCount !== 0) {
+      landingRef.current = null;
+      return;
+    }
+    // Focus outside this dialog's popup (the closing confirm portals beside
+    // it, not inside it) or on the popup itself hasn't come back yet, so the
+    // landing waits for it; only another control inside the popup drops it.
+    const settle = () => {
+      if (landingRef.current !== pending) return true;
+      const active = document.activeElement;
+      const primaryEl = primaryRef.current;
+      if (active !== null && active !== document.body && active !== primaryEl) {
+        const popup = primaryEl?.closest('[data-slot="dialog-content"]');
+        if (!popup || active === popup || !popup.contains(active)) return false;
+        landingRef.current = null;
+        return true;
+      }
+      landingRef.current = null;
+      const rowEls = [
+        ...(rowsHostRef.current?.querySelectorAll<HTMLElement>("[data-row]") ??
+          []),
+      ];
+      const target =
+        rowEls.find((el) =>
+          pending.names.has(el.getAttribute("data-row") ?? ""),
+        ) ??
+        rowEls[0] ??
+        cancelRef.current;
+      target?.focus();
+      target?.scrollIntoView({ block: "nearest" });
+      return true;
+    };
+    if (settle()) return;
+    // Re-armed by every commit while it waits; the cleanup also covers a
+    // close, a repo switch and unmount.
+    const onFocusIn = () => {
+      if (settle()) document.removeEventListener("focusin", onFocusIn);
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  });
+
   // The batch's one entry: holds the gate across every exit of runBatch.
   async function startBatch() {
     if (batchRunningRef.current) return;
@@ -1647,6 +1706,7 @@ export function CleanupBranchesDialog({
     // A confirm hands over the set and worktree rows it showed; an unconfirmed
     // Archive acts on the live selection and removes no worktree, since it
     // confirms whenever one is selected.
+    landingRef.current = null;
     const confirmed = confirmedRef.current;
     confirmedRef.current = null;
     const names =
@@ -1721,31 +1781,18 @@ export function CleanupBranchesDialog({
       listed.relist(name, actual);
       toast.info(SKIPPED_TOAST.moved(name));
     };
-    // What Restore re-applies is read fresh before any delete: a delete removes
-    // the branch's whole config section.
-    let rowsBefore: Awaited<ReturnType<typeof readBranchRowsFresh>> = null;
-    if (mode === "delete") {
-      rowsBefore = await readBranchRowsFresh(repoPath);
-      if (
-        refuseIfSwitched(
-          repoPath,
-          CONFIRM_REFUSED.delete,
-          "before the delete started",
-        )
-      )
-        return;
-    }
     const restorable: DeletedBranchEntry[] = [];
     // Entries whose record write failed; the rest were recorded, in order.
     const failedIds = new Set<string>();
     const recorded: DeletedBranchEntry[] = [];
-    // Awaited per row, so a crash mid-batch never strands a deleted tip.
-    const recordDeleted = async (name: string, tip: string) => {
-      const entry = mintDeletedBranch({
-        name,
-        tip,
-        ...deletedBranchFacts(rowsBefore, name),
-      });
+    // Awaited per row, so a crash mid-batch never strands a deleted tip. What
+    // Restore re-applies comes from the row's own delete outcome, read under
+    // the delete's lock.
+    const recordDeleted = async (
+      name: string,
+      facts: { tip: string; keptLocal: boolean; upstream: string | null },
+    ) => {
+      const entry = mintDeletedBranch({ name, ...facts });
       if (await recordDeletedBranches(repoPath, [entry])) recorded.push(entry);
       else failedIds.add(entry.id);
       restorable.push(entry);
@@ -1818,8 +1865,7 @@ export function CleanupBranchesDialog({
             if (out.movedTo !== undefined) keepMoved(name, out.movedTo);
             else fails.set(name, out.reason);
           } else {
-            if (out.deletedTip !== null)
-              await recordDeleted(name, out.deletedTip);
+            if (out.deleted !== null) await recordDeleted(name, out.deleted);
             const keptReason = KEPT_BRANCH_REASON[out.branch];
             if (keptReason !== null) {
               fails.set(name, keptReason);
@@ -1840,11 +1886,31 @@ export function CleanupBranchesDialog({
           else {
             const out = await api.gitDeleteBranch(repoPath, name, tip);
             if (out.status === "tipMoved") keepMoved(name, out.actual);
-            else await recordDeleted(name, out.tip);
+            else
+              await recordDeleted(name, {
+                tip: out.tip,
+                keptLocal: out.keptLocal,
+                upstream: out.upstream,
+              });
           }
         }
       } catch (e) {
         fails.set(name, presentError(e).summary);
+        // A plain delete that waited out its lock: the hold won't clear within
+        // the batch, so the rows after it stay unreached and selected. Matched
+        // by kind, since the sentence names whichever operation holds the lock.
+        if (
+          mode === "delete" &&
+          wtPath === undefined &&
+          skip === null &&
+          isAppError(e) &&
+          e.kind === "busy"
+        ) {
+          processed = i + 1;
+          if (i + 1 < names.length)
+            toast.info(cleanupStoppedBusy(landedIn(repoPath).away));
+          break;
+        }
       }
       setProgress({ done: i + 1, total: names.length });
     }
@@ -1887,6 +1953,10 @@ export function CleanupBranchesDialog({
         afterBatch: selectionContext,
       };
       setFrozen(null);
+      landingRef.current = {
+        repo: repoPath,
+        names: new Set([...moved, ...kept]),
+      };
     }
     setProgress(null);
 
@@ -1903,12 +1973,18 @@ export function CleanupBranchesDialog({
     // offers Restore all on the batch's own repo, which the title names after a
     // switch; anything else is title-only.
     const resultToast = (kind: "success" | "error", title: string) => {
-      if (restorable.length === 0) toast[kind](title);
-      else
-        toast[kind](
-          `${title}${landedIn(repoPath).away}`,
-          deletedToastOptions(queryClient, repoPath, restorable, unrecordedIds),
-        );
+      if (restorable.length === 0) {
+        toast[kind](title);
+        return;
+      }
+      const shown = `${title}${landedIn(repoPath).away}`;
+      toast[kind](
+        shown,
+        deletedToastOptions(queryClient, repoPath, restorable, unrecordedIds, {
+          kind,
+          title: shown,
+        }),
+      );
     };
     if (processed < names.length) {
       if (fails.size > 0) {
@@ -2432,6 +2508,7 @@ export function CleanupBranchesDialog({
                     // scrollable overflow and Windows draws a scrollbar for
                     // even one row.
                     <div
+                      ref={rowsHostRef}
                       className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1 py-2"
                       onKeyDown={nav.onRowKeyDown}
                     >
@@ -2592,6 +2669,7 @@ export function CleanupBranchesDialog({
 
           <DialogFooter>
             <DisabledReasonButton
+              ref={cancelRef}
               type="button"
               variant="outline"
               disabled={locked}
@@ -2601,6 +2679,7 @@ export function CleanupBranchesDialog({
               Cancel
             </DisabledReasonButton>
             <DisabledReasonButton
+              ref={primaryRef}
               type="button"
               variant={mode === "delete" ? "destructive" : "default"}
               disabled={primaryHeldReason !== null}

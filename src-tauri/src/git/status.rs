@@ -3,12 +3,11 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
-    UPSTREAM_ATOM_INDEX,
 };
 use crate::git::diff::git_config_bool;
 use crate::git::remote::{
-    is_named_remote, parse_upstream_tracking, remote_head_target, upstream_is_remote_default,
-    Upstream, UPSTREAM_TRACKING_FIELDS, UPSTREAM_TRACKING_FORMAT,
+    is_named_remote, parse_upstream_tracking, remote_head_target, tracking_line,
+    upstream_is_remote_default, Upstream, UPSTREAM_TRACKING_FORMAT,
 };
 use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
 use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus, SubmoduleChange};
@@ -133,12 +132,8 @@ fn tracking_line_upstream_ref(
     remote: &str,
     upstream: &str,
 ) -> Option<String> {
-    let fields: Vec<&str> = text.lines().next()?.split('\0').collect();
-    if fields.first() != Some(&refname) {
-        return None;
-    }
-    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
-    match atoms.get(UPSTREAM_ATOM_INDEX) {
+    let line = tracking_line(text, refname)?;
+    match line.upstream_atom() {
         Some(full) => Some(full.to_string()).filter(|f| !f.is_empty()),
         None => Some(format!("refs/remotes/{remote}/{upstream}")),
     }
@@ -412,19 +407,16 @@ fn tracking_line_push_destination(
     refname: &str,
     name: &str,
 ) -> ((Option<String>, Option<String>), String) {
-    let none = ((None, None), String::new());
-    let Some(line) = text.lines().next() else {
-        return none;
+    let Some(line) = tracking_line(text, refname) else {
+        return ((None, None), String::new());
     };
-    let fields: Vec<&str> = line.split('\0').collect();
-    if fields.first() != Some(&refname) {
-        return none;
-    }
-    let upstream_remoteref = fields.get(1).copied().unwrap_or("");
-    let upstream_remote = fields.get(2).copied().unwrap_or("");
-    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
-    let dest = push_destination_fields(name, atoms, upstream_remote, upstream_remoteref);
-    (dest, atoms.first().copied().unwrap_or("").to_string())
+    let dest = push_destination_fields(
+        name,
+        line.atoms(),
+        line.upstream_remote(),
+        line.upstream_remoteref(),
+    );
+    (dest, line.push_remotename().unwrap_or("").to_string())
 }
 
 /// push.default unset/`simple` refuses a bare push when the upstream's name differs
@@ -2361,6 +2353,57 @@ mod tests {
         ] {
             assert_eq!(read(text).as_deref(), want, "{text:?}");
         }
+    }
+
+    /// Both readers over a real line: the parser's atoms equal git's own single-atom
+    /// reads in order and number, and every atom the readers consume is compared with
+    /// them, so a reordered, inserted or appended atom goes red here.
+    #[tokio::test]
+    async fn tracking_line_readers_follow_each_push_atom() {
+        let (_guard, base) = temp_base("atom-order");
+        let work = renamed_branch_fixture(&base, "w").await;
+        let refname = "refs/heads/feat/y";
+        git(&work, &["config", "branch.feat/y.pushRemote", "origin"]).await;
+        let refspec = "refs/heads/feat/y:refs/heads/dest";
+        git(&work, &["config", "remote.origin.push", refspec]).await;
+        // In the order `push_destination_fields` destructures them.
+        let mut single = Vec::new();
+        for atom in [
+            "%(push:remotename)",
+            "%(push:remoteref)",
+            "%(push)",
+            "%(upstream)",
+        ] {
+            let format = format!("--format={atom}");
+            let out = git(&work, &["for-each-ref", refname, &format]).await;
+            single.push(out.trim_end().to_string());
+        }
+        for (i, a) in single.iter().enumerate() {
+            assert!(!a.is_empty(), "atom {i} empty: {single:?}");
+            assert!(
+                !single[i + 1..].contains(a),
+                "atoms not distinct: {single:?}"
+            );
+        }
+        let single_strs: Vec<&str> = single.iter().map(String::as_str).collect();
+        let text = read_refs_with_push_destination(&work, refname, UPSTREAM_TRACKING_FORMAT)
+            .await
+            .unwrap();
+        let line = tracking_line(&text, refname).expect("the branch's own line");
+        assert_eq!(line.atoms(), single_strs.as_slice(), "{text:?}");
+        assert_eq!(
+            tracking_line_upstream_ref(&text, refname, "origin", "feat/x"),
+            Some(single[3].clone()),
+            "{text:?}"
+        );
+        assert_eq!(
+            tracking_line_push_destination(&text, refname, "feat/y"),
+            (
+                push_destination_fields("feat/y", &single_strs, "origin", "refs/heads/feat/x"),
+                single[0].clone()
+            ),
+            "{text:?}"
+        );
     }
 
     /// The shapes that are never a mismatch, each read off a real repository. The

@@ -77,6 +77,46 @@ test("a missing local head branch is not fresh", () => {
   );
 });
 
+test("a head named like an Object.prototype key never reads an inherited member as its tip", () => {
+  // A comparator that accepts anything, so the tip read must refuse: the inherited
+  // member is a function, which the own-key read and the string check each refuse.
+  assert.equal(
+    localRefsFresh({}, [branch()], HEAD_SHA, "main", "constructor", () => true),
+    false,
+  );
+});
+
+test("a tip the tips object only inherits reads as absent", () => {
+  // An inherited STRING, so only the own-key read can refuse it.
+  assert.equal(
+    localRefsFresh(
+      Object.create({ "feature/x": HEAD_SHA }),
+      [branch()],
+      HEAD_SHA,
+      "main",
+      "feature/x",
+      exactSha,
+    ),
+    false,
+  );
+});
+
+test("an own tip that isn't a string reads as absent", () => {
+  // An own key and a comparator that accepts anything, so only the string check
+  // can refuse it.
+  assert.equal(
+    localRefsFresh(
+      { "feature/x": 1 },
+      [branch()],
+      HEAD_SHA,
+      "main",
+      "feature/x",
+      () => true,
+    ),
+    false,
+  );
+});
+
 test("a head sha the local tip doesn't match is not fresh", () => {
   assert.equal(
     localRefsFresh(

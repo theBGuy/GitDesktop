@@ -4,6 +4,7 @@ import { rowCheckoutCopy } from "@/features/repository/checkout-copy";
 import { KeptLocalChip } from "@/features/repository/KeptLocalChip";
 import { normPath } from "@/lib/git/path";
 import { useBranches, useUserWorktrees } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 
 export interface BranchPickerOptions {
   /** Selectable branch names in git order; session + archived branches excluded
@@ -63,8 +64,7 @@ export function useBranchPickerOptions(
     const keepSet = new Set(keepKey ? keepKey.split("\n") : []);
     const list = (branches.data ?? []).filter(
       (b) =>
-        !b.name.startsWith("gd/session/") &&
-        (!b.archived || keepSet.has(b.name)),
+        !isSessionBranchName(b.name) && (!b.archived || keepSet.has(b.name)),
     );
     const names = list.map((b) => b.name);
     const items = Object.fromEntries(names.map((n) => [n, n]));

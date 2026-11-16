@@ -521,7 +521,13 @@ pub(crate) async fn git_switch_autostash_core(
                 args.push("--no-guess");
             }
             args.push(&name);
-            run_git_raw(Some(&repo_path), &args, DEFAULT_TIMEOUT).await
+            // Inside the mutex, so the HEAD write cannot land inside a branch delete's
+            // guarded window; the stash push above and `settle` stay outside it.
+            let repo = repo_path.as_str();
+            with_config_write_lock(repo, |_held| async move {
+                run_git_raw(Some(repo), &args, DEFAULT_TIMEOUT).await
+            })
+            .await
         }
     };
     // Unreachable as a label: a refused `git switch` leaves nothing unmerged, so
@@ -1479,6 +1485,79 @@ mod tests {
         );
         assert_eq!(read(dir.path(), "b.txt"), "mine\n");
         assert!(stash_list(&repo).await.is_empty());
+    }
+
+    /// The plain switch in a linked worktree queues on the config-write mutex (held
+    /// here through the main checkout, which shares it) with HEAD unmoved, then lands.
+    #[tokio::test]
+    async fn switch_autostash_waits_on_the_config_mutex_before_moving_head() {
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        let (_dir, repo) = setup_with_feat("switch-mutex").await;
+        let wt_dir = temp("switch-mutex-wt");
+        let wt = wt_dir.path().join("wt").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+        let head_ref = |wt: String| async move {
+            run_git_raw(
+                Some(&wt),
+                &["symbolic-ref", "-q", "HEAD"],
+                TEST_GIT_HANG_GUARD,
+            )
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string()
+        };
+
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let repo = repo.clone();
+            async move {
+                with_config_write_lock(&repo, |_held| async move {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.await;
+                })
+                .await
+            }
+        });
+        held_rx.await.expect("the test holds the mutex");
+
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel::<()>();
+        let waiting_tx = std::sync::Mutex::new(Some(waiting_tx));
+        let events: std::sync::Arc<dyn Fn(&'static str) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                if event == "waiting" {
+                    if let Some(tx) = waiting_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            });
+        let switch = tokio::spawn({
+            let wt = wt.clone();
+            CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                git_switch_autostash_core(&AppState::default(), wt, "feat".into(), None, true).await
+            })
+        });
+        waiting_rx.await.expect("the switch reached the mutex");
+        assert_eq!(
+            head_ref(wt.clone()).await,
+            "",
+            "HEAD moved before the mutex"
+        );
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+
+        let outcome = tokio::time::timeout(TEST_GIT_HANG_GUARD, switch)
+            .await
+            .expect("the switch finishes once released")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(outcome, AutostashOutcome::NothingStashed),
+            "{outcome:?}"
+        );
+        assert_eq!(head_ref(wt).await, "refs/heads/feat");
     }
 
     #[tokio::test]

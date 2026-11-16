@@ -24,6 +24,7 @@ vi.mock("@/lib/plugin-store", () => {
     save: async () => {
       if (h.failSave) throw new Error("disk full");
     },
+    delete: async (key: string) => h.data.delete(key),
   };
   return {
     memoizedStoreLoader: () => async () => store,
@@ -339,4 +340,143 @@ describe("forgetDeletedBranch and loadDeletedBranches", () => {
       false,
     );
   });
+});
+
+describe("a list stored under the raw checkout path", () => {
+  let n = 0;
+  function paths() {
+    n++;
+    const repo = `C:/repos/raw-${n}`;
+    const id = `${repo}/.git`;
+    h.identity.mockResolvedValue(id);
+    return { repo, id };
+  }
+  const ids = (key: string) =>
+    (h.data.get(key) as DeletedBranchEntry[]).map((e) => e.id);
+
+  it("is listed beside the identity's entries and folded into them by the next write", async () => {
+    const { repo, id } = paths();
+    h.data.set(repo, [entry(1)]);
+    h.data.set(id, [entry(2)]);
+    const store = await fresh();
+    await expect(store.loadDeletedBranches(id, repo)).resolves.toEqual([
+      entry(2),
+      entry(1),
+    ]);
+    expect(h.data.has(repo)).toBe(true);
+    expect(h.data.has(id)).toBe(true);
+    await expect(store.loadDeletedBranches(id)).resolves.toEqual([entry(2)]);
+
+    await expect(store.recordDeletedBranches(repo, [entry(3)])).resolves.toBe(
+      true,
+    );
+    expect(ids(id)).toEqual(["id-3", "id-2", "id-1"]);
+    expect(h.data.has(repo)).toBe(false);
+  });
+
+  it("keeps the identity's copy of a shared id, on a read and on a fold", async () => {
+    const { repo, id } = paths();
+    h.data.set(repo, [entry(1, { name: "raw-copy" })]);
+    h.data.set(id, [entry(1, { name: "identity-copy" })]);
+    const store = await fresh();
+    const listed = await store.loadDeletedBranches(id, repo);
+    expect(listed.map((e) => e.name)).toEqual(["identity-copy"]);
+    await store.recordDeletedBranches(repo, [entry(2)]);
+    expect(
+      (h.data.get(id) as DeletedBranchEntry[]).map((e) => [e.id, e.name]),
+    ).toEqual([
+      ["id-2", "feat/2"],
+      ["id-1", "identity-copy"],
+    ]);
+  });
+
+  it("caps 30 + 30 merged entries at the newest 50", async () => {
+    const { repo, id } = paths();
+    h.data.set(
+      repo,
+      Array.from({ length: 30 }, (_, i) => entry(i)),
+    );
+    h.data.set(
+      id,
+      Array.from({ length: 30 }, (_, i) => entry(30 + i)),
+    );
+    const store = await fresh();
+    const listed = await store.loadDeletedBranches(id, repo);
+    expect(listed).toHaveLength(50);
+    expect(listed[0].id).toBe("id-59");
+    expect(listed.at(-1)?.id).toBe("id-10");
+    await store.recordDeletedBranches(repo, []);
+    expect(ids(id)).toEqual(listed.map((e) => e.id));
+  });
+
+  it("forgets an entry that was stored under the raw path", async () => {
+    const { repo, id } = paths();
+    h.data.set(repo, [entry(1), entry(4)]);
+    const store = await fresh();
+    await expect(store.forgetDeletedBranch(repo, "id-1")).resolves.toBe(true);
+    expect(ids(id)).toEqual(["id-4"]);
+    expect(h.data.has(repo)).toBe(false);
+  });
+
+  // A raw list can land after this session's first write from the path (a
+  // relocate in another instance): every write folds it, not only the first.
+  it("forgets an entry from a raw list stored after an earlier write", async () => {
+    const { repo, id } = paths();
+    const store = await fresh();
+    await expect(store.recordDeletedBranches(repo, [entry(1)])).resolves.toBe(
+      true,
+    );
+    h.data.set(repo, [entry(2)]);
+    const listed = await store.loadDeletedBranches(id, repo);
+    expect(listed.map((e) => e.id)).toEqual(["id-2", "id-1"]);
+
+    await expect(store.forgetDeletedBranch(repo, "id-2")).resolves.toBe(true);
+    await expect(store.loadDeletedBranches(id, repo)).resolves.toEqual([
+      entry(1),
+    ]);
+    expect(h.data.has(repo)).toBe(false);
+  });
+
+  it("merges a raw list stored after an earlier write into the next record", async () => {
+    const { repo, id } = paths();
+    const store = await fresh();
+    await expect(store.recordDeletedBranches(repo, [entry(1)])).resolves.toBe(
+      true,
+    );
+    h.data.set(repo, [entry(2)]);
+    await expect(store.recordDeletedBranches(repo, [entry(3)])).resolves.toBe(
+      true,
+    );
+    expect(ids(id)).toEqual(["id-3", "id-2", "id-1"]);
+    expect(h.data.has(repo)).toBe(false);
+  });
+
+  // The raw key's delete rides the rollback with the identity's write.
+  it("keeps the raw list and the identity's list as they were when the save fails", async () => {
+    const { repo, id } = paths();
+    h.data.set(repo, [entry(1)]);
+    h.data.set(id, [entry(2)]);
+    h.failSave = true;
+    const store = await fresh();
+    await expect(store.forgetDeletedBranch(repo, "id-1")).resolves.toBe(false);
+    expect(h.data.get(repo)).toEqual([entry(1)]);
+    expect(h.data.get(id)).toEqual([entry(2)]);
+  });
+
+  it.each([
+    ["an object", { "id-1": entry(1) }],
+    ["a number", 7],
+  ])(
+    "folds a raw key holding %s without failing the write",
+    async (_label, raw) => {
+      const { repo, id } = paths();
+      h.data.set(repo, raw);
+      const store = await fresh();
+      await expect(store.recordDeletedBranches(repo, [entry(3)])).resolves.toBe(
+        true,
+      );
+      expect(h.data.get(id)).toEqual([entry(3)]);
+      expect(h.data.has(repo)).toBe(false);
+    },
+  );
 });

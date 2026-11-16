@@ -3,6 +3,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -10,8 +11,10 @@ import {
 import { toast } from "sonner";
 import {
   InlineConfirm,
+  ignoreHeldEnter,
   useConfirmSwapFocus,
 } from "@/components/confirm-swap-focus";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,7 +33,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { awaitFocusRelease } from "@/lib/await-focus-release";
-import { openWithDefault } from "@/lib/git/api";
+import { type HookDeleteOutcome, openWithDefault } from "@/lib/git/api";
 import {
   useDeleteHook,
   useHookContent,
@@ -40,8 +43,11 @@ import {
   useUpdateHookManager,
   useWriteHook,
 } from "@/lib/git/queries";
+import type { HookEntry } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -89,6 +95,24 @@ const MANAGED_CONFIRM: Record<
     confirmVariant: "destructive",
   },
 };
+
+/** One toggle per state, so the focused button survives its own flip. */
+const TOGGLE: Record<
+  HookEntry["state"],
+  { label: string; enable: boolean } | null
+> = {
+  active: { label: "Disable", enable: false },
+  disabled: { label: "Enable", enable: true },
+  inactive: null,
+};
+
+const SAVE_RUNNING_HELD = "A save is already running.";
+const SCRIPT_EMPTY_HELD = "The script is empty.";
+const NO_CHANGES_HELD = "No changes to save.";
+const TOGGLE_RUNNING_HELD = "A hook change is already running.";
+
+const hookChangedNotice = (name: string) =>
+  `${name} changed since this list loaded — nothing was deleted.`;
 
 export function HooksDialog({
   repoPath,
@@ -192,13 +216,39 @@ export function HooksDialog({
   const dirty = draft !== original;
   const isBlank = draft.trim() === "";
   const noShebang = !isBlank && !draft.startsWith("#!");
-  const canSave =
-    entry !== null && !isBlank && (dirty || entry.state === "inactive");
+  const saveHeld = (() => {
+    switch (true) {
+      case writeHook.isPending:
+        return SAVE_RUNNING_HELD;
+      case isBlank:
+        return SCRIPT_EMPTY_HELD;
+      case !dirty && entry?.state !== "inactive":
+        return NO_CHANGES_HELD;
+      default:
+        return null;
+    }
+  })();
+  const toggleOf = entry === null ? null : TOGGLE[entry.state];
 
   // The managed guard's writes ask first. Each handler captures what it writes
   // before the ask, so a list re-read under the open prompt can't change it.
-  const confirmManaged = (action: keyof typeof MANAGED_CONFIRM) =>
-    useConfirm.getState().ask(MANAGED_CONFIRM[action]);
+  // While an ask is pending the dialog refuses dismissal: an Escape landing
+  // before the shared confirm takes focus would otherwise close it under the
+  // prompt. Per-ask token, so a superseded ask can't clear its successor's.
+  const promptPending = useRef<object | null>(null);
+  const confirmManaged = async (action: keyof typeof MANAGED_CONFIRM) => {
+    const token = {};
+    promptPending.current = token;
+    try {
+      return await useConfirm.getState().ask(MANAGED_CONFIRM[action]);
+    } finally {
+      if (promptPending.current === token) promptPending.current = null;
+    }
+  };
+  const onDialogOpenChange = (next: boolean) => {
+    if (!next && promptPending.current !== null) return;
+    onOpenChange(next);
+  };
 
   async function save() {
     if (!entry) return;
@@ -237,16 +287,23 @@ export function HooksDialog({
     if (!entry) return;
     const name = entry.name;
     if (!(await confirmManaged("delete"))) return;
-    await doDelete(name);
+    await doDelete(name, true);
   }
 
-  async function doDelete(name: string) {
+  // The delete carries the managed state the user confirmed against; a hook
+  // that changed since comes back undeleted.
+  async function doDelete(name: string, expectedManaged: boolean) {
     const firedIn = repoPath;
+    let outcome: HookDeleteOutcome;
     try {
-      await deleteHook.mutateAsync(name);
+      outcome = await deleteHook.mutateAsync({ name, expectedManaged });
     } catch (e) {
       pendingFocusRow.current = null;
       toastError(e);
+      return;
+    }
+    if (outcome.status === "managedChanged") {
+      await managedChanged(name, firedIn, outcome.managed);
       return;
     }
     toast.success(`Deleted ${name}`);
@@ -255,6 +312,60 @@ export function HooksDialog({
       setSelected((cur) => (cur === name ? null : cur));
     }
   }
+
+  // A hook that became the guard is asked about from a layout effect, never
+  // from this continuation: react-query's re-render dropping the inline swap
+  // can land after an ask made here, leaving the prompt to return focus to a
+  // removed node. The effect runs in the commit where the swap handed focus
+  // to Delete….
+  const pendingDeleteAsk = useRef<{ name: string; firedIn: string } | null>(
+    null,
+  );
+  const [deleteAskSeq, setDeleteAskSeq] = useState(0);
+
+  async function managedChanged(
+    name: string,
+    firedIn: string,
+    managed: boolean,
+  ) {
+    if (refuseIfSwitched(firedIn, "nothing was deleted")) return;
+    await hooks.refetch();
+    if (refuseIfSwitched(firedIn, "nothing was deleted")) return;
+    if (!managed) {
+      toast.info(hookChangedNotice(name));
+      return;
+    }
+    pendingDeleteAsk.current = { name, firedIn };
+    setConfirmDelete(false);
+    setDeleteAskSeq((n) => n + 1);
+  }
+
+  // Asks only while the dialog is open on that hook and the re-read still
+  // lists it: otherwise the prompt would open over whatever the user moved on
+  // to, or ask about a file that is already gone.
+  const askManagedDelete = useEffectEvent(() => {
+    const ask = pendingDeleteAsk.current;
+    pendingDeleteAsk.current = null;
+    if (ask === null) return;
+    if (refuseIfSwitched(ask.firedIn, "nothing was deleted")) return;
+    if (
+      !open ||
+      selected !== ask.name ||
+      entry === null ||
+      entry.state === "inactive"
+    ) {
+      toast.info(hookChangedNotice(ask.name));
+      return;
+    }
+    void (async () => {
+      if (!(await confirmManaged("delete"))) return;
+      await doDelete(ask.name, true);
+    })();
+  });
+  useLayoutEffect(() => {
+    if (deleteAskSeq === 0) return;
+    askManagedDelete();
+  }, [deleteAskSeq]);
 
   async function runManager(action: "install" | "update") {
     const manager = hooks.data?.manager;
@@ -292,7 +403,7 @@ export function HooksDialog({
   });
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={onDialogOpenChange}>
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Git hooks</DialogTitle>
@@ -486,32 +597,26 @@ export function HooksDialog({
                     </p>
                   )}
                   <div className="mt-2 flex items-center gap-2">
-                    <Button
+                    <DisabledReasonButton
                       size="sm"
                       onClick={() => void save()}
-                      disabled={!canSave || writeHook.isPending}
+                      onKeyDown={ignoreHeldEnter}
+                      disabled={saveHeld !== null}
+                      reason={saveHeld}
                     >
                       {entry.state === "inactive" ? "Create hook" : "Save"}
-                    </Button>
-                    {entry.state === "active" && (
-                      <Button
+                    </DisabledReasonButton>
+                    {toggleOf && (
+                      <DisabledReasonButton
                         variant="outline"
                         size="sm"
-                        onClick={() => void toggle(false)}
+                        onClick={() => void toggle(toggleOf.enable)}
+                        onKeyDown={ignoreHeldEnter}
                         disabled={setEnabled.isPending}
+                        reason={TOGGLE_RUNNING_HELD}
                       >
-                        Disable
-                      </Button>
-                    )}
-                    {entry.state === "disabled" && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void toggle(true)}
-                        disabled={setEnabled.isPending}
-                      >
-                        Enable
-                      </Button>
+                        {toggleOf.label}
+                      </DisabledReasonButton>
                     )}
                     <span className="flex-1" />
                     {/* A re-read that turns the entry managed under an open swap
@@ -526,13 +631,19 @@ export function HooksDialog({
                           pending={deleteHook.isPending}
                           swapFocusRef={swapFocus()}
                           onCancel={() => setConfirmDelete(false)}
-                          onAct={() => void doDelete(entry.name)}
+                          onAct={() =>
+                            void doDelete(entry.name, entry.managed === true)
+                          }
                         />
                       ) : (
-                        <Button
+                        <DisabledReasonButton
                           ref={swapFocus()}
                           variant="ghost"
                           size="sm"
+                          // Held like the inline act button, so a delete still
+                          // running can't be joined by a second one.
+                          disabled={deleteHook.isPending}
+                          reason={ACT_PENDING_REASON}
                           onClick={() =>
                             entry.managed
                               ? void deleteManaged()
@@ -540,7 +651,7 @@ export function HooksDialog({
                           }
                         >
                           Delete…
-                        </Button>
+                        </DisabledReasonButton>
                       ))}
                   </div>
                 </>

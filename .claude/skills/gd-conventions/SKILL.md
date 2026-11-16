@@ -1228,7 +1228,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `doCherryPick`) keeps its own `refuseIfSwitched` after the ask. A view whose
   repo can be a worktree rather than the open one compares its own prop instead
   (`useRefuseIfMoved` in `src/features/repository/use-refuse-if-moved.ts`, shared
-  by the two conflict views). A `useRepoMutation` whose mutationFn or
+  by the two conflict views). `refuseIfSwitched` passes again after a switch
+  away and back, so a confirm that closes on a switch drops its own session
+  (an effect on the repo, marked as switched; an unmount cleanup) and the
+  step that resumes raises the same notice through `notifyRepoChanged` for
+  the switch, or its dismissal line after an unmount (the reference is
+  `doDelete` in BranchSwitcher.tsx). A `useRepoMutation` whose mutationFn or
   callbacks close over repo/lens AND whose host survives a repo switch passes
   `identity: ["<op>", repo, lens]`, which scopes the HOLD: a changed key hash
   detaches the pending mutation at the switch, so the new repo's controls don't
@@ -1425,7 +1430,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   -d` at a measured tip, its guards run under the config-write mutex), never a
   new `branch -D`: that deletes whatever the ref points at when git runs. Any
   other local branch ref delete (the root-commit undo, PR checkout's
-  stray-branch cleanup) stays old-value guarded (`update-ref -d <ref> <oid>`).
+  stray-branch cleanup) stays old-value guarded (`update-ref -d <ref> <oid>`)
+  wherever a tip was read to compare (the undo's `-d HEAD` runs only when HEAD
+  did not resolve). Guard: check-rust-invariants check M, which reads an
+  `update-ref` delete's ref as its first operand wherever `-d` sits, and also
+  fails one whose ref it cannot resolve to a non-branch ref.
 - **Cached GitHub reads stay true:** gh REST GETs that adopt runner.rs's
   conditional layer (`run_gh_cached_get`/`run_gh_cached_get_raw`) key on
   (repo_path, host, argv) with the auth epoch in the value, detect a 304

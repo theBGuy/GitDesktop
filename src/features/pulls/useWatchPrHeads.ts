@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { maybeFireSync } from "@/lib/automations/sync";
-import { gitBranchTips } from "@/lib/git/api";
+import { gitBranchTips, tipOf } from "@/lib/git/api";
 import { useLocalPrs } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 
@@ -34,6 +34,8 @@ export function useWatchPrHeads(repoPath: string) {
     enabled: Boolean(repoPath) && headBranches.length > 0 && aiEnabled,
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
+    // The read rejects when git fails, and the next poll is its retry.
+    retry: false,
     // A local git read: react-query's default "online" mode would park it offline.
     networkMode: "always",
   });
@@ -43,7 +45,7 @@ export function useWatchPrHeads(repoPath: string) {
     const data = tips.data;
     if (!data) return;
     for (const pr of openPrs) {
-      const head = data[pr.head];
+      const head = tipOf(data, pr.head);
       if (!head) continue;
       maybeFireSync({
         repoPath,

@@ -424,6 +424,32 @@ export function landedIn(repoPath: string): {
   };
 }
 
+// This module's one spelling of the repository-changed notice, from one
+// landedIn read.
+function raiseRepoChanged(
+  { away, closed }: ReturnType<typeof landedIn>,
+  outcome: string,
+  when: string,
+): void {
+  const what = closed
+    ? "You closed the repository"
+    : "You switched repositories";
+  toast.info(`${what} ${when} — ${outcome}${away}.`);
+}
+
+/** The notice for an action begun in `startedIn` and dropped because the
+ *  repository changed while it waited, for a caller that already knows the
+ *  change happened, even one the user has since switched back from: the
+ *  sentence {@link refuseIfSwitched} raises, whose " in <repo>" is empty while
+ *  `startedIn` is the live repository again. Call it after the await. */
+export function notifyRepoChanged(
+  startedIn: string,
+  outcome: string,
+  when = "while the dialog was open",
+): void {
+  raiseRepoChanged(landedIn(startedIn), outcome, when);
+}
+
 /** Whether an action begun in `startedIn` stops because the user has since
  *  switched repositories, saying so: "You switched repositories <when> —
  *  <outcome> in <repo>.", or "You closed the repository …" when none is open.
@@ -435,14 +461,9 @@ export function refuseIfSwitched(
   outcome: string,
   when = "while the dialog was open",
 ): boolean {
-  const { live, away, closed } = landedIn(startedIn);
-  if (!live) {
-    const what = closed
-      ? "You closed the repository"
-      : "You switched repositories";
-    toast.info(`${what} ${when} — ${outcome}${away}.`);
-  }
-  return !live;
+  const landed = landedIn(startedIn);
+  if (!landed.live) raiseRepoChanged(landed, outcome, when);
+  return !landed.live;
 }
 
 export const markNotificationRead = (id: string): void =>

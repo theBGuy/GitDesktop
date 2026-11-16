@@ -16,8 +16,22 @@ export const gitHookSetEnabled = (
   enabled: boolean,
 ) => invoke<void>("git_hook_set_enabled", { repoPath, name, enabled });
 
-export const gitHookDelete = (repoPath: string, name: string) =>
-  invoke<void>("git_hook_delete", { repoPath, name });
+/** What a delete did. With `expectedManaged` given, a hook whose managed state
+ *  no longer matches it is left in place and its current state comes back. */
+export type HookDeleteOutcome =
+  | { status: "deleted" }
+  | { status: "managedChanged"; managed: boolean };
+
+export const gitHookDelete = (
+  repoPath: string,
+  name: string,
+  expectedManaged?: boolean,
+) =>
+  invoke<HookDeleteOutcome>("git_hook_delete", {
+    repoPath,
+    name,
+    expectedManaged,
+  });
 
 export const gitKeepLocalHookStatus = (repoPath: string) =>
   invoke<KeepLocalHookStatus>("git_keep_local_hook_status", { repoPath });

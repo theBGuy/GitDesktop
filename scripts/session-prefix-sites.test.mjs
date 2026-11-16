@@ -12,13 +12,8 @@
 // through a renamed or re-exported constant, `indexOf`/`slice` tests, and files
 // outside `src/` (the Rust side is not scanned).
 //
-// Two allowances, each with its reason:
-// - PERMITTED folders (`src/features/{pulls,issues,conversations,projects}/`)
-//   may hold the literal and are never required to: another lane edits them
-//   and may move or fix `useBranchPickerOptions.tsx`'s comparison, which must
-//   not turn this scan red either way.
-// - STRICT entries still hold the literal and MUST: an entry whose file no
-//   longer holds it fails, so it cannot outlive the fix that removes it.
+// One allowance: STRICT entries still hold the literal and MUST, so an entry
+// whose file no longer holds it fails and cannot outlive the fix that removes it.
 //
 // Fails closed: an empty corpus, an unreadable file or a non-string entry is a
 // failure, never a pass. Node's stdlib only, so the installless CI `guards` job
@@ -28,13 +23,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const HELPER_HOME = "src/lib/git/ref-name.ts";
-
-const PERMITTED_FOLDERS = [
-  "src/features/pulls/",
-  "src/features/issues/",
-  "src/features/conversations/",
-  "src/features/projects/",
-];
 
 /** Files that still spell the literal until the package that owns them swaps
  *  them onto the helper. Each entry must still match, or the scan fails. */
@@ -56,7 +44,6 @@ export function checkSessionPrefixSites(files, strict = STRICT) {
     }
     if (path === HELPER_HOME) continue;
     const spelled = SESSION_LITERAL.test(text) || PREFIX_CONSTANT.test(text);
-    if (PERMITTED_FOLDERS.some((folder) => path.startsWith(folder))) continue;
     if (path in strict) {
       if (!spelled)
         problems.push(
@@ -95,7 +82,7 @@ function walkSrc(dir = "src", out = {}) {
 
 const tree = walkSrc();
 const CLEAN = "src/features/compare/ComparePanel.tsx";
-const PERMITTED_FILE = "src/features/pulls/useBranchPickerOptions.tsx";
+const PICKER = "src/features/pulls/useBranchPickerOptions.tsx";
 
 test("the tree compares against the session prefix only through the helper", () => {
   assert.deepEqual(checkSessionPrefixSites(tree), []);
@@ -104,6 +91,7 @@ test("the tree compares against the session prefix only through the helper", () 
 test("the corpus is the real src/ tree", () => {
   assert.ok(Object.keys(tree).length > 100, "too few src/ files read");
   assert.ok(CLEAN in tree, `${CLEAN} was not read`);
+  assert.ok(PICKER in tree, `${PICKER} was not read`);
   assert.ok(
     tree[HELPER_HOME].includes('SESSION_BRANCH_PREFIX = "gd/session/"'),
     "ref-name.ts no longer defines the prefix",
@@ -117,7 +105,7 @@ for (const [quote, spelled] of [
   ["upper-case", '!b.name.startsWith("GD/Session/")'],
   ["constant", "!b.name.startsWith(SESSION_BRANCH_PREFIX)"],
 ]) {
-  test(`a mutant re-adding a ${quote} comparison outside the permitted folders fails`, () => {
+  test(`a mutant re-adding a ${quote} comparison fails`, () => {
     const mutant = {
       ...tree,
       [CLEAN]: `${tree[CLEAN]}\nconst x = ${spelled};\n`,
@@ -157,20 +145,14 @@ test("a STRICT entry naming an unread file fails", () => {
   assert.match(problems[0], /Gone\.tsx: STRICT entry names a file/);
 });
 
-test("a permitted folder may add or drop the literal", () => {
-  const added = {
+test("a mutant re-adding the comparison to the branch picker fails", () => {
+  const mutant = {
     ...tree,
-    "src/features/issues/New.tsx": 'n.startsWith("gd/session/")',
+    [PICKER]: `${tree[PICKER]}\nconst x = !b.name.startsWith("gd/session/");\n`,
   };
-  assert.deepEqual(checkSessionPrefixSites(added), []);
-  const dropped = {
-    ...tree,
-    [PERMITTED_FILE]: String(tree[PERMITTED_FILE] ?? "").replace(
-      /(["'`])gd\/session\/\1/gi,
-      "SESSION",
-    ),
-  };
-  assert.deepEqual(checkSessionPrefixSites(dropped), []);
+  const problems = checkSessionPrefixSites(mutant);
+  assert.equal(problems.length, 1, problems.join("\n"));
+  assert.match(problems[0], /useBranchPickerOptions\.tsx: compares against/);
 });
 
 test("copy and fixture names that start with the prefix pass", () => {

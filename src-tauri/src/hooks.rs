@@ -187,7 +187,7 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
         .iter_mut()
         .find(|e| e.name == "pre-push" && matches!(e.state, HookState::Active))
     {
-        pre_push.managed = listed_pre_push_is_managed(&repo_path, &hooks_dir).await;
+        pre_push.managed = hook_is_managed(&repo_path, &hooks_dir, "pre-push").await;
     }
     Ok(HooksInfo {
         hooks_path: hooks_dir.to_string_lossy().into_owned(),
@@ -198,15 +198,43 @@ pub async fn git_hooks_list(repo_path: String) -> AppResult<HooksInfo> {
     })
 }
 
-/// The three reads that make the Keep local guard status `installed`, so the Hooks
-/// list never labels a file the guard dialog calls blocked; any failed read is false.
-async fn listed_pre_push_is_managed(repo_path: &str, listed_dir: &Path) -> bool {
-    let Ok(managed) = managed_hooks_dir(repo_path).await else {
-        return false;
-    };
-    same_hooks_dir(listed_dir, &managed)
-        && matches!(hooks_dir_redirected(&managed), Ok(false))
-        && matches!(hook_file(&managed.join("pre-push")), Ok(HookFile::Ours))
+/// Whether `name` in the listed hooks dir is GitDesktop's managed guard, by the three
+/// reads that make the Keep local guard status `installed`, so the Hooks list never
+/// labels a file the guard dialog calls blocked. A name other than `pre-push`, no such
+/// file (a hooks path through a file included), a directory or symlink in its place,
+/// another hooks dir, a redirected one or a file without the marker is `false`; a read
+/// that fails on what exists, or a failed common-dir read, is the `Err`. The entry is
+/// read itself, never followed, so a symlink is `false` whatever it points at.
+async fn hook_managed_state(repo_path: &str, hooks_dir: &Path, name: &str) -> AppResult<bool> {
+    if name != "pre-push" {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(hooks_dir.join(name)) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Ok(false),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false)
+        }
+        Err(e) => return Err(AppError::Io(e)),
+    }
+    let managed = managed_hooks_dir(repo_path).await?;
+    if !same_hooks_dir(hooks_dir, &managed) || hooks_dir_redirected(&managed)? {
+        return Ok(false);
+    }
+    Ok(hook_file(&managed.join("pre-push"))? == HookFile::Ours)
+}
+
+/// [`hook_managed_state`] for the list's `HookEntry.managed`, where a failed read is
+/// `false`; the delete's expected-state check reads the fallible one.
+async fn hook_is_managed(repo_path: &str, hooks_dir: &Path, name: &str) -> bool {
+    hook_managed_state(repo_path, hooks_dir, name)
+        .await
+        .unwrap_or(false)
 }
 
 /// Runs a hook manager's CLI in the repo and returns its combined output.
@@ -356,12 +384,37 @@ pub async fn git_hook_set_enabled(
     Ok(())
 }
 
+/// What a hook delete did: deleted, or nothing deleted because the hook's managed
+/// state no longer matches the caller's list, `managed` being the value read now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum HookDeleteOutcome {
+    Deleted,
+    ManagedChanged { managed: bool },
+}
+
 /// Deletes a hook (active and disabled variants) to the OS recycle bin, so a
-/// hand-written script can be recovered.
+/// hand-written script can be recovered. With an expected managed state, a hook whose
+/// managed state changed since the caller's list is left alone, and one that can't be
+/// read is the `Err` with nothing deleted; the check and the delete are not atomic.
 #[tauri::command]
-pub async fn git_hook_delete(repo_path: String, name: String) -> AppResult<()> {
+pub async fn git_hook_delete(
+    repo_path: String,
+    name: String,
+    expected_managed: Option<bool>,
+) -> AppResult<HookDeleteOutcome> {
     validate_hook_name(&name)?;
     let (dir, _) = resolve_hooks_dir(&repo_path).await?;
+    if let Some(expected) = expected_managed {
+        let managed = hook_managed_state(&repo_path, &dir, &name).await?;
+        if managed != expected {
+            return Ok(HookDeleteOutcome::ManagedChanged { managed });
+        }
+    }
     for path in [dir.join(&name), dir.join(format!("{name}.disabled"))] {
         if path.exists() {
             tauri::async_runtime::spawn_blocking(move || {
@@ -371,7 +424,7 @@ pub async fn git_hook_delete(repo_path: String, name: String) -> AppResult<()> {
             .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
         }
     }
-    Ok(())
+    Ok(HookDeleteOutcome::Deleted)
 }
 
 /// A `pre-push` holding a line equal to this (trailing whitespace ignored) is
@@ -1908,6 +1961,267 @@ mod tests {
             r#"{"name":"pre-push","description":"D","state":"active","hasSample":false,"managed":true}"#
         );
         assert!(!json.contains("has_sample"));
+    }
+
+    #[test]
+    fn hook_delete_outcome_serializes_to_the_pinned_wire_shape() {
+        let deleted = serde_json::to_string(&HookDeleteOutcome::Deleted).unwrap();
+        assert_eq!(deleted, r#"{"status":"deleted"}"#);
+        let changed =
+            serde_json::to_string(&HookDeleteOutcome::ManagedChanged { managed: true }).unwrap();
+        assert_eq!(changed, r#"{"status":"managedChanged","managed":true}"#);
+        let unmanaged =
+            serde_json::to_string(&HookDeleteOutcome::ManagedChanged { managed: false }).unwrap();
+        assert_eq!(unmanaged, r#"{"status":"managedChanged","managed":false}"#);
+        for json in [&deleted, &changed, &unmanaged] {
+            for rust in ["\"Deleted\"", "\"ManagedChanged\"", "\"managed_changed\""] {
+                assert!(!json.contains(rust), "{json}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_expecting_the_guard_deletes_it() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-guard").await;
+        install(&repo).await;
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::Deleted);
+        assert!(!managed_file(&repo, "pre-push").exists());
+        assert_eq!(status(&repo).await.state, Absent);
+    }
+
+    #[tokio::test]
+    async fn hook_delete_expecting_no_guard_refuses_a_guard_installed_since() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-installed-since").await;
+        install(&repo).await;
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(false))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::ManagedChanged { managed: true });
+        let file = managed_file(&repo, "pre-push");
+        assert!(file.is_file());
+        assert!(matches!(hook_file(&file), Ok(HookFile::Ours)));
+        assert_eq!(status(&repo).await.state, Installed);
+    }
+
+    #[tokio::test]
+    async fn hook_delete_expecting_the_guard_refuses_once_it_is_gone() {
+        let (_g, base, repo, _remote) = hook_repo("delete-gone").await;
+        let file = managed_file(&repo, "pre-push");
+        let foreign = b"#!/bin/sh\necho mine\n";
+        std::fs::write(&file, foreign).unwrap();
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), foreign);
+
+        std::fs::remove_file(&file).unwrap();
+        install(&repo).await;
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("pre-push"), KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        git_ok(&repo, &["config", "core.hooksPath", &slashed(&elsewhere)]).await;
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert!(file.is_file(), "managed file kept");
+        assert!(elsewhere.join("pre-push").is_file(), "repointed copy kept");
+
+        let (_g2, _base2, other, _remote2) = hook_repo("delete-gone-other").await;
+        let pre_commit = managed_file(&other, "pre-commit");
+        std::fs::write(&pre_commit, foreign).unwrap();
+        let outcome = git_hook_delete(other.clone(), "pre-commit".into(), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            HookDeleteOutcome::ManagedChanged { managed: false }
+        );
+        assert!(pre_commit.is_file());
+        let outcome = git_hook_delete(other.clone(), "pre-commit".into(), Some(false))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::Deleted);
+        assert!(!pre_commit.exists());
+    }
+
+    #[tokio::test]
+    async fn hook_delete_without_an_expected_state_deletes_as_before() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-unchecked").await;
+        let file = managed_file(&repo, "pre-push");
+        install(&repo).await;
+        assert_eq!(
+            git_hook_delete(repo.clone(), "pre-push".into(), None)
+                .await
+                .unwrap(),
+            HookDeleteOutcome::Deleted
+        );
+        assert!(!file.exists());
+
+        let twin = managed_file(&repo, "pre-push.disabled");
+        std::fs::write(&file, "#!/bin/sh\necho mine\n").unwrap();
+        std::fs::write(&twin, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        assert_eq!(
+            git_hook_delete(repo.clone(), "pre-push".into(), None)
+                .await
+                .unwrap(),
+            HookDeleteOutcome::Deleted
+        );
+        assert!(!file.exists());
+        assert!(!twin.exists());
+    }
+
+    /// A `pre-push` whose managed state can't be read: the list labels it unmanaged, while
+    /// a delete expecting either state is the read's `Err` and leaves the file.
+    #[tokio::test]
+    async fn hook_delete_after_a_failed_managed_read_refuses() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-unreadable").await;
+        let file = managed_file(&repo, "pre-push");
+        std::fs::write(&file, KEEP_LOCAL_HOOK_SCRIPT).unwrap();
+        #[cfg(windows)]
+        let hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&file)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read(&file).is_ok() {
+                eprintln!("skipped: this user can read a mode-000 file (root)");
+                return;
+            }
+        }
+        let info = git_hooks_list(repo.clone()).await.unwrap();
+        let listed = info.entries.iter().find(|e| e.name == "pre-push").unwrap();
+        assert!(matches!(listed.state, HookState::Active), "{listed:?}");
+        assert!(!listed.managed, "{listed:?}");
+        // Expecting the guard tells the fallible read apart on Windows too, where a
+        // delete of the held file would fail on its own.
+        for expected in [false, true] {
+            let result = git_hook_delete(repo.clone(), "pre-push".into(), Some(expected)).await;
+            assert!(
+                matches!(result, Err(AppError::Io(_))),
+                "expected {expected}: {result:?}"
+            );
+            assert!(file.is_file(), "expected {expected}");
+        }
+        #[cfg(windows)]
+        drop(hold);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(matches!(hook_file(&file), Ok(HookFile::Ours)));
+    }
+
+    /// A readable hook without the marker, expected unmanaged, is deleted as before.
+    #[tokio::test]
+    async fn hook_delete_expecting_no_guard_deletes_a_readable_foreign_hook() {
+        let (_g, _base, repo, _remote) = hook_repo("delete-foreign").await;
+        let file = managed_file(&repo, "pre-push");
+        std::fs::write(&file, "#!/bin/sh\necho mine\n").unwrap();
+        let outcome = git_hook_delete(repo.clone(), "pre-push".into(), Some(false))
+            .await
+            .unwrap();
+        assert_eq!(outcome, HookDeleteOutcome::Deleted);
+        assert!(!file.exists());
+    }
+
+    /// A hooks path whose parent is a regular file has no such hook: `false`, never the
+    /// `Err` (Unix reports it as not-a-directory, Windows as not-found).
+    #[tokio::test]
+    async fn hook_managed_state_reads_a_hooks_path_through_a_file_as_no_hook() {
+        let (_g, base, repo, _remote) = hook_repo("managed-through-file").await;
+        let not_a_dir = base.join("hooks-file");
+        std::fs::write(&not_a_dir, "plain\n").unwrap();
+        assert!(matches!(
+            hook_managed_state(&repo, &not_a_dir, "pre-push").await,
+            Ok(false)
+        ));
+    }
+
+    /// A `pre-push` symlink is no managed hook, whatever it points at: a loop, which a
+    /// followed read fails on, and a regular file carrying the managed marker. Unix only,
+    /// since creating a symlink on Windows needs a privilege.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_managed_state_reads_a_pre_push_symlink_as_unmanaged() {
+        let (_g, base, repo, _remote) = hook_repo("managed-symlink").await;
+        let file = managed_file(&repo, "pre-push");
+        let hooks_dir = file.parent().unwrap().to_path_buf();
+        assert_status(&install(&repo).await, Installed, None, None);
+        let marked = base.join("marked-pre-push");
+        std::fs::copy(&file, &marked).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&marked, &file).unwrap();
+        assert_eq!(
+            hook_file(&marked).unwrap(),
+            HookFile::Ours,
+            "fixture sanity"
+        );
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&file, &file).unwrap();
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
+    }
+
+    /// The Windows twin of the test above, with file symlinks: it returns, with the reason
+    /// printed, where a link cannot be created (for example, a privilege this process
+    /// lacks).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn hook_managed_state_reads_a_pre_push_symlink_as_unmanaged_on_windows() {
+        let (_g, base, repo, _remote) = hook_repo("managed-symlink-win").await;
+        let file = managed_file(&repo, "pre-push");
+        let hooks_dir = file.parent().unwrap().to_path_buf();
+        assert_status(&install(&repo).await, Installed, None, None);
+        let marked = base.join("marked-pre-push");
+        std::fs::copy(&file, &marked).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        if try_symlink_file(&marked, &file).is_none() {
+            return;
+        }
+        assert_eq!(
+            hook_file(&marked).unwrap(),
+            HookFile::Ours,
+            "fixture sanity"
+        );
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
+        std::fs::remove_file(&file).unwrap();
+        try_symlink_file(&file, &file).expect("a second link is made where the first was");
+        assert!(
+            std::fs::metadata(&file).is_err(),
+            "fixture sanity: a followed read fails on the loop"
+        );
+        assert!(matches!(
+            hook_managed_state(&repo, &hooks_dir, "pre-push").await,
+            Ok(false)
+        ));
     }
 
     #[tokio::test]

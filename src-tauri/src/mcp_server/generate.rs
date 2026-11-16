@@ -1824,14 +1824,7 @@ impl GitDesktopMcp {
 
         let branches = crate::git::branches::git_branches(self.repo.clone())
             .await
-            .map(|bs| {
-                bs.into_iter()
-                    .map(|b| b.name)
-                    // App-internal agent-session branches don't belong in the
-                    // naming context (and could teach the model to mimic them).
-                    .filter(|n| !n.starts_with(super::SESSION_BRANCH_PREFIX))
-                    .collect::<Vec<_>>()
-            })
+            .map(|bs| naming_context_branches(bs.into_iter().map(|b| b.name)))
             .unwrap_or_default();
         let repo_instructions = self.repo_instructions().await?;
 
@@ -1848,6 +1841,16 @@ impl GitDesktopMcp {
             global_instructions: settings.global_instructions,
         }))
     }
+}
+
+/// The branch names a branch-name recipe shows the model. App-internal agent-session
+/// branches (any letter case) are dropped: they don't belong in the naming context and
+/// could teach the model to mimic them.
+fn naming_context_branches(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| !crate::git::branches::is_session_branch_name(n))
+        .collect()
 }
 
 /// Render a [`Recipe`] as the single user [`PromptMessage`] an MCP prompt returns:
@@ -2258,6 +2261,12 @@ fn committed_fallback_empty_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn naming_context_drops_session_branches_in_any_case() {
+        let names = ["GD/Session/x", "gd/session/y", "feature/a", "main"].map(String::from);
+        assert_eq!(naming_context_branches(names), ["feature/a", "main"]);
+    }
 
     #[test]
     fn pr_candidates_use_the_github_probe_budget() {

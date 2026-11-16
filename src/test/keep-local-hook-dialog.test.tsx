@@ -940,7 +940,7 @@ describe("the other checkouts of the repository", () => {
         write.mutateAsync({ name: "pre-push", content: "#!/bin/sh\n" }),
       Disable: () =>
         setEnabled.mutateAsync({ name: "pre-push", enabled: false }),
-      Delete: () => del.mutateAsync("pre-push"),
+      Delete: () => del.mutateAsync({ name: "pre-push" }),
       "Install hooks": () => install.mutateAsync("lefthook"),
     };
     runWriter = runs[which];

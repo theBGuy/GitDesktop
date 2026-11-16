@@ -424,7 +424,9 @@ pub async fn git_diff_between_refs(
 ///
 /// Names are read in full and stripped of exactly `refs/heads/`: the short form
 /// turns into `heads/<name>` for a branch shadowed by a same-named tag, which would
-/// drop it from the map.
+/// drop it from the map. A failed read is an error, never an empty map: absence means
+/// git listed the refs and the name wasn't among them. A broken loose ref reads as
+/// absent too, since git only warns about it and exits 0.
 #[tauri::command]
 pub async fn git_branch_tips(
     repo_path: String,
@@ -432,7 +434,7 @@ pub async fn git_branch_tips(
 ) -> AppResult<std::collections::HashMap<String, String>> {
     let wanted: std::collections::HashSet<&str> =
         branches.iter().map(String::as_str).collect();
-    let out = run_git_raw(
+    let out = run_git(
         Some(&repo_path),
         &[
             "for-each-ref",
@@ -1316,6 +1318,32 @@ mod tests {
             .await
             .expect("read tips");
         assert_eq!(tips.get("pr-head"), Some(&tip), "{tips:?}");
+    }
+
+    /// A read git refused is an error, never an empty map that reads as "every branch
+    /// absent".
+    #[tokio::test]
+    async fn branch_tips_errs_outside_a_repository() {
+        let (_base, repo) = seed_repo("tips-broken").await;
+        let root = std::path::Path::new(&repo);
+        std::fs::rename(root.join(".git"), root.join("git-moved")).unwrap();
+        let result = git_branch_tips(repo.clone(), vec!["main".into()]).await;
+        assert!(
+            matches!(&result, Err(AppError::Git { code: 128, stderr })
+                if stderr.contains("not a git repository")),
+            "{result:?}"
+        );
+    }
+
+    /// A repository with no branches yet answers an empty map: git listed the refs
+    /// and found none.
+    #[tokio::test]
+    async fn branch_tips_answers_an_empty_map_for_a_repository_without_branches() {
+        let (_base, repo) = seed_repo("tips-unborn").await;
+        let tips = git_branch_tips(repo, vec!["main".into(), "master".into()])
+            .await
+            .expect("read tips");
+        assert!(tips.is_empty(), "{tips:?}");
     }
 
     /// The Compare surfaces read the BRANCH a row names, never a same-named tag: the

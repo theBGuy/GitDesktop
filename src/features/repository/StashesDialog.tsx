@@ -57,6 +57,7 @@ import {
   DELETED_BRANCHES_LOADING_NAME,
   DELETED_BRANCHES_READ_FAILED,
   LOST_STASHES_CAPTION,
+  NAME_CHECK_FAILED_NOTE,
   nameExistsHeld,
   PRUNED_ROW_NOTE,
   RECOVER_DESCRIPTION,
@@ -69,8 +70,11 @@ import {
   shortTip,
 } from "@/lib/deleted-branches/copy";
 import {
+  claimDeletedBranchFlight,
   DELETED_BRANCHES_KEY,
+  releaseDeletedBranchFlight,
   useDeletedBranches,
+  useDeletedBranchFlights,
   useDeletedNameTips,
   useDeletedTipStates,
 } from "@/lib/deleted-branches/queries";
@@ -81,12 +85,14 @@ import {
 } from "@/lib/deleted-branches/store";
 import { presentError } from "@/lib/error-summary";
 import { tipOf } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import {
   useBranches,
   useDropStashAtAnyDepth,
   useOrphanedStashes,
   useOrphanedStashFileDiff,
   useOrphanedStashFiles,
+  useRepoIdentity,
   useRepoStatus,
   useRestoreOrphaned,
   useStashApply,
@@ -166,6 +172,13 @@ interface PendingDrop {
   repo: string;
 }
 
+/** Why the stash footer is held, by the write that runs; a pop is an apply. The
+ *  sentences name no stash: the hold follows the dialog into another repository. */
+const STASH_BUSY_HELD: Record<"apply" | "drop", string> = {
+  apply: "Applying a stash…",
+  drop: "Dropping a stash…",
+};
+
 const stashApplyPrompt = ({ index, pop }: PendingApply) => {
   const slot = `stash@{${index}}`;
   const copy = STASH_APPLY_COPY[pop ? "pop" : "apply"];
@@ -230,6 +243,9 @@ export function StashesDialog({
   const effectiveKey = effective ? stashRowKey(effective) : null;
   const rowReactKeys = stashRowReactKeys(list);
   const busy = apply.isPending || drop.isPending;
+  const busyReason = busy
+    ? STASH_BUSY_HELD[drop.isPending ? "drop" : "apply"]
+    : null;
   const onError = (e: unknown) => toastError(e);
 
   function askApply(index: number, pop: boolean) {
@@ -395,6 +411,9 @@ export function StashesDialog({
                       type="button"
                       key={rowReactKeys[i]}
                       data-stash={stashRowKey(stash)}
+                      aria-current={
+                        effectiveKey === stashRowKey(stash) || undefined
+                      }
                       className={cn(
                         "block w-full border-b px-3 py-2 text-left",
                         effectiveKey === stashRowKey(stash)
@@ -421,32 +440,42 @@ export function StashesDialog({
                 <div className="flex items-center gap-1.5 border-t p-2">
                   {busy && <Spinner className="size-3" />}
                   <span className="flex-1" />
-                  <Button
+                  {/* Held, not natively disabled, so focus stays through the
+                      write; a held Enter then repeats onto them. */}
+                  <DisabledReasonButton
                     variant="ghost"
                     size="xs"
                     className="text-destructive"
-                    aria-label="Drop stash"
+                    aria-label={`Drop stash@{${effective.index}}`}
                     disabled={busy}
+                    reason={busyReason}
+                    onKeyDown={ignoreHeldEnter}
                     onClick={() => askDrop(effective)}
                   >
                     <TrashIcon data-icon="inline-start" />
                     Drop…
-                  </Button>
-                  <Button
+                  </DisabledReasonButton>
+                  <DisabledReasonButton
                     variant="outline"
                     size="xs"
+                    aria-label={`Apply stash@{${effective.index}}`}
                     disabled={busy}
+                    reason={busyReason}
+                    onKeyDown={ignoreHeldEnter}
                     onClick={() => askApply(effective.index, false)}
                   >
                     Apply
-                  </Button>
-                  <Button
+                  </DisabledReasonButton>
+                  <DisabledReasonButton
                     size="xs"
+                    aria-label={`Pop stash@{${effective.index}}`}
                     disabled={busy}
+                    reason={busyReason}
+                    onKeyDown={ignoreHeldEnter}
                     onClick={() => askApply(effective.index, true)}
                   >
                     Pop
-                  </Button>
+                  </DisabledReasonButton>
                 </div>
               )}
             </aside>
@@ -545,15 +574,17 @@ type RowState =
   | "restorable"
   | "pruned"
   | "nameExists"
+  | "nameCheckFailed"
   | "alreadyBack"
   | "restoring"
   | "removing";
 
 /** What the footer button says and does per selected row state; a non-null
  *  reason holds it. Pruned rows offer only removal: their commit is gone. An
- *  already-back row restores through the same path, which re-reads git, so a
- *  stale tip read ends in whatever that read finds (a restore, or the
- *  name-exists answer). */
+ *  already-back row, and a taken name whose tips read failed, restore through
+ *  the same path, which re-reads git, so a stale or failed read ends in
+ *  whatever that read finds (a restore, the name-exists answer, or a failure
+ *  that creates nothing). */
 const ROW_FOOTER: Record<
   RowState,
   {
@@ -572,6 +603,11 @@ const ROW_FOOTER: Record<
     label: RESTORE_BRANCH_LABEL,
     held: nameExistsHeld,
     action: null,
+  },
+  nameCheckFailed: {
+    label: RESTORE_BRANCH_LABEL,
+    held: () => null,
+    action: "restore",
   },
   alreadyBack: {
     label: RESTORE_BRANCH_LABEL,
@@ -595,13 +631,16 @@ const ROW_NOTE: Partial<
   Record<RowState, { className: string; text: (name: string) => string }>
 > = {
   pruned: { className: "text-destructive", text: () => PRUNED_ROW_NOTE },
+  nameCheckFailed: {
+    className: "text-muted-foreground",
+    text: () => NAME_CHECK_FAILED_NOTE,
+  },
   alreadyBack: { className: "text-muted-foreground", text: alreadyBackNote },
 };
 
-/** The in-flight press; an object, so a settle clears only its own. Held per
- *  repository: a press there holds nothing in another repository's list. */
-type InFlight = { kind: "restoring" | "removing" };
-type InFlights = ReadonlyMap<string, InFlight>;
+/** Why a pruned row's Remove from list holds while its verdict comes from the
+ *  previous list's tip answers. */
+const PRUNED_RECHECK_HELD = "Checking this commit again…";
 
 /** The deleted branches recorded for this repository, newest first, with one
  *  footer button acting on the selected row. */
@@ -626,67 +665,87 @@ function DeletedBranchesSection({
     .filter((name) => branches.data?.some((b) => b.name === name));
   const nameTips = useDeletedNameTips(repoPath, takenNames, open);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [inFlights, setInFlights] = useState<InFlights>(new Map());
-  // Two presses inside one render both pass the held check; this refuses the second.
-  const flights = useRef(new Map<string, InFlight>());
-  const inFlight = inFlights.get(repoPath) ?? null;
+  // The hold is keyed like the list: every mount and checkout of the
+  // repository sees one running press.
+  const identity = useRepoIdentity(repoPath).data;
+  const pathKey = normPath(repoPath);
+  const flightKey = identity ?? pathKey;
+  // A press claimed under the path before the identity resolved keeps holding
+  // once it resolves.
+  const inFlight =
+    useDeletedBranchFlights(
+      (s) => s.flights.get(flightKey) ?? s.flights.get(pathKey),
+    ) ?? null;
+  // Written in the commit, so a settle right after a switch reads the new key.
+  // The path rides beside it: the key turning from path to identity is the
+  // same list.
+  const liveRef = useRef({ key: flightKey, path: pathKey });
+  useLayoutEffect(() => {
+    liveRef.current = { key: flightKey, path: pathKey };
+  }, [flightKey, pathKey]);
   const caption = useId();
 
   const selected = rows.find((e) => e.id === selectedId) ?? rows[0] ?? null;
 
   // "pruned" only from a confirmed read; a pending, unknown or unloaded answer
   // stays restorable and the press decides. A taken name clears only on a tip
-  // read that answered with the recorded commit; anything else stays held.
+  // read that answered with the recorded commit, turns pressable on a failed
+  // read (the press checks again), and otherwise stays held.
   const rowState = (entry: DeletedBranchEntry): RowState => {
     if (tipStates.data?.get(entry.tip) === "pruned") return "pruned";
-    if (branches.data?.some((b) => b.name === entry.name))
-      return nameTips.isSuccess &&
-        tipOf(nameTips.data, entry.name)?.toLowerCase() ===
-          entry.tip.toLowerCase()
-        ? "alreadyBack"
-        : "nameExists";
-    return "restorable";
+    if (!branches.data?.some((b) => b.name === entry.name)) return "restorable";
+    if (nameTips.isError) return "nameCheckFailed";
+    return nameTips.isSuccess &&
+      tipOf(nameTips.data, entry.name)?.toLowerCase() ===
+        entry.tip.toLowerCase()
+      ? "alreadyBack"
+      : "nameExists";
   };
+  // A pruned verdict read from the previous list's answers still renders, but
+  // acts only once this list's own read lands.
+  const prunedRecheck = (entry: DeletedBranchEntry) =>
+    tipStates.isPlaceholderData && rowState(entry) === "pruned";
 
   async function press(entry: DeletedBranchEntry) {
     // Pinned at the press: the settle acts on this repository whatever is open.
     const repo = repoPath;
-    const action = ROW_FOOTER[rowState(entry)].action;
-    if (action === null || flights.current.has(repo)) return;
-    const token: InFlight = {
-      kind: action === "restore" ? "restoring" : "removing",
-    };
-    flights.current.set(repo, token);
-    setInFlights((cur) => new Map(cur).set(repo, token));
+    const key = flightKey;
+    const path = pathKey;
+    const action = prunedRecheck(entry)
+      ? null
+      : ROW_FOOTER[rowState(entry)].action;
+    if (action === null) return;
+    const token = claimDeletedBranchFlight(
+      key,
+      action === "restore" ? "restoring" : "removing",
+      path,
+    );
+    if (token === null) return;
     const at = rows.indexOf(entry);
     const next = rows[at + 1] ?? rows[at - 1] ?? null;
     try {
       let left: boolean;
       if (action === "restore") {
-        left =
-          (await restoreAndReport(queryClient, repo, entry)).status ===
-          "restored";
+        const outcome = await restoreAndReport(queryClient, repo, entry);
+        // A record that couldn't be removed keeps its row listed.
+        left = outcome.status === "restored" && !outcome.recordKept;
       } else {
         left = await forgetDeletedBranch(repo, entry.id);
         if (!left) toast.error(removeFailedTitle(entry.name));
       }
       if (left) {
         // A pick made during the wait stands; only the pressed row or the
-        // unpicked fallback moves on.
-        setSelectedId((cur) =>
-          cur === null || cur === entry.id ? (next?.id ?? null) : cur,
-        );
+        // unpicked fallback moves on, and only in the list the press began on.
+        const live = liveRef.current;
+        if (live.key === key || live.path === path)
+          setSelectedId((cur) =>
+            cur === null || cur === entry.id ? (next?.id ?? null) : cur,
+          );
         // Held until the list re-reads, so the row that left can't be pressed.
         await queryClient.invalidateQueries({ queryKey: DELETED_BRANCHES_KEY });
       }
     } finally {
-      if (flights.current.get(repo) === token) flights.current.delete(repo);
-      setInFlights((cur) => {
-        if (cur.get(repo) !== token) return cur;
-        const next = new Map(cur);
-        next.delete(repo);
-        return next;
-      });
+      releaseDeletedBranchFlight(key, token);
     }
   }
 
@@ -753,10 +812,18 @@ function DeletedBranchesSection({
 
   // The label follows the selected row; only the hold follows a running press.
   const footer = selected === null ? null : ROW_FOOTER[rowState(selected)];
-  const heldReason =
-    selected === null || footer === null
-      ? null
-      : ROW_FOOTER[inFlight?.kind ?? rowState(selected)].held(selected.name);
+  const heldReason = (() => {
+    switch (true) {
+      case selected === null:
+        return null;
+      case inFlight !== null:
+        return ROW_FOOTER[inFlight.kind].held(selected.name);
+      case prunedRecheck(selected):
+        return PRUNED_RECHECK_HELD;
+      default:
+        return ROW_FOOTER[rowState(selected)].held(selected.name);
+    }
+  })();
 
   return (
     <section
@@ -842,6 +909,7 @@ function DeletedBranchesSection({
                     next row and must not act on it. */}
                 <DisabledReasonButton
                   size="xs"
+                  aria-label={`${footer.label}: ${selected.name}`}
                   disabled={heldReason !== null}
                   reason={heldReason}
                   onKeyDown={ignoreHeldEnter}
@@ -857,6 +925,12 @@ function DeletedBranchesSection({
     </section>
   );
 }
+
+/** Rescan's hold; worded apart from the visible scanning line. */
+const SCAN_RUNNING_HELD = "A scan is already running.";
+/** The lost-stash Restore's hold; names no stash, since the write's observer
+ *  follows the dialog into another repository. */
+const RESTORE_ORPHANED_HELD = "Restoring a stash…";
 
 /** The lost stashes: auto-scans (fsck) for orphaned stashes, lists them,
  *  browses their files/diffs, and restores non-destructively. */
@@ -916,91 +990,140 @@ function LostStashesPane({
     rowAttr: "data-orphaned",
   });
 
-  if (orphaned.isPending || orphaned.isFetching) {
-    return (
-      <div className="flex flex-1 items-center justify-center gap-2 text-xs text-muted-foreground">
-        <Spinner className="size-4" />
-        Scanning for lost stashes…
-      </div>
-    );
-  }
+  const scanning = orphaned.isPending || orphaned.isFetching;
+  // Scanning and empty share one box, so Rescan stays mounted through its scan.
+  const arm: "box" | "list" = scanning || list.length === 0 ? "box" : "list";
+  const selectedMessage = list.find((s) => s.sha === effectiveSha)?.message;
 
-  if (list.length === 0) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3">
-        <p className="text-center text-xs text-muted-foreground">
-          No lost stashes found.
-        </p>
-        <Button variant="outline" size="xs" onClick={() => orphaned.refetch()}>
-          Rescan
-        </Button>
-      </div>
-    );
-  }
+  // A swap unmounts the focused control and drops focus to <body>: land it on
+  // the selected row (box -> list) or Rescan (list -> box), the wrapper only
+  // when that is missing. Change-only, so a mount never takes focus.
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const rescanRef = useRef<HTMLButtonElement | null>(null);
+  const lastArm = useRef(arm);
+  const landSwapFocus = useEffectEvent((to: "box" | "list") => {
+    const wrapper = wrapperRef.current;
+    const active = document.activeElement;
+    if (active !== document.body && active !== wrapper) return;
+    let target: HTMLElement | null | undefined = rescanRef.current;
+    if (to === "list")
+      target =
+        effectiveSha === null
+          ? null
+          : wrapper?.querySelector<HTMLElement>(
+              `[data-orphaned="${CSS.escape(effectiveSha)}"]`,
+            );
+    (target?.isConnected ? target : wrapper)?.focus({ preventScroll: true });
+    // The list remounts scrolled to the top, so a landed row brings itself
+    // into view the way the arrow keys do.
+    if (to === "list" && target?.isConnected)
+      target.scrollIntoView({ block: "nearest" });
+  });
+  useLayoutEffect(() => {
+    if (lastArm.current === arm) return;
+    lastArm.current = arm;
+    landSwapFocus(arm);
+  }, [arm]);
 
   return (
-    <div className="flex min-h-0 flex-1 border">
-      <aside className="flex w-56 shrink-0 flex-col border-r">
-        <ScrollArea className="min-h-0 flex-1">
-          <div onKeyDown={onListKeyDown}>
-            {list.map((o) => (
-              <button
-                type="button"
-                key={o.sha}
-                data-orphaned={o.sha}
-                className={cn(
-                  "block w-full border-b px-3 py-2 text-left",
-                  effectiveSha === o.sha
-                    ? "bg-accent text-accent-foreground"
-                    : "hover:bg-muted/60",
-                )}
-                onClick={() => setSelectedSha(o.sha)}
-              >
-                <p className="truncate text-xs font-medium">{o.message}</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  <RelativeTime date={o.date} /> · {o.fileCount} file
-                  {o.fileCount === 1 ? "" : "s"}
-                </p>
-              </button>
-            ))}
-          </div>
-        </ScrollArea>
-        {effectiveSha !== null && (
-          <div className="flex items-center gap-1.5 border-t p-2">
-            {restore.isPending && <Spinner className="size-3" />}
-            <span className="flex-1" />
-            <Button
-              size="xs"
-              disabled={restore.isPending}
-              onClick={() => onRestoreClick(effectiveSha)}
-            >
-              Restore to working tree
-            </Button>
-          </div>
-        )}
-      </aside>
-      {effectiveSha !== null ? (
-        <StashFiles
-          key={effectiveSha}
-          repoPath={repoPath}
-          source={{ kind: "orphaned", sha: effectiveSha }}
-        />
-      ) : null}
+    <div
+      ref={wrapperRef}
+      tabIndex={-1}
+      className="flex min-h-0 flex-1 flex-col outline-none"
+    >
+      {arm === "box" ? (
+        <div className="flex flex-col items-start gap-1.5 border px-3 py-2 text-xs">
+          <p className="flex items-center gap-2 text-muted-foreground">
+            {scanning ? (
+              <>
+                <Spinner className="size-4" />
+                Scanning for lost stashes…
+              </>
+            ) : (
+              "No lost stashes found."
+            )}
+          </p>
+          <DisabledReasonButton
+            ref={rescanRef}
+            variant="outline"
+            size="xs"
+            disabled={scanning}
+            reason={scanning ? SCAN_RUNNING_HELD : null}
+            onKeyDown={ignoreHeldEnter}
+            onClick={() => void orphaned.refetch()}
+          >
+            Rescan
+          </DisabledReasonButton>
+        </div>
+      ) : (
+        <div className="flex min-h-0 flex-1 border">
+          <aside className="flex w-56 shrink-0 flex-col border-r">
+            <ScrollArea className="min-h-0 flex-1">
+              <div onKeyDown={onListKeyDown}>
+                {list.map((o) => (
+                  <button
+                    type="button"
+                    key={o.sha}
+                    data-orphaned={o.sha}
+                    aria-current={effectiveSha === o.sha || undefined}
+                    className={cn(
+                      "block w-full border-b px-3 py-2 text-left",
+                      effectiveSha === o.sha
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-muted/60",
+                    )}
+                    onClick={() => setSelectedSha(o.sha)}
+                  >
+                    <p className="truncate text-xs font-medium">{o.message}</p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      <RelativeTime date={o.date} /> · {o.fileCount} file
+                      {o.fileCount === 1 ? "" : "s"}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            </ScrollArea>
+            {effectiveSha !== null && (
+              <div className="flex items-center gap-1.5 border-t p-2">
+                {restore.isPending && <Spinner className="size-3" />}
+                <span className="flex-1" />
+                <DisabledReasonButton
+                  size="xs"
+                  aria-label={`Restore to working tree: ${selectedMessage ?? ""}`}
+                  disabled={restore.isPending}
+                  reason={RESTORE_ORPHANED_HELD}
+                  onKeyDown={ignoreHeldEnter}
+                  onClick={() => onRestoreClick(effectiveSha)}
+                >
+                  Restore to working tree
+                </DisabledReasonButton>
+              </div>
+            )}
+          </aside>
+          {effectiveSha !== null ? (
+            <StashFiles
+              key={effectiveSha}
+              repoPath={repoPath}
+              source={{ kind: "orphaned", sha: effectiveSha }}
+            />
+          ) : null}
 
-      <ConfirmDialog
-        open={confirmRestore !== null}
-        onCancel={() => setConfirmRestore(null)}
-        title="Restore over your changes?"
-        body="You have uncommitted changes — restoring may conflict. Continue?"
-        confirmLabel="Restore"
-        pending={restore.isPending}
-        onConfirm={() => {
-          if (confirmRestore === null) return;
-          const sha = confirmRestore;
-          setConfirmRestore(null);
-          void restoreSha(sha);
-        }}
-      />
+          <ConfirmDialog
+            open={confirmRestore !== null}
+            onCancel={() => setConfirmRestore(null)}
+            title="Restore over your changes?"
+            body="You have uncommitted changes — restoring may conflict. Continue?"
+            confirmLabel="Restore"
+            pending={restore.isPending}
+            onConfirm={() => {
+              if (confirmRestore === null) return;
+              const sha = confirmRestore;
+              setConfirmRestore(null);
+              void restoreSha(sha);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

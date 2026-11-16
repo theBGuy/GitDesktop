@@ -9,8 +9,11 @@ import { writeWithRollback } from "@/lib/plugin-store-rollback";
 
 // The branches deleted in this app's window, per repository identity
 // (git-common-dir), so every linked worktree shares one list. Only the commit
-// the branch pointed at restores its work; the rest is read from the branch
-// row before the delete, which removes the branch's whole config section.
+// the branch pointed at restores its work; the Keep local mark and the upstream
+// come from the delete's own outcome, read before it removed the branch's config.
+// A list stored under a raw checkout path (a relocate whose identity didn't
+// resolve) is read beside the identity's, and every write from that path folds it
+// into the identity's list and deletes the raw key.
 
 export const DELETED_BRANCHES_CAP = 50;
 
@@ -118,7 +121,20 @@ function writeList(
         // last loaded, and its entries must survive this write.
         await reloadToleratingEmptyStore(store);
         return writeWithRollback(store, async () => {
-          const current = parseDeletedBranches(await store.get(identity));
+          let current = parseDeletedBranches(await store.get(identity));
+          // Folded on every write, never once per session: the loader lists the
+          // raw key on every read, so a raw list that lands later must still be
+          // removable. Each side is parsed before the spread, as the loader does.
+          if (identity !== repoPath) {
+            const raw = await store.get(repoPath);
+            if (raw !== undefined) {
+              current = parseDeletedBranches([
+                ...current,
+                ...parseDeletedBranches(raw),
+              ]);
+              await store.delete(repoPath);
+            }
+          }
           const next = parseDeletedBranches(change(current));
           await store.set(identity, next);
           await store.save();
@@ -160,10 +176,13 @@ export function forgetDeletedBranch(
   return writeList(repoPath, (current) => current.filter((e) => e.id !== id));
 }
 
-/** Reads one identity key's entries from DISK. Rejects when the store is
- *  unreadable. */
+/** Reads one identity key's entries from DISK, plus those still stored under
+ *  `repoPath` when it is a different key (identity entries win a shared id).
+ *  Read-only: every write from `repoPath` folds the raw key into the identity's
+ *  list and deletes it. Rejects when the store is unreadable. */
 export function loadDeletedBranches(
   identityKey: string,
+  repoPath?: string,
 ): Promise<DeletedBranchEntry[]> {
   return serialize(async () => {
     const store = await getStore();
@@ -171,7 +190,12 @@ export function loadDeletedBranches(
     // which an in-lock writer (the relocate migration) may have staged.
     return withAppStoreLock(STORE_FILE, async () => {
       await reloadToleratingEmptyStore(store);
-      return parseDeletedBranches(await store.get(identityKey));
+      const own = parseDeletedBranches(await store.get(identityKey));
+      if (repoPath === undefined || repoPath === identityKey) return own;
+      return parseDeletedBranches([
+        ...own,
+        ...parseDeletedBranches(await store.get(repoPath)),
+      ]);
     });
   });
 }

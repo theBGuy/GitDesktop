@@ -15,13 +15,18 @@ import {
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { markerStagePrompt } from "@/features/repository/conflict-confirms";
 import { getSecret, gitStage, gitStatus } from "@/lib/git/api";
-import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import {
+  type ConflictSides,
+  checkoutConflictSide,
+  conflictSides,
+} from "@/lib/git/conflict";
 import {
   BINARY_REFUSAL,
   TOO_LARGE_REFUSAL,
 } from "@/lib/git/conflict-prefilter";
 import type { RepoStatus } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -41,6 +46,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 vi.mock("@/lib/git/conflict", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
   conflictSides: vi.fn(),
+  checkoutConflictSide: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: {
@@ -146,10 +152,14 @@ function renderView() {
   );
 }
 
-/** The refusal arm's button, once the mount's own read has landed. */
+/** The Mark resolved button, once the mount's own read has landed. A held
+ *  button stays natively enabled, so the wait also reads `aria-disabled`. */
 async function markButton() {
   const button = await screen.findByRole("button", { name: "Mark resolved" });
-  await waitFor(() => expect(button).toBeEnabled());
+  await waitFor(() => {
+    expect(button).toBeEnabled();
+    expect(button).not.toHaveAttribute("aria-disabled", "true");
+  });
   return button;
 }
 
@@ -244,31 +254,38 @@ describe("Mark resolved on a too-large or binary refusal", () => {
     },
   );
 
-  it("A1.2: the press always asks the unchecked question first; Cancel stages nothing", async () => {
-    renderView();
-    const button = await markButton();
-    await userEvent.setup().click(button);
-    await waitFor(() => expect(confirmRequest()).not.toBeNull());
-    expect(gitStatus).toHaveBeenCalledWith(REPO);
-    expect(gitStage).not.toHaveBeenCalled();
-    const expected = markerStagePrompt(
-      [{ name: BASE, unchecked: true }],
-      false,
-    );
-    const request = confirmRequest();
-    expect(request?.title).toBe(expected.title);
-    expect(request?.body).toBe(expected.body);
-    expect(request?.confirmLabel).toBe(expected.confirmLabel);
-    expect(request?.confirmVariant).toBe("destructive");
-    expect(request?.title).toBe(
-      `Stage ${BASE} with possible conflict markers?`,
-    );
-    expect(request?.confirmLabel).toBe("Stage anyway");
-    act(() => useConfirm.getState().answer(false));
-    await waitFor(() => expect(button).toBeEnabled());
-    expect(gitStage).not.toHaveBeenCalled();
-    expect(toast.success).not.toHaveBeenCalled();
-  });
+  it.each([
+    ["tooLarge", TOO_LARGE],
+    ["binary", BINARY],
+  ] as const)(
+    "the press on the %s refusal asks the unchecked question naming its cause; Cancel stages nothing",
+    async (cause, error) => {
+      disk = error;
+      renderView();
+      const button = await markButton();
+      await userEvent.setup().click(button);
+      await waitFor(() => expect(confirmRequest()).not.toBeNull());
+      expect(gitStatus).toHaveBeenCalledWith(REPO);
+      expect(gitStage).not.toHaveBeenCalled();
+      const expected = markerStagePrompt(
+        [{ name: BASE, unchecked: true, cause }],
+        false,
+      );
+      const request = confirmRequest();
+      expect(request?.title).toBe(expected.title);
+      expect(request?.body).toBe(expected.body);
+      expect(request?.confirmLabel).toBe(expected.confirmLabel);
+      expect(request?.confirmVariant).toBe("destructive");
+      expect(request?.title).toBe(
+        `Stage ${BASE} with possible conflict markers?`,
+      );
+      expect(request?.confirmLabel).toBe("Stage anyway");
+      act(() => useConfirm.getState().answer(false));
+      await waitFor(() => expect(button).toBeEnabled());
+      expect(gitStage).not.toHaveBeenCalled();
+      expect(toast.success).not.toHaveBeenCalled();
+    },
+  );
 
   it("A1.2/A1.6: Confirm stages the file as it is on disk and lands on the button", async () => {
     renderView();
@@ -391,7 +408,8 @@ describe("Mark resolved's Cancel keeps keyboard focus", () => {
     const button = await markButton();
     await userEvent.setup().click(button);
     await waitFor(() => expect(confirmRequest()).not.toBeNull());
-    blurLikeChromium();
+    // The fallback's button is held focusable, so Chromium keeps its focus.
+    if (read !== UNPARSED) blurLikeChromium();
     const popup = closingConfirm();
     act(() => useConfirm.getState().answer(false));
     // While the popup holds focus the landing waits instead of dropping.
@@ -433,5 +451,40 @@ describe("Mark resolved's Cancel keeps keyboard focus", () => {
     expect(button).not.toHaveAttribute("disabled");
     expect(button).toHaveAccessibleDescription("Checking the file…");
     expect(document.activeElement).toBe(button);
+  });
+
+  it("the fallback's button stays focusable and explains the click-time hold", async () => {
+    disk = CLEAN;
+    renderView();
+    const button = await markButton();
+    vi.mocked(conflictSides).mockImplementationOnce(
+      () => new Promise<ConflictSides>(() => undefined),
+    );
+    await userEvent.setup().click(button);
+    await waitFor(() =>
+      expect(button).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(button).not.toHaveAttribute("disabled");
+    expect(button).toHaveAccessibleDescription("Checking the file…");
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("the fallback's button names a running whole-file take as a pending change", async () => {
+    disk = CLEAN;
+    vi.mocked(checkoutConflictSide).mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    renderView();
+    const button = await markButton();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Accept all current" }));
+    await waitFor(() => expect(confirmRequest()).not.toBeNull());
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(checkoutConflictSide).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(button).toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(button).toHaveAccessibleDescription(ACT_PENDING_REASON);
   });
 });

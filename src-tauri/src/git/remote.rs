@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::branches::{restore_upstream, UPSTREAM_WRITE_FAILED};
+use crate::git::branches::{restore_upstream, UPSTREAM_ATOM_INDEX, UPSTREAM_WRITE_FAILED};
 use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::runner::{
     acquire_repo_lock, config_lock_busy, holder_label, is_config_lock_contention, run_git,
@@ -1135,17 +1135,15 @@ fn bare_push_destination(
     refname: &str,
     local: &str,
 ) -> (Option<String>, Option<String>) {
-    let Some(line) = text.lines().next() else {
+    let Some(line) = tracking_line(text, refname) else {
         return (None, None);
     };
-    let fields: Vec<&str> = line.split('\0').collect();
-    if fields.first() != Some(&refname) {
-        return (None, None);
-    }
-    let upstream_remoteref = fields.get(1).copied().unwrap_or("");
-    let upstream_remote = fields.get(2).copied().unwrap_or("");
-    let atoms = fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[]);
-    crate::git::branches::push_destination_fields(local, atoms, upstream_remote, upstream_remoteref)
+    crate::git::branches::push_destination_fields(
+        local,
+        line.atoms(),
+        line.upstream_remote(),
+        line.upstream_remoteref(),
+    )
 }
 
 /// The local branch a bare push would update in this repository, off the same line as
@@ -1156,10 +1154,8 @@ fn bare_push_local_upstream(text: &str, refname: &str) -> Option<String> {
     let (Upstream::Branch(up), remotename, _) = parse_upstream_tracking(text, refname)? else {
         return None;
     };
-    let line = text.lines().next()?;
-    let push_remote = line
-        .split('\0')
-        .nth(UPSTREAM_TRACKING_FIELDS)
+    let push_remote = tracking_line(text, refname)?
+        .push_remotename()
         .unwrap_or(&remotename);
     (push_remote == ".").then_some(up)
 }
@@ -1605,6 +1601,49 @@ pub(crate) const UPSTREAM_TRACKING_FORMAT: &str =
 /// How many fields [`UPSTREAM_TRACKING_FORMAT`] writes, so the push atoms a read appends
 /// start at this index.
 pub(crate) const UPSTREAM_TRACKING_FIELDS: usize = 4;
+
+/// The first line of a tracking read split once: [`UPSTREAM_TRACKING_FORMAT`]'s fields,
+/// then the push-destination atoms (none when the read fell back without them).
+pub(super) struct TrackingLine<'a> {
+    fields: Vec<&'a str>,
+}
+
+/// Position of `%(push:remotename)` among the push-destination atoms; the whole atom
+/// order is pinned against git by `tracking_line_reads_each_push_atom_by_name`.
+const PUSH_REMOTENAME_ATOM_INDEX: usize = 0;
+
+/// None when there is no line or it names another ref (for-each-ref matches a prefix).
+pub(super) fn tracking_line<'a>(text: &'a str, refname: &str) -> Option<TrackingLine<'a>> {
+    let fields: Vec<&str> = text.lines().next()?.split('\0').collect();
+    (fields.first() == Some(&refname)).then_some(TrackingLine { fields })
+}
+
+impl<'a> TrackingLine<'a> {
+    /// `%(upstream:remoteref)`, empty when untracked.
+    pub(super) fn upstream_remoteref(&self) -> &'a str {
+        self.fields.get(1).copied().unwrap_or("")
+    }
+
+    /// `%(upstream:remotename)`, empty when untracked.
+    pub(super) fn upstream_remote(&self) -> &'a str {
+        self.fields.get(2).copied().unwrap_or("")
+    }
+
+    /// The push-destination atoms, in `PUSH_DESTINATION_ATOMS` order.
+    pub(super) fn atoms(&self) -> &[&'a str] {
+        self.fields.get(UPSTREAM_TRACKING_FIELDS..).unwrap_or(&[])
+    }
+
+    /// None when the line carries no atoms; `Some("")` when the atom is empty.
+    pub(super) fn push_remotename(&self) -> Option<&'a str> {
+        self.atoms().get(PUSH_REMOTENAME_ATOM_INDEX).copied()
+    }
+
+    /// `%(upstream)`, the upstream's full tracking ref; None when the line carries no atoms.
+    pub(super) fn upstream_atom(&self) -> Option<&'a str> {
+        self.atoms().get(UPSTREAM_ATOM_INDEX).copied()
+    }
+}
 
 /// What a local branch tracks, as [`build_push_args`] needs it.
 #[derive(Debug, Clone, PartialEq)]
@@ -5056,6 +5095,116 @@ mod tests {
         assert_eq!(local(&tag, r), None, "not a branch");
         assert_eq!(local(&format!("{r}\0\0\0"), r), None);
         assert_eq!(local("", r), None, "unborn");
+    }
+
+    /// The parser and both bare readers take each push atom by name: every atom they
+    /// consume is compared with git's own single-atom read, so a reordered or inserted
+    /// atom goes red here.
+    #[tokio::test]
+    async fn tracking_line_reads_each_push_atom_by_name() {
+        use super::{bare_push_destination, bare_push_local_upstream, tracking_line};
+        use crate::git::branches::{push_destination_fields, read_refs_with_push_destination};
+        let (_guard, base, _origin, _url) = seeded_origin("atom-order").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        let refname = "refs/heads/feat";
+        // In the order `push_destination_fields` destructures them.
+        macro_rules! single_reads {
+            () => {{
+                let mut reads = Vec::new();
+                for atom in [
+                    "%(push:remotename)",
+                    "%(push:remoteref)",
+                    "%(push)",
+                    "%(upstream)",
+                ] {
+                    let format = format!("--format={atom}");
+                    let out = run(&work, &["for-each-ref", refname, &format]).await;
+                    reads.push(out.trim_end().to_string());
+                }
+                reads
+            }};
+        }
+        run(&work, &["checkout", "-q", "-b", "feat"]).await;
+        run(&work, &["branch", "-q", "--set-upstream-to=origin/main"]).await;
+        run(&work, &["config", "branch.feat.pushRemote", "origin"]).await;
+        let refspec = "refs/heads/feat:refs/heads/dest";
+        run(&work, &["config", "remote.origin.push", refspec]).await;
+
+        let single = single_reads!();
+        let single_strs: Vec<&str> = single.iter().map(String::as_str).collect();
+        for (i, a) in single.iter().enumerate() {
+            assert!(!a.is_empty(), "atom {i} empty: {single:?}");
+            assert!(
+                !single[i + 1..].contains(a),
+                "atoms not distinct: {single:?}"
+            );
+        }
+        let text = read_refs_with_push_destination(&work, refname, UPSTREAM_TRACKING_FORMAT)
+            .await
+            .unwrap();
+        let line = tracking_line(&text, refname).expect("the branch's own line");
+        assert_eq!(line.atoms(), single_strs.as_slice(), "{text:?}");
+        assert_eq!(line.push_remotename(), Some(single_strs[0]));
+        assert_eq!(line.upstream_atom(), Some(single_strs[3]));
+        assert_eq!(line.upstream_remoteref(), "refs/heads/main");
+        let (_, upstream_remote, _) = parse_upstream_tracking(&text, refname).unwrap();
+        assert_eq!(line.upstream_remote(), upstream_remote);
+        assert_eq!(
+            bare_push_destination(&text, refname, "feat"),
+            push_destination_fields("feat", &single_strs, "origin", "refs/heads/main")
+        );
+        assert_eq!(bare_push_local_upstream(&text, refname), None);
+
+        // One extra base field shifts every atom, as an inserted atom shifts the rest.
+        let shifted_format = format!("{UPSTREAM_TRACKING_FORMAT}%00%(objectname)");
+        let shifted = read_refs_with_push_destination(&work, refname, &shifted_format)
+            .await
+            .unwrap();
+        let shifted_line = tracking_line(&shifted, refname).expect("the branch's own line");
+        assert_ne!(shifted_line.atoms(), single_strs.as_slice(), "{shifted:?}");
+
+        // By value, never through `push_destination_fields`: what each atom MEANS.
+        run(&work, &["config", "--unset", "remote.origin.push"]).await;
+        for mode in ["current", "upstream"] {
+            run(&work, &["config", "push.default", mode]).await;
+            let single = single_reads!();
+            let remote = single[0].as_str();
+            assert_eq!(single[1], "", "{mode}: {single:?}");
+            let expected_branch = if mode == "current" {
+                let track_prefix = format!("refs/remotes/{remote}/");
+                assert_eq!(
+                    single[2],
+                    format!("{track_prefix}feat"),
+                    "{mode}: {single:?}"
+                );
+                single[2].strip_prefix(&track_prefix).unwrap().to_string()
+            } else {
+                assert_eq!(single[2], single[3], "{mode}: {single:?}");
+                "refs/heads/main"
+                    .strip_prefix("refs/heads/")
+                    .unwrap()
+                    .to_string()
+            };
+            let text = read_refs_with_push_destination(&work, refname, UPSTREAM_TRACKING_FORMAT)
+                .await
+                .unwrap();
+            assert_eq!(
+                bare_push_destination(&text, refname, "feat"),
+                (Some(remote.to_string()), Some(expected_branch)),
+                "{mode}: {text:?}"
+            );
+        }
+
+        run(&work, &["config", "branch.feat.pushRemote", "."]).await;
+        assert_eq!(single_reads!()[0], ".");
+        let text = read_refs_with_push_destination(&work, refname, UPSTREAM_TRACKING_FORMAT)
+            .await
+            .unwrap();
+        assert_eq!(
+            bare_push_local_upstream(&text, refname),
+            Some("main".to_string()),
+            "{text:?}"
+        );
     }
 
     /// Unpinned, so the untracked HEAD reads no push remote, the shape most repos take.

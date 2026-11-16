@@ -12,7 +12,7 @@ use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{
     app_err, cap_head, diff_text, ensure_not_flag, json_result, resolve_commit, to_value,
-    GitDesktopMcp, ShaArg, READ_FILE_MAX_BYTES, SESSION_BRANCH_PREFIX,
+    GitDesktopMcp, ShaArg, READ_FILE_MAX_BYTES,
 };
 
 // ---- Local-git tool parameters --------------------------------------------
@@ -158,7 +158,7 @@ impl GitDesktopMcp {
         // and the write-side tools refuse to touch them (see
         // `write_git::ensure_not_session_branch`). Filtering here keeps them off this
         // read surface too, matching every GUI branch list.
-        branches.retain(|b| !b.name.starts_with(SESSION_BRANCH_PREFIX));
+        branches.retain(|b| !crate::git::branches::is_session_branch_name(&b.name));
         json_result(&branches)
     }
 
@@ -677,6 +677,30 @@ mod tests {
             paths(log("o.txt").await.unwrap()),
             named(&[("renames", "o.txt")])
         );
+    }
+
+    /// `list_branches` hides agent-session branches in any letter case. One session
+    /// spelling per repository: a case-insensitive filesystem reuses the first spelling's
+    /// folder, so the lowercase control gets a repository of its own.
+    #[tokio::test]
+    async fn list_branches_hides_session_branches_in_any_case() {
+        for session in ["GD/Session/x", "gd/session/x"] {
+            let (_tmp, repo, _) = renamed_repo().await;
+            git(&repo, &["branch", session]).await;
+            git(&repo, &["branch", "feature/a"]).await;
+            let server = GitDesktopMcp::with_options(repo, false, false, false, false);
+            let result = server.list_branches().await.unwrap();
+            let text = &result.content[0].as_text().unwrap().text;
+            let rows: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
+            let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
+            assert!(names.contains(&"feature/a"), "{session}: {text}");
+            assert!(
+                names
+                    .iter()
+                    .all(|n| !n.to_ascii_lowercase().contains("session")),
+                "{session}: {text}"
+            );
+        }
     }
 
     /// A path leaving the bound directory is refused rather than answered with an
