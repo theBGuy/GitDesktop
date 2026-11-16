@@ -1146,7 +1146,7 @@ pub(crate) fn text_flag_argv<'a>(args: &[&'a str], flag: &'a str, text: &str) ->
 
 /// Runs a porcelain write whose text rides stdin behind `flag` (`--body-file`,
 /// `--notes-file`). An empty text sends neither flag nor stdin, so gh keeps its
-/// omitted-flag meaning (`gh release edit` keeps the notes).
+/// omitted-flag meaning (`gh pr review` posts no body, `gh release create` sets no notes).
 pub(crate) async fn run_gh_text_write(
     repo_path: &str,
     args: &[&str],
