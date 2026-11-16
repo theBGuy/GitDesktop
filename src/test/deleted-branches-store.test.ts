@@ -343,8 +343,6 @@ describe("forgetDeletedBranch and loadDeletedBranches", () => {
 });
 
 describe("a list stored under the raw checkout path", () => {
-  // The fold's once-per-session guard is module state keyed by path, so each
-  // case takes its own path.
   let n = 0;
   function paths() {
     n++;
@@ -418,6 +416,51 @@ describe("a list stored under the raw checkout path", () => {
     await expect(store.forgetDeletedBranch(repo, "id-1")).resolves.toBe(true);
     expect(ids(id)).toEqual(["id-4"]);
     expect(h.data.has(repo)).toBe(false);
+  });
+
+  // A raw list can land after this session's first write from the path (a
+  // relocate in another instance): every write folds it, not only the first.
+  it("forgets an entry from a raw list stored after an earlier write", async () => {
+    const { repo, id } = paths();
+    const store = await fresh();
+    await expect(store.recordDeletedBranches(repo, [entry(1)])).resolves.toBe(
+      true,
+    );
+    h.data.set(repo, [entry(2)]);
+    const listed = await store.loadDeletedBranches(id, repo);
+    expect(listed.map((e) => e.id)).toEqual(["id-2", "id-1"]);
+
+    await expect(store.forgetDeletedBranch(repo, "id-2")).resolves.toBe(true);
+    await expect(store.loadDeletedBranches(id, repo)).resolves.toEqual([
+      entry(1),
+    ]);
+    expect(h.data.has(repo)).toBe(false);
+  });
+
+  it("merges a raw list stored after an earlier write into the next record", async () => {
+    const { repo, id } = paths();
+    const store = await fresh();
+    await expect(store.recordDeletedBranches(repo, [entry(1)])).resolves.toBe(
+      true,
+    );
+    h.data.set(repo, [entry(2)]);
+    await expect(store.recordDeletedBranches(repo, [entry(3)])).resolves.toBe(
+      true,
+    );
+    expect(ids(id)).toEqual(["id-3", "id-2", "id-1"]);
+    expect(h.data.has(repo)).toBe(false);
+  });
+
+  // The raw key's delete rides the rollback with the identity's write.
+  it("keeps the raw list and the identity's list as they were when the save fails", async () => {
+    const { repo, id } = paths();
+    h.data.set(repo, [entry(1)]);
+    h.data.set(id, [entry(2)]);
+    h.failSave = true;
+    const store = await fresh();
+    await expect(store.forgetDeletedBranch(repo, "id-1")).resolves.toBe(false);
+    expect(h.data.get(repo)).toEqual([entry(1)]);
+    expect(h.data.get(id)).toEqual([entry(2)]);
   });
 
   it.each([

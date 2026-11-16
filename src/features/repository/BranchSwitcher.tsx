@@ -184,6 +184,7 @@ import {
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import {
   landedIn,
+  notifyRepoChanged,
   originNoteFor,
   refuseIfSwitched,
   repoNameFromPath,
@@ -745,19 +746,41 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const shownDeleteTarget = useRetained(deleteTarget);
   // The delete confirm's open session: minted by openDelete with the repo it
-  // opened in, dropped by every close (a repo switch closes the confirm in render
-  // and leaves it inert: a press needs a target, and the next open replaces it).
-  // The confirm is dismissible mid-delete and this switcher outlives repo
-  // switches, so a settle closes only the confirm it was fired from, never one
-  // reopened on a same-named branch here or in another repo, and a confirm
-  // answered after a switch refuses.
-  const deleteSessionRef = useRef<{ repo: string } | null>(null);
+  // opened in, dropped by every close. A repo switch closes the confirm in render
+  // and the first effect below drops the session marked `switched`, so a delete
+  // waiting on a read or the fallback checkout stops even after a switch back.
+  // An unmount (leaving the repo view, or closing the repo) closes the confirm
+  // with the switcher, so the second drops it unmarked and that delete stops as
+  // dismissed, even once the same repo is open again. The confirm is dismissible
+  // mid-delete and this switcher outlives repo switches, so a settle closes only
+  // the confirm it was fired from, never one reopened on a same-named branch here
+  // or in another repo, and a confirm answered after a switch refuses.
+  const deleteSessionRef = useRef<{ repo: string; switched: boolean } | null>(
+    null,
+  );
   // The session's repo for render: the ref stays the press-time gate.
   const [deleteSessionRepo, setDeleteSessionRepo] = useState<string | null>(
     null,
   );
+  // An effect, not the render-phase repo block: a ref is never written in render.
+  // React flushes it before the next render, so a switch back sees it dropped.
+  useEffect(() => {
+    const session = deleteSessionRef.current;
+    if (session !== null && session.repo !== repoPath) {
+      session.switched = true;
+      deleteSessionRef.current = null;
+    }
+  }, [repoPath]);
+  // No <Activity> hides this switcher, so the cleanup runs only on a real
+  // unmount; the StrictMode mount replay finds no session to drop yet.
+  useEffect(
+    () => () => {
+      deleteSessionRef.current = null;
+    },
+    [],
+  );
   function openDelete(branch: string) {
-    deleteSessionRef.current = { repo: repoPath };
+    deleteSessionRef.current = { repo: repoPath, switched: false };
     setDeleteSessionRepo(repoPath);
     setDeleteTarget(branch);
   }
@@ -1963,17 +1986,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           // A mutate past an await builds from the observer's CURRENT options, so
           // the checkout and delete below would act on whichever repo is live now;
           // a switch during the lookup refuses instead.
-          if (
-            refuseIfSwitched(
-              deleteIn,
-              "nothing was deleted",
-              "before the delete started",
-            )
-          )
-            return;
-          // A dismissal during the read cancels every step not yet started.
+          const readOutcome = "nothing was deleted";
+          const readWhen = "before the delete started";
+          if (refuseIfSwitched(deleteIn, readOutcome, readWhen)) return;
+          // A close during the read cancels every step not yet started; one a
+          // switch caused says so in the switch's words, even after a return.
           if (deleteSessionRef.current !== session) {
-            toast.info(deleteDismissed(deleteTarget));
+            if (session.switched)
+              notifyRepoChanged(deleteIn, readOutcome, readWhen);
+            else toast.info(deleteDismissed(deleteTarget));
             return;
           }
           // Inside the try, so the `.finally` clearTarget closes the confirm on
@@ -2003,17 +2024,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           await checkout.mutateAsync(fallback);
           switchedTo = fallback;
           // The same for the delete, which starts only after the checkout lands.
-          if (
-            refuseIfSwitched(
-              deleteIn,
-              `${fallback} is checked out and ${deleteTarget} was kept`,
-              `before ${deleteTarget} was deleted`,
-            )
-          )
-            return;
-          // The checkout can't be recalled, but a dismissal still stops the delete.
+          const checkoutOutcome = `${fallback} is checked out and ${deleteTarget} was kept`;
+          const checkoutWhen = `before ${deleteTarget} was deleted`;
+          if (refuseIfSwitched(deleteIn, checkoutOutcome, checkoutWhen)) return;
+          // The checkout can't be recalled, but a close still stops the delete.
           if (deleteSessionRef.current !== session) {
-            toast.info(deleteDismissed(deleteTarget, fallback));
+            if (session.switched)
+              notifyRepoChanged(deleteIn, checkoutOutcome, checkoutWhen);
+            else toast.info(deleteDismissed(deleteTarget, fallback));
             return;
           }
           if (

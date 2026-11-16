@@ -96,9 +96,12 @@
 //      a format! with any other method chained on, and a binding it cannot
 //      trust (a `let mut`, a `let` whose block closes before the use, or one a
 //      reassignment, `for`/`let` pattern, closure parameter or match arm of
-//      the same name shadows in between). The check fails when it cannot find
-//      the primitive's own delete in git/branches.rs. Allowlist rows are per
-//      function, so a second delete in an allowlisted function is not
+//      the same name shadows in between). Declarations and rebinds are both
+//      located on the literal-blanked text, so a string cannot spell either;
+//      a ref literal or format! template is read as Rust cooks it, and
+//      refs/heads/ matches in any letter case. The check fails when it cannot
+//      find the primitive's own delete in git/branches.rs. Allowlist rows are
+//      per function, so a second delete in an allowlisted function is not
 //      reported. A `#[cfg(test)] fn` outside a test module reads as
 //      production (reported, never missed). A name between two bars on its
 //      line (for example `a | r | b`) reads as a closure parameter, so its
@@ -128,7 +131,6 @@
 //      that is split across lines); a struct-pattern field bound without a
 //      space after its colon (`S{x:name}`) in a closure parameter, `let`, `for`
 //      or match arm; a match arm whose `=>` sits on the line after its pattern;
-//      a rebinding on the same line as the `let` it shadows;
 //      renames (branch -m/-M), push . :refs/heads/x, and removing a loose ref
 //      file from disk.
 //
@@ -905,27 +907,47 @@ export function stderrFieldValue(body) {
 /** The initializer of the nearest preceding `let <name> = …`, bounded by the
  *  enclosing signature so a same-named binding in another function can't answer.
  *  null when there is none — a parameter, or (unless `patterns`) a pattern's
- *  binding. With `patterns`, a destructuring `let (a, <name>) = …` or
- *  `let Some(<name>) = …` answers too. */
-export function bindingInitializer(lines, fromIdx, name, { patterns } = {}) {
+ *  binding — and when another declaration of the name follows on that line:
+ *  a later statement there shadows it and a pattern inside its initializer
+ *  does not, so the line names no one value. With `patterns`, a destructuring
+ *  `let (a, <name>) = …` or `let Some(<name>) = …` answers too. With `masked`
+ *  (the literal-blanked view of `lines`), the `let` is located there, so a
+ *  string cannot spell one, and its initializer is read from `lines` at that
+ *  offset (null when it does not read there); `readMasked` returns the masked
+ *  text of that initializer instead, for a verdict no string may satisfy. */
+export function bindingInitializer(
+  lines,
+  fromIdx,
+  name,
+  { patterns, masked, readMasked } = {},
+) {
   const decl = patterns
     ? new RegExp(
         `\\blet\\s+(?:mut\\s+)?(?=[^=]*?(?<![\\w.:])${name}\\b)[^=]*?=(?!=)\\s*(.*)$`,
       )
     : new RegExp(`\\blet\\s+(?:mut\\s+)?${name}\\s*(?::[^=]*)?=\\s*(.*)$`);
+  const view = masked ?? lines;
+  const out = readMasked ? masked : lines;
   for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
     if (FN_RE.test(lines[i])) return null;
-    const m = decl.exec(lines[i]);
+    const m = decl.exec(view[i]);
     if (!m) continue;
-    let init = m[1];
+    if (decl.test(view[i].slice(m.index + "let".length))) return null;
+    // The masked capture skips a leading literal's blanks as whitespace, so the
+    // initializer is re-read on the code line from the `let` itself.
+    const at = decl.exec(lines[i].slice(m.index));
+    if (at?.index !== 0) return null;
+    let init = at[1];
+    let text = out[i].slice(m.index + at[0].length - at[1].length);
     for (
       let j = i + 1;
       !init.includes(";") && j < i + 6 && j < lines.length;
       j++
     ) {
       init += lines[j];
+      text += out[j];
     }
-    return init;
+    return text;
   }
   return null;
 }
@@ -937,7 +959,7 @@ export function bindingInitializer(lines, fromIdx, name, { patterns } = {}) {
  *  none of the shaping tests match — which reads as correctly shaped. The
  *  seen-set bounds the walk and makes a mutually-recursive pair fail closed,
  *  like every other step the checker cannot resolve. */
-function stderrValueVerdict(value, lines, ctorIdx) {
+function stderrValueVerdict(value, lines, masked, ctorIdx) {
   const seen = new Set();
   for (let expr = value; ; ) {
     if (FULL_FAILURE_TEXT_RE.test(expr)) return null;
@@ -946,12 +968,17 @@ function stderrValueVerdict(value, lines, ctorIdx) {
     if (!BARE_IDENT_RE.test(expr)) return null;
     if (seen.has(expr)) return UNRESOLVED_FIX;
     seen.add(expr);
-    const init = bindingInitializer(lines, ctorIdx, expr);
+    const init = bindingInitializer(lines, ctorIdx, expr, { masked });
     if (init === null) return UNRESOLVED_FIX;
     // Judge the WHOLE initializer. The split below truncates at the first `;`,
     // including one inside a string (`format!("a; {}", out.stderr)`), so it is
     // only ever good enough to name the next alias — never to decide a verdict.
-    if (FULL_FAILURE_TEXT_RE.test(init)) return null;
+    // The passing verdict reads the masked text, so no string can earn it.
+    const shape = bindingInitializer(lines, ctorIdx, expr, {
+      masked,
+      readMasked: true,
+    });
+    if (FULL_FAILURE_TEXT_RE.test(shape)) return null;
     if (SUBSTITUTING_RE.test(init)) return SUBSTITUTION_FIX;
     if (STDERR_READ_RE.test(init)) return STDERR_ONLY_FIX;
     expr = init.split(";")[0].trim();
@@ -959,8 +986,9 @@ function stderrValueVerdict(value, lines, ctorIdx) {
 }
 
 export function checkStderrOnlyGitError(file, _src, lines, hits) {
-  const codeSrc = lexRust(lines.join("\n")).code;
+  const { code: codeSrc, masked } = lexRust(lines.join("\n"));
   const code = codeSrc.split("\n");
+  const maskedLines = masked.split("\n");
   const spans = testModuleSpans(codeSrc);
   GIT_CTOR_RE.lastIndex = 0;
   for (let m = GIT_CTOR_RE.exec(codeSrc); m; m = GIT_CTOR_RE.exec(codeSrc)) {
@@ -969,7 +997,7 @@ export function checkStderrOnlyGitError(file, _src, lines, hits) {
     const open = m.index + m[0].length - 1;
     const value = stderrFieldValue(braceBody(codeSrc, open));
     if (value === null) continue;
-    const fix = stderrValueVerdict(value, code, line - 1);
+    const fix = stderrValueVerdict(value, code, maskedLines, line - 1);
     if (fix === null) continue;
     const fn = enclosingFn(lines, line - 1);
     hits.push({
@@ -1083,13 +1111,19 @@ function argvElements(body) {
 }
 
 export function checkBareBranchRevs(file, _src, lines, hits) {
-  const codeSrc = lexRust(lines.join("\n")).code;
+  const { code: codeSrc, masked } = lexRust(lines.join("\n"));
   const code = codeSrc.split("\n");
+  const maskedLines = masked.split("\n");
   const spans = testModuleSpans(codeSrc);
   const inTest = (idx) => spans.some(([s, e]) => idx > s && idx < e);
   const report = (idx, name) => {
     const line = codeSrc.slice(0, idx).split("\n").length;
-    const init = bindingInitializer(code, line - 1, name, { patterns: true });
+    // Read masked, so a string in or after the initializer cannot make it safe.
+    const init = bindingInitializer(code, line - 1, name, {
+      patterns: true,
+      masked: maskedLines,
+      readMasked: true,
+    });
     if (init !== null && REV_SAFE_INIT_RE.test(init)) return;
     const fn = enclosingFn(lines, line - 1);
     hits.push({
@@ -1396,22 +1430,51 @@ const keywordRe = (word, tail = "") =>
 const BEFORE_NAME_RE = /[#\p{ID_Continue}]/u;
 
 /** The string a Rust literal token spells, or undefined when `t` is not
- *  exactly one string literal. */
+ *  exactly one string literal or holds a `\u` escape that names no character
+ *  (Rust refuses it). A line continuation skips what rustc skips: spaces,
+ *  tabs, CR and LF. */
 function literalValue(t) {
   const raw = /^(?:b|c)?r(#*)"([\s\S]*)"\1$/.exec(t);
   if (raw) return raw[2].includes(`"${raw[1]}`) ? undefined : raw[2];
   const str = /^(?:b|c)?"((?:[^"\\]|\\[\s\S])*)"$/.exec(t);
   if (!str) return undefined;
   const simple = { n: "\n", t: "\t", r: "\r", 0: "\0" };
-  return str[1].replace(
-    /\\(?:\n\s*|u\{([0-9a-fA-F_]+)\}|x([0-9a-fA-F]{2})|([\s\S]))/g,
+  let cooks = true;
+  const value = str[1].replace(
+    /\\(?:\n[ \t\r\n]*|u\{([0-9a-fA-F_]+)\}|x([0-9a-fA-F]{2})|([\s\S]))/g,
     (_, u, x, ch) => {
-      if (u)
-        return String.fromCodePoint(Number.parseInt(u.replace(/_/g, ""), 16));
+      if (u) {
+        const digits = u.replace(/_/g, "");
+        const code = Number.parseInt(digits, 16);
+        if (
+          u.startsWith("_") ||
+          digits.length > 6 ||
+          code > 0x10ffff ||
+          (code >= 0xd800 && code <= 0xdfff)
+        ) {
+          cooks = false;
+          return "";
+        }
+        return String.fromCodePoint(code);
+      }
       if (x) return String.fromCharCode(Number.parseInt(x, 16));
+      if (ch === "u") cooks = false;
       return ch === undefined ? "" : (simple[ch] ?? ch);
     },
   );
+  return cooks ? value : undefined;
+}
+
+// The template token of a `format!` call leading a text, as written.
+const FORMAT_TOKEN_RE =
+  /^format\s*!\s*[([{]\s*((?:b|c)?r(#*)"[\s\S]*?"\2|"(?:[^"\\]|\\[\s\S])*")/;
+/** The template of the `format!` call leading `t` as Rust reads it (escapes
+ *  and line continuations cooked, a raw string verbatim): undefined when `t`
+ *  does not lead with one, null when its token does not cook. */
+function formatTemplate(t) {
+  const token = FORMAT_TOKEN_RE.exec(t)?.[1];
+  if (token === undefined) return undefined;
+  return literalValue(token) ?? null;
 }
 
 // A block body's tail expression (its value, "" when it ends in `;`) and its
@@ -1557,13 +1620,9 @@ function argValues(text, resolve) {
   }
   const branches = branchValues(t, resolve);
   if (branches !== null) return branches;
-  const format =
-    /^format\s*!\s*[([{]\s*((?:b|c)?r(#*)"[\s\S]*?"\2|"(?:[^"\\]|\\[\s\S])*")/.exec(
-      t,
-    );
-  if (format) {
-    const template = literalValue(format[1]);
-    if (template === undefined) return undefined;
+  const template = formatTemplate(t);
+  if (template === null) return undefined;
+  if (template !== undefined) {
     if (!template.replace(/\{\{|\}\}/g, "").includes("{"))
       return [template.replace(/\{\{/g, "{").replace(/\}\}/g, "}")];
     return template.startsWith("-") ? [template] : undefined;
@@ -3315,7 +3374,6 @@ const isRefDeleteFlag = (value) =>
 // update-ref options that take no value; -m and a cluster ending in m take the next element.
 const UPDATE_REF_FLAGS = new Set(["--no-deref", "--create-reflog", "--stdin", "-z"]);
 const REF_TAIL_RE = /\.\s*(?:as_str|as_ref|clone|to_string|to_owned)\s*\(\s*\)$/;
-const FORMAT_TEMPLATE_RE = /^format!\s*\(\s*r?#*"((?:[^"\\]|\\.)*)"/;
 // The `||` operator as rustfmt spaces it inside a line: a token and whitespace
 // on each side. Every other `||` (unspaced, or starting or ending a line, where
 // a closure's split bars can sit) reads as two bars.
@@ -3352,8 +3410,8 @@ function updateRefOperand(elements, values) {
  *  bindingInitializer reads) is a binding the check cannot trust there: a
  *  `let mut`, a `let` whose block closes before the use, or one a
  *  reassignment, `for` or `let` pattern, closure parameter or match-arm
- *  binding of the same name shadows in between. Rebinds read the masked
- *  lines, so a string cannot spell one. */
+ *  binding of the same name shadows in between. The declaration and every
+ *  rebind are read on the masked lines, so a string cannot spell either. */
 function untrustedBinding(lines, maskedLines, fromIdx, name) {
   const decl = new RegExp(`\\blet\\s+(mut\\s+)?${name}\\s*(?::[^=]*)?=`);
   const rebind = new RegExp(
@@ -3367,11 +3425,18 @@ function untrustedBinding(lines, maskedLines, fromIdx, name) {
   const closureParam = new RegExp(`\\|[^|]*?(?<![\\w.:])${name}\\b[^|]*\\|`);
   for (let i = fromIdx; i >= 0 && i > fromIdx - 40; i--) {
     if (FN_RE.test(lines[i])) return false;
-    const m = decl.exec(lines[i]);
+    const m = decl.exec(maskedLines[i]);
     if (m) {
       if (m[1] !== undefined) return true;
       let depth = 0;
       const after = maskedLines[i].slice(m.index + m[0].length);
+      // A rebind or closure parameter later on the declaration's own line
+      // shadows it as one on a later line does.
+      if (
+        rebind.test(after) ||
+        closureParam.test(after.replace(SPACED_OR_RE, "  "))
+      )
+        return true;
       for (const text of [after, ...maskedLines.slice(i + 1, fromIdx)]) {
         for (const ch of text) {
           if (ch === "{") depth++;
@@ -3390,21 +3455,24 @@ function untrustedBinding(lines, maskedLines, fromIdx, name) {
 /** The fix a literal or `format!` ref earns, null for a ref outside
  *  refs/heads/, undefined when `ref` is neither. A literal HEAD deletes the
  *  branch it names unless --no-deref; a template is outside refs/heads/ only
- *  when its fixed lead names a literal namespace. */
+ *  when its fixed lead names a literal namespace. Both read the value as Rust
+ *  cooks it, and refs/heads/ in any letter case: a case-folding disk deletes
+ *  the loose branch through refs/HEADS/<name> (measured, git 2.51.1, NTFS). */
 function spelledRefFix(ref, noDeref) {
   const value = diffArgLiteral(ref);
   if (value !== undefined) {
-    if (value.startsWith("refs/heads/")) return LOCAL_BRANCH_DELETE_FIX;
+    if (/^refs\/heads\//i.test(value)) return LOCAL_BRANCH_DELETE_FIX;
     if (value === "HEAD" && !noDeref) return LOCAL_BRANCH_DELETE_FIX;
     return null;
   }
   // A method chained onto format!(…) beyond the stripped tails can rewrite it.
-  const open = /^format!\s*\(/.exec(ref)?.[0].length;
+  const open = /^format\s*!\s*[([{]/.exec(ref)?.[0].length;
   if (open !== undefined && open + bracketBody(ref, open - 1).length + 1 !== ref.length)
     return OPAQUE_DELETE_REF_FIX;
-  const template = FORMAT_TEMPLATE_RE.exec(ref)?.[1];
+  const template = formatTemplate(ref);
   if (template === undefined) return undefined;
-  if (template.includes("refs/heads/")) return LOCAL_BRANCH_DELETE_FIX;
+  if (template === null) return OPAQUE_DELETE_REF_FIX;
+  if (/refs\/heads\//i.test(template)) return LOCAL_BRANCH_DELETE_FIX;
   return /^refs\/[^/{}]+\//.test(template.split("{")[0])
     ? null
     : OPAQUE_DELETE_REF_FIX;
@@ -3422,7 +3490,9 @@ function deleteRefFix(element, codeLines, maskedLines, lineIdx, noDeref) {
     /^[A-Za-z_]\w*$/.test(ref) &&
     !untrustedBinding(codeLines, maskedLines, lineIdx, ref)
   ) {
-    const init = bindingInitializer(codeLines, lineIdx, ref);
+    const init = bindingInitializer(codeLines, lineIdx, ref, {
+      masked: maskedLines,
+    });
     const text = init === null ? "" : deleteRefText(init.split(";")[0]);
     const bound =
       init === null || diffArgLiteral(text)?.startsWith("-")

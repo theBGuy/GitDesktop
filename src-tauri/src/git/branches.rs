@@ -954,8 +954,9 @@ pub(crate) fn eq_ignoring_case(a: &str, b: &str) -> bool {
 /// a `show-ref` that exits non-zero reads no ref. Every compare that decides whether a
 /// ref may be deleted or moved without its checkout uses this rule, never a plain
 /// equality; a write through a holder's checkout also needs its HEAD at the branch's tip
-/// read under that checkout's hold, and a spelling [`writes_through_another_spelling`]
-/// accepts.
+/// read under that checkout's hold, a spelling [`writes_through_another_spelling`]
+/// accepts, and for another spelling a store whose names alias
+/// ([`spelling_reaches_branch`]).
 pub(crate) async fn holds_branch(repo_path: &str, holder: &str, target: &str) -> bool {
     if holder == target {
         return true;
@@ -3075,6 +3076,51 @@ pub(crate) fn other_spelling_message(holder: &str, now: &str, branch: &str) -> S
     )
 }
 
+/// The refusal for a checkout that no longer holds `branch` at its tip under its hold; a
+/// retry re-reads and takes whichever arm then applies.
+fn switched_away_message(holder: &str, branch: &str) -> String {
+    format!(
+        "The checkout at {holder} switched away from {branch} before it could be updated — \
+         try again. {branch} is unchanged."
+    )
+}
+
+/// [`update_branch_from`]'s verdict on merging in place through HEAD.
+#[derive(Debug, PartialEq, Eq)]
+enum InPlace {
+    Merge,
+    /// The current checkout is not on `branch`: the holder and bare arms update it.
+    NotHeld,
+    /// Refused: on a store whose names alias, a bare write would move the ref under HEAD.
+    Moved,
+}
+
+/// [`InPlace`] for a checkout `holds` (by [`holds_branch`]) on the exact name or another
+/// spelling of the stored branch. Another spelling merges only where the store's names can
+/// alias (`can_alias`, read strictly) and HEAD is the branch's tip under the hold. Only the
+/// truth-table test reaches the `can_alias` and HEAD-at-tip conjuncts: with stable reads
+/// `holds` is already false for another spelling where names can't alias, and an aliased
+/// spelling's HEAD leaves the tip only across a race.
+fn in_place_gate(
+    exact_name: bool,
+    holds: bool,
+    can_alias: bool,
+    head: Option<&str>,
+    tip: Option<&str>,
+) -> InPlace {
+    if !holds {
+        InPlace::NotHeld
+    } else if exact_name {
+        InPlace::Merge
+    } else if !can_alias {
+        InPlace::NotHeld
+    } else if head.is_none() || head != tip {
+        InPlace::Moved
+    } else {
+        InPlace::Merge
+    }
+}
+
 /// The in-place arm's outcome, read from what the merge did rather than a pre-probe:
 /// the user's `merge.ff` decides whether git fast-forwards or makes a merge commit.
 /// Only two successful reads may claim "up-to-date" or "fast-forward"; else "merge".
@@ -3139,10 +3185,34 @@ pub(crate) async fn update_branch_from(
     let base_rev = branch_first_rev(repo_path, base).await;
 
     // The current branch is already checked out, so just merge in place. The merge
-    // reads only HEAD and `base`, so an aliased spelling of it lands here too.
-    let in_place = match current.as_deref() {
+    // reads only HEAD and `base`, so an aliased spelling of it lands here too, once
+    // `in_place_gate` has seen HEAD at the branch's tip under this hold.
+    let holds = match current.as_deref() {
         Some(current) => holds_branch(repo_path, current, branch).await,
         None => false,
+    };
+    let exact_name = current.as_deref() == Some(branch);
+    let mut can_alias = false;
+    let (mut head, mut tip) = (None, None);
+    if holds && !exact_name {
+        can_alias = refs_can_alias_strict(repo_path).await?;
+        if can_alias {
+            head = head_commit(repo_path).await?;
+            tip = branch_tip_sha(repo_path, branch).await?;
+        }
+    }
+    let in_place = match in_place_gate(
+        exact_name,
+        holds,
+        can_alias,
+        head.as_deref(),
+        tip.as_deref(),
+    ) {
+        InPlace::Merge => true,
+        InPlace::NotHeld => false,
+        InPlace::Moved => {
+            return Err(AppError::Command(switched_away_message(repo_path, branch)));
+        }
     };
     if let Some(current) = current.as_deref().filter(|_| in_place) {
         // HEAD resolves: an unborn one was refused above, under this hold.
@@ -3436,7 +3506,10 @@ async fn update_in_holder(
     // an unborn HEAD, which would take the merge as its first commit, is refused.
     let now = current_branch_name(holder).await?;
     let still = match now.as_deref() {
-        Some(now) => holds_branch(holder, now, branch).await,
+        Some(now) => {
+            holds_branch(holder, now, branch).await
+                && spelling_reaches_branch(holder, now, branch).await?
+        }
         None => false,
     };
     let head = if still {
@@ -3459,10 +3532,7 @@ async fn update_in_holder(
             "moved",
             holder,
             branch,
-            format!(
-                "The checkout at {holder} switched away from {branch} before it could be \
-                 updated — try again. {branch} is unchanged."
-            ),
+            switched_away_message(holder, branch),
         ));
     }
     // The reads `ops::refuse_mid_op_for` gates on, split so the refusal can name the
@@ -3808,18 +3878,42 @@ pub(crate) async fn stored_branch_spelling(repo_path: &str, name: &str) -> AppRe
 /// than `core.ignorecase`, which a user may set false on a disk that still folds case. A
 /// reftable repository, recognized by [`is_reftable_store`], never aliases, since its ref
 /// names are table keys rather than file names; any other answers by its disk. A common
-/// dir that can't be resolved counts as aliasing, toward refusing.
+/// dir that can't be resolved, or a disk probe that fails, counts as aliasing, toward
+/// refusing.
 pub(crate) async fn refs_can_alias(repo_path: &str) -> bool {
-    match crate::git::worktree::git_common_dir(repo_path).await {
-        Ok(common) => refs_can_alias_at(std::path::Path::new(&common)),
-        Err(_) => true,
+    refs_can_alias_strict(repo_path).await.unwrap_or(true)
+}
+
+/// [`refs_can_alias`] for a caller whose `true` authorizes a write through a checkout on
+/// another spelling: a common dir that can't be resolved, or a disk probe that fails, is
+/// the `Err`, never "can alias".
+pub(crate) async fn refs_can_alias_strict(repo_path: &str) -> AppResult<bool> {
+    let common = crate::git::worktree::git_common_dir(repo_path).await?;
+    Ok(refs_can_alias_at(std::path::Path::new(&common))?)
+}
+
+/// Whether a checkout on `now`, which [`holds_branch`] says holds the stored `branch`, may
+/// be written through for it, as far as the store can tell: the same name, or a store whose
+/// names alias ([`refs_can_alias_strict`]). Where names can't alias, two spellings are two
+/// refs whatever `holds_branch`'s conservative reads answered. No spawn for the same name.
+pub(crate) async fn spelling_reaches_branch(
+    checkout: &str,
+    now: &str,
+    branch: &str,
+) -> AppResult<bool> {
+    if now == branch {
+        return Ok(true);
     }
+    refs_can_alias_strict(checkout).await
 }
 
 /// [`refs_can_alias`] over a resolved common dir: false for a reftable store, else
 /// [`refs_dir_folds_case`].
-fn refs_can_alias_at(common: &std::path::Path) -> bool {
-    !is_reftable_store(common) && refs_dir_folds_case(common)
+fn refs_can_alias_at(common: &std::path::Path) -> std::io::Result<bool> {
+    if is_reftable_store(common) {
+        return Ok(false);
+    }
+    refs_dir_folds_case(common)
 }
 
 /// Whether `common` holds a reftable ref store: `reftable/tables.list` beside a
@@ -3832,12 +3926,12 @@ fn is_reftable_store(common: &std::path::Path) -> bool {
 }
 
 /// Whether `<common>/refs` exists and its upper-cased spelling `REFS` resolves too; a
-/// missing `refs`, or a read that fails, answers true.
-fn refs_dir_folds_case(common: &std::path::Path) -> bool {
-    match common.join("refs").try_exists() {
-        Ok(true) => common.join("REFS").try_exists().unwrap_or(true),
-        _ => true,
+/// missing `refs` answers true, and a read that fails is the `Err`.
+fn refs_dir_folds_case(common: &std::path::Path) -> std::io::Result<bool> {
+    if !common.join("refs").try_exists()? {
+        return Ok(true);
     }
+    common.join("REFS").try_exists()
 }
 
 /// The refusal for a bare move of `branch` beside `twin`, a stored name that differs
@@ -12202,7 +12296,8 @@ mod tests {
     /// The reftable arm over each layout: only git's reftable layout (a `refs/heads` stub
     /// file beside a `reftable/tables.list` file) reads as reftable and never aliases;
     /// every near miss, a missing `refs` included, answers as the disk folds (true on a
-    /// case-insensitive one, and for a missing `refs` on any).
+    /// case-insensitive one, and for a missing `refs` on any). A probe the OS can't run
+    /// (a path with a NUL) is the `Err`, never "can alias".
     #[test]
     fn refs_can_alias_at_reads_reftable_only_from_its_layout() {
         use super::{is_reftable_store, refs_can_alias_at, refs_dir_folds_case};
@@ -12235,7 +12330,7 @@ mod tests {
         };
         let common = layout("reftable", "file", "file");
         assert!(is_reftable_store(&common));
-        assert!(!refs_can_alias_at(&common));
+        assert!(!refs_can_alias_at(&common).unwrap());
         for (name, heads, tables) in [
             ("stray-tables", "dir", "file"),
             ("stub-only", "file", ""),
@@ -12248,12 +12343,13 @@ mod tests {
             let common = layout(name, heads, tables);
             assert!(!is_reftable_store(&common), "{name}");
             assert_eq!(
-                refs_can_alias_at(&common),
-                refs_dir_folds_case(&common),
+                refs_can_alias_at(&common).unwrap(),
+                refs_dir_folds_case(&common).unwrap(),
                 "{name}"
             );
         }
-        assert!(refs_can_alias_at(&base.join("no-refs")));
+        assert!(refs_can_alias_at(&base.join("no-refs")).unwrap());
+        assert!(refs_can_alias_at(&base.join("bad\0name")).is_err());
     }
 
     /// A reftable repository never aliases ref names, on any disk: an unborn checkout on
@@ -12312,6 +12408,94 @@ mod tests {
             super::bare_move_tip(&repo, "topic").await.unwrap(),
             Some(seed)
         );
+    }
+
+    /// The in-place verdict: the exact name merges; another spelling `holds_branch` accepts
+    /// merges only where the store's names alias and HEAD is the branch's tip, is another
+    /// branch where they can't, and is refused where HEAD is elsewhere or unresolved.
+    #[test]
+    fn in_place_gate_merges_another_spelling_only_where_names_alias_at_the_tip() {
+        use super::{in_place_gate, InPlace};
+        let (a, b) = (Some("a"), Some("b"));
+        for (exact, holds, alias, head, tip, want) in [
+            (true, true, false, None, None, InPlace::Merge),
+            (false, false, true, a, a, InPlace::NotHeld),
+            (false, true, false, a, a, InPlace::NotHeld),
+            (false, true, true, a, b, InPlace::Moved),
+            (false, true, true, None, None, InPlace::Moved),
+            (false, true, true, None, a, InPlace::Moved),
+            (false, true, true, a, a, InPlace::Merge),
+        ] {
+            assert_eq!(
+                in_place_gate(exact, holds, alias, head, tip),
+                want,
+                "exact {exact} holds {holds} alias {alias} head {head:?} tip {tip:?}"
+            );
+        }
+    }
+
+    /// In a reftable repository `Topic/x` and `topic/x` are two branches: the strict alias
+    /// read and [`super::spelling_reaches_branch`] both say so, and with HEAD on `Topic/x`
+    /// an update of `topic/x` falls through to the requested branch, which moves alone;
+    /// `Topic/x`, HEAD and the tree are unchanged. `holds_branch` already answers false
+    /// here, so the in-place gate's conjuncts are left to its truth table. Returns early
+    /// when this git can't create a reftable repository.
+    #[tokio::test]
+    async fn update_branch_from_updates_the_requested_branch_beside_a_folder_variant_where_names_cannot_alias(
+    ) {
+        let (_g, base) = temp_base("reftable-in-place");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.to_string_lossy().into_owned();
+        let init = run_git_raw(
+            Some(&repo),
+            &["init", "-q", "--ref-format=reftable"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        if init.code != 0 {
+            eprintln!("note: this git can't create a reftable repo; skipping");
+            return;
+        }
+        run(&repo, &["config", "user.email", "t@t.local"]).await;
+        run(&repo, &["config", "user.name", "T"]).await;
+        commit_file(&repo, "a.txt", "seed\n").await;
+        let seed = full_ref_tip(&repo, "HEAD").await.unwrap();
+        run(&repo, &["branch", "topic/x"]).await;
+        run(&repo, &["switch", "-q", "-c", "up"]).await;
+        commit_file(&repo, "u.txt", "up\n").await;
+        let up = full_ref_tip(&repo, "HEAD").await.unwrap();
+        run(&repo, &["switch", "-q", "-c", "Topic/x", &seed]).await;
+        commit_file(&repo, "t.txt", "mine\n").await;
+        let mine = full_ref_tip(&repo, "HEAD").await.unwrap();
+        assert!(!super::refs_can_alias_strict(&repo).await.unwrap());
+        assert!(!super::spelling_reaches_branch(&repo, "Topic/x", "topic/x")
+            .await
+            .unwrap());
+
+        let outcome = update_branch_from(
+            &AppState::default(),
+            &repo,
+            "topic/x",
+            "up",
+            &HashSet::new(),
+            None,
+        )
+        .await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(full_ref_tip(&repo, "refs/heads/topic/x").await, Some(up));
+        assert_eq!(
+            full_ref_tip(&repo, "refs/heads/Topic/x").await,
+            Some(mine.clone())
+        );
+        assert_eq!(full_ref_tip(&repo, "HEAD").await, Some(mine));
+        assert_eq!(
+            run(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/Topic/x"
+        );
+        assert!(!std::path::Path::new(&repo).join("u.txt").exists());
+        assert_eq!(run(&repo, &["status", "--porcelain"]).await.trim(), "");
     }
 
     /// The update names `Chore/z` while `chore/z`, checked out here, is stored packed only,

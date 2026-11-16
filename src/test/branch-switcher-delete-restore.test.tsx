@@ -248,13 +248,13 @@ function renderSwitcher() {
       <BranchSwitcher repoPath={repo} />
     </QueryClientProvider>
   );
-  const { rerender } = render(view(REPO));
+  const { rerender, unmount } = render(view(REPO));
   const switchTo = (repo: string) =>
     act(() => {
       useUiStore.setState({ repoPath: repo });
       rerender(view(repo));
     });
-  return { user, switchTo };
+  return { user, switchTo, unmount };
 }
 
 type User = ReturnType<typeof userEvent.setup>;
@@ -727,6 +727,101 @@ describe("dismissing a current-branch delete's confirm", () => {
         "You closed the confirmation before feat was deleted — main is checked out and feat was kept.",
       ),
     );
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  // Leaving the repository view (Help, Settings, My work) unmounts the switcher
+  // without changing the open repository, so only the unmount ends the session.
+  it("starts nothing when the switcher unmounts during the worktree read", async () => {
+    onFeat();
+    const held = deferred<Awaited<ReturnType<typeof listUserWorktrees>>>();
+    vi.mocked(listUserWorktrees).mockImplementation(() => held.promise);
+    const { user, unmount } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(listUserWorktrees).toHaveBeenCalled());
+    unmount();
+    await act(async () => held.resolve([]));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "You closed the confirmation before the delete started — feat was kept.",
+      ),
+    );
+    expect(gitCheckoutBranch).not.toHaveBeenCalled();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("lands the switch but sends no delete when the switcher unmounts during the checkout", async () => {
+    onFeat();
+    const held = deferred<void>();
+    vi.mocked(gitCheckoutBranch).mockImplementation(() => held.promise);
+    const { user, unmount } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() =>
+      expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main"),
+    );
+    unmount();
+    await act(async () => held.resolve());
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "You closed the confirmation before feat was deleted — main is checked out and feat was kept.",
+      ),
+    );
+    expect(gitCheckoutBranch).toHaveBeenCalledTimes(1);
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  /** Away to another repository and back, waiting for the confirm to close. */
+  async function roundTrip(
+    switchTo: ReturnType<typeof renderSwitcher>["switchTo"],
+  ) {
+    await switchTo(OTHER_REPO);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Delete branch?" })).toBe(
+        null,
+      ),
+    );
+    await switchTo(REPO);
+  }
+
+  it("starts nothing after a switch away and back during the worktree read", async () => {
+    onFeat();
+    const held = deferred<Awaited<ReturnType<typeof listUserWorktrees>>>();
+    vi.mocked(listUserWorktrees).mockImplementation(() => held.promise);
+    const { user, switchTo } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() => expect(listUserWorktrees).toHaveBeenCalled());
+    await roundTrip(switchTo);
+    await act(async () => held.resolve([]));
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "You switched repositories before the delete started — nothing was deleted.",
+      ),
+    );
+    expect(gitCheckoutBranch).not.toHaveBeenCalled();
+    expect(gitDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("lands the switch but sends no delete after a switch away and back during the checkout", async () => {
+    onFeat();
+    const held = deferred<void>();
+    vi.mocked(gitCheckoutBranch).mockImplementation(() => held.promise);
+    const { user, switchTo } = renderSwitcher();
+    const confirm = await openDeleteConfirm(user, "feat", "feat");
+    await pressDelete(user, confirm);
+    await waitFor(() =>
+      expect(gitCheckoutBranch).toHaveBeenCalledWith(REPO, "main"),
+    );
+    await roundTrip(switchTo);
+    await act(async () => held.resolve());
+    await waitFor(() =>
+      expect(info).toHaveBeenCalledWith(
+        "You switched repositories before feat was deleted — main is checked out and feat was kept.",
+      ),
+    );
+    expect(gitCheckoutBranch).toHaveBeenCalledTimes(1);
     expect(gitDeleteBranch).not.toHaveBeenCalled();
   });
 

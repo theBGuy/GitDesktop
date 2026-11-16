@@ -1767,7 +1767,23 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // switched — so any future early exit inherits the guarantee. Both switches run
         // inside the config-write mutex, so neither HEAD write can land inside a branch
         // delete's guarded window; the picks, `--skip`, `--abort` and reset stay outside.
+        // The mutex wait is unbounded and the rollback resets `target` to `target_tip`, so
+        // the target is re-read under it, as it was captured, and a moved or deleted one is
+        // refused before the switch; a read that can't run is the error.
+        let (rev, tip) = (target_rev.as_str(), target_tip.as_str());
         let switched = match with_config_write_lock(repo_path, |_held| async move {
+            let tip_now = run_git_raw(
+                Some(repo_path),
+                &["rev-parse", "--verify", "-q", rev],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if tip_now.code != 0 || tip_now.stdout_lossy().trim() != tip {
+                return Err(AppError::InvalidArgument(format!(
+                    "{target_branch} changed while this cherry-pick was waiting to start, so \
+                     nothing was picked. Try again."
+                )));
+            }
             run_git(Some(repo_path), &["switch", target_branch], DEFAULT_TIMEOUT).await
         })
         .await
@@ -4256,7 +4272,7 @@ async fn refuse_unheld_twin(repo_path: &str, branch: &str, current: &str) -> App
     let BranchSpelling::Twin { twin, .. } = branch_spelling(repo_path, branch, true).await? else {
         return Ok(());
     };
-    if is_current_branch(repo_path, current, branch).await {
+    if is_current_branch(repo_path, current, branch).await? {
         return Ok(());
     }
     let listed = run_git(
@@ -4290,16 +4306,20 @@ async fn refuse_branch_operation(repo_path: &str, branch: &str, verb: &str) -> A
 /// (this one on `current`, else a listed holder) is on a spelling
 /// [`writes_through_another_spelling`] stops. Advisory: [`finalize_branch`] keeps its own
 /// checks under its holds, since a checkout can change spelling while a conflict is paused.
-/// `current` comes from [`current_branch_for_merge`], which refused an unborn HEAD.
+/// `current` comes from [`current_branch_for_merge`], which refused an unborn HEAD. This
+/// checkout on another spelling counts as the target's only where the store's names alias
+/// ([`is_current_branch`]); otherwise the listed holders are checked, and this checkout,
+/// listed among them, answers by [`holds_branch`]'s rule there.
 ///
 /// [`writes_through_another_spelling`]: crate::git::branches::writes_through_another_spelling
+/// [`holds_branch`]: crate::git::branches::holds_branch
 async fn refuse_other_spelling_checkout(
     repo_path: &str,
     branch: &str,
     current: &str,
 ) -> AppResult<()> {
     use crate::git::branches::{other_spelling_message, writes_through_another_spelling};
-    if is_current_branch(repo_path, current, branch).await {
+    if is_current_branch(repo_path, current, branch).await? {
         if writes_through_another_spelling(current, branch, true) {
             return Err(AppError::Command(other_spelling_message(
                 repo_path, current, branch,
@@ -4329,13 +4349,19 @@ async fn refuse_other_spelling_checkout(
 }
 
 /// Whether the main checkout, on `current` (`"HEAD"` when detached, a sentinel that holds
-/// no branch), holds `branch` by [`holds_branch`]'s rule: every compare that picks the
-/// current-branch path or its clean-tree checks, so a spelling of HEAD's branch other
-/// than the stored one still counts.
+/// no branch), is `branch`'s checkout: [`holds_branch`] accepts it and
+/// [`spelling_reaches_branch`] confirms another spelling from the store. A true answer
+/// picks the current-branch arm and its clean-tree gate and skips the session-holder and
+/// twin guards, so `holds_branch`'s conservative true on a failed or racing read never
+/// counts alone; a failed store read is the `Err`. The exact name spawns nothing.
 ///
 /// [`holds_branch`]: crate::git::branches::holds_branch
-async fn is_current_branch(repo_path: &str, current: &str, branch: &str) -> bool {
-    current != "HEAD" && crate::git::branches::holds_branch(repo_path, current, branch).await
+/// [`spelling_reaches_branch`]: crate::git::branches::spelling_reaches_branch
+async fn is_current_branch(repo_path: &str, current: &str, branch: &str) -> AppResult<bool> {
+    use crate::git::branches::{holds_branch, spelling_reaches_branch};
+    Ok(current != "HEAD"
+        && holds_branch(repo_path, current, branch).await
+        && spelling_reaches_branch(repo_path, current, branch).await?)
 }
 
 /// [`finalize_base`]'s mechanics for any target: a local PR's merge advances its base,
@@ -4354,13 +4380,13 @@ async fn finalize_branch(
     moved: fn(&str) -> String,
     verb: &str,
 ) -> AppResult<()> {
-    use crate::git::branches::{current_branch_name, holds_branch};
+    use crate::git::branches::{current_branch_name, holds_branch, spelling_reaches_branch};
     // A case variant of a stored branch acts as that branch from here on. Read before the
     // hold, as the current-branch check it feeds is: under the hold the checkout and the
     // tip are re-read by the stored name, and the bare arm re-classifies it.
     let stored = crate::git::branches::stored_branch_spelling(repo_path, branch).await?;
     let branch = stored.as_str();
-    let is_current = is_current_branch(repo_path, current, branch).await;
+    let is_current = is_current_branch(repo_path, current, branch).await?;
     let _current_guard = if is_current {
         let domain = state.working_tree_lock(repo_path).await;
         Some(acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?)
@@ -4370,11 +4396,14 @@ async fn finalize_branch(
     // The main checkout's hold spans the branch/pin reads through the fast-forward. The
     // fast-forward writes through HEAD, so its spelling is checked as in the holder arm;
     // HEAD is read again, since a pack since the start can leave a variant unreadable.
+    let mut variant_head = None;
     if is_current {
         let Some(now) = current_branch_name(repo_path).await? else {
             return Err(AppError::Command(moved(branch)));
         };
-        if !holds_branch(repo_path, &now, branch).await {
+        if !holds_branch(repo_path, &now, branch).await
+            || !spelling_reaches_branch(repo_path, &now, branch).await?
+        {
             return Err(AppError::Command(moved(branch)));
         }
         let head = crate::git::branches::head_commit(repo_path).await?;
@@ -4383,8 +4412,18 @@ async fn finalize_branch(
                 crate::git::branches::other_spelling_message(repo_path, &now, branch),
             ));
         }
+        if now != branch {
+            variant_head = Some(head);
+        }
     }
     let tip_now = branch_tip(repo_path, branch).await?;
+    // Another spelling's HEAD must be the branch's tip read under this hold, as in the
+    // holder arm: only that proves the fast-forward through HEAD moves `branch`.
+    if let Some(head) = variant_head {
+        if head.as_deref() != Some(tip_now.as_str()) {
+            return Err(AppError::Command(moved(branch)));
+        }
+    }
     if let Some(expected) = expected_tip {
         if tip_now != expected {
             return Err(AppError::Command(moved(branch)));
@@ -4509,6 +4548,7 @@ async fn finalize_branch(
             return Err(AppError::Command(moved(branch)));
         };
         if !holds_branch(&worktree, &now, branch).await
+            || !spelling_reaches_branch(&worktree, &now, branch).await?
             || branch_tip(&worktree, branch).await? != tip_now
         {
             return Err(AppError::Command(moved(branch)));
@@ -4654,7 +4694,7 @@ pub(crate) async fn merge_local_pr(
     // case on a clean tree (finalize_base's `merge --ff-only` would otherwise
     // fail, or clobber uncommitted work). Merging into any other branch leaves
     // the main tree alone, so no clean-tree requirement.
-    if is_current_branch(repo_path, &current, &stored_base).await {
+    if is_current_branch(repo_path, &current, &stored_base).await? {
         ensure_clean_tree(repo_path).await?;
     }
     refuse_unheld_twin(repo_path, &stored_base, &current).await?;
@@ -4932,7 +4972,7 @@ pub(crate) async fn finish_local_pr_merge(
     // `merge_local_pr` compared and read it.
     let stored_base = crate::git::branches::stored_branch_spelling(repo_path, base).await?;
     let current = current_branch_for_merge(repo_path).await?;
-    if is_current_branch(repo_path, &current, &stored_base).await {
+    if is_current_branch(repo_path, &current, &stored_base).await? {
         ensure_clean_tree(repo_path).await?;
     }
 
@@ -5639,7 +5679,7 @@ pub(crate) async fn update_local_pr_head(
         )));
     }
     // Nothing exists yet, so every refusal up to the journal entry leaves no trace.
-    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await;
+    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await?;
     if head_is_current {
         ensure_clean_head_checkout(repo_path).await?;
     } else {
@@ -5856,7 +5896,7 @@ pub(crate) async fn finish_local_pr_update(
 
     existing_branch_tip(repo_path, &stored_head).await?;
     let current = current_branch_for_merge(repo_path).await?;
-    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await;
+    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await?;
     if head_is_current {
         ensure_clean_head_checkout(repo_path).await?;
     } else {
@@ -16420,6 +16460,120 @@ mod tests {
             .unwrap();
         assert_eq!((out.applied, out.skipped), (1, 0));
         assert_eq!(head_ref(wt).await, "refs/heads/target");
+    }
+
+    /// A target moved or deleted while the switch waits on the config-write mutex is
+    /// refused before the switch, with one sentence for both, so a batch that would fail
+    /// never resets the target to the tip captured before the change.
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_a_target_moved_or_deleted_while_waiting_on_the_config_mutex()
+    {
+        for deleted in [false, true] {
+            pick_onto_with_the_target_changed_while_waiting(deleted).await;
+        }
+    }
+
+    async fn pick_onto_with_the_target_changed_while_waiting(deleted: bool) {
+        use crate::git::runner::{with_config_write_lock, CONFIG_WRITE_LOCK_EVENTS};
+        let name = if deleted {
+            "pick-onto-mutex-deleted"
+        } else {
+            "pick-onto-mutex-moved"
+        };
+        let (dir, repo) = setup_repo(name).await;
+        git(&repo, &["branch", "target"]).await;
+        let old_tip = rev(&repo, "target").await;
+        git(&repo, &["checkout", "-q", "-b", "mover", "target"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "target\n", "target edit").await;
+        let new_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "-q", "-b", "feature", "target"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature edit").await;
+        let c2 = rev(&repo, "HEAD").await;
+        let wt_dir = tempfile::Builder::new()
+            .prefix(&format!("gd-rewrite-{name}-wt-"))
+            .tempdir()
+            .unwrap();
+        let wt = wt_dir.path().join("wt").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "--detach", &wt]).await;
+
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let holder = tokio::spawn({
+            let repo = repo.clone();
+            async move {
+                with_config_write_lock(&repo, |_held| async move {
+                    let _ = held_tx.send(());
+                    let _ = release_rx.await;
+                })
+                .await
+            }
+        });
+        held_rx.await.expect("the test holds the mutex");
+
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel::<()>();
+        let waiting_tx = std::sync::Mutex::new(Some(waiting_tx));
+        let events: std::sync::Arc<dyn Fn(&'static str) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                if event == "waiting" {
+                    if let Some(tx) = waiting_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            });
+        let pick = tokio::spawn({
+            let (wt, hashes) = (wt.clone(), [c1, c2.clone()]);
+            CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                cherry_pick_onto(&AppState::default(), &wt, &hashes, "target", None).await
+            })
+        });
+        waiting_rx.await.expect("the switch reached the mutex");
+        if deleted {
+            git(&repo, &["update-ref", "-d", "refs/heads/target", &old_tip]).await;
+        } else {
+            git(
+                &repo,
+                &["update-ref", "refs/heads/target", &new_tip, &old_tip],
+            )
+            .await;
+        }
+        release_tx.send(()).unwrap();
+        holder.await.unwrap();
+
+        let result = tokio::time::timeout(TEST_GIT_HANG_GUARD, pick)
+            .await
+            .expect("the pick finishes once released")
+            .unwrap();
+        let target_now = run_git_raw(
+            Some(&repo),
+            &["rev-parse", "--verify", "-q", "refs/heads/target"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        let want = if deleted { "" } else { new_tip.as_str() };
+        assert_eq!(
+            target_now.stdout_lossy().trim(),
+            want,
+            "{name}: the change stays on the target"
+        );
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(m)) if m == "target changed while \
+                this cherry-pick was waiting to start, so nothing was picked. Try again."),
+            "{name}: {:?}",
+            result.as_ref().err()
+        );
+        let head_ref = run_git_raw(
+            Some(&wt),
+            &["symbolic-ref", "-q", "HEAD"],
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+        assert_eq!(head_ref.stdout_lossy().trim(), "", "HEAD stays detached");
+        assert_eq!(rev(&wt, "HEAD").await, c2);
+        assert!(!op_state(&wt).await.unwrap().cherry_picking);
     }
 
     /// A batch that fails and rolls back takes the mutex twice, once per switch, and
@@ -27051,6 +27205,29 @@ detached
         .await;
         assert!(refs.contains(&format!("refs/heads/Feat {a}")), "{refs}");
         assert!(refs.contains(&format!("refs/heads/feat {b}")), "{refs}");
+    }
+
+    /// The main checkout is a branch's checkout by the exact name, with no spawn, never
+    /// from a detached HEAD or an unrelated name, and on another spelling only when the
+    /// store confirms names alias. Outside a repository `holds_branch` answers its
+    /// conservative true for `Topic/x` against `topic/x`, so only the store read stands
+    /// between it and a true answer, and its failure is the `Err`.
+    #[tokio::test]
+    async fn is_current_branch_counts_another_spelling_only_when_the_store_confirms_it() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-is-current-no-repo-")
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        assert!(crate::git::branches::holds_branch(&path, "Topic/x", "topic/x").await);
+        assert!(is_current_branch(&path, "Topic/x", "topic/x")
+            .await
+            .is_err());
+        assert!(is_current_branch(&path, "topic/x", "topic/x")
+            .await
+            .unwrap());
+        assert!(!is_current_branch(&path, "HEAD", "head").await.unwrap());
+        assert!(!is_current_branch(&path, "other", "topic/x").await.unwrap());
     }
 
     /// A local-PR merge into `Feat` while `feat` beside it shares its loose file and no

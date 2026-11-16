@@ -6905,6 +6905,10 @@ test("bare-rev check fails closed on a binding it cannot resolve as safe", () =>
     ...Array.from({ length: 45 }, () => "    noop();"),
     '    run(&["rev-list", branch]);',
     "}",
+    "async fn same_line(repo: &str, name: &str) {",
+    "    let base = branch_first_rev(repo, name).await; let base = name;",
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
   ].join("\n");
   const hits = [];
   checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
@@ -6913,6 +6917,42 @@ test("bare-rev check fails closed on a binding it cannot resolve as safe", () =>
     [
       ["rebinds", 3],
       ["far", 52],
+      ["same_line", 56],
+    ],
+  );
+});
+
+test("bare-rev check reads no binding out of a string literal", () => {
+  // A string spelling a safe `let` declares nothing: `base` stays the parameter.
+  // The pattern's own `let` is read where it starts, never at a string's, and
+  // no string makes a real initializer safe, inside it or after it.
+  const src = [
+    "async fn spelled(repo: &str, base: &str) {",
+    '    let note = "let base = branch_first_rev(repo, x);";',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    "async fn pattern(repo: &str, pair: (&str, &str)) {",
+    '    let ("a=b", base) = pair else { return }; let _s = "let base = branch_first_rev(x)";',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    "async fn after_pattern(repo: &str, pair: (&str, &str)) {",
+    '    let ("a=b", base) = pair else { return }; let _s = "let base = "; let _t = branch_first_rev(x);',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+    "async fn argument(repo: &str, base: &str) {",
+    '    let base = pick(base, "branch_first_rev(");',
+    '    run(&["merge-base", "HEAD", base]);',
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkBareBranchRevs("fixture.rs", src, src.split("\n"), hits);
+  assert.deepEqual(
+    hits.map((h) => [h.fn, h.line]),
+    [
+      ["spelled", 3],
+      ["pattern", 7],
+      ["after_pattern", 11],
+      ["argument", 15],
     ],
   );
 });
@@ -7121,6 +7161,60 @@ test("branch-delete check flags update-ref -d on a branch ref", () => {
   assert.match(hits[6].fix, /a local branch ref delete goes only through/);
 });
 
+test("branch-delete check reads a ref as Rust cooks it, refs/heads/ in any case", () => {
+  // A template's escapes and line continuations cook before format! reads it,
+  // and a case-folding disk deletes the loose branch through refs/HEADS/<name>.
+  const src = (...body) => ["fn f(n: &str) {", ...body, "}"].join("\n");
+  const use = (ref) => `    run(&["update-ref", "-d", ${ref}]);`;
+  for (const body of [
+    [use(String.raw`&format!("refs/\x68eads/{n}")`)],
+    [use(String.raw`&format!("refs/h\u{65}ads/{n}")`)],
+    [use(String.raw`&format!("refs/\u{68}eads/{n}")`)],
+    ['    run(&["update-ref", "-d", &format!("refs/\\', '        heads/{n}")]);'],
+    [use(String.raw`format!("refs/\x68eads/{n}").as_str()`)],
+    [String.raw`    let r = format!("refs/h\x65ads/{n}");`, use("&r")],
+    [use('"refs/HEADS/x"')],
+    [use('&format!("refs/Heads/{n}")')],
+    [use('&format!["refs/heads/{n}"]')],
+    ['    run(&["update-ref", "-d", "refs/\\', '\t heads/x"]);'],
+  ]) {
+    const hits = branchDeleteHits(src(...body));
+    const label = body.join("\n");
+    assert.equal(hits.length, 1, label);
+    assert.equal("failClosed" in hits[0], false, label);
+    assert.match(hits[0].fix, /a local branch ref delete goes only through/, label);
+  }
+  // A raw template keeps its backslash at run time, so it names no branch; a
+  // continuation keeps a no-break space, so the namespace is not refs/heads/.
+  for (const body of [
+    [use(String.raw`&format!(r"refs/\x68eads/{n}")`)],
+    [use(String.raw`&format!(r#"refs/\x68eads/{n}"#)`)],
+    [use('&format!{"refs/tags/{n}"}')],
+    ['    run(&["update-ref", "-d", "refs/\\', `${String.fromCharCode(0xa0)}heads/x"]);`],
+  ]) {
+    assert.deepEqual(branchDeleteHits(src(...body)), [], body.join("\n"));
+  }
+  // A method chained onto any spelling of format! can rewrite it, and an
+  // escape Rust refuses leaves the literal unread: both are opaque.
+  for (const body of [
+    [use('&format!["refs/tags/{n}"].replace("tags", "heads")')],
+    [use('&format!{"refs/tags/{n}"}.to_lowercase()')],
+    [use('&format ! ("refs/tags/{n}").replace("tags", "heads")')],
+    [use(String.raw`&format!("refs/\u{110000}eads/{n}")`)],
+    [use(String.raw`"refs/\u{110000}eads/x"`)],
+    [use(String.raw`"refs/\u{_}heads/x"`)],
+    [use(String.raw`"refs/\u{d800}heads/x"`)],
+    [use(String.raw`"refs/\u{0000068}eads/x"`)],
+    [use(String.raw`"refs/\u{}heads/x"`)],
+    [String.raw`    let r = "refs/\u{110000}eads/x";`, use("r")],
+  ]) {
+    const label = body.join("\n");
+    const hits = branchDeleteHits(src(...body));
+    assert.equal(hits.length, 1, label);
+    assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, label);
+  }
+});
+
 test("branch-delete check finds an update-ref delete in any option order", () => {
   // git permutes update-ref's options: each of these deletes the branch.
   const orders = (ref) => [
@@ -7183,18 +7277,38 @@ test("branch-delete check fails closed on a ref binding it cannot trust", () => 
     fn('    let r = "refs/tags/x";', '    match branch_ref(n) { Some(r) => run(&["update-ref", "-d", r]), None => {} }'),
     fn("    {", '        let r = "refs/tags/x";', "        keep(r);", "    }", '    run(&["update-ref", "-d", r]);'),
     fn('    let r = "-m";', '    run(&["update-ref", "-d", r, "refs/heads/x"]);'),
+    // A string spelling a declaration declares nothing: `r` stays the parameter.
+    fn('    let note = r#"let r = "refs/tags/x";"#;', '    run(&["update-ref", "-d", r]);'),
+    fn('    let note = r#"', '        let r = "refs/tags/x";', '    "#;', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x";', "    for r in xs {", '        let note = r#"let r = "refs/tags/x";"#;', '        run(&["update-ref", "-d", r]);', "    }"),
+    // A shadow on the declaration's own line hides it as one below does.
+    fn('    let r = "refs/tags/x"; let r = format!("refs/heads/{n}");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let r = "refs/tags/x"; let r = r.replace("tags", "heads");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let r = "refs/tags/x"; xs.iter().for_each(|r| run(&["update-ref", "-d", r]));'),
   ]) {
     const hits = branchDeleteHits(src);
     assert.equal(hits.length, 1, src);
     assert.equal("failClosed" in hits[0], false, src);
     assert.match(hits[0].fix, /cannot resolve this `update-ref -d` ref/, src);
   }
+  // Nor does it hide the real declaration above it.
+  const hidden = branchDeleteHits(
+    fn('    let r = format!("refs/heads/{n}");', '    let note = r#"let r = "refs/tags/x";"#;', '    run(&["update-ref", "-d", &r]);'),
+  );
+  assert.equal(hidden.length, 1);
+  assert.match(hidden[0].fix, /a local branch ref delete goes only through/);
   // A trusted binding still resolves: comparisons, strings and nested blocks
   // that close before the use rebind nothing.
   for (const src of [
     fn('    let r = "refs/tags/x";', '    if r == "x" { keep(r); }', '    let s = "r = 1 | r |";', '    run(&["update-ref", "-d", r]);'),
     fn('    let r = "refs/tags/x";', "    {", "        keep(r);", "    }", '    run(&["update-ref", "-d", r]);'),
     fn('    let p = "refs/remotes/o/x".to_string();', '    run(&["update-ref", "-d", p.as_str()]);'),
+    fn('    let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r: &str = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn("    let r =", '        "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = format!("refs/remotes/o/{n}");', '    run(&["update-ref", "-d", &r]);'),
+    fn('    let note = "let r = 1;"; let r = "refs/tags/x";', '    run(&["update-ref", "-d", r]);'),
+    fn('    let r = "refs/tags/x"; run(&["update-ref", "-d", r]);'),
   ]) {
     assert.deepEqual(branchDeleteHits(src), [], src);
   }
@@ -7659,6 +7773,58 @@ test("an unresolvable stderr binding fails closed", () => {
   assert.equal(hits.length, 1);
   assert.equal(hits[0].fn, "passthrough");
   assert.match(hits[0].fix, /cannot resolve/);
+  // A second declaration on the binding's line leaves no one initializer.
+  const shadowed = [
+    "async fn shadowed(out: GitOutput) -> AppError {",
+    "    let report = out.full_failure_text(); let report = out.stderr;",
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const same = [];
+  checkStderrOnlyGitError("fixture.rs", shadowed, shadowed.split("\n"), same);
+  assert.deepEqual(
+    same.map((h) => h.fn),
+    ["shadowed"],
+  );
+  assert.match(same[0].fix, /cannot resolve/);
+});
+
+test("a string spelling a stderr binding's declaration declares nothing", () => {
+  // The `let` is located outside literals, so `report` stays the parameter.
+  const src = [
+    "async fn spelled(code: i32, report: String) -> AppError {",
+    '    let note = "let report = full_failure_text(o);";',
+    "    AppError::Git {",
+    "        code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const hits = [];
+  checkStderrOnlyGitError("fixture.rs", src, src.split("\n"), hits);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "spelled");
+  assert.match(hits[0].fix, /cannot resolve/);
+  // Nor does a string after a real initializer shape it.
+  const trailing = [
+    "async fn trailing(out: GitOutput) -> AppError {",
+    '    let report = String::from_utf8_lossy(&out.stderr).into_owned(); let _m = "full_failure_text(";',
+    "    AppError::Git {",
+    "        code: out.code,",
+    "        stderr: report,",
+    "    }",
+    "}",
+  ].join("\n");
+  const shaped = [];
+  checkStderrOnlyGitError("fixture.rs", trailing, trailing.split("\n"), shaped);
+  assert.deepEqual(
+    shaped.map((h) => h.fn),
+    ["trailing"],
+  );
+  assert.match(shaped[0].fix, /full_failure_text/);
 });
 
 test("failure_text() substitution is caught apart from the combining helper", () => {
