@@ -30,8 +30,8 @@ use crate::forge::my_work::{
 };
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
-    c_quote_label, c_quote_path, cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP,
-    FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
+    c_quote_label, c_quote_path, cap_readme, validate_owner, validate_repo_name, LandedWrite,
+    FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunFilters, RunJob, WorkflowRun};
@@ -3831,8 +3831,9 @@ pub async fn commit_comment_delete(repo_path: &str, sha: &str, comment_id: &str)
 //
 // Comment (note), close/reopen, title/body edit, approve/unapprove, and merge —
 // mirroring the gh_pr_* commands and dispatching through forge_pr_*. (Full reviews
-// stay GitHub-only.) Same glab `-f` raw-field + `state_event` shape as the issue
-// writes. Unlike issue close, MR close has no reason on either platform.
+// stay GitHub-only.) Same shapes as the issue writes: comment and title/body edit send
+// a JSON body on stdin (`glab_write_fields`), close/reopen a `state_event` field.
+// Unlike issue close, MR close has no reason on either platform.
 
 /// `glab --version` read as the health probe reads it, or `None` when the probe fails
 /// for any reason.
@@ -3975,117 +3976,153 @@ pub(crate) fn rewrite_body(body: &str, uploaded: &[(String, String)]) -> String 
     })
 }
 
-/// The rest of a glab write's command line besides the fields and body it is estimated over.
-const GLAB_FIXED_UNITS: usize = 1_000;
-/// How much longer one rewritten `/uploads/...` reference may be than the name it
-/// replaces, multiplied by the number of references to the staged names in the body.
-const UPLOAD_REFERENCE_UNITS: usize = 100;
-
-/// The command-line estimate for a glab write sending `fields` (each other argument a
-/// user can lengthen) and `body`, once every reference to `names` is rewritten.
-fn glab_attached_units(fields: &[&str], body: &str, names: &[String]) -> usize {
-    use crate::attachments::reference_token;
-    let references: usize = names
+/// A write's fields as ONE JSON object, every value a JSON string: the request `glab
+/// api -f key=value` builds for a non-GET call, sent on stdin instead of argv.
+fn glab_fields_json(fields: &[(&'static str, String)]) -> String {
+    let object: serde_json::Map<String, serde_json::Value> = fields
         .iter()
-        .map(|name| body.matches(&reference_token(name)).count())
-        .sum();
-    let fixed = GLAB_FIXED_UNITS + UPLOAD_REFERENCE_UNITS * references;
-    let texts: Vec<&str> = fields.iter().copied().chain([body]).collect();
-    crate::attachments::attached_command_line_units(fixed, &texts)
+        .map(|(key, value)| ((*key).to_string(), serde_json::Value::from(value.as_str())))
+        .collect();
+    serde_json::Value::Object(object).to_string()
 }
 
-/// The `labels=` field a create sends, absent without labels.
-fn labels_field(labels: &[String]) -> Option<String> {
-    (!labels.is_empty()).then(|| format!("labels={}", labels.join(",")))
+/// The one path this module's note, create and title/description writes take to glab:
+/// `fields` as a JSON body on `glab api --input -`, so text of any length or line count
+/// stays off argv. No `-f` may ride beside it: with `--input`, glab moves `-f` fields to
+/// the query string. `envs` is a bot token pair or empty. A timed-out run may still
+/// have landed, so its Err says so for `write`.
+async fn glab_write_fields(
+    repo_path: &str,
+    method: &str,
+    endpoint: &str,
+    fields: &[(&'static str, String)],
+    envs: &[(&str, &str)],
+    write: LandedWrite,
+) -> AppResult<GlabOutput> {
+    let input = glab_fields_json(fields);
+    run_glab_ex(
+        Some(repo_path),
+        &json_body_args(method, endpoint),
+        Some(&input),
+        envs,
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", write))
 }
 
-/// The `assignee_ids=` field a create sends, absent without assignees.
-fn assignee_ids_field(ids: &[u64]) -> Option<String> {
-    (!ids.is_empty()).then(|| {
-        let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
-        format!("assignee_ids={}", ids.join(","))
-    })
+/// A note's fields.
+fn note_fields(body: &str) -> Vec<(&'static str, String)> {
+    vec![("body", body.to_string())]
 }
 
-/// The fields an attached [`create_issue_in`] is estimated over, from the assignee ids
-/// it then sends (resolved before the uploads).
-pub(crate) fn issue_create_fields(title: &str, labels: &[String], ids: &[u64]) -> Vec<String> {
-    [
-        Some(title.trim().to_string()),
-        labels_field(labels),
-        assignee_ids_field(ids),
+/// An issue edit's fields.
+fn edit_issue_fields(title: &str, body: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("title", title.to_string()),
+        ("description", body.to_string()),
     ]
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
-/// [`glab_attached_units`] for an issue create with `assignees` ids not yet looked up:
-/// each counts at the widest id, so no resolved set can estimate longer.
-fn issue_create_upper_units(
-    title: &str,
-    labels: &[String],
-    assignees: usize,
-    body: &str,
-    names: &[String],
-) -> usize {
-    let fields = issue_create_fields(title, labels, &vec![u64::MAX; assignees]);
-    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-    glab_attached_units(&fields, body, names)
+/// An MR edit's fields. `target_branch` is a member ONLY when retargeting: an absent
+/// field leaves the MR's target untouched.
+fn edit_mr_fields(title: &str, body: &str, base: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut fields = edit_issue_fields(title, body);
+    fields.extend(base.map(|base| ("target_branch", base.to_string())));
+    fields
 }
 
-/// Refuses an attached issue create too long for the command line however its
-/// `assignees` resolve, so the refusal needs no lookup and runs before one.
-pub(crate) fn refuse_long_issue_create(
+/// The optional create members: labels as a comma-joined name list, assignees as
+/// comma-joined ids, each absent when empty so create behavior is unchanged.
+fn create_extra_fields(labels: &[String], ids: &[u64]) -> Vec<(&'static str, String)> {
+    let mut fields = Vec::new();
+    if !labels.is_empty() {
+        fields.push(("labels", labels.join(",")));
+    }
+    if !ids.is_empty() {
+        let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+        fields.push(("assignee_ids", ids.join(",")));
+    }
+    fields
+}
+
+/// An issue create's fields; `milestone_id` only when set.
+fn create_issue_fields(
     title: &str,
-    labels: &[String],
-    assignees: usize,
     body: &str,
-    staged: &crate::attachments::StagedRefs,
-    windows: bool,
-) -> AppResult<()> {
-    let units = issue_create_upper_units(title, labels, assignees, body, &staged.names);
-    crate::attachments::refuse_long_attached_argv(units, windows)
+    labels: &[String],
+    ids: &[u64],
+    milestone: Option<u64>,
+) -> Vec<(&'static str, String)> {
+    let mut fields = edit_issue_fields(title, body);
+    fields.extend(create_extra_fields(labels, ids));
+    fields.extend(milestone.map(|m| ("milestone_id", m.to_string())));
+    fields
+}
+
+/// An MR create's fields.
+fn create_mr_fields(
+    head: &str,
+    base: &str,
+    full_title: &str,
+    body: &str,
+    labels: &[String],
+    ids: &[u64],
+) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("source_branch", head.to_string()),
+        ("target_branch", base.to_string()),
+    ];
+    fields.extend(edit_issue_fields(full_title, body));
+    fields.extend(create_extra_fields(labels, ids));
+    fields
 }
 
 /// Uploads every staged file in order to the project `enc`, then returns `body` with
-/// each reference pointing at its upload. The length refusal stops before any upload;
-/// every failure stops before anything is posted.
+/// each reference pointing at its upload. Every staged file is found before the first
+/// upload, and every failure stops before anything is posted.
 async fn upload_and_rewrite(
     repo_path: &str,
     enc: &str,
-    fields: &[&str],
     body: &str,
     staged: &crate::attachments::StagedRefs,
     verb: UploadVerb,
 ) -> AppResult<String> {
-    let units = glab_attached_units(fields, body, &staged.names);
-    crate::attachments::refuse_long_attached_argv(units, cfg!(windows))?;
     if let Some(gone) = staged.names.iter().find(|n| !staged.dir.join(n).is_file()) {
         return Err(crate::attachments::no_longer_attached(gone));
     }
     let mut uploaded = Vec::with_capacity(staged.names.len());
     for name in &staged.names {
         let path = staged.dir.join(name);
-        let url = glab_upload(repo_path, enc, &path, name, verb).await?;
+        let url = glab_upload(repo_path, enc, &path, name, verb)
+            .await
+            .map_err(|refusal| upload_failure(path.is_file(), name, refusal))?;
         uploaded.push((name.clone(), url));
     }
     Ok(rewrite_body(body, &uploaded))
 }
 
-/// [`upload_and_rewrite`] into the project `enc` for a write that also sends `fields`:
-/// the body to send in place of `body`. The write then targets that same `enc`. An Err
-/// keeps every staged file and nothing has been posted.
+/// A failed upload of `name`: when the staged file is gone (`present` false) that is the
+/// cause, whatever the upload reported, a timeout included; else the upload's refusal.
+fn upload_failure(present: bool, name: &str, refusal: AppError) -> AppError {
+    if present {
+        refusal
+    } else {
+        crate::attachments::no_longer_attached(name)
+    }
+}
+
+/// [`upload_and_rewrite`] into the project `enc`: the body to send in place of `body`.
+/// The write then targets that same `enc`. An Err keeps every staged file and nothing
+/// has been posted.
 pub(crate) async fn body_with_uploads(
     repo_path: &str,
     enc: &str,
-    fields: &[impl AsRef<str>],
     body: &str,
     staged: &crate::attachments::StagedRefs,
     verb: UploadVerb,
 ) -> AppResult<String> {
-    let fields: Vec<&str> = fields.iter().map(AsRef::as_ref).collect();
-    upload_and_rewrite(repo_path, enc, &fields, body, staged, verb).await
+    upload_and_rewrite(repo_path, enc, body, staged, verb).await
 }
 
 /// Posts a note whose body references staged images: uploads them to this project,
@@ -4099,13 +4136,15 @@ pub async fn post_note_with_images(
     staged: &crate::attachments::StagedRefs,
 ) -> AppResult<crate::attachments::CommentOutcome> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let body = upload_and_rewrite(repo_path, &enc, &[], body, staged, UploadVerb::Posted).await?;
+    let body = upload_and_rewrite(repo_path, &enc, body, staged, UploadVerb::Posted).await?;
     let endpoint = format!("projects/{enc}/{endpoint_tail}");
-    let body_arg = format!("body={body}");
-    run_glab(
-        Some(repo_path),
-        &["api", "--method", "POST", &endpoint, "-f", &body_arg],
-        GLAB_NETWORK_TIMEOUT,
+    glab_write_fields(
+        repo_path,
+        "POST",
+        &endpoint,
+        &note_fields(&body),
+        &[],
+        LandedWrite::Posted,
     )
     .await?;
     crate::attachments::release_posted(staged, &[]).await;
@@ -4129,151 +4168,6 @@ mod attach_tests {
             Err(AppError::Glab(m)) => m,
             other => panic!("expected AppError::Glab, got {other:?}"),
         }
-    }
-
-    use crate::attachments::{attached_command_line_units, refuse_long_attached_argv};
-
-    fn glab_refused(fields: &[&str], body: &str, names: &[String], windows: bool) -> bool {
-        let units = glab_attached_units(fields, body, names);
-        refuse_long_attached_argv(units, windows).is_err()
-    }
-
-    fn staged_names(n: usize) -> Vec<String> {
-        (1..=n).map(|i| format!("image-{i}.png")).collect()
-    }
-
-    /// One `![](name)` reference per name, then `filler` characters.
-    fn citing(names: &[String], filler: usize) -> String {
-        let refs: String = names.iter().map(|n| format!("![]({n})")).collect();
-        refs + &"a".repeat(filler)
-    }
-
-    #[test]
-    fn a_long_body_with_an_image_is_refused_only_on_windows() {
-        let one = staged_names(1);
-        let body = citing(&one, 40_000);
-        assert!(glab_refused(&["Title"], &body, &one, true));
-        assert!(!glab_refused(&["Title"], &body, &one, false));
-        assert!(glab_refused(&[], &body, &one, true));
-        let ten = staged_names(10);
-        assert!(!glab_refused(&["Title"], &citing(&ten, 20_000), &ten, true));
-    }
-
-    #[test]
-    fn the_glab_estimate_counts_each_field_each_reference_and_the_rest_of_the_line() {
-        assert_eq!(glab_attached_units(&[], "ab", &[]), 1_000 + 5);
-        let body = "](image-1.png)](image-2.png)";
-        let two = staged_names(2);
-        assert_eq!(
-            glab_attached_units(&["t"], body, &two),
-            1_000 + 200 + 4 + 31
-        );
-        assert_eq!(
-            glab_attached_units(&["t", "u"], body, &two[..1]),
-            1_000 + 100 + 8 + 31
-        );
-    }
-
-    // 60 references at 100 units each: 31,103 units with one allowance, 37,003 with sixty.
-    #[test]
-    fn one_image_cited_60_times_is_counted_60_times() {
-        let one = staged_names(1);
-        let body = format!("{}{}", "![](image-1.png)".repeat(60), "a".repeat(29_040));
-        let once = GLAB_FIXED_UNITS + UPLOAD_REFERENCE_UNITS;
-        assert!(
-            refuse_long_attached_argv(attached_command_line_units(once, &[&body]), true).is_ok()
-        );
-        assert!(glab_refused(&[], &body, &one, true));
-        assert!(!glab_refused(&[], &body, &one, false));
-    }
-
-    #[test]
-    fn an_issue_create_is_estimated_over_its_labels_and_resolved_assignee_ids() {
-        let labels = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(
-            issue_create_fields(" T ", &labels, &[7, 42]),
-            ["T", "labels=a,b", "assignee_ids=7,42"]
-        );
-        assert_eq!(issue_create_fields("T", &[], &[]), ["T"]);
-    }
-
-    #[test]
-    fn the_pre_lookup_issue_create_estimate_bounds_every_resolved_one() {
-        let labels = vec!["bug".to_string()];
-        let one = staged_names(1);
-        let body = citing(&one, 10);
-        let widths = [0, 7, 42, 99_999, u64::MAX / 2, u64::MAX - 1, u64::MAX];
-        for count in 0..=3 {
-            let upper = issue_create_upper_units("T", &labels, count, &body, &one);
-            let mixed: Vec<u64> = widths.iter().copied().cycle().skip(2).take(count).collect();
-            for ids in widths.iter().map(|&w| vec![w; count]).chain([mixed]) {
-                let fields = issue_create_fields("T", &labels, &ids);
-                let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-                let resolved = glab_attached_units(&fields, &body, &one);
-                assert!(upper >= resolved, "{count}: {ids:?}");
-            }
-        }
-        let widest = issue_create_fields("T", &labels, &[u64::MAX; 2]);
-        let widest: Vec<&str> = widest.iter().map(String::as_str).collect();
-        assert_eq!(
-            issue_create_upper_units("T", &labels, 2, &body, &one),
-            glab_attached_units(&widest, &body, &one)
-        );
-    }
-
-    #[test]
-    fn the_issue_create_refusal_counts_its_assignees_and_staged_references() {
-        use crate::attachments::{
-            StagedRefs, ATTACHED_COMMAND_LINE_LIMIT, TOO_LONG_WITH_IMAGES_REFUSAL as TOO_LONG,
-        };
-        let too_long =
-            |r: AppResult<()>| matches!(r, Err(AppError::InvalidArgument(m)) if m == TOO_LONG);
-        let labels = vec!["bug".to_string()];
-        let one = staged_names(1);
-        let staged = StagedRefs {
-            names: one.clone(),
-            dir: std::path::PathBuf::new(),
-        };
-        let unstaged = StagedRefs {
-            names: Vec::new(),
-            dir: std::path::PathBuf::new(),
-        };
-        let limit = ATTACHED_COMMAND_LINE_LIMIT;
-        let upper = |assignees, body: &str, names: &[String]| {
-            issue_create_upper_units("T", &labels, assignees, body, names)
-        };
-        // Filler that brings 0 assignees over `names` exactly to the limit.
-        let filled = |names: &[String]| citing(&one, limit - upper(0, &citing(&one, 0), names));
-        let refuse = |assignees, body: &str, staged: &StagedRefs, windows| {
-            refuse_long_issue_create("T", &labels, assignees, body, staged, windows)
-        };
-
-        let body = filled(&one);
-        assert!(upper(0, &body, &one) <= limit && upper(3, &body, &one) > limit);
-        assert!(too_long(refuse(3, &body, &staged, true)));
-        assert!(refuse(0, &body, &staged, true).is_ok());
-        assert!(refuse(3, &body, &staged, false).is_ok());
-
-        let body = filled(&[]);
-        assert!(upper(0, &body, &[]) <= limit && upper(0, &body, &one) > limit);
-        assert!(too_long(refuse(0, &body, &staged, true)));
-        assert!(refuse(0, &body, &unstaged, true).is_ok());
-    }
-
-    // 3,006 units of labels: 30,111 units without them, 33,120 with them.
-    #[test]
-    fn long_labels_on_an_attached_issue_create_are_refused_on_windows() {
-        let one = staged_names(1);
-        let body = citing(&one, 28_984);
-        let labels: Vec<String> = (0..100)
-            .map(|i| format!("{i:03}{}", "l".repeat(26)))
-            .collect();
-        let fields = issue_create_fields("Title", &labels, &[]);
-        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-        let title_only = glab_attached_units(&["Title"], &body, &one);
-        assert!(refuse_long_attached_argv(title_only, true).is_ok());
-        assert!(glab_refused(&fields, &body, &one, true));
-        assert!(!glab_refused(&fields, &body, &one, false));
     }
 
     /// `source` (CRLF read as LF) without each column-0 `#[cfg(test)]` + `mod name` item: a
@@ -4344,28 +4238,33 @@ mod attach_tests {
             .is_some_and(|(e, l)| e < l)
     }
 
-    /// The length decision runs before the first upload.
-    fn decides_before_uploading(body: &str) -> bool {
-        precedes(body, "refuse_long_attached_argv(", "glab_upload(")
+    /// `body` with the first `a` and the first `b` exchanged.
+    fn swap_first(body: &str, a: &str, b: &str) -> String {
+        body.replacen(a, "@@swap@@", 1)
+            .replacen(b, a, 1)
+            .replacen("@@swap@@", b, 1)
     }
 
+    /// Every token occurs in `body`, the first of each in the order given.
+    fn in_order(body: &str, tokens: &[&str]) -> bool {
+        tokens
+            .windows(2)
+            .all(|pair| precedes(body, pair[0], pair[1]))
+    }
+
+    /// Each pin reads call tokens only, so a reformat, a re-spelled argument or an import
+    /// stays green, and a moved or removed call goes red. Every pin runs its own control.
     #[test]
-    fn every_gitlab_attached_route_decides_the_length_before_uploading() {
+    fn every_gitlab_attached_route_uploads_only_through_the_core() {
         use crate::github::repo_meta::tests::wiring_body;
         let gitlab = include_str!("gitlab.rs");
         let forge = include_str!("mod.rs");
-        let core = wiring_body(gitlab, "upload_and_rewrite");
-        assert!(decides_before_uploading(&core), "{core}");
-        let unchecked = core.replace("refuse_long_attached_argv(", "skipped(");
-        assert!(!decides_before_uploading(&unchecked));
-        // Every staged file is found before the upload loop, so a missing one uploads nothing.
-        assert!(
-            precedes(&core, "no_longer_attached(", "for name in &staged.names"),
-            "{core}"
-        );
         let production = production_text(gitlab);
-        assert!(production.contains("\nasync fn upload_and_rewrite("));
         assert!(!production.contains("mod attach_tests"));
+        let core = "upload_and_rewrite";
+        let defined = |text: &str| text.matches(&format!("fn {core}(")).count();
+        assert_eq!(defined(&production), 1);
+        assert_eq!(defined(&format!("{production}\nfn {core}(")), 2);
         let code = |text: String| {
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
@@ -4374,136 +4273,741 @@ mod attach_tests {
         };
         let gitlab_code = code(production);
         let forge_code = code(production_text(forge));
-        // The core holds the only upload call, and only `glab_upload` spells the endpoint.
-        assert_eq!(
-            gitlab_code.matches("glab_upload").count(),
-            2,
-            "its definition and the core's call"
-        );
-        assert_eq!(
-            gitlab_code.matches("/uploads").count(),
-            2,
-            "glab_upload's endpoint and upload_url_ok's prefix"
-        );
-        let endpoint = wiring_body(gitlab, "glab_upload");
-        assert!(endpoint.contains("format!(\"projects/{enc}/uploads\")"));
-        let url_check = wiring_body(gitlab, "upload_url_ok");
-        assert!(url_check.contains("strip_prefix(\"/uploads/\")"));
-        assert_eq!(forge_code.matches("/uploads").count(), 0);
-        // Each route reaches the uploads only through the core, passing the fields it sends.
-        let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
-        let with_fields = "upload_and_rewrite(repo_path, &enc, &fields, ";
-        let mr_fields = "[&source_arg, &target_arg, &title_arg] .into_iter() \
-                         .chain(labels_arg.iter().chain(&assignees_arg))";
-        let core_routes: [(&str, &[&str]); 3] = [
-            (
-                "body_with_uploads",
-                &["upload_and_rewrite(repo_path, enc, &fields, "],
-            ),
-            (
-                "post_note_with_images",
-                &["upload_and_rewrite(repo_path, &enc, &[], "],
-            ),
-            (
-                "create_mr",
-                &[
-                    with_fields,
-                    mr_fields,
-                    "let title_arg = format!(\"title={full_title}\");",
-                ],
-            ),
-        ];
-        for (name, calls) in core_routes {
-            let body = flat(wiring_body(gitlab, name));
-            for call in calls {
-                assert!(body.contains(call), "{name}: {call}\n{body}");
-            }
+        // The core holds the only upload call, and only `glab_upload` (the endpoint) and
+        // `upload_url_ok` (the prefix) spell `/uploads`.
+        let spelled_once = |gitlab: &str, forge: &str| {
+            gitlab.matches("glab_upload").count() == 2
+                && gitlab.matches("/uploads").count() == 2
+                && forge.matches("/uploads").count() == 0
+        };
+        assert!(spelled_once(&gitlab_code, &forge_code));
+        let extra_call = format!("{gitlab_code}\nglab_upload(x)");
+        assert!(!spelled_once(&extra_call, &forge_code));
+        let extra_endpoint = format!("{forge_code}\n/uploads");
+        assert!(!spelled_once(&gitlab_code, &extra_endpoint));
+        for name in ["glab_upload", "upload_url_ok"] {
+            let body = wiring_body(gitlab, name);
+            assert_eq!(body.matches("/uploads").count(), 1, "{name}\n{body}");
+            let moved = body.replace("/uploads", "/files");
+            assert_eq!(moved.matches("/uploads").count(), 0, "{name}: control");
         }
-        // A route's write targets the project its uploads went to, its `enc` read before them
-        // (the issue create's members lookup still reads the project path on its own).
-        let with_fields = "body_with_uploads(&repo_path, &enc, &fields, ";
-        let note = "post_note_with_images(";
-        let enc = "let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);";
-        let forge_routes: [(&str, &[&str]); 5] = [
+        // Every staged file is found before the upload loop, so a missing one uploads nothing.
+        let found_first = |body: &str| precedes(body, "no_longer_attached(", "glab_upload(");
+        let body = wiring_body(gitlab, core);
+        assert!(found_first(&body), "{body}");
+        let swapped = swap_first(&body, "no_longer_attached(", "glab_upload(");
+        assert!(!found_first(&swapped), "the control must flip");
+        // Each route reaches the uploads only through the core and the write after them.
+        let routes: [(&str, &str, &[&str]); 8] = [
+            (gitlab, "body_with_uploads", &["upload_and_rewrite("]),
+            (gitlab, "post_note_with_images", &["upload_and_rewrite("]),
+            (gitlab, "create_mr", &["upload_and_rewrite("]),
             (
+                forge,
                 "forge_pr_edit",
-                &[
-                    enc,
-                    with_fields,
-                    "[Some(&title), base.as_ref()]",
-                    "gitlab::edit_mr_in(&repo_path, &enc, ",
-                ],
+                &["project_path(", "body_with_uploads(", "edit_mr_in("],
             ),
             (
+                forge,
                 "forge_issue_edit",
-                &[
-                    enc,
-                    "body_with_uploads(&repo_path, &enc, &[&title], ",
-                    "gitlab::edit_issue_in(&repo_path, &enc, ",
-                ],
+                &["project_path(", "body_with_uploads(", "edit_issue_in("],
             ),
             (
+                forge,
                 "forge_issue_create",
                 &[
-                    enc,
-                    with_fields,
-                    "gitlab::refuse_long_issue_create( &title, &labels, assignees.len(), &body, &s, cfg!(windows), )?;",
-                    "let ids = gitlab::create_assignee_ids(&repo_path, &assignees).await?;",
-                    "gitlab::issue_create_fields(&title, &labels, &ids)",
-                    "gitlab::create_issue_in( &repo_path, &enc, &title, &body, &labels, &ids, ",
+                    "project_path(",
+                    "create_assignee_ids(",
+                    "body_with_uploads(",
+                    "create_issue_in(",
                 ],
             ),
-            ("forge_pr_comment", &[note]),
-            ("forge_issue_comment", &[note]),
+            (forge, "forge_pr_comment", &["post_note_with_images("]),
+            (forge, "forge_issue_comment", &["post_note_with_images("]),
         ];
-        for (name, calls) in forge_routes {
-            let body = flat(wiring_body(forge, name));
+        for (source, name, calls) in routes {
+            let body = wiring_body(source, name);
+            let holds = |body: &str| calls.iter().all(|call| body.contains(call));
+            assert!(holds(&body), "{name}: {calls:?}\n{body}");
             for call in calls {
-                assert!(body.contains(call), "{name}: {call}\n{body}");
+                assert!(
+                    !holds(&body.replace(call, "moved(")),
+                    "{name}: {call} control"
+                );
             }
         }
-        // The lookup-free length refusal precedes the assignee lookup, which precedes the first
-        // upload: a too-long create reads no member page, and a lookup miss uploads nothing.
-        let create = flat(wiring_body(forge, "forge_issue_create"));
-        let lookup = "gitlab::create_assignee_ids(";
-        assert!(
-            precedes(&create, "gitlab::refuse_long_issue_create(", lookup),
-            "{create}"
-        );
-        assert!(
-            precedes(&create, lookup, "gitlab::body_with_uploads("),
-            "{create}"
-        );
-        // Every caller in gitlab.rs and mod.rs of the core and its two wrappers is on a roster above.
-        let both = format!("{gitlab_code}\n{forge_code}");
-        let callers = |name: &str| {
-            let defined = both.matches(&format!("fn {name}(")).count();
-            assert_eq!(defined, 1, "{name}");
-            both.matches(name).count() - defined
-        };
-        assert_eq!(callers("upload_and_rewrite"), core_routes.len());
-        assert_eq!(
-            callers("body_with_uploads") + callers("post_note_with_images"),
-            forge_routes.len()
-        );
-        // create_mr's argv after the push sends the bindings the estimate was fed: each is
-        // defined once, read once by the estimate's fields and once by that argv.
-        let mr = flat(wiring_body(gitlab, "create_mr"));
-        let pushed = mr
-            .find("run_git_mutating_with_creds_for_branch(")
-            .map_or("", |at| &mr[at..]);
-        let argv = "\"-f\", &source_arg, \"-f\", &target_arg, \"-f\", &title_arg, \
-                    \"-f\", &desc_arg, ]; for field in labels_arg.iter().chain(&assignees_arg) {";
-        assert!(pushed.contains(argv), "{mr}");
-        for binding in [
-            "source_arg",
-            "target_arg",
-            "title_arg",
-            "labels_arg",
-            "assignees_arg",
-        ] {
-            assert_eq!(mr.matches(binding).count(), 3, "{binding}\n{mr}");
+        // The assignee lookup precedes the first upload: a lookup miss uploads nothing.
+        let looked_up = |body: &str| precedes(body, "create_assignee_ids(", "body_with_uploads(");
+        let create = wiring_body(forge, "forge_issue_create");
+        assert!(looked_up(&create), "{create}");
+        let swapped = swap_first(&create, "create_assignee_ids(", "body_with_uploads(");
+        assert!(!looked_up(&swapped), "the control must flip");
+    }
+
+    /// The function named by the last `fn <name>(` or `fn <name><` in `before`.
+    fn enclosing_fn(before: &str) -> String {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        before
+            .rmatch_indices("fn ")
+            .filter(|&(at, _)| !before[..at].ends_with(ident))
+            .find_map(|(at, _)| {
+                let rest = &before[at + 3..];
+                let name = &rest[..rest.find(|c: char| !ident(c)).unwrap_or(rest.len())];
+                let next = rest[name.len()..].chars().next();
+                (!name.is_empty() && matches!(next, Some('(' | '<'))).then(|| name.to_string())
+            })
+            .unwrap_or_default()
+    }
+
+    /// (file under `src/`, enclosing function, callee) for every call in `files` of the
+    /// upload core, its two wrappers and `glab_upload`, sorted. gitlab.rs and forge/mod.rs
+    /// count their production text; every other file counts whole, its tests included.
+    fn upload_callers(files: &[(String, String)]) -> Vec<(String, String, String)> {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut found = Vec::new();
+        for (path, text) in files {
+            let text = if path.ends_with("forge/gitlab.rs") || path.ends_with("forge/mod.rs") {
+                production_text(text)
+            } else {
+                text.replace("\r\n", "\n")
+            };
+            let code = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let file = path.rsplit_once("/src/").map_or(path.as_str(), |(_, f)| f);
+            for callee in [
+                "upload_and_rewrite",
+                "body_with_uploads",
+                "post_note_with_images",
+                "glab_upload",
+            ] {
+                for (at, _) in code.match_indices(&format!("{callee}(")) {
+                    let before = &code[..at];
+                    if before.ends_with("fn ") || before.ends_with(ident) {
+                        continue;
+                    }
+                    let caller = enclosing_fn(before);
+                    found.push((file.to_string(), caller, callee.to_string()));
+                }
+            }
         }
+        found.sort();
+        found
+    }
+
+    /// Every call of the upload core and its wrappers under `src/`, attributed to its
+    /// enclosing function, is exactly this roster.
+    #[test]
+    fn every_upload_core_caller_is_on_the_roster() {
+        use crate::github::repo_meta::tests::rust_sources;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&root, &mut files);
+        for needed in [
+            "forge/gitlab.rs",
+            "forge/mod.rs",
+            "github/pr.rs",
+            "mcp_server/write_forge.rs",
+        ] {
+            assert!(
+                files.iter().any(|(path, _)| path.ends_with(needed)),
+                "{needed} was not read"
+            );
+        }
+        let entry = |(file, caller, callee): (&str, &str, &str)| {
+            (file.to_string(), caller.to_string(), callee.to_string())
+        };
+        let mut roster: Vec<_> = [
+            ("forge/gitlab.rs", "body_with_uploads", "upload_and_rewrite"),
+            (
+                "forge/gitlab.rs",
+                "post_note_with_images",
+                "upload_and_rewrite",
+            ),
+            ("forge/gitlab.rs", "create_mr", "upload_and_rewrite"),
+            ("forge/gitlab.rs", "upload_and_rewrite", "glab_upload"),
+            ("forge/mod.rs", "forge_pr_edit", "body_with_uploads"),
+            ("forge/mod.rs", "forge_issue_edit", "body_with_uploads"),
+            ("forge/mod.rs", "forge_issue_create", "body_with_uploads"),
+            ("forge/mod.rs", "forge_pr_comment", "post_note_with_images"),
+            (
+                "forge/mod.rs",
+                "forge_issue_comment",
+                "post_note_with_images",
+            ),
+        ]
+        .into_iter()
+        .map(entry)
+        .collect();
+        roster.sort();
+        assert_eq!(upload_callers(&files), roster);
+        // A call from a file off the roster is attributed to its function.
+        let mut rogue = files.clone();
+        let text = "fn rogue() { gitlab::body_with_uploads(a) }";
+        rogue.push(("src/x.rs".to_string(), text.to_string()));
+        let rogue = upload_callers(&rogue);
+        assert!(rogue.contains(&entry(("src/x.rs", "rogue", "body_with_uploads"))));
+        assert_ne!(rogue, roster);
+        // A second wrapper call inside a roster function.
+        let mut twice = files.clone();
+        let (_, forge) = twice
+            .iter_mut()
+            .find(|(path, _)| path.ends_with("forge/mod.rs"))
+            .unwrap();
+        let call = "gitlab::body_with_uploads(";
+        *forge = forge.replacen(call, &format!("{call}x); {call}"), 1);
+        assert_ne!(upload_callers(&twice), roster);
+        // A roster call renamed away drops exactly its own entry.
+        let mut dropped = files.clone();
+        let (_, forge) = dropped
+            .iter_mut()
+            .find(|(path, _)| path.ends_with("forge/mod.rs"))
+            .unwrap();
+        *forge = forge.replacen(call, "gitlab::body_unlisted(", 1);
+        let lost = entry(("forge/mod.rs", "forge_pr_edit", "body_with_uploads"));
+        let expected: Vec<_> = roster.iter().filter(|e| **e != lost).cloned().collect();
+        assert_eq!(expected.len(), roster.len() - 1);
+        assert_eq!(upload_callers(&dropped), expected);
+    }
+
+    /// Each GitLab attached route reads its project once (`create_mr` reads `origin` once
+    /// and derives the project from it), looks its assignees up in that project, uploads
+    /// into it, then writes.
+    #[test]
+    fn every_gitlab_attached_route_reads_its_project_before_uploading() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gitlab = include_str!("gitlab.rs");
+        let forge = include_str!("mod.rs");
+        let routes: [(&str, &str, &str, &[&str]); 6] = [
+            (
+                forge,
+                "forge_pr_edit",
+                "project_path(",
+                &["project_path(", "body_with_uploads(", "edit_mr_in("],
+            ),
+            (
+                forge,
+                "forge_issue_edit",
+                "project_path(",
+                &["project_path(", "body_with_uploads(", "edit_issue_in("],
+            ),
+            (
+                forge,
+                "forge_issue_create",
+                "project_path(",
+                &[
+                    "project_path(",
+                    "create_assignee_ids(",
+                    "body_with_uploads(",
+                    "create_issue_in(",
+                ],
+            ),
+            (
+                gitlab,
+                "create_issue",
+                "project_path(",
+                &["project_path(", "create_assignee_ids(", "create_issue_in("],
+            ),
+            (
+                gitlab,
+                "post_note_with_images",
+                "project_path(",
+                &["project_path(", "upload_and_rewrite("],
+            ),
+            (
+                gitlab,
+                "create_mr",
+                "git_remote_url(",
+                &[
+                    "git_remote_url(",
+                    "clone_credential_config(",
+                    "project_path_from_url(",
+                    "create_assignee_ids(",
+                    "upload_and_rewrite(",
+                ],
+            ),
+        ];
+        for (source, name, read, tokens) in routes {
+            let read_once = |body: &str| body.matches(read).count() == 1;
+            let body = wiring_body(source, name);
+            assert!(in_order(&body, tokens), "{name}: {tokens:?}\n{body}");
+            assert!(read_once(&body), "{name}\n{body}");
+            for pair in tokens.windows(2) {
+                let swapped = swap_first(&body, pair[0], pair[1]);
+                assert!(!in_order(&swapped, tokens), "{name}: swapping {pair:?}");
+            }
+            let again = format!("{body}\n{read}x)");
+            assert!(!read_once(&again), "{name}: a second read must flip");
+        }
+    }
+
+    /// `create_mr` reads the project only from its one `origin` read, and looks assignees
+    /// up only through the lookup that takes that project.
+    #[test]
+    fn create_mr_derives_every_project_use_from_one_origin_read() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let pinned = |body: &str| {
+            body.matches("git_remote_url(").count() == 1
+                && body.matches("project_path(").count() == 0
+                && body.matches("project_path_from_url(").count() == 1
+                && body.matches("create_assignee_ids(").count() == 1
+                && !body.contains("resolve_assignee_ids")
+                && precedes(body, "git_remote_url(", "upload_and_rewrite(")
+                && precedes(body, "create_assignee_ids(", "upload_and_rewrite(")
+        };
+        let body = wiring_body(include_str!("gitlab.rs"), "create_mr");
+        assert!(pinned(&body), "{body}");
+        let reread = format!("{body}\nproject_path(x)");
+        assert!(!pinned(&reread), "a second project read must flip");
+        let late = body.replacen("git_remote_url(", "deferred(", 1) + "\ngit_remote_url(x)";
+        assert!(!pinned(&late), "an origin read after the uploads must flip");
+        let direct = body.replace("create_assignee_ids(", "resolve_assignee_ids(");
+        assert!(
+            !pinned(&direct),
+            "a lookup that reads its own project must flip"
+        );
+    }
+
+    /// A GitLab create reads its reply through its tolerant reader only after the run's own
+    /// `?`, so a rejected write never reaches the reader; a reply that isn't JSON is the
+    /// reader's Err, returned before the merge request's staged files are released.
+    #[test]
+    fn gitlab_creates_classify_their_reply_after_the_run() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gitlab = include_str!("gitlab.rs");
+        let forge = include_str!("mod.rs");
+        // Text after `from`, up to the first `to` after it.
+        let between = |body: &str, from: &str, to: &str| -> Option<String> {
+            let start = body.find(from)? + from.len();
+            let end = body[start..].find(to)?;
+            Some(body[start..start + end].to_string())
+        };
+        for (name, run, reader) in [
+            ("create_mr", "glab_write_fields(", "created_ref("),
+            ("create_issue_in", "glab_write_fields(", "created_ref("),
+            ("create_release", "run_glab(", "created_release_url("),
+        ] {
+            let tolerant = |body: &str| body.contains(reader) && !body.contains("gl_unreadable(");
+            let body = wiring_body(gitlab, name);
+            assert!(tolerant(&body), "{name}\n{body}");
+            let strict = format!("{body}\ngl_unreadable(x)");
+            assert!(!tolerant(&strict), "{name}: the control must flip");
+            let after_run = |body: &str| {
+                precedes(body, run, reader)
+                    && between(body, run, reader).is_some_and(|s| s.contains(".await?"))
+            };
+            assert!(after_run(&body), "{name}\n{body}");
+            let early = swap_first(&body, run, reader);
+            assert!(
+                !after_run(&early),
+                "{name}: a reader ahead of the run must flip"
+            );
+        }
+        // The reader's own `?` ends its statement, and nothing fallible follows it before
+        // the staged files are released.
+        let released = |body: &str| {
+            between(body, "created_ref(", "release_posted(").is_some_and(|s| {
+                s.split_once(")?;")
+                    .is_some_and(|(call, rest)| !call.contains(';') && !rest.contains('?'))
+            })
+        };
+        let mr = wiring_body(gitlab, "create_mr");
+        assert!(released(&mr), "{mr}");
+        let step = mr.replacen("release_posted(", "step().await?; release_posted(", 1);
+        assert!(!released(&step), "create_mr: a fallible step must flip");
+        let unchecked = mr.replacen("\"merge request\", true)?;", "\"merge request\", true);", 1);
+        assert_ne!(unchecked, mr);
+        assert!(
+            !released(&unchecked),
+            "create_mr: a reader without `?` must flip"
+        );
+        // The write statement's own `?` is legitimate; nothing fallible follows it.
+        let settled = |body: &str| {
+            between(body, "create_issue_in(", "created_outcome(")
+                .and_then(|s| s.split_once(';').map(|(_, rest)| rest.to_string()))
+                .is_some_and(|rest| !rest.contains('?'))
+        };
+        let create = wiring_body(forge, "forge_issue_create");
+        assert!(settled(&create), "{create}");
+        let lookup = create.replacen("created_outcome(", "lookup().await?; created_outcome(", 1);
+        assert!(
+            !settled(&lookup),
+            "forge_issue_create: the control must flip"
+        );
+    }
+
+    #[test]
+    fn created_ref_reads_each_field_on_its_own() {
+        let url = "https://gitlab.com/g/p/-/merge_requests/12";
+        let rows: [(&str, u64, &str); 10] = [
+            ("", 0, ""),
+            ("   ", 0, ""),
+            ("null", 0, ""),
+            ("[]", 0, ""),
+            ("\"x\"", 0, ""),
+            (r#"{"message":"201 Created"}"#, 0, ""),
+            (r#"{"iid":"12","web_url":7}"#, 0, ""),
+            (r#"{"iid":12}"#, 12, ""),
+            (
+                r#"{"web_url":"https://gitlab.com/g/p/-/merge_requests/12"}"#,
+                0,
+                url,
+            ),
+            (
+                r#"{"iid":12,"web_url":"https://gitlab.com/g/p/-/merge_requests/12","extra":null}"#,
+                12,
+                url,
+            ),
+        ];
+        for (reply, number, link) in rows {
+            let got = created_ref(reply, "merge request", true).unwrap();
+            assert_eq!((got.number, got.url.as_str()), (number, link), "{reply:?}");
+        }
+        let html = "<html><body>502 Bad Gateway</body></html>";
+        let hedged = [
+            "{\"iid\":12,\"web_url\":\"https://gitlab.com/g/p/-/merge_",
+            html,
+            "warning: token expires soon\n{\"iid\":12,\"web_url\":\"https://gitlab.com/g/p/-/merge_requests/12\"}",
+        ];
+        let pushed =
+            crate::forge::created_reply_unreadable(Provider::GitLab, "merge request", true);
+        // The ref has no Debug, so an Ok shows as its fields.
+        let outcome = |reply: &str, noun: &str, after_push: bool| {
+            created_ref(reply, noun, after_push)
+                .map(|r| (r.number, r.url))
+                .map_err(|e| e.to_string())
+        };
+        for reply in hedged {
+            let got = outcome(reply, "merge request", true);
+            assert_eq!(got, Err(pushed.to_string()), "{reply:?}");
+        }
+        assert!(pushed
+            .to_string()
+            .starts_with("The branch was pushed. GitLab accepted the request"));
+        let issue = outcome(html, "issue", false);
+        assert_eq!(
+            issue,
+            Err("GitLab accepted the request but its reply couldn't be read, so the issue may already exist. Check before creating it again.".to_string())
+        );
+    }
+
+    #[test]
+    fn created_release_url_reads_only_a_string_self_link() {
+        let url = "https://gitlab.com/g/p/-/releases/v1";
+        let full = format!(r#"{{"_links":{{"self":"{url}"}}}}"#);
+        assert_eq!(created_release_url(&full).unwrap(), url);
+        for reply in [
+            "{}",
+            r#"{"_links":null}"#,
+            r#"{"_links":{"self":7}}"#,
+            "",
+            "null",
+        ] {
+            assert_eq!(created_release_url(reply).unwrap(), "", "{reply:?}");
+        }
+        let hedge = "GitLab accepted the request but its reply couldn't be read, so the release may already exist. Check before creating it again.";
+        for reply in [
+            "not json",
+            "<!DOCTYPE html><html><body>Sign in</body></html>",
+        ] {
+            let got = created_release_url(reply).map_err(|e| e.to_string());
+            assert_eq!(got, Err(hedge.to_string()), "{reply:?}");
+        }
+    }
+
+    /// Each GitLab reader classifies its reply through `created_reply` and parses nothing
+    /// itself.
+    #[test]
+    fn gitlab_readers_classify_through_the_one_rule() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gitlab = include_str!("gitlab.rs");
+        // Converting the classified value (`from_value`) is not a parse of the reply.
+        let one_rule = |body: &str| {
+            let rest = body.replace("serde_json::from_value", "");
+            body.matches("created_reply(").count() == 1
+                && ![
+                    "from_str",
+                    "from_slice",
+                    "from_reader(",
+                    ".parse::<",
+                    "serde_json::from_",
+                ]
+                .iter()
+                .any(|token| rest.contains(token))
+        };
+        for reader in ["created_ref", "created_release_url"] {
+            let body = wiring_body(gitlab, reader);
+            assert!(one_rule(&body), "{reader}\n{body}");
+            for parse in [
+                "serde_json::from_str(x)",
+                "from_slice(x)",
+                "serde_json::from_reader(x)",
+                "from_reader(x)",
+                "x.parse::<Value>()",
+            ] {
+                let parsed = format!("{body}\n{parse}");
+                assert!(!one_rule(&parsed), "{reader}: a second parse must flip");
+            }
+            assert!(
+                one_rule(&format!("{body}\nserde_json::from_value(x)")),
+                "{reader}"
+            );
+            let bypassed = body.replace("created_reply(", "own_parse(");
+            assert!(!one_rule(&bypassed), "{reader}: a bypassed rule must flip");
+        }
+    }
+
+    /// Each route's reader names the noun and lead its timeout path names.
+    #[test]
+    fn gitlab_create_readers_name_their_route_noun() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gitlab = include_str!("gitlab.rs");
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        // The reader call's arguments split at top-level commas, so neither the first
+        // argument's spelling nor rustfmt's one-argument-per-line form matters.
+        // Each argument's trimmed byte span, so a control rewrites the argument the pin
+        // parsed rather than a literal spelling of the call.
+        let arg_spans = |body: &str| -> Option<Vec<(usize, usize)>> {
+            let start = body.find("created_ref(")? + "created_ref(".len();
+            let (mut depth, mut spans) = (0usize, vec![(start, start)]);
+            for (i, c) in body[start..].char_indices() {
+                let at = start + i;
+                match c {
+                    ')' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        let trimmed = spans.into_iter().map(|(a, b)| {
+                            let lead = body[a..b].len() - body[a..b].trim_start().len();
+                            (a + lead, a + lead + body[a..b].trim().len())
+                        });
+                        return Some(trimmed.filter(|(a, b)| a < b).collect());
+                    }
+                    ',' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        spans.push((at + 1, at + 1));
+                    }
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        };
+        let reader_args = |body: &str| -> Option<Vec<String>> {
+            let spans = arg_spans(body)?;
+            Some(spans.iter().map(|&(a, b)| body[a..b].to_string()).collect())
+        };
+        let with_arg = |body: &str, n: usize, to: &str| {
+            let (a, b) = arg_spans(body).expect("a created_ref( call")[n];
+            format!("{}{to}{}", &body[..a], &body[b..])
+        };
+        let named = |body: &str, landed: &str, noun: &str, pushed: &str| {
+            flat(body).contains(&flat(landed))
+                && reader_args(body).is_some_and(|a| {
+                    a.len() == 3 && a[1] == format!("\"{noun}\"") && a[2] == pushed
+                })
+        };
+        let mr = wiring_body(gitlab, "create_mr");
+        let mr_landed = "LandedWrite::CreatedAfterPush(\"merge request\")";
+        assert!(named(&mr, mr_landed, "merge request", "true"), "{mr}");
+        let issue = wiring_body(gitlab, "create_issue_in");
+        assert!(
+            named(&issue, "LandedWrite::Created(\"issue\")", "issue", "false"),
+            "{issue}"
+        );
+        // rustfmt's one-argument-per-line form of the same call, built from the real body.
+        let spans = arg_spans(&mr).expect("create_mr calls created_ref(");
+        let lines = reader_args(&mr)
+            .unwrap()
+            .into_iter()
+            .map(|a| format!("\n    {a},"));
+        let (first, last) = (spans[0].0, spans[spans.len() - 1].1);
+        let respelled = format!(
+            "{}{}\n{}",
+            &mr[..first],
+            lines.collect::<String>(),
+            &mr[last..]
+        );
+        assert!(
+            !respelled.contains("\"merge request\", true"),
+            "{respelled}"
+        );
+        for body in [&mr, &respelled] {
+            assert!(named(body, mr_landed, "merge request", "true"), "{body}");
+            let swapped = with_arg(body, 1, "\"issue\"");
+            assert!(
+                !named(&swapped, mr_landed, "merge request", "true"),
+                "create_mr: a swapped noun must flip\n{swapped}"
+            );
+            let flipped = with_arg(body, 2, "false");
+            assert!(
+                !named(&flipped, mr_landed, "merge request", "true"),
+                "create_mr: a flipped pushed flag must flip\n{flipped}"
+            );
+        }
+    }
+
+    /// A staged file gone mid-uploads explains the failure, whatever the upload said.
+    #[test]
+    fn a_vanished_staged_file_outranks_the_upload_refusal() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gone = upload_failure(false, "image-2.png", AppError::Timeout(120));
+        assert!(
+            matches!(&gone, AppError::InvalidArgument(m)
+                if m == "image-2.png is no longer attached. Attach it again."),
+            "{gone:?}"
+        );
+        let kept = upload_failure(true, "image-2.png", AppError::Glab("refused".into()));
+        assert!(
+            matches!(&kept, AppError::Glab(m) if m == "refused"),
+            "{kept:?}"
+        );
+        let routed = |body: &str| precedes(body, "glab_upload(", "upload_failure(");
+        let body = wiring_body(include_str!("gitlab.rs"), "upload_and_rewrite");
+        assert!(routed(&body), "{body}");
+        let plain = body.replace("upload_failure(", "plain(");
+        assert!(!routed(&plain), "the control must flip");
+    }
+
+    /// `create_mr` uploads before it pushes, and posts only after the push.
+    #[test]
+    fn create_mr_uploads_then_pushes_then_posts() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mr = flat(wiring_body(include_str!("gitlab.rs"), "create_mr"));
+        let ordered = |body: &str| {
+            let at = |token: &str| body.find(token);
+            let (upload, push, post) = (
+                at("upload_and_rewrite("),
+                at("run_git_mutating_with_creds_for_branch("),
+                at("glab_write_fields("),
+            );
+            matches!((upload, push, post), (Some(u), Some(p), Some(w)) if u < p && p < w)
+        };
+        assert!(ordered(&mr), "{mr}");
+        let late = mr.replacen("upload_and_rewrite(", "deferred(", 1) + " upload_and_rewrite(";
+        assert!(!ordered(&late), "the control must flip");
+    }
+
+    /// Each of the seven text writes reaches glab only through `glab_write_fields`, with
+    /// no `-f` field; `comment_mr` keeps its bot token pair.
+    #[test]
+    fn every_gitlab_text_write_sends_one_json_body() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let gitlab = include_str!("gitlab.rs");
+        let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let on_stdin = |body: &str| {
+            body.contains("glab_write_fields(")
+                && !body.contains("\"-f\"")
+                && !body.contains("run_glab(")
+        };
+        for name in [
+            "post_note_with_images",
+            "edit_mr_in",
+            "edit_issue_in",
+            "create_issue_in",
+            "create_mr",
+            "comment_issue",
+            "comment_mr",
+        ] {
+            let body = flat(wiring_body(gitlab, name));
+            assert!(on_stdin(&body), "{name}\n{body}");
+            let restored = format!("{body} run_glab(Some(repo_path), &[\"-f\"], t)");
+            assert!(!on_stdin(&restored), "{name}: the control must flip");
+        }
+        let comment = flat(wiring_body(gitlab, "comment_mr"));
+        assert!(comment.contains("(\"GITLAB_TOKEN\", "), "{comment}");
+        assert!(comment.contains("REVIEW_TOKEN_HOST"), "{comment}");
+    }
+
+    /// Every field becomes one string member of one object, whatever the text holds.
+    #[test]
+    fn glab_fields_json_sends_every_value_as_a_string() {
+        let tricky = "say \"hi\" \\ C:\\x\r\nnext %NAME% \u{1F600} [bug, ui] \u{0}";
+        let fields = vec![
+            ("title", "[bug, ui]".to_string()),
+            ("description", tricky.to_string()),
+            ("milestone_id", "3".to_string()),
+        ];
+        let parsed: serde_json::Value = serde_json::from_str(&glab_fields_json(&fields)).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "title": "[bug, ui]",
+                "description": tricky,
+                "milestone_id": "3",
+            })
+        );
+        assert_eq!(glab_fields_json(&[]), "{}");
+    }
+
+    /// The pure field builders give each member its key and value spelling, add optional
+    /// members only when set, and carry the text whole in one member.
+    #[test]
+    fn gitlab_field_builders_send_only_the_members_given() {
+        let own = |list: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            list.iter().map(|(k, v)| (*k, (*v).to_string())).collect()
+        };
+        assert_eq!(note_fields("B"), own(&[("body", "B")]));
+        assert_eq!(
+            edit_issue_fields("T", "B"),
+            own(&[("title", "T"), ("description", "B")])
+        );
+        let labels = vec!["bug".to_string(), "a,b".to_string()];
+        assert_eq!(
+            create_issue_fields("T", "B", &[], &[], None),
+            own(&[("title", "T"), ("description", "B")])
+        );
+        assert_eq!(
+            create_issue_fields("T", "B", &labels, &[7, 42], Some(3)),
+            own(&[
+                ("title", "T"),
+                ("description", "B"),
+                ("labels", "bug,a,b"),
+                ("assignee_ids", "7,42"),
+                ("milestone_id", "3"),
+            ])
+        );
+        assert_eq!(
+            create_issue_fields("T", "B", &[], &[7], None),
+            own(&[("title", "T"), ("description", "B"), ("assignee_ids", "7")])
+        );
+        assert_eq!(
+            create_mr_fields("feat", "main", "Draft: T", "B", &[], &[]),
+            own(&[
+                ("source_branch", "feat"),
+                ("target_branch", "main"),
+                ("title", "Draft: T"),
+                ("description", "B"),
+            ])
+        );
+        assert_eq!(
+            create_mr_fields("feat", "main", "T", "B", &labels, &[7, 42]),
+            own(&[
+                ("source_branch", "feat"),
+                ("target_branch", "main"),
+                ("title", "T"),
+                ("description", "B"),
+                ("labels", "bug,a,b"),
+                ("assignee_ids", "7,42"),
+            ])
+        );
+        // A long text rides its one member whole and unchanged, and no other member.
+        let long = "line\n".repeat(40_000);
+        let whole = |fields: &[(&'static str, String)]| {
+            let holders: Vec<(&str, &str)> = fields
+                .iter()
+                .filter(|(_, v)| v.contains("line\n"))
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect();
+            holders == [("description", long.as_str())]
+        };
+        let fields = edit_issue_fields("T", &long);
+        assert!(whole(&fields));
+        let mut cut = fields.clone();
+        cut[1].1.truncate(10);
+        assert!(!whole(&cut), "a shortened text must flip");
     }
 
     #[test]
@@ -4661,6 +5165,102 @@ mod attach_tests {
             "Nothing was saved. GitLab didn't accept image-1.png: it is larger than this project allows."
         );
     }
+
+    /// The distinct functions of `production` that call the write helper, definition
+    /// excluded.
+    fn write_helper_callers(production: &str) -> Vec<String> {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut callers: Vec<String> = production
+            .match_indices("glab_write_fields(")
+            .map(|(at, _)| &production[..at])
+            .filter(|before| !before.ends_with("fn ") && !before.ends_with(ident))
+            .map(enclosing_fn)
+            .collect();
+        callers.sort();
+        callers.dedup();
+        callers
+    }
+
+    /// A timed-out GitLab write says it may have landed: the helper maps its one run
+    /// once, and each of its callers passes exactly its own write kind.
+    #[test]
+    fn every_gitlab_write_hedges_a_timeout_through_its_one_map() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("gitlab.rs");
+        let helper = wiring_body(source, "glab_write_fields");
+        let mapped = |body: &str| {
+            body.matches("timed_out_write(").count() == 1
+                && precedes(body, "run_glab_ex(", "timed_out_write(")
+        };
+        assert!(mapped(&helper), "{helper}");
+        let deleted = helper.replacen("timed_out_write(", "mapped(", 1);
+        assert!(!mapped(&deleted), "the delete control must flip");
+
+        // Full tokens, noun included, so a caller passing another kind's noun goes red.
+        let posted = "LandedWrite::Posted";
+        let mr_saved = "LandedWrite::Saved(\"merge request\")";
+        let issue_saved = "LandedWrite::Saved(\"issue\")";
+        let issue_created = "LandedWrite::Created(\"issue\")";
+        let mr_created = "LandedWrite::CreatedAfterPush(\"merge request\")";
+        let kinds = [posted, mr_saved, issue_saved, issue_created, mr_created];
+        let roster = [
+            ("post_note_with_images", posted),
+            ("comment_mr", posted),
+            ("comment_issue", posted),
+            ("edit_mr_in", mr_saved),
+            ("edit_issue_in", issue_saved),
+            ("create_issue_in", issue_created),
+            ("create_mr", mr_created),
+        ];
+        let passes_only = |body: &str, kind: &str| {
+            kinds
+                .iter()
+                .all(|k| body.matches(k).count() == usize::from(*k == kind))
+        };
+        for (name, kind) in roster {
+            let body = wiring_body(source, name);
+            assert!(passes_only(&body, kind), "{name}: {body}");
+        }
+        let create_mr = wiring_body(source, "create_mr").replacen(
+            "LandedWrite::CreatedAfterPush(",
+            "LandedWrite::Created(",
+            1,
+        );
+        let swapped = !passes_only(&create_mr, mr_created);
+        assert!(swapped, "the swap control must flip");
+        let edit_mr = wiring_body(source, "edit_mr_in").replacen(mr_saved, issue_saved, 1);
+        let renamed = !passes_only(&edit_mr, mr_saved);
+        assert!(renamed, "the noun control must flip");
+
+        let production = production_text(source);
+        let mut names: Vec<&str> = roster.iter().map(|(name, _)| *name).collect();
+        names.sort_unstable();
+        assert_eq!(write_helper_callers(&production), names);
+        let rogue = format!("{production}\nfn rogue() {{\n    glab_write_fields(x);\n}}\n");
+        assert_ne!(
+            write_helper_callers(&rogue),
+            names,
+            "an eighth caller must flip"
+        );
+    }
+
+    /// An upload that timed out never ran the write, so it keeps "Nothing was posted",
+    /// never the may-have-landed sentence.
+    #[test]
+    fn an_upload_timeout_keeps_the_nothing_was_posted_refusal() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let reason = AppError::Timeout(120).to_string();
+        assert_eq!(
+            upload_refusal(UploadVerb::Posted, "image-1.png", &reason).to_string(),
+            "Nothing was posted. GitLab didn't accept image-1.png: git operation timed out after 120s."
+        );
+        let refuses =
+            |body: &str| body.contains("upload_refusal(") && !body.contains("timed_out_write(");
+        let upload = wiring_body(include_str!("gitlab.rs"), "glab_upload");
+        assert!(refuses(&upload), "{upload}");
+        let hedged = upload.replacen("upload_refusal(", "timed_out_write(", 1);
+        assert!(!refuses(&hedged), "the control must flip");
+    }
 }
 
 /// Post a comment (note) on a merge request. When `as_bot` is set and a review-bot
@@ -4673,8 +5273,8 @@ pub async fn comment_mr(repo_path: &str, number: u64, body: &str, as_bot: bool) 
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}/notes");
-    let body_arg = format!("body={body}");
-    let args: &[&str] = &["api", "--method", "POST", &endpoint, "-f", &body_arg];
+    let fields = note_fields(body);
+    let write = LandedWrite::Posted;
 
     // Try the bot token only when asked AND one is stored for this repo's host.
     let bot_token = if as_bot {
@@ -4683,16 +5283,13 @@ pub async fn comment_mr(repo_path: &str, number: u64, body: &str, as_bot: bool) 
         None
     };
     if let Some(token) = bot_token {
-        run_glab_ex(
-            Some(repo_path),
-            args,
-            None,
-            &[("GITLAB_TOKEN", &token), ("GITLAB_HOST", REVIEW_TOKEN_HOST)],
-            GLAB_NETWORK_TIMEOUT,
-        )
-        .await?;
+        let envs = [
+            ("GITLAB_TOKEN", token.as_str()),
+            ("GITLAB_HOST", REVIEW_TOKEN_HOST),
+        ];
+        glab_write_fields(repo_path, "POST", &endpoint, &fields, &envs, write).await?;
     } else {
-        run_glab(Some(repo_path), args, GLAB_NETWORK_TIMEOUT).await?;
+        glab_write_fields(repo_path, "POST", &endpoint, &fields, &[], write).await?;
     }
     Ok(())
 }
@@ -4828,30 +5425,9 @@ pub async fn set_mr_draft(repo_path: &str, number: u64, draft: bool) -> AppResul
     Ok(())
 }
 
-/// The PUT argv for an MR edit. `target_branch` is appended ONLY when retargeting:
-/// an absent field leaves the MR's target untouched.
-fn edit_mr_args(endpoint: &str, title: &str, body: &str, base: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        "api".to_string(),
-        "--method".to_string(),
-        "PUT".to_string(),
-        endpoint.to_string(),
-        "-f".to_string(),
-        format!("title={title}"),
-        "-f".to_string(),
-        format!("description={body}"),
-    ];
-    if let Some(base) = base {
-        args.push("-f".to_string());
-        args.push(format!("target_branch={base}"));
-    }
-    args
-}
-
 /// Edit a merge request's title/description, and its target branch when `base` is
 /// given. Mirrors `gh_pr_edit` (empty-title guard; an empty body clears the
-/// description). Validated live: `-f` keeps multi-line/comma/`=`/`@`/leading-`-`
-/// values intact.
+/// description).
 pub async fn edit_mr(
     repo_path: &str,
     number: u64,
@@ -4881,9 +5457,16 @@ pub(crate) async fn edit_mr_in(
 ) -> AppResult<()> {
     let title = title.trim();
     let endpoint = format!("projects/{enc}/merge_requests/{number}");
-    let args = edit_mr_args(&endpoint, title, body, base);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
+    let fields = edit_mr_fields(title, body, base);
+    glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &fields,
+        &[],
+        LandedWrite::Saved("merge request"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -6079,10 +6662,11 @@ pub async fn view_issue(repo_path: &str, number: u64) -> AppResult<IssueDetails>
 // Comment (note), close/reopen, title/body edit, and milestone — mirroring the
 // gh_issue_* commands and dispatching through forge_issue_* (labels/assignees/create
 // live in their own sections below). The GitHub close `reason` has no GitLab
-// analogue, so the dispatch drops it before calling close_issue. `glab api -f
-// key=value` is a RAW string field (no `@file` interpretation, unlike `-F`), so a
-// body starting with `@` or carrying newlines is safe (glab is a real .exe — no
-// BatBadBut shim refusal of newline argv).
+// analogue, so the dispatch drops it before calling close_issue. The writes here that
+// still send `glab api -f key=value` fields (`set_issue_state`, `edit_issue_comment`,
+// `lock_issue`, `move_issue`) rely on `-f` being a RAW string field (no `@file`
+// interpretation, unlike `-F`), so a value starting with `@` is safe there; the text
+// writes send one JSON body through `glab_write_fields` instead.
 
 /// Post a comment (note) on an issue.
 pub async fn comment_issue(repo_path: &str, number: u64, body: &str) -> AppResult<()> {
@@ -6091,11 +6675,13 @@ pub async fn comment_issue(repo_path: &str, number: u64, body: &str) -> AppResul
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/notes");
-    let body_arg = format!("body={body}");
-    run_glab(
-        Some(repo_path),
-        &["api", "--method", "POST", &endpoint, "-f", &body_arg],
-        GLAB_NETWORK_TIMEOUT,
+    glab_write_fields(
+        repo_path,
+        "POST",
+        &endpoint,
+        &note_fields(body),
+        &[],
+        LandedWrite::Posted,
     )
     .await?;
     Ok(())
@@ -6124,8 +6710,7 @@ pub async fn reopen_issue(repo_path: &str, number: u64) -> AppResult<()> {
 }
 
 /// Edit an issue's title/description. Mirrors `gh_issue_edit` (empty-title guard;
-/// an empty body clears the description). Validated live: `-f` keeps
-/// multi-line/comma/`=`/`@`/leading-`-` values intact.
+/// an empty body clears the description).
 pub async fn edit_issue(repo_path: &str, number: u64, title: &str, body: &str) -> AppResult<()> {
     let title = title.trim();
     if title.is_empty() {
@@ -6148,14 +6733,14 @@ pub(crate) async fn edit_issue_in(
 ) -> AppResult<()> {
     let title = title.trim();
     let endpoint = format!("projects/{enc}/issues/{number}");
-    let title_arg = format!("title={title}");
-    let desc_arg = format!("description={body}");
-    run_glab(
-        Some(repo_path),
-        &[
-            "api", "--method", "PUT", &endpoint, "-f", &title_arg, "-f", &desc_arg,
-        ],
-        GLAB_NETWORK_TIMEOUT,
+    let fields = edit_issue_fields(title, body);
+    glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &fields,
+        &[],
+        LandedWrite::Saved("issue"),
     )
     .await?;
     Ok(())
@@ -7543,8 +8128,18 @@ fn parse_member_page(stdout: &str) -> AppResult<Vec<GlabMember>> {
 /// `USER_LIST_CEILING`, which the error then names.
 async fn resolve_assignee_ids(repo_path: &str, assignees: &[String]) -> AppResult<Vec<u64>> {
     let enc = encode_project(&project_path(repo_path).await?);
+    resolve_assignee_ids_in(repo_path, &enc, assignees).await
+}
+
+/// [`resolve_assignee_ids`] against the project `enc` the caller already read, so a
+/// create looks its assignees up in the project it writes to.
+async fn resolve_assignee_ids_in(
+    repo_path: &str,
+    enc: &str,
+    assignees: &[String],
+) -> AppResult<Vec<u64>> {
     let (members, truncated) = walk_members_until_matched(assignees, |page| {
-        let endpoint = member_page_endpoint(&enc, page);
+        let endpoint = member_page_endpoint(enc, page);
         async move {
             let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
             Ok(out.stdout_lossy())
@@ -8148,11 +8743,22 @@ pub async fn publish_repo(
 // (GitLab has no draft field on create — the response then carries `draft: true`).
 // A created issue's `web_url` comes back in GitLab's newer `/-/work_items/<iid>` form.
 
-/// The created issue/MR fields we need back (GitLab returns the full object).
-#[derive(Deserialize)]
-struct GlabCreated {
-    iid: u64,
-    web_url: String,
+/// The created issue's or MR's `iid` and `web_url`, each read on its own (0 and "" when
+/// absent). An empty reply is created with both unknown; a reply that isn't JSON is the
+/// `created_reply` error, since the item may exist but nothing proves it.
+fn created_ref(stdout: &str, noun: &str, after_push: bool) -> AppResult<PrRef> {
+    let reply = crate::forge::created_reply(stdout, Provider::GitLab, noun, after_push)?;
+    Ok(PrRef {
+        number: reply
+            .get("iid")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        url: reply
+            .get("web_url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
 }
 
 /// Create an issue with optional labels (by name), assignees (by username —
@@ -8174,20 +8780,22 @@ pub async fn create_issue(
             "an issue title is required".into(),
         ));
     }
-    let ids = create_assignee_ids(repo_path, assignees).await?;
     let enc = encode_project(&project_path(repo_path).await?);
+    let ids = create_assignee_ids(repo_path, &enc, assignees).await?;
     create_issue_in(repo_path, &enc, title, body, labels, &ids, milestone).await
 }
 
-/// Full resolution or error, never a silently reduced set; no assignees reads nothing.
+/// Full resolution against the project `enc` or error, never a silently reduced set; no
+/// assignees reads nothing.
 pub(crate) async fn create_assignee_ids(
     repo_path: &str,
+    enc: &str,
     assignees: &[String],
 ) -> AppResult<Vec<u64>> {
     if assignees.is_empty() {
         return Ok(Vec::new());
     }
-    resolve_assignee_ids(repo_path, assignees).await
+    resolve_assignee_ids_in(repo_path, enc, assignees).await
 }
 
 /// [`create_issue`]'s POST into the project `enc` with assignee ids already resolved, so
@@ -8202,39 +8810,18 @@ pub(crate) async fn create_issue_in(
     milestone: Option<u64>,
 ) -> AppResult<PrRef> {
     let title = title.trim();
-    let labels_arg = labels_field(labels);
-    let ids_arg = assignee_ids_field(ids);
     let endpoint = format!("projects/{enc}/issues");
-    let title_arg = format!("title={title}");
-    let desc_arg = format!("description={body}");
-    let milestone_arg = milestone.map(|m| format!("milestone_id={m}"));
-    let mut args = vec![
-        "api", "--method", "POST", &endpoint, "-f", &title_arg, "-f", &desc_arg,
-    ];
-    if let Some(a) = &labels_arg {
-        args.push("-f");
-        args.push(a);
-    }
-    if let Some(a) = &ids_arg {
-        args.push("-f");
-        args.push(a);
-    }
-    if let Some(a) = &milestone_arg {
-        args.push("-f");
-        args.push(a);
-    }
-    let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
-    let created: GlabCreated = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "the created issue",
-                format!("could not parse the created issue: {e}"),
-            )
-        })?;
-    Ok(PrRef {
-        number: created.iid,
-        url: created.web_url,
-    })
+    let fields = create_issue_fields(title, body, labels, ids, milestone);
+    let out = glab_write_fields(
+        repo_path,
+        "POST",
+        &endpoint,
+        &fields,
+        &[],
+        LandedWrite::Created("issue"),
+    )
+    .await?;
+    created_ref(&out.stdout_lossy(), "issue", false)
 }
 
 /// Push `head` to origin, then open a merge request from `head` into `base`.
@@ -8266,41 +8853,9 @@ pub async fn create_mr(
     }
     let staged = glab_attach_checks(body, attachments, false).await?;
 
-    // Resolve assignee usernames→ids up front (before the push), so a resolution
-    // miss aborts cleanly rather than leaving a branch pushed with no MR opened.
-    let assignee_ids = if assignees.is_empty() {
-        Vec::new()
-    } else {
-        resolve_assignee_ids(repo_path, assignees).await?
-    };
-    // GitLab drafts are the `Draft:` title prefix (no field on create).
-    let full_title = if draft && !title.to_ascii_lowercase().starts_with("draft:") {
-        format!("Draft: {title}")
-    } else {
-        title.to_string()
-    };
-    let source_arg = format!("source_branch={head}");
-    let target_arg = format!("target_branch={base}");
-    let title_arg = format!("title={full_title}");
-    // Labels travel as a comma-joined name list; assignees as comma-joined ids
-    // (resolved above). Omitted entirely when empty so create behavior is unchanged.
-    let labels_arg = labels_field(labels);
-    let assignees_arg = assignee_ids_field(&assignee_ids);
-    // Uploads also run before the push, into the project the MR is created in.
-    let body = match &staged {
-        Some(s) => {
-            let fields: Vec<&str> = [&source_arg, &target_arg, &title_arg]
-                .into_iter()
-                .chain(labels_arg.iter().chain(&assignees_arg))
-                .map(String::as_str)
-                .collect();
-            let enc = encode_project(&project_path(repo_path).await?);
-            upload_and_rewrite(repo_path, &enc, &fields, body, s, UploadVerb::Posted).await?
-        }
-        None => body.to_string(),
-    };
-
-    // An MR needs the branch on the remote first.
+    // Every read the create needs runs before the first upload and the push, so a miss
+    // uploads and pushes nothing. This one `origin` read fixes the project path and the push
+    // credentials; each glab call and the push still resolve `origin` themselves.
     let origin =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
     // Same http gate as `publish_repo`: inert entries aren't worth a hard `GlabNotFound`.
@@ -8309,6 +8864,21 @@ pub async fn create_mr(
     } else {
         Vec::new()
     };
+    let enc = encode_project(&project_path_from_url(&origin)?);
+    let assignee_ids = create_assignee_ids(repo_path, &enc, assignees).await?;
+    // GitLab drafts are the `Draft:` title prefix (no field on create).
+    let full_title = if draft && !title.to_ascii_lowercase().starts_with("draft:") {
+        format!("Draft: {title}")
+    } else {
+        title.to_string()
+    };
+    // Uploads run before the push, so a refused image leaves no branch pushed.
+    let body = match &staged {
+        Some(s) => upload_and_rewrite(repo_path, &enc, body, s, UploadVerb::Posted).await?,
+        None => body.to_string(),
+    };
+
+    // An MR needs the branch on the remote first.
     let mut push_args: Vec<&str> = Vec::new();
     for entry in &config {
         push_args.push("-c");
@@ -8328,42 +8898,23 @@ pub async fn create_mr(
     )
     .await?;
 
-    let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests");
-    let desc_arg = format!("description={body}");
-    let mut args = vec![
-        "api",
-        "--method",
+    let fields = create_mr_fields(head, base, &full_title, &body, labels, &assignee_ids);
+    let out = glab_write_fields(
+        repo_path,
         "POST",
         &endpoint,
-        "-f",
-        &source_arg,
-        "-f",
-        &target_arg,
-        "-f",
-        &title_arg,
-        "-f",
-        &desc_arg,
-    ];
-    for field in labels_arg.iter().chain(&assignees_arg) {
-        args.push("-f");
-        args.push(field);
-    }
-    let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
-    let created: GlabCreated = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "the created merge request",
-                format!("could not parse the created merge request: {e}"),
-            )
-        })?;
+        &fields,
+        &[],
+        LandedWrite::CreatedAfterPush("merge request"),
+    )
+    .await?;
+    // An unread reply keeps the staged images, as a timed-out POST does.
+    let created = created_ref(&out.stdout_lossy(), "merge request", true)?;
     if let Some(s) = &staged {
         crate::attachments::release_posted(s, &[]).await;
     }
-    Ok(PrRef {
-        number: created.iid,
-        url: created.web_url,
-    })
+    Ok(created)
 }
 
 // ── Pipelines (CI, read) ──────────────────────────────────────────────────────
@@ -9289,14 +9840,19 @@ pub async fn create_release(
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
-    let r: GlabRelease = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "the created release",
-                format!("could not parse created GitLab release: {e}"),
-            )
-        })?;
-    Ok(r.links.self_url)
+    created_release_url(&out.stdout_lossy())
+}
+
+/// A created release's `_links.self`, or "" when an empty or JSON reply doesn't carry it;
+/// a reply that isn't JSON is the `created_reply` error, since the release may exist but
+/// nothing proves it.
+fn created_release_url(stdout: &str) -> AppResult<String> {
+    let reply = crate::forge::created_reply(stdout, Provider::GitLab, "release", false)?;
+    Ok(reply
+        .pointer("/_links/self")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// Edit a release's title and/or notes. Empty fields are left unchanged (the gh
@@ -13242,27 +13798,21 @@ mod tests {
     }
 
     /// The MR edit PUT sends `target_branch` only when retargeting — the no-base
-    /// form must stay byte-identical to the title/description-only request.
+    /// form must stay the title/description-only request.
     #[test]
-    fn edit_mr_args_append_target_branch_only_when_given() {
-        let plain = edit_mr_args("projects/9/merge_requests/7", "T", "D", None);
+    fn edit_mr_fields_carry_target_branch_only_when_given() {
+        let plain = edit_mr_fields("T", "D", None);
         assert_eq!(
             plain,
-            vec![
-                "api",
-                "--method",
-                "PUT",
-                "projects/9/merge_requests/7",
-                "-f",
-                "title=T",
-                "-f",
-                "description=D",
-            ]
+            vec![("title", "T".to_string()), ("description", "D".to_string())]
         );
 
-        let retarget = edit_mr_args("projects/9/merge_requests/7", "T", "D", Some("main"));
+        let retarget = edit_mr_fields("T", "D", Some("main"));
         assert_eq!(retarget[..plain.len()], plain[..]);
-        assert_eq!(retarget[plain.len()..], ["-f", "target_branch=main"]);
+        assert_eq!(
+            retarget[plain.len()..],
+            [("target_branch", "main".to_string())]
+        );
     }
 
     /// The hook body carries the secret token only when the form supplied one:

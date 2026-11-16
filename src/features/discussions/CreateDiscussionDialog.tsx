@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,7 +15,9 @@ import {
 } from "@/components/ui/dialog";
 import { useCancelOnIdentityChange } from "@/features/conversations/useAiStream";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
+import { createdNumberOf } from "@/lib/attachments/references";
 import { required, useAppForm } from "@/lib/form";
+import { useForgeGhHost } from "@/lib/git/host";
 import { useCreateDiscussion, useDiscussionMeta } from "@/lib/git/queries";
 import {
   ACT_PENDING_REASON,
@@ -27,6 +30,7 @@ import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
 } from "@/lib/use-disabled-reason";
+import { useDraftCreateHold } from "@/lib/use-draft-create-hold";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 
@@ -41,6 +45,7 @@ export function CreateDiscussionDialog({
 }) {
   const meta = useDiscussionMeta(repoPath, open);
   const createDiscussion = useCreateDiscussion(repoPath);
+  const bodyHostedImages = hostedImagesFor(repoPath, useForgeGhHost(repoPath));
   const selectDiscussion = useUiStore((s) => s.selectDiscussion);
   const categories = meta.data?.categories ?? [];
   const repoId = meta.data?.repoId ?? "";
@@ -48,42 +53,52 @@ export function CreateDiscussionDialog({
   // carry one repo's category into the next repo's create. A switch closes it;
   // the next open reseeds.
   useCancelOnIdentityChange(repoPath, () => onOpenChange(false));
-  // Which repo's draft the form holds, and which viewing session — both stamped
-  // by the seed: a create settling after a close-and-reopen (here or in another
-  // repo) closes only the draft that was submitted.
+  // Which repo's draft the form holds, and which viewing session (the hold's
+  // draft generation) — both stamped by the seed: a create settling after a
+  // close-and-reopen (here or in another repo) closes only the draft submitted.
   const draftRepoRef = useRef(repoPath);
-  const seedGenRef = useRef(0);
 
   const form = useAppForm({
     defaultValues: { title: "", body: "", categoryId: "" },
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
-      const submitGen = seedGenRef.current;
+      const run = createHold.begin();
       try {
-        const { number, url } = await createDiscussion.mutateAsync({
+        const created = await createDiscussion.mutateAsync({
           repoId,
           categoryId: value.categoryId,
           title: value.title.trim(),
           body: value.body,
         });
-        toast.success(`Opened discussion #${number}`, {
-          description: url,
-          action: { label: "View", onClick: () => openUrl(url) },
-        });
-        if (
-          draftRepoRef.current === repoPath &&
-          seedGenRef.current === submitGen
-        )
+        // A created discussion's reply can lack its number or link: nothing
+        // prints "#0", and an empty link gets no description or View.
+        const number = createdNumberOf(created);
+        const { url } = created;
+        toast.success(
+          number === null
+            ? "Opened discussion"
+            : `Opened discussion #${number}`,
+          url === ""
+            ? undefined
+            : {
+                description: url,
+                action: { label: "View", onClick: () => openUrl(url) },
+              },
+        );
+        if (draftRepoRef.current === repoPath && createHold.holds(run.gen))
           onOpenChange(false);
         // Adopt the new discussion only while this repo is still on screen —
         // the create can settle after a repo switch.
-        if (number > 0 && useUiStore.getState().repoPath === repoPath)
+        if (number !== null && useUiStore.getState().repoPath === repoPath)
           selectDiscussion({ number });
       } catch (e) {
         toastError(e);
+      } finally {
+        run.end();
       }
     },
   });
+  const createHold = useDraftCreateHold(form);
 
   const categoryId = useSelector(form.store, (s) => s.values.categoryId);
   // Starting a discussion holds offline rather than park: a parked create
@@ -91,7 +106,7 @@ export function CreateDiscussionDialog({
   // and a missing category each carry a reason, ranked running-first, so a flip
   // between them never drops focus to a native disable.
   const offlineHold = useOfflineHold();
-  const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
+  const isSubmitting = createHold.running;
   const offlineSubmit = useDisabledReason({
     disabled: !categoryId || !!offlineHold || isSubmitting,
     reason: (() => {
@@ -112,7 +127,7 @@ export function CreateDiscussionDialog({
   // reset values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
     draftRepoRef.current = repoPath;
-    seedGenRef.current += 1;
+    createHold.nextDraft();
     form.reset(
       { title: "", body: "", categoryId: categories[0]?.id ?? "" },
       { keepDefaultValues: true },
@@ -138,6 +153,8 @@ export function CreateDiscussionDialog({
           className="flex min-h-0 min-w-0 flex-col gap-4"
           onSubmit={(e) => {
             e.preventDefault();
+            // Form-core doesn't refuse a submit while one runs.
+            if (createHold.isRunning()) return;
             form.handleSubmit();
           }}
         >
@@ -177,6 +194,7 @@ export function CreateDiscussionDialog({
               {(field) => (
                 <field.MarkdownField
                   label="Body"
+                  hostedImages={bodyHostedImages}
                   placeholder="What would you like to discuss?"
                   rows={8}
                   textareaClassName="max-h-72 min-h-24 resize-y font-mono"
@@ -203,7 +221,8 @@ export function CreateDiscussionDialog({
               >
                 <form.SubmitButton
                   focusableWhenDisabled={!!offlineSubmit.blockedReason}
-                  disabled={!categoryId || !!offlineHold}
+                  disabled={!categoryId || !!offlineHold || isSubmitting}
+                  pending={isSubmitting}
                   aria-describedby={offlineSubmit.describedBy}
                   className={ARIA_DISABLED_CLASS}
                 >

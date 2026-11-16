@@ -113,6 +113,11 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("git operation timed out after {0}s")]
     Timeout(u64),
+    /// A forge write whose CLI run timed out and may have landed. Built only by
+    /// `forge::write_timed_out`; its sentence never starts with `Timeout`'s lead, which
+    /// is how the frontend's `mayHaveLanded` tells the two apart under one kind.
+    #[error("{0}")]
+    WriteTimedOut(String),
 }
 
 fn git_message(code: i32, stderr: &str) -> String {
@@ -192,6 +197,9 @@ impl Serialize for AppError {
             AppError::Command(_) => "command",
             AppError::Io(_) => "io",
             AppError::Timeout(_) => "timeout",
+            // Same kind as `Timeout`, so the label stays "Timed out" and the network
+            // rewrite (forge kinds only) never replaces the sentence.
+            AppError::WriteTimedOut(_) => "timeout",
         };
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("kind", kind)?;
@@ -515,6 +523,18 @@ mod tests {
             serde_json::to_string(&AppError::GitNotFound).unwrap(),
             r#"{"kind":"gitNotFound","message":"git executable not found"}"#
         );
+    }
+
+    /// `mayHaveLanded` reads kind `timeout` plus a message that is not the bare lead.
+    #[test]
+    fn write_timed_out_serializes_as_a_timeout_with_its_sentence() {
+        let value = serde_json::to_value(AppError::WriteTimedOut("x".to_string())).unwrap();
+        let map = value.as_object().unwrap();
+        let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["kind", "message"]);
+        assert_eq!(map["kind"], "timeout");
+        assert_eq!(map["message"], "x");
     }
 
     /// `DISPLAY_LEADS` (src/lib/error-summary.ts) matches these leads byte-for-byte

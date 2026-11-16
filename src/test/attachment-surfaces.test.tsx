@@ -307,6 +307,71 @@ describe("post copy helpers", () => {
     expect(createdWarning("issue", [], null)).toBeNull();
   });
 
+  it("names the steps a numberless create skipped (T22)", () => {
+    expect(createdWarning("issue", [], null, { skipped: ["sub-issue"] })).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't linked to its parent issue. Finish that from the issue.",
+    );
+    expect(createdWarning("issue", [], null, { skipped: ["project"] })).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't added to the project. Finish that from the issue.",
+    );
+    expect(createdWarning("issue", [], null, { skipped: ["projects"] })).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't added to the projects. Finish that from the issue.",
+    );
+    expect(
+      createdWarning("issue", [], null, { skipped: ["project", "sub-issue"] }),
+    ).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't added to the project and it wasn't linked to its parent issue. Finish that from the issue.",
+    );
+    expect(
+      createdWarning("pr", [], null, { skipped: ["reviewer-notes"] }),
+    ).toBe(
+      "Opened pull request, but its number couldn't be read, so your notes for reviewers weren't posted. Finish that from the pull request.",
+    );
+    expect(
+      createdWarning("pr", [], null, {
+        skipped: ["reviewer-notes"],
+        noun: "merge request",
+      }),
+    ).toBe(
+      "Opened merge request, but its number couldn't be read, so your notes for reviewers weren't posted. Finish that from the merge request.",
+    );
+    expect(
+      createdWarning("pr", [], "HTTP 422", { skipped: ["reviewer-notes"] }),
+    ).toBe(
+      "Opened pull request, but its number couldn't be read, so your notes for reviewers weren't posted. Finish that from the pull request. Its labels and assignees weren't applied.",
+    );
+    expect(
+      createdWarning("pr", ["image-1.png"], "HTTP 422", {
+        skipped: ["reviewer-notes"],
+      }),
+    ).toBe(
+      "Opened pull request, but its number couldn't be read, so your notes for reviewers weren't posted. Finish that from the pull request. Its labels and assignees weren't applied. Also, image-1.png didn't upload. Edit the description to add it again.",
+    );
+    expect(
+      createdWarning("issue", ["image-1.png"], null, {
+        skipped: ["sub-issue"],
+      }),
+    ).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't linked to its parent issue. Finish that from the issue. Also, image-1.png didn't upload. Edit the description to add it again.",
+    );
+    expect(
+      createdWarning("issue", [], "HTTP 422", { skipped: ["sub-issue"] }),
+    ).toBe(
+      "Opened issue, but its number couldn't be read, so it wasn't linked to its parent issue. Finish that from the issue. Some of its details weren't applied.",
+    );
+    // No skipped step: exactly the three-argument result, with or without a noun.
+    const plain = createdWarning("pr", ["image-1.png"], "HTTP 422");
+    expect(
+      createdWarning("pr", ["image-1.png"], "HTTP 422", { skipped: [] }),
+    ).toBe(plain);
+    expect(
+      createdWarning("pr", ["image-1.png"], "HTTP 422", {
+        noun: "merge request",
+      }),
+    ).toBe(plain);
+    expect(createdWarning("issue", [], null, { skipped: [] })).toBeNull();
+  });
+
   it("builds the edit copy: the in-dialog line and the fallback toast", () => {
     expect(partialEditNotice(["image-1.png"])).toBe(
       "Saved, but image-1.png didn't upload. It's still attached here. Save again to add it.",

@@ -45,6 +45,19 @@ vi.mock("@/lib/git/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/queries")>()),
   useCloseIssue: () => ({ mutateAsync: closeIssue }),
 }));
+// Names the may-have-landed class by a sentinel rather than Rust's sentence;
+// every other error keeps the real answer.
+const { MAY_HAVE_LANDED } = vi.hoisted(() => ({
+  MAY_HAVE_LANDED: new Error("sentinel: the edit may have landed"),
+}));
+vi.mock("@/lib/error-summary", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/error-summary")>();
+  return {
+    ...actual,
+    mayHaveLanded: (e: unknown) =>
+      e === MAY_HAVE_LANDED || actual.mayHaveLanded(e),
+  };
+});
 vi.mock("@/lib/attachments/api", () => ({
   attachmentStage: vi.fn(),
   attachmentDiscard: vi.fn(async () => undefined),
@@ -330,6 +343,267 @@ describe("RemoteIssueView edit attachments", () => {
       ),
     );
     expect(screen.queryByRole("dialog")).not.toBeNull();
+  });
+});
+
+describe("RemoteIssueView edit follows the issue", () => {
+  const titleBox = () =>
+    screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+  // A running save's spinner prefixes its label ("Loading").
+  const saveButton = () =>
+    screen.getByRole("button", { name: /^(Loading)?Save$/ });
+  const cancel = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  const closed = () =>
+    waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  function expectSaveHeld() {
+    expect(saveButton()).toHaveAttribute("aria-disabled", "true");
+    const reasonId = saveButton().getAttribute("aria-describedby") ?? "";
+    expect(document.getElementById(reasonId)?.textContent).toBe(
+      "Applying this change…",
+    );
+  }
+  function expectSaveLive() {
+    expect(saveButton()).not.toBeDisabled();
+    expect(saveButton()).not.toHaveAttribute("aria-disabled", "true");
+  }
+  /** The view on `number` with `title` in its header and its composer ready. */
+  async function shownTitled(title: string) {
+    await screen.findByText(title, undefined, { timeout: 3000 });
+    await waitFor(() => expect(box()).toBeInTheDocument());
+  }
+  /** Holds every later read of issue 7; returns its resolver and read count. */
+  function holdReadsOf7() {
+    const read = deferred<IssueDetails>();
+    let reads = 0;
+    vi.mocked(forgeIssueView).mockImplementation(async (_repo, number) => {
+      if (number !== 7) return issue(number);
+      reads += 1;
+      return read.promise;
+    });
+    return { read, reads: () => reads };
+  }
+  type Outcome = { failedAttachments: string[]; body: null };
+  const clean: Outcome = { failedAttachments: [], body: null };
+
+  beforeEach(() => {
+    vi.mocked(forgeIssueEdit).mockReset();
+    vi.mocked(toast.success).mockClear();
+  });
+
+  /** Way in (1): starts a save of 7 with a typed title, opens and cancels
+   *  Edit on 8, then opens a fresh form on 7 while the save still runs. */
+  async function freshFormOverSave() {
+    const { show } = mount(7);
+    await shown(7);
+    await openEdit();
+    fireEvent.change(titleBox(), { target: { value: "Typed title" } });
+    const save = deferred<Outcome>();
+    vi.mocked(forgeIssueEdit).mockReturnValueOnce(save.promise);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    // The view shows the title being saved from the press.
+    await screen.findByText("Typed title");
+    cancel();
+    await closed();
+    show(8);
+    await shown(8);
+    await openEdit();
+    cancel();
+    await closed();
+    show(7);
+    await shownTitled("Typed title");
+    await openEdit();
+    expect(titleBox().value).toBe("Typed title");
+    expectSaveHeld();
+    fireEvent.change(editBox(), { target: { value: "Typed description" } });
+    return { save, held: holdReadsOf7() };
+  }
+
+  it("holds a fresh form's Save through the re-read after the older save lands, then follows what the forge stored (AC7)", async () => {
+    const { save, held } = await freshFormOverSave();
+    await act(async () => save.resolve(clean));
+    await waitFor(() => expect(held.reads()).toBe(1));
+    expectSaveHeld();
+    fireEvent.click(saveButton());
+    await act(async () => undefined);
+    expect(forgeIssueEdit).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      held.read.resolve({ ...issue(7), title: "Stored title" }),
+    );
+    await waitFor(() => expect(titleBox().value).toBe("Stored title"));
+    expect(editBox().value).toBe("Typed description");
+    await waitFor(expectSaveLive);
+    vi.mocked(forgeIssueEdit).mockResolvedValueOnce(clean);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(forgeIssueEdit).mock.calls[1].slice(1, 4)).toEqual([
+      7,
+      "Stored title",
+      "Typed description",
+    ]);
+  });
+
+  it("returns a fresh form's untouched title to the issue's own when the older save fails, held until the re-read answers (AC7)", async () => {
+    const { save, held } = await freshFormOverSave();
+    await act(async () => save.reject(new Error("edit refused")));
+    await waitFor(() => expect(titleBox().value).toBe(TITLES[7]));
+    expect(editBox().value).toBe("Typed description");
+    await waitFor(() => expect(held.reads()).toBe(1));
+    expectSaveHeld();
+    await act(async () => held.read.resolve(issue(7)));
+    await waitFor(expectSaveLive);
+    expect(titleBox().value).toBe(TITLES[7]);
+  });
+
+  /** Way in (2): saves 7 (typed title and description, `images` staged) on
+   *  a held write, lands it while 8 is shown, then returns to 7 with its
+   *  read held. */
+  async function returnAfterSave(images: number) {
+    const { show } = mount(7);
+    await shown(7);
+    await openEdit();
+    if (images > 0) {
+      paste(editBox(), images);
+      await waitFor(() =>
+        expect(editBox().value).toContain(`](image-${images}.png)`),
+      );
+    }
+    fireEvent.change(titleBox(), { target: { value: "Saved title" } });
+    const sent = `Saved description${images > 0 ? ` ${editBox().value}` : ""}`;
+    fireEvent.change(editBox(), { target: { value: sent } });
+    const save = deferred<Outcome>();
+    vi.mocked(forgeIssueEdit).mockReturnValueOnce(save.promise);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    cancel();
+    await closed();
+    show(8);
+    await shown(8);
+    await act(async () => save.resolve(clean));
+    const held = holdReadsOf7();
+    show(7);
+    await shownTitled("Saved title");
+    // The return started a read of 7 that has not answered.
+    await waitFor(() => expect(held.reads()).toBe(1));
+    await openEdit();
+    expect(titleBox().value).toBe("Saved title");
+    return { held, sent };
+  }
+
+  it("seeds Edit with the saved values on return and follows the re-read (AC8)", async () => {
+    const { held } = await returnAfterSave(0);
+    expect(editBox().value).toBe("Saved description");
+    await act(async () =>
+      held.read.resolve({
+        ...issue(7),
+        title: "Stored title",
+        body: "Stored description",
+      }),
+    );
+    await waitFor(() => expect(titleBox().value).toBe("Stored title"));
+    expect(editBox().value).toBe("Stored description");
+    vi.mocked(forgeIssueEdit).mockResolvedValueOnce(clean);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(forgeIssueEdit).mock.calls[1].slice(1, 4)).toEqual([
+      7,
+      "Stored title",
+      "Stored description",
+    ]);
+  });
+
+  it("follows the title but keeps a description typed before the re-read answers (AC8)", async () => {
+    const { held } = await returnAfterSave(0);
+    fireEvent.change(editBox(), { target: { value: "Typed now" } });
+    await act(async () =>
+      held.read.resolve({
+        ...issue(7),
+        title: "Stored title",
+        body: "Stored description",
+      }),
+    );
+    await waitFor(() => expect(titleBox().value).toBe("Stored title"));
+    expect(editBox().value).toBe("Typed now");
+    vi.mocked(forgeIssueEdit).mockResolvedValueOnce(clean);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(forgeIssueEdit).mock.calls[1].slice(1, 4)).toEqual([
+      7,
+      "Stored title",
+      "Typed now",
+    ]);
+  });
+
+  it("seeds the pre-save description after a save carrying an image, then follows the stored one (AC8)", async () => {
+    const { held } = await returnAfterSave(1);
+    expect(editBox().value).toBe(issue(7).body);
+    const stored = "Saved description ![image](https://example.test/a.png)";
+    await act(async () => held.read.resolve({ ...issue(7), body: stored }));
+    await waitFor(() => expect(editBox().value).toBe(stored));
+    expect(titleBox().value).toBe(TITLES[7]);
+  });
+
+  /** Saves 7 (typed title and description) on a held write, moves the form to
+   *  8 by opening and cancelling Edit there, fails the save with a rejection
+   *  that may have landed, then returns to 7 with its read held and opens a
+   *  fresh Edit. */
+  async function returnAfterLandedFailure() {
+    const { show } = mount(7);
+    await shown(7);
+    await openEdit();
+    fireEvent.change(titleBox(), { target: { value: "Saved title" } });
+    fireEvent.change(editBox(), { target: { value: "Saved description" } });
+    const save = deferred<Outcome>();
+    vi.mocked(forgeIssueEdit).mockReturnValueOnce(save.promise);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    cancel();
+    await closed();
+    show(8);
+    await shown(8);
+    await openEdit();
+    cancel();
+    await closed();
+    await act(async () => save.reject(MAY_HAVE_LANDED));
+    const held = holdReadsOf7();
+    show(7);
+    // The patch stayed: the view shows the sent title before the re-read.
+    await shownTitled("Saved title");
+    await waitFor(() => expect(held.reads()).toBe(1));
+    await openEdit();
+    expect(titleBox().value).toBe("Saved title");
+    expect(editBox().value).toBe("Saved description");
+    return held;
+  }
+
+  it("keeps a save that may have landed in the view and a fresh Edit, following a re-read that says it did not (AC15)", async () => {
+    const held = await returnAfterLandedFailure();
+    await act(async () => held.read.resolve(issue(7)));
+    await waitFor(() => expect(titleBox().value).toBe(TITLES[7]));
+    expect(editBox().value).toBe(issue(7).body);
+  });
+
+  it("keeps the sent values when the re-read says a save that may have landed did (AC15)", async () => {
+    const held = await returnAfterLandedFailure();
+    await act(async () =>
+      held.read.resolve({
+        ...issue(7),
+        title: "Saved title",
+        body: "Saved description",
+      }),
+    );
+    await waitFor(expectSaveLive);
+    expect(titleBox().value).toBe("Saved title");
+    expect(editBox().value).toBe("Saved description");
+    vi.mocked(forgeIssueEdit).mockResolvedValueOnce(clean);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(forgeIssueEdit).mock.calls[1].slice(1, 4)).toEqual([
+      7,
+      "Saved title",
+      "Saved description",
+    ]);
   });
 });
 

@@ -257,6 +257,19 @@ pub(crate) mod tests {
             .join("\n")
     }
 
+    /// Every `.rs` file under `dir`, as (path with `/` separators, text).
+    pub(crate) fn rust_sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                out.push((path.to_string_lossy().replace('\\', "/"), text));
+            }
+        }
+    }
+
     #[test]
     fn wiring_bodies_ignore_commented_out_evictions() {
         let source =
@@ -296,7 +309,7 @@ pub(crate) mod tests {
             );
             if name == "gh_pr_edit" {
                 assert!(
-                    body.contains("let result = run_gh_api_write(&repo_path, &arg_refs).await;")
+                    body.contains("let result = run_gh_api_write_json(&repo_path, \"PATCH\", &endpoint, &payload).await;")
                 );
                 assert!(!body.contains("if base"));
             }

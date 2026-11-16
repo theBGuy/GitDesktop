@@ -89,6 +89,7 @@ import type { LockReason, MinimizeReason } from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
+  issueDetailsOptions,
   pendingIssueWrite,
   repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
@@ -524,7 +525,23 @@ export function RemoteIssueView({
         attachments: begin?.(body),
       }),
     successToast: "Issue updated",
-    attach: { draftKey: editDraftKey, kind: "issue" },
+    fresh:
+      details.data === undefined || detailsStale
+        ? null
+        : { title: details.data.title, body: details.data.body },
+    attach: {
+      draftKey: editDraftKey,
+      kind: "issue",
+      reread: () =>
+        queryClient.refetchQueries(
+          {
+            queryKey: issueDetailsOptions(repoPath, number, lens).queryKey,
+            exact: true,
+            type: "active",
+          },
+          { cancelRefetch: false },
+        ),
+    },
   });
   const editAttachOwner = useAttachmentOwner("issue-edit", true);
   const editAttachGate = useAttachmentSupport({

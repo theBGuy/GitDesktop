@@ -171,35 +171,55 @@ export function splitBodyRefBlock(
   return { text, refs, jiraRefs };
 }
 
+/** Text + ref lines joined by a blank line; either part absent degrades cleanly
+ *  (text alone / lines alone / ""). */
+function appendRefLines(text: string, refLines: string[]): string {
+  return [text.trimEnd(), refLines.join("\n")].filter(Boolean).join("\n\n");
+}
+
+const nativeRefLine = (r: BodyRef) =>
+  r.keyword === "closes" ? `Closes #${r.number}` : `Relates to #${r.number}`;
+
 /**
  * Compose the final body: text + the chips' ref lines (`Closes #N` /
- * `Relates to #N`, chip order), joined by a blank line; either part absent degrades
- * cleanly (text alone / lines alone / ""). The single composition used by ALL
- * create/edit save paths.
+ * `Relates to #N`). The single composition used by ALL create/edit save paths.
+ * No chips returns `text` untouched: a save with no chip never rewrites a body.
+ * Otherwise the result is the form a reopen re-splits to: the text's own trailing
+ * refs merge with the chips through {@link splitBodyRefBlock} (typed order first,
+ * a repeated number takes the chip's keyword), so no reference is written twice.
  */
 export function composeBodyWithRefs(
   text: string,
   chips: LinkedIssueChip[],
 ): string {
-  const refLines = chips.map((c) =>
-    c.keyword === "closes" ? `Closes #${c.number}` : `Relates to #${c.number}`,
+  if (chips.length === 0) return text;
+  const { text: rest, refs } = splitBodyRefBlock(
+    appendRefLines(text, chips.map(nativeRefLine)),
+    "native",
   );
-  if (refLines.length === 0) return text;
-  return [text.trimEnd(), refLines.join("\n")].filter(Boolean).join("\n\n");
+  return appendRefLines(rest, refs.map(nativeRefLine));
 }
 
 /**
  * The Jira-mention twin of {@link composeBodyWithRefs}: text + the chips'
- * `Relates to KEY` lines, same degrade-cleanly joining. Only `Relates to` is
- * emitted — there is no close form for Jira.
+ * `Relates to KEY` lines, the same no-chips and merge rules (a key typed and
+ * chipped is written once). Only `Relates to` is emitted — there is no close
+ * form for Jira.
  */
 export function composeBodyWithJiraRefs(
   text: string,
   chips: JiraMentionChip[],
 ): string {
-  const refLines = chips.map((c) => `Relates to ${c.key}`);
-  if (refLines.length === 0) return text;
-  return [text.trimEnd(), refLines.join("\n")].filter(Boolean).join("\n\n");
+  if (chips.length === 0) return text;
+  const line = (key: string) => `Relates to ${key}`;
+  const { text: rest, jiraRefs } = splitBodyRefBlock(
+    appendRefLines(
+      text,
+      chips.map((c) => line(c.key)),
+    ),
+    "jira",
+  );
+  return appendRefLines(rest, jiraRefs.map(line));
 }
 
 /** Lowercased tokens (length ≥ 4, split on non-alphanumerics) for ranking issue

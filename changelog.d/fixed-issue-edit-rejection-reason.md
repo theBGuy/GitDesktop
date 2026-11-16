@@ -1,0 +1,1 @@
+- A rejected issue edit on GitHub shows GitHub's reason.

@@ -672,12 +672,19 @@ pub async fn gh_discussion_create(
         ],
     )
     .await?;
-    let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        gh_unreadable(
-            "the new discussion",
-            format!("could not parse created discussion: {e}"),
-        )
-    })?;
+    created_discussion_ref(&out.stdout_lossy())
+}
+
+/// The created discussion's number and URL, or 0 and "" for what an empty or JSON reply
+/// doesn't carry; a reply that isn't JSON is the `created_reply` error, since the
+/// discussion may exist but nothing proves it.
+fn created_discussion_ref(stdout: &str) -> AppResult<PrRef> {
+    let value = crate::forge::created_reply(
+        stdout,
+        crate::forge::model::Provider::GitHub,
+        "discussion",
+        false,
+    )?;
     let d = value.pointer("/data/createDiscussion/discussion");
     Ok(PrRef {
         number: d
@@ -1023,6 +1030,83 @@ pub async fn gh_discussion_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_discussion_ref_reads_what_the_reply_carries() {
+        let full = r#"{"data":{"createDiscussion":{"discussion":{"number":5,"url":"https://github.com/o/r/discussions/5"}}}}"#;
+        let got = created_discussion_ref(full).unwrap();
+        assert_eq!(
+            (got.number, got.url.as_str()),
+            (5, "https://github.com/o/r/discussions/5")
+        );
+        for (reply, url) in [
+            (r#"{"data":{"createDiscussion":null}}"#, ""),
+            ("", ""),
+            ("null", ""),
+            (
+                r#"{"data":{"createDiscussion":{"discussion":{"url":"u"}}}}"#,
+                "u",
+            ),
+        ] {
+            let got = created_discussion_ref(reply).unwrap();
+            assert_eq!((got.number, got.url.as_str()), (0, url), "{reply:?}");
+        }
+        let hedge = "GitHub accepted the request but its reply couldn't be read, so the discussion may already exist. Check before creating it again.";
+        for reply in ["not json", r#"{"data":{"createDiscussion":{"discuss"#] {
+            let got = created_discussion_ref(reply)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            assert_eq!(got, Err(hedge.to_string()), "{reply:?}");
+        }
+        let tolerant = |body: &str| {
+            body.contains("created_discussion_ref(") && !body.contains("gh_unreadable(")
+        };
+        let source = include_str!("discussion.rs");
+        let body = crate::github::repo_meta::tests::wiring_body(source, "gh_discussion_create");
+        assert!(tolerant(&body), "{body}");
+        assert!(
+            !tolerant(&format!("{body}\ngh_unreadable(x)")),
+            "the control must flip"
+        );
+        // The reader reads only the run's `?`-unwrapped Ok, so a rejected write never
+        // reaches it.
+        let after_run = |body: &str| {
+            let run = body.find("run_mutation(");
+            let reader = body.find("created_discussion_ref(");
+            run.zip(reader)
+                .is_some_and(|(run, reader)| run < reader && body[run..reader].contains(".await?"))
+        };
+        assert!(after_run(&body), "{body}");
+        let early = body
+            .replacen("created_discussion_ref(", "@@reader@@", 1)
+            .replacen("run_mutation(", "created_discussion_ref(", 1)
+            .replacen("@@reader@@", "run_mutation(", 1);
+        assert!(!after_run(&early), "a reader ahead of the run must flip");
+        // The reader classifies through the one rule and parses nothing itself.
+        let reader = crate::github::repo_meta::tests::wiring_body(source, "created_discussion_ref");
+        // Converting the classified value (`from_value`) is not a parse of the reply.
+        let one_rule = |body: &str| {
+            let rest = body.replace("serde_json::from_value", "");
+            body.matches("created_reply(").count() == 1
+                && ![
+                    "from_str",
+                    "from_slice",
+                    "from_reader(",
+                    ".parse::<",
+                    "serde_json::from_",
+                ]
+                .iter()
+                .any(|token| rest.contains(token))
+        };
+        assert!(one_rule(&reader), "{reader}");
+        assert!(!one_rule(&format!("{reader}\nserde_json::from_str(x)")));
+        assert!(!one_rule(&format!("{reader}\nfrom_slice(x)")));
+        assert!(!one_rule(&format!("{reader}\nserde_json::from_reader(x)")));
+        assert!(!one_rule(&format!("{reader}\nfrom_reader(x)")));
+        assert!(!one_rule(&format!("{reader}\nx.parse::<Value>()")));
+        assert!(one_rule(&format!("{reader}\nserde_json::from_value(x)")));
+        assert!(!one_rule(&reader.replace("created_reply(", "own_parse(")));
+    }
 
     #[test]
     fn a_missing_scope_becomes_the_scope_sentence() {

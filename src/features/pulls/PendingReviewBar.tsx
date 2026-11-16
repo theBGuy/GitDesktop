@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
+import { useForgeGhHost } from "@/lib/git/host";
 import {
   pendingWriteMatching,
   useForgeStatus,
@@ -57,6 +59,9 @@ export function DraftCommentCard({
   // preview linkifies them against the PR's repo.
   const provider = useForgeStatus(repoPath).data?.provider;
   const refs = provider ? { provider, repoPath, lens } : undefined;
+  // Called here, never in the editor branch: both the rest view and Edit's
+  // Preview read it, and a hook there would run only while editing.
+  const hostedImages = hostedImagesFor(repoPath, useForgeGhHost(repoPath));
 
   const next = body.trim();
   const canSave = next.length > 0 && next !== draft.body.trim();
@@ -129,9 +134,12 @@ export function DraftCommentCard({
           pending={updateDraft.isPending}
           ariaLabel="Edit pending comment"
           textareaClassName="max-h-48 min-h-16 resize-y"
+          hostedImages={hostedImages}
         />
       ) : (
-        <Markdown refs={refs}>{draft.body}</Markdown>
+        <Markdown refs={refs} hostedImages={hostedImages}>
+          {draft.body}
+        </Markdown>
       )}
       <ConfirmDialog
         open={confirmDelete}

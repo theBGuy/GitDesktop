@@ -505,12 +505,6 @@ pub async fn gh_issue_summary(
     gh_issue_view_lean(&repo_path, number, lens.as_deref(), ISSUE_SUMMARY_FIELDS).await
 }
 
-#[derive(Deserialize)]
-struct CreatedIssue {
-    number: u64,
-    html_url: String,
-}
-
 /// Creates an issue via the REST API so labels/assignees (arrays) and milestone
 /// (by number) go in one call and the response carries the new number + URL
 /// directly. `labels` and `assignees` are applied by name/login (must exist).
@@ -560,16 +554,32 @@ pub async fn gh_issue_create(
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let landed = crate::forge::LandedWrite::Created("issue");
+    let result = result.map_err(|e| crate::forge::timed_out_write(e, "GitHub", landed));
     let out = result.map_err(map_issues_disabled)?;
-    let created: CreatedIssue = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        gh_unreadable(
-            "the new issue",
-            format!("could not parse created issue: {e}"),
-        )
-    })?;
+    created_issue_ref(&out.stdout_lossy())
+}
+
+/// The created issue's `number` and `html_url`, each read on its own (0 and "" when
+/// absent). An empty reply is created with both unknown; a reply that isn't JSON is the
+/// `created_reply` error, since the issue may exist but nothing proves it.
+fn created_issue_ref(stdout: &str) -> AppResult<PrRef> {
+    let reply = crate::forge::created_reply(
+        stdout,
+        crate::forge::model::Provider::GitHub,
+        "issue",
+        false,
+    )?;
     Ok(PrRef {
-        number: created.number,
-        url: created.html_url,
+        number: reply
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        url: reply
+            .get("html_url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -589,27 +599,17 @@ fn issue_label_routes(labels: &[String]) -> (&[String], &[String]) {
     }
 }
 
-/// `gh issue create` argv for a create carrying images: the trimmed title, the body,
-/// the create-route labels and the attach tail. Assignees, milestone and type never
-/// ride it; the follow-up applies them, so empty stdout keeps meaning nothing was
-/// created and a failed follow-up has a known issue number.
+/// `gh issue create` argv for a create carrying images: the trimmed title, the
+/// create-route labels and the attach tail (the choke point pipes the body). Assignees,
+/// milestone and type never ride it; the follow-up applies them, so empty stdout keeps
+/// meaning nothing was created and a failed follow-up has a known issue number.
 fn issue_create_attach_args<'a>(
     slug: &'a str,
     title: &'a str,
-    body: &'a str,
     labels: &'a [String],
     names: &'a [String],
 ) -> Vec<&'a str> {
-    let mut args = vec![
-        "issue",
-        "create",
-        "--repo",
-        slug,
-        "--title",
-        title.trim(),
-        "--body",
-        body,
-    ];
+    let mut args = vec!["issue", "create", "--repo", slug, "--title", title.trim()];
     for label in issue_label_routes(labels).0 {
         args.push("--label");
         args.push(label);
@@ -716,11 +716,12 @@ pub async fn gh_issue_create_attached(
         ));
     }
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let args = issue_create_attach_args(&slug, &title, &body, &labels, &staged.names);
+    let args = issue_create_attach_args(&slug, &title, &labels, &staged.names);
     let result = run_gh_maybe_attached(
         &repo_path,
         &slug,
         &args,
+        &body,
         Some(&staged),
         AttachedWrite::Create,
     )
@@ -960,7 +961,7 @@ pub async fn gh_issue_comment(
     }
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let mut args = vec!["issue", "comment", &n, "--repo", &slug, "--body", &body];
+    let mut args = vec!["issue", "comment", &n, "--repo", &slug];
     if let Some(s) = &staged {
         args.extend(attach_tail(&s.names));
     }
@@ -968,6 +969,7 @@ pub async fn gh_issue_comment(
         &repo_path,
         &slug,
         &args,
+        &body,
         staged.as_ref(),
         AttachedWrite::Post,
     )
@@ -1049,44 +1051,23 @@ pub async fn gh_issue_edit(
     }
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues/{number}");
-    run_gh(
-        Some(&repo_path),
-        &[
-            "api",
-            "--method",
-            "PATCH",
-            &endpoint,
-            "-f",
-            &format!("title={title}"),
-            "-f",
-            &format!("body={body}"),
-        ],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
+    let payload = serde_json::json!({ "title": title, "body": body }).to_string();
+    let run =
+        crate::github::pr::run_gh_api_write_json(&repo_path, "PATCH", &endpoint, &payload).await;
+    let landed = crate::forge::LandedWrite::Saved("issue");
+    run.map_err(|e| crate::forge::timed_out_write(e, "GitHub", landed))?;
     Ok(())
 }
 
-/// `gh issue edit` argv for an edit carrying images. The title is sent trimmed, as the
-/// REST route sends it.
+/// `gh issue edit` argv for an edit carrying images, without the body (the choke point
+/// pipes it). The title is sent trimmed, as the REST route sends it.
 fn issue_edit_attach_args<'a>(
     n: &'a str,
     slug: &'a str,
     title: &'a str,
-    body: &'a str,
     names: &'a [String],
 ) -> Vec<&'a str> {
-    let mut args = vec![
-        "issue",
-        "edit",
-        n,
-        "--repo",
-        slug,
-        "--title",
-        title.trim(),
-        "--body",
-        body,
-    ];
+    let mut args = vec!["issue", "edit", n, "--repo", slug, "--title", title.trim()];
     args.extend(crate::github::pr::attach_tail(names));
     args
 }
@@ -1110,9 +1091,9 @@ pub async fn gh_issue_edit_attached(
     }
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let n = number.to_string();
-    let args = issue_edit_attach_args(&n, &slug, &title, &body, &staged.names);
-    let out =
-        run_gh_maybe_attached(&repo_path, &slug, &args, Some(&staged), AttachedWrite::Edit).await?;
+    let args = issue_edit_attach_args(&n, &slug, &title, &staged.names);
+    let write = AttachedWrite::IssueEdit;
+    let out = run_gh_maybe_attached(&repo_path, &slug, &args, &body, Some(&staged), write).await?;
     settle_attached_edit(&repo_path, &slug, out, &staged, Readback::Issue(number)).await
 }
 
@@ -1899,10 +1880,82 @@ mod tests {
     use crate::github::test_support::{gh_output, HELD_REST_STDERR};
 
     #[test]
+    fn created_issue_ref_reads_each_field_on_its_own() {
+        for (reply, number, url) in [
+            (r#"{"number":7,"html_url":"u"}"#, 7, "u"),
+            ("{}", 0, ""),
+            ("[]", 0, ""),
+            (r#"{"number":"7","html_url":"u"}"#, 0, "u"),
+            (r#"{"number":7}"#, 7, ""),
+            ("", 0, ""),
+            ("null", 0, ""),
+            (r#"{"html_url":"u"}"#, 0, "u"),
+        ] {
+            let got = super::created_issue_ref(reply).unwrap();
+            assert_eq!((got.number, got.url.as_str()), (number, url), "{reply:?}");
+        }
+        let hedge = "GitHub accepted the request but its reply couldn't be read, so the issue may already exist. Check before creating it again.";
+        for reply in [
+            "not json",
+            "<!DOCTYPE html><html><body>Sign in</body></html>",
+        ] {
+            let got = super::created_issue_ref(reply)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            assert_eq!(got, Err(hedge.to_string()), "{reply:?}");
+        }
+        let tolerant =
+            |body: &str| body.contains("created_issue_ref(") && !body.contains("gh_unreadable(");
+        let source = include_str!("issue.rs");
+        let body = crate::github::repo_meta::tests::wiring_body(source, "gh_issue_create");
+        assert!(tolerant(&body), "{body}");
+        assert!(
+            !tolerant(&format!("{body}\ngh_unreadable(x)")),
+            "the control must flip"
+        );
+        // The reader reads only the run's `?`-unwrapped Ok, so a rejected write never
+        // reaches it.
+        let after_run = |body: &str| {
+            body.find("map_issues_disabled)?")
+                .zip(body.find("created_issue_ref("))
+                .is_some_and(|(run, reader)| run < reader)
+        };
+        assert!(after_run(&body), "{body}");
+        let early = body
+            .replacen("created_issue_ref(", "@@reader@@", 1)
+            .replacen("map_issues_disabled)?", "created_issue_ref(", 1)
+            .replacen("@@reader@@", "map_issues_disabled)?", 1);
+        assert!(!after_run(&early), "a reader ahead of the run must flip");
+        // The reader classifies through the one rule and parses nothing itself.
+        let reader = crate::github::repo_meta::tests::wiring_body(source, "created_issue_ref");
+        // Converting the classified value (`from_value`) is not a parse of the reply.
+        let one_rule = |body: &str| {
+            let rest = body.replace("serde_json::from_value", "");
+            body.matches("created_reply(").count() == 1
+                && ![
+                    "from_str",
+                    "from_slice",
+                    "from_reader(",
+                    ".parse::<",
+                    "serde_json::from_",
+                ]
+                .iter()
+                .any(|token| rest.contains(token))
+        };
+        assert!(one_rule(&reader), "{reader}");
+        assert!(!one_rule(&format!("{reader}\nserde_json::from_str(x)")));
+        assert!(!one_rule(&format!("{reader}\nfrom_slice(x)")));
+        assert!(!one_rule(&format!("{reader}\nserde_json::from_reader(x)")));
+        assert!(!one_rule(&format!("{reader}\nfrom_reader(x)")));
+        assert!(!one_rule(&format!("{reader}\nx.parse::<Value>()")));
+        assert!(one_rule(&format!("{reader}\nserde_json::from_value(x)")));
+        assert!(!one_rule(&reader.replace("created_reply(", "own_parse(")));
+    }
+
+    #[test]
     fn issue_edit_attach_argv_sends_the_trimmed_title_and_no_metadata() {
         let names = vec!["image-1.png".to_string(), "image-2.png".to_string()];
-        let body = "![a](image-1.png) ![b](image-2.png)";
-        let args = super::issue_edit_attach_args("91", "o/r", "  Title \n", body, &names);
+        let args = super::issue_edit_attach_args("91", "o/r", "  Title \n", &names);
         assert_eq!(
             args,
             [
@@ -1913,15 +1966,21 @@ mod tests {
                 "o/r",
                 "--title",
                 "Title",
-                "--body",
-                body,
                 "--attach",
                 "image-1.png",
                 "--attach",
                 "image-2.png",
             ]
         );
-        for flag in ["--assignee", "--milestone", "--type", "--add-label"] {
+        let banned = [
+            "--assignee",
+            "--milestone",
+            "--type",
+            "--add-label",
+            "--body",
+            "--body-file",
+        ];
+        for flag in banned {
             assert!(!args.contains(&flag), "{flag}");
         }
     }
@@ -1954,8 +2013,7 @@ mod tests {
     fn issue_create_attach_argv_sends_the_trimmed_title_and_no_metadata() {
         let names = strings(&["image-1.png", "image-2.png"]);
         let labels = strings(&["bug", "ui"]);
-        let body = "![a](image-1.png) ![b](image-2.png)";
-        let args = super::issue_create_attach_args("o/r", "  Title \n", body, &labels, &names);
+        let args = super::issue_create_attach_args("o/r", "  Title \n", &labels, &names);
         assert_eq!(
             args,
             [
@@ -1965,8 +2023,6 @@ mod tests {
                 "o/r",
                 "--title",
                 "Title",
-                "--body",
-                body,
                 "--label",
                 "bug",
                 "--label",
@@ -1977,7 +2033,15 @@ mod tests {
                 "image-2.png",
             ]
         );
-        for flag in ["--assignee", "--milestone", "--type", "--add-label"] {
+        let banned = [
+            "--assignee",
+            "--milestone",
+            "--type",
+            "--add-label",
+            "--body",
+            "--body-file",
+        ];
+        for flag in banned {
             assert!(!args.contains(&flag), "{flag}");
         }
     }
@@ -1987,7 +2051,7 @@ mod tests {
     fn issue_label_routes_send_a_list_with_an_unsafe_label_whole_to_the_patch() {
         let names = strings(&["image-1.png"]);
         let label_flags = |labels: &[String]| -> Vec<String> {
-            let args = super::issue_create_attach_args("o/r", "T", "b", labels, &names);
+            let args = super::issue_create_attach_args("o/r", "T", labels, &names);
             args.windows(2)
                 .filter(|w| w[0] == "--label")
                 .map(|w| w[1].to_string())
@@ -2296,6 +2360,69 @@ mod tests {
         assert!(body.contains("run_gh_cached_get("));
         assert!(body.contains("issue_lock_args("));
         assert!(!body.contains("\"--jq\""));
+    }
+
+    /// The REST issue edit sends its text in a JSON body on stdin and reads its result
+    /// as a write, so a rejection's reason in the response body reaches the error.
+    #[test]
+    fn the_rest_issue_edit_sends_its_text_as_a_json_body() {
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("issue.rs"), "gh_issue_edit");
+        let edit = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let no_argv_text = |body: &str| !body.contains("\"-f\"") && !body.contains("body=");
+        assert!(no_argv_text(&edit), "{edit}");
+        let restored = edit.replacen("let payload", "let f = [\"-f\"]; let payload", 1);
+        assert!(!no_argv_text(&restored), "the control must flip");
+        let reads_as_write =
+            |body: &str| body.contains("run_gh_api_write_json(") && !body.contains("gh_output_ok(");
+        assert!(reads_as_write(&edit), "{edit}");
+        let stderr_only = edit
+            .replacen("run_gh_api_write_json(", "run_gh_api_json(", 1)
+            .replacen("Ok(())", "gh_output_ok(out)?; Ok(())", 1);
+        assert!(!reads_as_write(&stderr_only), "the control must flip");
+    }
+
+    /// The two REST issue writes map a timeout once, after their write and (create)
+    /// after its eviction, so the eviction still sees the unmapped result.
+    #[test]
+    fn the_rest_issue_writes_hedge_their_timeouts() {
+        let holds = |body: &str, write: &str, eviction: Option<&str>| {
+            let Some(map) = body.find("timed_out_write(") else {
+                return false;
+            };
+            body.matches("timed_out_write(").count() == 1
+                && body.find(write).is_some_and(|w| w < map)
+                && eviction.is_none_or(|e| body.find(e).is_some_and(|i| i < map))
+        };
+        let source = include_str!("issue.rs");
+        let rows = [
+            (
+                "gh_issue_edit",
+                "run_gh_api_write_json(",
+                None,
+                "LandedWrite::Saved(\"issue\")",
+            ),
+            (
+                "gh_issue_create",
+                "run_gh_input(",
+                Some("invalidate_"),
+                "LandedWrite::Created(\"issue\")",
+            ),
+        ];
+        for (name, write, eviction, kind) in rows {
+            let body = crate::github::repo_meta::tests::wiring_body(source, name);
+            assert!(holds(&body, write, eviction), "{name}: {body}");
+            assert!(body.contains(kind), "{name}: {body}");
+            let deleted = body.replacen("timed_out_write(", "mapped(", 1);
+            assert!(!holds(&deleted, write, eviction), "{name}: delete control");
+            let anchor = eviction.unwrap_or(write);
+            let moved = body.replacen("timed_out_write(", "mapped(", 1).replacen(
+                anchor,
+                &format!("timed_out_write(); {anchor}"),
+                1,
+            );
+            assert!(!holds(&moved, write, eviction), "{name}: move control");
+        }
     }
 
     /// A `type:issue` search answers a repo with its tracker OFF with zero rows and no

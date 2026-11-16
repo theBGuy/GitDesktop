@@ -6,6 +6,7 @@ import {
   type ReactNode,
   type SetStateAction,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -47,7 +48,7 @@ import {
   settleAttachmentPost,
 } from "@/lib/attachments/store";
 import type { DraftAttachmentsHandle } from "@/lib/attachments/use-draft-attachments";
-import { otherChangesSaved } from "@/lib/error-summary";
+import { mayHaveLanded, otherChangesSaved } from "@/lib/error-summary";
 import { required, useAppForm, withForm } from "@/lib/form";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
@@ -71,6 +72,14 @@ export const editTitleBodyFormOpts = formOptions({
 
 /** One open of the dialog, with the item (draft key) it edits. */
 type EditSession = { draftKey: string | null };
+
+/** An open form's follow state: per field, the value it was last seeded with
+ *  and the last `fresh` value the session saw. */
+interface FollowRecord {
+  readonly session: EditSession;
+  readonly seeded: { title: string; body: string };
+  readonly seen: { title: string | undefined; body: string | undefined };
+}
 
 /** The session each item's running save belongs to, and the session last
  *  committed on screen. Replaced on every change, so it is its own snapshot. */
@@ -138,11 +147,18 @@ function shownSaveOf({ running, shown }: SaveLedgerState) {
 }
 
 // Edit rules with `attach` (an item is its draft key): one save per item per
-// instance, Save held on that item only; a reopen resumes the draft only while
-// the form still holds its session, and a save failing while closed keeps its
-// text and images for the first such reopen; a settle ends only the images its
-// own save started with. Not covered: a host remount drops the hold and the
-// keep, and a fresh form opened during a save shows the pre-save values.
+// instance, Save held on that item only, from the save's start until it settled
+// and the host's re-read of the item answered, failed or was parked offline (a
+// read that hangs holds for the read's own timeout); a settle skips that wait
+// when its session is still on screen or, for a failure, when its draft was
+// kept, unless the failure may have landed; a reopen resumes the draft only
+// while the form still holds its session, and a save failing while closed keeps
+// its text and images for the first such reopen; a settle ends only the images
+// its own save started with. An open form follows `fresh` per field while the
+// field still equals what it was seeded with; a changed field is never
+// replaced. Not covered: a host remount drops the hold and the keep; a Save
+// pressed before the item's re-read answers sends the seeded values wherever
+// the save's cache patch did not cover them.
 /**
  * The "Edit title + description" form/dialog shared by the local and remote
  * PR and issue views. The hook owns the form + open state + the seed-on-open
@@ -158,6 +174,9 @@ export function useEditTitleBody(opts: {
   ) => Promise<unknown>;
   /** Shown after a successful save (remote views); omitted for local views. */
   successToast?: string;
+  /** The item's current values in the form's shape, or null while the host
+   *  holds no copy it trusts for the item its draft key names. */
+  fresh?: { title: string; body: string } | null;
   /** Image attachments (remote hosts only). The draft key, not the handle: the
    *  host builds its handle from this hook's `open` and `form`. */
   attach?: {
@@ -169,6 +188,10 @@ export function useEditTitleBody(opts: {
     /** A save of the same session that kept failed images, or failed after
      *  saving its other changes. */
     onPartialSaved?: () => void;
+    /** Settles once the host's read of this item has answered: joins the read
+     *  in flight or starts one, settling at once when nothing observes the
+     *  item or the read is parked offline. Captured at submit. */
+    reread?: () => Promise<unknown>;
   };
 }) {
   const [open, setOpenState] = useState(false);
@@ -213,9 +236,11 @@ export function useEditTitleBody(opts: {
       // form-core; this backstops a submit whose render-time session differs
       // from the one last committed.
       if (!ledger.start(savedFrom)) return;
+      const attach = opts.attach;
+      let keptForReopen = false;
+      let landedUnknown = false;
       try {
         inFlightRef.current = savedFrom;
-        const attach = opts.attach;
         // `gen`: the entry this save started with, re-read after its begin
         // (which re-gens the entry); undefined when the draft had none.
         const begun: {
@@ -247,6 +272,7 @@ export function useEditTitleBody(opts: {
           );
         } catch (e) {
           if (inFlightRef.current === savedFrom) inFlightRef.current = null;
+          landedUnknown = mayHaveLanded(e);
           if (begun.ticket)
             settleAttachmentPost(begun.ticket, { posted: false, failed: [] });
           const shown = shownRef.current === savedFrom;
@@ -261,8 +287,10 @@ export function useEditTitleBody(opts: {
             formSessionRef.current === savedFrom &&
             (begun.ticket === null ||
               draftEntry(savedFrom.draftKey) !== undefined);
-          if (keep) failedWhileClosedRef.current = savedFrom;
-          else if (!shown) endLeftDraft(savedFrom, begun.gen);
+          if (keep) {
+            failedWhileClosedRef.current = savedFrom;
+            keptForReopen = true;
+          } else if (!shown) endLeftDraft(savedFrom, begun.gen);
           if ((shown || keep) && otherChangesSaved(e))
             attach?.onPartialSaved?.();
           toastError(e);
@@ -313,6 +341,19 @@ export function useEditTitleBody(opts: {
         else endLeftDraft(savedFrom, begun.gen);
         toast.warning(updatedWarning(attach.kind, failed));
       } finally {
+        // A form opened on the item after its save left the screen was seeded
+        // from the cache, so the record holds Save until that copy is re-read.
+        // A session still on screen or a kept draft holds the user's own text,
+        // unless its failure may have landed: only the re-read tells what the
+        // forge holds, so every failure arm waits on it then.
+        const reread = attach?.reread;
+        if (
+          reread !== undefined &&
+          savedFrom?.draftKey != null &&
+          (landedUnknown || (shownRef.current !== savedFrom && !keptForReopen))
+        ) {
+          await reread().catch(() => undefined);
+        }
         ledger.finish(savedFrom);
       }
     },
@@ -323,6 +364,42 @@ export function useEditTitleBody(opts: {
     shownRef.current = session;
     ledger.show(session);
   }, [open, session, ledger]);
+
+  // Follows `fresh` per field into an open form. A field is tested only when
+  // its own fresh value moved (the open counts as the first move), never on
+  // typing, so a field typed back to its seed is replaced only by a later move.
+  // No listeners run: a follow is not an edit, so it retires no partial-save line.
+  const followRef = useRef<FollowRecord | null>(null);
+  const freshTitle = opts.fresh?.title;
+  const freshBody = opts.fresh?.body;
+  const liveDraftKey = opts.attach?.draftKey ?? null;
+  useLayoutEffect(() => {
+    const record = followRef.current;
+    if (record === null || session === null || record.session !== session)
+      return;
+    if (formSessionRef.current !== session || session.draftKey !== liveDraftKey)
+      return;
+    if (freshTitle === undefined || freshBody === undefined) return;
+    const arrived = { title: freshTitle, body: freshBody };
+    for (const name of ["title", "body"] as const) {
+      const value = arrived[name];
+      if (record.seen[name] === value) continue;
+      record.seen[name] = value;
+      const seeded = record.seeded[name];
+      if (value === seeded || form.getFieldValue(name) !== seeded) continue;
+      form.setFieldValue(name, value, { dontRunListeners: true });
+      record.seeded[name] = value;
+    }
+  }, [session, liveDraftKey, freshTitle, freshBody, form]);
+
+  /** Whether the shown session's `name` field still holds what it was seeded
+   *  with or last followed to, the follow's own test; false with no record for
+   *  that session. Reads a ref and form state: effects and handlers only. */
+  function isFieldUntouched(name: "title" | "body"): boolean {
+    const record = followRef.current;
+    if (record === null || record.session !== shownRef.current) return false;
+    return form.getFieldValue(name) === record.seeded[name];
+  }
 
   /** Reopens the form's draft of this item when a save of it is still running
    *  or failed while closed, keeping its text, images and session (a running
@@ -352,6 +429,11 @@ export function useEditTitleBody(opts: {
     form.reset(seed, { keepDefaultValues: true });
     const next = { draftKey };
     formSessionRef.current = next;
+    followRef.current = {
+      session: next,
+      seeded: { title: seed.title, body: seed.body },
+      seen: { title: undefined, body: undefined },
+    };
     setSession(next);
     setOpenState(true);
   }
@@ -379,7 +461,15 @@ export function useEditTitleBody(opts: {
     return sessionRef.current?.draftKey === draftKey;
   }
 
-  return { form, open, setOpen, openEdit, resumeEdit, ownsDraft };
+  return {
+    form,
+    open,
+    setOpen,
+    openEdit,
+    resumeEdit,
+    ownsDraft,
+    isFieldUntouched,
+  };
 }
 
 /** Render props for the dialog. `withForm` infers required render props from the
@@ -469,9 +559,10 @@ export const EditTitleBodyDialog = withForm({
       run: onGenerate,
     });
     const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
-    // The shown item's running save, whichever session started it. form-core
-    // clears `isSubmitting` on a reset and at any submission's end, so with
-    // `attach` it adds only a validating submit; without it, the whole hold.
+    // The shown item's save record (its save, then any re-read it waits on),
+    // whichever session started it. form-core clears `isSubmitting` on a reset
+    // and at any submission's end, so with `attach` it adds only a validating
+    // submit; without it, the whole hold.
     const ledger = saveLedgerOf(form);
     const shownSave = shownSaveOf(
       useSyncExternalStore(ledger.subscribe, ledger.get),
@@ -494,8 +585,8 @@ export const EditTitleBodyDialog = withForm({
       })(),
     );
     const attaching = attachments?.attaching === true;
-    // A generation, an image still attaching and, with `attach`, a running save
-    // of the shown item from any session hold Save with a reason, so it keeps
+    // A generation, an image still attaching and, with `attach`, the shown
+    // item's save record from any session hold Save with a reason, so it keeps
     // focus and says why. Other items' saves hold nothing here.
     const saveHold = useDisabledReason({
       disabled: generating || attaching || saveRunning,
@@ -536,9 +627,32 @@ export const EditTitleBodyDialog = withForm({
       if (!(target instanceof HTMLElement) || !root?.contains(target)) return;
       if (!root.contains(document.activeElement)) target.focus();
     }, [saveRunning, open]);
+    // A reasoned hold keeps Save focusable. When it ends on a Save the form
+    // still disables natively (an invalid title, a validating submit), the
+    // engine drops that focus to the page, so it moves to Title, the field the
+    // user must act on. Only from Save (tracked by its own focus events, not by
+    // what the engine reports after the disable), never into a closing dialog.
+    const titleId = useId();
+    const canSubmit = useSelector(form.store, (s) => s.canSubmit);
+    const saveHeld = !!saveHold.blockedReason;
+    const saveDisabled =
+      !!generating || attaching || saveRunning || !canSubmit || isSubmitting;
+    const saveFocusRef = useRef<HTMLElement | null>(null);
+    const wasHeldRef = useRef(saveHeld);
+    useLayoutEffect(() => {
+      const was = wasHeldRef.current;
+      wasHeldRef.current = saveHeld;
+      if (!was || saveHeld || !saveDisabled || !open) return;
+      const save = saveFocusRef.current;
+      if (!save?.isConnected) return;
+      const active = document.activeElement;
+      if (active !== save && formRef.current?.contains(active)) return;
+      document.getElementById(titleId)?.focus();
+    }, [saveHeld, saveDisabled, open, titleId]);
     function submit() {
       // The chord's and form submit's guard (a held Save refuses its own click):
-      // a generation, the shown item's running save from any session, or
+      // a generation, the shown item's save record from any session (its save,
+      // then any re-read it waits on), or
       // form-core's flag (all of it without `attach`, a validating submit with).
       if (
         generating ||
@@ -622,7 +736,7 @@ export const EditTitleBodyDialog = withForm({
                   : undefined
               }
             >
-              {(field) => <field.TextField label="Title" />}
+              {(field) => <field.TextField label="Title" id={titleId} />}
             </form.AppField>
             <form.AppField name="body">
               {(field) => (
@@ -675,6 +789,12 @@ export const EditTitleBodyDialog = withForm({
                     title={saveHold.blockedReason ? undefined : SUBMIT_HINT}
                     className={ARIA_DISABLED_CLASS}
                     onKeyDown={ignoreHeldEnter}
+                    onFocus={(e) => {
+                      saveFocusRef.current = e.currentTarget;
+                    }}
+                    onBlur={() => {
+                      saveFocusRef.current = null;
+                    }}
                   >
                     Save
                   </form.SubmitButton>

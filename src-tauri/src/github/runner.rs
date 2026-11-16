@@ -250,6 +250,8 @@ fn apply_gh_env<C: crate::agent::ChildEnv>(cmd: &mut C, gh_host: Option<&str>) {
     cmd.set_var("GH_NO_UPDATE_NOTIFIER", "1");
     cmd.set_var("CLICOLOR", "0");
     cmd.set_var("NO_COLOR", "1");
+    // gh's forced colour outranks NO_COLOR and paints `gh api` JSON even into a pipe.
+    cmd.unset_var("CLICOLOR_FORCE");
     if let Some(host) = gh_host {
         cmd.set_var("GH_HOST", host);
     }
@@ -341,18 +343,21 @@ async fn run_gh_raw_resolved_with(
             repo_path.map(std::path::Path::new),
             gh_host,
             args,
+            None,
             timeout,
         )
     })
     .await
 }
 
-/// `run_gh_raw` with the child's cwd set to `cwd` instead of the repo; GH_HOST, the
-/// rate gate and the auth epoch still key on `repo_path` and `args`, never the cwd.
+/// `run_gh_raw` with the child's cwd set to `cwd` instead of the repo and `input` piped
+/// to its stdin; GH_HOST, the rate gate and the auth epoch still key on `repo_path` and
+/// `args`, never the cwd.
 pub(crate) async fn run_gh_raw_in_dir(
     repo_path: &str,
     cwd: &std::path::Path,
     args: &[&str],
+    input: &str,
     timeout: Duration,
 ) -> AppResult<GhOutput> {
     let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
@@ -361,7 +366,7 @@ pub(crate) async fn run_gh_raw_in_dir(
     let host = gh_host.as_deref();
     let epoch = gh_auth_epoch();
     run_gh_gated(&gh, host, args, rate_gate(), epoch, || {
-        spawn_gh_resolved(&gh, Some(cwd), host, args, timeout)
+        spawn_gh_resolved(&gh, Some(cwd), host, args, Some(input), timeout)
     })
     .await
 }
@@ -388,6 +393,7 @@ async fn spawn_gh_resolved(
     cwd: Option<&std::path::Path>,
     gh_host: Option<&str>,
     args: &[&str],
+    input: Option<&str>,
     timeout: Duration,
 ) -> AppResult<GhOutput> {
     let mut cmd = Command::new(gh);
@@ -396,29 +402,67 @@ async fn spawn_gh_resolved(
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
-        .map_err(|e| {
+    // Spawn, write and drains all sit inside the one timeout; a dropped child is killed.
+    let exchange = async {
+        let child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AppError::GhNotFound
             } else {
                 AppError::Io(e)
             }
         })?;
+        exchange_with_stdin(child, input.map(str::as_bytes))
+            .await
+            .map_err(AppError::Io)
+    };
+    let output = tokio::time::timeout(timeout, exchange)
+        .await
+        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
 
     Ok(GhOutput {
         stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code().unwrap_or(-1),
     })
+}
+
+/// Writes `input` to the child's stdin while draining stdout and stderr, closing the
+/// pipe once the write ends so the child reads EOF. A reaped child's output is the
+/// result whatever the write returned: a CLI that exits before reading keeps its own
+/// exit code and stderr. The write error surfaces only when the wait itself failed.
+/// Takes no timeout; each caller wraps the exchange in its own.
+pub(crate) async fn exchange_with_stdin(
+    mut child: tokio::process::Child,
+    input: Option<&[u8]>,
+) -> std::io::Result<std::process::Output> {
+    use tokio::io::AsyncWriteExt;
+
+    debug_assert!(
+        input.is_none() || child.stdin.is_some(),
+        "stdin text given for a child spawned without a piped stdin"
+    );
+    let stdin = child.stdin.take();
+    let write = async move {
+        let (Some(mut pipe), Some(bytes)) = (stdin, input) else {
+            return Ok(());
+        };
+        let written = pipe.write_all(bytes).await;
+        drop(pipe);
+        written
+    };
+    let (written, waited) = tokio::join!(write, child.wait_with_output());
+    waited.map_err(|wait_err| written.err().unwrap_or(wait_err))
 }
 
 /// Runs gh, treating any non-zero exit code as an error carrying gh's stderr.
@@ -492,65 +536,23 @@ pub async fn run_gh_input_raw(
     input: &str,
     timeout: Duration,
 ) -> AppResult<GhOutput> {
-    use tokio::io::AsyncWriteExt;
-
     let gh = gh_bin().await?;
     let gh_host = match repo_path {
         Some(repo) => gh_host_for_repo(repo).await,
         None => None,
     };
+    let host = gh_host.as_deref();
     let epoch = gh_auth_epoch();
-    run_gh_gated(
-        &gh,
-        gh_host.as_deref(),
-        args,
-        rate_gate(),
-        epoch,
-        || async {
-            let mut cmd = Command::new(&gh);
-            apply_gh_env(&mut cmd, gh_host.as_deref());
-            cmd.args(args);
-            if let Some(repo) = repo_path {
-                cmd.current_dir(repo);
-            }
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            #[cfg(windows)]
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            cmd.kill_on_drop(true);
-
-            let mut child = cmd.spawn().map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    AppError::GhNotFound
-                } else {
-                    AppError::Io(e)
-                }
-            })?;
-            // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
-            // outside it a stall hangs the caller forever instead of failing at the
-            // deadline. It still precedes the drain rather than running concurrently the
-            // way the git runner has to — one API body in, one small JSON document back —
-            // and the timeout bounds the exchange whatever a caller sends.
-            let exchange = async move {
-                // Dropping the handle after the write closes the pipe so gh reads EOF.
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(input.as_bytes()).await.map_err(AppError::Io)?;
-                    stdin.shutdown().await.ok();
-                }
-                child.wait_with_output().await.map_err(AppError::Io)
-            };
-            let output = tokio::time::timeout(timeout, exchange)
-                .await
-                .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
-
-            Ok(GhOutput {
-                stdout: output.stdout,
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                code: output.status.code().unwrap_or(-1),
-            })
-        },
-    )
+    run_gh_gated(&gh, host, args, rate_gate(), epoch, || {
+        spawn_gh_resolved(
+            &gh,
+            repo_path.map(std::path::Path::new),
+            host,
+            args,
+            Some(input),
+            timeout,
+        )
+    })
     .await
 }
 
@@ -1563,7 +1565,7 @@ async fn rate_limit_probe(gh: &std::path::Path, host: &Option<String>) -> Option
     if let Some(host) = host {
         args.extend(["--hostname", host]);
     }
-    let out = spawn_gh_resolved(gh, None, None, &args, RATE_LIMIT_PROBE_TIMEOUT)
+    let out = spawn_gh_resolved(gh, None, None, &args, None, RATE_LIMIT_PROBE_TIMEOUT)
         .await
         .ok()?;
     if out.code == 0 {
@@ -3852,5 +3854,341 @@ mod tests {
         assert!(!env.unset.iter().any(|k| k == "GH_HOST"), "{env:?}");
         // The sanitize pass still ran, and it precedes our sets so ours win.
         assert!(env.unset.iter().any(|k| k == "PWD"), "{env:?}");
+    }
+
+    #[test]
+    fn a_gh_child_never_inherits_forced_colour() {
+        let mut env = RecordingEnv::default();
+        apply_gh_env(&mut env, None);
+        assert_eq!(env.get("NO_COLOR"), Some("1"), "{env:?}");
+        assert!(
+            env.unset.iter().any(|k| k == "CLICOLOR_FORCE"),
+            "{env:?}"
+        );
+    }
+
+    /// Stand-in children for the stdin exchange: unix runs `sh`, Windows a `.cmd` in
+    /// `dir`, so the Windows arm also takes std's batch-file path a wrapper gh takes.
+    #[derive(Clone, Copy)]
+    enum Shape {
+        /// Copies stdin to stdout (findstr normalizes line ends on Windows).
+        Echo,
+        /// Prints `refused` to stderr and exits 3 without reading stdin.
+        Refuse,
+        /// Exits 0 without reading stdin or printing anything.
+        QuietExit,
+        /// Never reads stdin and lives about 3 s.
+        Sleeper,
+    }
+
+    #[cfg(unix)]
+    fn shape(_dir: &std::path::Path, shape: Shape) -> (PathBuf, Vec<&'static str>) {
+        let script = match shape {
+            Shape::Echo => "cat",
+            Shape::Refuse => "echo refused >&2; exit 3",
+            Shape::QuietExit => "exit 0",
+            Shape::Sleeper => "exec sleep 3",
+        };
+        (PathBuf::from("sh"), vec!["-c", script])
+    }
+
+    #[cfg(windows)]
+    fn shape(dir: &std::path::Path, shape: Shape) -> (PathBuf, Vec<&'static str>) {
+        let (name, body) = match shape {
+            Shape::Echo => (
+                "echo.cmd",
+                "@\"%SystemRoot%\\System32\\findstr.exe\" /R \"^\"\r\n",
+            ),
+            Shape::Refuse => ("refuse.cmd", "@echo refused 1>&2\r\n@exit /b 3\r\n"),
+            Shape::QuietExit => ("quiet.cmd", "@exit /b 0\r\n"),
+            Shape::Sleeper => ("sleeper.cmd", "@ping -n 4 127.0.0.1 >nul\r\n"),
+        };
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        (path, Vec::new())
+    }
+
+    /// At least 4 MiB over short lines: past tokio's 2 MiB Windows staging buffer and
+    /// any unix pipe buffer, so a write the child never reads really fails.
+    fn big_text() -> (String, usize) {
+        use std::fmt::Write as _;
+        let mut text = String::with_capacity(5 << 20);
+        let mut lines = 0usize;
+        while text.len() < 4 << 20 {
+            writeln!(text, "line {lines:07} {}", "x".repeat(100)).unwrap();
+            lines += 1;
+        }
+        (text, lines)
+    }
+
+    /// The exchange tests bound their elapsed time well under any budget they pass.
+    fn assert_quick(started: Instant) {
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    async fn run_shape(
+        dir: &std::path::Path,
+        which: Shape,
+        input: Option<&str>,
+        timeout: Duration,
+    ) -> AppResult<GhOutput> {
+        let (program, args) = shape(dir, which);
+        spawn_gh_resolved(&program, None, None, &args, input, timeout).await
+    }
+
+    #[tokio::test]
+    async fn a_large_multi_line_stdin_text_reaches_the_child_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (text, lines) = big_text();
+        let budget = Duration::from_secs(60);
+        let out = run_shape(dir.path(), Shape::Echo, Some(&text), budget)
+            .await
+            .expect("the echo child runs");
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        let echoed = String::from_utf8_lossy(&out.stdout);
+        let got: Vec<&str> = echoed.lines().collect();
+        let sent: Vec<&str> = text.lines().collect();
+        assert_eq!(got.len(), lines);
+        assert_eq!(got.first(), sent.first());
+        assert_eq!(got.last(), sent.last());
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_unread_keeps_its_exit_code_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let (text, _) = big_text();
+        let started = Instant::now();
+        let budget = Duration::from_secs(30);
+        let out = run_shape(dir.path(), Shape::Refuse, Some(&text), budget)
+            .await
+            .expect("a reaped child is Ok whatever the write returned");
+        assert_quick(started);
+        assert_eq!(out.code, 3);
+        assert!(out.stderr.contains("refused"), "stderr: {}", out.stderr);
+    }
+
+    /// The stdin runner resolves the real gh, so it is pinned to the seam the stand-in
+    /// children above exercise rather than run.
+    #[test]
+    fn the_stdin_runner_exchanges_through_the_shared_seam() {
+        // Each argument's trimmed byte span in the seam call, split at top-level commas so
+        // the call's line layout doesn't matter.
+        let arg_spans = |body: &str| -> Option<Vec<(usize, usize)>> {
+            let start = body.find("spawn_gh_resolved(")? + "spawn_gh_resolved(".len();
+            let (mut depth, mut spans) = (0usize, vec![(start, start)]);
+            for (i, c) in body[start..].char_indices() {
+                let at = start + i;
+                match c {
+                    ')' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        let trimmed = spans.into_iter().map(|(a, b)| {
+                            let lead = body[a..b].len() - body[a..b].trim_start().len();
+                            (a + lead, a + lead + body[a..b].trim().len())
+                        });
+                        return Some(trimmed.filter(|(a, b)| a < b).collect());
+                    }
+                    ',' if depth == 0 => {
+                        spans.last_mut()?.1 = at;
+                        spans.push((at + 1, at + 1));
+                    }
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            None
+        };
+        let args = |body: &str| -> Vec<String> {
+            let spans = arg_spans(body).unwrap_or_default();
+            let text = spans.iter().map(|&(a, b)| &body[a..b]);
+            text.map(|a| a.split_whitespace().collect::<String>())
+                .collect()
+        };
+        // The repository is the working directory and its resolved host is passed on.
+        let routed = |body: &str| {
+            let a = args(body);
+            a.len() == 6
+                && a[1] == "repo_path.map(std::path::Path::new)"
+                && a[2] == "host"
+                && a[4] == "Some(input)"
+                && body.contains("let host = gh_host.as_deref();")
+                && !body.contains("write_all")
+        };
+        let with_arg = |body: &str, n: usize, to: &str| {
+            let (a, b) = arg_spans(body).expect("a spawn_gh_resolved( call")[n];
+            format!("{}{to}{}", &body[..a], &body[b..])
+        };
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("runner.rs"),
+            "run_gh_input_raw",
+        );
+        let spans = arg_spans(&body).expect("run_gh_input_raw calls spawn_gh_resolved(");
+        let (first, last) = (spans[0].0, spans[spans.len() - 1].1);
+        let one_line = format!(
+            "{}{}{}",
+            &body[..first],
+            args(&body).join(", "),
+            &body[last..]
+        );
+        assert_ne!(one_line, body);
+        for body in [&body, &one_line] {
+            assert!(routed(body), "{body}");
+            let inline = body.replace("spawn_gh_resolved(", "spawn_inline(");
+            assert!(!routed(&inline), "the control must flip");
+            let written = format!("{body}\nstdin.write_all(input.as_bytes())");
+            assert!(!routed(&written), "the control must flip");
+            assert!(
+                !routed(&with_arg(body, 1, "None")),
+                "a dropped cwd must flip"
+            );
+            assert!(
+                !routed(&with_arg(body, 2, "None")),
+                "a dropped host must flip"
+            );
+            assert!(
+                !routed(&with_arg(body, 4, "None")),
+                "a dropped input must flip"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_that_exits_zero_unread_is_ok_not_a_write_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (text, _) = big_text();
+        let started = Instant::now();
+        let budget = Duration::from_secs(30);
+        let out = run_shape(dir.path(), Shape::QuietExit, Some(&text), budget)
+            .await
+            .expect("exit 0 after a failed write is still Ok");
+        assert_quick(started);
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert!(out.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_stdin_exchange_sits_inside_the_one_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "y".repeat(1024);
+        let started = Instant::now();
+        let budget = Duration::from_secs(1);
+        let res = run_shape(dir.path(), Shape::Sleeper, Some(&text), budget).await;
+        assert!(matches!(res, Err(AppError::Timeout(1))), "{:?}", res.err());
+        assert_quick(started);
+    }
+
+    #[tokio::test]
+    async fn a_missing_program_with_stdin_text_is_gh_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-gh");
+        let res = spawn_gh_resolved(
+            &missing,
+            None,
+            None,
+            &[],
+            Some("text"),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(matches!(res, Err(AppError::GhNotFound)), "{:?}", res.err());
+    }
+
+    #[tokio::test]
+    async fn no_input_leaves_stdin_at_end_of_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let out = run_shape(dir.path(), Shape::Echo, None, Duration::from_secs(30))
+            .await
+            .expect("the echo child runs");
+        assert_quick(started);
+        assert!(out.stdout.is_empty(), "{}", out.stdout_lossy());
+    }
+
+    /// An empty text reaches the child as an immediate end of input.
+    #[tokio::test]
+    async fn an_empty_stdin_text_ends_the_input_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let budget = Duration::from_secs(30);
+        let res = run_shape(dir.path(), Shape::Echo, Some(""), budget).await;
+        assert_quick(started);
+        let out = res.expect("the echo child runs");
+        // findstr, the Windows echo, exits 1 when no line matched.
+        let no_lines = if cfg!(windows) { 1 } else { 0 };
+        assert_eq!(out.code, no_lines, "stderr: {}", out.stderr);
+        assert!(out.stdout.is_empty(), "{}", out.stdout_lossy());
+    }
+
+    /// Text for a child whose stdin isn't piped would be dropped, so a debug build stops.
+    /// The child's stdin is null and it exits on its own, so nothing waits on a pipe.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "without a piped stdin")]
+    async fn stdin_text_for_an_unpiped_child_fails_a_debug_build() {
+        let mut command = if cfg!(windows) {
+            let mut c = tokio::process::Command::new("cmd");
+            c.args(["/C", "exit 0"]);
+            c
+        } else {
+            tokio::process::Command::new("true")
+        };
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let _ = exchange_with_stdin(child, Some(b"text")).await;
+    }
+
+    /// A wrapper-only gh: multi-line text fails at spawn as an argument (std refuses a
+    /// line break in a batch-file argument) and travels whole on stdin.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_cmd_wrapper_takes_multi_line_text_on_stdin_but_not_as_an_argument() {
+        use std::fmt::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let special = "%PATH% \"q\" & ^ |";
+        let mut text = String::new();
+        for i in 0..1000 {
+            if i == 500 {
+                // Padded to the same 40 characters as every other line.
+                writeln!(text, "{special:<39}").unwrap();
+            } else {
+                writeln!(text, "{i:04} {}", "z".repeat(34)).unwrap();
+            }
+        }
+        assert_eq!(text.chars().count(), 40_000);
+
+        let (program, _) = shape(dir.path(), Shape::Echo);
+        let args = [
+            "issue",
+            "comment",
+            "1",
+            "--repo",
+            "o/r",
+            "--attach",
+            "image-1.png",
+            "--body-file",
+            "-",
+        ];
+        let timeout = Duration::from_secs(30);
+        let out = spawn_gh_resolved(&program, None, None, &args, Some(&text), timeout)
+            .await
+            .expect("the wrapper spawns with the text on stdin");
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        let echoed = String::from_utf8_lossy(&out.stdout);
+        let got: Vec<&str> = echoed.lines().collect();
+        assert_eq!(got.len(), 1000);
+        assert_eq!(got[500].trim_end(), special);
+
+        let as_arg = ["issue", "comment", "1", "--body", text.as_str()];
+        let res = spawn_gh_resolved(&program, None, None, &as_arg, None, timeout).await;
+        match res {
+            Err(AppError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
+            other => panic!("expected a spawn refusal, got {:?}", other.err()),
+        }
     }
 }

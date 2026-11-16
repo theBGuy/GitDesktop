@@ -496,6 +496,93 @@ pub(crate) fn cap_readme(body: &str) -> String {
     body[..end].to_string()
 }
 
+/// What a forge write whose CLI run timed out may already have done. Each `&'static str`
+/// is the item noun ("issue", "pull request" or "merge request").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LandedWrite {
+    /// An issue create.
+    Created(&'static str),
+    /// A pull or merge request create, whose head branch was pushed before the write.
+    CreatedAfterPush(&'static str),
+    /// A conversation comment.
+    Posted,
+    /// A title, description or base edit.
+    Saved(&'static str),
+}
+
+/// The one builder of the may-have-landed sentences: line 1 says the write may have
+/// landed (never starting with `Timeout`'s lead, which the frontend's `mayHaveLanded`
+/// keys on), line 2 the timeout. scripts/attached-failure-leads.test.mjs reads these
+/// literals; keep them plain `format!` strings.
+pub(crate) fn write_timed_out(host: &str, write: LandedWrite, seconds: u64) -> AppError {
+    let lead = match write {
+        LandedWrite::Created(noun) => format!(
+            "{host} didn't answer in time, so the {noun} may still have been created. Check for it before trying again."
+        ),
+        LandedWrite::CreatedAfterPush(noun) => format!(
+            "{host} didn't answer in time. The branch was pushed, and the {noun} may still have been created. Check for it before trying again."
+        ),
+        LandedWrite::Posted => format!(
+            "{host} didn't answer in time, so your comment may still have been posted. Check the conversation before posting again."
+        ),
+        LandedWrite::Saved(noun) => format!(
+            "{host} didn't answer in time, so your changes may still have been saved. Check the {noun} before saving again."
+        ),
+    };
+    AppError::WriteTimedOut(format!("{lead}\n{host} CLI timed out after {seconds}s."))
+}
+
+/// A write's run Err with a timeout turned into `write_timed_out`'s; anything else
+/// unchanged.
+pub(crate) fn timed_out_write(e: AppError, host: &str, write: LandedWrite) -> AppError {
+    match e {
+        AppError::Timeout(seconds) => write_timed_out(host, write, seconds),
+        other => other,
+    }
+}
+
+/// A create the forge accepted whose reply is neither empty nor JSON, so the item may
+/// exist. It shares the forge's own kind, so the label is that forge's; the frontend's
+/// `mayHaveLanded` keys on the text after `{host}`, and
+/// scripts/attached-failure-leads.test.mjs reads these literals.
+pub(crate) fn created_reply_unreadable(
+    provider: Provider,
+    noun: &str,
+    after_push: bool,
+) -> AppError {
+    let host = match provider {
+        Provider::GitHub => "GitHub",
+        Provider::GitLab => "GitLab",
+        Provider::Bitbucket => "Bitbucket",
+    };
+    let pushed = if after_push {
+        "The branch was pushed. "
+    } else {
+        ""
+    };
+    let message = format!("{pushed}{host} accepted the request but its reply couldn't be read, so the {noun} may already exist. Check before creating it again.");
+    match provider {
+        Provider::GitHub => AppError::Gh(message),
+        Provider::GitLab => AppError::Glab(message),
+        Provider::Bitbucket => AppError::Bitbucket(message),
+    }
+}
+
+/// An accepted create's reply: empty or whitespace is `Null` (created, fields unknown),
+/// any JSON value is itself, and anything else is `created_reply_unreadable`'s error.
+pub(crate) fn created_reply(
+    reply: &str,
+    provider: Provider,
+    noun: &str,
+    after_push: bool,
+) -> AppResult<serde_json::Value> {
+    if reply.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str::<serde_json::Value>(reply)
+        .map_err(|_| created_reply_unreadable(provider, noun, after_push))
+}
+
 /// Drive a set of futures CONCURRENTLY and collect their results in input order — a
 /// tiny local `join_all` so we don't pull in the `futures` crate. All futures share
 /// this task (no spawn), so they may borrow non-`'static` data; each poll advances
@@ -2268,15 +2355,8 @@ pub async fn forge_pr_edit(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Saved;
-                    // A retarget sends the new target branch beside the title.
-                    let fields: Vec<&String> = [Some(&title), base.as_ref()]
-                        .into_iter()
-                        .flatten()
-                        .collect();
                     let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
-                    let body =
-                        gitlab::body_with_uploads(&repo_path, &enc, &fields, &body, &s, verb)
-                            .await?;
+                    let body = gitlab::body_with_uploads(&repo_path, &enc, &body, &s, verb).await?;
                     let base = base.as_deref();
                     gitlab::edit_mr_in(&repo_path, &enc, number, &title, &body, base).await?;
                     crate::attachments::release_posted(&s, &[]).await;
@@ -3137,9 +3217,7 @@ pub async fn forge_issue_edit(
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Saved;
                     let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
-                    let body =
-                        gitlab::body_with_uploads(&repo_path, &enc, &[&title], &body, &s, verb)
-                            .await?;
+                    let body = gitlab::body_with_uploads(&repo_path, &enc, &body, &s, verb).await?;
                     gitlab::edit_issue_in(&repo_path, &enc, number, &title, &body).await?;
                     crate::attachments::release_posted(&s, &[]).await;
                     return Ok(Default::default());
@@ -3557,22 +3635,11 @@ pub async fn forge_issue_create(
                 let staged = gitlab::glab_attach_checks(&body, attachments, false).await?;
                 if let Some(s) = staged {
                     let verb = gitlab::UploadVerb::Posted;
-                    // The length refusal needs no lookup, so it runs first; every lookup the
-                    // create needs then runs before the first upload, so a miss uploads nothing.
-                    gitlab::refuse_long_issue_create(
-                        &title,
-                        &labels,
-                        assignees.len(),
-                        &body,
-                        &s,
-                        cfg!(windows),
-                    )?;
-                    let ids = gitlab::create_assignee_ids(&repo_path, &assignees).await?;
+                    // Every lookup the create needs runs before the first upload, so a miss
+                    // uploads nothing.
                     let enc = gitlab::encode_project(&gitlab::project_path(&repo_path).await?);
-                    let fields = gitlab::issue_create_fields(&title, &labels, &ids);
-                    let body =
-                        gitlab::body_with_uploads(&repo_path, &enc, &fields, &body, &s, verb)
-                            .await?;
+                    let ids = gitlab::create_assignee_ids(&repo_path, &enc, &assignees).await?;
+                    let body = gitlab::body_with_uploads(&repo_path, &enc, &body, &s, verb).await?;
                     let pr = gitlab::create_issue_in(
                         &repo_path, &enc, &title, &body, &labels, &ids, milestone,
                     )
@@ -6699,5 +6766,165 @@ mod tests {
         keep_local_git(std::path::Path::new(&repo), &["config", "remote.origin.mirror", "false"]);
         let required = "a PR title is required";
         is_local_refusal(pr_create_with_empty_title(&repo, "feat/x").await, required, "twin");
+    }
+
+    /// Each write kind's line 1 is the approved sentence, word for word; line 2 names the
+    /// CLI and the seconds; nothing reads as a bare git timeout.
+    #[test]
+    fn a_timed_out_write_says_it_may_have_landed() {
+        let rows = [
+            (
+                LandedWrite::Created("issue"),
+                "{host} didn't answer in time, so the issue may still have been created. Check for it before trying again.",
+            ),
+            (
+                LandedWrite::CreatedAfterPush("pull request"),
+                "{host} didn't answer in time. The branch was pushed, and the pull request may still have been created. Check for it before trying again.",
+            ),
+            (
+                LandedWrite::CreatedAfterPush("merge request"),
+                "{host} didn't answer in time. The branch was pushed, and the merge request may still have been created. Check for it before trying again.",
+            ),
+            (
+                LandedWrite::Posted,
+                "{host} didn't answer in time, so your comment may still have been posted. Check the conversation before posting again.",
+            ),
+            (
+                LandedWrite::Saved("issue"),
+                "{host} didn't answer in time, so your changes may still have been saved. Check the issue before saving again.",
+            ),
+            (
+                LandedWrite::Saved("pull request"),
+                "{host} didn't answer in time, so your changes may still have been saved. Check the pull request before saving again.",
+            ),
+            (
+                LandedWrite::Saved("merge request"),
+                "{host} didn't answer in time, so your changes may still have been saved. Check the merge request before saving again.",
+            ),
+        ];
+        for host in ["GitHub", "GitLab"] {
+            for (write, line1) in rows {
+                let AppError::WriteTimedOut(message) = write_timed_out(host, write, 150) else {
+                    panic!("{write:?}: not a WriteTimedOut");
+                };
+                let lines: Vec<&str> = message.split('\n').collect();
+                assert_eq!(lines.len(), 2, "{host} {write:?}");
+                assert_eq!(lines[0], line1.replace("{host}", host), "{write:?}");
+                assert_eq!(lines[1], format!("{host} CLI timed out after 150s."));
+                assert!(!lines[0].starts_with("git operation timed out"));
+            }
+        }
+    }
+
+    /// Only a Timeout is rewritten; every other error passes through as it was.
+    #[test]
+    fn timed_out_write_maps_only_a_timeout() {
+        let write = LandedWrite::Saved("issue");
+        assert_eq!(
+            timed_out_write(AppError::Timeout(120), "GitLab", write).to_string(),
+            write_timed_out("GitLab", write, 120).to_string()
+        );
+        assert!(matches!(
+            timed_out_write(AppError::Timeout(120), "GitLab", write),
+            AppError::WriteTimedOut(_)
+        ));
+        for e in [
+            AppError::Gh("x".to_string()),
+            AppError::Glab("x".to_string()),
+            AppError::GhNotFound,
+        ] {
+            let before = format!("{e:?}");
+            assert_eq!(format!("{:?}", timed_out_write(e, "GitHub", write)), before);
+        }
+    }
+
+    /// The may-already-exist sentence, filled the way the builder must fill it.
+    fn unreadable_sentence(host: &str, noun: &str, after_push: bool) -> String {
+        let lead = if after_push {
+            "The branch was pushed. "
+        } else {
+            ""
+        };
+        format!(
+            "{lead}{host} accepted the request but its reply couldn't be read, so the {noun} may already exist. Check before creating it again."
+        )
+    }
+
+    /// Each forge's sentence rides that forge's own variant and kind, on one line.
+    #[test]
+    fn created_reply_unreadable_rides_each_forge_kind() {
+        let forges = [
+            (Provider::GitHub, "GitHub", "gh"),
+            (Provider::GitLab, "GitLab", "glab"),
+            (Provider::Bitbucket, "Bitbucket", "bitbucket"),
+        ];
+        for (provider, host, kind) in forges {
+            for after_push in [false, true] {
+                let e = created_reply_unreadable(provider, "pull request", after_push);
+                let want = unreadable_sentence(host, "pull request", after_push);
+                let variant_ok = match (&e, provider) {
+                    (AppError::Gh(m), Provider::GitHub)
+                    | (AppError::Glab(m), Provider::GitLab)
+                    | (AppError::Bitbucket(m), Provider::Bitbucket) => m == &want,
+                    _ => false,
+                };
+                assert!(variant_ok, "{provider:?} {after_push}: {e:?}");
+                assert!(!want.contains('\n'));
+                assert_eq!(
+                    serde_json::to_value(&e).unwrap(),
+                    serde_json::json!({ "kind": kind, "message": want }),
+                );
+            }
+        }
+    }
+
+    /// Empty and JSON replies are values; any other non-empty reply is the hedge.
+    #[test]
+    fn created_reply_splits_three_ways() {
+        let hedge = unreadable_sentence("GitLab", "issue", false);
+        let full = r#"{"iid":12,"web_url":"https://gitlab.com/g/p/-/merge_requests/12"}"#;
+        let values: [(&str, serde_json::Value); 8] = [
+            ("", serde_json::Value::Null),
+            ("   \r\n\t ", serde_json::Value::Null),
+            ("null", serde_json::Value::Null),
+            ("[]", serde_json::json!([])),
+            ("\"created\"", serde_json::json!("created")),
+            ("{}", serde_json::json!({})),
+            ("7", serde_json::json!(7)),
+            (full, serde_json::from_str(full).unwrap()),
+        ];
+        for (reply, want) in &values {
+            let got = created_reply(reply, Provider::GitLab, "issue", false);
+            assert_eq!(got.ok().as_ref(), Some(want), "{reply:?}");
+        }
+        let hedged = [
+            "{\"iid\":12,\"web_url\":\"https://gitlab.com/g/p/-/merge_",
+            "<!DOCTYPE html><html><head><title>Sign in</title></head><body><form method=\"post\"></form></body></html>",
+            "<html><body>502 Bad Gateway</body></html>",
+            "warning: token expires soon\n{\"iid\":12}",
+        ];
+        for reply in hedged {
+            let got = created_reply(reply, Provider::GitLab, "issue", false);
+            assert_eq!(
+                got.map_err(|e| e.to_string()),
+                Err(hedge.clone()),
+                "{reply:?}"
+            );
+            // Control: the tolerant rule this replaces reads every hedge row as created.
+            let lenient: serde_json::Value = serde_json::from_str(reply).unwrap_or_default();
+            assert_eq!(lenient, serde_json::Value::Null, "{reply:?}");
+        }
+        // Control: a bare parse errs on the empty rows, so the empty arm is needed.
+        assert!(serde_json::from_str::<serde_json::Value>("").is_err());
+        assert!(serde_json::from_str::<serde_json::Value>("   \r\n\t ").is_err());
+        // The error carries the caller's provider, noun and lead.
+        let html = hedged[2];
+        for (provider, host, noun, after_push) in [
+            (Provider::GitHub, "GitHub", "discussion", false),
+            (Provider::Bitbucket, "Bitbucket", "pull request", true),
+        ] {
+            let got = created_reply(html, provider, noun, after_push).map_err(|e| e.to_string());
+            assert_eq!(got, Err(unreadable_sentence(host, noun, after_push)));
+        }
     }
 }

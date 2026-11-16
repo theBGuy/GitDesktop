@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
+import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { splitUnifiedDiff } from "@/lib/git/diff-split";
+import { useForgeGhHost } from "@/lib/git/host";
 import {
   COMMIT_COMMENT_WRITES_FAMILY,
   type CommitCommentWriteVars,
@@ -39,6 +41,7 @@ import {
   COMMENT_POST_PENDING_REASON,
   pendingWriteReason,
 } from "@/lib/offline-writes";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 
@@ -184,12 +187,17 @@ export function useCommitLineAnchors(
   const refProvider = refs?.provider;
   const refRepoPath = refs?.repoPath;
   const refLens = refs?.lens;
+  // Without refs, the open repo's forge-status key: one the view already
+  // observes, so no probe runs on an empty path. Its answer goes unused then.
+  const openRepo = useUiStore((s) => s.repoPath);
+  const ghHost = useForgeGhHost(refRepoPath ?? openRepo ?? "");
   return useMemo<DiffLineAnchor[]>(() => {
     if (!path) return [];
     const bodyRefs: MarkdownRefs | undefined =
       refProvider && refRepoPath && refLens
         ? { provider: refProvider, repoPath: refRepoPath, lens: refLens }
         : undefined;
+    const bodyHosted = hostedImagesFor(refRepoPath, ghHost);
     const byLine = new Map<number, CommitCommentOut[]>();
     for (const c of comments ?? []) {
       if (c.path !== path) continue;
@@ -214,13 +222,15 @@ export function useCommitLineAnchors(
                 )}
                 <p className="text-[11px] font-medium">{c.author}</p>
               </div>
-              <Markdown refs={bodyRefs}>{c.body}</Markdown>
+              <Markdown refs={bodyRefs} hostedImages={bodyHosted}>
+                {c.body}
+              </Markdown>
             </div>
           ))}
         </div>
       ),
     }));
-  }, [comments, sections, path, refProvider, refRepoPath, refLens]);
+  }, [comments, sections, path, refProvider, refRepoPath, refLens, ghHost]);
 }
 
 /** Map a flat commit comment onto the {@link Thread} prop shape — commit
@@ -663,6 +673,10 @@ export function CommitComments({
           onSubmit={() => void submit()}
           submitLabel="Comment"
           mentions={mentions}
+          hostedImages={hostedImagesFor(
+            mentions.refs?.repoPath,
+            mentions.ghHost,
+          )}
           busy={busy}
           reason={composerReason}
         />
@@ -809,6 +823,7 @@ export function CommitLineComposer({
         rows={3}
         textareaClassName="max-h-48 min-h-16 resize-y"
         mentions={mentions}
+        hostedImages={hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost)}
       />
       <div className="flex items-center gap-2">
         <DisabledReasonButton

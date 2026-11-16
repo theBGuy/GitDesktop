@@ -1277,6 +1277,10 @@ export function DiscussionView({
                         rows={2}
                         textareaClassName="max-h-32 min-h-12 resize-y"
                         mentions={mentions}
+                        hostedImages={hostedImagesFor(
+                          mentions.refs?.repoPath,
+                          mentions.ghHost,
+                        )}
                       />
                       <div className="flex items-center gap-2">
                         <DisabledReasonButton
@@ -1333,6 +1337,7 @@ export function DiscussionView({
         ariaLabel="Add to the discussion"
         placeholder="Add to the discussion…"
         mentions={mentions}
+        hostedImages={hostedImagesFor(mentions.refs?.repoPath, mentions.ghHost)}
         busy={busy}
         reason={busyReason}
       />

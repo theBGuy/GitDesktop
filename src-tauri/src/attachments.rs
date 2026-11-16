@@ -36,9 +36,6 @@ pub(crate) const GH_AUTH_TYPE_REFUSAL: &str = "This GitHub CLI version can't att
 /// gh's own GHES refusal when the host gate had no host to read (Rust-only sentence).
 pub(crate) const GHES_UNKNOWN_HOST_REFUSAL: &str =
     "Image attachments need GitHub.com or GitHub Enterprise Cloud.";
-/// Refused before gh starts or glab uploads anything: an attached text rides the CLI's argv,
-/// past Windows' command-line cap.
-pub(crate) const TOO_LONG_WITH_IMAGES_REFUSAL: &str = "This text is too long to send with images. Shorten it to about 30,000 characters, or add the images separately.";
 const TOO_MANY_REFUSAL: &str = "You can attach up to 10 images at a time.";
 const PASTED_LABEL: &str = "The pasted file";
 
@@ -143,43 +140,6 @@ pub(crate) fn write_access_refusal(slug: &str) -> String {
 
 pub(crate) fn no_longer_attached(name: &str) -> AppError {
     AppError::InvalidArgument(format!("{name} is no longer attached. Attach it again."))
-}
-
-/// Below Windows' 32,767-unit command-line cap, leaving room for the estimates' slack.
-pub(crate) const ATTACHED_COMMAND_LINE_LIMIT: usize = 32_000;
-
-/// `fixed` plus the UTF-16 units std's `append_arg` gives `args`, each one assumed quoted
-/// (an upper bound): a backslash run of n gains n + 1 before an embedded `"` and n before
-/// the closing quote; other backslashes add nothing.
-pub(crate) fn attached_command_line_units(fixed: usize, args: &[&str]) -> usize {
-    let quoted_arg_units = |arg: &&str| {
-        // Two quotes and the separating space.
-        let mut units = 3;
-        let mut run = 0;
-        for u in arg.encode_utf16() {
-            units += 1;
-            if u == u16::from(b'\\') {
-                run += 1;
-            } else {
-                if u == u16::from(b'"') {
-                    units += run + 1;
-                }
-                run = 0;
-            }
-        }
-        units + run
-    };
-    fixed + args.iter().map(quoted_arg_units).sum::<usize>()
-}
-
-/// Refuses an attached write whose command line would pass the cap; only Windows has one.
-pub(crate) fn refuse_long_attached_argv(units: usize, windows: bool) -> AppResult<()> {
-    if windows && units > ATTACHED_COMMAND_LINE_LIMIT {
-        return Err(AppError::InvalidArgument(
-            TOO_LONG_WITH_IMAGES_REFUSAL.to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn not_an_image(label: &str) -> AppError {
@@ -694,18 +654,26 @@ pub(crate) fn discard_in(root: &Path, session: &str, names: Option<&[String]>) -
     }
     let result = match names {
         None => fs::remove_dir_all(&dir),
-        // Every name is tried; the first failure is reported after the rest.
-        Some(names) => {
-            let mut first_err = Ok(());
-            for n in names {
-                if let Err(e) = fs::remove_file(dir.join(n)) {
-                    if e.kind() != std::io::ErrorKind::NotFound && first_err.is_ok() {
-                        first_err = Err(e);
+        // Every name is tried; the first failure is reported after the rest. Only a name
+        // listed exactly is removed: a case-insensitive file system would also open a case
+        // variant, another image. An absent folder's `NotFound` is Ok below; any other
+        // listing failure is the error.
+        Some(names) => match fs::read_dir(&dir) {
+            Err(e) => Err(e),
+            Ok(entries) => {
+                let listed: Vec<std::ffi::OsString> =
+                    entries.flatten().map(|e| e.file_name()).collect();
+                let mut first_err = Ok(());
+                for n in names.iter().filter(|n| has_exact_entry(&listed, n)) {
+                    if let Err(e) = fs::remove_file(dir.join(n)) {
+                        if e.kind() != std::io::ErrorKind::NotFound && first_err.is_ok() {
+                            first_err = Err(e);
+                        }
                     }
                 }
+                first_err
             }
-            first_err
-        }
+        },
     };
     if names.is_some() {
         // Best effort: fails harmlessly while other files remain.
@@ -793,7 +761,7 @@ pub(crate) async fn checked_refs(
 
 /// Deletes every staged name not in `failed`, then the session folder once empty.
 /// Best-effort: errors are ignored, and a folder (or root) turned into a link since the
-/// checks is left alone.
+/// checks is left alone. Only a name listed exactly is deleted, as in [`discard_in`].
 fn release_in(dir: &Path, names: &[String], failed: &[String]) {
     let _guard = fs_lock();
     let root_ok = dir
@@ -802,7 +770,13 @@ fn release_in(dir: &Path, names: &[String], failed: &[String]) {
     if !root_ok || session_is_linked(dir) {
         return;
     }
-    for name in names.iter().filter(|n| !failed.contains(n)) {
+    let listed: Vec<std::ffi::OsString> = fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    for name in names
+        .iter()
+        .filter(|n| !failed.contains(n) && has_exact_entry(&listed, n))
+    {
         let _ = fs::remove_file(dir.join(name));
     }
     let _ = fs::remove_dir(dir);
@@ -952,36 +926,6 @@ pub(crate) mod tests {
 
     fn b64(bytes: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
-    // Each count is the argument's units plus 3 (two quotes and a space) plus std's escapes.
-    #[test]
-    fn command_line_units_add_backslashes_where_std_does() {
-        let units = |arg: &str| attached_command_line_units(0, &[arg]);
-        assert_eq!(units("ab"), 5);
-        assert_eq!(units(r"a\b\\c"), 9);
-        assert_eq!(units(r#"a\\"b"#), 8 + 3);
-        assert_eq!(units(r#"""#), 4 + 1);
-        assert_eq!(units(r"a\\"), 6 + 2);
-        assert_eq!(units(r#"\"x\"#), 7 + 2 + 1);
-        assert_eq!(attached_command_line_units(300, &["a", "b"]), 300 + 4 + 4);
-    }
-
-    #[test]
-    fn command_line_units_count_utf16_units_not_bytes() {
-        assert_eq!(attached_command_line_units(0, &["\u{E9}"]), 4);
-        assert_eq!(attached_command_line_units(0, &["\u{1F600}"]), 5);
-        assert_eq!(
-            attached_command_line_units(0, &[&"\u{E9}".repeat(20_000)]),
-            20_003
-        );
-    }
-
-    #[test]
-    fn the_long_text_refusal_starts_one_unit_past_the_limit() {
-        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT, true).is_ok());
-        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, true).is_err());
-        assert!(refuse_long_attached_argv(ATTACHED_COMMAND_LINE_LIMIT + 1, false).is_ok());
     }
 
     fn webp_fixture() -> Vec<u8> {
@@ -1588,6 +1532,42 @@ pub(crate) mod tests {
         assert_eq!(entries(&dir), ["image-1.png"]);
     }
 
+    /// A named discard removes only a name listed exactly. The first row is red without
+    /// the filter only on a case-insensitive file system (Windows, macOS), so the wiring
+    /// pin below holds the filter on every leg.
+    #[test]
+    fn a_named_discard_removes_only_the_exact_name() {
+        let root = private_root();
+        let dir = root.path().join(SID);
+        let names = |ns: &[&str]| ns.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("A.png"), b"x").unwrap();
+        fs::write(dir.join("image-1.png"), b"x").unwrap();
+        discard_in(root.path(), SID, Some(&names(&["a.png"]))).unwrap();
+        assert_eq!(entries(&dir), ["A.png", "image-1.png"]);
+        discard_in(root.path(), SID, Some(&names(&["A.png"]))).unwrap();
+        assert_eq!(entries(&dir), ["image-1.png"]);
+        fs::write(dir.join("A.png"), b"x").unwrap();
+        discard_in(root.path(), SID, Some(&names(&["a.png", "A.png"]))).unwrap();
+        assert_eq!(entries(&dir), ["image-1.png"]);
+
+        // A session whose folder doesn't exist discards nothing and creates nothing.
+        let other = "fedcba9876543210fedcba9876543210";
+        discard_in(root.path(), other, Some(&names(&["image-1.png"]))).unwrap();
+        assert!(!root.path().join(other).exists());
+
+        use crate::github::repo_meta::tests::wiring_body;
+        let filtered = |body: &str| {
+            body.find("has_exact_entry(")
+                .zip(body.find("remove_file("))
+                .is_some_and(|(f, r)| f < r)
+        };
+        let body = wiring_body(include_str!("attachments.rs"), "discard_in");
+        assert!(filtered(&body), "{body}");
+        let dropped = body.replace("has_exact_entry(", "kept(");
+        assert!(!filtered(&dropped), "the control must flip");
+    }
+
     #[test]
     fn post_checks_validate_every_rule() {
         let root = private_root();
@@ -1676,6 +1656,45 @@ pub(crate) mod tests {
         assert_eq!(entries(&dir), ["image-2.png"]);
         release_in(&dir, &names[1..2], &[]);
         assert!(!dir.exists());
+    }
+
+    /// A release deletes only a name listed exactly. The first row is red without the
+    /// filter only on a case-insensitive file system (Windows, macOS), so the wiring pin
+    /// below holds the filter on every leg; the `failed` conjunct is held on every leg by
+    /// `release_keeps_failed_names_and_the_nonempty_folder` (a failed, listed name stays).
+    #[test]
+    fn a_release_removes_only_the_exact_name() {
+        let root = private_root();
+        let dir = root.path().join(SID);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("A.png"), b"x").unwrap();
+        release_in(&dir, &["a.png".to_string()], &[]);
+        assert_eq!(entries(&dir), ["A.png"]);
+        release_in(&dir, &["A.png".to_string()], &[]);
+        assert!(!dir.exists());
+
+        use crate::github::repo_meta::tests::wiring_body;
+        let filtered = |body: &str| {
+            body.find("has_exact_entry(")
+                .zip(body.find("remove_file("))
+                .is_some_and(|(f, r)| f < r)
+        };
+        let body = wiring_body(include_str!("attachments.rs"), "release_in");
+        assert!(filtered(&body), "{body}");
+        let dropped = body.replace("has_exact_entry(", "kept(");
+        assert!(!filtered(&dropped), "the control must flip");
+    }
+
+    /// A named discard whose session folder can't be listed for a reason other than its
+    /// absence reports that failure; a session path holding a file is one on every OS.
+    #[test]
+    fn a_named_discard_reports_an_unreadable_folder() {
+        let root = private_root();
+        let dir = root.path().join(SID);
+        fs::write(&dir, b"x").unwrap();
+        let names = ["image-1.png".to_string()];
+        assert!(discard_in(root.path(), SID, Some(&names)).is_err());
+        assert!(dir.is_file());
     }
 
     #[tokio::test]

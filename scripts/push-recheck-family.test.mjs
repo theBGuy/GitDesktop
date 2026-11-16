@@ -169,7 +169,7 @@ const EXCLUDED = {
  *  membership can lag the state change or deletion they make, and the condition
  *  that must guard every such call in it (null = scheduled on every success).
  *  Any other unit scheduling it fails the check; the helper's gate plus the
- *  ISSUE_REREAD flag pin keep pin, lock, edit, transfer and delete out, and the
+ *  ISSUE_REREAD flag pin keep pin, lock, transfer and delete out, and the
  *  merge's gate keeps a queued merge out. */
 const LIST_REREAD = {
   useMergePr: { file: `${Q}pr-actions.ts`, gate: "if (!data.queued)" },
@@ -948,8 +948,8 @@ test("any other issue lifecycle write passing the re-read flag fails the check",
         callArgs(stripComments(body), helper).length > 0,
     )
     .map(([name]) => name);
-  // Pin, lock, unlock, edit, transfer and delete at the time of writing.
-  assert.ok(others.length >= 6, JSON.stringify(others));
+  // Pin, lock, unlock, transfer and delete at the time of writing.
+  assert.ok(others.length >= 5, JSON.stringify(others));
   for (const name of others) {
     const mutant = mutateUnit(sources, file, name, (body) => {
       const bare = stripComments(body);

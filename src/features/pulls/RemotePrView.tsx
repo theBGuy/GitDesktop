@@ -162,6 +162,7 @@ import {
   pendingWriteOfKind,
   prApprovalsOptions,
   prChecksRecheck,
+  prDetailsOptions,
   prDiffOptions,
   prUpdateBranchKeys,
   recheckRunsAfterPush,
@@ -332,6 +333,7 @@ import {
 } from "./useBranchRequiredChecks";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
+  type BodyRef,
   composeBodyWithJiraRefs,
   composeBodyWithRefs,
   splitBodyRefBlock,
@@ -704,6 +706,27 @@ export function useFocusCommentAction(
 function withRefLines(text: string, lines: string[]): string {
   if (lines.length === 0) return text;
   return [text.trimEnd(), lines.join("\n")].filter(Boolean).join("\n\n");
+}
+
+/** The edit path's chip cluster: the native tracker's, a linked Jira
+ *  project's, or none. */
+type EditCluster = "native" | "jira" | null;
+
+function editClusterOf(
+  canLinkIssues: boolean,
+  canJiraMention: boolean,
+): EditCluster {
+  if (canLinkIssues) return "native";
+  if (canJiraMention) return "jira";
+  return null;
+}
+
+/** A stored body's trailing refs (either cluster) as one comparable string. */
+function editRefsKey(parts: { refs: BodyRef[]; jiraRefs: string[] }): string {
+  return [
+    ...parts.refs.map((r) => `${r.keyword} #${r.number}`),
+    ...parts.jiraRefs,
+  ].join("\n");
 }
 
 export function RemotePrView({
@@ -2119,6 +2142,30 @@ export function RemotePrView({
   const sentEditBaseRef = useRef<string | undefined>(undefined);
   // The edit draft is keyed on the selected PR, the one the write addresses.
   const editDraftKey = draftKeyFor("pr-edit", entityKey);
+  // Per open of the edit dialog: the base and trailing refs it last seeded, the
+  // chip cluster it last acted under, and whether the user changed the active
+  // cluster since. A resume keeps it.
+  const editFollowRef = useRef<{
+    draftKey: string;
+    base: { seeded: string; seen: string };
+    refsKey: string;
+    cluster: EditCluster;
+    chipsTouched: boolean;
+  } | null>(null);
+  const activeCluster = editClusterOf(canLinkIssues, canJiraMention);
+  /** A stored body as the edit field's text plus the active cluster's trailing
+   *  refs. Pure, so the item's current copy can be read in render. */
+  function editBodyParts(stored: string): {
+    text: string;
+    refs: BodyRef[];
+    jiraRefs: string[];
+  } {
+    // Native active: numeric refs → chips; any trailing Jira line rides back in
+    // `text` so an unedited save can't drop it. Jira active: the mirror.
+    if (canLinkIssues) return splitBodyRefBlock(stored, "native");
+    if (canJiraMention) return splitBodyRefBlock(stored, "jira");
+    return { text: stored, refs: [], jiraRefs: [] };
+  }
   const edit = useEditTitleBody({
     onSave: ({ title, body }, begin) => {
       // The active cluster owns the trailing ref block — re-compose from the
@@ -2145,6 +2192,13 @@ export function RemotePrView({
       });
     },
     successToast: "Pull request updated",
+    fresh:
+      details.data === undefined || detailsStale
+        ? null
+        : {
+            title: details.data.title,
+            body: editBodyParts(details.data.body).text,
+          },
     attach: {
       draftKey: editDraftKey,
       kind: "pr",
@@ -2153,6 +2207,15 @@ export function RemotePrView({
         const sent = sentEditBaseRef.current;
         if (sent !== undefined) setSavedEditBase(sent);
       },
+      reread: () =>
+        queryClient.refetchQueries(
+          {
+            queryKey: prDetailsOptions(repoPath, number, lens).queryKey,
+            exact: true,
+            type: "active",
+          },
+          { cancelRefetch: false },
+        ),
     },
   });
   const editAttachOwner = useAttachmentOwner("pr-edit", true);
@@ -2220,6 +2283,67 @@ export function RemotePrView({
     commitSubjects: details.data?.commits.map((c) => c.headline) ?? [],
     link: jiraLink.data ?? null,
   });
+  /** Resets the active cluster's chips from a stored body's parts. */
+  function resetEditChips(parts: { refs: BodyRef[]; jiraRefs: string[] }) {
+    if (canLinkIssues) resetLinkedIssues(parts.refs);
+    else if (canJiraMention) resetJiraChips(parts.jiraRefs);
+  }
+  // Marks the active cluster changed by the user, so no follow resets it.
+  function markEditChipsTouched() {
+    if (editFollowRef.current) editFollowRef.current.chipsTouched = true;
+  }
+  // Follows the PR into its open edit dialog beside the text fields' own follow.
+  // The base moves only while the picker still holds its seed, tested when the
+  // PR's base itself moved. The chips reset only while the user hasn't changed
+  // the cluster since its seed: extraction adds chips after open, so the list
+  // can't say "untouched", and a reset would bring back a removed one.
+  // A cluster turning on while open takes the stored block over only while the
+  // description still holds what Edit seeded or last followed it to, per the
+  // hook's record: a value compare can't tell a reference the user deleted from
+  // one the text follow stripped. Otherwise the text stays as typed and the
+  // cluster counts as touched. A cluster turning off changes nothing here.
+  const followEdit = useEffectEvent(
+    (
+      open: boolean,
+      draftKey: string,
+      base: string | undefined,
+      stored: string | undefined,
+      cluster: EditCluster,
+    ) => {
+      const record = editFollowRef.current;
+      if (!open || record === null || record.draftKey !== draftKey) return;
+      if (base === undefined || stored === undefined) return;
+      if (record.base.seen !== base) {
+        record.base.seen = base;
+        if (base !== record.base.seeded && editBase === record.base.seeded) {
+          setEditBase(base);
+          record.base.seeded = base;
+        }
+      }
+      if (cluster !== record.cluster) {
+        record.cluster = cluster;
+        if (cluster === null) return;
+        if (edit.isFieldUntouched("body")) {
+          const parts = editBodyParts(stored);
+          record.refsKey = editRefsKey(parts);
+          resetEditChips(parts);
+        } else {
+          record.chipsTouched = true;
+        }
+        return;
+      }
+      const parts = editBodyParts(stored);
+      const refsKey = editRefsKey(parts);
+      if (record.chipsTouched || refsKey === record.refsKey) return;
+      record.refsKey = refsKey;
+      resetEditChips(parts);
+    },
+  );
+  const followBase = detailsStale ? undefined : details.data?.baseRefName;
+  const followBody = detailsStale ? undefined : details.data?.body;
+  useLayoutEffect(() => {
+    followEdit(edit.open, editDraftKey, followBase, followBody, activeCluster);
+  }, [edit.open, editDraftKey, followBase, followBody, activeCluster]);
   const prGen = useGeneratePrDescription(repoPath);
   const composerRef = useRef<MarkdownEditorHandle>(null);
   // The generate-commit-message binding's title suffix. The chord itself lives in
@@ -3267,25 +3391,6 @@ export function RemotePrView({
   // No tracker ⇒ no chips, open the raw body. `prForGen` aliases the narrowed `pr`
   // because TS doesn't carry the outer `!pr` guard into these hoisted closures.
   const prForGen = pr;
-  /** A stored body as the edit field's text, with the active cluster's chips
-   *  reset from its trailing ref block (on open). */
-  function seedEditBody(stored: string): string {
-    if (canLinkIssues) {
-      // Native active: numeric refs → chips; any trailing Jira line rides back in
-      // `text` so an unedited save can't drop it.
-      const { text, refs } = splitBodyRefBlock(stored, "native");
-      resetLinkedIssues(refs);
-      return text;
-    }
-    if (canJiraMention) {
-      // Jira active: mention keys → chips; any trailing numeric line rides back in
-      // `text` (mirror preservation).
-      const { text, jiraRefs } = splitBodyRefBlock(stored, "jira");
-      resetJiraChips(jiraRefs);
-      return text;
-    }
-    return stored;
-  }
   /** A partial save's read-back as the edit field's text, leaving the chips
    *  alone: they composed its trailing block and hold every change made since.
    *  Block lines the submitted text itself ended with stay in the text. */
@@ -3317,10 +3422,16 @@ export function RemotePrView({
     // a previous session's unsaved pick.
     setEditBase(prForGen.baseRefName);
     setSavedEditBase(null);
-    edit.openEdit({
-      title: prForGen.title,
-      body: seedEditBody(prForGen.body),
-    });
+    const parts = editBodyParts(prForGen.body);
+    resetEditChips(parts);
+    editFollowRef.current = {
+      draftKey: editDraftKey,
+      base: { seeded: prForGen.baseRefName, seen: prForGen.baseRefName },
+      refsKey: editRefsKey(parts),
+      cluster: activeCluster,
+      chipsTouched: false,
+    };
+    edit.openEdit({ title: prForGen.title, body: parts.text });
   }
 
   // AI title+description generation — shared by the Edit dialog's Generate button
@@ -3369,6 +3480,7 @@ export function RemotePrView({
         edit.form.setFieldValue("body", d.body);
         // Union the model's proposed issue links into the chip cluster (same
         // rules as create — relate-default, dismissed-set, AI sparkle).
+        markEditChipsTouched();
         upsertAiIssues({ closes: d.closes, relates: d.relates });
         // Union the model's proposed Jira mentions into the mention cluster.
         upsertAiJira({ jiraMentions: d.jiraMentions });
@@ -5235,9 +5347,18 @@ export function RemotePrView({
                 repoPath={repoPath}
                 lens={lens}
                 chips={linkedIssues}
-                onToggleKeyword={toggleIssueKeyword}
-                onRemove={removeIssue}
-                onPick={pickIssue}
+                onToggleKeyword={(n) => {
+                  markEditChipsTouched();
+                  toggleIssueKeyword(n);
+                }}
+                onRemove={(n) => {
+                  markEditChipsTouched();
+                  removeIssue(n);
+                }}
+                onPick={(n) => {
+                  markEditChipsTouched();
+                  pickIssue(n);
+                }}
                 disabled={prGen.generating}
                 appliedOn="save"
               />
@@ -5247,8 +5368,14 @@ export function RemotePrView({
                 repoPath={repoPath}
                 link={jiraLink.data ?? null}
                 jiraChips={jiraChips}
-                onRemove={removeJiraChip}
-                onPick={pickJiraChip}
+                onRemove={(key) => {
+                  markEditChipsTouched();
+                  removeJiraChip(key);
+                }}
+                onPick={(key) => {
+                  markEditChipsTouched();
+                  pickJiraChip(key);
+                }}
                 disabled={prGen.generating}
                 appliedOn="save"
               />

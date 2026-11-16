@@ -21,6 +21,7 @@ const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
 const {
+  BRANCH_PUSHED_DISCLOSURE,
   composedErrorPresentation,
   isTransportError,
   otherChangesSaved,
@@ -1663,6 +1664,33 @@ test("a bare Bitbucket transport failure still reads as unreachable", () => {
   assert.equal(
     presentError(appError("bitbucket", BB_TRANSPORT_LINE)).summary,
     reach("Bitbucket"),
+  );
+});
+
+/** `attached_run_failure`'s New pull request line (github/pr.rs), over gh's
+ *  stderr with a transport phrase. */
+const PR_PUSHED_HEADLINE =
+  "The branch was pushed, but the pull request wasn't created because image-1.png didn't upload. Try again.";
+const GH_UPLOAD_TRANSPORT =
+  'failed to upload image-1.png: Post "https://uploads.github.com/": dial tcp 140.82.112.6:443: i/o timeout';
+
+test("New pull request's branch-pushed headline outranks gh's transport tail", () => {
+  assert.ok(PR_PUSHED_HEADLINE.startsWith(BRANCH_PUSHED_DISCLOSURE));
+  const message = `${PR_PUSHED_HEADLINE}\n${GH_UPLOAD_TRANSPORT}`;
+  const p = presentError(appError("gh", message));
+  assert.equal(p.summary, PR_PUSHED_HEADLINE);
+  assert.equal(p.fullText, message);
+  // The rule is gh's alone: the same headline under another forge kind is not claimed.
+  assert.equal(
+    presentError(appError("glab", message)).summary,
+    reach("GitLab"),
+  );
+  // Bitbucket's create wrapper says the branch was pushed in its own words, which
+  // the constant does not claim.
+  assert.ok(
+    !"The branch was pushed, but creating the pull request failed: x".startsWith(
+      BRANCH_PUSHED_DISCLOSURE,
+    ),
   );
 });
 

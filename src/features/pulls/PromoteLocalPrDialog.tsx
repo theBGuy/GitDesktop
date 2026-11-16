@@ -18,7 +18,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { createdNumberOf } from "@/lib/attachments/references";
-import { presentError } from "@/lib/error-summary";
+import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
 import { useBranches, useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
@@ -196,7 +196,8 @@ export function PromoteLocalPrDialog({
     });
   }
 
-  /** Undoes {@link closeLocal} after a create that produced nothing remote. It
+  /** Undoes {@link closeLocal} after a create call that rejected, with no remote
+   *  pull request known to exist. It
    *  touches only status/closedAt, and only while the record still carries this
    *  flow's close: anything else changed it since, and that change wins. */
   function reopenLocal(
@@ -336,8 +337,9 @@ export function PromoteLocalPrDialog({
       }
     } catch (e) {
       if (created === null) {
-        // Nothing remote exists, so retrying is correct: keep the dialog open.
-        // A failed local close attempted no create, so there's nothing to undo.
+        // The create call rejected and no remote PR is known to exist: keep the
+        // dialog open either way (a may-have-landed error says to check before
+        // retrying). A failed local close attempted no create: nothing to undo.
         if (closedAt === null) {
           toastError(e);
           return;
@@ -353,7 +355,9 @@ export function PromoteLocalPrDialog({
         if (reopenError === null) toastError(e);
         else
           toastComposedError({
-            title: `Couldn't create the ${prNoun}: ${presentError(e).summary}`,
+            title: mayHaveLanded(e)
+              ? presentError(e).summary
+              : `Couldn't create the ${prNoun}: ${presentError(e).summary}`,
             description:
               "The local PR couldn't be reopened — reopen it from its view.",
             errors: [e, reopenError],

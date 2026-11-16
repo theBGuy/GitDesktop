@@ -1279,6 +1279,130 @@ test("generate-held-while-submitting sees every real form-hosted chord", () => {
   );
 });
 
+const draftCreateHold = scanner("draft-create-hold");
+
+/** A create dialog with all four member markers, one per line. */
+function draftHoldFixture({
+  form = "  const form = useAppForm({ onSubmit: async () => create() });",
+  seed = "  useSeedOnOpen(open, seedOnOpen);",
+  reset = "  const seedOnOpen = () => form.reset();",
+  create = "  const create = () => createIssue.mutateAsync(vars);",
+  hook = "",
+} = {}) {
+  return [
+    "export function CreateThingDialog({ open }) {",
+    form,
+    seed,
+    reset,
+    create,
+    hook,
+    "  return null;",
+    "}",
+  ].join("\n");
+}
+
+test("draft-create-hold reports a member without the hook at its useAppForm line", () => {
+  assert.deepEqual(draftCreateHold(draftHoldFixture()), [2]);
+  assert.deepEqual(
+    draftCreateHold(
+      draftHoldFixture({ hook: "  const hold = useDraftCreateHold(form);" }),
+    ),
+    [],
+  );
+});
+
+test("draft-create-hold needs every one of the four markers", () => {
+  for (const missing of ["form", "seed", "reset", "create"]) {
+    assert.deepEqual(
+      draftCreateHold(draftHoldFixture({ [missing]: "  const x = 1;" })),
+      [],
+      `a file without its ${missing} marker is no member`,
+    );
+  }
+});
+
+test("draft-create-hold counts a reset on any receiver ending in orm", () => {
+  assert.deepEqual(
+    draftCreateHold(
+      draftHoldFixture({
+        reset: "  const seedOnOpen = () => createForm.reset();",
+      }),
+    ),
+    [2],
+  );
+});
+
+test("draft-create-hold reads markers in code only, never in comments or strings", () => {
+  const inComments = draftHoldFixture({
+    form: "  // const form = useAppForm({});",
+    seed: "  /* useSeedOnOpen(open, seedOnOpen); */",
+    reset: "  // form.reset();",
+    create: "  // createIssue.mutateAsync(vars);",
+  });
+  assert.deepEqual(draftCreateHold(inComments), []);
+  const inStrings = draftHoldFixture({
+    form: '  const a = "useAppForm(";',
+    seed: "  const b = 'useSeedOnOpen(';",
+    reset: "  const c = `form.reset(`;",
+    create: '  const d = "mutateAsync(";',
+  });
+  assert.deepEqual(draftCreateHold(inStrings), []);
+});
+
+test("draft-create-hold takes no hook call spelled in a comment or a string", () => {
+  assert.deepEqual(
+    draftCreateHold(
+      draftHoldFixture({ hook: "  // const hold = useDraftCreateHold(form);" }),
+    ),
+    [2],
+  );
+  assert.deepEqual(
+    draftCreateHold(
+      draftHoldFixture({ hook: '  const note = "useDraftCreateHold(form)";' }),
+    ),
+    [2],
+  );
+});
+
+test("draft-create-hold refuses a source the mask cannot lex", () => {
+  assert.throws(
+    () =>
+      draftCreateHold(
+        draftHoldFixture({ hook: "  const broken = `unterminated ${ x;" }),
+      ),
+    /draft-create-hold: cannot lex/,
+  );
+});
+
+test("draft-create-hold sees exactly the ten real members", () => {
+  // A rename of the hook or a marker, or a new member, fails here instead of
+  // leaving the check scanning nothing.
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const check = CHECKS.find((c) => c.name === "draft-create-hold");
+  const adopters = [
+    "src/features/discussions/CreateDiscussionDialog.tsx",
+    "src/features/issues/CreateIssueDialog.tsx",
+    "src/features/issues/CreateLocalIssueDialog.tsx",
+    "src/features/pulls/CreateLocalPrDialog.tsx",
+    "src/features/tags/CreateReleaseDialog.tsx",
+  ];
+  const withoutHook = (source) =>
+    source.replace(/\buseDraftCreateHold\s*\(/g, "useOtherHook(");
+  const members = readdirSync(join(root, "src"), { recursive: true })
+    .map((entry) => `src/${String(entry).split("\\").join("/")}`)
+    .filter(check.appliesTo)
+    .filter((file) => {
+      const source = readFileSync(join(root, file), "utf8");
+      return check.scan(view(withoutHook(source)), file).length > 0;
+    })
+    .sort();
+  assert.deepEqual(members, [...adopters, ...check.allowlist].sort());
+  for (const file of adopters) {
+    const source = readFileSync(join(root, file), "utf8");
+    assert.deepEqual(check.scan(view(source), file), [], file);
+  }
+});
+
 test("lone-activity-boundary flags a JSX Activity in either spelling", () => {
   assert.deepEqual(
     loneActivity('<Activity mode="hidden">{kids}</Activity>'),

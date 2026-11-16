@@ -15,6 +15,7 @@ import { RemotePrView } from "@/features/pulls/RemotePrView";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import {
   forgeIssueList,
+  forgeIssueView,
   forgePrApprovals,
   forgePrComment,
   forgePrEdit,
@@ -30,6 +31,7 @@ import type {
   PrDetails,
 } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/handler-registry";
+import { getJiraLink } from "@/lib/jira/store";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -43,6 +45,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(),
   forgeIssueList: vi.fn(),
+  forgeIssueView: vi.fn(),
   forgePrView: vi.fn(),
   forgePrApprovals: vi.fn(),
   forgePrComment: vi.fn(),
@@ -75,6 +78,12 @@ vi.mock("@/lib/attachments/use-attachment-support", () => ({
 vi.mock("@/lib/attachments/api", () => ({
   attachmentStage: vi.fn(),
   attachmentDiscard: vi.fn(async () => undefined),
+}));
+// The repo's Jira link drives the Bitbucket mention cluster: unlinked unless a
+// test links one.
+vi.mock("@/lib/jira/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/jira/store")>()),
+  getJiraLink: vi.fn(),
 }));
 
 const REPO = "C:/repo";
@@ -187,6 +196,9 @@ beforeEach(() => {
   // The open-issues page the chips resolve against: unread unless a test lists one.
   vi.mocked(forgeIssueList).mockReset();
   vi.mocked(forgeIssueList).mockRejectedValue(new Error("not listed"));
+  vi.mocked(forgeIssueView).mockReset();
+  vi.mocked(forgeIssueView).mockRejectedValue(new Error("not read"));
+  vi.mocked(getJiraLink).mockResolvedValue(null);
   vi.mocked(gitBranches).mockResolvedValue(
     ["main", "next", "old"].map(
       (name) =>
@@ -216,6 +228,7 @@ function mount() {
       <RemotePrView repoPath={REPO} number={7} />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 const box = () =>
@@ -242,10 +255,11 @@ async function openPrEdit(extra: Record<string, boolean> = {}) {
     ...GITLAB,
     implemented: { ...implemented, mrEdit: true, ...extra },
   } as unknown as ForgeStatus);
-  mount();
+  const client = mount();
   await screen.findByText("Merge request seven", undefined, { timeout: 3000 });
   fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
   await waitFor(() => expect(editBox()).toBeInTheDocument());
+  return client;
 }
 
 describe("RemotePrView edit attachments", () => {
@@ -420,6 +434,35 @@ describe("RemotePrView edit attachments", () => {
   const chipButton = (n: number) =>
     screen.queryByRole("button", { name: new RegExp(`issue ${n}:`) });
 
+  it("sends a typed reference the save turned into a chip once on the retry", async () => {
+    let stored = "Words";
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: stored,
+    }));
+    await openPrEdit({ issues: true });
+    fireEvent.change(editBox(), {
+      target: { value: "Words edited\n\nCloses #5" },
+    });
+    // The write lands but its reply times out, so the re-read confirms it.
+    vi.mocked(forgePrEdit).mockImplementationOnce(async () => {
+      stored = "Words edited\n\nCloses #5";
+      throw { kind: "timeout", message: "may have landed" };
+    });
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(chipButton(5)).toBeTruthy());
+    expect(editBox().value).toBe("Words edited\n\nCloses #5");
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(sentBody(1)).toBe("Words edited\n\nCloses #5");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("keeps the chip edits made while a partial save ran, and sends them next", async () => {
     vi.mocked(forgePrView).mockImplementation(async () => ({
       ...pr(),
@@ -505,7 +548,8 @@ describe("RemotePrView edit attachments", () => {
     vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise as never);
     fireEvent.click(button("Save"));
     await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
-    expect(sentBody(0)).toBe(`${typed}\n\nCloses #3`);
+    // The typed ref and the chip's share one trailing block.
+    expect(sentBody(0)).toBe(`${typed}\nCloses #3`);
     await act(async () =>
       pending.resolve({
         failedAttachments: ["image-1.png"],
@@ -690,6 +734,613 @@ describe("RemotePrView edit attachments", () => {
     } finally {
       click.mockRestore();
     }
+  });
+});
+
+describe("RemotePrView edit follows the pull request", () => {
+  const sentBody = (call: number) =>
+    vi.mocked(forgePrEdit).mock.calls[call][3] as string;
+  const sentBase = (call: number) => vi.mocked(forgePrEdit).mock.calls[call][5];
+  const chipButton = (n: number) =>
+    screen.queryByRole("button", { name: new RegExp(`issue ${n}:`) });
+  const baseBox = () => screen.getByRole("combobox", { name: "Base branch" });
+  const issue = (number: number, title: string): IssueInfo => ({
+    number,
+    url: "",
+    title,
+    state: "OPEN",
+    createdAt: "",
+    updatedAt: "",
+    author: null,
+    labels: [],
+  });
+
+  /** Re-reads PR 7's details, answering with `next` over the base shape. */
+  async function reread(client: QueryClient, next: Partial<PrDetails>) {
+    vi.mocked(forgePrView).mockImplementation(
+      async () => ({ ...pr(), ...next }) as PrDetails,
+    );
+    // The details entry is the one whose data is PR 7 itself (the diff key
+    // extends it and holds text).
+    const query = client
+      .getQueryCache()
+      .findAll()
+      .find(
+        (q) =>
+          (q.state.data as { id?: string } | undefined)?.id === "PR_7" &&
+          q.getObserversCount() > 0,
+      );
+    expect(query).toBeDefined();
+    await act(async () => {
+      await client.refetchQueries({
+        queryKey: query?.queryKey,
+        exact: true,
+      });
+    });
+  }
+
+  /** A re-read that also moves the base, waited on until the untouched picker
+   *  shows it: the commit that delivered `next` has run every follow. */
+  async function rereadLanded(client: QueryClient, next: Partial<PrDetails>) {
+    await reread(client, { ...next, baseRefName: "next" });
+    await waitFor(() => expect(baseBox()).toHaveTextContent("next"));
+  }
+
+  async function saveAndClose() {
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }
+
+  it("follows the base into an untouched picker, and Save sends no base", async () => {
+    const client = await openPrEdit();
+    expect(baseBox()).toHaveTextContent("main");
+    await reread(client, { baseRefName: "next" });
+    await waitFor(() => expect(baseBox()).toHaveTextContent("next"));
+    await saveAndClose();
+    expect(sentBase(0)).toBeUndefined();
+  });
+
+  it("leaves a moved picker alone, and Save sends the pick", async () => {
+    const user = userEvent.setup();
+    const client = await openPrEdit();
+    await user.click(baseBox());
+    await user.click(await screen.findByRole("option", { name: /^old/ }));
+    expect(baseBox()).toHaveTextContent("old");
+    await reread(client, { baseRefName: "next" });
+    expect(baseBox()).toHaveTextContent("old");
+    await saveAndClose();
+    expect(sentBase(0)).toBe("old");
+  });
+
+  it("follows the base into a picker moved and moved back to its seed", async () => {
+    const user = userEvent.setup();
+    const client = await openPrEdit();
+    await user.click(baseBox());
+    await user.click(await screen.findByRole("option", { name: /^old/ }));
+    expect(baseBox()).toHaveTextContent("old");
+    await user.click(baseBox());
+    await user.click(await screen.findByRole("option", { name: /^main/ }));
+    expect(baseBox()).toHaveTextContent("main");
+    await reread(client, { baseRefName: "next" });
+    await waitFor(() => expect(baseBox()).toHaveTextContent("next"));
+    await saveAndClose();
+    expect(sentBase(0)).toBeUndefined();
+  });
+
+  it("resets untouched chips to the re-read refs, and Save ends with them", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    const client = await openPrEdit({ issues: true });
+    expect(chipButton(3)).toBeTruthy();
+    await reread(client, { body: "Words\n\nCloses #5" });
+    await waitFor(() => expect(chipButton(5)).toBeTruthy());
+    expect(chipButton(3)).toBeNull();
+    // The follow's reset probes the ref the open page lacks.
+    expect(vi.mocked(forgeIssueView).mock.calls.some((c) => c[1] === 5)).toBe(
+      true,
+    );
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words\n\nCloses #5");
+  });
+
+  it("keeps the extracted chip through a follow on an untouched cluster", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      headRefName: "fix/42-thing",
+    }));
+    vi.mocked(forgeIssueList).mockResolvedValue([issue(42, "Fix the thing")]);
+    const client = await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(42)).toBeTruthy());
+    await reread(client, {
+      headRefName: "fix/42-thing",
+      body: "Words\n\nCloses #3",
+    });
+    await waitFor(() => expect(chipButton(3)).toBeTruthy());
+    await waitFor(() => expect(chipButton(42)).toBeTruthy());
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toMatch(/^Words\n\n/);
+    expect(sentBody(0)).toContain("Closes #3");
+    expect(sentBody(0)).toContain("Relates to #42");
+  });
+
+  it("never resets a cluster whose extracted chip was removed", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      headRefName: "fix/42-thing",
+    }));
+    vi.mocked(forgeIssueList).mockResolvedValue([issue(42, "Fix the thing")]);
+    const client = await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(42)).toBeTruthy());
+    fireEvent.click(button("Remove #42"));
+    await waitFor(() => expect(chipButton(42)).toBeNull());
+    await rereadLanded(client, {
+      headRefName: "fix/42-thing",
+      body: "Words\n\nCloses #3",
+    });
+    await act(async () => undefined);
+    expect(editBox().value).toBe("Words");
+    expect(chipButton(3)).toBeNull();
+    expect(chipButton(42)).toBeNull();
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words");
+  });
+
+  it("never resets a cluster whose keyword was toggled", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    const client = await openPrEdit({ issues: true });
+    fireEvent.click(button(/^Closes issue 3:/));
+    await waitFor(() => expect(button(/^Relates to issue 3:/)).toBeTruthy());
+    await rereadLanded(client, { body: "Words\n\nCloses #3\nCloses #5" });
+    await act(async () => undefined);
+    expect(chipButton(5)).toBeNull();
+    expect(button(/^Relates to issue 3:/)).toBeTruthy();
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words\n\nRelates to #3");
+  });
+
+  it("never resets a cluster with a picked chip", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    vi.mocked(forgeIssueList).mockResolvedValue([
+      issue(3, "Three"),
+      issue(9, "Nine"),
+    ]);
+    const user = userEvent.setup();
+    const client = await openPrEdit({ issues: true });
+    await user.click(button("Link an issue"));
+    await user.click(
+      await screen.findByPlaceholderText("Search issues by # or title"),
+    );
+    await user.click(await screen.findByRole("option", { name: /#9/ }));
+    await waitFor(() => expect(chipButton(9)).toBeTruthy());
+    await rereadLanded(client, { body: "Words\n\nCloses #3\nCloses #5" });
+    await act(async () => undefined);
+    expect(chipButton(5)).toBeNull();
+    expect(chipButton(3)).toBeTruthy();
+    expect(chipButton(9)).toBeTruthy();
+  });
+
+  it("never resets a cluster an AI draft added a chip to", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    // The model's proposals land only from the candidates it was fed.
+    vi.mocked(forgeIssueList).mockResolvedValue([
+      issue(3, "Three"),
+      issue(9, "Nine"),
+    ]);
+    const client = await openPrEdit({ issues: true });
+    await waitFor(() => expect(button(/^Closes issue 3: Three/)).toBeTruthy());
+    act(() => screen.getByRole("textbox", { name: "Title" }).focus());
+    await userEvent.keyboard("{Control>}g{/Control}");
+    await act(async () => undefined);
+    expect(generateFromDiff).toHaveBeenCalledTimes(1);
+    const onUpdate = generateFromDiff.mock.calls[0][4] as (d: object) => void;
+    act(() =>
+      onUpdate({
+        title: "Generated",
+        body: "Generated body",
+        closes: [],
+        relates: [9],
+        jiraMentions: [],
+      }),
+    );
+    await waitFor(() => expect(chipButton(9)).toBeTruthy());
+    await rereadLanded(client, { body: "Words\n\nCloses #3\nCloses #5" });
+    await act(async () => undefined);
+    expect(chipButton(5)).toBeNull();
+    expect(chipButton(3)).toBeTruthy();
+    expect(chipButton(9)).toBeTruthy();
+  });
+
+  it("does not reset chips when a re-read carries the same refs", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    const client = await openPrEdit({ issues: true });
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    await reread(client, {
+      title: "Renamed elsewhere",
+      body: "Words\n\nCloses #3",
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue(
+        "Renamed elsewhere",
+      ),
+    );
+    // A reset would probe #3 again (it is on no open page).
+    expect(forgeIssueView).not.toHaveBeenCalled();
+    expect(button(/^Closes issue 3:/)).toBeTruthy();
+  });
+
+  it("follows the Jira cluster while untouched, never after a removal", async () => {
+    const link = {
+      siteHost: "acme.atlassian.net",
+      projectKey: "ABC",
+      projectName: "Acme",
+    };
+    vi.mocked(getJiraLink).mockResolvedValue(link);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nRelates to ABC-1",
+    }));
+    const bitbucket = {
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus;
+    vi.mocked(forgeStatus).mockResolvedValue(bitbucket);
+    let client = mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    const openEdit = async () => {
+      await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+      fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+      await waitFor(() => expect(editBox()).toBeInTheDocument());
+      await waitFor(() => expect(button("Remove ABC-1")).toBeTruthy());
+    };
+    await openEdit();
+    expect(editBox().value).toBe("Words");
+    await reread(client, { body: "Words\n\nRelates to ABC-2" });
+    await waitFor(() => expect(button("Remove ABC-2")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull();
+
+    cleanup();
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nRelates to ABC-1",
+    }));
+    client = mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await openEdit();
+    fireEvent.click(button("Remove ABC-1"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull(),
+    );
+    await rereadLanded(client, { body: "Words\n\nRelates to ABC-2" });
+    await act(async () => undefined);
+    expect(screen.queryByRole("button", { name: "Remove ABC-2" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull();
+  });
+
+  it("keeps the chip row and the sent description through its own save and an ordinary failure", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      headRefName: "fix/42-thing",
+    }));
+    vi.mocked(forgeIssueList).mockResolvedValue([issue(42, "Fix the thing")]);
+    const client = await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(42)).toBeTruthy());
+    const chipNames = () =>
+      screen
+        .getAllByRole("button", { name: /issue \d+:/ })
+        .map((b) => b.getAttribute("aria-label")?.split(":")[0]);
+    expect(chipNames()).toEqual(["Relates to issue 42"]);
+    const pending = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(pending.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    expect(sentBody(0)).toBe("Relates to #42");
+    // The save's own patch puts the composed description in the cache.
+    await waitFor(() =>
+      expect(
+        client
+          .getQueryCache()
+          .findAll()
+          .some(
+            (q) =>
+              (q.state.data as PrDetails | undefined)?.id === "PR_7" &&
+              q.getObserversCount() > 0 &&
+              (q.state.data as PrDetails).body === "Relates to #42",
+          ),
+      ).toBe(true),
+    );
+    await act(async () => undefined);
+    await waitFor(() => expect(chipNames()).toEqual(["Relates to issue 42"]));
+    await act(async () => pending.reject(new Error("refused")));
+    await waitFor(() =>
+      expect(button("Save")).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await waitFor(() => expect(chipButton(42)).toBeTruthy());
+    expect(chipNames()).toEqual(["Relates to issue 42"]);
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    expect(sentBody(1)).toBe(sentBody(0));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("takes the Jira block up into chips when the link lands after Edit opened, and Save keeps the line", async () => {
+    const link = {
+      siteHost: "acme.atlassian.net",
+      projectKey: "ABC",
+      projectName: "Acme",
+    };
+    const linkRead = deferred<Awaited<ReturnType<typeof getJiraLink>>>();
+    vi.mocked(getJiraLink).mockReturnValue(linkRead.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nRelates to ABC-1",
+    }));
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus);
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    // No cluster yet: the description holds the stored body whole.
+    expect(editBox().value).toBe("Words\n\nRelates to ABC-1");
+    expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull();
+    await act(async () => linkRead.resolve(link));
+    await waitFor(() => expect(button("Remove ABC-1")).toBeTruthy());
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words\n\nRelates to ABC-1");
+  });
+
+  it("takes the issue block up into chips when the forge status lands after Edit opened, and Save keeps the line", async () => {
+    // Pending status means no detected provider, which leaves Edit available.
+    const status = deferred<ForgeStatus>();
+    vi.mocked(forgeStatus).mockReturnValue(status.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words\n\nCloses #3");
+    expect(chipButton(3)).toBeNull();
+    const implemented = (GITLAB as unknown as { implemented: object })
+      .implemented;
+    await act(async () =>
+      status.resolve({
+        ...GITLAB,
+        implemented: { ...implemented, mrEdit: true, issues: true },
+      } as unknown as ForgeStatus),
+    );
+    await waitFor(() => expect(chipButton(3)).toBeTruthy());
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words\n\nCloses #3");
+  });
+
+  it("leaves the issue block with a description typed before the forge status lands, and Save sends it once", async () => {
+    const status = deferred<ForgeStatus>();
+    vi.mocked(forgeStatus).mockReturnValue(status.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    const typed = "Words edited\n\nCloses #3";
+    fireEvent.change(editBox(), { target: { value: typed } });
+    expect(
+      screen.queryByRole("button", { name: "Link an issue" }),
+    ).not.toBeInTheDocument();
+    const implemented = (GITLAB as unknown as { implemented: object })
+      .implemented;
+    await act(async () =>
+      status.resolve({
+        ...GITLAB,
+        implemented: { ...implemented, mrEdit: true, issues: true },
+      } as unknown as ForgeStatus),
+    );
+    // The cluster's field is on screen: the flip has reached the view.
+    await waitFor(() => expect(button("Link an issue")).toBeTruthy());
+    await act(async () => undefined);
+    expect(chipButton(3)).toBeNull();
+    // A reset would probe #3 (it is on no open page).
+    expect(vi.mocked(forgeIssueView).mock.calls.some((c) => c[1] === 3)).toBe(
+      false,
+    );
+    expect(editBox().value).toBe(typed);
+    await saveAndClose();
+    expect(sentBody(0)).toBe(typed);
+  });
+
+  it("leaves the Jira block with a description typed before the link lands, and Save sends it once", async () => {
+    const linkRead = deferred<Awaited<ReturnType<typeof getJiraLink>>>();
+    vi.mocked(getJiraLink).mockReturnValue(linkRead.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nRelates to ABC-1",
+    }));
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus);
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    const typed = "Words edited\n\nRelates to ABC-1";
+    fireEvent.change(editBox(), { target: { value: typed } });
+    expect(
+      screen.queryByRole("button", { name: "Link an issue" }),
+    ).not.toBeInTheDocument();
+    await act(async () =>
+      linkRead.resolve({
+        siteHost: "acme.atlassian.net",
+        projectKey: "ABC",
+        projectName: "Acme",
+      }),
+    );
+    await waitFor(() => expect(button("Link an issue")).toBeTruthy());
+    await act(async () => undefined);
+    expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull();
+    expect(editBox().value).toBe(typed);
+    await saveAndClose();
+    expect(sentBody(0)).toBe(typed);
+  });
+
+  it("brings back no issue chip for a reference deleted before the forge status lands, and Save leaves it out", async () => {
+    const status = deferred<ForgeStatus>();
+    vi.mocked(forgeStatus).mockReturnValue(status.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words\n\nCloses #3");
+    fireEvent.change(editBox(), { target: { value: "Words" } });
+    const implemented = (GITLAB as unknown as { implemented: object })
+      .implemented;
+    await act(async () =>
+      status.resolve({
+        ...GITLAB,
+        implemented: { ...implemented, mrEdit: true, issues: true },
+      } as unknown as ForgeStatus),
+    );
+    await waitFor(() => expect(button("Link an issue")).toBeTruthy());
+    await act(async () => undefined);
+    expect(chipButton(3)).toBeNull();
+    expect(vi.mocked(forgeIssueView).mock.calls.some((c) => c[1] === 3)).toBe(
+      false,
+    );
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words");
+  });
+
+  it("brings back no Jira chip for a reference deleted before the link lands, and Save leaves it out", async () => {
+    const linkRead = deferred<Awaited<ReturnType<typeof getJiraLink>>>();
+    vi.mocked(getJiraLink).mockReturnValue(linkRead.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nRelates to ABC-1",
+    }));
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus);
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words\n\nRelates to ABC-1");
+    fireEvent.change(editBox(), { target: { value: "Words" } });
+    await act(async () =>
+      linkRead.resolve({
+        siteHost: "acme.atlassian.net",
+        projectKey: "ABC",
+        projectName: "Acme",
+      }),
+    );
+    await waitFor(() => expect(button("Link an issue")).toBeTruthy());
+    await act(async () => undefined);
+    expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull();
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words");
+  });
+
+  it("holds a fresh form's Save through the host's re-read after a save that left the screen", async () => {
+    await openPrEdit();
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Typed title" },
+    });
+    const save = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(save.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const read = deferred<PrDetails>();
+    let reads = 0;
+    vi.mocked(forgePrView).mockImplementation(() => {
+      reads += 1;
+      return read.promise;
+    });
+    await act(async () => save.resolve({ failedAttachments: [], body: null }));
+    await waitFor(() => expect(reads).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    const saveButton = () =>
+      screen.getByRole("button", { name: /^(Loading)?Save$/ });
+    expect(saveButton()).toHaveAttribute("aria-disabled", "true");
+    expect(reasonOf(saveButton())).toBe("Applying this change…");
+    await act(async () => read.resolve({ ...pr(), title: "Typed title" }));
+    await waitFor(() =>
+      expect(saveButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(saveButton()).not.toBeDisabled();
   });
 });
 

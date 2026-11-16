@@ -1877,6 +1877,8 @@ async fn run_reconnect_child(
     // Non-interactive + quiet. Deliberately no GH_PROMPT_DISABLED — stdin-null
     // suffices and that env var's effect on the web flow is unvalidated.
     cmd.env("NO_COLOR", "1").env("CLICOLOR", "0");
+    // gh's forced colour outranks NO_COLOR.
+    cmd.env_remove("CLICOLOR_FORCE");
     if is_github {
         cmd.env("GH_NO_UPDATE_NOTIFIER", "1");
     } else {
