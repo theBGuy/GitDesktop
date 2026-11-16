@@ -67,8 +67,11 @@ export const forgeReleaseEdit = (
   // Tri-state: `undefined` omits `--latest` so GitHub keeps/decides Latest natively
   // (a draft's Latest is structurally false — sending it strips Latest on publish).
   latest: boolean | undefined,
+  // With empty `notes`, true clears the release's notes; false leaves them as
+  // they are. Ignored when `notes` has text, which is always sent.
+  clearNotes: boolean,
 ) =>
-  invoke<void>("forge_release_edit", {
+  invoke<void>("forge_release_save", {
     repoPath,
     tag,
     title,
@@ -76,6 +79,7 @@ export const forgeReleaseEdit = (
     prerelease,
     draft,
     latest,
+    clearNotes,
   });
 
 /** The release asset Tauri's updater polls. KEEP IN SYNC with `UPDATER_MANIFEST`

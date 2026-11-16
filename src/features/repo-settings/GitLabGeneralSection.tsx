@@ -50,6 +50,7 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
 } from "./parts";
+import { settingsDirty } from "./settings-dirty";
 import { GITLAB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
@@ -240,7 +241,7 @@ function GitLabGeneralForm({
     runGenerate,
   );
 
-  const dirty = JSON.stringify(form) !== JSON.stringify(base);
+  const dirty = settingsDirty(form, base);
   // Every hold carries a reason, so Save keeps focus through a save, including
   // the moment the saved settings read back and the form settles clean.
   const saveHeldReason = (() => {

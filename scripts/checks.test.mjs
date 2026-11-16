@@ -1378,7 +1378,7 @@ test("draft-create-hold refuses a source the mask cannot lex", () => {
   );
 });
 
-test("draft-create-hold sees exactly the ten real members", () => {
+test("draft-create-hold sees exactly its real members", () => {
   // A rename of the hook or a marker, or a new member, fails here instead of
   // leaving the check scanning nothing.
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");

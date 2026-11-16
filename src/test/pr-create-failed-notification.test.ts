@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { presentError } from "@/lib/error-summary";
+import {
+  BRANCH_PUSHED_DISCLOSURE,
+  BRANCH_PUSHED_FAILED_LEAD,
+  presentError,
+} from "@/lib/error-summary";
 import { emitNotification } from "@/lib/notifications/emit";
-import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
+import {
+  notifyPrCreateFailed,
+  prCreateFailedSentence,
+} from "@/lib/notifications/pr-create-failed";
 
 vi.mock("@/lib/notifications/emit", () => ({ emitNotification: vi.fn() }));
 
@@ -142,4 +149,125 @@ describe("notifyPrCreateFailed", () => {
       });
     }
   });
+
+  it.each(NOUNS)(
+    "says pushing the branch failed for a git-kind %s failure",
+    (noun) => {
+      const error = PUSH_REJECTED;
+      const got = emitted(noun, error);
+      const title = `Pushing my-branch failed, so the ${noun} wasn't created`;
+      expect(got).toEqual({
+        title,
+        osTitle: title,
+        subtitle: presentError(error).summary,
+      });
+    },
+  );
+
+  it.each(NOUNS)(
+    "says pushing the branch timed out for a %s whose push used git's whole budget",
+    (noun) => {
+      const error = { kind: "timeout", message: PUSH_TIMED_OUT };
+      const sentence = `Pushing my-branch timed out, so the ${noun} wasn't created`;
+      expect(prCreateFailedSentence(noun, "my-branch", error)).toBe(sentence);
+      const got = emitted(noun, error);
+      expect(got).toEqual({
+        title: sentence,
+        osTitle: sentence,
+        subtitle: presentError(error).summary,
+      });
+    },
+  );
+
+  it.each(NOUNS)(
+    "keeps the other sentences for every %s timeout that isn't the push's",
+    (noun) => {
+      const generic = `The ${noun} for my-branch wasn't created`;
+      for (const message of [
+        "git operation timed out after 120s",
+        "git operation timed out after 30s",
+        `${PUSH_TIMED_OUT}.`,
+        "",
+      ])
+        expect(
+          prCreateFailedSentence(noun, "my-branch", {
+            kind: "timeout",
+            message,
+          }),
+        ).toBe(generic);
+      // A timed-out write keeps its may-have-landed title.
+      expect(prCreateFailedSentence(noun, "my-branch", landed(noun))).toBe(
+        generic,
+      );
+      expect(emitted(noun, landed(noun)).title).toBe(
+        `The ${noun} for my-branch may have been created`,
+      );
+      // The same text under the git kind is a failed push, not a timed-out one.
+      expect(
+        prCreateFailedSentence(noun, "my-branch", {
+          kind: "git",
+          message: PUSH_TIMED_OUT,
+        }),
+      ).toBe(`Pushing my-branch failed, so the ${noun} wasn't created`);
+    },
+  );
+
+  it.each(NOUNS)(
+    "keeps wasn't created for a %s failing after its push, a bare timeout, a missing CLI and each push refusal",
+    (noun) => {
+      for (const error of NOT_AT_PUSH(noun)) {
+        const got = emitted(noun, error);
+        expect(got.title).toBe(`The ${noun} for my-branch wasn't created`);
+        expect(got.osTitle).toBe(got.title);
+      }
+    },
+  );
 });
+
+/** `AppError::Timeout`'s Display after git's network budget (NETWORK_TIMEOUT,
+ *  src-tauri/src/git/runner.rs), spelled out so a moved constant reds here. */
+const PUSH_TIMED_OUT = "git operation timed out after 600s";
+
+/** A rejected push as `run_git_mutating_with_creds_for_branch` returns it. */
+const PUSH_REJECTED = {
+  kind: "git",
+  code: 1,
+  message: "git push failed",
+  stderr:
+    "To github.com:o/r.git\n ! [rejected]        my-branch -> my-branch (fetch first)\nerror: failed to push some refs to 'github.com:o/r.git'\nhint: Updates were rejected because the remote contains work that you do not",
+};
+
+/** Rejections that are not the push failing: the forge-kind leads every
+ *  create route wraps an after-push failure in, a bare timeout, a missing
+ *  GitHub CLI, and the push refusals, which carry kinds of their own. */
+const NOT_AT_PUSH = (noun: string) => [
+  {
+    kind: "gh",
+    message: `${BRANCH_PUSHED_DISCLOSURE}GitHub refused it: Head sha can't be blank`,
+  },
+  {
+    kind: "glab",
+    message: `${BRANCH_PUSHED_FAILED_LEAD}${noun} failed: 409 Conflict`,
+  },
+  {
+    kind: "bitbucket",
+    message: `${BRANCH_PUSHED_FAILED_LEAD}${noun} failed: Bitbucket API error (400): source branch not found`,
+  },
+  { kind: "timeout", message: "git operation timed out after 120s" },
+  { kind: "ghNotFound", message: "GitHub CLI not found" },
+  {
+    kind: "branchKeptLocal",
+    message: "my-branch is kept local",
+    branch: "my-branch",
+  },
+  {
+    kind: "branchIsAgentSession",
+    message: "my-branch is an agent session branch",
+    branch: "my-branch",
+  },
+  {
+    kind: "pushRemoteIsMirror",
+    message: "origin is a mirror",
+    remote: "origin",
+  },
+];

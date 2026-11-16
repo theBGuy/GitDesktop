@@ -425,9 +425,9 @@ struct CloseDiscussionArgs {
 const UPDATER_MANIFEST: &str = "latest.json";
 
 /// The notes an updater-manifest sync should carry, or `None` when it must not run.
-/// Empty/whitespace notes leave the release body untouched (the edit trims and skips
-/// `--notes`), so syncing them would blank a live manifest; `Some(false)` is the
-/// caller's opt-out. The text is TRIMMED, matching what the edit wrote to the body.
+/// The edit trims the notes and sends empty ones with no notes flag, which leaves the
+/// release body untouched, so syncing them would blank a live manifest; `Some(false)`
+/// is the caller's opt-out. The text is TRIMMED, matching what the edit wrote.
 fn updater_notes_to_sync(notes: Option<&str>, sync: Option<bool>) -> Option<String> {
     if sync == Some(false) {
         return None;
@@ -2343,7 +2343,8 @@ mod tests {
 
     /// The updater-sync gate: a sync only fires for notes the edit actually wrote,
     /// and never against the caller's opt-out. Syncing empty notes would blank a
-    /// live manifest, since the edit itself skips `--notes` for them.
+    /// live manifest, since the edit sends empty notes with no notes flag and gh keeps the
+    /// body; non-empty notes go on stdin behind `--notes-file -`.
     #[test]
     fn updater_notes_to_sync_gates_empty_notes_and_the_opt_out() {
         assert_eq!(updater_notes_to_sync(None, None), None, "no notes, no sync");

@@ -361,9 +361,23 @@ pub async fn gh_hook_create(repo_path: String, input: WebhookInput) -> AppResult
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
-    serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| gh_unreadable("the webhook", format!("could not parse the webhook: {e}")))
+    .await
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Created("webhook"))
+    })?;
+    created_webhook(&out.stdout_lossy())
+}
+
+/// The created webhook as the accepted reply carries it; a reply without one may still
+/// mean the webhook exists.
+fn created_webhook(reply: &str) -> AppResult<Webhook> {
+    serde_json::from_str(reply).map_err(|_| {
+        crate::forge::created_reply_unreadable(
+            crate::forge::model::Provider::GitHub,
+            "webhook",
+            false,
+        )
+    })
 }
 
 #[tauri::command]
@@ -388,7 +402,10 @@ pub async fn gh_hook_update(
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Saved("webhook"))
+    })?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable("the webhook", format!("could not parse the webhook: {e}")))
 }
@@ -882,6 +899,93 @@ pub async fn gh_repo_settings_update(
 #[cfg(test)]
 mod tests {
     use super::{write_access_from_repo_json, GhOutput};
+
+    /// Webhook create and update map their run's timeout to their own noun's hedge, right
+    /// on the run and before the reply is read. Read over the body with whitespace removed,
+    /// so rustfmt's wrap of the map can't unpin it.
+    #[test]
+    fn webhook_writes_hedge_their_timeout() {
+        let source = include_str!("repo_settings.rs");
+        let flat = |s: &str| s.split_whitespace().collect::<String>();
+        let call = |write: &str| {
+            format!(
+                "crate::forge::timed_out_write(e,\"GitHub\",crate::forge::LandedWrite::{write})"
+            )
+        };
+        let holds = |body: &str, write: &str| {
+            let call = call(write);
+            body.matches("timed_out_write(").count() == 1
+                && body.find(&call).is_some_and(|m| {
+                    let on_run = [".await.map_err(|e|", ".await.map_err(|e|{"]
+                        .iter()
+                        .any(|lead| body[..m].ends_with(lead));
+                    let parse = body
+                        .find("from_str(")
+                        .or_else(|| body.find("created_webhook("));
+                    let ran = body.find("run_gh_input(");
+                    on_run && ran.is_some_and(|r| r < m) && parse.is_some_and(|p| m < p)
+                })
+        };
+        for (name, write, other) in [
+            (
+                "gh_hook_create",
+                "Created(\"webhook\")",
+                "Saved(\"webhook\")",
+            ),
+            (
+                "gh_hook_update",
+                "Saved(\"webhook\")",
+                "Created(\"webhook\")",
+            ),
+        ] {
+            let body = flat(&crate::github::repo_meta::tests::wiring_body(source, name));
+            assert!(holds(&body, write), "{name}: {body}");
+            let controls = [
+                ("a dropped map", body.replace(&call(write), "e")),
+                (
+                    "an earlier ?",
+                    body.replace(".await.map_err(", ".await?.map_err("),
+                ),
+                (
+                    "a parse before the map",
+                    format!("serde_json::from_str(x);{body}"),
+                ),
+                ("the other noun", body.replace(write, other)),
+                ("the generic hedge", body.replace(write, "Changed")),
+            ];
+            for (label, mutant) in controls {
+                assert_ne!(mutant, body, "{name}: {label} changed nothing");
+                assert!(!holds(&mutant, write), "{name}: {label} must flip");
+            }
+        }
+        let create = flat(&crate::github::repo_meta::tests::wiring_body(
+            source,
+            "gh_hook_create",
+        ));
+        assert!(
+            create.contains("created_webhook(&out.stdout_lossy())"),
+            "{create}"
+        );
+    }
+
+    /// The created webhook's reply: one with the hook is read; an empty, non-JSON or
+    /// hook-less reply is the may-already-exist hedge, since GitHub took the create.
+    #[test]
+    fn a_created_webhook_reply_without_the_hook_may_already_exist() {
+        let hook = super::created_webhook(r#"{"id":42,"active":true,"events":["push"]}"#);
+        assert_eq!(hook.unwrap().id, 42);
+        let hedge = crate::forge::created_reply_unreadable(
+            crate::forge::model::Provider::GitHub,
+            "webhook",
+            false,
+        )
+        .to_string();
+        for reply in ["", "{}", "null", "<html>", r#"{"id":42,"#, r#"{"id":"x"}"#] {
+            let e = super::created_webhook(reply).err().expect(reply);
+            assert!(matches!(e, crate::error::AppError::Gh(_)), "{e:?}");
+            assert_eq!(e.to_string(), hedge, "{reply}");
+        }
+    }
 
     #[test]
     fn repo_admin_full_body_verdicts_are_explicit() {

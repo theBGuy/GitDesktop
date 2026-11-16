@@ -1,5 +1,11 @@
 import { WarningIcon } from "@phosphor-icons/react";
 import { formOptions } from "@tanstack/react-form";
+import {
+  isCancelledError,
+  matchQuery,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import {
   type Dispatch,
@@ -146,10 +152,78 @@ function shownSaveOf({ running, shown }: SaveLedgerState) {
   return { running: saver !== undefined, own: saver === shown };
 }
 
+/** How long a re-read another write cancelled waits for a fetched answer: a
+ *  cancelling write normally settles within seconds; a slower one unlocks Save
+ *  into the edit contract's not-covered case. */
+export const REREAD_WAIT_MS = 15_000;
+
+/**
+ * The hosts' `attach.reread`: one read of `queryKey`, settling once a fetch of
+ * it answered or failed after the call (a cache write is no answer). A read
+ * another write cancelled starts no fetch of its own, since a GET landing
+ * before that write would put the old item back over its optimistic patch: it
+ * waits through any further cancel for the next fetched answer, at most
+ * `REREAD_WAIT_MS`. It also settles when the read starts paused or is parked
+ * during that wait, the query leaves the cache, or nothing enabled observes the
+ * key; those releases count only while it waits. Reads only the key it was given.
+ */
+export async function rereadEditedItem(
+  client: QueryClient,
+  queryKey: QueryKey,
+): Promise<void> {
+  const cache = client.getQueryCache();
+  let answered = false;
+  // An observer leaving and returning during the first read must not end a
+  // later wait, so the subscriber releases only once this is set.
+  let waiting = false;
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const idle = () => {
+    const query = cache.find({ queryKey, exact: true });
+    return (
+      query === undefined ||
+      query.state.fetchStatus === "paused" ||
+      !query.isActive()
+    );
+  };
+  const unsubscribe = cache.subscribe((event) => {
+    if (!matchQuery({ queryKey, exact: true }, event.query)) return;
+    if (event.type === "updated") {
+      const { action } = event;
+      if (
+        (action.type === "success" && !action.manual) ||
+        (action.type === "error" && !isCancelledError(action.error))
+      )
+        answered = true;
+    }
+    if (waiting && (answered || event.type === "removed" || idle())) release();
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await client
+      .refetchQueries(
+        { queryKey, exact: true, type: "active" },
+        { cancelRefetch: false },
+      )
+      .catch(() => undefined);
+    waiting = true;
+    if (answered || idle()) return;
+    timer = setTimeout(release, REREAD_WAIT_MS);
+    await released;
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+  }
+}
+
 // Edit rules with `attach` (an item is its draft key): one save per item per
 // instance, Save held on that item only, from the save's start until it settled
 // and the host's re-read of the item answered, failed or was parked offline (a
-// read that hangs holds for the read's own timeout); a settle skips that wait
+// read that hangs holds for the read's own timeout; once another write cancels
+// it, the hold waits at most `REREAD_WAIT_MS` for the next fetched answer, then
+// Save unlocks into the not-covered case below); a settle skips that wait
 // when its session is still on screen or, for a failure, when its draft was
 // kept, unless the failure may have landed; a reopen resumes the draft only
 // while the form still holds its session, and a save failing while closed keeps
@@ -182,6 +256,9 @@ export function useEditTitleBody(opts: {
   attach?: {
     draftKey: string;
     kind: ItemKind;
+    /** The item's lower-case noun when its forge names it differently from
+     *  `kind`'s default ("merge request"). */
+    noun?: string;
     /** A partial save's read-back as the description text, given the text that
      *  save submitted; default identity. */
     seedBody?: (stored: string, submitted: string) => string;
@@ -325,21 +402,22 @@ export function useEditTitleBody(opts: {
           const missing = failed.filter(
             (name) => !referencesName(seeded, name),
           );
-          form.setFieldValue(
-            "body",
+          const reseeded =
             missing.length === 0
               ? seeded
               : withFailedReferences(
                   seeded,
                   failedReferencesDraft(begun.finalBody, missing),
-                ),
-          );
+                );
+          form.setFieldValue("body", reseeded);
+          if (savedFrom !== null)
+            reseededRef.current = { session: savedFrom, body: reseeded };
           attach.onPartialSaved?.();
           return;
         }
         if (same) flushSync(() => setOpen(false));
         else endLeftDraft(savedFrom, begun.gen);
-        toast.warning(updatedWarning(attach.kind, failed));
+        toast.warning(updatedWarning(attach.kind, failed, attach.noun));
       } finally {
         // A form opened on the item after its save left the screen was seeded
         // from the cache, so the record holds Save until that copy is re-read.
@@ -392,13 +470,32 @@ export function useEditTitleBody(opts: {
     }
   }, [session, liveDraftKey, freshTitle, freshBody, form]);
 
-  /** Whether the shown session's `name` field still holds what it was seeded
-   *  with or last followed to, the follow's own test; false with no record for
-   *  that session. Reads a ref and form state: effects and handlers only. */
-  function isFieldUntouched(name: "title" | "body"): boolean {
+  // The description a partial save of a session re-seeded, a baseline only
+  // `untouchedBaseline` reads: were the follow to read it, a `fresh` move would
+  // replace the re-seed and drop the failed images' references it appended.
+  const reseededRef = useRef<{ session: EditSession; body: string } | null>(
+    null,
+  );
+
+  /** Which baseline the shown session's `name` field still holds: "seeded" for
+   *  what it was seeded with or last followed to (the follow's own test),
+   *  "reseeded" for the description a partial save of that session re-seeded
+   *  it to; null when edited or with no record for that session. Reads refs
+   *  and form state: effects and handlers only. */
+  function untouchedBaseline(
+    name: "title" | "body",
+  ): "seeded" | "reseeded" | null {
     const record = followRef.current;
-    if (record === null || record.session !== shownRef.current) return false;
-    return form.getFieldValue(name) === record.seeded[name];
+    if (record === null || record.session !== shownRef.current) return null;
+    const value = form.getFieldValue(name);
+    if (value === record.seeded[name]) return "seeded";
+    const reseeded = reseededRef.current;
+    return name === "body" &&
+      reseeded !== null &&
+      reseeded.session === record.session &&
+      value === reseeded.body
+      ? "reseeded"
+      : null;
   }
 
   /** Reopens the form's draft of this item when a save of it is still running
@@ -468,7 +565,7 @@ export function useEditTitleBody(opts: {
     openEdit,
     resumeEdit,
     ownsDraft,
-    isFieldUntouched,
+    untouchedBaseline,
   };
 }
 

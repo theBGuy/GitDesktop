@@ -1,5 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { Marked, type Token } from "marked";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { issueDetailsOptions, useIssueList } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { extractIssueNumbers } from "@/lib/issues/extract";
@@ -16,6 +23,7 @@ import {
   dismissIssue,
   fillIssueMeta,
   INITIAL_LINKED_ISSUE_BUCKETS,
+  isPullRequestUrl,
   type LinkedIssueBucket,
   type LinkedIssueBuckets,
   type LinkedIssueTargetSig,
@@ -61,8 +69,9 @@ const JIRA_REF_LINE = /^relates to\s+([A-Z][A-Z0-9_]*-\d+)\s*$/i;
  * loses no line of either kind. Prose refs elsewhere in the body are untouched.
  *
  * Contract: exactly ONE of `refs` / `jiraRefs` is populated (the active kind); the
- * other is always `[]`. Native: a repeated number keeps the LAST line's keyword.
- * Jira: first occurrence wins.
+ * other is always `[]`. Native: a repeated number yields one ref, at its first
+ * line's position, that closes when any of its lines says Closes. Jira: first
+ * occurrence wins.
  *
  *   native: "x\n\nCloses #6\nRelates to JIRA-4"
  *             → { text: "x\n\nRelates to JIRA-4", refs: [C#6] }
@@ -126,10 +135,12 @@ export function splitBodyRefBlock(
   const jiraRefs: string[] = [];
   const inactiveLines: string[] = [];
   if (kind === "native") {
-    // Dedupe by number, keeping the LAST line's keyword (later entry wins).
+    // Dedupe by number at its first line's position; a Closes on any of its
+    // lines wins, so a repeated reference is never weakened.
     const byNumber = new Map<number, "closes" | "relates">();
     for (const b of block)
-      if (b.kind === "native") byNumber.set(b.ref.number, b.ref.keyword);
+      if (b.kind === "native" && byNumber.get(b.ref.number) !== "closes")
+        byNumber.set(b.ref.number, b.ref.keyword);
     const emitted = new Set<number>();
     for (const b of block) {
       if (b.kind === "native") {
@@ -180,21 +191,170 @@ function appendRefLines(text: string, refLines: string[]): string {
 const nativeRefLine = (r: BodyRef) =>
   r.keyword === "closes" ? `Closes #${r.number}` : `Relates to #${r.number}`;
 
+/** A reference line written in the text: GitHub's closing family or "relates
+ *  to" (which only mentions), ASCII spaces, then `#N` or a Jira key. Only what
+ *  both GitHub and GitLab read as a reference counts: the keyword's first
+ *  letter in either case and the rest lowercase, and a key in capitals. */
+const WRITTEN_REF_LINE =
+  /^(?:([Cc]lose[sd]?|[Ff]ix(?:es|ed)?|[Rr]esolve[sd]?)|[Rr]elates +to) +(#\d+|[A-Z][A-Z0-9_]*-\d+)$/;
+// Plain GFM: the app's own instance lexes forge references as their own tokens.
+const REF_LEXER = new Marked({ gfm: true });
+// Elements whose opening tag code-styles or hides what follows it on a forge.
+const HIDING_TAG =
+  /<(?:pre|code|script|style|textarea|xmp|plaintext|listing|noscript|iframe|noembed|noframes|template|title|svg|math|samp|kbd|tt|var)(?=[\s/>]|$)/i;
+const COMPLETE_COMMENT = /<!--[\s\S]*?-->/g;
+// `marked` has no footnotes, so it lexes one as a definition or a paragraph; a
+// forge lets one interrupt a paragraph and folds the lazy lines under it into a
+// definition it may never render, so any line of a block's raw can open one.
+const FOOTNOTE_DEF = /^ {0,3}\[\^[^\]]*\]:/m;
+// An opening tag's attribute run, quoted values matched whole.
+const OPEN_TAG_ATTRS = /<[a-z][^\s/>]*((?:"[^"]*"|'[^']*'|[^"'>])*)/gi;
+const QUOTED_VALUE = /"[^"]*"|'[^']*'/g;
+// Attributes a forge that keeps them can hide an element's content with.
+const HIDING_ATTR = /(?:^|[\s/])(?:hidden|style)(?=[\s=/>]|$)/i;
+// GitHub caps a body at 65,536 characters; past this bound the lexer's cost on
+// adversarial input outgrows a submit-time call, so nothing counts.
+const MAX_SCANNED_TEXT = 100_000;
+
+/** Whether a block's raw can hide or code-style what follows: a `$$` math
+ *  opener (a forge extension `marked` doesn't lex), a footnote definition, or
+ *  HTML that hides. */
+function hidesWhatFollows(raw: string): boolean {
+  if (raw.includes("$$") || FOOTNOTE_DEF.test(raw)) return true;
+  if (!raw.includes("<")) return false;
+  const rest = raw.replace(COMPLETE_COMMENT, "");
+  if (rest.includes("<!--") || HIDING_TAG.test(rest)) return true;
+  for (const tag of rest.matchAll(OPEN_TAG_ATTRS)) {
+    if (HIDING_ATTR.test(tag[1].replace(QUOTED_VALUE, ""))) return true;
+  }
+  return false;
+}
+
+/** Whether a comment in `raw` spans lines. Inside a list item `marked` folds
+ *  an unindented closing line in lazily, while a forge ends the HTML block
+ *  with the item and leaves the comment open over the rest of the text. */
+function commentSpansLines(raw: string): boolean {
+  return raw.match(COMPLETE_COMMENT)?.some((c) => c.includes("\n")) ?? false;
+}
+
+function recordRefLine(line: string, refs: Map<string, BodyRef["keyword"]>) {
+  const m = WRITTEN_REF_LINE.exec(line.trim());
+  if (!m) return;
+  const target = m[2].toUpperCase();
+  if (m[1] !== undefined) refs.set(target, "closes");
+  else if (!refs.has(target)) refs.set(target, "relates");
+}
+
+/** Records the lines lying wholly inside one inline `text` token, bounded on
+ *  each side by a newline in that token, a `br` token or the block's edge; a
+ *  line touching any other token (span, tag, link, emphasis) never counts. */
+function recordPlainLines(
+  inline: Token[],
+  refs: Map<string, BodyRef["keyword"]>,
+) {
+  inline.forEach((token, i) => {
+    if (token.type !== "text") return;
+    const pieces = token.raw.split("\n");
+    const leftBound = i === 0 || inline[i - 1].type === "br";
+    const rightBound = i === inline.length - 1 || inline[i + 1].type === "br";
+    pieces.forEach((piece, j) => {
+      if ((j > 0 || leftBound) && (j < pieces.length - 1 || rightBound)) {
+        recordRefLine(piece, refs);
+      }
+    });
+  });
+}
+
+/** Walks blocks in order; true once a stop rule fired, which ends the count. */
+function walkRefBlocks(
+  blocks: Token[],
+  refs: Map<string, BodyRef["keyword"]>,
+  inItem = false,
+): boolean {
+  for (const block of blocks) {
+    // Code is escaped on the page, so nothing in it stops the count.
+    if (block.type === "space" || block.type === "code") continue;
+    if (block.type === "list") {
+      for (const item of block.items) {
+        if (item.task) {
+          if (hidesWhatFollows(item.raw) || commentSpansLines(item.raw))
+            return true;
+        } else if (walkRefBlocks(item.tokens, refs, true)) return true;
+      }
+      continue;
+    }
+    if (hidesWhatFollows(block.raw)) return true;
+    if (inItem && block.type === "html" && commentSpansLines(block.raw))
+      return true;
+    // `marked` takes a block opener on the line after `[a]:` as the
+    // destination; a forge opens the block there.
+    if (block.type === "def" && block.raw.trim().includes("\n")) return true;
+    if (block.type !== "paragraph" && block.type !== "text") continue;
+    // A single `$` may open an inline math span within this block.
+    if (block.raw.includes("$")) continue;
+    if (Array.isArray(block.tokens)) recordPlainLines(block.tokens, refs);
+  }
+  return false;
+}
+
+/** Each issue the text references on a line of its own, by its strongest
+ *  keyword there; keyed `#N`, or by the Jira key, which counts only in
+ *  capitals. A line counts when it is exactly a keyword and one reference
+ *  ({@link WRITTEN_REF_LINE}'s grammar), wholly plain text of a paragraph or
+ *  non-task list item outside a quote, in a block holding no `$` with nothing
+ *  that stops the scan in or before that block. It may miss a real line (the
+ *  chip then writes a second one) but must never count one a forge renders as
+ *  code or hides: it reads the markdown lexer's blocks and stops at HTML that
+ *  can hide or code-style what follows, at `$$`, at a footnote definition
+ *  opening any line of a block (a paragraph's or list item's included), and at a
+ *  definition whose destination sits on a later line; a text over
+ *  MAX_SCANNED_TEXT counts nothing. Out of its sight: text ending
+ *  inside an unclosed fence or comment (the chip lines land inside it),
+ *  wherever `marked` and a forge's parser disagree (math, GitLab front matter
+ *  and `>>>` quotes, a declaration with no space after its letters, a bare URL
+ *  a forge autolinks after parsing, an empty task item), and DOM-level effects
+ *  of malformed HTML such as an unbalanced attribute quote. */
+function writtenRefs(text: string): Map<string, BodyRef["keyword"]> {
+  const refs = new Map<string, BodyRef["keyword"]>();
+  if (text.length > MAX_SCANNED_TEXT) return refs;
+  let blocks: Token[];
+  try {
+    blocks = REF_LEXER.lexer(text);
+  } catch {
+    return refs;
+  }
+  walkRefBlocks(blocks, refs);
+  return refs;
+}
+
+/** Whether a written reference already says what a chip's line would: a
+ *  closing line covers either chip, a relates line only a relates chip. */
+function covers(
+  written: BodyRef["keyword"] | undefined,
+  chip: BodyRef["keyword"],
+): boolean {
+  return written === "closes" || (written === "relates" && chip === "relates");
+}
+
 /**
- * Compose the final body: text + the chips' ref lines (`Closes #N` /
- * `Relates to #N`). The single composition used by ALL create/edit save paths.
- * No chips returns `text` untouched: a save with no chip never rewrites a body.
- * Otherwise the result is the form a reopen re-splits to: the text's own trailing
- * refs merge with the chips through {@link splitBodyRefBlock} (typed order first,
- * a repeated number takes the chip's keyword), so no reference is written twice.
+ * Compose the final body: text + the chips' `Closes #N` / `Relates to #N`
+ * lines, for every create and edit save. A chip writes no line when a counting
+ * line anywhere in the text ({@link writtenRefs}) already references its issue
+ * at least as strongly ({@link covers}); no chip left returns `text` untouched.
+ * The rest merge with the trailing block through {@link splitBodyRefBlock}, so
+ * a reopen re-splits to the same chips and a typed Closes is never weakened.
  */
 export function composeBodyWithRefs(
   text: string,
   chips: LinkedIssueChip[],
 ): string {
-  if (chips.length === 0) return text;
+  const written = writtenRefs(text);
+  const kept = chips.filter(
+    (c) => !covers(written.get(`#${c.number}`), c.keyword),
+  );
+  if (kept.length === 0) return text;
   const { text: rest, refs } = splitBodyRefBlock(
-    appendRefLines(text, chips.map(nativeRefLine)),
+    appendRefLines(text, kept.map(nativeRefLine)),
     "native",
   );
   return appendRefLines(rest, refs.map(nativeRefLine));
@@ -202,20 +362,24 @@ export function composeBodyWithRefs(
 
 /**
  * The Jira-mention twin of {@link composeBodyWithRefs}: text + the chips'
- * `Relates to KEY` lines, the same no-chips and merge rules (a key typed and
- * chipped is written once). Only `Relates to` is emitted — there is no close
- * form for Jira.
+ * `Relates to KEY` lines, the same no-chips, written-reference and merge rules
+ * (a key typed and chipped is written once). Only `Relates to` is emitted —
+ * there is no close form for Jira — so any written reference line covers it.
  */
 export function composeBodyWithJiraRefs(
   text: string,
   chips: JiraMentionChip[],
 ): string {
-  if (chips.length === 0) return text;
+  const written = writtenRefs(text);
+  const kept = chips.filter(
+    (c) => !covers(written.get(c.key.toUpperCase()), "relates"),
+  );
+  if (kept.length === 0) return text;
   const line = (key: string) => `Relates to ${key}`;
   const { text: rest, jiraRefs } = splitBodyRefBlock(
     appendRefLines(
       text,
-      chips.map((c) => line(c.key)),
+      kept.map((c) => line(c.key)),
     ),
     "jira",
   );
@@ -326,6 +490,13 @@ export function useLinkedIssueChips(opts: {
   const lastCandidatesRef = useRef<Map<string, Map<number, IssueCandidate>>>(
     new Map(),
   );
+  // `enabled` as of the last commit, for landings that settle after it: a
+  // caller may compose chips while the field is hidden, so a chip that lands
+  // then would write a line nobody saw.
+  const enabledRef = useRef(enabled);
+  useLayoutEffect(() => {
+    enabledRef.current = enabled;
+  }, [enabled]);
 
   function probedFor(key: string): Set<number> {
     let probed = probedRef.current.get(key);
@@ -451,9 +622,10 @@ export function useLinkedIssueChips(opts: {
 
   // Extraction seeding: pull candidate issue numbers from the head branch name and
   // commit subjects, then add a chip for each that's a real repo issue — resolved
-  // from the open page or probed once (dropped on any error: a PR number, a deleted
-  // issue, or noise). Dismissed/present numbers skipped; once per number per
-  // reset, per target, so returning to a target re-seeds only what it lacks.
+  // from the open page or probed once. A failed probe (a deleted issue, or noise)
+  // adds nothing, and neither does a probe that answers with a pull request.
+  // Dismissed/present numbers skipped; once per number per reset, per target, so
+  // returning to a target re-seeds only what it lacks.
   const seedExtractedIssues = useEffectEvent(
     (
       key: string,
@@ -472,7 +644,8 @@ export function useLinkedIssueChips(opts: {
         if (existing.has(n) || current.dismissed.has(n)) continue;
         const hit = openIssues?.find((i) => i.number === n);
         if (hit) {
-          route(key, gen, (b) => addExtractedIssue(b, extractedChip(hit)));
+          if (enabledRef.current)
+            route(key, gen, (b) => addExtractedIssue(b, extractedChip(hit)));
           continue;
         }
         // Not on the open page — probe the tracker once. Skip if the open list
@@ -483,11 +656,20 @@ export function useLinkedIssueChips(opts: {
         // `gen` was read at fire time: a reset before this settles makes the
         // seed stale.
         probed.add(n);
+        // gh's `issue view` answers a pull request's number too; that answer
+        // stays probed and adds no chip. An answer landing while the hook is
+        // disabled is dropped unprobed, so the run `enabled`'s return re-fires
+        // probes it again.
         queryClient
           .fetchQuery(issueDetailsOptions(repoPath, n, lens))
-          .then((issue) =>
-            route(key, gen, (b) => addExtractedIssue(b, extractedChip(issue))),
-          )
+          .then((issue) => {
+            if (isPullRequestUrl(issue.url)) return;
+            if (!enabledRef.current) {
+              probed.delete(n);
+              return;
+            }
+            route(key, gen, (b) => addExtractedIssue(b, extractedChip(issue)));
+          })
           .catch(() => undefined);
       }
     },
@@ -650,6 +832,11 @@ export function useJiraMentionChips(opts: {
   // The exact candidate set last fed to the AI generate — `upsertFromDraft`
   // resolves an AI-proposed key's summary/status from here.
   const lastCandidatesRef = useRef<Map<string, JiraCandidate>>(new Map());
+  // `active` as of the last commit; see `enabledRef` in useLinkedIssueChips.
+  const activeRef = useRef(active);
+  useLayoutEffect(() => {
+    activeRef.current = active;
+  }, [active]);
 
   // Resolve a chip's summary/status once; a failed probe leaves the chip as it is.
   function probeSummary(gen: number, siteHost: string, key: string) {
@@ -793,6 +980,7 @@ export function useJiraMentionChips(opts: {
         if (existing.has(key) || dismissedRef.current.has(key)) continue;
         const hit = openIssues?.find((i) => i.key === key);
         if (hit) {
+          if (!activeRef.current) continue;
           setChips((prev) =>
             prev.some((c) => c.key === key)
               ? prev
@@ -818,6 +1006,12 @@ export function useJiraMentionChips(opts: {
           .then((issue) => {
             if (generationRef.current !== gen) return;
             if (dismissedRef.current.has(key)) return;
+            // Dropped unprobed, so the run `active`'s return re-fires probes
+            // it again.
+            if (!activeRef.current) {
+              probedRef.current.delete(key);
+              return;
+            }
             setChips((prev) =>
               prev.some((c) => c.key === key)
                 ? prev

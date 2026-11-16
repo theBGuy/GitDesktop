@@ -1001,19 +1001,88 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Writes that may have landed** — a frontend arm asks
   `mayHaveLanded(error)` (`@/lib/error-summary`) before it says an item
   wasn't created, saved or posted, and never matches the sentence itself. Two
-  Rust builders in forge/mod.rs feed it. A timed-out write returns
-  `AppError::WriteTimedOut` (kind `timeout`), built only by
-  `write_timed_out`: `glab_write_fields` and the GitHub REST edits and issue
-  create map through `timed_out_write`, `run_gh_maybe_attached` through
-  `gh_write_error` (github/pr.rs). Only writes through those choke points
-  hedge; any other forge write keeps the bare timeout. A create whose exit-0
-  or 2xx reply is neither empty nor JSON returns `created_reply_unreadable`'s
-  sentence under its forge's own kind: the five readers that parse a create's
-  reply (`created_ref`, `created_release_url`, `created_issue_ref`,
-  `created_discussion_ref`, `created_pr_ref`) call `created_reply` before
-  reading a field; GitHub's pull request create, attached issue create and
-  release create (`gh_release_create`) scrape a URL instead. Both builders
-  are pinned from both sides by `scripts/attached-failure-leads.test.mjs`.
+  families of Rust builders in forge/mod.rs feed it. A timed-out write
+  returns `AppError::WriteTimedOut` (kind `timeout`): `write_timed_out` for a
+  CLI run, `request_timed_out` for a Bitbucket or Jira request that was sent
+  and not answered (never a connect timeout; `send_error` in forge/http.rs
+  builds it). A CLI write hedges only when its Err passes through
+  `timed_out_write`, which also re-leads a generic sentence with its caller's
+  noun: at a helper (`glab_write_fields`, `run_gh_api_write` /
+  `run_gh_api_write_json`, `discussion_write_error`, the Projects reply
+  helpers `project_reply`, `write_reply` and `bulk_response`) or in a direct
+  call at the write (the GitHub issue create and REST edits, the webhook
+  saves, a card's field edit, the Bitbucket repository create, GitLab's
+  positioned commit comment); `run_gh_maybe_attached` maps through
+  `gh_write_error` (github/pr.rs). A write with no noun at its helper takes
+  `LandedWrite::Changed`. Any other write keeps the bare timeout. A Bitbucket
+  or Jira write reads a received 2xx whose body couldn't be read through its
+  classifier (`bb_write_answer` in forge/http.rs; `merge_answer`,
+  `created_pr_response` and `created_repo_response` in forge/bitbucket.rs;
+  `write_answer` in forge/jira.rs), never as the transport error. The outcome
+  follows the helper, not whether the caller uses the reply: `bb_post_empty`,
+  `bb_delete`, Jira's `send_no_content` and a 200 or 202 merge succeed with
+  the body unread; `bb_put_json` and Jira's `put_json` give
+  `saved_reply_unreadable`'s sentence under its forge's own kind, callers
+  that discard the reply included; a create gives the may-already-exist
+  sentence, except Bitbucket's pull request create (`created_pr_response`:
+  created, number unknown) and repository create (`created_repo_response`:
+  reported as created at its URL). A non-2xx and every read keep their error.
+  Jira's `raw_request` serves reads only (the POST search included); its
+  writes send through `raw_request_split`. A create whose exit-0 or 2xx reply
+  is neither empty nor JSON returns `created_reply_unreadable`'s sentence
+  under its forge's own kind (`jira_reply_unreadable` for Jira): the readers
+  that parse a create's reply call `created_reply` before reading a field
+  (GitLab's `created_ref`, `created_release_url`, `forked_project` and
+  `added_time_stats`; GitHub's `created_issue_ref`, `created_discussion_ref`
+  and `created_from_reply`; Bitbucket's `created_pr_ref` and
+  `bb_created_reply`); GitHub's pull request create, attached issue create
+  and release create (`gh_release_create`) scrape a URL instead. A create
+  that must return its item gives the same sentence when the accepted reply
+  carries none: `bb_post_json` (every other Bitbucket POST create; an empty
+  2xx is accepted), Jira's `post_created` (its comment and worklog through
+  `created_with_id`), GitLab's fork and add-spent-time through
+  `forked_project` and `added_time_stats` (the add route only; the estimate
+  and reset routes keep their parse error), the Projects creates through
+  `created_from_reply` (a reply with GraphQL `errors` returns its reader's
+  own result, unhedged; gh exits non-zero on GraphQL errors, so no write
+  reaches it with one) and `gh_hook_create`. A New pull request or merge
+  request that fails after its push says the branch was pushed: a plain
+  failure leads with `BRANCH_PUSHED_FAILED_LEAD` (`@/lib/error-summary`;
+  built by `after_push_error`, `mr_post_error` and `pr_post_error`; a
+  missing gh or glab passes through unwrapped), a timeout or an unreadable
+  reply keeps its own after-push sentence. Every step after the push sits
+  inside that wrap, so no create returns a `git`-kind error once the branch
+  is pushed, and the summary composes the lead with the network sentence.
+  A push that itself times out is recognised only by its exact message,
+  `GIT_PUSH_TIMEOUT_MESSAGE` (defined in `@/lib/error-summary`, read by
+  `createTimedOutAtPush` in `@/lib/notifications/pr-create-failed`, tied
+  to `NETWORK_TIMEOUT` in git/runner.rs). The Bitbucket and GitLab compound
+  review wraps that set their cause in parentheses (two on Bitbucket, three
+  on GitLab) split it through `paren_parts` (forge/mod.rs), so a multi-line
+  cause's first line closes the parenthesis and the rest follows it; the
+  others put the cause after a colon. Every wrap keeps its partial-state
+  line ahead of the network rewrite through `PARTIAL_STATE_WRAPS`
+  (`@/lib/error-summary`): a new wrap literal in `review_submit`,
+  `request_changes_pr` or `request_changes_mr` joins that table.
+  `scripts/attached-failure-leads.test.mjs` counts each of those fns'
+  `AppError::<Variant>(format!(` literals and fails unless they match its
+  wrap rows plus its listed non-wraps (a message bound before it is wrapped
+  goes uncounted), and pins the builders and both contracts from both sides.
+- **Linked-issue reference lines** — every create and edit save composes the
+  body with its chips through `composeBodyWithRefs` /
+  `composeBodyWithJiraRefs` (`src/features/pulls/useLinkedIssueChips.ts`),
+  never a hand-appended line. Whether a chip's line is already written is
+  `writtenRefs`'s call (same module), which reads a plain GFM `marked`
+  lexer's blocks and is built to err one way: it may miss a real line (the
+  chip then writes a second one) but must never count one a forge renders as
+  code or hides. Its doc comment lists what is out of its sight, where that
+  direction isn't guaranteed; a new skip or stop rule keeps the direction.
+- **Settings dirty compare** — a settings form holding a list the forge
+  normalises (topics) compares its draft through `settingsDirty`
+  (`src/features/repo-settings/settings-dirty.ts`), never through a raw
+  `JSON.stringify`: the forge may answer a save in another order and keeps
+  one spelling of topics that differ only in letter case, so a raw compare
+  of the draft stays dirty after the save lands.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

@@ -459,7 +459,7 @@ pub fn run() {
             forge::forge_release_list,
             forge::forge_release_view,
             forge::forge_release_create,
-            forge::forge_release_edit,
+            forge::forge_release_save,
             forge::forge_release_sync_updater_notes,
             forge::forge_release_delete,
             forge::forge_release_upload_asset,

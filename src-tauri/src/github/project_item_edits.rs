@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::{timed_out_write, LandedWrite};
 use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
-use crate::github::project::build_edit_projects_mutation;
+use crate::github::project::{build_edit_projects_mutation, created_from_reply};
 use crate::github::project_items::{
     board_item_selection, parse_board_item, parse_content, BoardItem, BoardItemContent,
     DRAFT_CONTENT_SELECTION,
@@ -104,8 +105,10 @@ pub(super) fn bulk_outcomes(item_ids: &[String]) -> AppResult<BulkItemOutcomes> 
     })
 }
 
+/// One bulk document's answer. A timed-out document is the generic may-have-landed hedge
+/// for every item it carried; the documents before it keep their own outcomes.
 fn bulk_response(output: AppResult<GhOutput>) -> AppResult<Value> {
-    let output = output?;
+    let output = output.map_err(|e| timed_out_write(e, "GitHub", LandedWrite::Changed))?;
     let parsed = serde_json::from_slice::<Value>(&output.stdout);
     // gh exits nonzero on per-alias GraphQL errors; stdout still carries landed writes.
     if output.code != 0 {
@@ -525,6 +528,32 @@ async fn request(repo_path: &str, input: &str, surface: &str) -> AppResult<Value
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
 }
 
+/// A board write's exit-0 stdout, unparsed: a timeout is the may-have-landed hedge for
+/// `landed`, then the scope hint. `request` stays the reads' own runner.
+async fn write_reply(repo_path: &str, input: &str, landed: LandedWrite) -> AppResult<String> {
+    let out = run_gh_input(
+        Some(repo_path),
+        &GRAPHQL_INPUT_ARGS,
+        input,
+        GH_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| item_edits_scope_error(timed_out_write(e, "GitHub", landed)))?;
+    Ok(out.stdout_lossy())
+}
+
+/// [`write_reply`] parsed; a create reads its reply through `created_from_reply` instead.
+async fn write_request(
+    repo_path: &str,
+    input: &str,
+    surface: &str,
+    landed: LandedWrite,
+) -> AppResult<Value> {
+    let reply = write_reply(repo_path, input, landed).await?;
+    serde_json::from_str(&reply)
+        .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
+}
+
 fn response_id(value: &Value, pointer: &str, surface: &str) -> AppResult<String> {
     value
         .pointer(pointer)
@@ -740,14 +769,15 @@ pub async fn gh_add_draft_item(
     title: String,
     body: String,
 ) -> AppResult<BoardItem> {
-    let value = request(
+    let reply = write_reply(
         &repo_path,
         &draft_input(&project_id, &title, &body),
-        "the new project draft",
+        LandedWrite::Created("draft"),
     )
-    .await
-    .map_err(item_edits_scope_error)?;
-    response_item(&value, DRAFT_POINTER, "the new project draft")
+    .await?;
+    created_from_reply(&reply, "draft", |value| {
+        response_item(value, DRAFT_POINTER, "the new project draft")
+    })
 }
 
 #[tauri::command]
@@ -760,10 +790,11 @@ pub async fn gh_add_board_item(
         &add_item_mutation(),
         json!({"projectId": project_id, "contentId": content_id}),
     );
-    let value = request(&repo_path, &input, "the added project item")
-        .await
-        .map_err(item_edits_scope_error)?;
-    response_item(&value, ADD_ITEM_POINTER, "the added project item")
+    let landed = LandedWrite::Created("project item");
+    let reply = write_reply(&repo_path, &input, landed).await?;
+    created_from_reply(&reply, "project item", |value| {
+        response_item(value, ADD_ITEM_POINTER, "the added project item")
+    })
 }
 
 #[tauri::command]
@@ -786,9 +817,8 @@ pub async fn gh_update_draft_item(
         None
     };
     let input = update_draft_input(&draft_id, &title, &body, assignee_ids.as_deref());
-    let value = request(&repo_path, &input, "the updated draft")
-        .await
-        .map_err(item_edits_scope_error)?;
+    let landed = LandedWrite::Saved("draft");
+    let value = write_request(&repo_path, &input, "the updated draft", landed).await?;
     parse_updated_draft(&value)
 }
 
@@ -801,9 +831,8 @@ pub(crate) async fn update_draft_fields(
     body: Option<String>,
 ) -> AppResult<BoardItemContent> {
     let input = update_draft_fields_input(&draft_id, title.as_deref(), body.as_deref())?;
-    let value = request(&repo_path, &input, "the updated draft")
-        .await
-        .map_err(item_edits_scope_error)?;
+    let landed = LandedWrite::Saved("draft");
+    let value = write_request(&repo_path, &input, "the updated draft", landed).await?;
     parse_updated_draft(&value)
 }
 
@@ -826,9 +855,10 @@ pub async fn gh_convert_draft_item(
         &convert_mutation(),
         json!({"itemId": item_id, "repositoryId": repository_id}),
     );
-    let result = request(&repo_path, &input, "the converted draft").await;
+    let landed = LandedWrite::Changed;
+    let result = write_request(&repo_path, &input, "the converted draft", landed).await;
     invalidate_repo_meta_after(&format!("{owner}/{name}"), &result);
-    let value = result.map_err(item_edits_scope_error)?;
+    let value = result?;
     parse_converted(&value)
 }
 
@@ -858,9 +888,7 @@ async fn archive_request(repo_path: &str, project_id: &str, item_id: &str) -> Ap
         ARCHIVE_MUTATION,
         json!({"projectId": project_id, "itemId": item_id}),
     );
-    request(repo_path, &input, ARCHIVE_SURFACE)
-        .await
-        .map_err(item_edits_scope_error)
+    write_request(repo_path, &input, ARCHIVE_SURFACE, LandedWrite::Changed).await
 }
 
 /// Duplicate ids execute as separate aliases and retain separate outcomes in input order.
@@ -885,9 +913,8 @@ pub async fn gh_unarchive_board_item(
         UNARCHIVE_MUTATION,
         json!({"projectId": project_id, "itemId": item_id}),
     );
-    let value = request(&repo_path, &input, "the unarchived project item")
-        .await
-        .map_err(item_edits_scope_error)?;
+    let landed = LandedWrite::Changed;
+    let value = write_request(&repo_path, &input, "the unarchived project item", landed).await?;
     require_payload(&value, UNARCHIVE_POINTER, "the unarchived project item")
 }
 
@@ -913,9 +940,8 @@ pub async fn gh_remove_board_item(
         REMOVE_MUTATION,
         json!({"projectId": project_id, "itemId": item_id}),
     );
-    let value = request(&repo_path, &input, "the removed project item")
-        .await
-        .map_err(item_edits_scope_error)?;
+    let landed = LandedWrite::Changed;
+    let value = write_request(&repo_path, &input, "the removed project item", landed).await?;
     require_payload(&value, REMOVE_POINTER, "the removed project item")
 }
 
@@ -939,9 +965,8 @@ pub async fn gh_set_item_position(
     after_id: Option<String>,
 ) -> AppResult<BoardOrder> {
     let input = position_input(&project_id, &item_id, after_id.as_deref());
-    let value = request(&repo_path, &input, "the board's new order")
-        .await
-        .map_err(item_edits_scope_error)?;
+    let landed = LandedWrite::Changed;
+    let value = write_request(&repo_path, &input, "the board's new order", landed).await?;
     parse_board_order(&value)
 }
 
@@ -963,14 +988,14 @@ pub async fn gh_add_issue_to_projects(
     let value = request(&repo_path, &input, "the issue to add to projects").await?;
     let issue_id = response_id(&value, ISSUE_ID_POINTER, "the issue to add to projects")?;
     let document = build_edit_projects_mutation(&issue_id, &add_project_ids, &[])?;
-    request(
+    let reply = write_reply(
         &repo_path,
         &graphql_input(&document, json!({})),
-        "the added project memberships",
+        LandedWrite::Created("project item"),
     )
-    .await
-    .map_err(item_edits_scope_error)?;
-    Ok(())
+    .await?;
+    // Nothing is read from the reply: only one that isn't JSON leaves the add unproven.
+    created_from_reply(&reply, "project item", |_| Ok(()))
 }
 
 #[cfg(test)]
@@ -1074,6 +1099,56 @@ mod tests {
         for (n, outcome) in outcomes.outcomes.iter().enumerate() {
             assert_eq!(outcome.item_id, ids[n]);
             assert_eq!(outcome.error.as_deref(), (25..50).contains(&n).then_some("connection reset"));
+        }
+    }
+
+    /// A timed-out document is the generic hedge for each of its items, one item or several;
+    /// the document that answered first keeps its own outcomes.
+    #[tokio::test]
+    async fn a_timed_out_bulk_document_may_have_landed_for_its_items() {
+        let hedge = crate::forge::write_timed_out("GitHub", LandedWrite::Changed, 120).to_string();
+        assert_eq!(
+            bulk_response(Err(AppError::Timeout(120)))
+                .unwrap_err()
+                .to_string(),
+            hedge
+        );
+        for total in [26, 30] {
+            let ids: Vec<_> = (0..total).map(|n| format!("PVTI_{n}")).collect();
+            let docs = build_bulk_item_documents("PVT_p", &ids, REMOVE_MUTATION, "/deletedItemId")
+                .unwrap();
+            let mut calls = 0;
+            let outcomes = run_bulk_documents_with(
+                bulk_outcomes(&ids).unwrap(),
+                docs,
+                map_bulk_item_error,
+                |_, _| {
+                    let call = calls;
+                    calls += 1;
+                    std::future::ready(if call == 1 {
+                        Err(AppError::Timeout(120))
+                    } else {
+                        let mut data = json!({});
+                        for n in 0..25 {
+                            data[format!("a{n}")] = json!({"deletedItemId":"PVTI_ok"});
+                        }
+                        Ok(GhOutput {
+                            stdout: serde_json::to_vec(&json!({"data":data})).unwrap(),
+                            stderr: String::new(),
+                            code: 0,
+                        })
+                    })
+                },
+            )
+            .await;
+            assert_eq!(calls, 2);
+            for (n, outcome) in outcomes.outcomes.iter().enumerate() {
+                assert_eq!(
+                    outcome.error.as_deref(),
+                    (n >= 25).then_some(hedge.as_str()),
+                    "{total}: {n}"
+                );
+            }
         }
     }
 

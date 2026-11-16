@@ -4,10 +4,12 @@ import {
   cleanup,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteIssueView } from "@/features/issues/RemoteIssueView";
@@ -16,9 +18,11 @@ import { draftEntry, draftKeyFor } from "@/lib/attachments/store";
 import {
   forgeIssueComment,
   forgeIssueEdit,
+  forgeIssueSetMilestone,
   forgeIssueView,
   forgeStatus,
 } from "@/lib/git/api";
+import { useSetIssueMilestone } from "@/lib/git/queries";
 import type { ForgeStatus, IssueDetails } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -37,6 +41,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeIssueView: vi.fn(),
   forgeIssueComment: vi.fn(),
   forgeIssueEdit: vi.fn(),
+  forgeIssueSetMilestone: vi.fn(async () => undefined),
 }));
 // The close is observed at its hook: the state write itself is named only by
 // the hook that re-files its row (scripts/remote-row-state-wiring.test.mjs).
@@ -442,6 +447,43 @@ describe("RemoteIssueView edit follows the issue", () => {
       "Stored title",
       "Typed description",
     ]);
+  });
+
+  it("holds a fresh form's Save while another write cancels the re-read after the older save lands (AC3)", async () => {
+    const { client } = mount(7);
+    await shown(7);
+    await openEdit();
+    fireEvent.change(titleBox(), { target: { value: "Typed title" } });
+    const save = deferred<Outcome>();
+    vi.mocked(forgeIssueEdit).mockReturnValueOnce(save.promise);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(forgeIssueEdit).toHaveBeenCalledTimes(1));
+    cancel();
+    await closed();
+    const held = holdReadsOf7();
+    await act(async () => save.resolve(clean));
+    await waitFor(() => expect(held.reads()).toBeGreaterThan(0));
+    // Another optimistic write on the same issue cancels its re-read.
+    const milestone = renderHook(() => useSetIssueMilestone(REPO, "origin"), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+    await act(async () => {
+      void milestone.result.current
+        .mutateAsync({ number: 7, milestone: null })
+        .catch(() => undefined);
+    });
+    await waitFor(() =>
+      expect(forgeIssueSetMilestone).toHaveBeenCalledTimes(1),
+    );
+    await act(async () => undefined);
+    await openEdit();
+    expectSaveHeld();
+    await act(async () =>
+      held.read.resolve({ ...issue(7), title: "Typed title" }),
+    );
+    await waitFor(expectSaveLive);
   });
 
   it("returns a fresh form's untouched title to the issue's own when the older save fails, held until the re-read answers (AC7)", async () => {

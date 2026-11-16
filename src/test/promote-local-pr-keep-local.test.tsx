@@ -17,7 +17,12 @@ import {
 } from "vitest";
 import { PromoteLocalPrDialog } from "@/features/pulls/PromoteLocalPrDialog";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
-import { mayHaveLanded, presentError } from "@/lib/error-summary";
+import {
+  BRANCH_PUSHED_FAILED_LEAD,
+  GIT_PUSH_TIMEOUT_MESSAGE,
+  mayHaveLanded,
+  presentError,
+} from "@/lib/error-summary";
 import { forgePrComment, forgeStatus, gitBranches } from "@/lib/git/api";
 import { prChecksRecheck, repoKeys } from "@/lib/git/queries";
 import { recheckRunsAfterPush } from "@/lib/git/queries/push-writes";
@@ -275,7 +280,7 @@ describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", 
   const REOPEN = "The local PR couldn't be reopened — reopen it from its view.";
 
   /** The close lands, the forge create rejects, the reopen rejects too. */
-  async function failBoth() {
+  async function failBoth(rejected: unknown = rejection) {
     vi.mocked(gitBranches).mockResolvedValue([
       row("main", false),
       row("feat", false),
@@ -283,7 +288,7 @@ describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", 
     vi.mocked(updateLocalPr)
       .mockResolvedValueOnce({ ...PR, status: "closed" })
       .mockRejectedValueOnce(new Error("reopen refused"));
-    forgePrCreate.mockRejectedValueOnce(rejection);
+    forgePrCreate.mockRejectedValueOnce(rejected);
     const error = vi.spyOn(toast, "error").mockImplementation(() => "");
     const user = userEvent.setup();
     renderDialog();
@@ -309,4 +314,119 @@ describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", 
     );
     expect(options.description).toBe(REOPEN);
   });
+
+  it("titles the toast with the pushed-branch line alone after the push landed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    const pushed = {
+      kind: "gh",
+      message: `${BRANCH_PUSHED_FAILED_LEAD}pull request failed: HTTP 422`,
+    };
+    const [title, options] = await failBoth(pushed);
+    expect(title).toBe(presentError(pushed).summary);
+    expect(title.startsWith(BRANCH_PUSHED_FAILED_LEAD)).toBe(true);
+    expect(options.description).toBe(REOPEN);
+  });
+
+  it("leads the title with the push sentence when the push is what failed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    const [title, options] = await failBoth(PUSH_REJECTED);
+    expect(title).toBe(
+      `Pushing feat failed, so the pull request wasn't created: ${presentError(PUSH_REJECTED).summary}`,
+    );
+    expect(options.description).toBe(REOPEN);
+  });
+
+  it("leads the title with the timed-out push sentence when the push timed out", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    const timedOut = { kind: "timeout", message: GIT_PUSH_TIMEOUT_MESSAGE };
+    const [title, options] = await failBoth(timedOut);
+    expect(title).toBe(
+      `Pushing feat timed out, so the pull request wasn't created: ${presentError(timedOut).summary}`,
+    );
+    expect(options.description).toBe(REOPEN);
+  });
+});
+
+const PUSH_REJECTED = {
+  kind: "git",
+  code: 1,
+  message: "git push failed",
+  stderr:
+    "To github.com:o/r.git\n ! [rejected]        feat -> feat (fetch first)\nerror: failed to push some refs to 'github.com:o/r.git'",
+};
+
+describe("PromoteLocalPrDialog when the create fails and the reopen lands", () => {
+  /** The close lands, the forge create rejects (once `settle` runs), the
+   *  reopen lands; `away` switches repositories while the create is pending. */
+  async function failCreate(rejected: unknown, away = false) {
+    vi.mocked(gitBranches).mockResolvedValue([
+      row("main", false),
+      row("feat", false),
+    ]);
+    vi.mocked(updateLocalPr)
+      .mockResolvedValueOnce({ ...PR, status: "closed" })
+      .mockResolvedValueOnce(PR);
+    let reject!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, rej) => {
+        reject = rej;
+      }) as never,
+    );
+    const error = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const user = userEvent.setup();
+    renderDialog();
+    await waitFor(() => expect(gitBranches).toHaveBeenCalled());
+    await user.click(publishButton());
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    if (away) useUiStore.setState({ repoPath: "C:/other" });
+    await act(async () => reject(rejected));
+    await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(updateLocalPr).toHaveBeenCalledTimes(2);
+    const [title, options] = error.mock.calls[0] as [
+      string,
+      { description?: string },
+    ];
+    expect(title).toBe(presentError(rejected).summary);
+    return options.description;
+  }
+
+  it.each([
+    {
+      variant: "a rejected push",
+      rejected: PUSH_REJECTED,
+      note: "Pushing feat failed, so the pull request wasn't created.",
+    },
+    {
+      variant: "a timed-out push",
+      rejected: { kind: "timeout", message: GIT_PUSH_TIMEOUT_MESSAGE },
+      note: "Pushing feat timed out, so the pull request wasn't created.",
+    },
+    {
+      variant: "a forge failure",
+      rejected: { kind: "gh", message: "HTTP 500" },
+      note: "The pull request for feat wasn't created.",
+    },
+  ])("names the branch after $variant", async ({ rejected, note }) => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    expect(await failCreate(rejected)).toBe(note);
+  });
+
+  it("names the repository when a failed push settles elsewhere", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    expect(await failCreate(PUSH_REJECTED, true)).toBe(
+      "In repo, pushing feat failed, so the pull request wasn't created.",
+    );
+  });
+
+  it.each([
+    { where: "in the repository", away: false, note: undefined },
+    { where: "elsewhere", away: true, note: "In repo" },
+  ])(
+    "claims nothing about the create when it may have landed, settled $where",
+    async ({ away, note }) => {
+      const rejection = { kind: "timeout", message: "may have landed" };
+      vi.mocked(mayHaveLanded).mockImplementation((e) => e === rejection);
+      expect(await failCreate(rejection, away)).toBe(note);
+    },
+  );
 });

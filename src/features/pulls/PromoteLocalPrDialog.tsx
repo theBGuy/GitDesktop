@@ -18,11 +18,20 @@ import { Spinner } from "@/components/ui/spinner";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { createdNumberOf } from "@/lib/attachments/references";
-import { mayHaveLanded, presentError } from "@/lib/error-summary";
+import {
+  BRANCH_PUSHED_FAILED_LEAD,
+  mayHaveLanded,
+  presentError,
+} from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
 import { useBranches, useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
-import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
+import {
+  createFailedAtPush,
+  createTimedOutAtPush,
+  notifyPrCreateFailed,
+  prCreateFailedSentence,
+} from "@/lib/notifications/pr-create-failed";
 import {
   pendingWriteReason,
   refuseWhileOffline,
@@ -31,7 +40,7 @@ import {
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
-import { landedIn } from "@/lib/stores/notifications";
+import { landedIn, repoNameFromPath } from "@/lib/stores/notifications";
 import {
   LANE_BLOCKED_HINT,
   markPrCreated,
@@ -42,7 +51,11 @@ import {
 } from "@/lib/stores/pr-create";
 import { armPrCreateHandOff } from "@/lib/stores/pr-create-handoff";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastComposedError, toastError } from "@/lib/toast";
+import {
+  toastComposedError,
+  toastError,
+  toastErrorWithNote,
+} from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
   heldButtonRender,
@@ -352,17 +365,43 @@ export function PromoteLocalPrDialog({
         } catch (err) {
           reopenError = err;
         }
-        if (reopenError === null) toastError(e);
-        else
+        if (reopenError === null) {
+          // New pull request's note: the branch named, the push failure said,
+          // and the repo named when the settle lands elsewhere. No note when the
+          // write may have landed (the error says to check).
+          const awayRepo = landedIn(repoPath).live
+            ? null
+            : repoNameFromPath(repoPath);
+          if (mayHaveLanded(e)) {
+            if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
+            else toastError(e);
+          } else {
+            const sentence = prCreateFailedSentence(prNoun, pr.head, e);
+            toastErrorWithNote(
+              e,
+              awayRepo
+                ? `In ${awayRepo}, ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}.`
+                : `${sentence}.`,
+            );
+          }
+        } else {
+          // A pushed-branch line already says the create failed; a push failure
+          // leads with the notification's sentence, since the description is
+          // taken by the reopen instruction.
+          const { summary } = presentError(e);
+          let title = `Couldn't create the ${prNoun}: ${summary}`;
+          if (mayHaveLanded(e) || summary.startsWith(BRANCH_PUSHED_FAILED_LEAD))
+            title = summary;
+          else if (createFailedAtPush(e) || createTimedOutAtPush(e))
+            title = `${prCreateFailedSentence(prNoun, pr.head, e)}: ${summary}`;
           toastComposedError({
-            title: mayHaveLanded(e)
-              ? presentError(e).summary
-              : `Couldn't create the ${prNoun}: ${presentError(e).summary}`,
+            title,
             description:
               "The local PR couldn't be reopened — reopen it from its view.",
             errors: [e, reopenError],
             headings: [`Creating the ${prNoun}`, "Reopening the local PR"],
           });
+        }
         // The toast fades in seconds; this outlives it for a user who moved on.
         notifyPrCreateFailed({
           repoPath,

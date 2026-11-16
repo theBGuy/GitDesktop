@@ -454,6 +454,7 @@ export type ReleaseWriteVars = {
     prerelease: boolean;
     draft: boolean;
     latest: boolean | undefined;
+    clearNotes: boolean;
   };
   "sync-updater": { tag: string; notes: string };
   "delete-release": { tag: string; cleanupTag: boolean };

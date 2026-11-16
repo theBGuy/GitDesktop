@@ -38,17 +38,17 @@ use crate::forge::model::{
 use crate::forge::my_work::{
     merge_legs, normalize_updated_at, MyWorkItem, MyWorkLeg, MyWorkPage, MY_WORK_LIMIT,
 };
-use crate::forge::{
-    cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
-    FORK_POLL_DELAY, README_CANDIDATES,
-};
 use crate::forge::Forge;
+use crate::forge::{
+    cap_readme, paren_parts, validate_owner, validate_repo_name, LandedWrite, FORK_LIST_CAP,
+    FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
+};
 use crate::github::actions::{CiRunPage, RunActor, RunDetail, RunFilters, RunJob, WorkflowRun};
 use crate::github::pr::{
-    comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut,
-    DraftCommentIn, PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut, PrDetails, PrFileOut,
-    PrHeadRef, PrInfo, PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut,
-    ReviewSubmitOut, ReviewThreadOut, ReviewThreadsOut,
+    comments_or_unknown, read_or_unknown, ApprovalState, CommitCommentOut, DraftCommentIn,
+    PrAuthor, PrCiRefIn, PrCiStatus, PrCommitOut, PrDetails, PrFileOut, PrHeadRef, PrInfo,
+    PrListLabel, PrMergeability, PrPollInfo, PrRef, PrThreadOut, ReviewSubmitOut, ReviewThreadOut,
+    ReviewThreadsOut,
 };
 
 /// Whether this process has SUCCESSFULLY seeded git's credential store this session
@@ -3327,7 +3327,10 @@ struct BbMergeTask {
 /// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
 /// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
 /// merges return 202 with a `Location` task-status URL we poll until `SUCCESS`. Any other
-/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400).
+/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400), or the
+/// body read's own error when that read failed. The body is never consulted on a 200
+/// (merged) or a 202: a 202 with a non-empty `Location` is queued (the poll decides), and
+/// one without errors.
 pub async fn merge_pr(
     repo_path: &str,
     number: u64,
@@ -3344,20 +3347,34 @@ pub async fn merge_pr(
         "close_source_branch": delete_branch,
     });
     let (status, location, body) =
-        http::bb_send(&creds, reqwest::Method::POST, &path, Some(&payload)).await?;
-    match status {
-        // Synchronous merge — done.
-        200 => Ok(()),
+        http::bb_send_request_split(&creds, reqwest::Method::POST, &path, Some(&payload)).await?;
+    match merge_answer(status, location, body)? {
         // Asynchronous merge — poll the task-status URL from the Location header.
-        202 => {
-            let task_url = location.filter(|l| !l.is_empty()).ok_or_else(|| {
-                AppError::Bitbucket(
-                    "Bitbucket accepted the merge but returned no task-status URL to poll.".into(),
-                )
-            })?;
-            poll_merge_task(&creds, &task_url).await
-        }
-        _ => Err(http::http_error(status, &body)),
+        Some(task_url) => poll_merge_task(&creds, &task_url).await,
+        // Synchronous merge — done.
+        None => Ok(()),
+    }
+}
+
+/// The merge POST's answer: 200 merged (`None`), 202 queued behind its `Location` task
+/// URL for the caller to poll. The body only reports any other status, so a 200 or 202
+/// answers the same whether or not it could be read.
+fn merge_answer(
+    status: u16,
+    location: Option<String>,
+    body: AppResult<String>,
+) -> AppResult<Option<String>> {
+    match status {
+        200 => Ok(None),
+        202 => location.filter(|l| !l.is_empty()).map(Some).ok_or_else(|| {
+            AppError::Bitbucket(
+                "Bitbucket accepted the merge but returned no task-status URL to poll.".into(),
+            )
+        }),
+        _ => Err(match body {
+            Ok(text) => http::http_error(status, &text),
+            Err(e) => e,
+        }),
     }
 }
 
@@ -3379,7 +3396,7 @@ fn merge_unconfirmed(err: AppError) -> AppError {
 /// refuses one outside the API base before any request.
 async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()> {
     for _ in 0..30 {
-        let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None)
+        let (status, _, body) = http::bb_send(creds, task_url)
             .await
             .map_err(merge_unconfirmed)?;
         if !(200..300).contains(&status) {
@@ -3920,24 +3937,39 @@ pub async fn create_pr(
     )
     .await?;
 
-    let creds = http::load_credentials().await?;
-    let repo = repo_base(repo_path).await?;
-    let path = format!("{repo}/pullrequests");
-    let payload = build_create_body(base, head, title, body, draft, reviewers);
-    let sent =
-        http::bb_send_request_split(&creds, reqwest::Method::POST, &path, Some(&payload)).await;
-    let reply = sent
-        .and_then(|(status, _, body)| created_pr_response(status, body))
-        .map_err(|e| {
-            // The branch is already on the remote; disclose that partial state so the
-            // user knows a retry needn't re-push (and the branch isn't orphaned silently).
-            AppError::Bitbucket(format!(
-                "The branch was pushed, but creating the pull request failed: {e}"
-            ))
-        })?;
+    // Every step after the push sits in the wrap, the credential and remote reads included,
+    // so each Err discloses the pushed branch.
+    let reply = async {
+        let creds = http::load_credentials().await?;
+        let repo = repo_base(repo_path).await?;
+        let path = format!("{repo}/pullrequests");
+        let payload = build_create_body(base, head, title, body, draft, reviewers);
+        let sent =
+            http::bb_send_request_split(&creds, reqwest::Method::POST, &path, Some(&payload)).await;
+        sent.and_then(|(status, _, body)| created_pr_response(status, body))
+    }
+    .await
+    .map_err(pr_post_error)?;
     // Outside the wrap: an accepted create whose reply isn't JSON may exist, so its error
     // never says the create failed.
     created_pr_ref(&reply)
+}
+
+/// `create_pr`'s Err after the push, led by the push fact so the user knows a retry
+/// needn't re-push. A timed-out write takes the after-push sentence; a bare `Timeout` came
+/// from a git read before the send, so it wraps like any other Err. The frontend keys on
+/// the lead (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
+fn pr_post_error(e: AppError) -> AppError {
+    let landed = LandedWrite::CreatedAfterPush("pull request");
+    match e {
+        e @ AppError::WriteTimedOut(_) => crate::forge::timed_out_write(e, "Bitbucket", landed),
+        e => {
+            let detail = crate::forge::error_detail(e);
+            AppError::Bitbucket(format!(
+                "The branch was pushed, but creating the pull request failed: {detail}"
+            ))
+        }
+    }
 }
 
 /// A created pull request's id and web link, or (0, "") when an empty or JSON body doesn't
@@ -4051,9 +4083,11 @@ pub async fn review_submit(
             http::bb_post_json::<serde_json::Value>(&creds, &endpoint, &payload, "review comment")
                 .await
         {
+            let (first, rest) = paren_parts(&e);
             return Err(AppError::Bitbucket(format!(
                 "Posted {} of {} review comments before the failure; the review was not \
-                 submitted. Check the pull request on Bitbucket before retrying. ({e})",
+                 submitted. Check the pull request on Bitbucket before \
+                 retrying. ({first}){rest}",
                 i, total
             )));
         }
@@ -4083,9 +4117,10 @@ pub async fn review_submit(
         } else {
             String::new()
         };
+        let (first, rest) = paren_parts(&e);
         return Err(AppError::Bitbucket(format!(
             "The review was posted, but the {action} step failed: {landed}only re-run the \
-             {action} action on Bitbucket. ({e})"
+             {action} action on Bitbucket. ({first}){rest}"
         )));
     }
 
@@ -4381,7 +4416,20 @@ pub async fn pr_task_create(repo_path: &str, number: u64, text: &str) -> AppResu
     let base = repo_base(repo_path).await?;
     let path = format!("{base}/pullrequests/{number}/tasks");
     let payload = serde_json::json!({ "content": { "raw": text } });
-    let created: BbTask = http::bb_post_json(&creds, &path, &payload, "created task").await?;
+    let created: BbTask = http::bb_post_json(&creds, &path, &payload, "task").await?;
+    created_task(created)
+}
+
+/// The created task, which the caller acts on by id: an accepted reply without one is
+/// the may-already-exist hedge.
+fn created_task(created: BbTask) -> AppResult<PrTask> {
+    if created.id.is_none() {
+        return Err(crate::forge::created_reply_unreadable(
+            Provider::Bitbucket,
+            "task",
+            false,
+        ));
+    }
     Ok(from_bb_task(created))
 }
 
@@ -5913,9 +5961,11 @@ pub async fn publish_repo(
     // POST does — the create's own parse failure is already past the point of no return.
     let created_at_url = format!("https://bitbucket.org/{workspace}/{slug}");
     // Only a received 2xx can establish creation when the response body is unreadable.
+    let landed = LandedWrite::Created("repository");
     let (status, _, body) =
         http::bb_send_request_split(&creds, reqwest::Method::POST, &create_path, Some(&payload))
-            .await?;
+            .await
+            .map_err(|e| crate::forge::timed_out_write(e, "Bitbucket", landed))?;
     let created = created_repo_response(status, body, &created_at_url)?;
     let created_slug = if created.slug.is_empty() {
         slug.clone()
@@ -6134,7 +6184,6 @@ pub async fn search_repos(query: &str, _sort: &str, _page: u32) -> AppResult<For
 /// response is the new repo object (its `full_name` names where the fork actually
 /// landed); readiness is a bounded `GET` poll on the fork (5×2s → ready on 200).
 pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
-    use serde_json::Value;
     validate_owner(owner)?;
     validate_repo_name(name)?;
     let creds = http::load_credentials().await?;
@@ -6143,12 +6192,33 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
         encode_query_value(owner),
         encode_query_value(name),
     );
-    let fork: Value = http::bb_post_json(&creds, &path, &serde_json::json!({}), "fork").await?;
+    let reply: serde_json::Value =
+        http::bb_post_json(&creds, &path, &serde_json::json!({}), "fork").await?;
+    let mut fork = forked_repo(&reply)?;
+    // Readiness: poll the fork by its full_name (5×2s) — 200 ⇒ ready. Bitbucket's
+    // async fork semantics aren't documented-confirmed; the bounded poll covers
+    // both a synchronous and an eventual-consistency case.
+    fork.ready = poll_fork_ready(&creds, &fork.full_name).await;
+    Ok(fork)
+}
+
+/// The fork an accepted reply names, not yet polled (`ready` false). A reply without
+/// a readable `full_name` names no fork to poll or open, so it is the may-already-exist
+/// hedge, as for a created task.
+fn forked_repo(fork: &serde_json::Value) -> AppResult<ForgeForkResult> {
+    use serde_json::Value;
     let full_name = fork
         .get("full_name")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if full_name.is_empty() {
+        return Err(crate::forge::created_reply_unreadable(
+            Provider::Bitbucket,
+            "fork",
+            false,
+        ));
+    }
     let clone_url = fork
         .get("links")
         .and_then(|l| l.get("clone"))
@@ -6166,19 +6236,11 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
         .and_then(|h| h.get("href"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    // Readiness: poll the fork by its full_name (5×2s) — 200 ⇒ ready. Bitbucket's
-    // async fork semantics aren't documented-confirmed; the bounded poll covers
-    // both a synchronous and an eventual-consistency case.
-    let ready = if full_name.is_empty() {
-        false
-    } else {
-        poll_fork_ready(&creds, &full_name).await
-    };
     Ok(ForgeForkResult {
         full_name,
         clone_url,
         web_url,
-        ready,
+        ready: false,
     })
 }
 
@@ -6606,7 +6668,6 @@ mod tests {
             ("branch restriction", "the branch restriction"),
             ("comment", "the comment"),
             ("commit comment", "the commit comment"),
-            ("created task", "the created task"),
             ("default reviewer", "the default reviewer"),
             ("fork", "the fork"),
             ("pipeline", "the pipeline"),
@@ -6614,10 +6675,7 @@ mod tests {
             ("pipeline variable", "the pipeline variable"),
             ("pull request", "the pull request"),
             ("pull request activity", "the pull request activity"),
-            ("reply", "the reply"),
             ("repository", "the repository"),
-            ("review comment", "the review comment"),
-            ("review summary", "the review summary"),
             ("task", "the task"),
             ("user", "the user"),
             ("webhook", "the webhook"),
@@ -8662,6 +8720,55 @@ definitions:
         assert_eq!(t.url, "https://bitbucket.org/x/tasks/1");
     }
 
+    /// A created task is acted on by id, so an accepted reply without one is the hedge.
+    #[test]
+    fn a_created_task_without_an_id_may_already_exist() {
+        let raw: BbTask = serde_json::from_str("{}").unwrap();
+        let e = created_task(raw)
+            .err()
+            .expect("an id-less task is the hedge");
+        assert!(matches!(e, AppError::Bitbucket(_)), "{e:?}");
+        assert_eq!(
+            e.to_string(),
+            "Bitbucket accepted the request but its reply couldn't be read, so the task may already exist. Check before creating it again."
+        );
+        let raw: BbTask = serde_json::from_str(r#"{"id": 9}"#).unwrap();
+        assert_eq!(created_task(raw).unwrap().id, "9");
+        let src = include_str!("bitbucket.rs");
+        let body = crate::github::repo_meta::tests::wiring_body(src, "pr_task_create");
+        assert!(body.contains("\"task\").await?;") && body.contains("created_task(created)"));
+    }
+
+    /// A fork is polled and opened by its `full_name`, so an accepted reply without
+    /// one (an empty body included) is the hedge.
+    #[test]
+    fn a_fork_reply_without_a_full_name_may_already_exist() {
+        let hedge = "Bitbucket accepted the request but its reply couldn't be read, so the fork may already exist. Check before creating it again.";
+        let full: serde_json::Value = http::bb_created_reply(
+            201,
+            r#"{"full_name":"me/app","links":{"clone":[{"name":"https","href":"https://bitbucket.org/me/app.git"}],"html":{"href":"https://bitbucket.org/me/app"}}}"#,
+            "fork",
+        )
+        .unwrap();
+        let fork = forked_repo(&full).unwrap();
+        assert_eq!(fork.full_name, "me/app");
+        assert_eq!(fork.clone_url, "https://bitbucket.org/me/app.git");
+        assert_eq!(
+            fork.web_url.as_deref(),
+            Some("https://bitbucket.org/me/app")
+        );
+        assert!(!fork.ready);
+        for body in ["", r#"{"links":{}}"#, r#"{"full_name":""}"#] {
+            let reply: serde_json::Value = http::bb_created_reply(201, body, "fork").unwrap();
+            let e = forked_repo(&reply).err().expect(body);
+            assert!(matches!(e, AppError::Bitbucket(_)), "{body}: {e:?}");
+            assert_eq!(e.to_string(), hedge, "{body}");
+        }
+        let src = include_str!("bitbucket.rs");
+        let body = crate::github::repo_meta::tests::wiring_body(src, "fork_repo");
+        assert!(body.contains("\"fork\").await?;") && body.contains("forked_repo(&reply)?"));
+    }
+
     #[test]
     fn from_bb_task_tolerates_missing_optional_fields() {
         let raw: BbTask = serde_json::from_str(r#"{"id": 5, "state": "UNRESOLVED"}"#).unwrap();
@@ -9213,37 +9320,310 @@ definitions:
                 assert_ne!(early, got);
             }
         }
-        let body =
-            crate::github::repo_meta::tests::wiring_body(include_str!("bitbucket.rs"), "create_pr");
+        let source = include_str!("bitbucket.rs");
+        let body = crate::github::repo_meta::tests::wiring_body(source, "create_pr");
+        let mapper = crate::github::repo_meta::tests::wiring_body(source, "pr_post_error");
+        // The mapper is passed by name, so the token is its `map_err` call.
+        let map = "map_err(pr_post_error)";
         let wrap = "The branch was pushed, but creating the pull request failed";
-        let split = |body: &str| {
+        let split = |body: &str, mapper: &str| {
             body.contains("bb_send_request_split(")
                 && body.contains("created_pr_response(")
                 && !body.contains("bb_post_json(")
                 && !body.contains("bb_send(")
-                && body.contains(wrap)
+                && body.contains(map)
+                && mapper.contains(wrap)
         };
-        assert!(split(&body), "{body}");
+        assert!(split(&body, &mapper), "{body}\n{mapper}");
         assert!(
-            !split(&format!("{body}\nbb_post_json(x)")),
+            !split(&format!("{body}\nbb_post_json(x)"), &mapper),
             "bb_post_json control"
         );
         let plain = body.replace("bb_send_request_split(", "bb_send(");
-        assert!(!split(&plain), "bb_send control");
+        assert!(!split(&plain, &mapper), "bb_send control");
+        assert!(
+            !split(&format!("{body}\nbb_send(x)"), &mapper),
+            "a bb_send beside the split send must flip"
+        );
+        let unmapped = body.replace(map, "plain(");
+        assert!(!split(&unmapped, &mapper), "an unmapped wrap must flip");
+        let reworded = mapper.replace(wrap, "The pull request failed");
+        assert!(!split(&body, &reworded), "a reworded wrap must flip");
         // The reply is classified outside the wrap, so the hedge never says the create failed.
         let outside = |body: &str| {
-            body.find(wrap)
+            body.find(map)
                 .zip(body.find("created_pr_ref("))
                 .is_some_and(|(w, r)| w < r)
         };
         assert!(outside(&body), "{body}");
         let inside = body.replacen("created_pr_ref(&reply)", "", 1).replacen(
-            wrap,
-            &format!("created_pr_ref(x); {wrap}"),
+            map,
+            &format!("created_pr_ref(x); {map}"),
             1,
         );
         assert_ne!(inside, body);
         assert!(!outside(&inside), "a reader inside the wrap must flip");
+    }
+
+    /// A 200 merged and a 202 queues its task whether or not the body read; any other status
+    /// reports its body, or the body read's own error.
+    #[test]
+    fn merge_answer_reads_only_the_status_on_success() {
+        let read_failed = || {
+            Err(AppError::Bitbucket(
+                "could not read Bitbucket response".into(),
+            ))
+        };
+        let task =
+            "https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge/task-status/t";
+        assert_eq!(merge_answer(200, None, read_failed()).unwrap(), None);
+        assert_eq!(
+            merge_answer(202, Some(task.into()), read_failed()).unwrap(),
+            Some(task.to_string())
+        );
+        let no_task = "Bitbucket accepted the merge but returned no task-status URL to poll.";
+        for (location, body) in [
+            (None, read_failed()),
+            (Some(String::new()), Ok("{}".into())),
+        ] {
+            match merge_answer(202, location, body) {
+                Err(AppError::Bitbucket(m)) => assert_eq!(m, no_task),
+                other => panic!("{other:?}"),
+            }
+        }
+        let envelope = r#"{"type":"error","error":{"message":"Pull request already merged"}}"#;
+        for status in [400, 201] {
+            assert_eq!(
+                merge_answer(status, None, Ok(envelope.into()))
+                    .unwrap_err()
+                    .to_string(),
+                http::http_error(status, envelope).to_string(),
+            );
+        }
+        match merge_answer(400, None, read_failed()) {
+            Err(AppError::Bitbucket(m)) => assert_eq!(m, "could not read Bitbucket response"),
+            other => panic!("{other:?}"),
+        }
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("bitbucket.rs"), "merge_pr");
+        let split = |b: &str| {
+            b.contains("bb_send_request_split(")
+                && b.contains("merge_answer(")
+                && !b.contains("bb_send(")
+        };
+        assert!(split(&body), "{body}");
+        assert!(
+            !split(&body.replace("bb_send_request_split(", "bb_send(")),
+            "bb_send control"
+        );
+        assert!(
+            !split(&format!("{body}\nbb_send(x)")),
+            "a bb_send beside the split send must flip"
+        );
+    }
+
+    /// Each compound wrap embeds the step's error, a landed hedge included, with no early
+    /// return ahead of it: the wrap carries the partial-state line (what already posted, do
+    /// not resubmit) that a retry needs. The roster is every `{e}` wrap in the two functions; the
+    /// parenthesised two embed it through `paren_parts`.
+    #[test]
+    fn compound_wraps_embed_every_error() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("bitbucket.rs");
+        let roster = [
+            (
+                "request_changes_pr",
+                "Changes were requested, but posting the comment failed",
+            ),
+            ("review_submit", "The review summary couldn't be posted"),
+            ("review_submit", "review comments before the failure"),
+            (
+                "review_submit",
+                "The review was posted, but the {action} step failed",
+            ),
+        ];
+        let paren = [
+            "review comments before the failure",
+            "The review was posted, but the {action} step failed",
+        ];
+        let token_of = |wrap: &str| {
+            if paren.contains(&wrap) {
+                "({first}){rest}"
+            } else {
+                "{e}"
+            }
+        };
+        const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
+        let start_of = |body: &str, at: usize| {
+            let before = &body[..at];
+            [before.rfind("if let Err(e)"), before.rfind("map_err(|e|")]
+                .into_iter()
+                .flatten()
+                .max()
+        };
+        // From the error's binding to the wrap: no `?`, and the only `return` is the wrap's.
+        let embeds = |body: &str, wrap: &str| {
+            body.find(wrap).is_some_and(|at| {
+                let Some(s) = start_of(body, at) else {
+                    return false;
+                };
+                let seg = &body[s..at];
+                let direct = match seg.rfind("return") {
+                    None => true,
+                    Some(r) => {
+                        !seg[..r].contains("return")
+                            && seg[r..].starts_with("return Err(AppError::Bitbucket(format!(")
+                            && !seg[r..].contains(';')
+                    }
+                };
+                let tail = &body[at..];
+                let end = tail.find("))").unwrap_or(tail.len());
+                let token = token_of(wrap);
+                let split = token == "{e}" || seg.contains(SPLIT);
+                direct && split && !seg.contains('?') && tail[..end].contains(token)
+            })
+        };
+        for (name, wrap) in roster {
+            let body = wiring_body(source, name);
+            assert!(embeds(&body, wrap), "{name}: {wrap}");
+            let at = body.find(wrap).unwrap();
+            let s = start_of(&body, at).unwrap();
+            let open = s + body[s..].find('{').unwrap() + 1;
+            let early = format!("{} return Err(e);{}", &body[..open], &body[open..]);
+            assert!(!embeds(&early, wrap), "{name}: an early return must flip");
+            let token = token_of(wrap);
+            let tail_end = at + body[at..].find("))").unwrap();
+            let dropped = format!("{}{}", &body[..at], body[at..].replacen(token, "", 1));
+            assert!(
+                body[at..tail_end].contains(token) && !embeds(&dropped, wrap),
+                "{name}: a wrap without its error must flip"
+            );
+            if token != "{e}" {
+                let call = s + body[s..at].find(SPLIT).unwrap();
+                let unsplit = format!(
+                    "{}let (first, rest) = (e.to_string(), String::new());{}",
+                    &body[..call],
+                    &body[call + SPLIT.len()..]
+                );
+                assert!(
+                    !embeds(&unsplit, wrap),
+                    "{name}: an unsplit error must flip"
+                );
+            }
+        }
+        for name in ["request_changes_pr", "review_submit"] {
+            let body = wiring_body(source, name);
+            let wraps = body.matches("{e}").count() + body.matches("({first}){rest}").count();
+            let listed = roster.iter().filter(|(n, _)| *n == name).count();
+            assert_eq!(wraps, listed, "{name}: an unlisted {{e}} wrap");
+        }
+        let publish = wiring_body(source, "publish_repo");
+        assert!(
+            publish.contains("LandedWrite::Created(\"repository\")"),
+            "{publish}"
+        );
+        assert!(publish
+            .contains(".map_err(|e| crate::forge::timed_out_write(e, \"Bitbucket\", landed))?;"));
+    }
+
+    /// A pull request create's Err after the push leads with the push fact under kind
+    /// `bitbucket`; a timed-out write keeps its may-have-landed sentence.
+    #[test]
+    fn a_failed_pr_post_says_the_branch_was_pushed() {
+        let wrap = |detail: &str| {
+            format!("The branch was pushed, but creating the pull request failed: {detail}")
+        };
+        let wrapped = |e: AppError| match pr_post_error(e) {
+            AppError::Bitbucket(m) => m,
+            other => panic!("expected kind bitbucket, got {other:?}"),
+        };
+        let git = AppError::Git {
+            code: 128,
+            stderr: "fatal: No such remote 'origin'".into(),
+        };
+        let not_configured = AppError::BitbucketNotConfigured.to_string();
+        let rows = [
+            (
+                http::http_error(400, "source branch not found"),
+                wrap(&http::http_error(400, "source branch not found").to_string()),
+            ),
+            (git, wrap("fatal: No such remote 'origin'")),
+            (AppError::BitbucketNotConfigured, wrap(&not_configured)),
+            (
+                AppError::InvalidArgument("not a Bitbucket remote".into()),
+                wrap("not a Bitbucket remote"),
+            ),
+            // A bare timeout came from a git read before the send, so it is no hedge.
+            (
+                AppError::Timeout(120),
+                wrap("git operation timed out after 120s"),
+            ),
+        ];
+        for (e, want) in rows {
+            assert_eq!(wrapped(e), want);
+        }
+        let timed_out = || {
+            crate::forge::write_timed_out(
+                "Bitbucket",
+                crate::forge::LandedWrite::CreatedAfterPush("pull request"),
+                150,
+            )
+        };
+        let kept = pr_post_error(timed_out());
+        assert_eq!(format!("{kept:?}"), format!("{:?}", timed_out()));
+        // The send's generic hedge takes the after-push sentence, line 2 kept.
+        let generic =
+            crate::forge::write_timed_out("Bitbucket", crate::forge::LandedWrite::Changed, 150);
+        assert_eq!(
+            format!("{:?}", pr_post_error(generic)),
+            format!("{:?}", timed_out())
+        );
+        // Every other variant keeps the released text: the cause's own Display.
+        for e in [
+            AppError::Bitbucket("Bitbucket API error (400): x".into()),
+            AppError::Io(std::io::Error::other("disk")),
+            AppError::Keyring("locked".into()),
+        ] {
+            let display = e.to_string();
+            assert_eq!(wrapped(e), wrap(&display));
+        }
+    }
+
+    /// After its push, `create_pr` returns an Err only from the wrapped block and from its
+    /// reply reader (a `bitbucket` hedge), so no `git`-kind error leaves once the branch is
+    /// pushed: the credential and remote reads sit inside the wrap.
+    #[test]
+    fn create_pr_returns_nothing_unled_after_the_push() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let flat = |body: &str| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let pr = flat(&wiring_body(include_str!("bitbucket.rs"), "create_pr"));
+        let after_push = |body: &str| -> Option<String> {
+            let push = body.find("run_git_mutating_with_creds_for_branch(")?;
+            let start = body[push..].find(".await?;")? + push + ".await?;".len();
+            Some(body[start..].to_string())
+        };
+        // Everything up to the wrap's close, then the reader, the section's only `?`s.
+        let led = |body: &str| {
+            after_push(body).is_some_and(|s| {
+                let Some((block, rest)) = s.split_once("} .await .map_err(pr_post_error)?;") else {
+                    return false;
+                };
+                block.trim_start().starts_with("let reply = async {")
+                    && !rest.contains('?')
+                    && rest.contains("created_pr_ref(&reply)")
+            })
+        };
+        assert!(led(&pr), "{pr}");
+        let push = pr.find("run_git_mutating_with_creds_for_branch(").unwrap();
+        let at = pr[push..].find(".await?;").unwrap() + push + ".await?;".len();
+        let read = format!("{} repo_base(repo_path).await?;{}", &pr[..at], &pr[at..]);
+        assert!(!led(&read), "a read after the push must flip");
+        let late = pr.replacen(
+            "created_pr_ref(&reply)",
+            "repo_base(repo_path).await?; created_pr_ref(&reply)",
+            1,
+        );
+        assert!(!led(&late), "a read after the wrap must flip");
     }
 
     fn clone_body(body: &AppResult<String>) -> AppResult<String> {

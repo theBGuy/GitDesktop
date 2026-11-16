@@ -1,4 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+  QueryObserver,
+} from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -13,6 +18,8 @@ import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EditTitleBodyDialog,
+  REREAD_WAIT_MS,
+  rereadEditedItem,
   useEditTitleBody,
 } from "@/features/conversations/EditTitleBodyDialog";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
@@ -1147,6 +1154,28 @@ describe("edit dialog follows the item while open", () => {
     expect(desc().value).toBe("Before");
   });
 
+  it("keeps a partial save's re-seeded description and its failed image reference through a later description move (AC2c)", async () => {
+    const save = vi.fn<Save>(async () => ({
+      failedAttachments: ["image-1.png"],
+      body: "Stored",
+    }));
+    const { open, rerender } = mount({ save, fresh: SEED });
+    await open();
+    await stageImages(1);
+    fireEvent.click(saveButton());
+    await waitFor(() =>
+      expect(politeRegionText()).toBe(partialLine("image-1.png")),
+    );
+    const reseeded = desc().value;
+    expect(reseeded).toMatch(/^Stored/);
+    expect(reseeded).toContain("](image-1.png)");
+    rerender({ save, fresh: { title: "Seven", body: "Stored" } });
+    await act(async () => undefined);
+    rerender({ save, fresh: { title: "Seven", body: "Moved" } });
+    await act(async () => undefined);
+    expect(desc().value).toBe(reseeded);
+  });
+
   it("keeps a partial save's line through a title follow, waiting on no re-read", async () => {
     const reread = vi.fn(async () => undefined);
     const save = vi.fn<Save>(async () => ({
@@ -1465,5 +1494,161 @@ describe("edit dialog focus when Save's reasoned hold ends (AC9)", () => {
     rerender({ save, attach: false, generating: false });
     expect(saveButton()).toBeDisabled();
     expect(titleBox()).toHaveFocus();
+  });
+});
+
+describe("rereadEditedItem after another write cancels its read (F2)", () => {
+  const KEY = ["repo", "/r", "pr", "origin", 7];
+  let unsubscribe: () => void = () => undefined;
+  afterEach(() => {
+    unsubscribe();
+    vi.useRealTimers();
+  });
+
+  /** One enabled observer on KEY whose every fetch gets its own deferred
+   *  answer; the observer's first read has landed. */
+  async function observed() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const answers: ReturnType<typeof deferred<string>>[] = [];
+    const read = vi.fn(() => {
+      const answer = deferred<string>();
+      answers.push(answer);
+      return answer.promise;
+    });
+    const observer = new QueryObserver(client, {
+      queryKey: KEY,
+      queryFn: read,
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    unsubscribe = observer.subscribe(() => undefined);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    answers[0].resolve("stored");
+    await vi.waitFor(() => expect(client.getQueryData(KEY)).toBe("stored"));
+    return { client, read, answers };
+  }
+
+  /** Starts the helper, then cancels its read and patches the cache the way
+   *  an optimistic write's onMutate does. */
+  async function rereadCancelled() {
+    const setup = await observed();
+    let settled = false;
+    void rereadEditedItem(setup.client, KEY).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(setup.read).toHaveBeenCalledTimes(2));
+    await setup.client.cancelQueries({ queryKey: KEY });
+    setup.client.setQueryData(KEY, "optimistic");
+    return { ...setup, settled: () => settled };
+  }
+
+  it("starts no fetch of its own while the cancelling write is unsettled", async () => {
+    const { read, settled, client } = await rereadCancelled();
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(settled()).toBe(false);
+    expect(client.getQueryData(KEY)).toBe("optimistic");
+  });
+
+  it("settles when the cancelling write's settle refetch answers", async () => {
+    const { read, answers, settled, client } = await rereadCancelled();
+    void client.invalidateQueries({ queryKey: KEY });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+    expect(settled()).toBe(false);
+    answers[2].resolve("written");
+    await vi.waitFor(() => expect(settled()).toBe(true));
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps waiting through a further cancel", async () => {
+    const { read, answers, settled, client } = await rereadCancelled();
+    void client.invalidateQueries({ queryKey: KEY });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+    await client.cancelQueries({ queryKey: KEY });
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(settled()).toBe(false);
+    expect(read).toHaveBeenCalledTimes(3);
+    void client.invalidateQueries({ queryKey: KEY });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(4));
+    answers[3].resolve("written");
+    await vi.waitFor(() => expect(settled()).toBe(true));
+  });
+
+  it("settles at the bound when nothing answers", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { read, settled } = await rereadCancelled();
+    await vi.advanceTimersByTimeAsync(REREAD_WAIT_MS - 1);
+    expect(settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled()).toBe(true);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("settles when the key loses its last observer", async () => {
+    const { settled } = await rereadCancelled();
+    unsubscribe();
+    await vi.waitFor(() => expect(settled()).toBe(true));
+  });
+
+  it("an observer leaving and returning during the read doesn't end a later wait", async () => {
+    const setup = await observed();
+    let settled = false;
+    void rereadEditedItem(setup.client, KEY).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(setup.read).toHaveBeenCalledTimes(2));
+    const observer = new QueryObserver(setup.client, {
+      queryKey: KEY,
+      queryFn: setup.read,
+      staleTime: Number.POSITIVE_INFINITY,
+    });
+    unsubscribe();
+    unsubscribe = observer.subscribe(() => undefined);
+    await setup.client.cancelQueries({ queryKey: KEY });
+    for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false);
+    void setup.client.invalidateQueries({ queryKey: KEY });
+    await vi.waitFor(() => expect(setup.read).toHaveBeenCalledTimes(3));
+    setup.answers[2].resolve("written");
+    await vi.waitFor(() => expect(settled).toBe(true));
+  });
+
+  describe("releases", () => {
+    afterEach(() => onlineManager.setOnline(true));
+
+    it("settles at once when its read starts paused", async () => {
+      const { client, read } = await observed();
+      onlineManager.setOnline(false);
+      let settled = false;
+      void rereadEditedItem(client, KEY).then(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+
+    it("settles when the awaited refetch is parked offline", async () => {
+      const { read, settled, client } = await rereadCancelled();
+      onlineManager.setOnline(false);
+      void client.invalidateQueries({ queryKey: KEY });
+      await vi.waitFor(() => expect(settled()).toBe(true));
+      expect(read).toHaveBeenCalledTimes(2);
+    });
+
+    it("settles when the query leaves the cache", async () => {
+      const { settled, client } = await rereadCancelled();
+      client.removeQueries({ queryKey: KEY });
+      await vi.waitFor(() => expect(settled()).toBe(true));
+    });
+
+    it("settles when the awaited refetch fails", async () => {
+      const { read, answers, settled, client } = await rereadCancelled();
+      void client.invalidateQueries({ queryKey: KEY });
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+      expect(settled()).toBe(false);
+      answers[2].reject(new Error("read failed"));
+      await vi.waitFor(() => expect(settled()).toBe(true));
+    });
   });
 });

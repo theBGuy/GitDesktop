@@ -15,6 +15,7 @@ use serde::Deserialize;
 use tauri_plugin_http::reqwest::{self, Client};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::LandedWrite;
 
 /// Keep the summary on line one and the original detail available on line two.
 pub(crate) fn bb_unreadable(what: &str, detail: String) -> AppError {
@@ -23,7 +24,6 @@ pub(crate) fn bb_unreadable(what: &str, detail: String) -> AppError {
         "branch restriction" => "the branch restriction",
         "comment" => "the comment",
         "commit comment" => "the commit comment",
-        "created task" => "the created task",
         "default reviewer" => "the default reviewer",
         "fork" => "the fork",
         "pipeline" => "the pipeline",
@@ -31,10 +31,7 @@ pub(crate) fn bb_unreadable(what: &str, detail: String) -> AppError {
         "pipeline variable" => "the pipeline variable",
         "pull request" => "the pull request",
         "pull request activity" => "the pull request activity",
-        "reply" => "the reply",
         "repository" => "the repository",
-        "review comment" => "the review comment",
-        "review summary" => "the review summary",
         "task" => "the task",
         "user" => "the user",
         "webhook" => "the webhook",
@@ -457,18 +454,15 @@ pub async fn bb_get_classified(
     bb_get_status(creds, path_or_url, true).await
 }
 
-/// The low-level write primitive: send `method` to `path_or_url` with an optional JSON
-/// `body` and HTTP Basic auth, returning the raw `(status, location_header, body_text)`
-/// WITHOUT turning a non-2xx into an error — the caller decides. Used directly by the
-/// merge path, which must branch on 200 (sync) vs 202 (async task, follow `Location`);
-/// the typed helpers below build on it.
+/// A GET's raw `(status, location_header, body_text)` WITHOUT turning a non-2xx into an
+/// error; the caller decides. A write calls [`bb_send_request_split`] instead, so a 2xx
+/// whose body can't be read is never a transport failure.
 pub async fn bb_send(
     creds: &BbCredentials,
-    method: reqwest::Method,
     path_or_url: &str,
-    body: Option<&serde_json::Value>,
 ) -> AppResult<(u16, Option<String>, String)> {
-    let (status, location, body) = bb_send_request_split(creds, method, path_or_url, body).await?;
+    let (status, location, body) =
+        bb_send_request_split(creds, reqwest::Method::GET, path_or_url, None).await?;
     Ok((status, location, body?))
 }
 
@@ -479,6 +473,7 @@ pub(super) async fn bb_send_request_split(
     body: Option<&serde_json::Value>,
 ) -> AppResult<(u16, Option<String>, AppResult<String>)> {
     let url = resolve_url(path_or_url)?;
+    let landed = (method != reqwest::Method::GET).then_some(LandedWrite::Changed);
     let mut req = client()
         .request(method, &url)
         .basic_auth(&creds.email, Some(&creds.token))
@@ -492,17 +487,42 @@ pub(super) async fn bb_send_request_split(
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(text);
     }
-    bb_send_split(req, "Bitbucket request failed").await
+    bb_send_split(req, "Bitbucket request failed", landed).await
+}
+
+/// A send that reached the server and then ran out of time: a write may have landed. A
+/// connect timeout never reached it, so it isn't one.
+pub(crate) fn sent_write_timed_out(e: &reqwest::Error) -> bool {
+    e.is_timeout() && !e.is_connect()
+}
+
+/// A failed send: a `landed` write that [`sent_write_timed_out`] is `host`'s hedge with the
+/// transport text on line 2; anything else is `wrap` over that text.
+pub(crate) fn send_error(
+    e: &reqwest::Error,
+    ctx: &str,
+    host: &str,
+    landed: Option<LandedWrite>,
+    wrap: fn(String) -> AppError,
+) -> AppError {
+    let message = transport_failure_message(ctx, e);
+    match landed {
+        Some(write) if sent_write_timed_out(e) => {
+            crate::forge::request_timed_out(host, write, &message)
+        }
+        _ => wrap(message),
+    }
 }
 
 pub(super) async fn bb_send_split(
     req: reqwest::RequestBuilder,
     ctx: &str,
+    landed: Option<LandedWrite>,
 ) -> AppResult<(u16, Option<String>, AppResult<String>)> {
     let resp = req
         .send()
         .await
-        .map_err(|e| AppError::Bitbucket(transport_failure_message(ctx, &e)))?;
+        .map_err(|e| send_error(&e, ctx, "Bitbucket", landed, AppError::Bitbucket))?;
     #[cfg(test)]
     let _ = BODY_READ_STARTED.try_with(|started| {
         if let Some(started) = started.borrow_mut().take() {
@@ -519,61 +539,93 @@ pub(super) async fn bb_send_split(
     Ok((status, location, body))
 }
 
+/// Only a received 2xx establishes a write: its reply text, or `None` when that couldn't be
+/// read. A non-2xx keeps [`http_error`], or the body read's own error.
+fn bb_write_answer(status: u16, body: AppResult<String>) -> AppResult<Option<String>> {
+    match body {
+        Ok(text) if !(200..300).contains(&status) => Err(http_error(status, &text)),
+        Err(e) if !(200..300).contains(&status) => Err(e),
+        Ok(text) => Ok(Some(text)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// POST JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`.
-/// `Accept`/`Content-Type: application/json`, HTTP Basic auth. Non-2xx →
-/// [`http_error`]; a parse failure takes [`bb_unreadable`]'s summary on line one
-/// (`what` article-mapped, unlisted labels passed through), with the original serde
-/// error on line two.
+/// `Accept`/`Content-Type: application/json`, HTTP Basic auth. Every caller is a
+/// create, so the reply is read by [`bb_created_reply`], and an accepted reply that
+/// couldn't be read is the same may-already-exist hedge.
 pub async fn bb_post_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
     body: &serde_json::Value,
     what: &str,
 ) -> AppResult<T> {
-    let (status, _, body) = bb_send(creds, reqwest::Method::POST, path_or_url, Some(body)).await?;
-    if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
+    let (status, _, body) =
+        bb_send_request_split(creds, reqwest::Method::POST, path_or_url, Some(body)).await?;
+    match bb_write_answer(status, body)? {
+        Some(text) => bb_created_reply(status, &text, what),
+        None => Err(crate::forge::created_reply_unreadable(
+            crate::forge::model::Provider::Bitbucket,
+            what,
+            false,
+        )),
     }
-    serde_json::from_str(&body)
-        .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
-/// PUT JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`. Same shape
-/// as [`bb_post_json`]: [`bb_unreadable`]'s article-mapped summary on line one, with
-/// the original serde error on line two.
+/// A create's answer: non-2xx → [`http_error`]. An empty 2xx body is an accepted
+/// create read as `Null`; a body that isn't JSON, or that `T` can't be read from, is
+/// the may-already-exist hedge for `what`, since the forge took the request.
+pub(crate) fn bb_created_reply<T: serde::de::DeserializeOwned>(
+    status: u16,
+    body: &str,
+    what: &str,
+) -> AppResult<T> {
+    if !(200..300).contains(&status) {
+        return Err(http_error(status, body));
+    }
+    let provider = crate::forge::model::Provider::Bitbucket;
+    let value = crate::forge::created_reply(body, provider, what, false)?;
+    serde_json::from_value(value)
+        .map_err(|_| crate::forge::created_reply_unreadable(provider, what, false))
+}
+
+/// PUT JSON to a Bitbucket endpoint and deserialize the 2xx body into `T`. Non-2xx →
+/// [`http_error`]; a parse failure takes [`bb_unreadable`]'s article-mapped summary on
+/// line one, with the original serde error on line two. An accepted reply that couldn't
+/// be read is [`crate::forge::saved_reply_unreadable`]'s may-be-saved sentence.
 pub async fn bb_put_json<T: serde::de::DeserializeOwned>(
     creds: &BbCredentials,
     path_or_url: &str,
     body: &serde_json::Value,
     what: &str,
 ) -> AppResult<T> {
-    let (status, _, body) = bb_send(creds, reqwest::Method::PUT, path_or_url, Some(body)).await?;
-    if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
-    }
-    serde_json::from_str(&body)
+    let (status, _, body) =
+        bb_send_request_split(creds, reqwest::Method::PUT, path_or_url, Some(body)).await?;
+    let Some(text) = bb_write_answer(status, body)? else {
+        return Err(crate::forge::saved_reply_unreadable(
+            "Bitbucket",
+            AppError::Bitbucket,
+        ));
+    };
+    serde_json::from_str(&text)
         .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
 /// POST to a Bitbucket endpoint with NO request body (decline / approve /
-/// stopPipeline). Any 2xx (including a 200 participant echo or a 204) → `Ok`; the
-/// returned body is ignored. Non-2xx → [`http_error`].
+/// stopPipeline). Any 2xx (including a 200 participant echo or a 204) → `Ok`, read or
+/// not, since the returned body is ignored. Non-2xx → [`http_error`].
 pub async fn bb_post_empty(creds: &BbCredentials, path_or_url: &str) -> AppResult<()> {
-    let (status, _, body) = bb_send(creds, reqwest::Method::POST, path_or_url, None).await?;
-    if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
-    }
-    Ok(())
+    let (status, _, body) =
+        bb_send_request_split(creds, reqwest::Method::POST, path_or_url, None).await?;
+    bb_write_answer(status, body).map(drop)
 }
 
-/// DELETE a Bitbucket endpoint. Any 2xx (typically 204) → `Ok`. Non-2xx →
-/// [`http_error`].
+/// DELETE a Bitbucket endpoint. Any 2xx (typically 204) → `Ok`, its body read or not.
+/// Non-2xx → [`http_error`].
 pub async fn bb_delete(creds: &BbCredentials, path_or_url: &str) -> AppResult<()> {
-    let (status, _, body) = bb_send(creds, reqwest::Method::DELETE, path_or_url, None).await?;
-    if !(200..300).contains(&status) {
-        return Err(http_error(status, &body));
-    }
-    Ok(())
+    let (status, _, body) =
+        bb_send_request_split(creds, reqwest::Method::DELETE, path_or_url, None).await?;
+    bb_write_answer(status, body).map(drop)
 }
 
 #[cfg(test)]
@@ -590,6 +642,24 @@ pub(super) async fn refused_connection_error() -> reqwest::Error {
         .unwrap_err()
 }
 
+// Accepts the connection and never answers, so only the client's deadline ends the send.
+#[cfg(test)]
+pub(super) async fn unanswered_send_error() -> reqwest::Error {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+    let error = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(200))
+        .build()
+        .unwrap()
+        .post(url)
+        .send()
+        .await
+        .unwrap_err();
+    drop(listener);
+    error
+}
+
 // SYNTHETIC: headers arrive successfully, then the body stalls or ends early.
 #[cfg(test)]
 pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
@@ -598,7 +668,7 @@ pub(super) async fn incomplete_body_error(timeout: bool) -> reqwest::Error {
 
 #[cfg(test)]
 async fn incomplete_body_error_mode(timeout: bool, reset: bool) -> reqwest::Error {
-    let (req, body_started, server) = incomplete_body_request(timeout, reset).await;
+    let (req, body_started, server) = incomplete_body_request(timeout, reset, false).await;
     let response = req.send().await.unwrap();
     if reset {
         body_started.send(()).unwrap();
@@ -621,11 +691,30 @@ pub(super) async fn incomplete_body_split(
     timeout: bool,
     reset: bool,
 ) -> (u16, Option<String>, AppResult<String>) {
-    let (req, body_started, server) = incomplete_body_request(timeout, reset).await;
+    incomplete_split(timeout, reset, None).await
+}
+
+// The same truncated reply to a POST sent as a write that may land.
+#[cfg(test)]
+async fn incomplete_written_split(
+    timeout: bool,
+    reset: bool,
+) -> (u16, Option<String>, AppResult<String>) {
+    incomplete_split(timeout, reset, Some(LandedWrite::Changed)).await
+}
+
+#[cfg(test)]
+async fn incomplete_split(
+    timeout: bool,
+    reset: bool,
+    landed: Option<LandedWrite>,
+) -> (u16, Option<String>, AppResult<String>) {
+    let write = landed.is_some();
+    let (req, body_started, server) = incomplete_body_request(timeout, reset, write).await;
     let result = BODY_READ_STARTED
         .scope(
             std::cell::RefCell::new(reset.then_some(body_started)),
-            bb_send_split(req, "Bitbucket request failed"),
+            bb_send_split(req, "Bitbucket request failed", landed),
         )
         .await;
     server.abort();
@@ -636,6 +725,7 @@ pub(super) async fn incomplete_body_split(
 async fn incomplete_body_request(
     timeout: bool,
     reset: bool,
+    write: bool,
 ) -> (
     reqwest::RequestBuilder,
     tokio::sync::oneshot::Sender<()>,
@@ -666,18 +756,67 @@ async fn incomplete_body_request(
             std::future::pending::<()>().await;
         }
     });
+    let method = if write {
+        reqwest::Method::POST
+    } else {
+        reqwest::Method::GET
+    };
     let req = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()
         .unwrap()
-        .get(url);
+        .request(method, url);
     (req, body_started, server)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `bb_post_json` create: JSON and an empty body are accepted, anything else
+    /// the forge took is the may-already-exist hedge, under kind `bitbucket`.
+    #[test]
+    fn bb_create_replies_hedge_only_an_accepted_unreadable_body() {
+        use serde_json::{json, Value};
+        let hedge = crate::forge::created_reply_unreadable(
+            crate::forge::model::Provider::Bitbucket,
+            "comment",
+            false,
+        )
+        .to_string();
+        let read = |body: &str| bb_created_reply::<Value>(201, body, "comment");
+        assert_eq!(read(r#"{"id":5}"#).unwrap(), json!({"id":5}));
+        assert_eq!(read("{}").unwrap(), json!({}));
+        assert_eq!(read("").unwrap(), Value::Null);
+        assert_eq!(read(" \n").unwrap(), Value::Null);
+        for body in ["<html><body>Log in</body></html>", r#"{"id":5,"#] {
+            let e = read(body).unwrap_err();
+            assert!(matches!(e, AppError::Bitbucket(_)), "{e:?}");
+            assert_eq!(e.to_string(), hedge, "{body}");
+        }
+        // A typed reader that can't read its item from an accepted reply hedges too.
+        #[derive(serde::Deserialize, Debug)]
+        struct Typed {
+            id: u64,
+        }
+        for body in ["", "{}", "null", r#"{"id":"x"}"#] {
+            let e = bb_created_reply::<Typed>(201, body, "comment").unwrap_err();
+            assert_eq!(e.to_string(), hedge, "{body}");
+        }
+        assert_eq!(
+            bb_created_reply::<Typed>(201, r#"{"id":5}"#, "comment")
+                .unwrap()
+                .id,
+            5
+        );
+        // A refusal stays the HTTP error.
+        let refused = bb_created_reply::<Value>(400, "<html>", "comment").unwrap_err();
+        assert!(
+            !refused.to_string().contains("may already exist"),
+            "{refused}"
+        );
+    }
 
     #[derive(Debug)]
     struct NestedError(Box<dyn std::error::Error>);
@@ -801,6 +940,142 @@ mod tests {
                 forbidden_response(body, json, false).await,
                 "You do not have access to this repository.",
             );
+        }
+    }
+
+    /// Only a received 2xx establishes a write, read or not; a non-2xx keeps its error.
+    #[test]
+    fn bb_write_answer_trusts_only_a_received_2xx() {
+        let read_failed = || AppError::Bitbucket("could not read Bitbucket response".into());
+        assert_eq!(
+            bb_write_answer(201, Ok("x".into())).unwrap(),
+            Some("x".into())
+        );
+        for status in [200, 201, 204, 299] {
+            assert_eq!(bb_write_answer(status, Err(read_failed())).unwrap(), None);
+        }
+        let envelope = r#"{"type":"error","error":{"message":"Repository not found"}}"#;
+        assert_eq!(
+            bb_write_answer(400, Ok(envelope.into()))
+                .unwrap_err()
+                .to_string(),
+            http_error(400, envelope).to_string(),
+        );
+        for status in [199, 300, 400, 500] {
+            match bb_write_answer(status, Err(read_failed())) {
+                Err(AppError::Bitbucket(m)) => {
+                    assert_eq!(m, "could not read Bitbucket response", "{status}")
+                }
+                other => panic!("{status}: {other:?}"),
+            }
+        }
+    }
+
+    /// Answers one request with `status` headers promising 100 bytes, sends 7 and closes its
+    /// write half, so the client's body read fails after the status arrived.
+    fn truncated_reply_server(status: u16) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            // Read the whole request body, so closing never resets the connection.
+            let head = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial"
+            )
+            .unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+        (url, server)
+    }
+
+    /// Each typed write helper's result when its reply's body can't be read.
+    async fn truncated_write_outcomes(status: u16) -> [AppResult<()>; 4] {
+        use serde_json::{json, Value};
+        let creds = BbCredentials {
+            email: "fixture@example.test".into(),
+            token: "fixture".into(),
+        };
+        let payload = json!({ "content": { "raw": "x" } });
+        let (url, server) = truncated_reply_server(status);
+        let posted = bb_post_json::<Value>(&creds, &url, &payload, "comment")
+            .await
+            .map(drop);
+        server.join().unwrap();
+        let (url, server) = truncated_reply_server(status);
+        let put = bb_put_json::<Value>(&creds, &url, &payload, "comment")
+            .await
+            .map(drop);
+        server.join().unwrap();
+        let (url, server) = truncated_reply_server(status);
+        let empty = bb_post_empty(&creds, &url).await;
+        server.join().unwrap();
+        let (url, server) = truncated_reply_server(status);
+        let deleted = bb_delete(&creds, &url).await;
+        server.join().unwrap();
+        [posted, put, empty, deleted]
+    }
+
+    /// A 2xx whose body can't be read: a create is the may-already-exist hedge, an edit the
+    /// may-be-saved sentence, and a write that discards its reply succeeds.
+    #[tokio::test]
+    async fn an_accepted_write_with_an_unreadable_reply_is_never_a_transport_error() {
+        let [posted, put, empty, deleted] = truncated_write_outcomes(201).await;
+        let hedge = crate::forge::created_reply_unreadable(
+            crate::forge::model::Provider::Bitbucket,
+            "comment",
+            false,
+        )
+        .to_string();
+        match posted {
+            Err(AppError::Bitbucket(m)) => assert_eq!(m, hedge),
+            other => panic!("{other:?}"),
+        }
+        match put {
+            Err(AppError::Bitbucket(m)) => assert_eq!(
+                m,
+                "Bitbucket accepted the request but its reply couldn't be read, so the change may already be saved. Check before trying again."
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(empty.is_ok(), "{empty:?}");
+        assert!(deleted.is_ok(), "{deleted:?}");
+        let [_, put, empty, deleted] = truncated_write_outcomes(200).await;
+        assert!(matches!(put, Err(AppError::Bitbucket(_))), "{put:?}");
+        assert!(empty.is_ok(), "{empty:?}");
+        assert!(deleted.is_ok(), "{deleted:?}");
+    }
+
+    /// A refused write's unreadable body keeps the body read's own error.
+    #[tokio::test]
+    async fn a_refused_write_with_an_unreadable_reply_keeps_the_read_error() {
+        for outcome in truncated_write_outcomes(500).await {
+            match outcome {
+                Err(AppError::Bitbucket(m)) => {
+                    assert!(m.contains("could not read Bitbucket response"), "{m}");
+                    assert!(!m.contains("accepted the request"), "{m}");
+                    assert!(!m.contains("didn't answer"), "{m}");
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 
@@ -1035,6 +1310,95 @@ mod tests {
         let message = transport_failure_message("Jira request failed", &error);
         assert!(message.ends_with(": request timed out"), "{message}");
         assert!(!message.contains(TRANSPORT_CONNECT_FAILED), "{message}");
+    }
+
+    /// A write sent and not answered is the hedge with the transport text on line 2; a read
+    /// and a refused connection keep the plain transport error, and so does a marked write's
+    /// body-read timeout. After a 2xx the caller answers by the status alone: success for a
+    /// write that discards the reply, the write's own sentence for a create or an edit when
+    /// its reply couldn't be read.
+    #[tokio::test]
+    async fn only_a_sent_write_that_timed_out_may_have_landed() {
+        let unanswered = unanswered_send_error().await;
+        assert!(sent_write_timed_out(&unanswered), "{unanswered:?}");
+        let ctx = "Bitbucket request failed";
+        let plain = transport_failure_message(ctx, &unanswered);
+        let hedged = send_error(
+            &unanswered,
+            ctx,
+            "Bitbucket",
+            Some(LandedWrite::Changed),
+            AppError::Bitbucket,
+        );
+        let AppError::WriteTimedOut(message) = &hedged else {
+            panic!("{hedged:?}");
+        };
+        let (line1, line2) = message.split_once('\n').unwrap();
+        assert_eq!(line1, "Bitbucket didn't answer in time, so your change may still have gone through. Check before trying again.");
+        assert_eq!(line2, plain);
+        assert!(line2.ends_with(": request timed out"), "{line2}");
+        match send_error(&unanswered, ctx, "Bitbucket", None, AppError::Bitbucket) {
+            AppError::Bitbucket(m) => assert_eq!(m, plain),
+            other => panic!("{other:?}"),
+        }
+        let refused = refused_connection_error().await;
+        assert!(!sent_write_timed_out(&refused));
+        match send_error(
+            &refused,
+            ctx,
+            "Bitbucket",
+            Some(LandedWrite::Changed),
+            AppError::Bitbucket,
+        ) {
+            AppError::Bitbucket(m) => assert!(m.ends_with(": connection failed"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // A marked write's body read runs after the send landed, so its timeout keeps the plain
+        // transport text and kind `bitbucket`; the status decides what the caller makes of it.
+        let (status, _, body) = incomplete_written_split(true, false).await;
+        assert_eq!(status, 200);
+        let m = match body {
+            Err(AppError::Bitbucket(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        assert!(m.ends_with(": request timed out"), "{m}");
+        let timed_out = || Err(AppError::Bitbucket(m.clone()));
+        assert_eq!(bb_write_answer(status, timed_out()).unwrap(), None);
+        match bb_write_answer(500, timed_out()) {
+            Err(AppError::Bitbucket(kept)) => assert_eq!(kept, m),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The rule is written once; deleting its connect arm must flip the pin. No inert fixture
+    /// yields a connect TIMEOUT, so that arm is pinned by source only.
+    #[test]
+    fn the_sent_write_rule_excludes_a_connect_timeout() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("http.rs"),
+            "sent_write_timed_out",
+        );
+        let holds = |b: &str| b.contains("e.is_timeout() && !e.is_connect()");
+        assert!(holds(&body), "{body}");
+        assert!(!holds(&body.replace(" && !e.is_connect()", "")));
+        let src = include_str!("http.rs").replace("\r\n", "\n");
+        let rule = src.split("\nmod tests {").next().unwrap();
+        assert_eq!(rule.matches("is_timeout() && !").count(), 1);
+    }
+
+    /// A non-GET send through the split helper is a write; a GET is not.
+    #[test]
+    fn the_split_helper_marks_every_non_get_as_a_write() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("http.rs"),
+            "bb_send_request_split",
+        );
+        let marks = |b: &str| {
+            b.contains("(method != reqwest::Method::GET).then_some(LandedWrite::Changed)")
+                && b.contains("bb_send_split(req, \"Bitbucket request failed\", landed)")
+        };
+        assert!(marks(&body), "{body}");
+        assert!(!marks(&body.replace(", landed)", ", None)")));
     }
 
     #[test]

@@ -93,7 +93,10 @@ import {
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { useJiraLink } from "@/lib/jira/queries";
-import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
+import {
+  notifyPrCreateFailed,
+  prCreateFailedSentence,
+} from "@/lib/notifications/pr-create-failed";
 import {
   ACT_PENDING_REASON,
   AI_DRAFT_PENDING_REASON,
@@ -788,11 +791,14 @@ export function CreatePrDialog({
             if (awayRepo) toastErrorWithNote(e, `In ${awayRepo}`);
             else toastError(e);
           } else {
+            // A failed push says so; the notification's title is the same
+            // sentence.
+            const sentence = prCreateFailedSentence(prNoun, value.head, e);
             toastErrorWithNote(
               e,
               awayRepo
-                ? `In ${awayRepo}, the ${prNoun} for ${value.head} wasn't created.`
-                : `The ${prNoun} for ${value.head} wasn't created.`,
+                ? `In ${awayRepo}, ${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}.`
+                : `${sentence}.`,
             );
           }
           // The toast fades in seconds; this outlives it for a user who moved on.

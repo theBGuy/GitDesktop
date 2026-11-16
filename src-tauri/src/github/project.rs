@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::model::Provider;
+use crate::forge::{timed_out_write, LandedWrite};
 use crate::github::gh_unreadable;
 use crate::github::issue::repo_owner_name;
 use crate::github::pr::validate_graphql_embed;
@@ -427,7 +429,7 @@ pub async fn gh_edit_item_projects(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(project_scope_error)?;
+    .map_err(|e| project_scope_error(timed_out_write(e, "GitHub", LandedWrite::Changed)))?;
     Ok(())
 }
 
@@ -435,9 +437,14 @@ const CREATE_PROJECT_POINTER: &str = "/data/createProjectV2/projectV2";
 const UPDATE_PROJECT_POINTER: &str = "/data/updateProjectV2/projectV2";
 const DELETE_PROJECT_POINTER: &str = "/data/deleteProjectV2";
 
-/// One project or view write, sent over stdin: titles and names ride as JSON
-/// variables, never through argv or spliced into the document.
-pub(super) async fn project_write(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> {
+/// One project or view write's exit-0 stdout, unparsed, sent over stdin: titles and
+/// names ride as JSON variables, never through argv or spliced into the document. A
+/// timeout is the may-have-landed hedge for `landed`.
+pub(super) async fn project_reply(
+    repo_path: &str,
+    input: &str,
+    landed: LandedWrite,
+) -> AppResult<String> {
     let out = run_gh_input(
         Some(repo_path),
         &GRAPHQL_INPUT_ARGS,
@@ -445,9 +452,41 @@ pub(super) async fn project_write(repo_path: &str, input: &str, surface: &str) -
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(project_scope_error)?;
-    serde_json::from_str(&out.stdout_lossy())
+    .map_err(|e| project_scope_error(timed_out_write(e, "GitHub", landed)))?;
+    Ok(out.stdout_lossy())
+}
+
+/// [`project_reply`] parsed; an unparsable reply is a plain read failure, so a create
+/// reads its reply through [`created_from_reply`] instead.
+pub(super) async fn project_write(
+    repo_path: &str,
+    input: &str,
+    surface: &str,
+    landed: LandedWrite,
+) -> AppResult<Value> {
+    let reply = project_reply(repo_path, input, landed).await?;
+    serde_json::from_str(&reply)
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
+}
+
+/// A Projects create's accepted reply, read by `read`. A reply that isn't JSON, or one
+/// `read` errs on, is the may-already-exist hedge for `noun`. A reply with a non-empty
+/// GraphQL `errors` list returns `read`'s own result, so a reader that reads nothing
+/// returns Ok; gh exits non-zero on GraphQL errors, so its writes never pass one here.
+pub(super) fn created_from_reply<T>(
+    reply: &str,
+    noun: &str,
+    read: impl FnOnce(&Value) -> AppResult<T>,
+) -> AppResult<T> {
+    let value = crate::forge::created_reply(reply, Provider::GitHub, noun, false)?;
+    let refused = value
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty());
+    if refused {
+        return read(&value);
+    }
+    read(&value).map_err(|_| crate::forge::created_reply_unreadable(Provider::GitHub, noun, false))
 }
 
 /// A value the server would refuse, or silently ignore, as blank, refused here
@@ -531,18 +570,6 @@ fn response_project(value: &Value, pointer: &str, surface: &str) -> AppResult<Pr
         .ok_or_else(|| gh_unreadable(surface, format!("missing project at {pointer}")))
 }
 
-/// A create that timed out may still have landed on GitHub, so its error says so
-/// rather than inviting a retry that would make a second one. Any other error
-/// passes through untouched.
-pub(super) fn create_outcome_unknown(e: AppError, what: &str) -> AppError {
-    if matches!(e, AppError::Timeout(_)) {
-        return AppError::Gh(format!(
-            "GitHub didn't answer in time, so the {what} may still have been created. Check for it before trying again.\n{e}"
-        ));
-    }
-    e
-}
-
 /// Creates a project under `owner_id`, linked to `repository_id` when one is
 /// given, and answers with it as GitHub stored it.
 #[tauri::command]
@@ -553,10 +580,11 @@ pub async fn gh_create_project(
     repository_id: Option<String>,
 ) -> AppResult<ProjectV2Ref> {
     let input = create_project_input(&owner_id, &title, repository_id.as_deref())?;
-    let value = project_write(&repo_path, &input, "the new project")
-        .await
-        .map_err(|e| create_outcome_unknown(e, "project"))?;
-    response_project(&value, CREATE_PROJECT_POINTER, "the new project")
+    let landed = LandedWrite::Created("project");
+    let reply = project_reply(&repo_path, &input, landed).await?;
+    created_from_reply(&reply, "project", |value| {
+        response_project(value, CREATE_PROJECT_POINTER, "the new project")
+    })
 }
 
 /// Renames, describes, closes or reopens a project; absent patch fields are left
@@ -568,7 +596,8 @@ pub async fn gh_update_project(
     patch: ProjectPatch,
 ) -> AppResult<ProjectV2Ref> {
     let input = update_project_input(&project_id, patch)?;
-    let value = project_write(&repo_path, &input, "the updated project").await?;
+    let landed = LandedWrite::Saved("project");
+    let value = project_write(&repo_path, &input, "the updated project", landed).await?;
     response_project(&value, UPDATE_PROJECT_POINTER, "the updated project")
 }
 
@@ -579,6 +608,7 @@ pub async fn gh_delete_project(repo_path: String, project_id: String) -> AppResu
         &repo_path,
         &delete_project_input(&project_id),
         "the deleted project",
+        LandedWrite::Changed,
     )
     .await?;
     if value
@@ -1204,20 +1234,297 @@ mod tests {
         }
     }
 
+    /// A timed-out project create keeps its released line 1, now as a timeout.
     #[test]
     fn a_timed_out_create_says_it_may_have_landed() {
-        let AppError::Gh(message) = create_outcome_unknown(AppError::Timeout(120), "project")
-        else {
-            panic!("expected the Gh variant");
+        let e = timed_out_write(
+            AppError::Timeout(120),
+            "GitHub",
+            LandedWrite::Created("project"),
+        );
+        let AppError::WriteTimedOut(message) = e else {
+            panic!("expected the WriteTimedOut variant");
         };
         assert!(message.starts_with(
-            "GitHub didn't answer in time, so the project may still have been created."
+            "GitHub didn't answer in time, so the project may still have been created. Check for it before trying again.\n"
         ));
         // Anything else is the write's own failure, and keeps its own words.
         assert!(matches!(
-            create_outcome_unknown(AppError::Gh("denied".into()), "project"),
+            timed_out_write(AppError::Gh("denied".into()), "GitHub", LandedWrite::Created("project")),
             AppError::Gh(ref m) if m == "denied"
         ));
+    }
+
+    /// Every Projects write helper maps a timeout before its scope hint, and each call site
+    /// names its landed write; the read runner `request` keeps a bare timeout. Each map's
+    /// deletion must flip.
+    #[test]
+    fn projects_writes_hedge_their_timeout() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let sources = [
+            ("project.rs", include_str!("project.rs")),
+            ("project_views.rs", include_str!("project_views.rs")),
+            (
+                "project_item_edits.rs",
+                include_str!("project_item_edits.rs"),
+            ),
+            (
+                "project_status_updates.rs",
+                include_str!("project_status_updates.rs"),
+            ),
+            ("project_fields.rs", include_str!("project_fields.rs")),
+        ];
+        let src = |file: &str| sources.iter().find(|(f, _)| *f == file).unwrap().1;
+        // (file, fn, the map it must hold after its run)
+        let maps = [
+            (
+                "project.rs",
+                "project_reply",
+                "project_scope_error(timed_out_write(e, \"GitHub\", landed))",
+            ),
+            (
+                "project.rs",
+                "gh_edit_item_projects",
+                "project_scope_error(timed_out_write(e, \"GitHub\", LandedWrite::Changed))",
+            ),
+            (
+                "project_item_edits.rs",
+                "write_reply",
+                "item_edits_scope_error(timed_out_write(e, \"GitHub\", landed))",
+            ),
+            (
+                "project_item_edits.rs",
+                "bulk_response",
+                "output.map_err(|e| timed_out_write(e, \"GitHub\", LandedWrite::Changed))?",
+            ),
+            (
+                "project_status_updates.rs",
+                "write_reply",
+                "write_scope_error(timed_out_write(e, \"GitHub\", landed))",
+            ),
+            (
+                "project_fields.rs",
+                "gh_set_item_field_values",
+                "map_field_write_error(crate::forge::timed_out_write(e, \"GitHub\", landed))",
+            ),
+        ];
+        for (file, name, map) in maps {
+            let body = wiring_body(src(file), name);
+            assert!(body.contains(map), "{file} {name}: {body}");
+            assert!(
+                !body.replace(map, "x").contains("timed_out_write("),
+                "{file} {name}: control"
+            );
+        }
+        assert!(!wiring_body(src("project_item_edits.rs"), "request").contains("timed_out_write("));
+        // The parsing helpers carry the map only through their `*_reply` sibling.
+        for (file, name, reply) in [
+            ("project.rs", "project_write", "project_reply("),
+            ("project_item_edits.rs", "write_request", "write_reply("),
+            ("project_status_updates.rs", "write", "write_reply("),
+        ] {
+            let body = wiring_body(src(file), name);
+            assert!(body.contains(reply), "{file} {name}: {body}");
+            assert!(!body.contains("timed_out_write("), "{file} {name}: {body}");
+        }
+        // Each write call site names its landed write.
+        let calls = [
+            (
+                "project.rs",
+                "gh_create_project",
+                "LandedWrite::Created(\"project\")",
+            ),
+            (
+                "project.rs",
+                "gh_update_project",
+                "LandedWrite::Saved(\"project\")",
+            ),
+            ("project.rs", "gh_delete_project", "LandedWrite::Changed"),
+            (
+                "project_views.rs",
+                "write_view_update",
+                "LandedWrite::Saved(\"view\")",
+            ),
+            (
+                "project_views.rs",
+                "gh_create_view",
+                "LandedWrite::Created(\"view\")",
+            ),
+            ("project_views.rs", "gh_delete_view", "LandedWrite::Changed"),
+            (
+                "project_views.rs",
+                "gh_duplicate_view",
+                "LandedWrite::Created(\"copy\")",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_add_draft_item",
+                "LandedWrite::Created(\"draft\")",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_add_board_item",
+                "LandedWrite::Created(\"project item\")",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_update_draft_item",
+                "LandedWrite::Saved(\"draft\")",
+            ),
+            (
+                "project_item_edits.rs",
+                "update_draft_fields",
+                "LandedWrite::Saved(\"draft\")",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_convert_draft_item",
+                "LandedWrite::Changed",
+            ),
+            (
+                "project_item_edits.rs",
+                "archive_request",
+                "LandedWrite::Changed",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_unarchive_board_item",
+                "LandedWrite::Changed",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_remove_board_item",
+                "LandedWrite::Changed",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_set_item_position",
+                "LandedWrite::Changed",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_add_issue_to_projects",
+                "LandedWrite::Created(\"project item\")",
+            ),
+            (
+                "project_status_updates.rs",
+                "gh_create_project_status_update",
+                "LandedWrite::Created(\"status update\")",
+            ),
+            (
+                "project_status_updates.rs",
+                "gh_update_project_status_update",
+                "LandedWrite::Saved(\"status update\")",
+            ),
+            (
+                "project_status_updates.rs",
+                "gh_delete_project_status_update",
+                "LandedWrite::Changed",
+            ),
+        ];
+        for (file, name, landed) in calls {
+            let body = wiring_body(src(file), name);
+            assert!(body.contains(landed), "{file} {name}: {body}");
+        }
+        // Every former `.map_err(item_edits_scope_error)` write moved onto the wrapper.
+        let edits = src("project_item_edits.rs")
+            .split("\nmod tests {")
+            .next()
+            .unwrap();
+        assert_eq!(
+            edits.matches("write_request(").count() + edits.matches("write_reply(").count(),
+            13
+        );
+        assert_eq!(edits.matches(".map_err(item_edits_scope_error)").count(), 0);
+        // The seven creates read their accepted reply through `created_from_reply`.
+        for (file, name, noun) in [
+            ("project.rs", "gh_create_project", "\"project\""),
+            ("project_views.rs", "gh_create_view", "\"view\""),
+            ("project_views.rs", "gh_duplicate_view", "\"copy\""),
+            ("project_item_edits.rs", "gh_add_draft_item", "\"draft\""),
+            (
+                "project_item_edits.rs",
+                "gh_add_board_item",
+                "\"project item\"",
+            ),
+            (
+                "project_item_edits.rs",
+                "gh_add_issue_to_projects",
+                "\"project item\"",
+            ),
+            (
+                "project_status_updates.rs",
+                "gh_create_project_status_update",
+                "\"status update\"",
+            ),
+        ] {
+            let body = wiring_body(src(file), name);
+            let call = format!("created_from_reply(&reply, {noun}");
+            assert!(body.contains(&call), "{file} {name}: {body}");
+            for parsed in ["project_write(", "write_request(", "write(&"] {
+                assert!(!body.contains(parsed), "{file} {name}: {parsed}");
+            }
+        }
+    }
+
+    /// A Projects create's reply: valid is read; not JSON, empty, or JSON without the
+    /// item is the hedge; a GraphQL `errors` reply keeps the reader's own error.
+    #[test]
+    fn projects_create_replies_hedge_an_accepted_unreadable_reply() {
+        let read =
+            |value: &Value| response_project(value, CREATE_PROJECT_POINTER, "the new project");
+        let hedge = crate::forge::created_reply_unreadable(Provider::GitHub, "project", false);
+        let valid = r#"{"data":{"createProjectV2":{"projectV2":{"id":"PVT_1","title":"T","number":3,"closed":false,"viewerCanUpdate":true}}}}"#;
+        assert_eq!(
+            created_from_reply(valid, "project", read).unwrap().id,
+            "PVT_1"
+        );
+        for reply in [
+            "",
+            "  ",
+            "{}",
+            "null",
+            "<html><body>Sign in</body></html>",
+            r#"{"data":{"createProjectV2":"#,
+            r#"{"data":{"createProjectV2":null}}"#,
+        ] {
+            let e = created_from_reply(reply, "project", read)
+                .err()
+                .expect(reply);
+            assert!(matches!(e, AppError::Gh(_)), "{e:?}");
+            assert_eq!(e.to_string(), hedge.to_string(), "{reply}");
+        }
+        let refused = r#"{"errors":[{"message":"x"}]}"#;
+        let e = created_from_reply(refused, "project", read)
+            .err()
+            .expect(refused);
+        assert_eq!(
+            e.to_string(),
+            read(&serde_json::from_str(refused).unwrap())
+                .err()
+                .expect(refused)
+                .to_string()
+        );
+        assert!(!e.to_string().contains("may already exist"));
+        // An empty `errors` list is no refusal.
+        let e = created_from_reply(r#"{"errors":[]}"#, "project", read)
+            .err()
+            .expect("no refusal");
+        assert_eq!(e.to_string(), hedge.to_string());
+        // A create that reads nothing (the membership add) hedges only a non-JSON reply.
+        let nothing = |_: &Value| -> AppResult<()> { Ok(()) };
+        for reply in ["", "{}", r#"{"errors":[{"message":"x"}]}"#] {
+            assert!(
+                created_from_reply(reply, "project item", nothing).is_ok(),
+                "{reply}"
+            );
+        }
+        for reply in ["<html>", r#"{"data":"#] {
+            let e = created_from_reply(reply, "project item", nothing).unwrap_err();
+            assert!(e
+                .to_string()
+                .contains("so the project item may already exist"));
+        }
     }
 
     #[test]

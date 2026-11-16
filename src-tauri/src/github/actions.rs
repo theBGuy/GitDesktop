@@ -14,7 +14,7 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::runner::{
     gh_auth_epoch, gh_host_for_repo, gh_output_ok, run_gh, run_gh_cached_get,
-    run_gh_cached_get_raw_on_host, run_gh_on_host, run_gh_raw, GH_NETWORK_TIMEOUT,
+    run_gh_cached_get_raw_on_host, run_gh_input, run_gh_on_host, run_gh_raw, GH_NETWORK_TIMEOUT,
 };
 use crate::github::workflow_inputs::{parse_workflow_dispatch_inputs, WorkflowInput};
 
@@ -1586,6 +1586,30 @@ fn quoted_tokens(raw: &str) -> Vec<&str> {
     tokens
 }
 
+/// The `gh workflow run` argv; `--json` (last) makes gh read the inputs as one
+/// JSON object on stdin. Pure, so the shape is pinned without a spawn.
+fn workflow_run_args(slug: &str, workflow: &str, git_ref: &str, json_inputs: bool) -> Vec<String> {
+    let mut args: Vec<String> = ["workflow", "run", "-R", slug, workflow, "--ref", git_ref]
+        .map(String::from)
+        .to_vec();
+    if json_inputs {
+        args.push("--json".into());
+    }
+    args
+}
+
+/// A dispatch's inputs as one JSON object whose every value is a string, for gh's
+/// stdin, so no value meets argv's length cap or a `.cmd` shim.
+fn workflow_inputs_json(inputs: &HashMap<String, String>) -> String {
+    serde_json::Value::Object(
+        inputs
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::from(v.as_str())))
+            .collect(),
+    )
+    .to_string()
+}
+
 /// Manually dispatches a workflow (`workflow_dispatch`) on a ref, with inputs.
 /// `workflow` is the numeric id or the file name (e.g. "ci.yml").
 pub async fn gh_workflow_run(
@@ -1601,37 +1625,29 @@ pub async fn gh_workflow_run(
     }
     validate_ref(&git_ref)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let mut args: Vec<String> = vec![
-        "workflow".into(),
-        "run".into(),
-        "-R".into(),
-        slug.clone(),
-        workflow,
-        "--ref".into(),
-        git_ref.clone(),
-    ];
-    for (k, v) in &inputs {
-        if k.is_empty() || k.starts_with('-') {
-            return Err(AppError::InvalidArgument(format!("invalid input key: {k}")));
-        }
-        args.push("-f".into());
-        args.push(format!("{k}={v}"));
+    if let Some(k) = inputs.keys().find(|k| k.is_empty() || k.starts_with('-')) {
+        return Err(AppError::InvalidArgument(format!("invalid input key: {k}")));
     }
+    let args = workflow_run_args(&slug, &workflow, &git_ref, !inputs.is_empty());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)
-        .await
-        .map_err(|e| match e {
-            AppError::Gh(msg) => {
-                let message = humanize_dispatch_error(&msg, &git_ref);
-                // GitHub refused the inputs, so this process's cached schema for the ref is
-                // stale; only the GUI's next probe reads it (the MCP server's cache is empty).
-                if message.starts_with(DISPATCH_INPUTS_REJECTED_LEAD) {
-                    evict_probe_entries(&repo_path, &slug, &git_ref);
-                }
-                AppError::Gh(message)
+    let run = if inputs.is_empty() {
+        run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await
+    } else {
+        let json = workflow_inputs_json(&inputs);
+        run_gh_input(Some(&repo_path), &arg_refs, &json, GH_NETWORK_TIMEOUT).await
+    };
+    run.map_err(|e| match e {
+        AppError::Gh(msg) => {
+            let message = humanize_dispatch_error(&msg, &git_ref);
+            // GitHub refused the inputs, so this process's cached schema for the ref is
+            // stale; only the GUI's next probe reads it (the MCP server's cache is empty).
+            if message.starts_with(DISPATCH_INPUTS_REJECTED_LEAD) {
+                evict_probe_entries(&repo_path, &slug, &git_ref);
             }
-            other => other,
-        })?;
+            AppError::Gh(message)
+        }
+        other => other,
+    })?;
     Ok(())
 }
 
@@ -1639,6 +1655,76 @@ pub async fn gh_workflow_run(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A dispatch WITH inputs adds `--json` as the last element and nothing else;
+    /// without inputs the argv is the plain run.
+    #[test]
+    fn workflow_run_args_add_json_only_for_inputs() {
+        let plain = ["workflow", "run", "-R", "o/r", "ci.yml", "--ref", "main"];
+        assert_eq!(workflow_run_args("o/r", "ci.yml", "main", false), plain);
+        let json = workflow_run_args("o/r", "ci.yml", "main", true);
+        assert_eq!(json[..plain.len()], plain);
+        assert_eq!(json[plain.len()..], ["--json"]);
+    }
+
+    /// Every input reaches gh as a JSON string member, byte for byte, however
+    /// long and whatever it holds.
+    #[test]
+    fn workflow_inputs_json_carries_every_value_verbatim() {
+        let mut hostile = String::from("-dash \"quoted\" \\\\\\ run\r\n%PATH% & ^ | \0 end\n@at\n");
+        while hostile.len() < 50_000 {
+            hostile.push_str("line with \"quotes\", \\ and %TEMP% & ^ |\r\n");
+        }
+        let inputs = HashMap::from([
+            ("long".to_string(), hostile.clone()),
+            ("plain".to_string(), "v".to_string()),
+            ("empty".to_string(), String::new()),
+        ]);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&workflow_inputs_json(&inputs)).unwrap();
+        let object = parsed.as_object().unwrap();
+        assert_eq!(object.len(), inputs.len());
+        for (k, v) in &inputs {
+            assert_eq!(object[k].as_str(), Some(v.as_str()), "{k}");
+        }
+        assert_eq!(workflow_inputs_json(&HashMap::new()), "{}");
+    }
+
+    /// Inputs go to gh on stdin behind `--json`; a dispatch without inputs keeps the
+    /// plain `run_gh` call, and the key guard runs before either.
+    #[test]
+    fn workflow_dispatch_sends_its_inputs_on_stdin() {
+        let src = include_str!("actions.rs").replace("\r\n", "\n");
+        let src = src.split("\nmod tests {").next().unwrap();
+        let body = crate::github::repo_meta::tests::wiring_body(src, "gh_workflow_run");
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let wired = |flat: &str| {
+            let guard = flat.find("\"invalid input key: {k}\"");
+            let builder =
+                flat.find("workflow_run_args(&slug, &workflow, &git_ref, !inputs.is_empty())");
+            guard.is_some()
+                && builder.is_some()
+                && guard < builder
+                && flat.contains("let run = if inputs.is_empty() { run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)")
+                && flat.contains("let json = workflow_inputs_json(&inputs); run_gh_input(Some(&repo_path), &arg_refs, &json, GH_NETWORK_TIMEOUT)")
+                && flat.contains("humanize_dispatch_error(&msg, &git_ref)")
+                && flat.contains("evict_probe_entries(&repo_path, &slug, &git_ref)")
+                && !flat.contains("\"-f\"")
+                && !flat.contains("format!(\"{k}={v}\")")
+        };
+        assert!(wired(&flat), "{flat}");
+        let argv = format!("{flat} args.push(\"-f\".into()); args.push(format!(\"{{k}}={{v}}\"));");
+        assert!(!wired(&argv), "inputs back on argv must flip");
+        let no_plain = flat.replacen(
+            "run_gh(Some(&repo_path)",
+            "run_gh_input(Some(&repo_path)",
+            1,
+        );
+        assert!(
+            !wired(&no_plain),
+            "losing the no-inputs run_gh arm must flip"
+        );
+    }
 
     fn cache_updated_at() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-10-24T16:37:10Z")

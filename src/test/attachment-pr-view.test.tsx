@@ -4,11 +4,14 @@ import {
   cleanup,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
+import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LinkedIssuesField } from "@/features/pulls/LinkedIssuesField";
 import { RemotePrView } from "@/features/pulls/RemotePrView";
@@ -20,10 +23,12 @@ import {
   forgePrComment,
   forgePrEdit,
   forgePrRequestChanges,
+  forgePrSetDraft,
   forgePrView,
   forgeStatus,
   gitBranches,
 } from "@/lib/git/api";
+import { useSetPrDraft } from "@/lib/git/queries";
 import type {
   Branch,
   ForgeStatus,
@@ -51,6 +56,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgePrComment: vi.fn(),
   forgePrRequestChanges: vi.fn(async () => undefined),
   forgePrEdit: vi.fn(),
+  forgePrSetDraft: vi.fn(async () => undefined),
   gitBranches: vi.fn(),
 }));
 // The generator is observed at its hook; a test drives its draft callback.
@@ -851,6 +857,21 @@ describe("RemotePrView edit follows the pull request", () => {
     expect(sentBody(0)).toBe("Words\n\nCloses #5");
   });
 
+  it("opens a block naming one issue under both keywords as one Closes chip, and Save keeps the close", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #6\nRelates to #6",
+    }));
+    await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(6)).toBeTruthy());
+    const chips = screen.getAllByRole("button", { name: /issue 6:/ });
+    expect(chips).toHaveLength(1);
+    expect(chips[0].getAttribute("aria-label")).toMatch(/^Closes issue 6:/);
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words\n\nCloses #6");
+  });
+
   it("keeps the extracted chip through a follow on an untouched cluster", async () => {
     vi.mocked(forgePrView).mockImplementation(async () => ({
       ...pr(),
@@ -1311,6 +1332,398 @@ describe("RemotePrView edit follows the pull request", () => {
     expect(sentBody(0)).toBe("Words");
   });
 
+  const GITLAB_EDIT = {
+    ...(GITLAB as unknown as { implemented: object }).implemented,
+    mrEdit: true,
+  };
+  /** Re-reads the forge status, answering with `implemented` over GitLab's,
+   *  and returns once the view has rendered the answer: react-query tells its
+   *  observers on a zero-delay timer, so a bare `refetchQueries` returns while
+   *  the view still shows the previous status. */
+  async function restatus(client: QueryClient, issues: boolean) {
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      implemented: issues ? { ...GITLAB_EDIT, issues: true } : GITLAB_EDIT,
+    } as unknown as ForgeStatus);
+    await act(async () => {
+      await client.refetchQueries({
+        predicate: (q) =>
+          (q.state.data as { implemented?: unknown } | undefined)
+            ?.implemented !== undefined,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+  const linkShown = () =>
+    screen.queryByRole("button", { name: "Link an issue" }) !== null;
+  const STORED = "Text\n\nCloses #6\nRelates to #7";
+  /** Opens Edit on a stored body whose block holds #6 and #7 as chips. */
+  async function openWithBlock() {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: STORED,
+    }));
+    const client = await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(6)).toBeTruthy());
+    expect(chipButton(7)).toBeTruthy();
+    expect(editBox().value).toBe("Text");
+    return client;
+  }
+  async function clusterOff(client: QueryClient) {
+    await restatus(client, false);
+    await waitFor(() => expect(linkShown()).toBe(false));
+    await act(async () => undefined);
+  }
+
+  it("keeps both reference lines when the issue cluster turns off after the description was typed (AC1b)", async () => {
+    const client = await openWithBlock();
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    await clusterOff(client);
+    expect(editBox().value).toBe("Typed");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Typed\n\nCloses #6\nRelates to #7");
+  });
+
+  it("keeps the Jira line when the link goes away after the description was typed (AC1c)", async () => {
+    const link = {
+      siteHost: "acme.atlassian.net",
+      projectKey: "KEY",
+      projectName: "Key",
+    };
+    vi.mocked(getJiraLink).mockResolvedValue(link);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Text\n\nRelates to KEY-1",
+    }));
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus);
+    const client = mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(button("Remove KEY-1")).toBeTruthy());
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    vi.mocked(getJiraLink).mockResolvedValue(null);
+    await act(async () => {
+      await client.refetchQueries({
+        predicate: (q) =>
+          (q.state.data as { siteHost?: unknown } | null | undefined)
+            ?.siteHost !== undefined,
+      });
+    });
+    await waitFor(() => expect(linkShown()).toBe(false));
+    await act(async () => undefined);
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Typed\n\nRelates to KEY-1");
+  });
+
+  it("writes only the chips left when a chip was removed before the cluster turned off (AC1d)", async () => {
+    const client = await openWithBlock();
+    fireEvent.click(button("Remove #6"));
+    await waitFor(() => expect(chipButton(6)).toBeNull());
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    await clusterOff(client);
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Typed\n\nRelates to #7");
+  });
+
+  it("never writes back a removed chip's line over an untouched description when the cluster turns off (AC1e)", async () => {
+    const client = await openWithBlock();
+    fireEvent.click(button("Remove #6"));
+    await waitFor(() => expect(chipButton(6)).toBeNull());
+    await clusterOff(client);
+    expect(editBox().value).toBe("Text");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Text\n\nRelates to #7");
+  });
+
+  it("sends the stored body when only the title changed before the cluster turned off (AC1e2)", async () => {
+    const client = await openWithBlock();
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Renamed" },
+    });
+    await clusterOff(client);
+    await saveAndClose();
+    expect(sentBody(0)).toBe(STORED);
+  });
+
+  it("lets untouched chips follow the stored block while the cluster is off (AC1e3)", async () => {
+    const client = await openWithBlock();
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    await clusterOff(client);
+    await rereadLanded(client, { body: "Text\n\nRelates to #7" });
+    await act(async () => undefined);
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Typed\n\nRelates to #7");
+  });
+
+  it("keeps the chips and description through the cluster turning off and on again (AC1e4, AC2b)", async () => {
+    const client = await openWithBlock();
+    fireEvent.click(button("Remove #6"));
+    await waitFor(() => expect(chipButton(6)).toBeNull());
+    await clusterOff(client);
+    await restatus(client, true);
+    await waitFor(() => expect(linkShown()).toBe(true));
+    await act(async () => undefined);
+    expect(chipButton(6)).toBeNull();
+    expect(chipButton(7)).toBeTruthy();
+    expect(editBox().value).toBe("Text");
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Typed\n\nRelates to #7");
+  });
+
+  it("neither adds nor marks chips from a generation while the cluster is off (AC1f)", async () => {
+    const client = await openWithBlock();
+    await clusterOff(client);
+    act(() => screen.getByRole("textbox", { name: "Title" }).focus());
+    await userEvent.keyboard("{Control>}g{/Control}");
+    await act(async () => undefined);
+    expect(generateFromDiff).toHaveBeenCalledTimes(1);
+    const onUpdate = generateFromDiff.mock.calls[0][4] as (d: object) => void;
+    act(() =>
+      onUpdate({
+        title: "Generated",
+        body: "Generated body",
+        closes: [9],
+        relates: [],
+        jiraMentions: [],
+      }),
+    );
+    // Untouched chips still follow the stored block.
+    await rereadLanded(client, { body: "Text\n\nRelates to #7" });
+    await act(async () => undefined);
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Generated body\n\nRelates to #7");
+  });
+
+  it("takes no chip and no touched mark from a chunk that lands after the cluster turned off mid-generation (F3)", async () => {
+    // #9 is fed as a candidate, so a chunk the gate let through would add it.
+    vi.mocked(forgeIssueList).mockResolvedValue([
+      issue(6, "Six"),
+      issue(7, "Seven"),
+      issue(9, "Nine"),
+    ]);
+    const client = await openWithBlock();
+    act(() => screen.getByRole("textbox", { name: "Title" }).focus());
+    await userEvent.keyboard("{Control>}g{/Control}");
+    await act(async () => undefined);
+    expect(generateFromDiff).toHaveBeenCalledTimes(1);
+    const onUpdate = generateFromDiff.mock.calls[0][4] as (d: object) => void;
+    await clusterOff(client);
+    act(() =>
+      onUpdate({
+        title: "Generated",
+        body: "Generated body",
+        closes: [9],
+        relates: [],
+        jiraMentions: [],
+      }),
+    );
+    // Untouched chips still follow the stored block.
+    await rereadLanded(client, { body: "Text\n\nRelates to #7" });
+    await act(async () => undefined);
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Generated body\n\nRelates to #7");
+  });
+
+  it("marks the Jira cluster touched from a generation while it is on (F6)", async () => {
+    vi.mocked(getJiraLink).mockResolvedValue({
+      siteHost: "acme.atlassian.net",
+      projectKey: "KEY",
+      projectName: "Key",
+    });
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Text\n\nRelates to KEY-1",
+    }));
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus);
+    const client = mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(button("Remove KEY-1")).toBeTruthy());
+    act(() => screen.getByRole("textbox", { name: "Title" }).focus());
+    await userEvent.keyboard("{Control>}g{/Control}");
+    await act(async () => undefined);
+    expect(generateFromDiff).toHaveBeenCalledTimes(1);
+    const onUpdate = generateFromDiff.mock.calls[0][4] as (d: object) => void;
+    act(() =>
+      onUpdate({
+        title: "Generated",
+        body: "Generated body",
+        closes: [],
+        relates: [],
+        jiraMentions: [],
+      }),
+    );
+    // A touched cluster no longer follows the stored block.
+    await rereadLanded(client, { body: "Text\n\nRelates to KEY-2" });
+    await act(async () => undefined);
+    expect(button("Remove KEY-1")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Remove KEY-2" })).toBeNull();
+  });
+
+  it("shows no chip an earlier session picked when the cluster turns on after a reopen (AC2a)", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    vi.mocked(forgeIssueList).mockResolvedValue([
+      issue(3, "Three"),
+      issue(9, "Nine"),
+    ]);
+    const user = userEvent.setup();
+    const client = await openPrEdit({ issues: true });
+    await user.click(button("Link an issue"));
+    await user.click(
+      await screen.findByPlaceholderText("Search issues by # or title"),
+    );
+    await user.click(await screen.findByRole("option", { name: /#9/ }));
+    await waitFor(() => expect(chipButton(9)).toBeTruthy());
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await restatus(client, false);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words\n\nCloses #3");
+    fireEvent.change(editBox(), { target: { value: "Typed" } });
+    await restatus(client, true);
+    await waitFor(() => expect(linkShown()).toBe(true));
+    await act(async () => undefined);
+    expect(chipButton(9)).toBeNull();
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Typed");
+  });
+
+  /** Opens Edit with no cluster active on "Words\n\nCloses #3", pastes an image,
+   *  lets a partial save read `stored` back (image-1.png failed), then turns
+   *  the issue cluster on. */
+  async function partialSaveThenClusterOn(stored: string) {
+    const status = deferred<ForgeStatus>();
+    vi.mocked(forgeStatus).mockReturnValue(status.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    fireEvent.paste(editBox(), {
+      clipboardData: {
+        files: [
+          new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+        ],
+        types: ["Files"],
+        getData: () => "",
+      },
+    });
+    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: ["image-1.png"],
+      body: stored,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(editBox().value).toContain(stored));
+    await act(async () =>
+      status.resolve({
+        ...GITLAB,
+        implemented: { ...GITLAB_EDIT, issues: true },
+      } as unknown as ForgeStatus),
+    );
+    await waitFor(() => expect(linkShown()).toBe(true));
+    await act(async () => undefined);
+  }
+  async function saveAgainAndClose() {
+    vi.mocked(forgePrEdit).mockResolvedValueOnce({
+      failedAttachments: [],
+      body: null,
+    } as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  }
+  const countOf = (text: string, line: string) => text.split(line).length - 1;
+
+  it("writes no reference removed from the chips after a partial save re-seeded the block and the cluster turned on (F1a, AC2c)", async () => {
+    await partialSaveThenClusterOn("Words ![image](image-1.png)\n\nCloses #3");
+    await waitFor(() => expect(chipButton(3)).toBeTruthy());
+    expect(editBox().value).toBe("Words ![image](image-1.png)");
+    fireEvent.click(button("Remove #3"));
+    await waitFor(() => expect(chipButton(3)).toBeNull());
+    await saveAgainAndClose();
+    expect(sentBody(1)).not.toContain("Closes #3");
+  });
+
+  it("writes each reference once when failed-image lines follow the re-seeded block and the cluster turns on (F1b)", async () => {
+    await partialSaveThenClusterOn("Words\n\nCloses #3");
+    expect(editBox().value).not.toBe("Words\n\nCloses #3");
+    await saveAgainAndClose();
+    expect(countOf(sentBody(1), "Closes #3")).toBe(1);
+  });
+
+  it("holds a fresh form's Save while another write cancels the host's re-read (AC3)", async () => {
+    const client = await openPrEdit();
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Typed title" },
+    });
+    const save = deferred<unknown>();
+    vi.mocked(forgePrEdit).mockReturnValueOnce(save.promise as never);
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(forgePrEdit).toHaveBeenCalledTimes(1));
+    fireEvent.click(button("Cancel"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const read = deferred<PrDetails>();
+    let reads = 0;
+    vi.mocked(forgePrView).mockImplementation(() => {
+      reads += 1;
+      return read.promise;
+    });
+    await act(async () => save.resolve({ failedAttachments: [], body: null }));
+    await waitFor(() => expect(reads).toBeGreaterThan(0));
+    // Another optimistic write on the same pull request cancels its re-read.
+    const draft = renderHook(() => useSetPrDraft(REPO), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    });
+    await act(async () => {
+      void draft.result.current
+        .mutateAsync({ number: 7, lens: "origin", draft: true })
+        .catch(() => undefined);
+    });
+    await waitFor(() => expect(forgePrSetDraft).toHaveBeenCalledTimes(1));
+    await act(async () => undefined);
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    const saveButton = () =>
+      screen.getByRole("button", { name: /^(Loading)?Save$/ });
+    expect(saveButton()).toHaveAttribute("aria-disabled", "true");
+    expect(reasonOf(saveButton())).toBe("Applying this change…");
+    await act(async () => read.resolve({ ...pr(), title: "Typed title" }));
+    await waitFor(() =>
+      expect(saveButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+  });
+
   it("holds a fresh form's Save through the host's re-read after a save that left the screen", async () => {
     await openPrEdit();
     fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
@@ -1504,5 +1917,78 @@ describe("linked-issue hint", () => {
     expect(
       screen.queryByText("Added to the description on create."),
     ).toBeNull();
+  });
+});
+
+describe("RemotePrView names the forge's item in its Edit copy (AC4)", () => {
+  it.each([
+    ["gitlab", "Merge request", "merge request"],
+    ["github", "Pull request", "pull request"],
+    ["bitbucket", "Pull request", "pull request"],
+  ])("on %s", async (provider, noun, lower) => {
+    const success = vi.spyOn(toast, "success");
+    try {
+      vi.mocked(forgeStatus).mockResolvedValue({
+        ...GITLAB,
+        provider,
+        implemented: {
+          ...(GITLAB as unknown as { implemented: object }).implemented,
+          mrEdit: true,
+          mrDraftToggle: true,
+        },
+      } as unknown as ForgeStatus);
+      mount();
+      await screen.findByText("Merge request seven", undefined, {
+        timeout: 3000,
+      });
+      await waitFor(() =>
+        expect(button("Convert to draft")).toHaveAttribute(
+          "title",
+          `Turn this ${lower} back into a draft`,
+        ),
+      );
+      fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+      await waitFor(() => expect(editBox()).toBeInTheDocument());
+      vi.mocked(forgePrEdit).mockResolvedValueOnce({
+        failedAttachments: [],
+        body: null,
+      } as never);
+      fireEvent.click(button("Save"));
+      await waitFor(() =>
+        expect(success).toHaveBeenCalledWith(`${noun} updated`),
+      );
+    } finally {
+      success.mockRestore();
+    }
+  });
+
+  it("names the merge request in the warning when an image didn't upload and nothing was read back", async () => {
+    const warning = vi.spyOn(toast, "warning");
+    try {
+      vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+      await openPrEdit();
+      fireEvent.paste(editBox(), {
+        clipboardData: {
+          files: [
+            new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+          ],
+          types: ["Files"],
+          getData: () => "",
+        },
+      });
+      await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+      vi.mocked(forgePrEdit).mockResolvedValueOnce({
+        failedAttachments: ["image-1.png"],
+        body: null,
+      } as never);
+      fireEvent.click(button("Save"));
+      await waitFor(() =>
+        expect(warning).toHaveBeenCalledWith(
+          "Merge request updated, but image-1.png didn't upload. Edit the description to add it again.",
+        ),
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
 });

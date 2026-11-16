@@ -2382,8 +2382,10 @@ mod tests {
         assert!(!reads_as_write(&stderr_only), "the control must flip");
     }
 
-    /// The two REST issue writes map a timeout once, after their write and (create)
-    /// after its eviction, so the eviction still sees the unmapped result.
+    /// Each REST issue write calls `timed_out_write` once, after the write. The create's raw
+    /// result reaches its eviction first (which skips only `GhNotFound`), then a bare timeout
+    /// is mapped with its noun; the edit re-leads the one its helper already mapped under
+    /// `Changed`.
     #[test]
     fn the_rest_issue_writes_hedge_their_timeouts() {
         let holds = |body: &str, write: &str, eviction: Option<&str>| {

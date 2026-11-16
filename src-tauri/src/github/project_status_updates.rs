@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::{timed_out_write, LandedWrite};
 use crate::github::gh_unreadable;
+use crate::github::project::created_from_reply;
 use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
 use crate::github::runner::{
     map_scope_error, run_gh, run_gh_input, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE,
@@ -276,7 +278,9 @@ fn response_update(value: &Value, pointer: &str, surface: &str) -> AppResult<Pro
         .ok_or_else(|| gh_unreadable(surface, format!("missing status update at {pointer}")))
 }
 
-async fn write(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> {
+/// One status-update write's exit-0 stdout, unparsed; a timeout is the may-have-landed
+/// hedge for `landed`.
+async fn write_reply(repo_path: &str, input: &str, landed: LandedWrite) -> AppResult<String> {
     let out = run_gh_input(
         Some(repo_path),
         &GRAPHQL_INPUT_ARGS,
@@ -284,8 +288,19 @@ async fn write(repo_path: &str, input: &str, surface: &str) -> AppResult<Value> 
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(write_scope_error)?;
-    serde_json::from_str(&out.stdout_lossy())
+    .map_err(|e| write_scope_error(timed_out_write(e, "GitHub", landed)))?;
+    Ok(out.stdout_lossy())
+}
+
+/// [`write_reply`] parsed; the create reads its reply through `created_from_reply`.
+async fn write(
+    repo_path: &str,
+    input: &str,
+    surface: &str,
+    landed: LandedWrite,
+) -> AppResult<Value> {
+    let reply = write_reply(repo_path, input, landed).await?;
+    serde_json::from_str(&reply)
         .map_err(|e| gh_unreadable(surface, format!("could not parse the response: {e}")))
 }
 
@@ -319,8 +334,11 @@ pub async fn gh_create_project_status_update(
 ) -> AppResult<ProjectStatusUpdate> {
     let content = StatusContent::new(None, body, start_date, target_date)?;
     let input = create_input(&project_id, &status, &content)?;
-    let value = write(&repo_path, &input, "the new status update").await?;
-    response_update(&value, CREATE_POINTER, "the new status update")
+    let landed = LandedWrite::Created("status update");
+    let reply = write_reply(&repo_path, &input, landed).await?;
+    created_from_reply(&reply, "status update", |value| {
+        response_update(value, CREATE_POINTER, "the new status update")
+    })
 }
 
 #[tauri::command]
@@ -334,7 +352,8 @@ pub async fn gh_update_project_status_update(
 ) -> AppResult<ProjectStatusUpdate> {
     let content = StatusContent::new(status, body, start_date, target_date)?.require_any()?;
     let input = update_input(&status_update_id, &content);
-    let value = write(&repo_path, &input, "the updated status update").await?;
+    let landed = LandedWrite::Saved("status update");
+    let value = write(&repo_path, &input, "the updated status update", landed).await?;
     response_update(&value, UPDATE_POINTER, "the updated status update")
 }
 
@@ -347,6 +366,7 @@ pub async fn gh_delete_project_status_update(
         &repo_path,
         &delete_input(&status_update_id),
         "the deleted status update",
+        LandedWrite::Changed,
     )
     .await?;
     match value.pointer(DELETE_POINTER).and_then(Value::as_str) {

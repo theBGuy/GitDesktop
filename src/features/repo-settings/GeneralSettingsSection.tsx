@@ -52,6 +52,7 @@ import {
   OFFLINE_WRITE_REASON,
   RemoteFormSection,
 } from "./parts";
+import { settingsDirty } from "./settings-dirty";
 import { GITHUB_TOPIC_RULES, TopicsField } from "./TopicsField";
 import { useGenerateRepoDescription } from "./useGenerateRepoDescription";
 
@@ -300,7 +301,7 @@ function GeneralForm({
 
   const mergeValid =
     form.allowSquashMerge || form.allowMergeCommit || form.allowRebaseMerge;
-  const dirty = JSON.stringify(form) !== JSON.stringify(base);
+  const dirty = settingsDirty(form, base);
   // Every hold carries a reason, so Save keeps focus through a save, including
   // the moment the saved settings read back and the form settles clean.
   const saveHeldReason = (() => {

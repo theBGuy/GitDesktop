@@ -1,7 +1,7 @@
 import { SparkleIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent, useLayoutEffect, useRef } from "react";
+import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -113,6 +113,17 @@ export function CreateLocalPrDialog({
   // Set when this dialog's own draft failed to create while it was closed, so the
   // next open shows it again; that open consumes it.
   const failedWhileClosedRef = useRef(false);
+  // Render state for the picker's keep list: the pair the latest submit sent, a
+  // failure while closed the next open has yet to see, and whether this open
+  // holds that sent draft (an archived head or base stays listed only then).
+  const [sentPair, setSentPair] = useState<{
+    repo: string;
+    head: string;
+    base: string;
+  } | null>(null);
+  const [failedClosed, setFailedClosed] = useState(false);
+  const [holdsSent, setHoldsSent] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
 
   const currentName = status.data?.branch?.name ?? null;
   // Retained on `open`, not on the values: an unseeded next open must resync to
@@ -120,16 +131,6 @@ export function CreateLocalPrDialog({
   // open's archived branch listed and selectable in both pickers.
   const shownDefaultHead = useRetained(defaultHead, open);
   const shownDefaultBase = useRetained(defaultBase, open);
-  // Branch options with per-branch worktree chips; drops the app-internal
-  // `gd/session/*` branches (a local PR must never target one) and archived
-  // branches, matching BranchSwitcher. `keep` retains the seeded defaults even
-  // if archived, so the head/base defaults stay selectable.
-  const { names, items, annotations } = useBranchPickerOptions(repoPath, open, [
-    currentName,
-    shownDefaultHead,
-    shownDefaultBase,
-    defaultBranch.data,
-  ]);
 
   const form = useAppForm({
     defaultValues: { head: "", base: "", title: "", body: "", notes: "" },
@@ -140,6 +141,7 @@ export function CreateLocalPrDialog({
     },
     onSubmit: async ({ value }) => {
       const run = createHold.begin();
+      setSentPair({ repo: repoPath, head: value.head, base: value.base });
       let created = false;
       try {
         // Append the linked-issue chips as their exact keyword lines via the
@@ -237,8 +239,10 @@ export function CreateLocalPrDialog({
           !openRef.current &&
           draftRepoRef.current === repoPath &&
           createHold.holds(run.gen)
-        )
+        ) {
           failedWhileClosedRef.current = true;
+          setFailedClosed(true);
+        }
         // Read at the failure, not before it: a create that fails after a repo
         // switch has to name the repo it belongs to, same as the success arm.
         const originNote = originNoteFor(repoPath);
@@ -253,6 +257,36 @@ export function CreateLocalPrDialog({
   // can't tell drafts apart within one repo, since closing and reopening
   // mid-create puts a fresh draft behind the same path.
   const createHold = useDraftCreateHold(form);
+
+  // Decided in the open's first render, from the inputs the seed reads, so the
+  // reopen that keeps the sent draft lists its pair from its first frame and no
+  // other open lists it at all: its repo, no head or base requested, and its
+  // create still running or failed while closed. A close drops it.
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    setHoldsSent(
+      open &&
+        sentPair !== null &&
+        sentPair.repo === repoPath &&
+        defaultHead === undefined &&
+        defaultBase === undefined &&
+        (createHold.running || failedClosed),
+    );
+    if (open) setFailedClosed(false);
+  }
+  const keepsSent = holdsSent && sentPair !== null;
+  // Branch options with per-branch worktree chips; drops the app-internal
+  // `gd/session/*` branches (a local PR must never target one) and archived
+  // branches, matching BranchSwitcher. `keep` retains the seeded defaults and a
+  // kept draft's pair even if archived, so they stay selectable.
+  const { names, items, annotations } = useBranchPickerOptions(repoPath, open, [
+    currentName,
+    shownDefaultHead,
+    shownDefaultBase,
+    defaultBranch.data,
+    keepsSent ? sentPair.head : null,
+    keepsSent ? sentPair.base : null,
+  ]);
 
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded head/base back to empty (untouched form).

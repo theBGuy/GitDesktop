@@ -69,6 +69,15 @@ const DISPLAY_LEADS: Partial<
   timeout: ["git operation timed out", "Git operation timed out"],
 };
 
+/** `NETWORK_TIMEOUT` in src-tauri/src/git/runner.rs: the budget every create
+ *  route's push runs under, longer than any gh or glab call's or git read's
+ *  (pinned by scripts/attached-failure-leads.test.mjs). */
+export const GIT_NETWORK_TIMEOUT_SECS = 600;
+
+/** The bare `Timeout` a git network op gives after its whole budget, which only
+ *  a create route's push can produce among a create's steps. */
+export const GIT_PUSH_TIMEOUT_MESSAGE = `${DISPLAY_LEADS.timeout?.[0]} after ${GIT_NETWORK_TIMEOUT_SECS}s`;
+
 /** The words app-written detail opens with — the only leads a stripped summary
  *  capitalizes. Some producers open with an interpolated branch name, SHA or path
  *  (`main has no upstream…`), whose case is part of the name, so an unlisted lead
@@ -745,27 +754,133 @@ function nothingExistsDisclosure(
     : null;
 }
 
-/** Rust's `created_reply_unreadable` sentence after its host, and the lead a
- *  create that pushed its branch first puts before it. Module-private: callers
- *  ask `mayHaveLanded`, never match the text. */
+/** New pull request or merge request failed after its branch was pushed
+ *  (`after_push_error` in github/pr.rs, `mr_post_error` in forge/gitlab.rs,
+ *  `pr_post_error` in forge/bitbucket.rs; keep in step). The push fact decides
+ *  the retry, so the line outranks the network rewrite, which instead replaces
+ *  only the cause after ` failed: `. */
+export const BRANCH_PUSHED_FAILED_LEAD =
+  "The branch was pushed, but creating the ";
+const BRANCH_PUSHED_FAILED_KINDS: ReadonlySet<AppError["kind"]> = new Set([
+  "gh",
+  "glab",
+  "bitbucket",
+]);
+const BRANCH_PUSHED_FAILED_CAUSE = " failed: ";
+
+function branchPushedFailure(
+  kind: AppError["kind"],
+  message: string,
+  network: string | null,
+): string | null {
+  if (!BRANCH_PUSHED_FAILED_KINDS.has(kind)) return null;
+  const headline = firstMeaningfulLine(message);
+  if (!headline.startsWith(BRANCH_PUSHED_FAILED_LEAD)) return null;
+  if (network === null) return headline;
+  const cause = headline.indexOf(
+    BRANCH_PUSHED_FAILED_CAUSE,
+    BRANCH_PUSHED_FAILED_LEAD.length,
+  );
+  return cause === -1
+    ? headline
+    : `${headline.slice(0, cause + BRANCH_PUSHED_FAILED_CAUSE.length)}${network}`;
+}
+
+/** The compound review wraps that put a step's error after a partial-state line
+ *  (`request_changes_pr` + `review_submit` in forge/bitbucket.rs,
+ *  `request_changes_mr` + `review_submit` in forge/gitlab.rs; tied to those
+ *  `format!` literals by scripts/attached-failure-leads.test.mjs). Each `lead`
+ *  matches line one up to where the error starts; a lead ending in `(` sets the
+ *  error in parentheses, which the network rewrite drops with the error. */
+const PARTIAL_STATE_WRAPS: readonly {
+  kind: AppError["kind"];
+  lead: RegExp;
+}[] = [
+  {
+    kind: "bitbucket",
+    lead: /^Changes were requested, but posting the comment failed: /,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^The review summary couldn't be posted, so the review was not submitted: /,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^Posted \d+ of \d+ review comments before the failure; the review was not submitted\. Check the pull request on Bitbucket before retrying\. \(/,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on Bitbucket\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^Changes were requested, but posting the comment failed: /,
+  },
+  {
+    kind: "glab",
+    lead: /^The review summary couldn't be saved as a draft, so the review was not submitted: /,
+  },
+  {
+    kind: "glab",
+    lead: /^Saved \d+ of \d+ review comments as drafts before the failure; the review was not submitted\. Check the merge request on GitLab before retrying\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^The review's draft notes couldn't be published, so the review was not submitted\. Check the merge request on GitLab before retrying\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on GitLab\. \(/,
+  },
+];
+
+/** Line one of a compound review failure, or null for any other message. What
+ *  already posted decides the retry, so the line outranks the network rewrite,
+ *  which instead replaces only the embedded error. */
+function partialStateWrap(
+  kind: AppError["kind"],
+  message: string,
+  network: string | null,
+): string | null {
+  const headline = firstMeaningfulLine(message);
+  for (const wrap of PARTIAL_STATE_WRAPS) {
+    if (wrap.kind !== kind) continue;
+    const lead = wrap.lead.exec(headline);
+    if (lead === null) continue;
+    if (network === null) return headline;
+    const kept = lead[0].endsWith("(") ? lead[0].slice(0, -1) : lead[0];
+    return `${kept}${network}`;
+  }
+  return null;
+}
+
+/** Rust's unread-reply sentence after its host (`UNREAD_REPLY_LEAD` in
+ *  forge/mod.rs), and the lead a create that pushed its branch first puts before
+ *  it. Module-private: callers ask `mayHaveLanded`, never match the text. */
 const UNREAD_REPLY_LEAD =
   " accepted the request but its reply couldn't be read, so the ";
 const UNREAD_REPLY_PUSHED = "The branch was pushed. ";
 
-/** The forge kinds whose creates can answer with an unreadable reply. */
+/** The kinds whose accepted writes can answer with an unreadable reply: creates
+ *  on the three forges (`created_reply_unreadable`) and Jira
+ *  (`jira_reply_unreadable`), and edits on Bitbucket and Jira
+ *  (`saved_reply_unreadable`). */
 const UNREAD_REPLY_HOSTS: Partial<Record<AppError["kind"], string>> = {
   gh: FORGE_KIND_HOSTS.gh,
   glab: FORGE_KIND_HOSTS.glab,
   bitbucket: FORGE_KIND_HOSTS.bitbucket,
+  jira: FORGE_KIND_HOSTS.jira,
 };
 
-/** Whether an error's forge write may have reached the forge: a GitHub or
- *  GitLab create, edit or comment write that timed out (`AppError::WriteTimedOut`
- *  from `write_timed_out`, kind `timeout`, told from a bare timeout by the bare
- *  one's Rust lead), or a GitHub, GitLab or Bitbucket create the forge accepted
- *  whose reply couldn't be read (`created_reply_unreadable`, under that forge's
- *  own kind and host). False for every other error, a bare timeout included.
- *  Both producers are pinned by scripts/attached-failure-leads.test.mjs. */
+/** Whether an error's write may have reached the forge: a write that timed out
+ *  after it was sent (`AppError::WriteTimedOut` from `write_timed_out` or
+ *  `request_timed_out`, kind `timeout`, told from a bare timeout by the bare
+ *  one's Rust lead), or a write the host accepted whose reply couldn't be read,
+ *  under that host's own kind: a GitHub, GitLab, Bitbucket or Jira create
+ *  (`created_reply_unreadable` or `jira_reply_unreadable`) or a Bitbucket or
+ *  Jira edit (`saved_reply_unreadable`). False for every other error, a bare
+ *  timeout included. Each producer is pinned by
+ *  scripts/attached-failure-leads.test.mjs. */
 export function mayHaveLanded(error: unknown): boolean {
   if (!isAppError(error)) return false;
   const message = error.message ?? "";
@@ -1044,6 +1159,8 @@ export function presentError(e: unknown): ErrorPresentation {
       createdDisclosure(e.kind, message) ??
       savedDisclosure(e.kind, message) ??
       nothingExistsDisclosure(e.kind, message) ??
+      branchPushedFailure(e.kind, message, network) ??
+      partialStateWrap(e.kind, message, network) ??
       longPathSummary(combined) ??
       (isConflict
         ? conflictSummary(combined)
@@ -1053,10 +1170,10 @@ export function presentError(e: unknown): ErrorPresentation {
           (firstMeaningfulLine(displayRegister(e.kind, message)) || label)));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
-    // A network rewrite replaces even a one-line message, so the raw text is
-    // reachable only through Details.
+    // A network rewrite replaces even a one-line message (whole, or after a
+    // push lead), so the raw text is reachable only through Details.
     const long =
-      (network !== null && summary === network) ||
+      (network !== null && summary.endsWith(network)) ||
       nonEmptyLineCount(message) > 1 ||
       distinctStderr ||
       fullText.length > 140;

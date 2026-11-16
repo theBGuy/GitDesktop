@@ -30,8 +30,8 @@ use crate::forge::my_work::{
 };
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
-    c_quote_label, c_quote_path, cap_readme, validate_owner, validate_repo_name, LandedWrite,
-    FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
+    c_quote_label, c_quote_path, cap_readme, paren_parts, validate_owner, validate_repo_name,
+    LandedWrite, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunFilters, RunJob, WorkflowRun};
@@ -3557,8 +3557,8 @@ pub async fn commit_diff(repo_path: &str, sha: &str) -> AppResult<String> {
 // GitLab has no first-class "commit comment" — a comment on a commit is a note in a
 // commit DISCUSSION (`…/repository/commits/{sha}/discussions`), so the neutral
 // comment id is the COMPOSITE `"{discussion_id}:{note_id}"` that edit/delete parse
-// apart. A whole-commit comment posts a flat `-f body`; an anchored one needs the
-// nested `position` JSON via `--input -` (flat `-f position[x]=y` is SILENTLY
+// apart. A whole-commit comment posts a JSON body through `glab_write_fields`; an
+// anchored one needs the nested `position` JSON via `--input -` (flat `-f position[x]=y` is SILENTLY
 // ignored by GitLab).
 
 /// A note inside a commit discussion (the fields we map). `position` (present only
@@ -3727,8 +3727,9 @@ async fn commit_parent_sha(repo_path: &str, enc: &str, sha: &str) -> AppResult<S
     })
 }
 
-/// Post a comment on a commit. Whole-commit (`path`/`line` both None) posts a flat
-/// `-f body`; an anchored one posts the nested `position` JSON via `--input -`.
+/// Post a comment on a commit. Whole-commit (`path`/`line` both None) posts its body
+/// through `glab_write_fields`; an anchored one posts the nested `position` JSON via
+/// `--input -`. Both hedge a timeout as a comment that may have been posted.
 /// `start_line`, when set and different from `line`, makes it a MULTI-LINE range
 /// (new side only): fetch the commit's per-file diffs and attach
 /// `position.line_range`, falling back to line_code-less refs if the file/line
@@ -3771,14 +3772,17 @@ pub async fn commit_comment_create(
                 &[],
                 GLAB_NETWORK_TIMEOUT,
             )
-            .await?;
+            .await
+            .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Posted))?;
         }
         _ => {
-            let body_arg = format!("body={body}");
-            run_glab(
-                Some(repo_path),
-                &["api", "--method", "POST", &endpoint, "-f", &body_arg],
-                GLAB_NETWORK_TIMEOUT,
+            glab_write_fields(
+                repo_path,
+                "POST",
+                &endpoint,
+                &note_fields(body),
+                &[],
+                LandedWrite::Posted,
             )
             .await?;
         }
@@ -3786,8 +3790,8 @@ pub async fn commit_comment_create(
     Ok(())
 }
 
-/// Edit a commit comment (`PUT …/commits/{sha}/discussions/{did}/notes/{nid}`,
-/// `-f body`). Empty-body guard + composite-id parse both run BEFORE the request.
+/// Edit a commit comment (`PUT …/commits/{sha}/discussions/{did}/notes/{nid}`).
+/// Empty-body guard + composite-id parse both run BEFORE the request.
 pub async fn commit_comment_edit(
     repo_path: &str,
     sha: &str,
@@ -3801,11 +3805,13 @@ pub async fn commit_comment_edit(
     let (did, nid) = parse_commit_comment_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/repository/commits/{sha}/discussions/{did}/notes/{nid}");
-    let body_arg = format!("body={body}");
-    run_glab(
-        Some(repo_path),
-        &["api", "--method", "PUT", &endpoint, "-f", &body_arg],
-        GLAB_NETWORK_TIMEOUT,
+    glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &note_fields(body),
+        &[],
+        LandedWrite::Saved("comment"),
     )
     .await?;
     Ok(())
@@ -4075,6 +4081,74 @@ fn create_mr_fields(
     ];
     fields.extend(edit_issue_fields(full_title, body));
     fields.extend(create_extra_fields(labels, ids));
+    fields
+}
+
+/// A release edit's fields: `name` trimmed and `description` untrimmed, each only when
+/// it has text, so an empty one leaves the release's value unchanged; `clear_notes`
+/// with empty notes sends an empty `description`, which empties the release's notes.
+fn release_edit_fields(title: &str, notes: &str, clear_notes: bool) -> Vec<(&'static str, String)> {
+    let mut fields = Vec::new();
+    if !title.trim().is_empty() {
+        fields.push(("name", title.trim().to_string()));
+    }
+    if !notes.trim().is_empty() {
+        fields.push(("description", notes.to_string()));
+    } else if clear_notes {
+        fields.push(("description", String::new()));
+    }
+    fields
+}
+
+/// A release create's fields: `tag_name`, then `ref` (trimmed) only when set, then the
+/// edit's members.
+fn release_create_fields(
+    tag: &str,
+    target: &str,
+    title: &str,
+    notes: &str,
+) -> Vec<(&'static str, String)> {
+    let mut fields = vec![("tag_name", tag.to_string())];
+    if !target.trim().is_empty() {
+        fields.push(("ref", target.trim().to_string()));
+    }
+    fields.extend(release_edit_fields(title, notes, false));
+    fields
+}
+
+/// A project-settings save's fields, every value the string `-f` sent (booleans as
+/// `true`/`false`, topics comma-joined); `default_branch` only when one is chosen, since
+/// an empty project has none.
+fn repo_settings_fields(input: &GitLabRepoSettingsInput) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("description", input.description.clone()),
+        ("topics", input.topics.join(",")),
+        ("issues_access_level", input.issues_access_level.clone()),
+        (
+            "merge_requests_access_level",
+            input.merge_requests_access_level.clone(),
+        ),
+        ("wiki_access_level", input.wiki_access_level.clone()),
+        ("snippets_access_level", input.snippets_access_level.clone()),
+        ("forking_access_level", input.forking_access_level.clone()),
+        ("merge_method", input.merge_method.clone()),
+        ("squash_option", input.squash_option.clone()),
+        (
+            "remove_source_branch_after_merge",
+            input.remove_source_branch_after_merge.to_string(),
+        ),
+        (
+            "only_allow_merge_if_pipeline_succeeds",
+            input.only_allow_merge_if_pipeline_succeeds.to_string(),
+        ),
+        (
+            "only_allow_merge_if_all_discussions_are_resolved",
+            input
+                .only_allow_merge_if_all_discussions_are_resolved
+                .to_string(),
+        ),
+    ];
+    fields.extend(input.default_branch.clone().map(|b| ("default_branch", b)));
     fields
 }
 
@@ -4587,16 +4661,27 @@ mod attach_tests {
         for (name, run, reader) in [
             ("create_mr", "glab_write_fields(", "created_ref("),
             ("create_issue_in", "glab_write_fields(", "created_ref("),
-            ("create_release", "run_glab(", "created_release_url("),
+            (
+                "create_release",
+                "glab_write_fields(",
+                "created_release_url(",
+            ),
         ] {
             let tolerant = |body: &str| body.contains(reader) && !body.contains("gl_unreadable(");
             let body = wiring_body(gitlab, name);
             assert!(tolerant(&body), "{name}\n{body}");
             let strict = format!("{body}\ngl_unreadable(x)");
             assert!(!tolerant(&strict), "{name}: the control must flip");
+            // The run's own `?`, compared with all whitespace removed: `create_mr` maps its
+            // POST through the push lead first.
+            let awaited = match name {
+                "create_mr" => ".await.map_err(mr_post_error)?",
+                _ => ".await?",
+            };
+            let squeezed = |s: &str| s.split_whitespace().collect::<String>();
             let after_run = |body: &str| {
                 precedes(body, run, reader)
-                    && between(body, run, reader).is_some_and(|s| s.contains(".await?"))
+                    && between(body, run, reader).is_some_and(|s| squeezed(&s).contains(awaited))
             };
             assert!(after_run(&body), "{name}\n{body}");
             let early = swap_first(&body, run, reader);
@@ -4604,6 +4689,12 @@ mod attach_tests {
                 !after_run(&early),
                 "{name}: a reader ahead of the run must flip"
             );
+            if name == "create_mr" {
+                let unchecked =
+                    body.replacen(".map_err(mr_post_error)?", ".map_err(mr_post_error)", 1);
+                assert_ne!(unchecked, body);
+                assert!(!after_run(&unchecked), "create_mr: a dropped `?` must flip");
+            }
         }
         // The reader's own `?` ends its statement, and nothing fallible follows it before
         // the staged files are released.
@@ -4717,6 +4808,86 @@ mod attach_tests {
         }
     }
 
+    /// A fork reply must name the new project; anything else is the create hedge.
+    #[test]
+    fn forked_project_needs_a_named_project() {
+        let full = r#"{"id":42,"path_with_namespace":"me/app","http_url_to_repo":"https://gitlab.com/me/app.git","web_url":"https://gitlab.com/me/app"}"#;
+        let got = forked_project(full).unwrap();
+        assert_eq!(got["path_with_namespace"], "me/app");
+        assert_eq!(got["id"], 42);
+        let hedge = crate::forge::created_reply_unreadable(Provider::GitLab, "fork", false);
+        assert_eq!(
+            hedge.to_string(),
+            "GitLab accepted the request but its reply couldn't be read, so the fork may already exist. Check before creating it again."
+        );
+        for reply in [
+            "",
+            "not json",
+            "<html><body>502 Bad Gateway</body></html>",
+            "{}",
+            r#"{"path_with_namespace":""}"#,
+            r#"{"path_with_namespace":7}"#,
+        ] {
+            let got = forked_project(reply).map_err(|e| serde_json::to_value(e).unwrap());
+            assert_eq!(got, Err(serde_json::to_value(&hedge).unwrap()), "{reply:?}");
+        }
+        assert_eq!(serde_json::to_value(&hedge).unwrap()["kind"], "glab");
+    }
+
+    /// An added time entry's reply must be time stats; an unreadable one is the create
+    /// hedge, while a readable object with no fields keeps reading as zeros.
+    #[test]
+    fn added_time_stats_hedges_an_unreadable_reply() {
+        let got = added_time_stats(
+            r#"{"time_estimate":3600,"total_time_spent":900,"human_time_estimate":"1h","human_total_time_spent":"15m"}"#,
+        )
+        .unwrap();
+        assert_eq!((got.time_estimate, got.total_time_spent), (3600, 900));
+        assert_eq!(
+            (
+                got.human_time_estimate.as_str(),
+                got.human_total_time_spent.as_str()
+            ),
+            ("1h", "15m")
+        );
+        let zeros = added_time_stats("{}").unwrap();
+        assert_eq!((zeros.time_estimate, zeros.total_time_spent), (0, 0));
+        assert_eq!(zeros.human_total_time_spent, "");
+        let hedge = crate::forge::created_reply_unreadable(Provider::GitLab, "time entry", false);
+        assert_eq!(
+            hedge.to_string(),
+            "GitLab accepted the request but its reply couldn't be read, so the time entry may already exist. Check before creating it again."
+        );
+        for reply in ["", "<html>", "null", r#"{"time_estimate":"x"}"#] {
+            let got = added_time_stats(reply).map_err(|e| serde_json::to_value(e).unwrap());
+            assert!(got.is_err(), "{reply:?}");
+            assert_eq!(
+                got.err(),
+                Some(serde_json::to_value(&hedge).unwrap()),
+                "{reply:?}"
+            );
+        }
+    }
+
+    /// Only the add route reads its reply as a create; the estimate and reset routes stay
+    /// edits.
+    #[test]
+    fn only_add_spent_time_reads_its_reply_as_a_create() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let flat = |s: &str| s.split_whitespace().collect::<String>();
+        let guarded = |body: &str| {
+            body.contains(
+                r#"ifsuffix=="add_spent_time"{returnadded_time_stats(&out.stdout_lossy());}"#,
+            ) && body.matches("added_time_stats(").count() == 1
+        };
+        let body = flat(&wiring_body(include_str!("gitlab.rs"), "write_time"));
+        assert!(guarded(&body), "{body}");
+        let unguarded = body.replace(r#"ifsuffix=="add_spent_time"{"#, "{");
+        assert!(!guarded(&unguarded), "an unguarded call must flip");
+        let widened = body.replace(r#"suffix=="add_spent_time""#, r#"!is_reset"#);
+        assert!(!guarded(&widened), "a widened guard must flip");
+    }
+
     /// Each GitLab reader classifies its reply through `created_reply` and parses nothing
     /// itself.
     #[test]
@@ -4737,7 +4908,12 @@ mod attach_tests {
                 .iter()
                 .any(|token| rest.contains(token))
         };
-        for reader in ["created_ref", "created_release_url"] {
+        for reader in [
+            "created_ref",
+            "created_release_url",
+            "forked_project",
+            "added_time_stats",
+        ] {
             let body = wiring_body(gitlab, reader);
             assert!(one_rule(&body), "{reader}\n{body}");
             for parse in [
@@ -4890,8 +5066,88 @@ mod attach_tests {
         assert!(!ordered(&late), "the control must flip");
     }
 
-    /// Each of the seven text writes reaches glab only through `glab_write_fields`, with
-    /// no `-f` field; `comment_mr` keeps its bot token pair.
+    /// A merge request POST that fails after the push leads with the push fact under kind
+    /// `glab`; a timed-out one keeps its may-have-landed sentence, a missing glab its kind.
+    #[test]
+    fn a_failed_mr_post_says_the_branch_was_pushed() {
+        let wrap = |detail: &str| {
+            format!("The branch was pushed, but creating the merge request failed: {detail}")
+        };
+        let wrapped = |e: AppError| match mr_post_error(e) {
+            AppError::Glab(m) => m,
+            other => panic!("expected kind glab, got {other:?}"),
+        };
+        let git = AppError::Git {
+            code: 128,
+            stderr: "fatal: unable to access".into(),
+        };
+        let rows = [
+            (AppError::Glab("glab: 422".into()), wrap("glab: 422")),
+            (git, wrap("fatal: unable to access")),
+            (
+                crate::attachments::no_longer_attached("image-1.png"),
+                wrap("image-1.png is no longer attached. Attach it again."),
+            ),
+            (
+                AppError::Io(std::io::Error::other("x")),
+                wrap("io error: x"),
+            ),
+            // A bare timeout never came from the POST, so it is no hedge.
+            (
+                AppError::Timeout(120),
+                wrap("git operation timed out after 120s"),
+            ),
+        ];
+        for (e, want) in rows {
+            assert_eq!(wrapped(e), want);
+        }
+        let timed_out = || {
+            crate::forge::write_timed_out(
+                "GitLab",
+                LandedWrite::CreatedAfterPush("merge request"),
+                150,
+            )
+        };
+        let kept = mr_post_error(timed_out());
+        assert_eq!(format!("{kept:?}"), format!("{:?}", timed_out()));
+        // A missing glab keeps its own kind, as `GhNotFound` does on GitHub.
+        let missing = mr_post_error(AppError::GlabNotFound);
+        assert!(matches!(missing, AppError::GlabNotFound), "{missing:?}");
+    }
+
+    /// After its push, `create_mr` returns an Err only from the POST (through the push
+    /// lead) and from its reply reader (a `glab` hedge), so no `git`-kind error leaves once
+    /// the branch is pushed; the uploads and reads before the push carry no lead.
+    #[test]
+    fn create_mr_returns_nothing_unled_after_the_push() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let flat = |body: &str| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mr = flat(&wiring_body(include_str!("gitlab.rs"), "create_mr"));
+        let after_push = |body: &str| -> Option<String> {
+            let push = body.find("run_git_mutating_with_creds_for_branch(")?;
+            let start = body[push..].find(".await?;")? + push + ".await?;".len();
+            Some(body[start..].to_string())
+        };
+        let led = |body: &str| {
+            after_push(body).is_some_and(|s| {
+                s.matches('?').count() == 2
+                    && s.contains(".await .map_err(mr_post_error)?;")
+                    && s.contains("\"merge request\", true)?;")
+            }) && body.matches("mr_post_error").count() == 1
+        };
+        assert!(led(&mr), "{mr}");
+        let push = mr.find("run_git_mutating_with_creds_for_branch(").unwrap();
+        let at = mr[push..].find(".await?;").unwrap() + push + ".await?;".len();
+        let read = format!("{} repo_base(repo_path).await?;{}", &mr[..at], &mr[at..]);
+        assert!(!led(&read), "a read after the push must flip");
+        let bare = mr.replacen(" .map_err(mr_post_error)?;", "?;", 1);
+        assert!(!led(&bare), "an unmapped POST must flip");
+        let early = format!("{} .map_err(mr_post_error)", &mr[..push]) + &mr[push..];
+        assert!(!led(&early), "a lead before the push must flip");
+    }
+
+    /// Each text write reaches glab only through `glab_write_fields`, with no `-f` field;
+    /// `comment_mr` keeps its bot token pair.
     #[test]
     fn every_gitlab_text_write_sends_one_json_body() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -4910,6 +5166,14 @@ mod attach_tests {
             "create_mr",
             "comment_issue",
             "comment_mr",
+            "commit_comment_create",
+            "commit_comment_edit",
+            "edit_mr_comment",
+            "edit_issue_comment",
+            "reply_thread",
+            "create_release",
+            "edit_release",
+            "update_repo_settings",
         ] {
             let body = flat(wiring_body(gitlab, name));
             assert!(on_stdin(&body), "{name}\n{body}");
@@ -4919,6 +5183,195 @@ mod attach_tests {
         let comment = flat(wiring_body(gitlab, "comment_mr"));
         assert!(comment.contains("(\"GITLAB_TOKEN\", "), "{comment}");
         assert!(comment.contains("REVIEW_TOKEN_HOST"), "{comment}");
+    }
+
+    /// A review's summary draft note sends its text as a JSON body and keeps its wrap;
+    /// `bulk_publish` keeps its field-less `run_glab(`, so only `-f` is ruled out.
+    #[test]
+    fn review_summary_sends_its_note_as_a_json_body() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(wiring_body(include_str!("gitlab.rs"), "review_submit"));
+        let on_stdin = |body: &str| {
+            !body.contains("\"-f\"")
+                && body.contains(
+                    "json_body_args(\"POST\", &draft_endpoint), \
+                     Some(&glab_fields_json(&[(\"note\",",
+                )
+                && body.contains("The review summary couldn't be saved as a draft")
+        };
+        assert!(on_stdin(&body), "{body}");
+        let restored = format!("{body} run_glab(Some(repo_path), &[\"-f\", &note_arg], t)");
+        assert!(!on_stdin(&restored), "the control must flip");
+        let elsewhere = body.replacen(
+            "&draft_endpoint), Some(&glab_fields_json",
+            "&endpoint), Some(&glab_fields_json",
+            1,
+        );
+        assert!(!on_stdin(&elsewhere), "another endpoint must flip");
+    }
+
+    /// Each parenthesised review wrap embeds `paren_parts`' split of the step's error, bound
+    /// between the error's binding and the wrap, so a multi-line cause closes the
+    /// parenthesis on line one. The roster is every `({first}){rest}` wrap in the function.
+    #[test]
+    fn review_wraps_split_the_error_they_embed() {
+        use crate::github::repo_meta::tests::wiring_body;
+        const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
+        let body = wiring_body(include_str!("gitlab.rs"), "review_submit");
+        let wraps = [
+            "review comments as drafts before the failure",
+            "The review's draft notes couldn't be published",
+            "The review was posted, but the {action} step failed",
+        ];
+        let split = |body: &str, wrap: &str| {
+            body.find(wrap).is_some_and(|at| {
+                let before = &body[..at];
+                let start = [before.rfind("if let Err(e)"), before.rfind("map_err(|e|")]
+                    .into_iter()
+                    .flatten()
+                    .max();
+                let tail = &body[at..];
+                let end = tail.find("))").unwrap_or(tail.len());
+                start.is_some_and(|s| {
+                    let seg = &body[s..at];
+                    seg.contains(SPLIT) && seg.matches("let (first, rest)").count() == 1
+                }) && tail[..end].contains("({first}){rest}")
+            })
+        };
+        for wrap in wraps {
+            assert!(split(&body, wrap), "{wrap}\n{body}");
+            let call = body[..body.find(wrap).unwrap()].rfind(SPLIT).unwrap();
+            let unsplit = format!(
+                "{}let (first, rest) = (e.to_string(), String::new());{}",
+                &body[..call],
+                &body[call + SPLIT.len()..]
+            );
+            assert!(!split(&unsplit, wrap), "{wrap}: an unsplit error must flip");
+        }
+        assert_eq!(
+            body.matches("({first}){rest}").count(),
+            wraps.len(),
+            "an unlisted parenthesised wrap"
+        );
+    }
+
+    /// The release and settings builders keep each member's key, value spelling and
+    /// optional rule: GitLab's release `description` is never trimmed, and every settings
+    /// value, the booleans included, is a JSON string.
+    #[test]
+    fn release_and_settings_fields_keep_their_members() {
+        let own = |list: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            list.iter().map(|(k, v)| (*k, (*v).to_string())).collect()
+        };
+        assert_eq!(
+            release_create_fields("v1", "", "", "  "),
+            own(&[("tag_name", "v1")])
+        );
+        let full = release_create_fields("v1", " main ", " T ", " notes\n");
+        assert_eq!(
+            full,
+            own(&[
+                ("tag_name", "v1"),
+                ("ref", "main"),
+                ("name", "T"),
+                ("description", " notes\n"),
+            ])
+        );
+        let untrimmed = |src: &str| {
+            let body = crate::github::repo_meta::tests::wiring_body(src, "release_edit_fields");
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains("fields.push((\"description\", notes.to_string()));")
+        };
+        let src = include_str!("gitlab.rs");
+        assert!(untrimmed(src));
+        let trimmed = src.replacen(
+            "(\"description\", notes.to_string())",
+            "(\"description\", notes.trim().to_string())",
+            1,
+        );
+        assert!(!untrimmed(&trimmed), "a trimmed description must flip");
+        assert!(release_edit_fields("", " \n ", false).is_empty());
+        assert_eq!(release_edit_fields(" T ", "", false), own(&[("name", "T")]));
+        assert_eq!(
+            release_edit_fields("", " N ", false),
+            own(&[("description", " N ")])
+        );
+        // The clear signal sends an empty description, and only for empty notes.
+        assert_eq!(
+            release_edit_fields("", "", true),
+            own(&[("description", "")])
+        );
+        assert_eq!(
+            release_edit_fields("", "  ", true),
+            own(&[("description", "")])
+        );
+        assert!(release_edit_fields("", "", false).is_empty());
+        assert_eq!(
+            release_edit_fields("T", " n ", true),
+            own(&[("name", "T"), ("description", " n ")])
+        );
+        assert_eq!(
+            release_edit_fields(" T ", "", true),
+            own(&[("name", "T"), ("description", "")])
+        );
+        assert_eq!(
+            glab_fields_json(&release_edit_fields("", "", true)),
+            r#"{"description":""}"#
+        );
+
+        let input =
+            |default_branch: Option<&str>, on: bool, topics: &[&str]| GitLabRepoSettingsInput {
+                description: "line 1\nline 2".into(),
+                topics: topics.iter().map(|t| (*t).to_string()).collect(),
+                default_branch: default_branch.map(str::to_string),
+                issues_access_level: "enabled".into(),
+                merge_requests_access_level: "private".into(),
+                wiki_access_level: "disabled".into(),
+                snippets_access_level: "enabled".into(),
+                forking_access_level: "private".into(),
+                merge_method: "ff".into(),
+                squash_option: "default_on".into(),
+                remove_source_branch_after_merge: on,
+                only_allow_merge_if_pipeline_succeeds: !on,
+                only_allow_merge_if_all_discussions_are_resolved: on,
+            };
+        let members = |on: &str, off: &str, topics: &str| {
+            own(&[
+                ("description", "line 1\nline 2"),
+                ("topics", topics),
+                ("issues_access_level", "enabled"),
+                ("merge_requests_access_level", "private"),
+                ("wiki_access_level", "disabled"),
+                ("snippets_access_level", "enabled"),
+                ("forking_access_level", "private"),
+                ("merge_method", "ff"),
+                ("squash_option", "default_on"),
+                ("remove_source_branch_after_merge", on),
+                ("only_allow_merge_if_pipeline_succeeds", off),
+                ("only_allow_merge_if_all_discussions_are_resolved", on),
+            ])
+        };
+        assert_eq!(
+            repo_settings_fields(&input(None, true, &[])),
+            members("true", "false", "")
+        );
+        assert_eq!(
+            repo_settings_fields(&input(None, false, &["one"])),
+            members("false", "true", "one")
+        );
+        let mut branched = members("true", "false", "a b,c");
+        branched.push(("default_branch", "main".to_string()));
+        let fields = repo_settings_fields(&input(Some("main"), true, &["a b", "c"]));
+        assert_eq!(fields, branched);
+        let parsed: serde_json::Value = serde_json::from_str(&glab_fields_json(&fields)).unwrap();
+        let object = parsed.as_object().unwrap();
+        assert_eq!(object.len(), 13);
+        assert!(
+            object.values().all(serde_json::Value::is_string),
+            "{parsed}"
+        );
+        assert_eq!(object["remove_source_branch_after_merge"], "true");
     }
 
     /// Every field becomes one string member of one object, whatever the text holds.
@@ -5202,45 +5655,83 @@ mod attach_tests {
         let issue_saved = "LandedWrite::Saved(\"issue\")";
         let issue_created = "LandedWrite::Created(\"issue\")";
         let mr_created = "LandedWrite::CreatedAfterPush(\"merge request\")";
-        let kinds = [posted, mr_saved, issue_saved, issue_created, mr_created];
-        let roster = [
-            ("post_note_with_images", posted),
-            ("comment_mr", posted),
-            ("comment_issue", posted),
-            ("edit_mr_in", mr_saved),
-            ("edit_issue_in", issue_saved),
-            ("create_issue_in", issue_created),
-            ("create_mr", mr_created),
+        let comment_saved = "LandedWrite::Saved(\"comment\")";
+        let release_created = "LandedWrite::Created(\"release\")";
+        let release_saved = "LandedWrite::Saved(\"release\")";
+        let settings_saved = "LandedWrite::Saved(\"project settings\")";
+        let kinds = [
+            posted,
+            mr_saved,
+            issue_saved,
+            issue_created,
+            mr_created,
+            comment_saved,
+            release_created,
+            release_saved,
+            settings_saved,
         ];
-        let passes_only = |body: &str, kind: &str| {
+        // `commit_comment_create`'s positioned arm maps its own run, so it passes twice.
+        let roster = [
+            ("post_note_with_images", posted, 1),
+            ("comment_mr", posted, 1),
+            ("comment_issue", posted, 1),
+            ("edit_mr_in", mr_saved, 1),
+            ("edit_issue_in", issue_saved, 1),
+            ("create_issue_in", issue_created, 1),
+            ("create_mr", mr_created, 1),
+            ("commit_comment_create", posted, 2),
+            ("commit_comment_edit", comment_saved, 1),
+            ("edit_mr_comment", comment_saved, 1),
+            ("edit_issue_comment", comment_saved, 1),
+            ("reply_thread", posted, 1),
+            ("create_release", release_created, 1),
+            ("edit_release", release_saved, 1),
+            ("update_repo_settings", settings_saved, 1),
+        ];
+        let passes_only = |body: &str, kind: &str, count: usize| {
             kinds
                 .iter()
-                .all(|k| body.matches(k).count() == usize::from(*k == kind))
+                .all(|k| body.matches(k).count() == if *k == kind { count } else { 0 })
         };
-        for (name, kind) in roster {
+        for (name, kind, count) in roster {
             let body = wiring_body(source, name);
-            assert!(passes_only(&body, kind), "{name}: {body}");
+            assert!(passes_only(&body, kind, count), "{name}: {body}");
         }
         let create_mr = wiring_body(source, "create_mr").replacen(
             "LandedWrite::CreatedAfterPush(",
             "LandedWrite::Created(",
             1,
         );
-        let swapped = !passes_only(&create_mr, mr_created);
+        let swapped = !passes_only(&create_mr, mr_created, 1);
         assert!(swapped, "the swap control must flip");
         let edit_mr = wiring_body(source, "edit_mr_in").replacen(mr_saved, issue_saved, 1);
-        let renamed = !passes_only(&edit_mr, mr_saved);
+        let renamed = !passes_only(&edit_mr, mr_saved, 1);
         assert!(renamed, "the noun control must flip");
 
+        // Both commit-comment arms hedge: the positioned arm's own map follows its run.
+        let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let commit = flat(wiring_body(source, "commit_comment_create"));
+        let arm_map =
+            ".map_err(|e| crate::forge::timed_out_write(e, \"GitLab\", LandedWrite::Posted))";
+        let both_arms = |body: &str| {
+            passes_only(body, posted, 2)
+                && body.contains(arm_map)
+                && precedes(body, "run_glab_ex(", "timed_out_write(")
+        };
+        assert!(both_arms(&commit), "{commit}");
+        let unmapped = commit.replacen(arm_map, "", 1);
+        assert_ne!(unmapped, commit);
+        assert!(!both_arms(&unmapped), "a dropped arm map must flip");
+
         let production = production_text(source);
-        let mut names: Vec<&str> = roster.iter().map(|(name, _)| *name).collect();
+        let mut names: Vec<&str> = roster.iter().map(|(name, _, _)| *name).collect();
         names.sort_unstable();
         assert_eq!(write_helper_callers(&production), names);
         let rogue = format!("{production}\nfn rogue() {{\n    glab_write_fields(x);\n}}\n");
         assert_ne!(
             write_helper_callers(&rogue),
             names,
-            "an eighth caller must flip"
+            "an unlisted caller must flip"
         );
     }
 
@@ -5493,11 +5984,13 @@ pub async fn edit_mr_comment(
     let note_id = parse_note_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}/notes/{note_id}");
-    let body_arg = format!("body={body}");
-    run_glab(
-        Some(repo_path),
-        &["api", "--method", "PUT", &endpoint, "-f", &body_arg],
-        GLAB_NETWORK_TIMEOUT,
+    glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &note_fields(body),
+        &[],
+        LandedWrite::Saved("comment"),
     )
     .await?;
     Ok(())
@@ -6760,11 +7253,13 @@ pub async fn edit_issue_comment(
     let note_id = parse_note_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/notes/{note_id}");
-    let body_arg = format!("body={body}");
-    run_glab(
-        Some(repo_path),
-        &["api", "--method", "PUT", &endpoint, "-f", &body_arg],
-        GLAB_NETWORK_TIMEOUT,
+    glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &note_fields(body),
+        &[],
+        LandedWrite::Saved("comment"),
     )
     .await?;
     Ok(())
@@ -7625,7 +8120,7 @@ pub async fn review_threads(repo_path: &str, number: u64) -> AppResult<ReviewThr
     })
 }
 
-/// Reply in an existing MR discussion (`POST …/discussions/{id}/notes`, `-f body`).
+/// Reply in an existing MR discussion (`POST …/discussions/{id}/notes`).
 pub async fn reply_thread(
     repo_path: &str,
     number: u64,
@@ -7641,11 +8136,13 @@ pub async fn reply_thread(
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint =
         format!("projects/{enc}/merge_requests/{number}/discussions/{discussion_id}/notes");
-    let body_arg = format!("body={body}");
-    run_glab(
-        Some(repo_path),
-        &["api", "--method", "POST", &endpoint, "-f", &body_arg],
-        GLAB_NETWORK_TIMEOUT,
+    glab_write_fields(
+        repo_path,
+        "POST",
+        &endpoint,
+        &note_fields(body),
+        &[],
+        LandedWrite::Posted,
     )
     .await?;
     Ok(())
@@ -7815,11 +8312,13 @@ pub async fn review_submit(
     };
 
     // The summary → a plain draft note. Failure here means nothing landed yet.
+    // A draft note stays invisible until `bulk_publish`, so its timeout stays bare.
     if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
-        let note_arg = format!("note={s}");
-        run_glab(
+        run_glab_ex(
             Some(repo_path),
-            &["api", "--method", "POST", &draft_endpoint, "-f", &note_arg],
+            &json_body_args("POST", &draft_endpoint),
+            Some(&glab_fields_json(&[("note", s.to_string())])),
+            &[],
             GLAB_NETWORK_TIMEOUT,
         )
         .await
@@ -7863,9 +8362,10 @@ pub async fn review_submit(
         )
         .await
         {
+            let (first, rest) = paren_parts(&e);
             return Err(AppError::Glab(format!(
                 "Saved {} of {} review comments as drafts before the failure; the review was \
-                 not submitted. Check the merge request on GitLab before retrying. ({e})",
+                 not submitted. Check the merge request on GitLab before retrying. ({first}){rest}",
                 i, total
             )));
         }
@@ -7882,9 +8382,10 @@ pub async fn review_submit(
         )
         .await
         .map_err(|e| {
+            let (first, rest) = paren_parts(&e);
             AppError::Glab(format!(
                 "The review's draft notes couldn't be published, so the review was not \
-                 submitted. Check the merge request on GitLab before retrying. ({e})"
+                 submitted. Check the merge request on GitLab before retrying. ({first}){rest}"
             ))
         })?;
     }
@@ -7913,9 +8414,10 @@ pub async fn review_submit(
         } else {
             String::new()
         };
+        let (first, rest) = paren_parts(&e);
         return Err(AppError::Glab(format!(
             "The review was posted, but the {action} step failed: {landed}only re-run the \
-             {action} action on GitLab. ({e})"
+             {action} action on GitLab. ({first}){rest}"
         )));
     }
 
@@ -8908,13 +9410,27 @@ pub async fn create_mr(
         &[],
         LandedWrite::CreatedAfterPush("merge request"),
     )
-    .await?;
+    .await
+    .map_err(mr_post_error)?;
     // An unread reply keeps the staged images, as a timed-out POST does.
     let created = created_ref(&out.stdout_lossy(), "merge request", true)?;
     if let Some(s) = &staged {
         crate::attachments::release_posted(s, &[]).await;
     }
     Ok(created)
+}
+
+/// `create_mr`'s POST Err, led by the push fact so a retry needn't re-push; a timeout
+/// keeps its may-have-landed sentence and a missing glab its own kind. The frontend
+/// keys on the lead (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
+fn mr_post_error(e: AppError) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_) | AppError::GlabNotFound) {
+        return e;
+    }
+    let detail = crate::forge::error_detail(e);
+    AppError::Glab(format!(
+        "The branch was pushed, but creating the merge request failed: {detail}"
+    ))
 }
 
 // ── Pipelines (CI, read) ──────────────────────────────────────────────────────
@@ -9818,28 +10334,15 @@ pub async fn create_release(
     crate::git::ops::validate_tag_name(tag)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/releases");
-    let mut args: Vec<String> = vec![
-        "api".into(),
-        "--method".into(),
-        "POST".into(),
-        endpoint,
-        "-f".into(),
-        format!("tag_name={tag}"),
-    ];
-    if !target.trim().is_empty() {
-        args.push("-f".into());
-        args.push(format!("ref={}", target.trim()));
-    }
-    if !title.trim().is_empty() {
-        args.push("-f".into());
-        args.push(format!("name={}", title.trim()));
-    }
-    if !notes.trim().is_empty() {
-        args.push("-f".into());
-        args.push(format!("description={notes}"));
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
+    let out = glab_write_fields(
+        repo_path,
+        "POST",
+        &endpoint,
+        &release_create_fields(tag, target, title, notes),
+        &[],
+        LandedWrite::Created("release"),
+    )
+    .await?;
     created_release_url(&out.stdout_lossy())
 }
 
@@ -9855,10 +10358,16 @@ fn created_release_url(stdout: &str) -> AppResult<String> {
         .to_string())
 }
 
-/// Edit a release's title and/or notes. Empty fields are left unchanged (the gh
-/// path likewise only passes non-empty `--title`/`--notes`); when both are empty
-/// there's nothing to send, so it's a no-op.
-pub async fn edit_release(repo_path: &str, tag: &str, title: &str, notes: &str) -> AppResult<()> {
+/// Edit a release's title and/or notes. Empty fields are left unchanged, except that
+/// `clear_notes` with empty notes empties them (as on the gh path); with nothing to
+/// send it's a no-op.
+pub async fn edit_release(
+    repo_path: &str,
+    tag: &str,
+    title: &str,
+    notes: &str,
+    clear_notes: bool,
+) -> AppResult<()> {
     if tag.is_empty() {
         return Err(AppError::InvalidArgument("a tag is required".into()));
     }
@@ -9866,20 +10375,19 @@ pub async fn edit_release(repo_path: &str, tag: &str, title: &str, notes: &str) 
     let enc = encode_project(&project_path(repo_path).await?);
     let enc_tag = encode_query_value(tag);
     let endpoint = format!("projects/{enc}/releases/{enc_tag}");
-    let mut args: Vec<String> = vec!["api".into(), "--method".into(), "PUT".into(), endpoint];
-    if !title.trim().is_empty() {
-        args.push("-f".into());
-        args.push(format!("name={}", title.trim()));
-    }
-    if !notes.trim().is_empty() {
-        args.push("-f".into());
-        args.push(format!("description={notes}"));
-    }
-    if args.len() == 4 {
+    let fields = release_edit_fields(title, notes, clear_notes);
+    if fields.is_empty() {
         return Ok(());
     }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_glab(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
+    glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &fields,
+        &[],
+        LandedWrite::Saved("release"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -10355,58 +10863,15 @@ pub async fn update_repo_settings(
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}");
-    let description = format!("description={}", input.description);
-    let topics = format!("topics={}", input.topics.join(","));
-    let issues = format!("issues_access_level={}", input.issues_access_level);
-    let mrs = format!(
-        "merge_requests_access_level={}",
-        input.merge_requests_access_level
-    );
-    let wiki = format!("wiki_access_level={}", input.wiki_access_level);
-    let snippets = format!("snippets_access_level={}", input.snippets_access_level);
-    let forking = format!("forking_access_level={}", input.forking_access_level);
-    let merge_method = format!("merge_method={}", input.merge_method);
-    let squash = format!("squash_option={}", input.squash_option);
-    let remove_source = format!(
-        "remove_source_branch_after_merge={}",
-        input.remove_source_branch_after_merge
-    );
-    let pipeline = format!(
-        "only_allow_merge_if_pipeline_succeeds={}",
-        input.only_allow_merge_if_pipeline_succeeds
-    );
-    let discussions = format!(
-        "only_allow_merge_if_all_discussions_are_resolved={}",
-        input.only_allow_merge_if_all_discussions_are_resolved
-    );
-    let mut args: Vec<&str> = vec!["api", "--method", "PUT", &endpoint];
-    for arg in [
-        &description,
-        &topics,
-        &issues,
-        &mrs,
-        &wiki,
-        &snippets,
-        &forking,
-        &merge_method,
-        &squash,
-        &remove_source,
-        &pipeline,
-        &discussions,
-    ] {
-        args.push("-f");
-        args.push(arg);
-    }
-    // Only send a default branch when one is chosen (an empty project has none).
-    let default_branch = input
-        .default_branch
-        .as_deref()
-        .map(|b| format!("default_branch={b}"));
-    if let Some(db) = &default_branch {
-        args.push("-f");
-        args.push(db);
-    }
-    let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    let out = glab_write_fields(
+        repo_path,
+        "PUT",
+        &endpoint,
+        &repo_settings_fields(&input),
+        &[],
+        LandedWrite::Saved("project settings"),
+    )
+    .await?;
     let p: GlabProjectSettings = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| {
             gl_unreadable(
@@ -11788,6 +12253,9 @@ async fn write_time(
         args.push(&duration_arg);
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    if suffix == "add_spent_time" {
+        return added_time_stats(&out.stdout_lossy());
+    }
     let s: GlabTimeStats = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| {
             gl_unreadable(
@@ -11795,6 +12263,17 @@ async fn write_time(
                 format!("could not parse GitLab time stats: {e}"),
             )
         })?;
+    Ok(from_glab_time_stats(s))
+}
+
+/// An accepted add-spent-time's reply: it adds an entry, so a reply that isn't time stats
+/// is the create hedge (the entry may exist). The estimate and reset routes are edits, for
+/// which that sentence would be false, so they keep `gl_unreadable`.
+fn added_time_stats(stdout: &str) -> AppResult<GitLabTimeStats> {
+    let reply = crate::forge::created_reply(stdout, Provider::GitLab, "time entry", false)?;
+    let s: GlabTimeStats = serde_json::from_value(reply).map_err(|_| {
+        crate::forge::created_reply_unreadable(Provider::GitLab, "time entry", false)
+    })?;
     Ok(from_glab_time_stats(s))
 }
 
@@ -12106,6 +12585,25 @@ fn fork_failure(code: i32, stderr: &str) -> AppError {
     })
 }
 
+/// An accepted fork's reply, which must name the new project: one that isn't JSON or
+/// carries no `path_with_namespace` is the create hedge, since the fork may exist but
+/// nothing proves which one.
+fn forked_project(stdout: &str) -> AppResult<serde_json::Value> {
+    let reply = crate::forge::created_reply(stdout, Provider::GitLab, "fork", false)?;
+    let named = reply
+        .get("path_with_namespace")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|p| !p.is_empty());
+    if !named {
+        return Err(crate::forge::created_reply_unreadable(
+            Provider::GitLab,
+            "fork",
+            false,
+        ));
+    }
+    Ok(reply)
+}
+
 /// Fork a GitLab project by `owner/name` into the caller's namespace. `glab api -X
 /// POST projects/{enc}/fork` returns the new project; we poll `projects/{id}` until
 /// `import_status == "finished"` (bounded 5×2s → `ready`). A 409 (already forked)
@@ -12122,13 +12620,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     if out.code != 0 {
         return Err(fork_failure(out.code, &out.stderr));
     }
-    let fork: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "the forked project",
-                format!("could not parse the forked project: {e}"),
-            )
-        })?;
+    let fork = forked_project(&out.stdout_lossy())?;
     let full_name = fork
         .get("path_with_namespace")
         .and_then(Value::as_str)
