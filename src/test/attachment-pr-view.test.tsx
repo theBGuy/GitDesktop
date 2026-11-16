@@ -1239,6 +1239,78 @@ describe("RemotePrView edit follows the pull request", () => {
     expect(sentBody(0)).toBe(typed);
   });
 
+  it("brings back no issue chip for a reference deleted before the forge status lands, and Save leaves it out", async () => {
+    const status = deferred<ForgeStatus>();
+    vi.mocked(forgeStatus).mockReturnValue(status.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #3",
+    }));
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words\n\nCloses #3");
+    fireEvent.change(editBox(), { target: { value: "Words" } });
+    const implemented = (GITLAB as unknown as { implemented: object })
+      .implemented;
+    await act(async () =>
+      status.resolve({
+        ...GITLAB,
+        implemented: { ...implemented, mrEdit: true, issues: true },
+      } as unknown as ForgeStatus),
+    );
+    await waitFor(() => expect(button("Link an issue")).toBeTruthy());
+    await act(async () => undefined);
+    expect(chipButton(3)).toBeNull();
+    expect(vi.mocked(forgeIssueView).mock.calls.some((c) => c[1] === 3)).toBe(
+      false,
+    );
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words");
+  });
+
+  it("brings back no Jira chip for a reference deleted before the link lands, and Save leaves it out", async () => {
+    const linkRead = deferred<Awaited<ReturnType<typeof getJiraLink>>>();
+    vi.mocked(getJiraLink).mockReturnValue(linkRead.promise);
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nRelates to ABC-1",
+    }));
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      provider: "bitbucket",
+      host: "bitbucket.org",
+      implemented: { mrEdit: true },
+    } as unknown as ForgeStatus);
+    mount();
+    await screen.findByText("Merge request seven", undefined, {
+      timeout: 3000,
+    });
+    await waitFor(() => expect(getJiraLink).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    await waitFor(() => expect(editBox()).toBeInTheDocument());
+    expect(editBox().value).toBe("Words\n\nRelates to ABC-1");
+    fireEvent.change(editBox(), { target: { value: "Words" } });
+    await act(async () =>
+      linkRead.resolve({
+        siteHost: "acme.atlassian.net",
+        projectKey: "ABC",
+        projectName: "Acme",
+      }),
+    );
+    await waitFor(() => expect(button("Link an issue")).toBeTruthy());
+    await act(async () => undefined);
+    expect(screen.queryByRole("button", { name: "Remove ABC-1" })).toBeNull();
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words");
+  });
+
   it("holds a fresh form's Save through the host's re-read after a save that left the screen", async () => {
     await openPrEdit();
     fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {

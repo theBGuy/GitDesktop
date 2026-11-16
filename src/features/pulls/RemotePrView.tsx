@@ -2298,8 +2298,9 @@ export function RemotePrView({
   // the cluster since its seed: extraction adds chips after open, so the list
   // can't say "untouched", and a reset would bring back a removed one.
   // A cluster turning on while open takes the stored block over only while the
-  // description is still the item's own text (stored, or stored minus the block:
-  // either side of the text follow); otherwise the text keeps its block and the
+  // description still holds what Edit seeded or last followed it to, per the
+  // hook's record: a value compare can't tell a reference the user deleted from
+  // one the text follow stripped. Otherwise the text stays as typed and the
   // cluster counts as touched. A cluster turning off changes nothing here.
   const followEdit = useEffectEvent(
     (
@@ -2322,9 +2323,8 @@ export function RemotePrView({
       if (cluster !== record.cluster) {
         record.cluster = cluster;
         if (cluster === null) return;
-        const parts = editBodyParts(stored);
-        const text = edit.form.getFieldValue("body");
-        if (text === stored || text === parts.text) {
+        if (edit.isFieldUntouched("body")) {
+          const parts = editBodyParts(stored);
           record.refsKey = editRefsKey(parts);
           resetEditChips(parts);
         } else {

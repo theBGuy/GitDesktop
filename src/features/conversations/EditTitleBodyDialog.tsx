@@ -392,6 +392,15 @@ export function useEditTitleBody(opts: {
     }
   }, [session, liveDraftKey, freshTitle, freshBody, form]);
 
+  /** Whether the shown session's `name` field still holds what it was seeded
+   *  with or last followed to, the follow's own test; false with no record for
+   *  that session. Reads a ref and form state: effects and handlers only. */
+  function isFieldUntouched(name: "title" | "body"): boolean {
+    const record = followRef.current;
+    if (record === null || record.session !== shownRef.current) return false;
+    return form.getFieldValue(name) === record.seeded[name];
+  }
+
   /** Reopens the form's draft of this item when a save of it is still running
    *  or failed while closed, keeping its text, images and session (a running
    *  save's settle closes only the session it captured). False otherwise. */
@@ -452,7 +461,15 @@ export function useEditTitleBody(opts: {
     return sessionRef.current?.draftKey === draftKey;
   }
 
-  return { form, open, setOpen, openEdit, resumeEdit, ownsDraft };
+  return {
+    form,
+    open,
+    setOpen,
+    openEdit,
+    resumeEdit,
+    ownsDraft,
+    isFieldUntouched,
+  };
 }
 
 /** Render props for the dialog. `withForm` infers required render props from the
