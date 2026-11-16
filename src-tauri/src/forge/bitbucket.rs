@@ -3327,9 +3327,10 @@ struct BbMergeTask {
 /// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
 /// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
 /// merges return 202 with a `Location` task-status URL we poll until `SUCCESS`. Any other
-/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400). The body
-/// is never read on a 200 (merged) or a 202: a 202 with a non-empty `Location` is queued
-/// (the poll decides), and one without errors.
+/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400), or the
+/// body read's own error when that read failed. The body is never consulted on a 200
+/// (merged) or a 202: a 202 with a non-empty `Location` is queued (the poll decides), and
+/// one without errors.
 pub async fn merge_pr(
     repo_path: &str,
     number: u64,
@@ -3395,7 +3396,7 @@ fn merge_unconfirmed(err: AppError) -> AppError {
 /// refuses one outside the API base before any request.
 async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()> {
     for _ in 0..30 {
-        let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None)
+        let (status, _, body) = http::bb_send(creds, task_url)
             .await
             .map_err(merge_unconfirmed)?;
         if !(200..300).contains(&status) {
@@ -9340,6 +9341,10 @@ definitions:
         );
         let plain = body.replace("bb_send_request_split(", "bb_send(");
         assert!(!split(&plain, &mapper), "bb_send control");
+        assert!(
+            !split(&format!("{body}\nbb_send(x)"), &mapper),
+            "a bb_send beside the split send must flip"
+        );
         let unmapped = body.replace(map, "plain(");
         assert!(!split(&unmapped, &mapper), "an unmapped wrap must flip");
         let reworded = mapper.replace(wrap, "The pull request failed");
@@ -9410,6 +9415,10 @@ definitions:
         assert!(
             !split(&body.replace("bb_send_request_split(", "bb_send(")),
             "bb_send control"
+        );
+        assert!(
+            !split(&format!("{body}\nbb_send(x)")),
+            "a bb_send beside the split send must flip"
         );
     }
 

@@ -454,16 +454,15 @@ pub async fn bb_get_classified(
     bb_get_status(creds, path_or_url, true).await
 }
 
-/// A read's raw `(status, location_header, body_text)` WITHOUT turning a non-2xx into an
+/// A GET's raw `(status, location_header, body_text)` WITHOUT turning a non-2xx into an
 /// error; the caller decides. A write calls [`bb_send_request_split`] instead, so a 2xx
 /// whose body can't be read is never a transport failure.
 pub async fn bb_send(
     creds: &BbCredentials,
-    method: reqwest::Method,
     path_or_url: &str,
-    body: Option<&serde_json::Value>,
 ) -> AppResult<(u16, Option<String>, String)> {
-    let (status, location, body) = bb_send_request_split(creds, method, path_or_url, body).await?;
+    let (status, location, body) =
+        bb_send_request_split(creds, reqwest::Method::GET, path_or_url, None).await?;
     Ok((status, location, body?))
 }
 

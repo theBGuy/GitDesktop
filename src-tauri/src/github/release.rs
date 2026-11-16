@@ -368,7 +368,7 @@ pub async fn gh_release_edit(
             run_gh_input(Some(&repo_path), &clear, "", GH_NETWORK_TIMEOUT).await?;
         }
         NotesWrite::Keep => {
-            run_gh_text_write(&repo_path, &arg_refs, "--notes-file", notes.trim()).await?;
+            run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
         }
         NotesWrite::Send(text) => {
             run_gh_text_write(&repo_path, &arg_refs, "--notes-file", text).await?;
@@ -719,25 +719,29 @@ mod tests {
         );
     }
 
-    /// Both release writes hand their trimmed notes to the one stdin choke point.
+    /// The create hands its trimmed notes to the one stdin choke point, and neither
+    /// release write maps its timeout itself (the edit's notes plan is pinned below).
     #[test]
     fn release_writes_send_their_notes_on_stdin() {
         let src = include_str!("release.rs");
         let src = src.split("\nmod tests {").next().unwrap();
+        let unmapped = |body: &str| !body.contains("timed_out_write(");
         let on_stdin = |body: &str| {
             let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
             flat.contains("run_gh_text_write(")
                 && flat.contains("\"--notes-file\", notes.trim())")
                 && !flat.contains("run_gh(")
-                && !flat.contains("timed_out_write(")
+                && unmapped(&flat)
         };
+        let body = crate::github::repo_meta::tests::wiring_body(src, "gh_release_create");
+        assert!(on_stdin(&body), "{body}");
+        let argv = format!("{body}\nrun_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)");
+        assert!(!on_stdin(&argv), "an argv run must flip");
         for name in ["gh_release_create", "gh_release_edit"] {
             let body = crate::github::repo_meta::tests::wiring_body(src, name);
-            assert!(on_stdin(&body), "{name}: {body}");
-            let argv = format!("{body}\nrun_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)");
-            assert!(!on_stdin(&argv), "{name}: an argv run must flip");
+            assert!(unmapped(&body), "{name}: {body}");
             let mapped = format!("{body}\n.map_err(|e| timed_out_write(e, \"GitHub\", landed))");
-            assert!(!on_stdin(&mapped), "{name}: a timeout map must flip");
+            assert!(!unmapped(&mapped), "{name}: a timeout map must flip");
         }
     }
 
@@ -751,8 +755,8 @@ mod tests {
     }
 
     /// The edit plans its notes in one place: a clear runs gh on an empty stdin
-    /// with `--notes-file -`, every other plan takes the shared text write, and a
-    /// send writes the planner's own text.
+    /// with `--notes-file -`, a keep runs gh with no notes flag, and a send writes
+    /// the planner's own text through the shared text write.
     #[test]
     fn release_edit_clears_notes_through_an_empty_notes_file() {
         let src = include_str!("release.rs");
@@ -762,14 +766,17 @@ mod tests {
         let wired = |flat: &str| {
             flat.contains("match release_notes_write(notes.trim(), clear_notes) {")
                 && flat.contains(
-                    "run_gh_text_write(&repo_path, &arg_refs, \"--notes-file\", notes.trim())",
+                    "NotesWrite::Keep => { run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)",
                 )
                 && flat.contains("&[\"--notes-file\", \"-\"]")
                 && flat.contains("run_gh_input(Some(&repo_path), &clear, \"\", GH_NETWORK_TIMEOUT)")
                 && flat.contains(
                     "NotesWrite::Send(text) => { run_gh_text_write(&repo_path, &arg_refs, \"--notes-file\", text)",
                 )
+                && flat.matches("run_gh(").count() == 1
                 && !flat.contains("\"--notes\"")
+                && !flat.contains("\"-n\"")
+                && !flat.contains("\"--notes=")
         };
         assert!(wired(&flat), "{flat}");
         let start = flat.find("NotesWrite::Clear =>").unwrap();
@@ -778,6 +785,12 @@ mod tests {
         assert!(!wired(&no_clear), "dropping the clear arm must flip");
         let argv = format!("{flat} args.push(\"--notes\".into());");
         assert!(!wired(&argv), "a notes argv flag must flip");
+        let second = format!("{flat} run_gh(Some(&repo_path), &x, GH_NETWORK_TIMEOUT)");
+        assert!(!wired(&second), "a second argv run must flip");
+        let short = format!("{flat} args.push(\"-n\".into());");
+        assert!(!wired(&short), "a short notes flag must flip");
+        let inline = format!("{flat} args.push(format!(\"--notes={{}}\", notes.trim()));");
+        assert!(!wired(&inline), "an inline notes flag must flip");
         let resend = flat.replacen(
             "\"--notes-file\", text)",
             "\"--notes-file\", notes.trim())",
@@ -785,6 +798,16 @@ mod tests {
         );
         assert_ne!(resend, flat);
         assert!(!wired(&resend), "a send that re-reads the notes must flip");
+        let keep_notes = flat.replacen(
+            "run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)",
+            "run_gh_text_write(&repo_path, &arg_refs, \"--notes-file\", notes.trim())",
+            1,
+        );
+        assert_ne!(keep_notes, flat);
+        assert!(
+            !wired(&keep_notes),
+            "a keep that changes its call must flip"
+        );
     }
 
     /// `gh release list` decodes `publishedAt` into a non-pointer Go time, so a

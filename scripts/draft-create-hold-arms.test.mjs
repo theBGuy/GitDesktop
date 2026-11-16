@@ -142,6 +142,33 @@ test("the hook's own flag and its uses pass", () => {
   assert.deepEqual(scan(fixture({ body })), []);
 });
 
+test("a local read inside a destructuring default is no key", () => {
+  for (const line of [
+    "  const { disabled = combine(false, isSubmitting) } = props;",
+    "  const { deps = [open, isSubmitting] } = props;",
+    "  const f = ({ disabled = combine(false, isSubmitting) }) => disabled;",
+    "  run(function ({ disabled = combine(false, isSubmitting) }) { return disabled; });",
+    "  const { disabled = f(a, g(b, isSubmitting)) } = props;",
+  ]) {
+    const body = ["  const isSubmitting = createHold.running;", line];
+    assert.deepEqual(scan(fixture({ body })), [], line);
+  }
+});
+
+test("a key after a default holding a nested comma is still a read", () => {
+  for (const line of [
+    "  const { disabled = combine(a, b), isSubmitting } = form.state;",
+    "  const { deps = [a, b], isSubmitting } = form.state;",
+    "  const { a = f(b)), isSubmitting } = form.state;",
+    "  const { a = b]], isSubmitting } = form.state;",
+  ]) {
+    assert.deepEqual(scan(fixture({ body: [line] })), [7], line);
+  }
+  const multi =
+    "  const {\n    disabled = combine(a, b),\n    isSubmitting,\n  } = form.state;";
+  assert.deepEqual(scan(fixture({ body: [multi] })), [9]);
+});
+
 test("an object literal or a rest element named isSubmitting is no read", () => {
   const body = [
     "  report({ isSubmitting });",
@@ -220,6 +247,8 @@ test("the spellings the message names as unseen pass", () => {
     "  const f = ({ isSubmitting }): (() => void) => () => load(isSubmitting);",
     "  const { state: { isSubmitting } } = form;",
     '  const busy = form.state["isSubmitting"];',
+    '  const { "isSubmitting": busy } = form.state;',
+    '  const { ["isSubmitting"]: busy } = form.state;',
     "  const { isSubmitting, values: { title } } = form.state;",
     "  const f = ({ isSubmitting, onSave }: { isSubmitting: boolean; onSave: () => void }) =>",
   ]) {
@@ -234,6 +263,7 @@ test("the spellings the message names as unseen pass", () => {
     "return type holds parentheses or an equals sign",
     "nested pattern",
     "bracket access",
+    "a quoted or computed pattern key",
     "a pattern holding any nested pattern",
     "annotated with a function type",
   ])
