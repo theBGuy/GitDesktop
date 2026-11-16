@@ -241,7 +241,7 @@ pub(crate) async fn refuse_linked_path(
 }
 
 /// Reads a blob from an unmerged index stage (1 = base, 2 = ours, 3 = theirs).
-/// `present` is the caller's `unmerged_stages` listing: a stage missing from it
+/// `present` is the caller's [`unmerged_entries`] stages: a stage missing from it
 /// (a side added or deleted the file) is `None` without a spawn. A listed stage
 /// whose read fails is re-listed once: gone now means an outside resolve landed
 /// after the listing (`None`, agreeing with the index); still listed is an
@@ -276,8 +276,8 @@ async fn stage_blob(
 }
 
 /// The unmerged index stages present for `spec` (1 = base, 2 = ours, 3 = theirs).
-/// Empty when the path isn't conflicted at all. The presence truth for both the
-/// take-a-side removal gate and `git_conflict_sides`' blob reads.
+/// Empty when the path isn't conflicted at all. [`stage_blob`]'s re-list after a
+/// failed read: whether that stage is still listed.
 ///
 /// One `ls-files -u` spawn answers for every stage and returns only mode/sha/stage
 /// metadata; `git show :N:` costs the same spawn but materializes the whole blob

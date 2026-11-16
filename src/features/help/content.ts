@@ -800,8 +800,8 @@ the failed part's line when one shows.
   that commit is already pushed to the branch's upstream, the dialog warns that the
   branch will need a force push, and a protected branch refuses. On a branch with no
   upstream, it also warns when a remote branch already has that commit. On an older
-  unpushed commit it opens **Edit history** with that commit's date editor open. Elsewhere the
-  item is held and says why. It's in the command palette too (palette-only by default;
+  unpushed commit it opens **Edit history** with that commit's date editor open. Elsewhere
+  the item is held and says why. It's in the command palette too (palette-only by default;
   bind a key in Settings). Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
   separator, \`±HHMM\`, \`Z\`, no seconds, and a date pasted from \`git log\`, in its
   default or \`--date=iso\` form and with its \`Date:\` label, all work. Where your

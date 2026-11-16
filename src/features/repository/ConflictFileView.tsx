@@ -308,7 +308,7 @@ const submoduleAcceptedCopy = (
 };
 
 const submoduleChangedCopy = (name: string) =>
-  `The submodule conflict in ${name} changed after it was read — nothing was staged.`;
+  `The submodule conflict in ${name}, or its checkout, changed after it was read — nothing was staged.`;
 
 const REREAD_FAILED_TOAST =
   "Couldn't re-read the file — nothing was marked resolved.";

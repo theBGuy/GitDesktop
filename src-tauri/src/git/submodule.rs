@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -25,6 +27,11 @@ use crate::state::AppState;
 /// probes — the remove path's submodule-worktree check and
 /// [`refuse_unsettled_gitmodules`] — carry it.
 const UNTRACKED_NORMAL: &str = "--untracked-files=normal";
+
+/// The conflict read's refusal once a path's conflict holds no gitlink. The
+/// frontend matches it (workingtree.ts NOT_SUBMODULE_CONFLICT), pinned by
+/// scripts/conflict-prefilter.test.mjs.
+pub(crate) const NOT_SUBMODULE_CONFLICT: &str = "not a submodule conflict";
 
 /// A caller-supplied path that git will resolve inside the repo. Rejected before
 /// it reaches argv: a leading `-` parses as an option, and an absolute or
@@ -1361,9 +1368,7 @@ pub(crate) async fn git_submodule_conflict_core(
         });
     }
     if !entries.iter().any(|entry| entry.mode == GITLINK_MODE) {
-        return Err(AppError::InvalidArgument(
-            "not a submodule conflict".to_string(),
-        ));
+        return Err(AppError::InvalidArgument(NOT_SUBMODULE_CONFLICT.into()));
     }
     let (dir, state) = submodule_checkout_state(repo_path, &path).await;
     let recorded: Vec<&str> = entries.iter().map(|entry| entry.sha.as_str()).collect();
@@ -1441,6 +1446,29 @@ pub(crate) async fn git_accept_submodule_conflict_side_core(
     expected: &SubmoduleConflictStages,
     expect_checkout: bool,
 ) -> AppResult<SubmoduleAcceptOutcome> {
+    accept_submodule_side_within(
+        state,
+        repo_path,
+        path,
+        side,
+        expected,
+        expect_checkout,
+        LOCK_WAIT_TIMEOUT,
+    )
+    .await
+}
+
+/// The accept, with the bound on its wait for the submodule's own working tree
+/// as a parameter so a test can shorten it.
+async fn accept_submodule_side_within(
+    state: &AppState,
+    repo_path: &str,
+    path: &str,
+    side: &str,
+    expected: &SubmoduleConflictStages,
+    expect_checkout: bool,
+    submodule_wait: Duration,
+) -> AppResult<SubmoduleAcceptOutcome> {
     let path = conflict_rel_path(path)?;
     let stage = match side {
         "ours" => 2u8,
@@ -1486,7 +1514,30 @@ pub(crate) async fn git_accept_submodule_conflict_side_core(
     // The LISTED sha, never re-resolved from a ref.
     let sha = target.sha.clone();
 
+    // A submodule opened as its own repository takes its own working-tree domain:
+    // hold it too, parent then child (no path takes them the other way), so a
+    // switch there can't land between the plan and the checkout. Only a folder
+    // with its own `.git` has one; git resolves any other to the parent's checkout.
+    let worktree = Path::new(repo_path).join(&path);
+    let has_git = worktree.join(".git").try_exists().unwrap_or(false);
+    let submodule_domain = if has_git {
+        Some(state.working_tree_lock(&worktree.to_string_lossy()).await)
+    } else {
+        None
+    }
+    .filter(|child| !Arc::ptr_eq(&child.lock(), &domain.lock()));
+    let _submodule_guard = match &submodule_domain {
+        Some(child) => {
+            Some(acquire_repo_lock(child, submodule_wait, "a conflict resolution").await?)
+        }
+        None => None,
+    };
+
     let (dir, live) = submodule_checkout_state(repo_path, &path).await;
+    // A checkout that appeared after the hold was decided would be moved unheld.
+    if live.checkout == SubmoduleCheckout::Ok && !has_git {
+        return Ok(SubmoduleAcceptOutcome::Changed);
+    }
     let present = side_present(&dir, &live, &sha).await?;
     let recorded: Vec<&str> = entries.iter().map(|entry| entry.sha.as_str()).collect();
     let plan = plan_checkout(&live, &sha, present, &recorded);
@@ -1523,7 +1574,8 @@ pub(crate) async fn git_accept_submodule_conflict_side_core(
 /// Err: the pointer is already staged and the caller must hear so. Never `submodule
 /// update`, which fetches; `--no-overwrite-ignore` because a plain checkout replaces
 /// an ignored file the target tracks while status calls the tree clean (measured,
-/// git 2.51.1). Nested submodules are not updated.
+/// git 2.51.1). `--no-recurse-submodules` keeps nested submodules where they are,
+/// whatever `submodule.recurse` the repo, user or submodule configures.
 async fn checkout_staged_commit(dir: &str, sha: &str) -> SubmoduleAcceptCheckout {
     let failed = |reason| SubmoduleAcceptCheckout::Left {
         why: SubmoduleCheckoutLeft::Failed,
@@ -1531,7 +1583,13 @@ async fn checkout_staged_commit(dir: &str, sha: &str) -> SubmoduleAcceptCheckout
     };
     match run_git_raw(
         Some(dir),
-        &["checkout", "--no-overwrite-ignore", "--detach", sha],
+        &[
+            "checkout",
+            "--no-recurse-submodules",
+            "--no-overwrite-ignore",
+            "--detach",
+            sha,
+        ],
         WORKTREE_OP_TIMEOUT,
     )
     .await
@@ -3845,7 +3903,7 @@ mod tests {
         .await;
         assert_invalid(
             git_submodule_conflict_core(&f.host, "plain.txt").await,
-            "not a submodule conflict",
+            NOT_SUBMODULE_CONFLICT,
         );
     }
 
@@ -4255,6 +4313,125 @@ mod tests {
         assert_eq!(stages, stages_of(None, Some("o"), Some("t")));
     }
 
+    /// A submodule opened as its own repository holds its own working-tree domain,
+    /// spelled as git spells its toplevel. The accept waits on it, then stages
+    /// nothing; once it is free the accept proceeds.
+    #[tokio::test]
+    async fn accept_waits_on_the_submodules_own_working_tree() {
+        let f = gitlink_fixture("conflict-child-lock").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let before = index_entries(&f.host).await;
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let wait = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let err = accept_submodule_side_within(
+            &state, &f.host, "libs/dep", "ours", &expected, true, wait,
+        )
+        .await
+        .expect_err("the accept meets the tab's hold");
+        assert!(
+            matches!(&err, AppError::Busy { holder } if holder == "a test hold"),
+            "got {err:?}"
+        );
+        assert!(started.elapsed() >= wait, "it waited before giving up");
+        assert_eq!(index_entries(&f.host).await, before, "nothing staged");
+        assert_eq!(head_of(&f.sub).await, f.c2);
+        drop(held);
+
+        let outcome = git_accept_submodule_conflict_side_core(
+            &state, &f.host, "libs/dep", "ours", &expected, true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: f.c1.clone(),
+                checkout: SubmoduleAcceptCheckout::CheckedOut,
+            }
+        );
+        assert_pointer_staged(&f.host, &f.c1).await;
+        assert_eq!(head_of(&f.sub).await, f.c1);
+    }
+
+    /// `submodule.recurse=true` would carry the accept's checkout into a nested
+    /// submodule whose recorded commit differs between the two sides.
+    #[tokio::test]
+    async fn accept_leaves_a_nested_submodule_under_submodule_recurse() {
+        allow_file_submodules();
+        let dir = temp("conflict-nested");
+        let root = dir.path();
+        let leaf = seed_repo(root, "leaf").await;
+        let mid = seed_repo(root, "mid").await;
+        let host = seed_repo(root, "host").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            mid.clone(),
+            "../leaf".into(),
+            Some("deep/leaf".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&mid, &["commit", "-qm", "add leaf"]).await;
+        let m0 = head_of(&mid).await;
+        let l1 = commit_in(&leaf, "leaf.txt", "v1").await;
+        let mid_leaf = Path::new(&mid)
+            .join("deep/leaf")
+            .to_string_lossy()
+            .into_owned();
+        git(&mid_leaf, &["fetch", "-q", "origin"]).await;
+        git(&mid_leaf, &["checkout", "-q", &l1]).await;
+        git(&mid, &["add", "deep/leaf"]).await;
+        git(&mid, &["commit", "-qm", "leaf v1"]).await;
+        let m1 = head_of(&mid).await;
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../mid".into(),
+            Some("libs/dep".into()),
+            Some("main".into()),
+        )
+        .await
+        .unwrap();
+        git(&host, &["commit", "-qm", "add mid"]).await;
+        let sub = sub_dir(&host);
+        git(&sub, &["submodule", "update", "--init", "-q"]).await;
+        let nested = Path::new(&sub)
+            .join("deep/leaf")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            head_of(&nested).await,
+            l1,
+            "fixture: nested sits at what m1 records"
+        );
+        git(&sub, &["config", "submodule.recurse", "true"]).await;
+
+        conflict_at(&host, None, Some(&m1), Some(&m0)).await;
+        let expected = stages_of(None, Some(&m1), Some(&m0));
+        let outcome = accept(&host, "theirs", &expected, true).await.unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: m0.clone(),
+                checkout: SubmoduleAcceptCheckout::CheckedOut,
+            }
+        );
+        assert_eq!(head_of(&sub).await, m0);
+        assert_eq!(head_of(&nested).await, l1, "the nested checkout stays put");
+    }
+
     #[test]
     fn submodule_conflict_cores_gate_the_path_and_lock_before_writing() {
         fn body(source: &str, name: &str) -> String {
@@ -4270,11 +4447,23 @@ mod tests {
         let source = include_str!("submodule.rs");
         let read = body(source, "git_submodule_conflict_core");
         assert!(read.contains("conflict_rel_path("));
-        let write = body(source, "git_accept_submodule_conflict_side_core");
+        let core = body(source, "git_accept_submodule_conflict_side_core");
+        assert!(
+            core.contains("LOCK_WAIT_TIMEOUT"),
+            "the app waits the bounded default"
+        );
+        let write = body(source, "accept_submodule_side_within");
         let at = |needle: &str| write.find(needle).unwrap_or_else(|| panic!("{needle}"));
         assert!(at("conflict_rel_path(") < at("working_tree_lock("));
         assert!(at("working_tree_lock(") < at("acquire_repo_lock("));
         assert!(at("acquire_repo_lock(") < at("\"update-index\""));
         assert!(at("acquire_repo_lock(") < at("checkout_staged_commit("));
+        // The submodule's own hold: bounded, and taken before anything reads inside it.
+        let child = write
+            .find("acquire_repo_lock(child, submodule_wait")
+            .expect("child hold");
+        assert!(at("acquire_repo_lock(") < child);
+        assert!(child < at("submodule_checkout_state("));
+        assert!(!write.contains("acquire_repo_lock_unbounded"));
     }
 }

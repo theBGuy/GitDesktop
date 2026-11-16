@@ -3418,7 +3418,8 @@ pub(crate) async fn update_branch_from(
             std::fs::create_dir_all(root).map_err(AppError::Io)?;
         }
         let marker = crate::git::update_marker::UpdateMarker::create_for(&tmp, branch)?;
-        // No task takes two locks of one domain: release this checkout's first.
+        // Two sibling checkouts' working-tree locks are never held together (only a
+        // submodule accept nests, parent then child): release this checkout's first.
         drop(guard);
         let result = update_in_holder(state, &holder, branch, base, &pins.base_sha, merge).await;
         settle_marker(Some(marker), &tmp.to_string_lossy());

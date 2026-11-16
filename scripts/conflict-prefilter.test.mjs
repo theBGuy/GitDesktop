@@ -477,6 +477,53 @@ test("the refusal twins match the backend's strings", () => {
   );
 });
 
+// The submodule read's "not a submodule conflict" refusal and its frontend twin,
+// which the submodule query matches to re-read the file.
+const SUBMODULE_RS = "src-tauri/src/git/submodule.rs";
+const WORKINGTREE = "src/lib/git/queries/workingtree.ts";
+const RUST_NOT_SUBMODULE =
+  /^pub\(crate\) const NOT_SUBMODULE_CONFLICT: &str = "([^"\\]*)";$/m;
+const TS_NOT_SUBMODULE = /^const NOT_SUBMODULE_CONFLICT = "([^"\\]*)";$/m;
+
+function pinNotSubmoduleConflict(rust, ts) {
+  const rustConst = RUST_NOT_SUBMODULE.exec(rust);
+  assert.ok(rustConst, "submodule.rs must declare NOT_SUBMODULE_CONFLICT");
+  const tsConst = TS_NOT_SUBMODULE.exec(ts);
+  assert.ok(tsConst, `${WORKINGTREE} must declare NOT_SUBMODULE_CONFLICT`);
+  assert.equal(tsConst[1], rustConst[1]);
+  // Raised through the constant, and spelled nowhere else in the Rust file.
+  assert.match(rust, /InvalidArgument\(NOT_SUBMODULE_CONFLICT\.into\(\)\)/);
+  assert.equal(rust.split(`"${rustConst[1]}"`).length - 1, 1);
+}
+
+test("the not-a-submodule-conflict twin matches the backend's string", () => {
+  const rust = read(SUBMODULE_RS);
+  const ts = read(WORKINGTREE);
+  pinNotSubmoduleConflict(rust, ts);
+  assert.throws(() =>
+    pinNotSubmoduleConflict(
+      mutate(rust, '"not a submodule conflict"', '"not a submodule conflict!"'),
+      ts,
+    ),
+  );
+  assert.throws(() =>
+    pinNotSubmoduleConflict(
+      rust,
+      mutate(ts, '"not a submodule conflict"', '"no submodule conflict"'),
+    ),
+  );
+  assert.throws(() =>
+    pinNotSubmoduleConflict(
+      mutate(
+        rust,
+        "InvalidArgument(NOT_SUBMODULE_CONFLICT.into())",
+        'InvalidArgument("not a submodule conflict".into())',
+      ),
+      ts,
+    ),
+  );
+});
+
 const pathRefusal = (why, linkedLeaf = false) => ({
   summary: `Can't resolve the conflict in a/b — ${why}. Nothing was changed.`,
   linkedLeaf,

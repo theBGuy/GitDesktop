@@ -21,8 +21,14 @@ const READING = "Reading the conflict…";
 const READ_ERROR =
   "Couldn't read this submodule conflict, so its commits can't be shown here. Resolve it in a terminal.";
 
-const TERMINAL_HINT =
-  "To take the removal instead, resolve this conflict in a terminal.";
+/** Why a side offers no Accept. */
+type NoAcceptCause = "removed" | "file";
+
+/** The terminal route to the side the pane can't stage, per cause. */
+const TERMINAL_HINT: Record<NoAcceptCause, string> = {
+  removed: "To take the removal instead, resolve this conflict in a terminal.",
+  file: "To keep the file instead, resolve this conflict in a terminal.",
+};
 
 /** Each side worded and tinted as a text conflict's region words its sides. */
 const SIDE_COPY: Record<
@@ -111,6 +117,23 @@ const FOOTER: Record<StayingPlan | "confirmed", (name: string) => string> = {
 /** A side whose commit can be staged: present, and a gitlink. */
 const offersAccept = (side: SubmoduleConflictSide | null) =>
   side !== null && side.gitlink;
+
+function noAcceptCause(
+  side: SubmoduleConflictSide | null,
+): NoAcceptCause | null {
+  if (side === null) return "removed";
+  return side.gitlink ? null : "file";
+}
+
+/** One line per cause, current's first; two sides lacking an Accept for one
+ *  cause share its line. */
+const terminalHints = (sides: (SubmoduleConflictSide | null)[]) => [
+  ...new Set(
+    sides
+      .map(noAcceptCause)
+      .filter((cause): cause is NoAcceptCause => cause !== null),
+  ),
+];
 
 /** Plans under which the read never looked inside the submodule, so a missing
  *  commit there means nothing about fetching. */
@@ -234,6 +257,7 @@ export function SubmoduleConflictPane({
   }
   const relation = relationView(data.relation);
   const offering = [data.ours, data.theirs].filter(offersAccept);
+  const hints = terminalHints([data.ours, data.theirs]);
   const staying: OrderedPlan | undefined = FOOTER_ORDER.find((plan) =>
     offering.some((side) => side?.plan === plan),
   );
@@ -259,10 +283,12 @@ export function SubmoduleConflictPane({
         newer={relation.newer === "theirs"}
         {...sideProps}
       />
-      {(!offersAccept(data.ours) || !offersAccept(data.theirs)) && (
-        <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-          {TERMINAL_HINT}
-        </p>
+      {hints.length > 0 && (
+        <div className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
+          {hints.map((cause) => (
+            <p key={cause}>{TERMINAL_HINT[cause]}</p>
+          ))}
+        </div>
       )}
       {footer !== null && (
         <p className="border-t px-3 py-1.5 text-[11px] text-muted-foreground">

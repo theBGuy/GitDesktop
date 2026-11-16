@@ -90,8 +90,10 @@ const READ_ERROR =
   "Couldn't read this submodule conflict, so its commits can't be shown here. Resolve it in a terminal.";
 const FALLBACK =
   "Couldn't read this file, so it can't be shown here. Resolve the conflict in your editor.";
-const TERMINAL =
+const TERMINAL_REMOVED =
   "To take the removal instead, resolve this conflict in a terminal.";
+const TERMINAL_FILE =
+  "To keep the file instead, resolve this conflict in a terminal.";
 const NOT_CONFLICTED = "This file is no longer conflicted.";
 
 const BASE = "3f1c9a7e2b6d4058a1c3e9f7b2d4a6c8e0f13579";
@@ -357,19 +359,22 @@ describe("ConflictFileView's submodule conflict pane", () => {
   });
 
   it.each([
-    ["removed", null, "Removed on this side"],
+    ["removed", null, "Removed on this side", TERMINAL_REMOVED, TERMINAL_FILE],
     [
       "a file",
       { sha: THEIRS, gitlink: false, commit: null, plan: null },
       "A file on this side, not a submodule commit",
+      TERMINAL_FILE,
+      TERMINAL_REMOVED,
     ],
   ])(
-    "U4: incoming %s offers no Accept and points to a terminal",
-    async (_, theirs, line) => {
+    "U4: incoming %s offers no Accept and points to a terminal for it",
+    async (_, theirs, line, hint, otherHint) => {
       subDisk = { ...DESCENDANT, theirs, relation: { kind: "unknown" } };
       renderView();
       expect(await screen.findByText(line)).toBeInTheDocument();
-      expect(screen.getByText(TERMINAL)).toBeInTheDocument();
+      expect(screen.getByText(hint)).toBeInTheDocument();
+      expect(screen.queryByText(otherHint)).not.toBeInTheDocument();
       expect(acceptButton("Accept current")).toBeInTheDocument();
       expect(
         screen.queryByRole("button", { name: /Accept incoming/ }),
@@ -439,6 +444,41 @@ describe("ConflictFileView's submodule conflict pane", () => {
     await screen.findByText("Removed on this side");
     expect(screen.queryByText(/^Picking a side/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Accept/ })).toBeNull();
+  });
+
+  it("R1: sides lacking an Accept for different causes each get their line, current first", async () => {
+    subDisk = {
+      base: BASE,
+      ours: null,
+      theirs: { sha: THEIRS, gitlink: false, commit: null, plan: null },
+      relation: { kind: "unknown" },
+    };
+    renderView();
+    await screen.findByText("Removed on this side");
+    expect(
+      screen
+        .getAllByText(/resolve this conflict in a terminal.$/, {
+          selector: "p",
+        })
+        .map((p) => p.textContent),
+    ).toEqual([TERMINAL_REMOVED, TERMINAL_FILE]);
+  });
+
+  it("R1: two file sides share one line", async () => {
+    subDisk = {
+      base: BASE,
+      ours: { sha: OURS, gitlink: false, commit: null, plan: null },
+      theirs: { sha: THEIRS, gitlink: false, commit: null, plan: null },
+      relation: { kind: "unknown" },
+    };
+    renderView();
+    expect(await screen.findByText(TERMINAL_FILE)).toBeInTheDocument();
+    expect(screen.queryByText(TERMINAL_REMOVED)).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText(/resolve this conflict in a terminal.$/, {
+        selector: "p",
+      }),
+    ).toHaveLength(1);
   });
 
   it("U7: a read error holds across re-reads, then heals", async () => {
@@ -727,7 +767,7 @@ describe("Accepting a submodule side", () => {
     await user.click(button);
     await waitFor(() =>
       expect(toast.info).toHaveBeenCalledWith(
-        `The submodule conflict in ${NAME} changed after it was read — nothing was staged.`,
+        `The submodule conflict in ${NAME}, or its checkout, changed after it was read — nothing was staged.`,
       ),
     );
     expect(

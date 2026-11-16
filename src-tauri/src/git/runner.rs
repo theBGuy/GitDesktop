@@ -861,9 +861,9 @@ type ConfigWriteLocks = std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<
 /// before the add); across the checkout of tracking switches and of checked-out creates;
 /// and across the app's plain switches onto an existing branch for their HEAD move, so
 /// none lands inside a branch delete's guarded window. PR checkout's two switches skip it
-/// and are excluded by the worktree-admin hold every delete caller takes. The long commands' unheld first runs, and other processes,
-/// can still collide, which the retry and repairs cover. A LEAF lock: taken after any
-/// domain lock, never before one.
+/// and are excluded by the worktree-admin hold every delete caller takes. The long
+/// commands' unheld first runs, and other processes, can still collide, which the retry
+/// and repairs cover. A LEAF lock: taken after any domain lock, never before one.
 static CONFIG_WRITE_LOCKS: OnceLock<ConfigWriteLocks> = OnceLock::new();
 
 /// The config-write mutex for `repo_path`, keyed by the common git dir because every
