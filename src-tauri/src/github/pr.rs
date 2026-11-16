@@ -2325,8 +2325,9 @@ mod attach_tests {
         }
     }
 
-    /// The REST pull request edit maps its timeout once, after the write and after the
-    /// eviction, so the eviction still sees the unmapped result.
+    /// The REST pull request edit re-leads its timeout with its noun once, after the write
+    /// and after the eviction. Its write helper already maps the timeout under `Changed`,
+    /// and the eviction skips only `GhNotFound`, so it reads either form alike.
     #[test]
     fn the_rest_pr_edit_hedges_its_timeout_after_the_eviction() {
         let body =

@@ -362,7 +362,9 @@ pub async fn gh_hook_create(repo_path: String, input: WebhookInput) -> AppResult
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Created("webhook"))
+    })?;
     created_webhook(&out.stdout_lossy())
 }
 
@@ -401,7 +403,9 @@ pub async fn gh_hook_update(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Saved("webhook"))
+    })?;
     serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable("the webhook", format!("could not parse the webhook: {e}")))
 }
@@ -896,32 +900,68 @@ pub async fn gh_repo_settings_update(
 mod tests {
     use super::{write_access_from_repo_json, GhOutput};
 
-    /// Webhook create and update map their run's timeout to the generic hedge, before the
-    /// reply is read; deleting either map must flip.
+    /// Webhook create and update map their run's timeout to their own noun's hedge, right
+    /// on the run and before the reply is read. Read over the body with whitespace removed,
+    /// so rustfmt's wrap of the map can't unpin it.
     #[test]
     fn webhook_writes_hedge_their_timeout() {
         let source = include_str!("repo_settings.rs");
-        let map = ".map_err(|e| crate::forge::timed_out_write(e, \"GitHub\", crate::forge::LandedWrite::Changed))?;";
-        let holds = |body: &str| {
-            body.matches("timed_out_write(").count() == 1
-                && body
-                    .find("run_gh_input(")
-                    .zip(body.find(map))
-                    .is_some_and(|(r, m)| r < m)
-                && body
-                    .find(map)
-                    .zip(
-                        body.find("from_str(")
-                            .or_else(|| body.find("created_webhook(")),
-                    )
-                    .is_some_and(|(m, p)| m < p)
+        let flat = |s: &str| s.split_whitespace().collect::<String>();
+        let call = |write: &str| {
+            format!(
+                "crate::forge::timed_out_write(e,\"GitHub\",crate::forge::LandedWrite::{write})"
+            )
         };
-        for name in ["gh_hook_create", "gh_hook_update"] {
-            let body = crate::github::repo_meta::tests::wiring_body(source, name);
-            assert!(holds(&body), "{name}: {body}");
-            assert!(!holds(&body.replace(map, "?;")), "{name}: control");
+        let holds = |body: &str, write: &str| {
+            let call = call(write);
+            body.matches("timed_out_write(").count() == 1
+                && body.find(&call).is_some_and(|m| {
+                    let on_run = [".await.map_err(|e|", ".await.map_err(|e|{"]
+                        .iter()
+                        .any(|lead| body[..m].ends_with(lead));
+                    let parse = body
+                        .find("from_str(")
+                        .or_else(|| body.find("created_webhook("));
+                    let ran = body.find("run_gh_input(");
+                    on_run && ran.is_some_and(|r| r < m) && parse.is_some_and(|p| m < p)
+                })
+        };
+        for (name, write, other) in [
+            (
+                "gh_hook_create",
+                "Created(\"webhook\")",
+                "Saved(\"webhook\")",
+            ),
+            (
+                "gh_hook_update",
+                "Saved(\"webhook\")",
+                "Created(\"webhook\")",
+            ),
+        ] {
+            let body = flat(&crate::github::repo_meta::tests::wiring_body(source, name));
+            assert!(holds(&body, write), "{name}: {body}");
+            let controls = [
+                ("a dropped map", body.replace(&call(write), "e")),
+                (
+                    "an earlier ?",
+                    body.replace(".await.map_err(", ".await?.map_err("),
+                ),
+                (
+                    "a parse before the map",
+                    format!("serde_json::from_str(x);{body}"),
+                ),
+                ("the other noun", body.replace(write, other)),
+                ("the generic hedge", body.replace(write, "Changed")),
+            ];
+            for (label, mutant) in controls {
+                assert_ne!(mutant, body, "{name}: {label} changed nothing");
+                assert!(!holds(&mutant, write), "{name}: {label} must flip");
+            }
         }
-        let create = crate::github::repo_meta::tests::wiring_body(source, "gh_hook_create");
+        let create = flat(&crate::github::repo_meta::tests::wiring_body(
+            source,
+            "gh_hook_create",
+        ));
         assert!(
             create.contains("created_webhook(&out.stdout_lossy())"),
             "{create}"

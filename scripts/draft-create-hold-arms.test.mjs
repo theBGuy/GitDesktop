@@ -47,9 +47,14 @@ test("a three-marker file whose create is a promise-typed prop is a member", () 
   });
   assert.deepEqual(scan(source), [2]);
   assert.deepEqual(
-    scan(fixture({ create: "  const onCreate = () => Promise .resolve();" })),
+    scan(
+      fixture({
+        create: "  const onCreate = () => Promise .resolve();",
+        hook: "",
+      }),
+    ),
     [],
-    "a hook caller reading no form flag scans clean",
+    "a promise VALUE is no marker",
   );
 });
 
@@ -151,6 +156,10 @@ test("a default-parameter object literal or a type annotation is no read", () =>
     "  const f = (o = { isSubmitting: false }) => o;",
     "  const x: { isSubmitting: boolean } = load();",
     "  const g = (p: { isSubmitting: boolean }) => p;",
+    "  const f = (s: [A, { isSubmitting: boolean }, B]) => s;",
+    "  const f = (s: Foo<A, { isSubmitting: boolean }, B>) => s;",
+    "  type T = (s: Foo<A, { isSubmitting: boolean }, B>) => void;",
+    "  const f = (s: Foo<A, { isSubmitting: boolean }, Map<B, C>>) => s;",
   ]) {
     assert.deepEqual(scan(fixture({ body: [line] })), [], line);
   }
@@ -168,9 +177,47 @@ test("a pattern opened after a paren, a comma or a declaration keyword is still 
   }
 });
 
+test("an arrow pattern with later parameters, or an anonymous function's, is a read", () => {
+  for (const line of [
+    "  const f = ({ isSubmitting }, i) => isSubmitting;",
+    "  items.map(({ isSubmitting }, i) => i);",
+    "  run(async function ({ isSubmitting }) { return isSubmitting; });",
+    "  run(function* ({ isSubmitting }) { yield isSubmitting; });",
+    "  export default function ({ isSubmitting }) { return isSubmitting; }",
+    "  const f = ({ isSubmitting }): boolean => isSubmitting;",
+    "  const f = ({ isSubmitting }, i): boolean => isSubmitting;",
+    "  const f = ({ isSubmitting }: S): Promise<boolean> => load(isSubmitting);",
+    "  const f = (a, { isSubmitting }, b: Map<K, V>) => isSubmitting;",
+  ]) {
+    assert.deepEqual(scan(fixture({ body: [line] })), [7], line);
+  }
+});
+
+test("an anonymous function's pattern is reported at its key's line", () => {
+  const line = "  run(function ({\n    values,\n    isSubmitting,\n  }) {});";
+  assert.deepEqual(scan(fixture({ body: [line] })), [9]);
+});
+
+test("an object literal passed beside later arguments is no read", () => {
+  for (const line of [
+    "  report({ isSubmitting }, x);",
+    "  foo({ isSubmitting }, (x) => x);",
+    "  foo({ isSubmitting }, x => x);",
+    "  factory.function({ isSubmitting: x });",
+    "  factory?.function({ isSubmitting });",
+  ]) {
+    assert.deepEqual(scan(fixture({ body: [line] })), [], line);
+  }
+});
+
 test("the spellings the message names as unseen pass", () => {
   for (const line of [
     "  function busyOf({ isSubmitting }: S) { return isSubmitting; }",
+    "  const busyOf = function named({ isSubmitting }) { return isSubmitting; };",
+    "  run(function (a, { isSubmitting }) { return isSubmitting; });",
+    "  const f = ({ isSubmitting }, i = f()) => isSubmitting;",
+    "  const f = ({ isSubmitting }, i = a > b) => isSubmitting;",
+    "  const f = ({ isSubmitting }): (() => void) => () => load(isSubmitting);",
     "  const { state: { isSubmitting } } = form;",
     '  const busy = form.state["isSubmitting"];',
     "  const { isSubmitting, values: { title } } = form.state;",
@@ -180,6 +227,11 @@ test("the spellings the message names as unseen pass", () => {
   }
   for (const spelling of [
     "function declaration",
+    "a named function expression",
+    "an anonymous function's later parameter",
+    "a later parameter holding parentheses",
+    "an unmatched `]` or `>`",
+    "return type holds parentheses or an equals sign",
     "nested pattern",
     "bracket access",
     "a pattern holding any nested pattern",

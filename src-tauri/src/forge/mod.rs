@@ -613,6 +613,15 @@ pub(crate) fn jira_reply_unreadable(noun: &str) -> AppError {
     ))
 }
 
+/// An edit `host` accepted whose reply couldn't be read, so the change may be saved, under
+/// `wrap`'s kind (Jira is no `Provider`). The frontend's `mayHaveLanded` keys on the text
+/// after `{host}`, and scripts/attached-failure-leads.test.mjs reads this literal.
+pub(crate) fn saved_reply_unreadable(host: &str, wrap: fn(String) -> AppError) -> AppError {
+    wrap(format!(
+        "{host}{UNREAD_REPLY_LEAD}change may already be saved. Check before trying again."
+    ))
+}
+
 /// An accepted create's reply: empty or whitespace is `Null` (created, fields unknown),
 /// any JSON value is itself, and anything else is `created_reply_unreadable`'s error.
 pub(crate) fn created_reply(
@@ -626,6 +635,17 @@ pub(crate) fn created_reply(
     }
     serde_json::from_str::<serde_json::Value>(reply)
         .map_err(|_| created_reply_unreadable(provider, noun, after_push))
+}
+
+/// An error a wrap sets in parentheses, split so its first line goes inside them and
+/// any further lines (a timed-out write's transport line) follow the closing one: line
+/// one never ends inside an open parenthesis, and a one-line error reads `({e})`.
+pub(crate) fn paren_parts(e: &AppError) -> (String, String) {
+    let text = e.to_string();
+    match text.split_once('\n') {
+        Some((first, rest)) => (first.to_string(), format!("\n{rest}")),
+        None => (text, String::new()),
+    }
 }
 
 /// Drive a set of futures CONCURRENTLY and collect their results in input order — a
@@ -7083,6 +7103,50 @@ mod tests {
                     "kind": "jira",
                     "message": unreadable_sentence("Jira", noun, false),
                 }),
+            );
+        }
+    }
+
+    /// An edit's sentence is one line on the shared lead, under the kind its host's wrap gives.
+    #[test]
+    fn saved_reply_unreadable_rides_the_hosts_kind() {
+        type Wrap = fn(String) -> AppError;
+        let hosts = [
+            ("Bitbucket", AppError::Bitbucket as Wrap, "bitbucket"),
+            ("Jira", AppError::Jira, "jira"),
+        ];
+        for (host, wrap, kind) in hosts {
+            let want = format!(
+                "{host} accepted the request but its reply couldn't be read, so the change may already be saved. Check before trying again."
+            );
+            assert!(!want.contains('\n'));
+            assert!(want.starts_with(&format!("{host}{UNREAD_REPLY_LEAD}")));
+            assert_eq!(
+                serde_json::to_value(saved_reply_unreadable(host, wrap)).unwrap(),
+                serde_json::json!({ "kind": kind, "message": want }),
+            );
+        }
+    }
+
+    /// A one-line error reads as it did before the split; a further line follows the
+    /// closing parenthesis. Both forges whose compound wraps embed through it are covered.
+    #[test]
+    fn paren_parts_keeps_a_one_line_error_as_it_was() {
+        type Wrap = fn(String) -> AppError;
+        for wrap in [AppError::Bitbucket as Wrap, AppError::Glab] {
+            let one = wrap("API error (500): boom".into());
+            let (first, rest) = paren_parts(&one);
+            assert_eq!(
+                format!("retrying. ({first}){rest}"),
+                format!("retrying. ({one})")
+            );
+            let two = wrap("didn't answer in time.\nrequest timed out".into());
+            let text = two.to_string();
+            let (line1, line2) = text.split_once('\n').unwrap();
+            let (first, rest) = paren_parts(&two);
+            assert_eq!(
+                format!("retrying. ({first}){rest}"),
+                format!("retrying. ({line1})\n{line2}")
             );
         }
     }

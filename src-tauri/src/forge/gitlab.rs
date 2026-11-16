@@ -30,8 +30,8 @@ use crate::forge::my_work::{
 };
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
-    c_quote_label, c_quote_path, cap_readme, validate_owner, validate_repo_name, LandedWrite,
-    FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
+    c_quote_label, c_quote_path, cap_readme, paren_parts, validate_owner, validate_repo_name,
+    LandedWrite, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
 use crate::github::actions::{CiRunPage, RunDetail, RunFilters, RunJob, WorkflowRun};
@@ -4808,6 +4808,86 @@ mod attach_tests {
         }
     }
 
+    /// A fork reply must name the new project; anything else is the create hedge.
+    #[test]
+    fn forked_project_needs_a_named_project() {
+        let full = r#"{"id":42,"path_with_namespace":"me/app","http_url_to_repo":"https://gitlab.com/me/app.git","web_url":"https://gitlab.com/me/app"}"#;
+        let got = forked_project(full).unwrap();
+        assert_eq!(got["path_with_namespace"], "me/app");
+        assert_eq!(got["id"], 42);
+        let hedge = crate::forge::created_reply_unreadable(Provider::GitLab, "fork", false);
+        assert_eq!(
+            hedge.to_string(),
+            "GitLab accepted the request but its reply couldn't be read, so the fork may already exist. Check before creating it again."
+        );
+        for reply in [
+            "",
+            "not json",
+            "<html><body>502 Bad Gateway</body></html>",
+            "{}",
+            r#"{"path_with_namespace":""}"#,
+            r#"{"path_with_namespace":7}"#,
+        ] {
+            let got = forked_project(reply).map_err(|e| serde_json::to_value(e).unwrap());
+            assert_eq!(got, Err(serde_json::to_value(&hedge).unwrap()), "{reply:?}");
+        }
+        assert_eq!(serde_json::to_value(&hedge).unwrap()["kind"], "glab");
+    }
+
+    /// An added time entry's reply must be time stats; an unreadable one is the create
+    /// hedge, while a readable object with no fields keeps reading as zeros.
+    #[test]
+    fn added_time_stats_hedges_an_unreadable_reply() {
+        let got = added_time_stats(
+            r#"{"time_estimate":3600,"total_time_spent":900,"human_time_estimate":"1h","human_total_time_spent":"15m"}"#,
+        )
+        .unwrap();
+        assert_eq!((got.time_estimate, got.total_time_spent), (3600, 900));
+        assert_eq!(
+            (
+                got.human_time_estimate.as_str(),
+                got.human_total_time_spent.as_str()
+            ),
+            ("1h", "15m")
+        );
+        let zeros = added_time_stats("{}").unwrap();
+        assert_eq!((zeros.time_estimate, zeros.total_time_spent), (0, 0));
+        assert_eq!(zeros.human_total_time_spent, "");
+        let hedge = crate::forge::created_reply_unreadable(Provider::GitLab, "time entry", false);
+        assert_eq!(
+            hedge.to_string(),
+            "GitLab accepted the request but its reply couldn't be read, so the time entry may already exist. Check before creating it again."
+        );
+        for reply in ["", "<html>", "null", r#"{"time_estimate":"x"}"#] {
+            let got = added_time_stats(reply).map_err(|e| serde_json::to_value(e).unwrap());
+            assert!(got.is_err(), "{reply:?}");
+            assert_eq!(
+                got.err(),
+                Some(serde_json::to_value(&hedge).unwrap()),
+                "{reply:?}"
+            );
+        }
+    }
+
+    /// Only the add route reads its reply as a create; the estimate and reset routes stay
+    /// edits.
+    #[test]
+    fn only_add_spent_time_reads_its_reply_as_a_create() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let flat = |s: &str| s.split_whitespace().collect::<String>();
+        let guarded = |body: &str| {
+            body.contains(
+                r#"ifsuffix=="add_spent_time"{returnadded_time_stats(&out.stdout_lossy());}"#,
+            ) && body.matches("added_time_stats(").count() == 1
+        };
+        let body = flat(&wiring_body(include_str!("gitlab.rs"), "write_time"));
+        assert!(guarded(&body), "{body}");
+        let unguarded = body.replace(r#"ifsuffix=="add_spent_time"{"#, "{");
+        assert!(!guarded(&unguarded), "an unguarded call must flip");
+        let widened = body.replace(r#"suffix=="add_spent_time""#, r#"!is_reset"#);
+        assert!(!guarded(&widened), "a widened guard must flip");
+    }
+
     /// Each GitLab reader classifies its reply through `created_reply` and parses nothing
     /// itself.
     #[test]
@@ -4828,7 +4908,12 @@ mod attach_tests {
                 .iter()
                 .any(|token| rest.contains(token))
         };
-        for reader in ["created_ref", "created_release_url"] {
+        for reader in [
+            "created_ref",
+            "created_release_url",
+            "forked_project",
+            "added_time_stats",
+        ] {
             let body = wiring_body(gitlab, reader);
             assert!(one_rule(&body), "{reader}\n{body}");
             for parse in [
@@ -5124,6 +5209,51 @@ mod attach_tests {
             1,
         );
         assert!(!on_stdin(&elsewhere), "another endpoint must flip");
+    }
+
+    /// Each parenthesised review wrap embeds `paren_parts`' split of the step's error, bound
+    /// between the error's binding and the wrap, so a multi-line cause closes the
+    /// parenthesis on line one. The roster is every `({first}){rest}` wrap in the function.
+    #[test]
+    fn review_wraps_split_the_error_they_embed() {
+        use crate::github::repo_meta::tests::wiring_body;
+        const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
+        let body = wiring_body(include_str!("gitlab.rs"), "review_submit");
+        let wraps = [
+            "review comments as drafts before the failure",
+            "The review's draft notes couldn't be published",
+            "The review was posted, but the {action} step failed",
+        ];
+        let split = |body: &str, wrap: &str| {
+            body.find(wrap).is_some_and(|at| {
+                let before = &body[..at];
+                let start = [before.rfind("if let Err(e)"), before.rfind("map_err(|e|")]
+                    .into_iter()
+                    .flatten()
+                    .max();
+                let tail = &body[at..];
+                let end = tail.find("))").unwrap_or(tail.len());
+                start.is_some_and(|s| {
+                    let seg = &body[s..at];
+                    seg.contains(SPLIT) && seg.matches("let (first, rest)").count() == 1
+                }) && tail[..end].contains("({first}){rest}")
+            })
+        };
+        for wrap in wraps {
+            assert!(split(&body, wrap), "{wrap}\n{body}");
+            let call = body[..body.find(wrap).unwrap()].rfind(SPLIT).unwrap();
+            let unsplit = format!(
+                "{}let (first, rest) = (e.to_string(), String::new());{}",
+                &body[..call],
+                &body[call + SPLIT.len()..]
+            );
+            assert!(!split(&unsplit, wrap), "{wrap}: an unsplit error must flip");
+        }
+        assert_eq!(
+            body.matches("({first}){rest}").count(),
+            wraps.len(),
+            "an unlisted parenthesised wrap"
+        );
     }
 
     /// The release and settings builders keep each member's key, value spelling and
@@ -8232,9 +8362,10 @@ pub async fn review_submit(
         )
         .await
         {
+            let (first, rest) = paren_parts(&e);
             return Err(AppError::Glab(format!(
                 "Saved {} of {} review comments as drafts before the failure; the review was \
-                 not submitted. Check the merge request on GitLab before retrying. ({e})",
+                 not submitted. Check the merge request on GitLab before retrying. ({first}){rest}",
                 i, total
             )));
         }
@@ -8251,9 +8382,10 @@ pub async fn review_submit(
         )
         .await
         .map_err(|e| {
+            let (first, rest) = paren_parts(&e);
             AppError::Glab(format!(
                 "The review's draft notes couldn't be published, so the review was not \
-                 submitted. Check the merge request on GitLab before retrying. ({e})"
+                 submitted. Check the merge request on GitLab before retrying. ({first}){rest}"
             ))
         })?;
     }
@@ -8282,9 +8414,10 @@ pub async fn review_submit(
         } else {
             String::new()
         };
+        let (first, rest) = paren_parts(&e);
         return Err(AppError::Glab(format!(
             "The review was posted, but the {action} step failed: {landed}only re-run the \
-             {action} action on GitLab. ({e})"
+             {action} action on GitLab. ({first}){rest}"
         )));
     }
 
@@ -12120,6 +12253,9 @@ async fn write_time(
         args.push(&duration_arg);
     }
     let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    if suffix == "add_spent_time" {
+        return added_time_stats(&out.stdout_lossy());
+    }
     let s: GlabTimeStats = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| {
             gl_unreadable(
@@ -12127,6 +12263,17 @@ async fn write_time(
                 format!("could not parse GitLab time stats: {e}"),
             )
         })?;
+    Ok(from_glab_time_stats(s))
+}
+
+/// An accepted add-spent-time's reply: it adds an entry, so a reply that isn't time stats
+/// is the create hedge (the entry may exist). The estimate and reset routes are edits, for
+/// which that sentence would be false, so they keep `gl_unreadable`.
+fn added_time_stats(stdout: &str) -> AppResult<GitLabTimeStats> {
+    let reply = crate::forge::created_reply(stdout, Provider::GitLab, "time entry", false)?;
+    let s: GlabTimeStats = serde_json::from_value(reply).map_err(|_| {
+        crate::forge::created_reply_unreadable(Provider::GitLab, "time entry", false)
+    })?;
     Ok(from_glab_time_stats(s))
 }
 
@@ -12438,6 +12585,25 @@ fn fork_failure(code: i32, stderr: &str) -> AppError {
     })
 }
 
+/// An accepted fork's reply, which must name the new project: one that isn't JSON or
+/// carries no `path_with_namespace` is the create hedge, since the fork may exist but
+/// nothing proves which one.
+fn forked_project(stdout: &str) -> AppResult<serde_json::Value> {
+    let reply = crate::forge::created_reply(stdout, Provider::GitLab, "fork", false)?;
+    let named = reply
+        .get("path_with_namespace")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|p| !p.is_empty());
+    if !named {
+        return Err(crate::forge::created_reply_unreadable(
+            Provider::GitLab,
+            "fork",
+            false,
+        ));
+    }
+    Ok(reply)
+}
+
 /// Fork a GitLab project by `owner/name` into the caller's namespace. `glab api -X
 /// POST projects/{enc}/fork` returns the new project; we poll `projects/{id}` until
 /// `import_status == "finished"` (bounded 5×2s → `ready`). A 409 (already forked)
@@ -12454,13 +12620,7 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     if out.code != 0 {
         return Err(fork_failure(out.code, &out.stderr));
     }
-    let fork: Value = serde_json::from_str(&out.stdout_lossy())
-        .map_err(|e| {
-            gl_unreadable(
-                "the forked project",
-                format!("could not parse the forked project: {e}"),
-            )
-        })?;
+    let fork = forked_project(&out.stdout_lossy())?;
     let full_name = fork
         .get("path_with_namespace")
         .and_then(Value::as_str)

@@ -857,6 +857,21 @@ describe("RemotePrView edit follows the pull request", () => {
     expect(sentBody(0)).toBe("Words\n\nCloses #5");
   });
 
+  it("opens a block naming one issue under both keywords as one Closes chip, and Save keeps the close", async () => {
+    vi.mocked(forgePrView).mockImplementation(async () => ({
+      ...pr(),
+      body: "Words\n\nCloses #6\nRelates to #6",
+    }));
+    await openPrEdit({ issues: true });
+    await waitFor(() => expect(chipButton(6)).toBeTruthy());
+    const chips = screen.getAllByRole("button", { name: /issue 6:/ });
+    expect(chips).toHaveLength(1);
+    expect(chips[0].getAttribute("aria-label")).toMatch(/^Closes issue 6:/);
+    expect(editBox().value).toBe("Words");
+    await saveAndClose();
+    expect(sentBody(0)).toBe("Words\n\nCloses #6");
+  });
+
   it("keeps the extracted chip through a follow on an untouched cluster", async () => {
     vi.mocked(forgePrView).mockImplementation(async () => ({
       ...pr(),
@@ -1648,7 +1663,7 @@ describe("RemotePrView edit follows the pull request", () => {
   }
   const countOf = (text: string, line: string) => text.split(line).length - 1;
 
-  it("writes no reference removed from the chips after a partial save re-seeded the block and the cluster turned on (F1a)", async () => {
+  it("writes no reference removed from the chips after a partial save re-seeded the block and the cluster turned on (F1a, AC2c)", async () => {
     await partialSaveThenClusterOn("Words ![image](image-1.png)\n\nCloses #3");
     await waitFor(() => expect(chipButton(3)).toBeTruthy());
     expect(editBox().value).toBe("Words ![image](image-1.png)");
@@ -1663,48 +1678,6 @@ describe("RemotePrView edit follows the pull request", () => {
     expect(editBox().value).not.toBe("Words\n\nCloses #3");
     await saveAgainAndClose();
     expect(countOf(sentBody(1), "Closes #3")).toBe(1);
-  });
-
-  it("takes the block into chips when the cluster turns on after a partial save re-seeded the description (AC2c)", async () => {
-    const status = deferred<ForgeStatus>();
-    vi.mocked(forgeStatus).mockReturnValue(status.promise);
-    vi.mocked(forgePrView).mockImplementation(async () => ({
-      ...pr(),
-      body: "Words\n\nCloses #3",
-    }));
-    vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
-    mount();
-    await screen.findByText("Merge request seven", undefined, {
-      timeout: 3000,
-    });
-    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
-    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0]);
-    await waitFor(() => expect(editBox()).toBeInTheDocument());
-    fireEvent.paste(editBox(), {
-      clipboardData: {
-        files: [
-          new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
-        ],
-        types: ["Files"],
-        getData: () => "",
-      },
-    });
-    await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
-    const stored = "Words ![image](image-1.png)\n\nCloses #3";
-    vi.mocked(forgePrEdit).mockResolvedValueOnce({
-      failedAttachments: ["image-1.png"],
-      body: stored,
-    } as never);
-    fireEvent.click(button("Save"));
-    await waitFor(() => expect(editBox().value).toBe(stored));
-    await act(async () =>
-      status.resolve({
-        ...GITLAB,
-        implemented: { ...GITLAB_EDIT, issues: true },
-      } as unknown as ForgeStatus),
-    );
-    await waitFor(() => expect(linkShown()).toBe(true));
-    await waitFor(() => expect(chipButton(3)).toBeTruthy());
   });
 
   it("holds a fresh form's Save while another write cancels the host's re-read (AC3)", async () => {
@@ -1986,6 +1959,36 @@ describe("RemotePrView names the forge's item in its Edit copy (AC4)", () => {
       );
     } finally {
       success.mockRestore();
+    }
+  });
+
+  it("names the merge request in the warning when an image didn't upload and nothing was read back", async () => {
+    const warning = vi.spyOn(toast, "warning");
+    try {
+      vi.mocked(attachmentStage).mockImplementation(async () => staged(1));
+      await openPrEdit();
+      fireEvent.paste(editBox(), {
+        clipboardData: {
+          files: [
+            new File([new Uint8Array([1])], "a.png", { type: "image/png" }),
+          ],
+          types: ["Files"],
+          getData: () => "",
+        },
+      });
+      await waitFor(() => expect(editBox().value).toContain("](image-1.png)"));
+      vi.mocked(forgePrEdit).mockResolvedValueOnce({
+        failedAttachments: ["image-1.png"],
+        body: null,
+      } as never);
+      fireEvent.click(button("Save"));
+      await waitFor(() =>
+        expect(warning).toHaveBeenCalledWith(
+          "Merge request updated, but image-1.png didn't upload. Edit the description to add it again.",
+        ),
+      );
+    } finally {
+      warning.mockRestore();
     }
   });
 });

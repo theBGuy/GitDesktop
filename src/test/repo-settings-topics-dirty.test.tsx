@@ -82,9 +82,11 @@ describe("settingsDirty", () => {
   });
 
   it("leaves both drafts' topics in their own order", () => {
-    const form = { ...base, topics: ["zeta", "alpha"] };
-    settingsDirty(form, base);
-    expect(form.topics).toEqual(["zeta", "alpha"]);
+    const saved = { ...base, topics: ["zeta", "alpha"] };
+    const form = { ...base, topics: ["mid", "beta", "alpha"] };
+    settingsDirty(form, saved);
+    expect(form.topics).toEqual(["mid", "beta", "alpha"]);
+    expect(saved.topics).toEqual(["zeta", "alpha"]);
   });
 });
 

@@ -83,4 +83,17 @@ describe("getLatestPartialReview as a query", () => {
     expect(state?.data).toBeNull();
     client.clear();
   });
+
+  it("returns the newest kept partial of the ref, past a later completed review", async () => {
+    const partial = (id: string, finishedAt: number, ref = "7") =>
+      ({ ...completed, id, ref, phase: "error", finishedAt }) as const;
+    data.set(REPO, [
+      partial("older", 3_000),
+      partial("newer", 5_000),
+      { ...completed, finishedAt: 9_000 },
+      partial("other-ref", 8_000, "8"),
+    ]);
+    const latest = await getLatestPartialReview(REPO, "origin", "remote", "7");
+    expect(latest?.id).toBe("newer");
+  });
 });

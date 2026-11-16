@@ -1,4 +1,5 @@
 import {
+  onlineManager,
   QueryClient,
   QueryClientProvider,
   QueryObserver,
@@ -1611,5 +1612,43 @@ describe("rereadEditedItem after another write cancels its read (F2)", () => {
     await vi.waitFor(() => expect(setup.read).toHaveBeenCalledTimes(3));
     setup.answers[2].resolve("written");
     await vi.waitFor(() => expect(settled).toBe(true));
+  });
+
+  describe("releases", () => {
+    afterEach(() => onlineManager.setOnline(true));
+
+    it("settles at once when its read starts paused", async () => {
+      const { client, read } = await observed();
+      onlineManager.setOnline(false);
+      let settled = false;
+      void rereadEditedItem(client, KEY).then(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+
+    it("settles when the awaited refetch is parked offline", async () => {
+      const { read, settled, client } = await rereadCancelled();
+      onlineManager.setOnline(false);
+      void client.invalidateQueries({ queryKey: KEY });
+      await vi.waitFor(() => expect(settled()).toBe(true));
+      expect(read).toHaveBeenCalledTimes(2);
+    });
+
+    it("settles when the query leaves the cache", async () => {
+      const { settled, client } = await rereadCancelled();
+      client.removeQueries({ queryKey: KEY });
+      await vi.waitFor(() => expect(settled()).toBe(true));
+    });
+
+    it("settles when the awaited refetch fails", async () => {
+      const { read, answers, settled, client } = await rereadCancelled();
+      void client.invalidateQueries({ queryKey: KEY });
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+      expect(settled()).toBe(false);
+      answers[2].reject(new Error("read failed"));
+      await vi.waitFor(() => expect(settled()).toBe(true));
+    });
   });
 });

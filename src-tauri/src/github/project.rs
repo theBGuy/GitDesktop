@@ -470,8 +470,9 @@ pub(super) async fn project_write(
 }
 
 /// A Projects create's accepted reply, read by `read`. A reply that isn't JSON, or one
-/// `read` can't find the item in, is the may-already-exist hedge for `noun`; a reply
-/// carrying GraphQL `errors` is the forge refusing, so `read`'s own error stands.
+/// `read` errs on, is the may-already-exist hedge for `noun`. A reply with a non-empty
+/// GraphQL `errors` list returns `read`'s own result, so a reader that reads nothing
+/// returns Ok; gh exits non-zero on GraphQL errors, so its writes never pass one here.
 pub(super) fn created_from_reply<T>(
     reply: &str,
     noun: &str,

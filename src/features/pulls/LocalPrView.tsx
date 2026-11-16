@@ -421,18 +421,15 @@ export function LocalPrView({
   // the noun stays two-way because only GitLab calls it a merge request.
   const promoteLabel = providerLabel(provider);
   const promoteNoun = provider === "gitlab" ? "merge request" : "pull request";
-  // Linked-issue chips on the local-PR edit path: the chips OWN the trailing ref
-  // block (peeled at open, re-composed on save). A local PR's `Closes #N` lines
-  // survive promotion verbatim into the real forge PR, so these become real
-  // closing refs later — that's intended.
+  // The chips own the trailing ref block from open to Save, so Save composes them
+  // whether or not the field is still shown: a tracker that goes away mid-edit
+  // drops no line. `Closes #N` lines survive promotion into the forge PR verbatim.
   const canLinkIssues =
     !!ghStatus.data && forgeFeatureReady(ghStatus.data, "issues");
   const edit = useEditTitleBody({
     onSave: async ({ title, body }) => {
       if (!pr) return;
-      const finalBody = canLinkIssues
-        ? composeBodyWithRefs(body, linkedIssues)
-        : body;
+      const finalBody = composeBodyWithRefs(body, linkedIssues);
       await update.mutateAsync({
         id: pr.id,
         mutate: (cur) => ({ ...cur, title, body: finalBody }),
@@ -780,6 +777,13 @@ export function LocalPrView({
   // its own view in place of this bar.
   const actionBarRef = useRef<HTMLDivElement>(null);
   useToastClearance(actionBarRef, !!pr && !takeover);
+  // The committed render's availability, for a generation's chunks that outlive
+  // their render: chips nobody can see would be written on Save. Written in an
+  // effect so a discarded render never lands.
+  const liveCanLinkIssuesRef = useRef(canLinkIssues);
+  useLayoutEffect(() => {
+    liveCanLinkIssuesRef.current = canLinkIssues;
+  }, [canLinkIssues]);
 
   if (!pr) {
     return (
@@ -826,8 +830,10 @@ export function LocalPrView({
         edit.form.setFieldValue("title", d.title);
         edit.form.setFieldValue("body", d.body);
         // Union the model's proposed issue links into the chip cluster (same
-        // rules as create — relate-default, dismissed-set, AI sparkle).
-        upsertAiIssues({ closes: d.closes, relates: d.relates });
+        // rules as create — relate-default, dismissed-set, AI sparkle), only
+        // while the field is on screen; read live, since it can go mid-stream.
+        if (liveCanLinkIssuesRef.current)
+          upsertAiIssues({ closes: d.closes, relates: d.relates });
       },
       undefined,
       [],
@@ -913,16 +919,17 @@ export function LocalPrView({
 
   function openEdit() {
     if (!pr) return;
-    // The chips OWN the trailing ref block: peel any exact `Closes #N` /
-    // `Relates to #N` lines off the end of the body into chips (keyword
-    // preserved) and open the editor with the STRIPPED text. On save the block is
-    // re-appended from chips. With the tracker unavailable there are no chips.
+    // Every open reseeds the form and the chips together (no `attach`, so no
+    // draft resumes; a resume would have to skip this reset): with the tracker
+    // available the trailing block moves into chips, otherwise the text keeps it
+    // and no earlier open's chips remain to be composed on Save.
     if (canLinkIssues) {
       const { text, refs } = splitBodyRefBlock(pr.body, "native");
       edit.openEdit({ title: pr.title, body: text });
       resetLinkedIssues(refs);
     } else {
       edit.openEdit({ title: pr.title, body: pr.body });
+      resetLinkedIssues([]);
     }
   }
 

@@ -5752,20 +5752,40 @@ export const CHECKS = [
       // A hook caller's hold is `running`, so any read of form-core's own flag in
       // it is reported: a member access (never a spread), or a destructuring
       // pattern's key. A pattern opens after `(`, `,` or a declaration keyword,
-      // which leaves out a default parameter's literal and a type annotation.
+      // which leaves out a default parameter's literal and a type annotation; it
+      // closes an arrow's parameters only when the later ones hold no parens, so
+      // a call passing an object literal beside a callback is no read, and no
+      // unmatched `]` or `>`, which close a tuple or generic type around it.
       if (/\buseDraftCreateHold\s*\(/.test(masked)) {
         const hits = new Set();
         for (const m of masked.matchAll(/(?<!\.)\.\s*(isSubmitting)\b/g))
           hits.add(lineOf(source, m.index + m[0].length - m[1].length));
-        const pattern =
-          /(?<=(?:[(,]|\b(?:const|let|var))\s*)\{([^{}]*)\}\s*(?::[^=()]*)?(?:\)\s*=>|=(?![=>]))/g;
-        for (const m of masked.matchAll(pattern)) {
+        // `brace` is the pattern's `{` offset in the match: the reported line is
+        // the key's, counted from the pattern, never from where the match starts.
+        const keyHit = (m, brace) => {
           const key = /(^|,)\s*isSubmitting\b/.exec(m[1]);
           if (key) {
             const at = key.index + key[0].length - "isSubmitting".length;
-            hits.add(lineOf(source, m.index + 1 + at));
+            hits.add(lineOf(source, m.index + brace + 1 + at));
           }
+        };
+        const pattern =
+          /(?<=(?:[(,]|\b(?:const|let|var))\s*)\{([^{}]*)\}\s*(?::[^=()]*)?(?:\)\s*(?::[^=()]*)?=>|(,[^()]*)\)\s*(?::[^=()]*)?=>|=(?![=>]))/g;
+        const unmatched = (tail, open, close) =>
+          tail.split(close).length > tail.split(open).length;
+        for (const m of masked.matchAll(pattern)) {
+          const tail = m[2]?.replaceAll("=>", "");
+          const closesType =
+            tail && (unmatched(tail, "[", "]") || unmatched(tail, "<", ">"));
+          if (!closesType) keyHit(m, 0);
         }
+        // An anonymous function's first parameter, never a property named
+        // `function`; a named function's parameters are not read, and the
+        // message names them as unseen.
+        for (const m of masked.matchAll(
+          /(?<!\.\s*)\bfunction\s*\*?\s*\(\s*\{([^{}]*)\}/g,
+        ))
+          keyHit(m, m[0].indexOf("{"));
         return [...hits].sort((a, b) => a - b);
       }
       const form = /\buseAppForm\s*\(/.exec(masked);
@@ -5800,7 +5820,7 @@ export const CHECKS = [
       "src/features/projects/BoardDraftEditDialog.tsx",
     ],
     message:
-      "a create dialog whose form a reopen can reseed while its create runs holds through useDraftCreateHold (src/lib/use-draft-create-hold.ts): form-core keeps one `isSubmitting` per form, which a reseed clears and an older draft's settle clears again, so a newer draft's Create goes live mid-create and a press creates it twice. Call the hook, bump `nextDraft()` where the form takes another draft, wrap the submit in `begin()`/`end()`, ask `isRunning()` on every submit path, and pass `running` to the submit button's `disabled` and `pending`; a dialog whose duplicate guard lives where a reset can't clear it needs an allowlist entry with rationale. A member is a .tsx calling `useAppForm(`, `useSeedOnOpen(`, `<…orm>.reset(`, and `mutateAsync(` or a function type returning a promise (`=> Promise<`); a file that calls the hook is reported instead at each read of form-core's submit flag (a `.isSubmitting` member access, or `isSubmitting` destructured as the key of a pattern opened after `(`, `,` or `const` / `let` / `var` and closed before `) =>` or `=`), since its hold is `running`. The scan can't see a form built by `withForm(` or by a generic call spelled `useAppForm<…>(`, a reset through a destructured `reset`, or a create that is neither (an untyped callback prop, a direct api call); it looks for the hook call anywhere in the file, so a file holding several form components passes on one call; and of the hook's wiring it reads only those flag reads, so a submit button left without `disabled` / `pending`, a submit path that never asks `isRunning()`, and form-core's flag reached through an alias, an import, a pattern in a function declaration's parameters (`function f({ isSubmitting }: P) {`), a nested pattern (`const { state: { isSubmitting } } = form`), a pattern holding any nested pattern, or annotated with a function type, or bracket access (`form.state[\"isSubmitting\"]`) all pass",
+      "a create dialog whose form a reopen can reseed while its create runs holds through useDraftCreateHold (src/lib/use-draft-create-hold.ts): form-core keeps one `isSubmitting` per form, which a reseed clears and an older draft's settle clears again, so a newer draft's Create goes live mid-create and a press creates it twice. Call the hook, bump `nextDraft()` where the form takes another draft, wrap the submit in `begin()`/`end()`, ask `isRunning()` on every submit path, and pass `running` to the submit button's `disabled` and `pending`; a dialog whose duplicate guard lives where a reset can't clear it needs an allowlist entry with rationale. A member is a .tsx calling `useAppForm(`, `useSeedOnOpen(`, `<…orm>.reset(`, and `mutateAsync(` or a function type returning a promise (`=> Promise<`); a file that calls the hook is reported instead at each read of form-core's submit flag (a `.isSubmitting` member access, or `isSubmitting` destructured as the key of a pattern opened after `(`, `,` or `const` / `let` / `var` and closed before `) =>` (a return type annotation between them included: `({ isSubmitting }): boolean =>`), before `=`, or before a comma and later arrow parameters holding no parentheses and no unmatched `]` or `>` (`({ isSubmitting }, i) =>`), or as the key of the first-parameter pattern of an anonymous function (`function ({ isSubmitting }) {`, `export default function ({ isSubmitting }) {` included)), since its hold is `running`. The scan can't see a form built by `withForm(` or by a generic call spelled `useAppForm<…>(`, a reset through a destructured `reset`, or a create that is neither (an untyped callback prop, a direct api call); it looks for the hook call anywhere in the file, so a file holding several form components passes on one call; and of the hook's wiring it reads only those flag reads, so a submit button left without `disabled` / `pending`, a submit path that never asks `isRunning()`, and form-core's flag reached through an alias, an import, a pattern in the parameters of a function declaration or a named function expression (`function f({ isSubmitting }: P) {`), a pattern in an anonymous function's later parameter (`function (a, { isSubmitting }) {`), an arrow pattern followed by a later parameter holding parentheses (`({ isSubmitting }, i = f()) =>`) or an unmatched `]` or `>` (`({ isSubmitting }, i = a > b) =>`), an arrow whose return type holds parentheses or an equals sign (`({ isSubmitting }): (() => void) =>`), a nested pattern (`const { state: { isSubmitting } } = form`), a pattern holding any nested pattern, or annotated with a function type, or bracket access (`form.state[\"isSubmitting\"]`) all pass",
   },
   {
     name: "hand-rolled-diff-stat",

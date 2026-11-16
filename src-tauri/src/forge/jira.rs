@@ -23,7 +23,7 @@ use tauri_plugin_http::reqwest::{self, Client};
 use crate::error::{AppError, AppResult};
 use crate::forge::http::{is_transport_failure, send_error, transport_failure_message};
 use crate::forge::model::ForgeUserRef;
-use crate::forge::{jira_reply_unreadable, LandedWrite};
+use crate::forge::{jira_reply_unreadable, saved_reply_unreadable, LandedWrite};
 
 /// Keep the summary on line one and the original detail available on line two.
 fn jira_unreadable(what: &str, detail: String) -> AppError {
@@ -407,17 +407,16 @@ fn jira_body_read_error(e: reqwest::Error) -> AppError {
 }
 
 /// The low-level authenticated request: send `method` to the base-resolved `path` with
-/// HTTP Basic auth (and an optional JSON body), returning the raw `(status, body)`
-/// WITHOUT turning a non-2xx into an error — the caller decides (base resolution needs
-/// to inspect a 401 specifically). Only a transport/read failure is an `Err`. A `landed`
-/// write sent and not answered in time is the may-have-landed hedge; a read passes `None`.
-async fn raw_request(
+/// HTTP Basic auth (and an optional JSON body), returning the raw status and the body
+/// read's own result WITHOUT turning a non-2xx into an error. Only a failed send is an
+/// `Err`; a `landed` write sent and not answered in time is the may-have-landed hedge.
+async fn raw_request_split(
     creds: &JiraCredentials,
     method: reqwest::Method,
     path: &str,
     json_body: Option<&Value>,
     landed: Option<LandedWrite>,
-) -> AppResult<(u16, String)> {
+) -> AppResult<(u16, AppResult<String>)> {
     let url = creds.base.resolve(path);
     let mut req = client()
         .request(method, &url)
@@ -434,8 +433,20 @@ async fn raw_request(
         .await
         .map_err(|e| send_error(&e, "Jira request failed", "Jira", landed, AppError::Jira))?;
     let status = resp.status().as_u16();
-    let body = resp.text().await.map_err(jira_body_read_error)?;
+    let body = resp.text().await.map_err(jira_body_read_error);
     Ok((status, body))
+}
+
+/// A read: the raw `(status, body)` with no write to hedge, the caller deciding on the
+/// status (base resolution inspects a 401). A transport or body-read failure is an `Err`.
+async fn raw_request(
+    creds: &JiraCredentials,
+    method: reqwest::Method,
+    path: &str,
+    json_body: Option<&Value>,
+) -> AppResult<(u16, String)> {
+    let (status, body) = raw_request_split(creds, method, path, json_body, None).await?;
+    Ok((status, body?))
 }
 
 /// GET a Jira endpoint expecting JSON, deserializing into `T` against the creds' resolved
@@ -450,7 +461,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     path: &str,
     what: &str,
 ) -> AppResult<T> {
-    let (status, body) = raw_request(creds, reqwest::Method::GET, path, None, None).await?;
+    let (status, body) = raw_request(creds, reqwest::Method::GET, path, None).await?;
     if !(200..300).contains(&status) {
         return Err(http_error_for(status, &body, &creds.site));
     }
@@ -466,8 +477,7 @@ async fn post_json<T: serde::de::DeserializeOwned>(
     body: &Value,
     what: &str,
 ) -> AppResult<T> {
-    let (status, resp_body) =
-        raw_request(creds, reqwest::Method::POST, path, Some(body), None).await?;
+    let (status, resp_body) = raw_request(creds, reqwest::Method::POST, path, Some(body)).await?;
     if !(200..300).contains(&status) {
         return Err(http_error_for(status, &resp_body, &creds.site));
     }
@@ -475,8 +485,9 @@ async fn post_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| jira_unreadable(what, format!("could not parse Jira {what}: {e}")))
 }
 
-/// POST a create: a timeout after the send is the may-have-landed hedge for `landed`, and
-/// the reply is read by [`created_reply_value`].
+/// POST a create: a timeout after the send is the may-have-landed hedge for `landed`, the
+/// reply is read by [`created_reply_value`], and an accepted reply that couldn't be read
+/// is the may-already-exist hedge for `noun`.
 async fn post_created(
     creds: &JiraCredentials,
     path: &str,
@@ -485,8 +496,11 @@ async fn post_created(
     landed: LandedWrite,
 ) -> AppResult<Value> {
     let (status, resp_body) =
-        raw_request(creds, reqwest::Method::POST, path, Some(body), Some(landed)).await?;
-    created_reply_value(status, &resp_body, &creds.site, noun)
+        raw_request_split(creds, reqwest::Method::POST, path, Some(body), Some(landed)).await?;
+    match write_answer(status, resp_body, &creds.site)? {
+        Some(text) => created_reply_value(status, &text, &creds.site, noun),
+        None => Err(jira_reply_unreadable(noun)),
+    }
 }
 
 /// A create's answer: non-2xx → [`http_error_for`]. An empty 2xx body is an accepted
@@ -512,9 +526,29 @@ fn created_issue_key(reply: &Value) -> AppResult<String> {
         .ok_or_else(|| jira_reply_unreadable("issue"))
 }
 
+/// A created comment or worklog, which callers list and act on by id: an accepted reply
+/// without one is the may-already-exist hedge, never a blank item.
+fn created_with_id<'a>(reply: &'a Value, noun: &'static str) -> AppResult<&'a Value> {
+    match reply.get("id").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() => Ok(reply),
+        _ => Err(jira_reply_unreadable(noun)),
+    }
+}
+
+/// Only a received 2xx establishes a write: its reply text, or `None` when that couldn't be
+/// read. A non-2xx keeps [`http_error_for`], or the body read's own error.
+fn write_answer(status: u16, body: AppResult<String>, site: &str) -> AppResult<Option<String>> {
+    match body {
+        Ok(text) if !(200..300).contains(&status) => Err(http_error_for(status, &text, site)),
+        Err(e) if !(200..300).contains(&status) => Err(e),
+        Ok(text) => Ok(Some(text)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Send a write with an optional JSON body, expecting a no-content (or don't-care) 2xx.
-/// The 2xx body is discarded; a non-2xx maps through [`http_error_for`] so field errors
-/// surface.
+/// The 2xx body is discarded, so a 2xx succeeds whether or not it could be read; a
+/// non-2xx maps through [`http_error_for`] so field errors surface.
 async fn send_no_content(
     creds: &JiraCredentials,
     method: reqwest::Method,
@@ -522,10 +556,8 @@ async fn send_no_content(
     body: Option<&Value>,
 ) -> AppResult<()> {
     let (status, resp_body) =
-        raw_request(creds, method, path, body, Some(LandedWrite::Changed)).await?;
-    if !(200..300).contains(&status) {
-        return Err(http_error_for(status, &resp_body, &creds.site));
-    }
+        raw_request_split(creds, method, path, body, Some(LandedWrite::Changed)).await?;
+    write_answer(status, resp_body, &creds.site)?;
     Ok(())
 }
 
@@ -770,7 +802,7 @@ async fn resolve_base(
         },
         site: site.to_string(),
     };
-    let (status, body) = raw_request(&direct, reqwest::Method::GET, "myself", None, None).await?;
+    let (status, body) = raw_request(&direct, reqwest::Method::GET, "myself", None).await?;
     match decide_after_direct(status) {
         DirectProbeStep::UseDirect => {
             let me: JiraUser = serde_json::from_str(&body)
@@ -793,7 +825,7 @@ async fn resolve_base(
                 site: site.to_string(),
             };
             let (g_status, g_body) =
-                raw_request(&gateway, reqwest::Method::GET, "myself", None, None).await?;
+                raw_request(&gateway, reqwest::Method::GET, "myself", None).await?;
             if (200..300).contains(&g_status) {
                 let me: JiraUser = serde_json::from_str(&g_body)
                     .map_err(|e| {
@@ -2094,7 +2126,7 @@ pub async fn issue_comment(site: &str, key: &str, body_md: &str) -> AppResult<Ji
     let body = json!({ "body": adf });
     let path = format!("issue/{key}/comment");
     let resp = post_created(&creds, &path, &body, "comment", LandedWrite::Posted).await?;
-    Ok(map_comment(&resp))
+    Ok(map_comment(created_with_id(&resp, "comment")?))
 }
 
 /// The result of a close/reopen transition — the issue's fresh status after the workflow
@@ -2877,7 +2909,7 @@ pub async fn worklog_add(
     let path = format!("issue/{key}/worklog");
     let landed = LandedWrite::Created("worklog");
     let resp = post_created(&creds, &path, &Value::Object(body), "worklog", landed).await?;
-    Ok(map_worklog(&resp))
+    Ok(map_worklog(created_with_id(&resp, "worklog")?))
 }
 
 /// Edit one of your own worklog entries (`PUT /issue/<key>/worklog/<id>`); the duration
@@ -2962,14 +2994,16 @@ pub async fn worklog_delete(site: &str, key: &str, worklog_id: &str) -> AppResul
 
 /// PUT JSON to a Jira endpoint and deserialize the 2xx body into `T` (comment edit and
 /// worklog update return the updated object; the 204-returning PUTs use
-/// [`send_no_content`]). Same error handling as [`post_json`].
+/// [`send_no_content`]). A non-2xx maps as in [`post_json`]; unlike that read, a send that
+/// timed out is the may-have-landed hedge for a change, and an accepted reply that couldn't
+/// be read is [`saved_reply_unreadable`]'s may-be-saved sentence.
 async fn put_json<T: serde::de::DeserializeOwned>(
     creds: &JiraCredentials,
     path: &str,
     body: &Value,
     what: &str,
 ) -> AppResult<T> {
-    let (status, resp_body) = raw_request(
+    let (status, resp_body) = raw_request_split(
         creds,
         reqwest::Method::PUT,
         path,
@@ -2977,10 +3011,10 @@ async fn put_json<T: serde::de::DeserializeOwned>(
         Some(LandedWrite::Changed),
     )
     .await?;
-    if !(200..300).contains(&status) {
-        return Err(http_error_for(status, &resp_body, &creds.site));
-    }
-    serde_json::from_str(&resp_body)
+    let Some(text) = write_answer(status, resp_body, &creds.site)? else {
+        return Err(saved_reply_unreadable("Jira", AppError::Jira));
+    };
+    serde_json::from_str(&text)
         .map_err(|e| jira_unreadable(what, format!("could not parse Jira {what}: {e}")))
 }
 
@@ -2988,13 +3022,123 @@ async fn put_json<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
 
-    /// Only the writes pass a `landed`: the edits, transitions, assignments and deletes;
-    /// every read, the `myself` probes and the JQL search (a read sent as POST) pass `None`.
+    /// Every `name(` call in whitespace-free source, as its top-level arguments. A match is
+    /// skipped only when the identifier run glued ahead of it is a `fn` head or a longer
+    /// identifier; a run made of expression keywords alone (`returnraw_request(`) is a call.
+    /// A call in a `for` header (`forxinraw_request(`) is also skipped, since `for` and the
+    /// loop pattern stay glued ahead of its `in`.
+    fn call_args(src: &str, name: &str) -> Vec<Vec<String>> {
+        const LEADS: [&str; 9] = [
+            "return", "match", "if", "else", "while", "in", "break", "move", "mut",
+        ];
+        let needle = format!("{name}(");
+        let mut calls = Vec::new();
+        for (at, _) in src.match_indices(&needle) {
+            let before = &src[..at];
+            let ident = |c: char| c.is_alphanumeric() || c == '_';
+            let mut run = &before[before.trim_end_matches(ident).len()..];
+            while let Some(rest) = LEADS.iter().find_map(|k| run.strip_suffix(k)) {
+                run = rest;
+            }
+            if !run.is_empty() {
+                continue;
+            }
+            let (mut depth, mut args, mut arg) = (0, Vec::new(), String::new());
+            for c in src[at + needle.len()..].chars() {
+                match c {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' if depth == 0 => break,
+                    ')' | ']' | '}' => depth -= 1,
+                    ',' if depth == 0 => {
+                        args.push(std::mem::take(&mut arg));
+                        continue;
+                    }
+                    _ => {}
+                }
+                arg.push(c);
+            }
+            if !arg.is_empty() {
+                args.push(arg);
+            }
+            calls.push(args);
+        }
+        calls
+    }
+
+    /// Why the production text's requests break the read/write split, if they do: reads go
+    /// through `raw_request`, which takes no `landed`, and only the three writes call
+    /// `raw_request_split` with one.
+    fn request_split_mismatch(prod: &str) -> Option<String> {
+        let reads = call_args(prod, "raw_request");
+        if reads.len() != 4 {
+            return Some(format!("{} raw_request calls, want 4", reads.len()));
+        }
+        if let Some(args) = reads.iter().find(|args| args.len() != 4) {
+            return Some(format!("a raw_request call with {} arguments", args.len()));
+        }
+        let gets = reads
+            .iter()
+            .filter(|args| args[1] == "reqwest::Method::GET")
+            .count();
+        if gets != 3 {
+            return Some(format!("{gets} GET reads, want 3"));
+        }
+        let splits = call_args(prod, "raw_request_split");
+        let forward = ["creds", "method", "path", "json_body", "None"];
+        let (forwards, writes): (Vec<_>, Vec<_>) =
+            splits.iter().partition(|args| args[..] == forward[..]);
+        if forwards.len() != 1 || writes.len() != 3 {
+            return Some(format!("raw_request_split calls {splits:?}"));
+        }
+        if let Some(args) = writes.iter().find(|args| {
+            args.len() != 5 || !args[4].starts_with("Some(") || args[1].contains("Method::GET")
+        }) {
+            return Some(format!("a write without a landed: {args:?}"));
+        }
+        let sends = call_args(prod, "send_no_content");
+        if sends.len() != 8 || sends.iter().any(|args| args[1] == "reqwest::Method::GET") {
+            return Some(format!("send_no_content calls {sends:?}"));
+        }
+        None
+    }
+
+    /// Only the writes pass a `landed`: the edits, transitions, assignments and deletes; every
+    /// read, the `myself` probes and the JQL search (a read sent as POST) can pass none.
     #[test]
     fn only_jira_writes_hedge_a_timed_out_send() {
         let src = include_str!("jira.rs");
         // Three of these are generic (`fn get_json<T…>(`), so the head is matched either way.
         let flat = src.replace("\r\n", "\n");
+        let prod: String = flat
+            .split("\nmod tests {")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert_eq!(request_split_mismatch(&prod), None);
+        let swap = |from: &str, to: &str| {
+            assert_eq!(prod.matches(from).count(), 1, "{from}");
+            prod.replace(from, to)
+        };
+        let gateway = swap(
+            "raw_request(&gateway,reqwest::Method::GET,\"myself\",None)",
+            "raw_request_split(&gateway,reqwest::Method::GET,\"myself\",None,Some(LandedWrite::Changed))",
+        );
+        let unmarked = swap("Some(body),Some(landed))", "Some(body),None)");
+        let first = &call_args(&prod, "send_no_content")[0];
+        let get_send = swap(
+            &format!("send_no_content({},{},", first[0], first[1]),
+            &format!("send_no_content({},reqwest::Method::GET,", first[0]),
+        );
+        // A call behind an expression keyword still counts.
+        let returned =
+            format!("{prod}fnx(){{returnraw_request(creds,reqwest::Method::PUT,path,Some(body))}}");
+        let matched = format!(
+            "{prod}fnx(){{matchsend_no_content(creds,reqwest::Method::PUT,path,None){{}}}}"
+        );
+        for mutant in [gateway, unmarked, get_send, returned, matched] {
+            assert!(request_split_mismatch(&mutant).is_some(), "{mutant}");
+        }
         let body = |name: &str| {
             let start = flat
                 .find(&format!("fn {name}<"))
@@ -3006,39 +3150,115 @@ mod tests {
                 .collect::<String>()
                 .replace(",)", ")")
         };
-        let request = body("raw_request");
-        assert!(
-            request.contains("send_error(&e,\"Jirarequestfailed\",\"Jira\",landed,AppError::Jira)")
-        );
-        let rows = [
-            ("get_json", "path,None,None)"),
-            ("post_json", "Some(body),None)"),
-            ("send_no_content", "body,Some(LandedWrite::Changed))"),
-            ("put_json", "Some(body),Some(LandedWrite::Changed))"),
-            ("resolve_base", "\"myself\",None,None)"),
-            ("post_created", "Some(body),Some(landed))"),
-        ];
-        let row_holds = |b: &str, args: &str| b.contains("raw_request(") && b.contains(args);
-        for (name, args) in rows {
-            let b = body(name);
-            assert!(row_holds(&b, args), "{name}: {b}");
-        }
-        let flipped = body("send_no_content").replace("Some(LandedWrite::Changed))", "None)");
-        assert!(!row_holds(&flipped, "body,Some(LandedWrite::Changed))"));
-        // The three creates read through `post_created`, each naming what may have landed.
-        for (name, call) in [
-            ("issue_create", "LandedWrite::Created(\"issue\")"),
-            ("issue_comment", "\"comment\",LandedWrite::Posted)"),
-            ("worklog_add", "LandedWrite::Created(\"worklog\")"),
+        assert!(body("raw_request_split")
+            .contains("send_error(&e,\"Jirarequestfailed\",\"Jira\",landed,AppError::Jira)"));
+        assert!(body("raw_request").contains("raw_request_split(creds,method,path,json_body,None)"));
+        // The three creates read through `post_created`, each naming what may have landed; the
+        // comment and worklog need the created id.
+        for (name, call, read) in [
+            (
+                "issue_create",
+                "LandedWrite::Created(\"issue\")",
+                "created_issue_key(&reply)?",
+            ),
+            (
+                "issue_comment",
+                "\"comment\",LandedWrite::Posted)",
+                "created_with_id(&resp,\"comment\")?",
+            ),
+            (
+                "worklog_add",
+                "LandedWrite::Created(\"worklog\")",
+                "created_with_id(&resp,\"worklog\")?",
+            ),
         ] {
             let b = body(name);
             assert!(
-                b.contains("post_created(") && b.contains(call),
+                b.contains("post_created(") && b.contains(call) && b.contains(read),
                 "{name}: {b}"
             );
             assert!(!b.contains("post_json("), "{name}: {b}");
         }
-        assert!(body("issue_create").contains("created_issue_key(&reply)?"));
+    }
+
+    /// Each write reads its status through `write_answer`; a 2xx whose body couldn't be read
+    /// is a create's may-already-exist hedge, an edit's may-be-saved sentence, and a
+    /// no-content write's success.
+    #[test]
+    fn jira_writes_answer_an_unread_2xx_by_their_class() {
+        let flat = include_str!("jira.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let start = flat
+                .find(&format!("fn {name}<"))
+                .or_else(|| flat.find(&format!("fn {name}(")));
+            let text = flat[start.unwrap()..].split("\n}").next().unwrap();
+            text.split_whitespace().collect::<String>()
+        };
+        // The body read's Result reaches `write_answer` untouched: bound, then passed, and
+        // never named anywhere else.
+        const ANSWER: &str = "write_answer(status,resp_body,&creds.site)";
+        let unread = |b: &str| b.contains(ANSWER) && b.matches("resp_body").count() == 2;
+        let created = |b: &str| unread(b) && b.contains("jira_reply_unreadable(noun)");
+        let no_content = |b: &str| {
+            unread(b)
+                && !b.contains("jira_reply_unreadable")
+                && !b.contains("saved_reply_unreadable")
+        };
+        let saved = |b: &str| {
+            unread(b)
+                && b.contains("saved_reply_unreadable(\"Jira\",AppError::Jira)")
+                && !b.contains("request_timed_out")
+        };
+        fn pin(name: &str, b: &str, holds: impl Fn(&str) -> bool, from: &str, to: &str) {
+            assert!(holds(b), "{name}: {b}");
+            assert!(b.contains(from), "{name}: {from}");
+            assert!(!holds(&b.replace(from, to)), "{name}: control");
+            let read_first = "write_answer(status,Ok(resp_body?),&creds.site)";
+            assert!(
+                !holds(&b.replace(ANSWER, read_first)),
+                "{name}: a read body"
+            );
+            let shadowed = format!("letresp_body=Ok(resp_body?);{ANSWER}");
+            assert!(
+                !holds(&b.replace(ANSWER, &shadowed)),
+                "{name}: a shadowed body"
+            );
+        }
+        let (name, from, to) = ("post_created", "jira_reply_unreadable(noun)", "Err(e)");
+        pin(name, &body(name), created, from, to);
+        let (name, from, to) = ("send_no_content", "write_answer(", "Ok::<_,AppError>(");
+        pin(name, &body(name), no_content, from, to);
+        let (name, from, to) = ("put_json", "saved_reply_unreadable(", "request_timed_out(");
+        pin(name, &body(name), saved, from, to);
+    }
+
+    #[test]
+    fn write_answer_trusts_only_a_received_2xx() {
+        let site = "acme.atlassian.net";
+        let read_failed = || AppError::Jira("could not read Jira response".into());
+        assert_eq!(
+            write_answer(201, Ok("x".into()), site).unwrap(),
+            Some("x".into())
+        );
+        for status in [200, 201, 204, 299] {
+            assert_eq!(
+                write_answer(status, Err(read_failed()), site).unwrap(),
+                None
+            );
+        }
+        let envelope = r#"{"errorMessages":["Issue does not exist"]}"#;
+        assert_eq!(
+            write_answer(400, Ok(envelope.into()), site)
+                .unwrap_err()
+                .to_string(),
+            http_error_for(400, envelope, site).to_string(),
+        );
+        for status in [199, 300, 400, 500] {
+            match write_answer(status, Err(read_failed()), site) {
+                Err(AppError::Jira(m)) => assert_eq!(m, "could not read Jira response", "{status}"),
+                other => panic!("{status}: {other:?}"),
+            }
+        }
     }
 
     /// A create's 2xx reply: JSON is itself and empty is `Null`; anything else is the
@@ -3061,8 +3281,16 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("may already exist"));
-        // The comment and worklog readers are tolerant of an item-less reply.
-        assert_eq!(map_comment(&Value::Null).id, map_comment(&json!({})).id);
+        // A created comment or worklog needs its id; the readers stay tolerant for lists.
+        let reply = json!({"id": "10001"});
+        for noun in ["comment", "worklog"] {
+            assert_eq!(created_with_id(&reply, noun).unwrap(), &reply);
+            for reply in [Value::Null, json!({}), json!({"id": ""}), json!({"id": 7})] {
+                let e = created_with_id(&reply, noun).unwrap_err();
+                assert!(matches!(e, AppError::Jira(_)), "{e:?}");
+                assert_eq!(e.to_string(), hedge(noun), "{reply}");
+            }
+        }
         // The issue create acts on the key, so a reply without one is the hedge.
         assert_eq!(
             created_issue_key(&json!({"id":"1","key":"ENG-7"})).unwrap(),

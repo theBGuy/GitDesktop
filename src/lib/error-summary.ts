@@ -861,8 +861,10 @@ const UNREAD_REPLY_LEAD =
   " accepted the request but its reply couldn't be read, so the ";
 const UNREAD_REPLY_PUSHED = "The branch was pushed. ";
 
-/** The kinds whose creates can answer with an unreadable reply: the three
- *  forges (`created_reply_unreadable`) and Jira (`jira_reply_unreadable`). */
+/** The kinds whose accepted writes can answer with an unreadable reply: creates
+ *  on the three forges (`created_reply_unreadable`) and Jira
+ *  (`jira_reply_unreadable`), and edits on Bitbucket and Jira
+ *  (`saved_reply_unreadable`). */
 const UNREAD_REPLY_HOSTS: Partial<Record<AppError["kind"], string>> = {
   gh: FORGE_KIND_HOSTS.gh,
   glab: FORGE_KIND_HOSTS.glab,
@@ -873,10 +875,11 @@ const UNREAD_REPLY_HOSTS: Partial<Record<AppError["kind"], string>> = {
 /** Whether an error's write may have reached the forge: a write that timed out
  *  after it was sent (`AppError::WriteTimedOut` from `write_timed_out` or
  *  `request_timed_out`, kind `timeout`, told from a bare timeout by the bare
- *  one's Rust lead), or a GitHub, GitLab, Bitbucket or Jira create the forge
- *  accepted whose reply couldn't be read (`created_reply_unreadable` or
- *  `jira_reply_unreadable`, under that host's own kind). False for every other
- *  error, a bare timeout included. Both producers are pinned by
+ *  one's Rust lead), or a write the host accepted whose reply couldn't be read,
+ *  under that host's own kind: a GitHub, GitLab, Bitbucket or Jira create
+ *  (`created_reply_unreadable` or `jira_reply_unreadable`) or a Bitbucket or
+ *  Jira edit (`saved_reply_unreadable`). False for every other error, a bare
+ *  timeout included. Each producer is pinned by
  *  scripts/attached-failure-leads.test.mjs. */
 export function mayHaveLanded(error: unknown): boolean {
   if (!isAppError(error)) return false;

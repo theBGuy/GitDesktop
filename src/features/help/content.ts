@@ -2131,27 +2131,27 @@ A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
 tracker) lets you reference real repo issues on create: chips are **auto-detected** from
 your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, validated
 against your actual issues), and you can add more by hand with **Link issue**. Each chip
-starts as **Relates to** and a click — or Enter on the focused chip — flips it to
+starts as **Relates to** and a click (or Enter on the focused chip) flips it to
 **Closes**, which asks the forge to close that issue when the PR merges; the chips become
 \`Closes #N\` / \`Relates to #N\` lines appended to the description on create. A chip adds no
-line when the description already says as much on a line of its own, and a closing line
-you typed is kept. The row is
-keyboard-operable: **← / →** move between chips, Enter or Space toggles Closes / Relates,
-and Delete removes a chip. The **same row is on the Edit dialog** and on **local PRs**
-(create and edit, wherever the repo's forge has an issue tracker): opening Edit peels any
-trailing \`Closes #N\` / \`Relates to #N\` lines back out of the description into chips
-(keyword preserved) and re-appends them when you save, so the chips — not the raw text —
-are the single editor for that ref block. A local PR's ref lines survive **promotion**
+line when the app can tell the description already says as much on a plain line of its
+own, and a closing line you typed is kept. The row is keyboard-operable: **← / →** move
+between chips, Enter or Space toggles Closes / Relates, and Delete removes a chip. The
+**same row is on the Edit dialog** and on **local PRs** (create and edit, wherever the
+repo's forge has an issue tracker): opening Edit peels any trailing \`Closes #N\` /
+\`Relates to #N\` lines back out of the description into chips (when the block names an
+issue both ways the chip is **Closes**) and writes the chips back as lines when you save,
+so the chips are where you edit that block. A local PR's ref lines survive **promotion**
 verbatim, becoming real closing refs on the forge once it's promoted to a real PR. On a
 **Bitbucket** repo with a **linked Jira project** (Create and Edit of a remote PR), the
 row instead surfaces linked-Jira issues (\`KEY-123\`) as **mention-only** chips — a fixed
 *Relates to* with no Closes, appended as \`Relates to KEY-123\` lines, since Jira tickets
 are never closed from PR text.{{ai}} You can also fill the title and description with an
-**AI-generated** draft from the branch diff and commit subjects — which additionally
+**AI-generated** draft from the branch diff and commit subjects, which additionally
 **proposes labels**, chosen only from the repository's existing labels and added to
 whatever you've already picked (never invented), and can **propose issue links** too,
 picked only from a grounded shortlist of your open issues (AI-picked chips carry a
-**sparkle**; a proposed *Closes* still lands as a safe *Relates to* you can toggle up) —
+**sparkle**; a proposed *Closes* still lands as a safe *Relates to* you can toggle up),
 or, on a Bitbucket repo with a linked Jira project, linked-Jira keys to mention, drawn
 from the same kind of grounded shortlist so it never invents a key. A suggested name
 that isn't one of the repository's labels is called out beneath the **Labels** field.

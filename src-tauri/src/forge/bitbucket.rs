@@ -40,8 +40,8 @@ use crate::forge::my_work::{
 };
 use crate::forge::Forge;
 use crate::forge::{
-    cap_readme, validate_owner, validate_repo_name, LandedWrite, FORK_LIST_CAP, FORK_POLL_ATTEMPTS,
-    FORK_POLL_DELAY, README_CANDIDATES,
+    cap_readme, paren_parts, validate_owner, validate_repo_name, LandedWrite, FORK_LIST_CAP,
+    FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::github::actions::{CiRunPage, RunActor, RunDetail, RunFilters, RunJob, WorkflowRun};
 use crate::github::pr::{
@@ -3327,7 +3327,9 @@ struct BbMergeTask {
 /// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
 /// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
 /// merges return 202 with a `Location` task-status URL we poll until `SUCCESS`. Any other
-/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400).
+/// status errors via [`http::http_error`] (an already-closed PR surfaces its 400). The body
+/// is never read on a 200 (merged) or a 202: a 202 with a non-empty `Location` is queued
+/// (the poll decides), and one without errors.
 pub async fn merge_pr(
     repo_path: &str,
     number: u64,
@@ -3344,20 +3346,34 @@ pub async fn merge_pr(
         "close_source_branch": delete_branch,
     });
     let (status, location, body) =
-        http::bb_send(&creds, reqwest::Method::POST, &path, Some(&payload)).await?;
-    match status {
-        // Synchronous merge — done.
-        200 => Ok(()),
+        http::bb_send_request_split(&creds, reqwest::Method::POST, &path, Some(&payload)).await?;
+    match merge_answer(status, location, body)? {
         // Asynchronous merge — poll the task-status URL from the Location header.
-        202 => {
-            let task_url = location.filter(|l| !l.is_empty()).ok_or_else(|| {
-                AppError::Bitbucket(
-                    "Bitbucket accepted the merge but returned no task-status URL to poll.".into(),
-                )
-            })?;
-            poll_merge_task(&creds, &task_url).await
-        }
-        _ => Err(http::http_error(status, &body)),
+        Some(task_url) => poll_merge_task(&creds, &task_url).await,
+        // Synchronous merge — done.
+        None => Ok(()),
+    }
+}
+
+/// The merge POST's answer: 200 merged (`None`), 202 queued behind its `Location` task
+/// URL for the caller to poll. The body only reports any other status, so a 200 or 202
+/// answers the same whether or not it could be read.
+fn merge_answer(
+    status: u16,
+    location: Option<String>,
+    body: AppResult<String>,
+) -> AppResult<Option<String>> {
+    match status {
+        200 => Ok(None),
+        202 => location.filter(|l| !l.is_empty()).map(Some).ok_or_else(|| {
+            AppError::Bitbucket(
+                "Bitbucket accepted the merge but returned no task-status URL to poll.".into(),
+            )
+        }),
+        _ => Err(match body {
+            Ok(text) => http::http_error(status, &text),
+            Err(e) => e,
+        }),
     }
 }
 
@@ -4112,17 +4128,6 @@ pub async fn review_submit(
         total,
         verdict_applied: verdict != "comment",
     })
-}
-
-/// An error a wrap sets in parentheses, split so its first line goes inside them and
-/// any further lines (a timed-out write's transport line) follow the closing one: line
-/// one never ends inside an open parenthesis, and a one-line error reads `({e})`.
-fn paren_parts(e: &AppError) -> (String, String) {
-    let text = e.to_string();
-    match text.split_once('\n') {
-        Some((first, rest)) => (first.to_string(), format!("\n{rest}")),
-        None => (text, String::new()),
-    }
 }
 
 /// Revoke the viewer's requested-changes state
@@ -9355,23 +9360,56 @@ definitions:
         assert!(!outside(&inside), "a reader inside the wrap must flip");
     }
 
-    /// A one-line error reads as it did before the split; a further line follows the
-    /// closing parenthesis.
+    /// A 200 merged and a 202 queues its task whether or not the body read; any other status
+    /// reports its body, or the body read's own error.
     #[test]
-    fn paren_parts_keeps_a_one_line_error_as_it_was() {
-        let one = AppError::Bitbucket("Bitbucket API error (500): boom".into());
-        let (first, rest) = paren_parts(&one);
+    fn merge_answer_reads_only_the_status_on_success() {
+        let read_failed = || {
+            Err(AppError::Bitbucket(
+                "could not read Bitbucket response".into(),
+            ))
+        };
+        let task =
+            "https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge/task-status/t";
+        assert_eq!(merge_answer(200, None, read_failed()).unwrap(), None);
         assert_eq!(
-            format!("retrying. ({first}){rest}"),
-            format!("retrying. ({one})")
+            merge_answer(202, Some(task.into()), read_failed()).unwrap(),
+            Some(task.to_string())
         );
-        let two = AppError::Bitbucket("didn't answer in time.\nrequest timed out".into());
-        let text = two.to_string();
-        let (line1, line2) = text.split_once('\n').unwrap();
-        let (first, rest) = paren_parts(&two);
-        assert_eq!(
-            format!("retrying. ({first}){rest}"),
-            format!("retrying. ({line1})\n{line2}")
+        let no_task = "Bitbucket accepted the merge but returned no task-status URL to poll.";
+        for (location, body) in [
+            (None, read_failed()),
+            (Some(String::new()), Ok("{}".into())),
+        ] {
+            match merge_answer(202, location, body) {
+                Err(AppError::Bitbucket(m)) => assert_eq!(m, no_task),
+                other => panic!("{other:?}"),
+            }
+        }
+        let envelope = r#"{"type":"error","error":{"message":"Pull request already merged"}}"#;
+        for status in [400, 201] {
+            assert_eq!(
+                merge_answer(status, None, Ok(envelope.into()))
+                    .unwrap_err()
+                    .to_string(),
+                http::http_error(status, envelope).to_string(),
+            );
+        }
+        match merge_answer(400, None, read_failed()) {
+            Err(AppError::Bitbucket(m)) => assert_eq!(m, "could not read Bitbucket response"),
+            other => panic!("{other:?}"),
+        }
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("bitbucket.rs"), "merge_pr");
+        let split = |b: &str| {
+            b.contains("bb_send_request_split(")
+                && b.contains("merge_answer(")
+                && !b.contains("bb_send(")
+        };
+        assert!(split(&body), "{body}");
+        assert!(
+            !split(&body.replace("bb_send_request_split(", "bb_send(")),
+            "bb_send control"
         );
     }
 
