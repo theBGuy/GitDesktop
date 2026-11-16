@@ -296,7 +296,7 @@ export const reviewPartialKey = (
   ref: string,
 ) => ["review-partial", repo, lens, kind, ref] as const;
 
-/** The most recent kept PARTIAL run for a PR (either mode), or undefined if none —
+/** The most recent kept PARTIAL run for a PR (either mode), or null if none —
  *  the output a timed-out run left behind, which the panel can show after a restart.
  *  Deliberately its own read: a partial is not a review, so nothing that builds on
  *  "the previous review" (prior context, the automation coverage gates) may see it. */
@@ -305,17 +305,19 @@ export async function getLatestPartialReview(
   lens: RemoteLens,
   kind: "remote" | "local",
   ref: string,
-): Promise<PersistedReview | undefined> {
+): Promise<PersistedReview | null> {
   const all = await read(repo);
-  return all
-    .filter(
-      (r) =>
-        lensOf(r) === lens &&
-        r.kind === kind &&
-        r.ref === ref &&
-        isPartialReview(r),
-    )
-    .sort((a, b) => b.finishedAt - a.finishedAt)[0];
+  return (
+    all
+      .filter(
+        (r) =>
+          lensOf(r) === lens &&
+          r.kind === kind &&
+          r.ref === ref &&
+          isPartialReview(r),
+      )
+      .sort((a, b) => b.finishedAt - a.finishedAt)[0] ?? null
+  );
 }
 
 /** Query key for {@link listPartialReviews}. Deliberately a CHILD of

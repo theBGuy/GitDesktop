@@ -132,7 +132,7 @@ vi.mock("@/lib/ai/agent", async (importOriginal) => ({
 }));
 vi.mock("@/lib/pulls/reviews-history", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/reviews-history")>()),
-  getLatestPartialReview: vi.fn(async () => undefined),
+  getLatestPartialReview: vi.fn(async () => null),
   markReviewPosted: vi.fn(async () => undefined),
 }));
 vi.mock("sonner", async (importOriginal) => ({

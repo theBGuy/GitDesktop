@@ -40,6 +40,7 @@ import { ConversationScrollArea } from "@/features/conversations/ConversationScr
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import {
   EditTitleBodyDialog,
+  rereadEditedItem,
   useEditTitleBody,
 } from "@/features/conversations/EditTitleBodyDialog";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
@@ -533,13 +534,9 @@ export function RemoteIssueView({
       draftKey: editDraftKey,
       kind: "issue",
       reread: () =>
-        queryClient.refetchQueries(
-          {
-            queryKey: issueDetailsOptions(repoPath, number, lens).queryKey,
-            exact: true,
-            type: "active",
-          },
-          { cancelRefetch: false },
+        rereadEditedItem(
+          queryClient,
+          issueDetailsOptions(repoPath, number, lens).queryKey,
         ),
     },
   });

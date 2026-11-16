@@ -860,7 +860,10 @@ pub async fn gh_set_item_field_values(
         GH_NETWORK_TIMEOUT,
     )
     .await
-    .map_err(map_field_write_error)?;
+    .map_err(|e| {
+        let landed = crate::forge::LandedWrite::Changed;
+        map_field_write_error(crate::forge::timed_out_write(e, "GitHub", landed))
+    })?;
     parse_field_write_response(&out.stdout_lossy())
 }
 

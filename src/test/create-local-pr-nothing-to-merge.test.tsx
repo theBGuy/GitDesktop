@@ -44,6 +44,29 @@ vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   createLocalPr: vi.fn(),
   updateLocalPr: vi.fn(async () => undefined),
 }));
+// Pass-through spy over the options hook: each COMMITTED render's open flag and
+// keep list are recorded from a layout effect, so a render React discards (a
+// render-phase state update re-runs it) never counts.
+const pickerCommits = vi.hoisted(
+  () => [] as { open: boolean; keep: unknown[] }[],
+);
+vi.mock("@/features/pulls/useBranchPickerOptions", async (importOriginal) => {
+  const real =
+    await importOriginal<
+      typeof import("@/features/pulls/useBranchPickerOptions")
+    >();
+  const { useLayoutEffect } = await import("react");
+  function useSpiedBranchPickerOptions(
+    ...args: Parameters<typeof real.useBranchPickerOptions>
+  ) {
+    const [, open, keep] = args;
+    useLayoutEffect(() => {
+      pickerCommits.push({ open, keep: [...(keep ?? [])] });
+    });
+    return real.useBranchPickerOptions(...args);
+  }
+  return { ...real, useBranchPickerOptions: useSpiedBranchPickerOptions };
+});
 vi.mock("@/lib/automations/runner", () => ({
   triggerAutomations: vi.fn(),
 }));
@@ -777,6 +800,147 @@ describe("Create local PR: a reopen during a create", () => {
       await act(async () => pending.reject(new Error("refused")));
       reopen();
       expect(await screen.findByLabelText("Title")).toHaveValue("");
+    });
+  });
+
+  describe("Create local PR: a kept draft whose head is archived", () => {
+    beforeEach(() => {
+      vi.mocked(gitBranches).mockResolvedValue(
+        ["main", "feat", "dev", "old"].map(
+          (name) =>
+            ({
+              name,
+              isCurrent: name === "feat",
+              archived: name === "old",
+            }) as Branch,
+        ),
+      );
+    });
+
+    const merge = () => screen.getByRole("combobox", { name: "Merge" });
+    const pause = () => act(() => new Promise((r) => setTimeout(r, 20)));
+
+    /** The Merge picker's option names, read from its open popup and closed again. */
+    async function mergeOptions(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(merge());
+      const listbox = await screen.findByRole("listbox");
+      const names = within(listbox)
+        .getAllByRole("option")
+        .map((o) => o.textContent ?? "");
+      await user.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
+      return names;
+    }
+
+    /** Opens on the archived head by request, submits, and closes mid-create. */
+    async function createOldThenClose() {
+      const pending: {
+        resolve: (v: Awaited<ReturnType<typeof createLocalPr>>) => void;
+        reject: (e: unknown) => void;
+      } = { resolve: () => undefined, reject: () => undefined };
+      vi.mocked(createLocalPr).mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            pending.resolve = resolve;
+            pending.reject = reject;
+          }),
+      );
+      const user = userEvent.setup();
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      render(
+        <QueryClientProvider client={client}>
+          <Host />
+        </QueryClientProvider>,
+      );
+      await screen.findByLabelText("Title");
+      act(() => control.setOpen(false));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      reopen({ defaultHead: "old", defaultBase: "main" });
+      await waitFor(() => expect(merge()).toHaveTextContent("old"));
+      const title = await fillTitle(user);
+      expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+      expect(await mergeOptions(user)).toContainEqual(
+        expect.stringContaining("old"),
+      );
+      title.focus();
+      await user.keyboard("{Control>}{Enter}{/Control}");
+      await waitFor(() => expect(createLocalPr).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(createLocalPr).mock.calls[0]?.[1]).toMatchObject({
+        head: "old",
+      });
+      act(() => control.setOpen(false));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      return { user, pending };
+    }
+
+    it("still lists the kept head when the failed draft reopens", async () => {
+      const { user, pending } = await createOldThenClose();
+      await act(async () => pending.reject(new Error("refused")));
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+      expect(merge()).toHaveTextContent("old");
+      expect(await mergeOptions(user)).toContainEqual(
+        expect.stringContaining("old"),
+      );
+    });
+
+    it("still lists the kept head when a reopen finds the create running", async () => {
+      const { user, pending } = await createOldThenClose();
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+      expect(merge()).toHaveTextContent("old");
+      expect(await mergeOptions(user)).toContainEqual(
+        expect.stringContaining("old"),
+      );
+      await act(async () => pending.reject(new Error("refused")));
+      await pause();
+    });
+
+    /** Whether any open render since `from` kept the archived head listed. */
+    const keptOldSince = (from: number) =>
+      pickerCommits
+        .slice(from)
+        .some(({ open, keep }) => open && keep.includes("old"));
+
+    it("lists the kept head in no render of a later normal open", async () => {
+      const { pending } = await createOldThenClose();
+      await act(async () => pending.reject(new Error("refused")));
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("A title");
+      act(() => control.setOpen(false));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      const from = pickerCommits.length;
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+      await pause();
+      expect(keptOldSince(from)).toBe(false);
+    });
+
+    it("lists the kept head in no render of a requested reopen over the create, nor of the open after it", async () => {
+      const { pending } = await createOldThenClose();
+      const from = pickerCommits.length;
+      reopen({ defaultHead: "dev", defaultBase: "main" });
+      await waitFor(() => expect(merge()).toHaveTextContent("dev"));
+      act(() => control.setOpen(false));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await act(async () => pending.reject(new Error("refused")));
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+      await pause();
+      expect(keptOldSince(from)).toBe(false);
+    });
+
+    it("lists the kept head in no render of the open after a create that landed", async () => {
+      const { pending } = await createOldThenClose();
+      await act(async () => pending.resolve({ ...created, head: "old" }));
+      await pause();
+      const from = pickerCommits.length;
+      reopen();
+      expect(await screen.findByLabelText("Title")).toHaveValue("");
+      await pause();
+      expect(keptOldSince(from)).toBe(false);
     });
   });
 });

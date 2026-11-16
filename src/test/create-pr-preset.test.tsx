@@ -1936,5 +1936,47 @@ describe("CreatePrDialog created with a warning", () => {
       expect(title).toBe(presentError(pushed).summary);
       expect(options.description).toBe(NOTE);
     });
+
+    const pushRejected = {
+      kind: "git",
+      code: 1,
+      message: "git push failed",
+      stderr:
+        "To github.com:o/r.git\n ! [rejected]        feat -> feat (fetch first)\nerror: failed to push some refs to 'github.com:o/r.git'",
+    };
+
+    it("says pushing the branch failed when the push is what failed", async () => {
+      const [title, options] = await failWith(pushRejected);
+      expect(title).toBe(presentError(pushRejected).summary);
+      expect(options.description).toBe(
+        "Pushing feat failed, so the pull request wasn't created.",
+      );
+    });
+
+    it("names the origin repository when a failed push settles elsewhere", async () => {
+      await ready();
+      let reject!: (e: unknown) => void;
+      forgePrCreate.mockReturnValueOnce(
+        new Promise((_, rej) => {
+          reject = rej;
+        }) as never,
+      );
+      create();
+      await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+      useUiStore.setState({ repoPath: "C:/other" });
+      try {
+        await act(async () => reject(pushRejected));
+        await waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+        const [, options] = error.mock.calls[0] as [
+          string,
+          { description?: string },
+        ];
+        expect(options.description).toBe(
+          "In repo, pushing feat failed, so the pull request wasn't created.",
+        );
+      } finally {
+        useUiStore.setState({ repoPath: REPO });
+      }
+    });
   });
 });

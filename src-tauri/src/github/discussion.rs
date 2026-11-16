@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{AppError, AppResult};
+use crate::forge::{timed_out_write, LandedWrite};
 use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, IssueReactions};
 use crate::github::pr::{PrAuthor, PrRef, RepoLabel};
-use crate::github::runner::{map_scope_error, run_gh, GhOutput, GH_NETWORK_TIMEOUT};
+use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
+use crate::github::runner::{map_scope_error, run_gh, run_gh_input, GhOutput, GH_NETWORK_TIMEOUT};
 
 /// Discussions are Labelable, so labels come back as a `{ nodes: [...] }`
 /// connection (name + color; id stays empty, like PR-embedded labels).
@@ -628,10 +630,33 @@ fn discussion_scope_error(e: AppError) -> AppError {
     map_scope_error(e, "write:discussion", DISCUSSION_SCOPE_HINT)
 }
 
+/// A discussion write's run Err: a timeout as the generic may-have-landed hedge, then the
+/// scope hint. Every discussion write maps through here.
+fn discussion_write_error(e: AppError) -> AppError {
+    discussion_scope_error(timed_out_write(e, "GitHub", LandedWrite::Changed))
+}
+
+/// The post-spawn mapping both mutation forms end in.
+fn mutation_result(run: AppResult<GhOutput>) -> AppResult<GhOutput> {
+    run.map_err(discussion_write_error)
+}
+
 async fn run_mutation(repo_path: &str, args: &[&str]) -> AppResult<GhOutput> {
-    run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT)
-        .await
-        .map_err(discussion_scope_error)
+    mutation_result(run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT).await)
+}
+
+/// A mutation whose `{"query","variables"}` body rides stdin, so user text never
+/// reaches gh's command line (Windows' length cap, `.cmd` shims refusing newlines).
+async fn run_mutation_input(repo_path: &str, input: &str) -> AppResult<GhOutput> {
+    mutation_result(
+        run_gh_input(
+            Some(repo_path),
+            &GRAPHQL_INPUT_ARGS,
+            input,
+            GH_NETWORK_TIMEOUT,
+        )
+        .await,
+    )
 }
 
 const CREATE_MUTATION: &str = "mutation($repoId:ID!,$categoryId:ID!,$title:String!,$body:String!){ createDiscussion(input:{repositoryId:$repoId, categoryId:$categoryId, title:$title, body:$body}){ discussion{ number url } } }";
@@ -654,25 +679,23 @@ pub async fn gh_discussion_create(
     if category_id.is_empty() {
         return Err(AppError::InvalidArgument("a category is required".into()));
     }
-    let out = run_mutation(
-        &repo_path,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={CREATE_MUTATION}"),
-            "-f",
-            &format!("repoId={repo_id}"),
-            "-f",
-            &format!("categoryId={category_id}"),
-            "-f",
-            &format!("title={title}"),
-            "-f",
-            &format!("body={body}"),
-        ],
-    )
-    .await?;
+    let input = create_input(&repo_id, &category_id, title, &body);
+    let out = run_mutation_input(&repo_path, &input)
+        .await
+        .map_err(|e| timed_out_write(e, "GitHub", LandedWrite::Created("discussion")))?;
     created_discussion_ref(&out.stdout_lossy())
+}
+
+fn create_input(repo_id: &str, category_id: &str, title: &str, body: &str) -> String {
+    graphql_input(
+        CREATE_MUTATION,
+        serde_json::json!({
+            "repoId": repo_id,
+            "categoryId": category_id,
+            "title": title,
+            "body": body,
+        }),
+    )
 }
 
 /// The created discussion's number and URL, or 0 and "" for what an empty or JSON reply
@@ -713,23 +736,21 @@ pub async fn gh_discussion_add_comment(
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
-    let mut args = vec![
-        "api".to_string(),
-        "graphql".to_string(),
-        "-f".to_string(),
-        format!("query={ADD_COMMENT_MUTATION}"),
-        "-f".to_string(),
-        format!("discussionId={discussion_id}"),
-        "-f".to_string(),
-        format!("body={body}"),
-    ];
-    if let Some(reply) = reply_to_id.as_deref().filter(|r| !r.is_empty()) {
-        args.push("-f".to_string());
-        args.push(format!("replyToId={reply}"));
-    }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_mutation(&repo_path, &arg_refs).await?;
+    let input = add_comment_input(&discussion_id, &body, reply_to_id.as_deref());
+    run_mutation_input(&repo_path, &input)
+        .await
+        .map_err(|e| timed_out_write(e, "GitHub", LandedWrite::Posted))?;
     Ok(())
+}
+
+/// `replyToId` rides only when a non-empty reply target is given, so a top-level
+/// comment sends no such variable.
+fn add_comment_input(discussion_id: &str, body: &str, reply_to_id: Option<&str>) -> String {
+    let mut variables = serde_json::json!({ "discussionId": discussion_id, "body": body });
+    if let Some(reply) = reply_to_id.filter(|r| !r.is_empty()) {
+        variables["replyToId"] = reply.into();
+    }
+    graphql_input(ADD_COMMENT_MUTATION, variables)
 }
 
 #[tauri::command]
@@ -781,21 +802,20 @@ pub async fn gh_discussion_update_comment(
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
-    run_mutation(
-        &repo_path,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            "query=mutation($id:ID!,$body:String!){ updateDiscussionComment(input:{commentId:$id, body:$body}){ comment{ id } } }",
-            "-f",
-            &format!("id={comment_id}"),
-            "-f",
-            &format!("body={body}"),
-        ],
-    )
-    .await?;
+    let input = update_comment_input(&comment_id, &body);
+    run_mutation_input(&repo_path, &input)
+        .await
+        .map_err(|e| timed_out_write(e, "GitHub", LandedWrite::Saved("comment")))?;
     Ok(())
+}
+
+const UPDATE_COMMENT_MUTATION: &str = "mutation($id:ID!,$body:String!){ updateDiscussionComment(input:{commentId:$id, body:$body}){ comment{ id } } }";
+
+fn update_comment_input(comment_id: &str, body: &str) -> String {
+    graphql_input(
+        UPDATE_COMMENT_MUTATION,
+        serde_json::json!({ "id": comment_id, "body": body }),
+    )
 }
 
 #[tauri::command]
@@ -1031,6 +1051,176 @@ pub async fn gh_discussion_delete(
 mod tests {
     use super::*;
 
+    /// The one function whose run Err maps through `discussion_write_error`.
+    const MAPPED_IN: &str = "mutation_result";
+
+    /// The writes that re-lead the generic hedge with their own noun, one map each.
+    const RE_LEADS: [(&str, &str); 3] = [
+        (
+            "gh_discussion_create",
+            "LandedWrite::Created(\"discussion\")",
+        ),
+        ("gh_discussion_add_comment", "LandedWrite::Posted"),
+        (
+            "gh_discussion_update_comment",
+            "LandedWrite::Saved(\"comment\")",
+        ),
+    ];
+
+    /// Discussion writes hedge a timeout in one place: `discussion_write_error` holds the
+    /// generic `timed_out_write(` and is used once outside its definition, in `MAPPED_IN`,
+    /// which both spawn forms end in; the only other `timed_out_write(`s are the
+    /// `RE_LEADS` rows' own. Each control must flip.
+    #[test]
+    fn discussion_writes_hedge_their_timeout_in_one_place() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let full = include_str!("discussion.rs").replace("\r\n", "\n");
+        let holds = |full: &str| {
+            let src = full.split("\nmod tests {").next().unwrap();
+            let mapper = wiring_body(src, "discussion_write_error");
+            let host = wiring_body(src, MAPPED_IN);
+            let uses = src.matches("discussion_write_error").count();
+            let spawns_end_in_it = [
+                ("run_mutation", "run_gh("),
+                ("run_mutation_input", "run_gh_input("),
+            ]
+            .iter()
+            .all(|(name, spawn)| {
+                let body = wiring_body(src, name);
+                body.contains(spawn) && body.matches("mutation_result(").count() == 1
+            });
+            let re_led = RE_LEADS.iter().all(|(name, token)| {
+                let body = wiring_body(src, name);
+                body.matches("timed_out_write(").count() == 1
+                    && body.contains(&format!("timed_out_write(e, \"GitHub\", {token})"))
+            });
+            src.matches("timed_out_write(").count() == 1 + RE_LEADS.len()
+                && mapper.contains("timed_out_write(")
+                && mapper.contains("discussion_scope_error(")
+                && uses == 2
+                && host.matches("discussion_write_error").count() == 1
+                && spawns_end_in_it
+                && re_led
+        };
+        assert!(holds(&full));
+        let host = wiring_body(&full, MAPPED_IN);
+        let unmapped = full.replacen(
+            &host,
+            &host.replace("discussion_write_error", "discussion_scope_error"),
+            1,
+        );
+        assert!(!holds(&unmapped), "an unmapped run must flip");
+        let doubled = full.replacen(
+            "fn discussion_scope_error(",
+            "fn x() { timed_out_write(); }\nfn discussion_scope_error(",
+            1,
+        );
+        assert!(!holds(&doubled), "a second map must flip");
+        let bypass = full.replacen("mutation_result(run_gh(", "Ok::<_, AppError>(run_gh(", 1);
+        assert!(!holds(&bypass), "an argv run past the mapping must flip");
+        for (name, token) in RE_LEADS {
+            let body = wiring_body(&full, name);
+            let site = format!(".map_err(|e| timed_out_write(e, \"GitHub\", {token}))");
+            assert!(body.contains(&site), "{name}: {body}");
+            let dropped = full.replacen(&body, &body.replacen(&site, "", 1), 1);
+            assert!(!holds(&dropped), "{name}: a dropped re-lead must flip");
+            let renamed = full.replacen(&body, &body.replacen(token, "LandedWrite::Changed", 1), 1);
+            assert!(!holds(&renamed), "{name}: a swapped noun must flip");
+        }
+    }
+
+    /// Each re-lead turns the generic hedge into its own nouned sentence, CLI line kept.
+    #[test]
+    fn discussion_writes_re_lead_a_timeout_with_their_noun() {
+        let generic = || discussion_write_error(AppError::Timeout(30));
+        let cli = "\nGitHub CLI timed out after 30s.";
+        for (write, lead) in [
+            (
+                LandedWrite::Created("discussion"),
+                "GitHub didn't answer in time, so the discussion may still have been created. Check for it before trying again.",
+            ),
+            (
+                LandedWrite::Posted,
+                "GitHub didn't answer in time, so your comment may still have been posted. Check the conversation before posting again.",
+            ),
+            (
+                LandedWrite::Saved("comment"),
+                "GitHub didn't answer in time, so your changes may still have been saved. Check the comment before saving again.",
+            ),
+        ] {
+            let e = timed_out_write(generic(), "GitHub", write);
+            assert!(matches!(e, AppError::WriteTimedOut(_)), "{e:?}");
+            assert_eq!(e.to_string(), format!("{lead}{cli}"));
+        }
+    }
+
+    /// The three text writes send one `{"query","variables"}` body on stdin whose
+    /// variables carry each text field byte-for-byte.
+    #[test]
+    fn discussion_text_writes_send_their_variables_on_stdin() {
+        let text = crate::github::pr::hostile_input::hostile_text();
+        let parse = |s: String| serde_json::from_str::<serde_json::Value>(&s).unwrap();
+        assert_eq!(
+            parse(create_input("R_1", "DIC_1", "Title", &text)),
+            serde_json::json!({"query": CREATE_MUTATION, "variables": {
+                "repoId": "R_1", "categoryId": "DIC_1", "title": "Title", "body": text}}),
+        );
+        let top = serde_json::json!({"query": ADD_COMMENT_MUTATION, "variables": {
+            "discussionId": "D_1", "body": text}});
+        assert_eq!(parse(add_comment_input("D_1", &text, None)), top);
+        assert_eq!(parse(add_comment_input("D_1", &text, Some(""))), top);
+        assert_eq!(
+            parse(add_comment_input("D_1", &text, Some("DC_1"))),
+            serde_json::json!({"query": ADD_COMMENT_MUTATION, "variables": {
+                "discussionId": "D_1", "body": text, "replyToId": "DC_1"}}),
+        );
+        assert_eq!(
+            parse(update_comment_input("DC_1", &text)),
+            serde_json::json!({"query": UPDATE_COMMENT_MUTATION, "variables": {
+                "id": "DC_1", "body": text}}),
+        );
+        for doc in [
+            CREATE_MUTATION,
+            ADD_COMMENT_MUTATION,
+            UPDATE_COMMENT_MUTATION,
+        ] {
+            assert!(doc.starts_with("mutation("), "{doc}");
+        }
+    }
+
+    /// The text writes stay inside the stdin helper: no `-f` field, no direct spawn.
+    #[test]
+    fn discussion_text_writes_send_one_json_body() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let full = include_str!("discussion.rs");
+        let src = full.split("\nmod tests {").next().unwrap();
+        let sends_json = |body: &str| {
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains("run_mutation_input(")
+                && !flat.contains("\"-f\"")
+                && !flat.contains("body=")
+                && !flat.contains("run_gh(")
+                && !flat.contains("run_gh_input(")
+                && !flat.contains("run_mutation(")
+        };
+        for (name, _) in RE_LEADS {
+            let body = wiring_body(src, name);
+            assert!(sends_json(&body), "{name}: {body}");
+            let direct =
+                format!("{body}\nrun_gh_input(Some(&repo_path), &GRAPHQL_INPUT_ARGS, &input, t)");
+            assert!(!sends_json(&direct), "{name}: a direct spawn must flip");
+            let argv = format!(
+                "{body}\nrun_gh(Some(repo_path), &[\"-f\", &format!(\"body={{body}}\")], t)"
+            );
+            assert!(!sends_json(&argv), "{name}: an argv field must flip");
+        }
+        let helper = wiring_body(src, "run_mutation_input");
+        for token in ["run_gh_input(", "&GRAPHQL_INPUT_ARGS", "mutation_result("] {
+            assert!(helper.contains(token), "{token}: {helper}");
+        }
+        assert!(wiring_body(src, "run_mutation").contains("mutation_result("));
+    }
+
     #[test]
     fn created_discussion_ref_reads_what_the_reply_carries() {
         let full = r#"{"data":{"createDiscussion":{"discussion":{"number":5,"url":"https://github.com/o/r/discussions/5"}}}}"#;
@@ -1069,18 +1259,22 @@ mod tests {
             "the control must flip"
         );
         // The reader reads only the run's `?`-unwrapped Ok, so a rejected write never
-        // reaches it.
+        // reaches it (the re-lead sits between the `.await` and its `?`).
         let after_run = |body: &str| {
-            let run = body.find("run_mutation(");
+            let run = body.find("run_mutation_input(");
             let reader = body.find("created_discussion_ref(");
-            run.zip(reader)
-                .is_some_and(|(run, reader)| run < reader && body[run..reader].contains(".await?"))
+            run.zip(reader).is_some_and(|(run, reader)| {
+                run < reader && {
+                    let between = &body[run..reader];
+                    between.contains(".await") && between.contains(")?;")
+                }
+            })
         };
         assert!(after_run(&body), "{body}");
         let early = body
             .replacen("created_discussion_ref(", "@@reader@@", 1)
-            .replacen("run_mutation(", "created_discussion_ref(", 1)
-            .replacen("@@reader@@", "run_mutation(", 1);
+            .replacen("run_mutation_input(", "created_discussion_ref(", 1)
+            .replacen("@@reader@@", "run_mutation_input(", 1);
         assert!(!after_run(&early), "a reader ahead of the run must flip");
         // The reader classifies through the one rule and parses nothing itself.
         let reader = crate::github::repo_meta::tests::wiring_body(source, "created_discussion_ref");

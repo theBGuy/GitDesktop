@@ -496,26 +496,27 @@ pub(crate) fn cap_readme(body: &str) -> String {
     body[..end].to_string()
 }
 
-/// What a forge write whose CLI run timed out may already have done. Each `&'static str`
-/// is the item noun ("issue", "pull request" or "merge request").
+/// What a forge write that timed out may already have done. Each `&'static str` noun
+/// names the item the user is told to check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LandedWrite {
-    /// An issue create.
+    /// A create.
     Created(&'static str),
     /// A pull or merge request create, whose head branch was pushed before the write.
     CreatedAfterPush(&'static str),
     /// A conversation comment.
     Posted,
-    /// A title, description or base edit.
+    /// An edit to an existing item.
     Saved(&'static str),
+    /// Any other write, or one whose helper has no noun for it.
+    Changed,
 }
 
-/// The one builder of the may-have-landed sentences: line 1 says the write may have
-/// landed (never starting with `Timeout`'s lead, which the frontend's `mayHaveLanded`
-/// keys on), line 2 the timeout. scripts/attached-failure-leads.test.mjs reads these
-/// literals; keep them plain `format!` strings.
-pub(crate) fn write_timed_out(host: &str, write: LandedWrite, seconds: u64) -> AppError {
-    let lead = match write {
+/// Line 1 of every may-have-landed sentence, never starting with `Timeout`'s lead (the
+/// frontend's `mayHaveLanded` keys on that). scripts/attached-failure-leads.test.mjs reads
+/// these literals; keep them plain `format!` strings.
+fn landed_lead(host: &str, write: LandedWrite) -> String {
+    match write {
         LandedWrite::Created(noun) => format!(
             "{host} didn't answer in time, so the {noun} may still have been created. Check for it before trying again."
         ),
@@ -528,18 +529,54 @@ pub(crate) fn write_timed_out(host: &str, write: LandedWrite, seconds: u64) -> A
         LandedWrite::Saved(noun) => format!(
             "{host} didn't answer in time, so your changes may still have been saved. Check the {noun} before saving again."
         ),
-    };
+        LandedWrite::Changed => format!(
+            "{host} didn't answer in time, so your change may still have gone through. Check before trying again."
+        ),
+    }
+}
+
+/// A CLI write that timed out: the landed lead, then the CLI timeout on line 2.
+pub(crate) fn write_timed_out(host: &str, write: LandedWrite, seconds: u64) -> AppError {
+    let lead = landed_lead(host, write);
     AppError::WriteTimedOut(format!("{lead}\n{host} CLI timed out after {seconds}s."))
 }
 
-/// A write's run Err with a timeout turned into `write_timed_out`'s; anything else
-/// unchanged.
+/// An HTTP write that was sent and not answered in time: the landed lead, then the
+/// transport's own text.
+pub(crate) fn request_timed_out(host: &str, write: LandedWrite, detail: &str) -> AppError {
+    let lead = landed_lead(host, write);
+    AppError::WriteTimedOut(format!("{lead}\n{detail}"))
+}
+
+/// A write's Err with a timeout turned into `write_timed_out`'s. A `WriteTimedOut` a
+/// helper already built is re-led with this caller's sentence (line 2 kept), except
+/// under `Changed`, which never replaces a lead; anything else is unchanged.
 pub(crate) fn timed_out_write(e: AppError, host: &str, write: LandedWrite) -> AppError {
     match e {
         AppError::Timeout(seconds) => write_timed_out(host, write, seconds),
+        AppError::WriteTimedOut(message) if write != LandedWrite::Changed => {
+            let lead = landed_lead(host, write);
+            AppError::WriteTimedOut(match message.split_once('\n') {
+                Some((_, rest)) => format!("{lead}\n{rest}"),
+                None => lead,
+            })
+        }
         other => other,
     }
 }
+
+/// An error's text for a sentence that wraps it: an `InvalidArgument`'s own message
+/// (its Display lead `invalid argument: ` would read as a second headline), else Display.
+pub(crate) fn error_detail(e: AppError) -> String {
+    match e {
+        AppError::InvalidArgument(m) => m,
+        other => other.to_string(),
+    }
+}
+
+/// The text after `{host}` in the unread-reply sentence: every builder of it fills this
+/// one copy, so the frontend's `mayHaveLanded` match can't drift from any of them.
+const UNREAD_REPLY_LEAD: &str = " accepted the request but its reply couldn't be read, so the ";
 
 /// A create the forge accepted whose reply is neither empty nor JSON, so the item may
 /// exist. It shares the forge's own kind, so the label is that forge's; the frontend's
@@ -560,12 +597,20 @@ pub(crate) fn created_reply_unreadable(
     } else {
         ""
     };
-    let message = format!("{pushed}{host} accepted the request but its reply couldn't be read, so the {noun} may already exist. Check before creating it again.");
+    let message = format!("{pushed}{host}{UNREAD_REPLY_LEAD}{noun} may already exist. Check before creating it again.");
     match provider {
         Provider::GitHub => AppError::Gh(message),
         Provider::GitLab => AppError::Glab(message),
         Provider::Bitbucket => AppError::Bitbucket(message),
     }
+}
+
+/// `created_reply_unreadable`'s sentence for a Jira create, under kind `jira`; Jira is no
+/// `Provider`, and nothing is pushed before a Jira create.
+pub(crate) fn jira_reply_unreadable(noun: &str) -> AppError {
+    AppError::Jira(format!(
+        "Jira{UNREAD_REPLY_LEAD}{noun} may already exist. Check before creating it again."
+    ))
 }
 
 /// An accepted create's reply: empty or whitespace is `Null` (created, fields unknown),
@@ -6838,6 +6883,77 @@ mod tests {
         }
     }
 
+    /// The generic sentence under every host, and an HTTP write's twin keeping the
+    /// transport's own text on line 2.
+    #[test]
+    fn a_changed_write_and_a_request_share_the_landed_lead() {
+        let generic = "{host} didn't answer in time, so your change may still have gone through. Check before trying again.";
+        for host in ["GitHub", "GitLab", "Bitbucket", "Jira"] {
+            let line1 = generic.replace("{host}", host);
+            assert_eq!(
+                write_timed_out(host, LandedWrite::Changed, 30).to_string(),
+                format!("{line1}\n{host} CLI timed out after 30s.")
+            );
+            let detail = format!("{host} request failed: error sending request: request timed out");
+            for (write, lead) in [
+                (LandedWrite::Changed, line1.clone()),
+                (
+                    LandedWrite::Created("worklog"),
+                    format!("{host} didn't answer in time, so the worklog may still have been created. Check for it before trying again."),
+                ),
+            ] {
+                let e = request_timed_out(host, write, &detail);
+                assert!(matches!(e, AppError::WriteTimedOut(_)), "{e:?}");
+                assert_eq!(e.to_string(), format!("{lead}\n{detail}"));
+            }
+        }
+    }
+
+    /// A helper's generic hedge takes its caller's noun with line 2 kept, byte-equal to the
+    /// caller building it itself; `Changed` never re-leads, and a one-line hedge can't panic.
+    #[test]
+    fn timed_out_write_re_leads_a_helper_hedge() {
+        let helper = write_timed_out("GitHub", LandedWrite::Changed, 150);
+        let saved = LandedWrite::Saved("issue");
+        assert_eq!(
+            format!("{:?}", timed_out_write(helper, "GitHub", saved)),
+            format!("{:?}", write_timed_out("GitHub", saved, 150))
+        );
+        let nouned = write_timed_out("GitHub", saved, 150);
+        let before = format!("{nouned:?}");
+        assert_eq!(
+            format!(
+                "{:?}",
+                timed_out_write(nouned, "GitHub", LandedWrite::Changed)
+            ),
+            before
+        );
+        let bare = AppError::WriteTimedOut("x".into());
+        assert_eq!(
+            timed_out_write(bare, "Bitbucket", LandedWrite::Created("repository")).to_string(),
+            "Bitbucket didn't answer in time, so the repository may still have been created. Check for it before trying again."
+        );
+    }
+
+    #[test]
+    fn error_detail_drops_only_the_invalid_argument_lead() {
+        assert_eq!(
+            error_detail(AppError::InvalidArgument("image-1.png is gone".into())),
+            "image-1.png is gone"
+        );
+        for e in [
+            AppError::Bitbucket("Bitbucket API error (400): x".into()),
+            AppError::Timeout(120),
+            AppError::Git {
+                code: 128,
+                stderr: "fatal: x".into(),
+            },
+        ] {
+            let display = e.to_string();
+            assert_eq!(error_detail(e), display);
+        }
+    }
+
     /// The may-already-exist sentence, filled the way the builder must fill it.
     fn unreadable_sentence(host: &str, noun: &str, after_push: bool) -> String {
         let lead = if after_push {
@@ -6875,6 +6991,21 @@ mod tests {
                     serde_json::json!({ "kind": kind, "message": want }),
                 );
             }
+        }
+    }
+
+    /// Jira's sentence is the same template with host Jira and no push lead, kind `jira`.
+    #[test]
+    fn jira_reply_unreadable_is_the_template_under_kind_jira() {
+        for noun in ["issue", "comment", "worklog"] {
+            let e = jira_reply_unreadable(noun);
+            assert_eq!(
+                serde_json::to_value(&e).unwrap(),
+                serde_json::json!({
+                    "kind": "jira",
+                    "message": unreadable_sentence("Jira", noun, false),
+                }),
+            );
         }
     }
 

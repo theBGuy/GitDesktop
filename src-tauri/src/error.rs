@@ -113,9 +113,9 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("git operation timed out after {0}s")]
     Timeout(u64),
-    /// A forge write whose CLI run timed out and may have landed. Built only by
-    /// `forge::write_timed_out`; its sentence never starts with `Timeout`'s lead, which
-    /// is how the frontend's `mayHaveLanded` tells the two apart under one kind.
+    /// A forge write that timed out and may have landed. Built only in forge/mod.rs
+    /// (`write_timed_out`, `request_timed_out`); its sentence never starts with `Timeout`'s
+    /// lead, which is how the frontend's `mayHaveLanded` tells the two apart under one kind.
     #[error("{0}")]
     WriteTimedOut(String),
 }

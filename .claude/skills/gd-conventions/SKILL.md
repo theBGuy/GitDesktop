@@ -1001,19 +1001,40 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Writes that may have landed** — a frontend arm asks
   `mayHaveLanded(error)` (`@/lib/error-summary`) before it says an item
   wasn't created, saved or posted, and never matches the sentence itself. Two
-  Rust builders in forge/mod.rs feed it. A timed-out write returns
-  `AppError::WriteTimedOut` (kind `timeout`), built only by
-  `write_timed_out`: `glab_write_fields` and the GitHub REST edits and issue
-  create map through `timed_out_write`, `run_gh_maybe_attached` through
-  `gh_write_error` (github/pr.rs). Only writes through those choke points
-  hedge; any other forge write keeps the bare timeout. A create whose exit-0
-  or 2xx reply is neither empty nor JSON returns `created_reply_unreadable`'s
-  sentence under its forge's own kind: the five readers that parse a create's
+  families of Rust builders in forge/mod.rs feed it. A timed-out write
+  returns `AppError::WriteTimedOut` (kind `timeout`): `write_timed_out` for a
+  CLI run, `request_timed_out` for a Bitbucket or Jira request that was sent
+  and not answered (never a connect timeout; `send_error` in forge/http.rs
+  builds it). A CLI write hedges only when its Err passes through
+  `timed_out_write`, which also re-leads a generic sentence with its caller's
+  noun: at a helper (`glab_write_fields`, `run_gh_api_write` /
+  `run_gh_api_write_json`, `discussion_write_error`, the Projects reply
+  helpers `project_reply`, `write_reply` and `bulk_response`) or in a direct
+  call at the write (the GitHub issue create and REST edits, the webhook
+  saves, a card's field edit, the Bitbucket repository create, GitLab's
+  positioned commit comment); `run_gh_maybe_attached` maps through
+  `gh_write_error` (github/pr.rs). A write with no noun at its helper takes
+  `LandedWrite::Changed`. Any other write keeps the bare timeout. A create
+  whose exit-0 or 2xx reply is neither empty nor JSON returns
+  `created_reply_unreadable`'s sentence under its forge's own kind
+  (`jira_reply_unreadable` for Jira): the five readers that parse a create's
   reply (`created_ref`, `created_release_url`, `created_issue_ref`,
   `created_discussion_ref`, `created_pr_ref`) call `created_reply` before
   reading a field; GitHub's pull request create, attached issue create and
-  release create (`gh_release_create`) scrape a URL instead. Both builders
-  are pinned from both sides by `scripts/attached-failure-leads.test.mjs`.
+  release create (`gh_release_create`) scrape a URL instead. A create that
+  must return its item gives the same sentence when the accepted reply
+  carries none: `bb_post_json` (every Bitbucket POST create; an empty 2xx is
+  accepted), Jira's `post_created`, the Projects creates through
+  `created_from_reply` (a reply with GraphQL `errors` stays a plain error)
+  and `gh_hook_create`. A New pull request or merge request that fails after
+  its push says the branch was pushed: a plain failure leads with
+  `BRANCH_PUSHED_FAILED_LEAD` (`@/lib/error-summary`; built by
+  `after_push_error`, `mr_post_error` and `pr_post_error`; a missing gh or
+  glab passes through unwrapped), a timeout or an unreadable reply keeps its
+  own after-push sentence. Every step after the push sits inside that wrap,
+  so no create returns a `git`-kind error once the branch is pushed, and the
+  summary composes the lead with the network sentence. The builders are
+  pinned from both sides by `scripts/attached-failure-leads.test.mjs`.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

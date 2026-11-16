@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::LandedWrite;
 use crate::github::gh_unreadable;
-use crate::github::project::{create_outcome_unknown, project_write, required_text};
+use crate::github::project::{created_from_reply, project_reply, project_write, required_text};
 use crate::github::project_item_edits::graphql_input;
 use crate::github::runner::{map_scope_error, run_gh, GH_NETWORK_TIMEOUT, PROJECT_READ_SCOPE};
 
@@ -325,7 +326,8 @@ async fn write_view_update(
     update: &ViewUpdate,
 ) -> AppResult<ProjectViewDef> {
     let input = update_view_input(view_id, update)?;
-    let value = project_write(repo_path, &input, "the updated view").await?;
+    let landed = LandedWrite::Saved("view");
+    let value = project_write(repo_path, &input, "the updated view", landed).await?;
     response_view(&value, UPDATE_VIEW_POINTER, "the updated view")
 }
 
@@ -338,10 +340,11 @@ pub async fn gh_create_view(
     layout: String,
 ) -> AppResult<ProjectViewDef> {
     let input = create_view_input(&project_id, &name, &layout)?;
-    let value = project_write(&repo_path, &input, "the new view")
-        .await
-        .map_err(|e| create_outcome_unknown(e, "view"))?;
-    response_view(&value, CREATE_VIEW_POINTER, "the new view")
+    let landed = LandedWrite::Created("view");
+    let reply = project_reply(&repo_path, &input, landed).await?;
+    created_from_reply(&reply, "view", |value| {
+        response_view(value, CREATE_VIEW_POINTER, "the new view")
+    })
 }
 
 /// Renames a view, changes its layout, or sets its visible fields; absent patch
@@ -359,7 +362,8 @@ pub async fn gh_update_view(
 /// Deletes a saved view. GitHub has no undelete for views.
 #[tauri::command]
 pub async fn gh_delete_view(repo_path: String, view_id: String) -> AppResult<()> {
-    let value = project_write(&repo_path, &delete_view_input(&view_id), "the deleted view").await?;
+    let input = delete_view_input(&view_id);
+    let value = project_write(&repo_path, &input, "the deleted view", LandedWrite::Changed).await?;
     if value
         .pointer(DELETE_VIEW_POINTER)
         .is_some_and(Value::is_object)
@@ -385,10 +389,11 @@ pub async fn gh_duplicate_view(
     let name = duplicate_name(&source.name);
     let input = create_view_input(&project_id, &name, &source.layout)?;
     let followup = duplicate_followup(&source);
-    let value = project_write(&repo_path, &input, "the new view")
-        .await
-        .map_err(|e| create_outcome_unknown(e, "copy"))?;
-    let created = response_view(&value, CREATE_VIEW_POINTER, "the new view")?;
+    let landed = LandedWrite::Created("copy");
+    let reply = project_reply(&repo_path, &input, landed).await?;
+    let created = created_from_reply(&reply, "copy", |value| {
+        response_view(value, CREATE_VIEW_POINTER, "the new view")
+    })?;
     let Some(update) = followup else {
         return Ok(created);
     };
@@ -406,7 +411,7 @@ fn partial_duplicate_message(name: &str, update: &ViewUpdate, error: &AppError) 
         _ => "its fields",
     };
     // A timeout's write may still have landed: say the outcome is unknown.
-    let outcome = if matches!(error, AppError::Timeout(_)) {
+    let outcome = if matches!(error, AppError::Timeout(_) | AppError::WriteTimedOut(_)) {
         "may not have been copied"
     } else {
         "could not be copied"
@@ -805,10 +810,13 @@ mod tests {
         }
         // A timeout leaves the follow-up's outcome unknown, and says so.
         let update = duplicate_followup(&source(Some("is:open"), &[])).unwrap();
-        let message = partial_duplicate_message("Copy of Triage", &update, &AppError::Timeout(30));
-        assert!(message.starts_with(
-            "The view \"Copy of Triage\" was created, but its filter may not have been copied.\n"
-        ));
+        let hedge = crate::forge::write_timed_out("GitHub", LandedWrite::Saved("view"), 30);
+        for timed_out in [AppError::Timeout(30), hedge] {
+            let message = partial_duplicate_message("Copy of Triage", &update, &timed_out);
+            assert!(message.starts_with(
+                "The view \"Copy of Triage\" was created, but its filter may not have been copied.\n"
+            ));
+        }
     }
 
     #[test]

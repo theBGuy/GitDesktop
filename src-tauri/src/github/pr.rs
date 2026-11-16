@@ -18,6 +18,7 @@ use crate::forge::{c_quote_label, c_quote_path, validate_compare_branch};
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::pr_search::viewer_login_core;
+use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
 use crate::github::repo_meta::{
     invalidate_all_repo_meta_after, invalidate_repo_meta_after, write_was_attempted,
 };
@@ -1017,13 +1018,8 @@ pub async fn gh_pr_review(
         }
     };
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let body = body.trim();
-    let mut args = vec!["pr", "review", &n, flag, "--repo", &slug];
-    if !body.is_empty() {
-        args.push("--body");
-        args.push(body);
-    }
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    let args = ["pr", "review", &n, flag, "--repo", &slug];
+    run_gh_text_write(&repo_path, &args, "--body-file", body.trim()).await?;
     Ok(())
 }
 
@@ -1137,6 +1133,33 @@ pub(crate) fn gh_write_argv<'a>(args: &[&'a str]) -> Vec<&'a str> {
     argv
 }
 
+/// A porcelain text write's argv: `args` then `<flag> -` (gh reads the text from
+/// stdin), or `args` alone for an empty text. One place decides both, since a file
+/// flag over a null stdin saves EMPTY text and a piped text with no flag is ignored.
+pub(crate) fn text_flag_argv<'a>(args: &[&'a str], flag: &'a str, text: &str) -> Vec<&'a str> {
+    let mut argv = args.to_vec();
+    if !text.is_empty() {
+        argv.extend([flag, "-"]);
+    }
+    argv
+}
+
+/// Runs a porcelain write whose text rides stdin behind `flag` (`--body-file`,
+/// `--notes-file`). An empty text sends neither flag nor stdin, so gh keeps its
+/// omitted-flag meaning (`gh release edit` keeps the notes).
+pub(crate) async fn run_gh_text_write(
+    repo_path: &str,
+    args: &[&str],
+    flag: &str,
+    text: &str,
+) -> AppResult<GhOutput> {
+    if text.is_empty() {
+        return run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT).await;
+    }
+    let argv = text_flag_argv(args, flag, text);
+    run_gh_input(Some(repo_path), &argv, text, GH_NETWORK_TIMEOUT).await
+}
+
 /// The last stdout line that starts with `http` (gh prints the created item's URL
 /// last), or "".
 pub(crate) fn last_url_line(stdout: &str) -> &str {
@@ -1234,29 +1257,52 @@ pub(crate) async fn run_gh_maybe_attached(
     staged: Option<&StagedRefs>,
     write: AttachedWrite,
 ) -> AppResult<GhOutput> {
-    let Some(s) = staged else {
-        let cwd = std::path::Path::new(repo_path);
-        let run = run_gh_raw_in_dir(
-            repo_path,
-            cwd,
-            &gh_write_argv(args),
-            body,
-            GH_NETWORK_TIMEOUT,
-        )
-        .await;
-        let out = run.map_err(|e| gh_write_error(e, write, None, true))?;
-        return gh_output_ok(out);
+    // Every Err leaves this block, so `after_push_error` sees each exit exactly once.
+    async {
+        let Some(s) = staged else {
+            let cwd = std::path::Path::new(repo_path);
+            let run = run_gh_raw_in_dir(
+                repo_path,
+                cwd,
+                &gh_write_argv(args),
+                body,
+                GH_NETWORK_TIMEOUT,
+            )
+            .await;
+            let out = run.map_err(|e| gh_write_error(e, write, None, true))?;
+            return gh_output_ok(out);
+        };
+        if !s.dir.is_dir() {
+            return Err(crate::attachments::no_longer_attached(&s.names[0]));
+        }
+        let timeout = attach_timeout(s.names.len());
+        let run = run_gh_raw_in_dir(repo_path, &s.dir, &gh_write_argv(args), body, timeout).await;
+        let out = run.map_err(|e| gh_write_error(e, write, Some(&s.names[0]), s.dir.is_dir()))?;
+        match classify_gh_attach_run(out.code, &out.stdout_lossy()) {
+            GhAttachRun::Failed => Err(attached_run_failure(out, slug, &s.names, write)),
+            GhAttachRun::Posted | GhAttachRun::Partial => Ok(out),
+        }
+    }
+    .await
+    .map_err(|e| after_push_error(e, write))
+}
+
+/// A pull request create's Err after its push, led by the push fact so a retry needn't
+/// re-push. A timeout keeps its may-have-landed sentence, the first-image refusal its own
+/// lead, and a missing gh its install guidance; every other write kind is unchanged.
+/// The frontend keys on the lead (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
+fn after_push_error(e: AppError, write: AttachedWrite) -> AppError {
+    if write != AttachedWrite::PrCreate {
+        return e;
+    }
+    let detail = match e {
+        AppError::WriteTimedOut(_) | AppError::GhNotFound => return e,
+        AppError::Gh(m) if m.starts_with("The branch was pushed") => return AppError::Gh(m),
+        other => crate::forge::error_detail(other),
     };
-    if !s.dir.is_dir() {
-        return Err(crate::attachments::no_longer_attached(&s.names[0]));
-    }
-    let timeout = attach_timeout(s.names.len());
-    let run = run_gh_raw_in_dir(repo_path, &s.dir, &gh_write_argv(args), body, timeout).await;
-    let out = run.map_err(|e| gh_write_error(e, write, Some(&s.names[0]), s.dir.is_dir()))?;
-    match classify_gh_attach_run(out.code, &out.stdout_lossy()) {
-        GhAttachRun::Failed => Err(attached_run_failure(out, slug, &s.names, write)),
-        GhAttachRun::Posted | GhAttachRun::Partial => Ok(out),
-    }
+    AppError::Gh(format!(
+        "The branch was pushed, but creating the pull request failed: {detail}"
+    ))
 }
 
 /// Where a partial post's body is read back from.
@@ -2087,6 +2133,196 @@ mod attach_tests {
         let bare = body.replacen(".await;", ".await?;", 1);
         assert_ne!(bare, body);
         assert!(!mapped(&bare), "the control must flip");
+    }
+
+    /// A pull request create's Err after the push leads with the push fact under kind
+    /// `gh`; a timeout, the first-image refusal and a missing gh keep their own error, and
+    /// every other write kind is unchanged.
+    #[test]
+    fn a_pr_create_error_after_the_push_says_the_branch_was_pushed() {
+        use crate::forge::{write_timed_out, LandedWrite};
+        let wrap = |detail: &str| {
+            format!("The branch was pushed, but creating the pull request failed: {detail}")
+        };
+        let wrapped = |e: AppError| match after_push_error(e, AttachedWrite::PrCreate) {
+            AppError::Gh(m) => m,
+            other => panic!("expected kind gh, got {other:?}"),
+        };
+        assert_eq!(
+            wrapped(AppError::Gh("gh: denied".into())),
+            wrap("gh: denied")
+        );
+        assert_eq!(
+            wrapped(crate::attachments::no_longer_attached("image-1.png")),
+            "The branch was pushed, but creating the pull request failed: image-1.png is no longer attached. Attach it again."
+        );
+        let refusal = crate::attachments::write_access_refusal("o/r");
+        assert_eq!(wrapped(AppError::Gh(refusal.clone())), wrap(&refusal));
+        assert_eq!(
+            wrapped(AppError::Io(std::io::Error::other("x"))),
+            wrap("io error: x")
+        );
+        let git = AppError::Git {
+            code: 128,
+            stderr: "fatal: unable to access".into(),
+        };
+        assert_eq!(wrapped(git), wrap("fatal: unable to access"));
+        // A bare timeout here never came from the create request, so it is no hedge.
+        assert_eq!(
+            wrapped(AppError::Timeout(120)),
+            wrap("git operation timed out after 120s")
+        );
+
+        let first_image = "The branch was pushed, but the pull request wasn't created because image-1.png didn't upload. Try again.\nx";
+        let kept = after_push_error(AppError::Gh(first_image.into()), AttachedWrite::PrCreate);
+        assert!(
+            matches!(&kept, AppError::Gh(m) if m == first_image),
+            "{kept:?}"
+        );
+        let timed_out =
+            || write_timed_out("GitHub", LandedWrite::CreatedAfterPush("pull request"), 150);
+        let kept = after_push_error(timed_out(), AttachedWrite::PrCreate);
+        assert_eq!(format!("{kept:?}"), format!("{:?}", timed_out()));
+        let kept = after_push_error(AppError::GhNotFound, AttachedWrite::PrCreate);
+        assert!(matches!(kept, AppError::GhNotFound), "{kept:?}");
+
+        let others = [
+            AttachedWrite::Create,
+            AttachedWrite::Post,
+            AttachedWrite::PrEdit,
+            AttachedWrite::IssueEdit,
+        ];
+        for write in others {
+            let rows = [
+                AppError::Gh("gh: denied".into()),
+                crate::attachments::no_longer_attached("image-1.png"),
+                AppError::Io(std::io::Error::other("x")),
+                AppError::Git {
+                    code: 128,
+                    stderr: "x".into(),
+                },
+                AppError::Timeout(120),
+                timed_out(),
+            ];
+            for e in rows {
+                let before = format!("{e:?}");
+                assert_eq!(
+                    format!("{:?}", after_push_error(e, write)),
+                    before,
+                    "{write:?}"
+                );
+            }
+        }
+    }
+
+    /// Every Err `run_gh_maybe_attached` returns leaves one block that `after_push_error`
+    /// maps once, so no exit skips the push lead.
+    #[test]
+    fn the_choke_point_maps_every_exit_after_the_push() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "run_gh_maybe_attached",
+        );
+        let flat = flat(&body);
+        let mapped = |flat: &str| {
+            let Some(map) = flat.find(".await .map_err(|e| after_push_error(e, write))") else {
+                return false;
+            };
+            flat.matches("after_push_error(").count() == 1
+                && flat.find("async {").is_some_and(|block| block < map)
+                && flat[map..]
+                    .trim_end()
+                    .ends_with("after_push_error(e, write))")
+        };
+        assert!(mapped(&flat), "{flat}");
+        let unmapped = flat.replacen(" .map_err(|e| after_push_error(e, write))", "", 1);
+        assert!(!mapped(&unmapped), "the control must flip");
+        let bypass = format!("{flat} fn x() {{ after_push_error(e, write) }}");
+        assert!(!mapped(&bypass), "a second mapper must flip");
+    }
+
+    const PUSH_ARGV: &str = "&[\"push\", \"-u\", \"origin\", &spec],";
+
+    /// Where the push call starting at `push` ends: just past its own `.await?;`.
+    fn after_push_call(flat: &str, push: usize) -> Option<usize> {
+        Some(flat[push..].find(".await?;")? + push + ".await?;".len())
+    }
+
+    /// The two post-push sections of `gh_pr_create_core`: the upstream arm from its push
+    /// call to its `return Ok(PrCreateOutcome`, and the origin arm from its push call to
+    /// the end. The origin arm's pre-push reads sit between the two and are not in either.
+    /// Each section's only `?` is the create's own `result?`, which `run_gh_maybe_attached`
+    /// has already led with the push fact; this guards a future fallible step there, which
+    /// would return its own kind, a `git` one included, without the lead.
+    fn post_push_returns_only_the_create(flat: &str) -> bool {
+        let pushes: Vec<usize> = flat.match_indices(PUSH_ARGV).map(|(i, _)| i).collect();
+        let [upstream, origin] = pushes[..] else {
+            return false;
+        };
+        let sections = after_push_call(flat, upstream).and_then(|start| {
+            let end = flat[start..].find("return Ok(PrCreateOutcome")? + start;
+            let rest = after_push_call(flat, origin)?;
+            (end < origin).then(|| [&flat[start..end], &flat[rest..]])
+        });
+        sections.is_some_and(|sections| {
+            sections
+                .iter()
+                .all(|s| s.matches('?').count() == 1 && s.contains("let out = result?;"))
+        })
+    }
+
+    #[test]
+    fn a_pr_create_returns_nothing_unled_after_either_push() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_create_core",
+        );
+        let flat = flat(&body);
+        assert!(post_push_returns_only_the_create(&flat), "{flat}");
+        for nth in [0, 1] {
+            let push = flat.match_indices(PUSH_ARGV).nth(nth).unwrap().0;
+            let at = after_push_call(&flat, push).unwrap();
+            let read = format!(
+                "{} repo_base(repo_path).await?;{}",
+                &flat[..at],
+                &flat[at..]
+            );
+            assert!(
+                !post_push_returns_only_the_create(&read),
+                "a read after push {nth} must flip"
+            );
+        }
+    }
+
+    /// Both `gh api` write helpers map their run's timeout to the generic hedge before the
+    /// exit check, once each; deleting either map must flip.
+    #[test]
+    fn the_gh_api_write_helpers_hedge_a_timeout() {
+        let source = include_str!("pr.rs");
+        let map =
+            "crate::forge::timed_out_write(e, \"GitHub\", crate::forge::LandedWrite::Changed)";
+        let holds = |body: &str, run: &str| {
+            body.matches("timed_out_write(").count() == 1
+                && body
+                    .find(run)
+                    .zip(body.find(map))
+                    .is_some_and(|(r, m)| r < m)
+                && body
+                    .find(map)
+                    .zip(body.find("gh_api_write_result("))
+                    .is_some_and(|(m, x)| m < x)
+        };
+        for (name, run) in [
+            ("run_gh_api_write", "run_gh_raw("),
+            ("run_gh_api_write_json", "run_gh_api_json("),
+        ] {
+            let body = crate::github::repo_meta::tests::wiring_body(source, name);
+            assert!(holds(&body, run), "{name}: {body}");
+            assert!(
+                !holds(&body.replace(map, "mapped(e)"), run),
+                "{name}: control"
+            );
+        }
     }
 
     /// The REST pull request edit maps its timeout once, after the write and after the
@@ -3499,22 +3735,24 @@ pub async fn edit_comment(repo_path: &str, comment_id: &str, body: &str) -> AppR
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
-    run_gh(
+    run_gh_input(
         Some(repo_path),
-        &[
-            "api",
-            "graphql",
-            "-f",
-            "query=mutation($id:ID!,$body:String!){updateIssueComment(input:{id:$id,body:$body}){issueComment{id}}}",
-            "-f",
-            &format!("id={comment_id}"),
-            "-f",
-            &format!("body={body}"),
-        ],
+        &GRAPHQL_INPUT_ARGS,
+        &id_body_input(EDIT_COMMENT_MUTATION, comment_id, body),
         GH_NETWORK_TIMEOUT,
     )
     .await?;
     Ok(())
+}
+
+const EDIT_COMMENT_MUTATION: &str = "mutation($id:ID!,$body:String!){updateIssueComment(input:{id:$id,body:$body}){issueComment{id}}}";
+
+const EDIT_REVIEW_COMMENT_MUTATION: &str = "mutation($id:ID!,$body:String!){updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:$body}){pullRequestReviewComment{id}}}";
+
+/// A GraphQL `{id, body}` write's stdin body; the text rides as a JSON variable, off
+/// gh's command line, byte-for-byte.
+fn id_body_input(document: &str, id: &str, body: &str) -> String {
+    graphql_input(document, serde_json::json!({ "id": id, "body": body }))
 }
 
 /// Permanently deletes a conversation comment by its GraphQL node id. Like
@@ -3545,18 +3783,10 @@ pub async fn edit_review_comment(repo_path: &str, comment_id: &str, body: &str) 
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a comment is required".into()));
     }
-    run_gh(
+    run_gh_input(
         Some(repo_path),
-        &[
-            "api",
-            "graphql",
-            "-f",
-            "query=mutation($id:ID!,$body:String!){updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:$body}){pullRequestReviewComment{id}}}",
-            "-f",
-            &format!("id={comment_id}"),
-            "-f",
-            &format!("body={body}"),
-        ],
+        &GRAPHQL_INPUT_ARGS,
+        &id_body_input(EDIT_REVIEW_COMMENT_MUTATION, comment_id, body),
         GH_NETWORK_TIMEOUT,
     )
     .await?;
@@ -5460,9 +5690,14 @@ fn gh_api_write_result(out: GhOutput) -> AppResult<String> {
     Ok(stdout)
 }
 
-/// Run a `gh api` WRITE whose fields ride argv.
+/// Run a `gh api` WRITE whose fields ride argv; a timeout is the generic may-have-landed
+/// hedge.
 async fn run_gh_api_write(repo_path: &str, args: &[&str]) -> AppResult<String> {
-    let out = run_gh_raw(Some(repo_path), args, GH_NETWORK_TIMEOUT).await?;
+    let out = run_gh_raw(Some(repo_path), args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     gh_api_write_result(out)
 }
 
@@ -5480,14 +5715,20 @@ pub(crate) async fn run_gh_api_json(
     run_gh_raw_in_dir(repo_path, cwd, &args, payload, GH_NETWORK_TIMEOUT).await
 }
 
-/// [`run_gh_api_json`] read as a write: both streams on failure.
+/// [`run_gh_api_json`] read as a write: both streams on failure, and a timeout as the
+/// generic may-have-landed hedge, which a caller with a noun re-leads.
 pub(crate) async fn run_gh_api_write_json(
     repo_path: &str,
     method: &str,
     endpoint: &str,
     payload: &str,
 ) -> AppResult<String> {
-    gh_api_write_result(run_gh_api_json(repo_path, method, endpoint, payload).await?)
+    let out = run_gh_api_json(repo_path, method, endpoint, payload)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
+    gh_api_write_result(out)
 }
 
 /// Updates a PR's title and body via the REST API, and its base branch when `base`
@@ -9451,23 +9692,17 @@ pub async fn gh_pr_reply_review_thread(
     if body.trim().is_empty() {
         return Err(AppError::InvalidArgument("a reply is required".into()));
     }
-    run_gh(
+    run_gh_input(
         Some(&repo_path),
-        &[
-            "api",
-            "graphql",
-            "-f",
-            "query=mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}",
-            "-f",
-            &format!("id={thread_id}"),
-            "-f",
-            &format!("body={body}"),
-        ],
+        &GRAPHQL_INPUT_ARGS,
+        &id_body_input(REPLY_THREAD_MUTATION, &thread_id, &body),
         GH_NETWORK_TIMEOUT,
     )
     .await?;
     Ok(())
 }
+
+const REPLY_THREAD_MUTATION: &str = "mutation($id:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){comment{id}}}";
 
 /// Resolves or unresolves a review thread by its GraphQL node id.
 pub async fn gh_pr_resolve_review_thread(
@@ -9863,6 +10098,7 @@ pub(crate) fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 
 #[cfg(test)]
 mod tests {
+    use super::hostile_input::hostile_text;
     use super::{
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async, escape_head_branch_path,
         external_items_from_thread_nodes, external_reviews_truncated, fallback_auth_outcome,
@@ -11959,6 +12195,142 @@ mod tests {
         assert!(write.contains("run_gh_api_json("), "{write}");
         assert!(write.contains("gh_api_write_result("), "{write}");
         assert!(!write.contains("gh_output_ok("), "{write}");
+    }
+
+    /// The three GraphQL edits send `{"query": DOC, "variables": {"id", "body"}}` on
+    /// stdin, text byte-for-byte.
+    #[test]
+    fn id_body_input_carries_the_text_as_a_variable() {
+        let text = hostile_text();
+        for doc in [
+            super::EDIT_COMMENT_MUTATION,
+            super::EDIT_REVIEW_COMMENT_MUTATION,
+            super::REPLY_THREAD_MUTATION,
+        ] {
+            assert!(doc.starts_with("mutation("), "{doc}");
+            let sent: serde_json::Value =
+                serde_json::from_str(&super::id_body_input(doc, "C_1", &text)).unwrap();
+            assert_eq!(
+                sent,
+                serde_json::json!({"query": doc, "variables": {"id": "C_1", "body": text}})
+            );
+        }
+    }
+
+    /// Each GraphQL edit sends its own mutation document, and each document names
+    /// the mutation its edit means.
+    #[test]
+    fn each_graphql_edit_sends_its_own_mutation() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("pr.rs");
+        let source = source.split("\nmod tests {").next().unwrap();
+        let docs = [
+            "EDIT_COMMENT_MUTATION",
+            "EDIT_REVIEW_COMMENT_MUTATION",
+            "REPLY_THREAD_MUTATION",
+        ];
+        let sends_only = |body: &str, own: &str| {
+            docs.iter()
+                .all(|d| body.contains(&format!("id_body_input({d},")) == (*d == own))
+        };
+        let rows = [
+            ("edit_comment", "EDIT_COMMENT_MUTATION"),
+            ("edit_review_comment", "EDIT_REVIEW_COMMENT_MUTATION"),
+            ("gh_pr_reply_review_thread", "REPLY_THREAD_MUTATION"),
+        ];
+        for (name, own) in rows {
+            let body = wiring_body(source, name);
+            assert!(sends_only(&body, own), "{name}: {body}");
+        }
+        let swapped = wiring_body(source, "edit_comment").replacen(
+            "EDIT_COMMENT_MUTATION",
+            "EDIT_REVIEW_COMMENT_MUTATION",
+            1,
+        );
+        assert!(
+            !sends_only(&swapped, "EDIT_COMMENT_MUTATION"),
+            "a swapped constant must flip"
+        );
+        assert!(super::EDIT_COMMENT_MUTATION.contains("{updateIssueComment("));
+        assert!(super::EDIT_REVIEW_COMMENT_MUTATION.contains("{updatePullRequestReviewComment("));
+        assert!(super::REPLY_THREAD_MUTATION.contains("{addPullRequestReviewThreadReply("));
+    }
+
+    /// Every GitHub GraphQL text write in this file sends one JSON body on stdin: no
+    /// `-f` field, no argv spawn, and no timeout map of its own (bare, as before).
+    #[test]
+    fn every_github_graphql_text_write_sends_one_json_body() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("pr.rs");
+        let source = source.split("\nmod tests {").next().unwrap();
+        let sends_json = |body: &str| {
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains("&GRAPHQL_INPUT_ARGS")
+                && flat.contains("run_gh_input(")
+                && !flat.contains("\"-f\"")
+                && !flat.contains("body=")
+                && !flat.contains("run_gh(")
+                && !flat.contains("timed_out_write(")
+        };
+        for name in [
+            "edit_comment",
+            "edit_review_comment",
+            "gh_pr_reply_review_thread",
+        ] {
+            let body = wiring_body(source, name);
+            assert!(sends_json(&body), "{name}: {body}");
+            let argv = format!(
+                "{body}\nrun_gh(Some(repo_path), &[\"-f\", &format!(\"body={{body}}\")], t)"
+            );
+            assert!(!sends_json(&argv), "{name}: an argv field must flip");
+        }
+    }
+
+    /// The porcelain text flag and the stdin text are decided in one place.
+    #[test]
+    fn text_flag_argv_adds_the_file_flag_only_with_text() {
+        let args = ["pr", "review", "7", "--comment", "--repo", "o/r"];
+        let text = hostile_text();
+        let argv = super::text_flag_argv(&args, "--body-file", &text);
+        assert_eq!(argv[..args.len()], args);
+        assert_eq!(argv[args.len()..], ["--body-file", "-"]);
+        assert_eq!(argv.iter().filter(|a| **a == "--body-file").count(), 1);
+        assert!(argv.iter().all(|a| !a.contains("dash")), "{argv:?}");
+        assert_eq!(super::text_flag_argv(&args, "--body-file", ""), args);
+
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("pr.rs");
+        let source = source.split("\nmod tests {").next().unwrap();
+        // Empty text runs the plain call; any other text takes the flag and stdin.
+        let one_choke_point = |body: &str| {
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains(
+                "if text.is_empty() { return run_gh(Some(repo_path), args, GH_NETWORK_TIMEOUT)\
+                 .await; } let argv = text_flag_argv(args, flag, text); \
+                 run_gh_input(Some(repo_path), &argv, text, GH_NETWORK_TIMEOUT).await",
+            )
+        };
+        let helper = wiring_body(source, "run_gh_text_write");
+        assert!(one_choke_point(&helper), "{helper}");
+        let bypass = helper.replacen("text_flag_argv(args, flag, text)", "args.to_vec()", 1);
+        assert!(!one_choke_point(&bypass), "a flagless stdin arm must flip");
+        let inverted = helper.replacen("if text.is_empty()", "if !text.is_empty()", 1);
+        assert!(!one_choke_point(&inverted), "an inverted guard must flip");
+
+        let on_stdin = |body: &str| {
+            let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+            flat.contains("run_gh_text_write(")
+                && flat.contains("\"--body-file\", body.trim())")
+                && !flat.contains("\"--body\"")
+                && !flat.contains("run_gh(")
+                && !flat.contains("timed_out_write(")
+        };
+        let review = wiring_body(source, "gh_pr_review");
+        assert!(on_stdin(&review), "{review}");
+        let argv = format!("{review}\nargs.push(\"--body\"); run_gh(Some(&repo_path), &args, t)");
+        assert!(!on_stdin(&argv), "an argv body must flip");
+        let untrimmed = review.replacen("body.trim()", "body", 1);
+        assert!(!on_stdin(&untrimmed), "an untrimmed body must flip");
     }
 
     /// gh puts only the top-level message on stderr and the REASON in the body's
@@ -16146,5 +16518,21 @@ mod checkout_source_tests {
             body.contains("gh_checkout_source_from(pr, lens, number)"),
             "{body}"
         );
+    }
+}
+
+/// Test fixture text shared by this file's and `discussion.rs`'s write pins.
+#[cfg(test)]
+pub(crate) mod hostile_input {
+    /// A 200,000-character multi-line text past every argv cap, carrying what a
+    /// command line or a shell would mangle: quotes, a backslash run before a quote,
+    /// CRLF, a 4-byte emoji, `%PATH%`, `& ^ |`, a leading `-`, a leading `@`, U+0000.
+    pub(crate) fn hostile_text() -> String {
+        let emoji = char::from_u32(0x1F600).unwrap();
+        let nul = char::from(0);
+        let line = format!("@at \"q\" \\\\\\\" %PATH% & ^ | {emoji} {nul} end\r\n");
+        let text = format!("-dash\n{}", line.repeat(200_000 / line.chars().count() + 1));
+        assert!(text.chars().count() > 200_000);
+        text
     }
 }

@@ -1,6 +1,28 @@
 import { mayHaveLanded, presentError } from "@/lib/error-summary";
 import { repoNameFromPath } from "@/lib/stores/notifications";
+import { isAppError } from "@/lib/tauri/invoke";
 import { emitNotification } from "./emit";
+
+/**
+ * Whether a create failed at pushing its head branch: every create route
+ * returns the push's own git error unwrapped and any later failure under a
+ * forge kind. A git-kind read before the push (the remote's URL, a config
+ * read) lands here too; nothing was pushed then either.
+ */
+export function createFailedAtPush(error: unknown): boolean {
+  return isAppError(error) && error.kind === "git";
+}
+
+/** The sentence a failed create's toast note and notification title share. */
+export function prCreateFailedSentence(
+  noun: string,
+  head: string,
+  error: unknown,
+): string {
+  return createFailedAtPush(error)
+    ? `Pushing ${head} failed, so the ${noun} wasn't created`
+    : `The ${noun} for ${head} wasn't created`;
+}
 
 /**
  * Announces a pull/merge request create that failed — inbox row plus an OS ping
@@ -27,7 +49,7 @@ export function notifyPrCreateFailed(input: {
   // reply) may exist on the forge, so the title doesn't deny it.
   const title = mayHaveLanded(error)
     ? `The ${noun} for ${head} may have been created`
-    : `The ${noun} for ${head} wasn't created`;
+    : prCreateFailedSentence(noun, head, error);
   emitNotification({
     source: "prCreate",
     row: {

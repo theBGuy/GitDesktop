@@ -359,7 +359,8 @@ describe("post copy helpers", () => {
     ).toBe(
       "Opened issue, but its number couldn't be read, so it wasn't linked to its parent issue. Finish that from the issue. Some of its details weren't applied.",
     );
-    // No skipped step: exactly the three-argument result, with or without a noun.
+    // No skipped step: exactly the three-argument result, its item named by
+    // the noun when one is given.
     const plain = createdWarning("pr", ["image-1.png"], "HTTP 422");
     expect(
       createdWarning("pr", ["image-1.png"], "HTTP 422", { skipped: [] }),
@@ -368,7 +369,9 @@ describe("post copy helpers", () => {
       createdWarning("pr", ["image-1.png"], "HTTP 422", {
         noun: "merge request",
       }),
-    ).toBe(plain);
+    ).toBe(
+      "Merge request created, but its labels and assignees weren't applied. Add them from the merge request. Also, image-1.png didn't upload. Edit the description to add it again.",
+    );
     expect(createdWarning("issue", [], null, { skipped: [] })).toBeNull();
   });
 

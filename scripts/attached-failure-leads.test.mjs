@@ -3,8 +3,9 @@
 // (src-tauri/src/github/pr.rs) must start with one of NOTHING_EXISTS_DISCLOSURES or
 // BRANCH_PUSHED_DISCLOSURE, or the summary rewrites it as a network failure;
 // `edit_body_dropped_text`'s must start with SAVED_DISCLOSURE_LEAD and carry the
-// saved-changes marker `otherChangesSaved` keys on; and every `write_timed_out`
-// sentence (src-tauri/src/forge/mod.rs) must read as `mayHaveLanded` while a bare
+// saved-changes marker `otherChangesSaved` keys on; and every `landed_lead`
+// sentence (src-tauri/src/forge/mod.rs), under `write_timed_out`'s CLI line and
+// `request_timed_out`'s transport line, must read as `mayHaveLanded` while a bare
 // `Timeout` (src-tauri/src/error.rs) must not. A one-sided rewording would
 // silently lose any of them.
 //
@@ -21,6 +22,8 @@ after(() => hooks.deregister());
 
 const {
   BRANCH_PUSHED_DISCLOSURE,
+  BRANCH_PUSHED_FAILED_LEAD,
+  isTransportError,
   mayHaveLanded,
   NOTHING_EXISTS_DISCLOSURES,
   otherChangesSaved,
@@ -31,6 +34,11 @@ const {
 const RUST = new URL("../src-tauri/src/github/pr.rs", import.meta.url);
 const FORGE = new URL("../src-tauri/src/forge/mod.rs", import.meta.url);
 const ERROR = new URL("../src-tauri/src/error.rs", import.meta.url);
+const GITLAB = new URL("../src-tauri/src/forge/gitlab.rs", import.meta.url);
+const BITBUCKET = new URL(
+  "../src-tauri/src/forge/bitbucket.rs",
+  import.meta.url,
+);
 const read = (url) => readFileSync(url, "utf8");
 
 /** A gh transport line the summary rewrites unless line one outranks it. */
@@ -117,33 +125,42 @@ function droppedMismatch(src) {
     : `no saved marker in ${JSON.stringify(line)}`;
 }
 
-const NOUNS = ["issue", "pull request", "merge request"];
+const NOUNS = ["issue", "pull request", "merge request", "repository"];
+const TIMEOUT_HOSTS = ["GitHub", "GitLab", "Bitbucket", "Jira"];
+/** A transport line 2, as `request_timed_out` receives it from a Bitbucket or Jira send. */
+const SENT_TIMEOUT = (host) =>
+  `${host} request failed: error sending request for url (https://api.example.test/x): request timed out`;
 
-/** Every two-line message `write_timed_out` can build, filled for both hosts and
- *  every noun, or the reason the source can't be read. */
-function timedOutMessages(src) {
+/** Every two-line message `landed_lead`'s arms can lead, under `write_timed_out`'s
+ *  CLI line (or, with `builder` "request_timed_out", that twin's transport line),
+ *  filled for every host and noun; or the reason the source can't be read. */
+function timedOutMessages(src, builder = "write_timed_out") {
   const enumBody = src.match(/enum LandedWrite \{([^}]*)\}/);
   if (enumBody === null) return "enum LandedWrite not found";
   const variants = [...enumBody[1].matchAll(/^\s*(\w+)(?:\(|,)/gm)].map(
     (m) => m[1],
   );
   if (variants.length === 0) return "no LandedWrite variants read";
-  const body = fnBody(src, "write_timed_out");
-  if (body === null) return "write_timed_out not found exactly once";
+  const body = fnBody(src, "landed_lead");
+  if (body === null) return "landed_lead not found exactly once";
+  const twin = fnBody(src, builder);
+  if (twin === null) return `${builder} not found exactly once`;
+  if (!twin.includes("landed_lead(host, write)"))
+    return `${builder} doesn't lead with landed_lead`;
   const arms = [
     ...body.matchAll(
       /LandedWrite::(\w+)(?:\(\w+\))? => format!\(\s*"((?:[^"\\]|\\.)*)"/g,
     ),
   ].map((m) => [m[1], m[2]]);
-  if (arms.length < variants.length)
+  if (arms.length !== variants.length)
     return `read ${arms.length} sentences for ${variants.length} variants`;
-  const joined = body.match(
+  const joined = twin.match(
     /WriteTimedOut\(format!\(\s*"((?:[^"\\]|\\.)*)"\)\)/,
   );
   if (joined === null) return "no two-line WriteTimedOut literal";
   const messages = [];
   for (const [variant, sentence] of arms) {
-    for (const host of ["GitHub", "GitLab"]) {
+    for (const host of TIMEOUT_HOSTS) {
       for (const noun of NOUNS) {
         const line1 = sentence
           .replaceAll("{host}", host)
@@ -152,6 +169,7 @@ function timedOutMessages(src) {
           .replace("{lead}", line1)
           .replaceAll("{host}", host)
           .replace("{seconds}", "150")
+          .replace("{detail}", SENT_TIMEOUT(host))
           .replace("\\n", "\n");
         if (/[{}\\]/.test(message))
           return `${variant}: a placeholder or escape this pin can't fill`;
@@ -162,18 +180,25 @@ function timedOutMessages(src) {
   return messages;
 }
 
-/** Null when every `write_timed_out` message reads as may-have-landed under
- *  `predicate` and presents as "Timed out" with line one as its summary. */
+/** Null when every landed message, under both builders, reads as may-have-landed
+ *  under `predicate` and presents as "Timed out" with line one as its summary; a
+ *  transport line 2 also stays a transport error. */
 function timedOutMismatch(src, predicate = mayHaveLanded) {
-  const messages = timedOutMessages(src);
-  if (typeof messages === "string") return messages;
-  for (const [variant, line1, message] of messages) {
-    if (message.split("\n").length !== 2) return `${variant}: not two lines`;
-    const error = { kind: "timeout", message };
-    if (!predicate(error)) return `${variant}: not may-have-landed`;
-    const p = presentError(error);
-    if (p.label !== "Timed out") return `${variant}: label ${p.label}`;
-    if (p.summary !== line1) return `${variant}: summary ${p.summary}`;
+  for (const builder of ["write_timed_out", "request_timed_out"]) {
+    const messages = timedOutMessages(src, builder);
+    if (typeof messages === "string") return messages;
+    for (const [variant, line1, message] of messages) {
+      if (message.split("\n").length !== 2)
+        return `${builder} ${variant}: not two lines`;
+      const error = { kind: "timeout", message };
+      if (!predicate(error))
+        return `${builder} ${variant}: not may-have-landed`;
+      const p = presentError(error);
+      if (p.label !== "Timed out") return `${variant}: label ${p.label}`;
+      if (p.summary !== line1) return `${variant}: summary ${p.summary}`;
+      if (builder === "request_timed_out" && !isTransportError(error))
+        return `${variant}: the transport line 2 isn't a transport error`;
+    }
   }
   return null;
 }
@@ -210,8 +235,18 @@ function unreadReplyMessages(forgeSrc, errorSrc) {
   if (leads.length !== 1) return `read ${leads.length} push leads, want 1`;
   const lead = leads[0][1];
   if (body.match(/format!\(/g)?.length !== 1) return "want one format! call";
-  const template = formatLiteral(body);
-  if (template === null) return "no format! literal";
+  const literal = formatLiteral(body);
+  if (literal === null) return "no format! literal";
+  // The text after `{host}` is a const every unread-reply builder shares; fill it from
+  // its one definition.
+  const consts = [
+    ...forgeSrc.matchAll(
+      /const UNREAD_REPLY_LEAD: &str =\s*"((?:[^"\\]|\\.)*)";/g,
+    ),
+  ];
+  if (consts.length !== 1)
+    return `read ${consts.length} UNREAD_REPLY_LEAD, want 1`;
+  const template = literal.replaceAll("{UNREAD_REPLY_LEAD}", consts[0][1]);
   const messages = [];
   for (const [, provider, host] of hosts) {
     const variant = variants.get(provider);
@@ -258,6 +293,52 @@ function unreadReplyMismatch(forgeSrc, errorSrc, predicate = mayHaveLanded) {
   return null;
 }
 
+const JIRA_NOUNS = ["issue", "comment", "worklog"];
+
+/** Null when `jira_reply_unreadable`'s literal is `created_reply_unreadable`'s
+ *  template with no push lead and host Jira, rides kind `jira`, and each noun's
+ *  sentence reads as may-have-landed only under that kind (labelled "Jira error",
+ *  the whole sentence its summary). */
+function jiraReplyMismatch(forgeSrc, errorSrc, predicate = mayHaveLanded) {
+  const read = unreadReplyMessages(forgeSrc, errorSrc);
+  if (typeof read === "string") return read;
+  const body = fnBody(forgeSrc, "jira_reply_unreadable");
+  if (body === null) return "jira_reply_unreadable not found exactly once";
+  if (body.match(/format!\(/g)?.length !== 1) return "want one format! call";
+  if (body.match(/AppError::\w+\(/g)?.join() !== "AppError::Jira(")
+    return "want the one variant AppError::Jira";
+  const literal = formatLiteral(body);
+  if (literal === null) return "no format! literal";
+  const consts = [
+    ...forgeSrc.matchAll(
+      /const UNREAD_REPLY_LEAD: &str =\s*"((?:[^"\\]|\\.)*)";/g,
+    ),
+  ];
+  if (consts.length !== 1)
+    return `read ${consts.length} UNREAD_REPLY_LEAD, want 1`;
+  const jira = literal.replaceAll("{UNREAD_REPLY_LEAD}", consts[0][1]);
+  const want = read.template
+    .replaceAll("{pushed}", "")
+    .replaceAll("{host}", "Jira");
+  if (jira !== want)
+    return `literal ${JSON.stringify(jira)}, want ${JSON.stringify(want)}`;
+  const kinds = [...errorSrc.matchAll(/AppError::Jira\(_\) => "(\w+)"/g)];
+  if (kinds.length !== 1) return `Jira: ${kinds.length} kind arms`;
+  const kind = kinds[0][1];
+  for (const noun of JIRA_NOUNS) {
+    const message = jira.replaceAll("{noun}", noun);
+    if (/[{}\\\n]/.test(message)) return "a placeholder, escape or line break";
+    if (!predicate({ kind, message })) return `${noun}: not may-have-landed`;
+    const p = presentError({ kind, message });
+    if (p.label !== "Jira error") return `${noun}: label ${p.label}`;
+    if (p.summary !== message) return `${noun}: summary ${p.summary}`;
+    for (const other of ["gh", "glab", "bitbucket", "git"])
+      if (predicate({ kind: other, message }))
+        return `${noun}: may-have-landed under ${other}`;
+  }
+  return null;
+}
+
 const HEDGE = (host, noun = "issue") =>
   `${host} accepted the request but its reply couldn't be read, so the ${noun} may already exist. Check before creating it again.`;
 const EMPTY_TIMEOUT = { kind: "timeout", message: "" };
@@ -283,8 +364,10 @@ const NOT_LANDED = [
   CAPITAL_TIMEOUT,
   GITHUB_HEDGE_AS_GLAB,
   { kind: "gh", message: HEDGE("GitLab") },
-  { kind: "jira", message: HEDGE("Jira") },
+  { kind: "jira", message: HEDGE("GitHub") },
   { kind: "git", message: HEDGE("GitHub") },
+  { kind: "git", message: HEDGE("Jira") },
+  { kind: "gh", message: HEDGE("Jira") },
   { kind: "gh", message: `Error: ${HEDGE("GitHub")}` },
   { kind: "bitbucket", message: "The branch was pushed. " },
   {
@@ -352,8 +435,12 @@ test("edit_body_dropped_text's sentence leads with the TS lead and carries the s
 test("every write_timed_out sentence reads as may-have-landed and presents as Timed out", () => {
   const src = read(FORGE);
   assert.equal(timedOutMismatch(src), null);
-  const messages = timedOutMessages(src);
-  assert.ok(Array.isArray(messages) && messages.length >= 4 * 2 * 3);
+  // Five LandedWrite arms, four hosts, four nouns, per builder.
+  for (const builder of ["write_timed_out", "request_timed_out"]) {
+    const messages = timedOutMessages(src, builder);
+    assert.ok(Array.isArray(messages), String(messages));
+    assert.equal(messages.length, 5 * 4 * 4);
+  }
   assert.equal(falseRowsMismatch(), null);
   assert.equal(bareTimeoutMismatch(read(ERROR)), null);
 });
@@ -418,6 +505,19 @@ test("the may-have-landed pins fail on a mutated sentence or predicate", () => {
       forge.replace("fn write_timed_out(", () => "fn timed_out("),
     ],
     [
+      "a renamed twin",
+      forge.replace("fn request_timed_out(", () => "fn request_timeout("),
+    ],
+    [
+      "a twin off the shared lead",
+      (() => {
+        const b = fnBody(forge, "request_timed_out");
+        return forge.replace(b, () =>
+          b.replace("landed_lead(host, write)", "other_lead(host, write)"),
+        );
+      })(),
+    ],
+    [
       "an arm the reader can't see",
       forge.replace(
         "LandedWrite::Posted => format!(",
@@ -474,10 +574,15 @@ test("the unread-reply pin fails on a mutated sentence, source or predicate", ()
   const sourceMutants = [
     [
       "a reworded sentence",
-      swap(
-        "couldn't be read, so the {noun}",
-        "could not be read, so the {noun}",
-      ),
+      swap("couldn't be read, so the \";", 'could not be read, so the ";'),
+    ],
+    [
+      "a second shared lead",
+      `${forge}\nconst UNREAD_REPLY_LEAD: &str = "x";\n`,
+    ],
+    [
+      "the shared lead dropped from the literal",
+      swap("{host}{UNREAD_REPLY_LEAD}{noun}", "{host} {noun}"),
     ],
     [
       "a reworded lead",
@@ -561,4 +666,379 @@ test("the unread-reply pin fails on a mutated sentence, source or predicate", ()
   );
   // The timed-out messages stay may-have-landed and "Timed out" under the change.
   assert.equal(timedOutMismatch(forge), null);
+});
+
+/** Each after-push wrap: its kind, source, mapper, the literal's cause
+ *  placeholder, the noun, and a transport failure in that route's own shape (gh
+ *  and glab put it on line two, Bitbucket's wrap is one line). */
+const PUSH_WRAPS = [
+  {
+    kind: "gh",
+    url: RUST,
+    name: "after_push_error",
+    placeholder: "{detail}",
+    noun: "pull request",
+    transport: (wrap) => `${wrap("gh: request failed")}\n${TRANSPORT_TAIL}`,
+  },
+  {
+    kind: "glab",
+    url: GITLAB,
+    name: "mr_post_error",
+    placeholder: "{detail}",
+    noun: "merge request",
+    transport: (wrap) =>
+      `${wrap("glab: request failed")}\nPost "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests": dial tcp: lookup gitlab.com: no such host`,
+  },
+  {
+    kind: "bitbucket",
+    url: BITBUCKET,
+    name: "pr_post_error",
+    placeholder: "{detail}",
+    noun: "pull request",
+    transport: (wrap) =>
+      wrap(
+        "Bitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/repositories/w/r/pullrequests): connection failed",
+      ),
+  },
+];
+
+const HOSTS = { gh: "GitHub", glab: "GitLab", bitbucket: "Bitbucket" };
+
+/** Causes the network rewrite must leave alone: an answered status or a limit. */
+const VERDICT_CAUSES = [
+  "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+  "HTTP 403: Resource not accessible by integration",
+  "HTTP 429: Too Many Requests",
+  "API rate limit exceeded for user ID 1.",
+];
+
+/** Per route, a function filling the Rust wrap literal with a cause, or the
+ *  reason the source can't be read. */
+function pushWraps(sources) {
+  const wraps = [];
+  for (const route of PUSH_WRAPS) {
+    const body = fnBody(sources[route.kind], route.name);
+    if (body === null) return `${route.name} not found exactly once`;
+    if (body.match(/format!\(/g)?.length !== 1)
+      return `${route.name}: want one format! call`;
+    const literal = formatLiteral(body);
+    if (literal === null) return `${route.name}: no format! literal`;
+    if (literal.split(route.placeholder).length !== 2)
+      return `${route.name}: want one ${route.placeholder}`;
+    const wrap = (cause) => literal.replace(route.placeholder, () => cause);
+    if (/[{}\\]/.test(wrap("x")))
+      return `${route.name}: a placeholder or escape this pin can't fill`;
+    wraps.push({ ...route, wrap });
+  }
+  return wraps;
+}
+
+/** Null when every after-push wrap leads with BRANCH_PUSHED_FAILED_LEAD, stays
+ *  the summary over an app-side cause and a verdict cause, composes the lead
+ *  with the network sentence over a transport cause, and never reads as
+ *  may-have-landed; otherwise the reason the pin fails. */
+function pushWrapMismatch(sources) {
+  const wraps = pushWraps(sources);
+  if (typeof wraps === "string") return wraps;
+  for (const { kind, name, noun, transport, wrap } of wraps) {
+    const lead = `${BRANCH_PUSHED_FAILED_LEAD}${noun} failed: `;
+    const plain = wrap("source branch not found");
+    if (plain !== `${lead}source branch not found`)
+      return `${name}: ${JSON.stringify(plain)} doesn't lead with the TS lead`;
+    const network = `Couldn't reach ${HOSTS[kind]} — check your network connection.`;
+    const message = transport(wrap);
+    const rows = [
+      [plain, plain],
+      [message, `${lead}${network}`],
+      ...VERDICT_CAUSES.map((cause) => [
+        kind === "bitbucket"
+          ? wrap(cause)
+          : `${wrap(cause)}\n${TRANSPORT_TAIL}`,
+        wrap(cause),
+      ]),
+    ];
+    for (const [text, want] of rows) {
+      const error = { kind, message: text };
+      const p = presentError(error);
+      if (p.summary !== want)
+        return `${name}: summary ${JSON.stringify(p.summary)} for ${JSON.stringify(text)}`;
+      if (p.fullText !== text) return `${name}: fullText ${p.fullText}`;
+      if (mayHaveLanded(error)) return `${name}: read as may-have-landed`;
+    }
+    if (!presentError({ kind, message }).long)
+      return `${name}: the raw transport text isn't behind Details`;
+    // The same composed line under a kind the rule doesn't own is not claimed.
+    for (const other of ["jira", "git"])
+      if (
+        presentError({ kind: other, message }).summary === `${lead}${network}`
+      )
+        return `${name}: claimed under kind ${other}`;
+  }
+  return null;
+}
+
+const pushSources = () => ({
+  gh: read(RUST),
+  glab: read(GITLAB),
+  bitbucket: read(BITBUCKET),
+});
+
+test("jira_reply_unreadable is the shared template under kind jira, may-have-landed only there", () => {
+  const forge = read(FORGE);
+  const errorSrc = read(ERROR);
+  assert.equal(jiraReplyMismatch(forge, errorSrc), null);
+  assert.equal(
+    mayHaveLanded({ kind: "jira", message: HEDGE("Jira", "worklog") }),
+    true,
+  );
+  assert.equal(falseRowsMismatch(), null);
+});
+
+test("the Jira pin fails on a mutated literal, variant or predicate", () => {
+  const forge = read(FORGE);
+  const errorSrc = read(ERROR);
+  const swap = (from, to) => {
+    assert.ok(forge.includes(from), `missing: ${from}`);
+    return forge.replace(from, () => to);
+  };
+  const mutants = [
+    [
+      "a reworded literal",
+      swap('"Jira{UNREAD_REPLY_LEAD}{noun} may', '"Jira {noun} may'),
+    ],
+    [
+      "a push lead",
+      swap(
+        '"Jira{UNREAD_REPLY_LEAD}',
+        '"The branch was pushed. Jira{UNREAD_REPLY_LEAD}',
+      ),
+    ],
+    [
+      "a swapped variant",
+      swap("AppError::Jira(format!(", "AppError::Gh(format!("),
+    ],
+    ["a renamed fn", swap("fn jira_reply_unreadable(", "fn jira_unread(")],
+    ["a duplicated fn", `${forge}\nfn jira_reply_unreadable() {\n}\n`],
+  ];
+  for (const [name, mutant] of mutants) {
+    assert.notEqual(mutant, forge, `${name}: changed nothing`);
+    assert.notEqual(
+      jiraReplyMismatch(mutant, errorSrc),
+      null,
+      `mutant passed: ${name}`,
+    );
+  }
+  // A predicate without the Jira host, and one that ignores the kind.
+  const noJira = (e) => mayHaveLanded(e) && e.kind !== "jira";
+  assert.match(
+    jiraReplyMismatch(forge, errorSrc, noJira) ?? "",
+    /not may-have-landed/,
+  );
+  const anyKind = (e) =>
+    mayHaveLanded(e) || mayHaveLanded({ kind: "jira", message: e?.message });
+  assert.match(jiraReplyMismatch(forge, errorSrc, anyKind) ?? "", /under gh/);
+  assert.notEqual(
+    falseRowsMismatch(
+      (e) =>
+        mayHaveLanded(e) ||
+        (e?.kind === "jira" && e.message.includes("so the")),
+    ),
+    null,
+  );
+});
+
+test("the after-push wraps lead with the TS lead and compose with the network sentence", () => {
+  const sources = pushSources();
+  assert.equal(pushWrapMismatch(sources), null);
+  const wraps = pushWraps(sources);
+  assert.ok(Array.isArray(wraps));
+  assert.deepEqual(
+    wraps.map(({ kind, wrap }) => [kind, wrap("x")]),
+    [
+      ["gh", "The branch was pushed, but creating the pull request failed: x"],
+      [
+        "glab",
+        "The branch was pushed, but creating the merge request failed: x",
+      ],
+      [
+        "bitbucket",
+        "The branch was pushed, but creating the pull request failed: x",
+      ],
+    ],
+  );
+  // No ` failed: ` past the lead leaves nothing to replace, so the line stands.
+  const odd = `${BRANCH_PUSHED_FAILED_LEAD}pull request broke`;
+  assert.equal(
+    presentError({ kind: "gh", message: `${odd}\n${TRANSPORT_TAIL}` }).summary,
+    odd,
+  );
+});
+
+test("the after-push pin fails on a reworded, renamed or duplicated Rust source", () => {
+  const sources = pushSources();
+  // Each mutation lands inside the mapper's own body, never on a test's copy.
+  const mutate = (kind, name, from, to) => {
+    const body = fnBody(sources[kind], name);
+    assert.ok(body?.includes(from), `missing in ${name}: ${from}`);
+    const mutated = body.replace(from, () => to);
+    return { ...sources, [kind]: sources[kind].replace(body, () => mutated) };
+  };
+  const mutants = [
+    [
+      "a reworded GitHub lead",
+      mutate(
+        "gh",
+        "after_push_error",
+        '"The branch was pushed, but',
+        '"The branch was pushed but',
+      ),
+    ],
+    [
+      "a reworded GitLab noun",
+      mutate("glab", "mr_post_error", "the merge request", "the MR"),
+    ],
+    [
+      "a dropped Bitbucket cause separator",
+      mutate(
+        "bitbucket",
+        "pr_post_error",
+        "failed: {detail}",
+        "failed {detail}",
+      ),
+    ],
+    [
+      "a renamed fn",
+      mutate("glab", "mr_post_error", "fn mr_post_error(", "fn post_error("),
+    ],
+    [
+      "a duplicated fn",
+      {
+        ...sources,
+        bitbucket: `${sources.bitbucket}\nfn pr_post_error() {\n}\n`,
+      },
+    ],
+    [
+      "the literal moved off format!",
+      mutate(
+        "gh",
+        "after_push_error",
+        "AppError::Gh(format!(",
+        "AppError::Gh(concat!(",
+      ),
+    ],
+  ];
+  for (const [label, mutant] of mutants)
+    assert.notEqual(pushWrapMismatch(mutant), null, `mutant passed: ${label}`);
+});
+
+// Bitbucket's compound review wraps (request_changes_pr, review_submit in
+// src-tauri/src/forge/bitbucket.rs) embed a step's error after their partial-state
+// line. A timed-out step makes the message two lines, so line one, disclosure
+// included, must stay the summary over the transport line beneath it.
+const BB_TIMED_OUT =
+  "Bitbucket didn't answer in time, so your change may still have gone through. Check before trying again.\nBitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/repositories/ws/app/pullrequests/1/comments): request timed out";
+const BB_UNREAD = (noun) =>
+  `Bitbucket accepted the request but its reply couldn't be read, so the ${noun} may already exist. Check before creating it again.`;
+/** The one `format!` literal in `body` holding `marker`, its line continuations
+ *  joined, or null when not exactly one does. */
+function wrapLiteral(body, marker) {
+  const all = [...body.matchAll(/format!\(\s*"((?:[^"\\]|\\[\s\S])*)"/g)]
+    .map((m) => m[1].replace(/\\\r?\n\s*/g, ""))
+    .filter((l) => l.includes(marker));
+  return all.length === 1 ? all[0] : null;
+}
+
+/** `paren_parts`' split: line one inside the parentheses, the rest after them. */
+function parenFill(literal, e) {
+  const cut = e.indexOf("\n");
+  const [first, rest] = cut === -1 ? [e, ""] : [e.slice(0, cut), e.slice(cut)];
+  return literal.replace("({first}){rest}", () => `(${first})${rest}`);
+}
+
+/** `[wrap, noun]` per compound wrap, each filling its Rust literal the way the
+ *  wrap embeds the error (noun: the create a reply hedge names, null for the
+ *  verdict), or the reason the source can't be read. */
+function bbWraps(src) {
+  const changes = fnBody(src, "request_changes_pr");
+  const review = fnBody(src, "review_submit");
+  if (changes === null || review === null) return "a wrap fn not found exactly once";
+  const rows = [
+    [changes, "Changes were requested, but posting the comment failed", "{e}", "comment"],
+    [review, "The review summary couldn't be posted", "{e}", "review summary"],
+    [review, "review comments before the failure", "({first}){rest}", "review comment"],
+    [review, "The review was posted, but the {action} step failed", "({first}){rest}", null],
+  ];
+  const landed = wrapLiteral(review, "were already posted successfully");
+  if (landed === null) return "no landed literal";
+  const wraps = [];
+  for (const [body, marker, token, noun] of rows) {
+    const literal = wrapLiteral(body, marker);
+    if (literal === null) return `no single literal holding ${marker}`;
+    if (literal.split(token).length !== 2) return `${marker}: want one ${token}`;
+    const filled = literal
+      .replace("Posted {} of {}", "Posted 2 of 3")
+      .replaceAll("{action}", "approve")
+      .replace("{landed}", () => landed.replace("{n}", "3"));
+    const wrap = (e) =>
+      token === "{e}" ? filled.replace(token, () => e) : parenFill(filled, e);
+    if (/[{}\\]/.test(wrap("x")))
+      return `${marker}: a placeholder or escape this pin can't fill`;
+    wraps.push([wrap, noun]);
+  }
+  return wraps;
+}
+
+/** Whether every `(` in `line` closes on it. */
+function balanced(line) {
+  let depth = 0;
+  for (const c of line) {
+    depth += c === "(" ? 1 : c === ")" ? -1 : 0;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
+}
+
+/** Null when each wrap keeps its partial-state line one as the summary, closes its
+ *  parentheses on that line, and embeds every error's first line; otherwise the
+ *  reason the pin fails. */
+function bbWrapMismatch(src) {
+  const wraps = bbWraps(src);
+  if (typeof wraps === "string") return wraps;
+  for (const [wrap, noun] of wraps) {
+    const embedded = noun === null ? [BB_TIMED_OUT] : [BB_TIMED_OUT, BB_UNREAD(noun)];
+    for (const e of embedded) {
+      const message = wrap(e);
+      const line1 = message.split("\n")[0];
+      if (!line1.includes(e.split("\n")[0])) return `not embedded: ${message}`;
+      if (!balanced(line1)) return `line one leaves a parenthesis open: ${line1}`;
+      const summary = presentError({ kind: "bitbucket", message }).summary;
+      if (summary !== line1) return `summary ${JSON.stringify(summary)} for ${message}`;
+    }
+  }
+  return null;
+}
+
+test("Bitbucket's compound review wraps keep their partial-state line as the summary", () => {
+  const src = read(BITBUCKET);
+  assert.equal(bbWrapMismatch(src), null);
+  const wraps = bbWraps(src);
+  // A one-line error sits inside the parentheses, as the wrap always set it.
+  assert.ok(wraps[2][0]("boom").endsWith(" retrying. (boom)"), wraps[2][0]("boom"));
+  // Controls: a reworded literal, the old in-parentheses shape, a dropped error.
+  const mutants = [
+    ["close after the rest", src.replace("retrying. ({first}){rest}", "retrying. ({first}{rest})")],
+    ["the error inside", src.replace("on Bitbucket. ({first}){rest}", "on Bitbucket. ({e})")],
+    ["dropped error", src.replace("posting the comment failed: {e}", "posting the comment failed")],
+  ];
+  for (const [label, mutant] of mutants) {
+    assert.notEqual(mutant, src, label);
+    assert.notEqual(bbWrapMismatch(mutant), null, `mutant passed: ${label}`);
+  }
+  // The rewrite this guards against is live for a one-line transport cause.
+  const [wrap] = wraps[0];
+  const raw = BB_TIMED_OUT.split("\n")[1];
+  assert.equal(
+    presentError({ kind: "bitbucket", message: wrap(raw) }).summary,
+    "Couldn't reach Bitbucket — check your network connection.",
+  );
 });

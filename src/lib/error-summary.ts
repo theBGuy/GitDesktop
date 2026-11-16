@@ -745,27 +745,62 @@ function nothingExistsDisclosure(
     : null;
 }
 
-/** Rust's `created_reply_unreadable` sentence after its host, and the lead a
- *  create that pushed its branch first puts before it. Module-private: callers
- *  ask `mayHaveLanded`, never match the text. */
+/** New pull request or merge request failed after its branch was pushed
+ *  (`after_push_error` in github/pr.rs, `mr_post_error` in forge/gitlab.rs,
+ *  `pr_post_error` in forge/bitbucket.rs; keep in step). The push fact decides
+ *  the retry, so the line outranks the network rewrite, which instead replaces
+ *  only the cause after ` failed: `. */
+export const BRANCH_PUSHED_FAILED_LEAD =
+  "The branch was pushed, but creating the ";
+const BRANCH_PUSHED_FAILED_KINDS: ReadonlySet<AppError["kind"]> = new Set([
+  "gh",
+  "glab",
+  "bitbucket",
+]);
+const BRANCH_PUSHED_FAILED_CAUSE = " failed: ";
+
+function branchPushedFailure(
+  kind: AppError["kind"],
+  message: string,
+  network: string | null,
+): string | null {
+  if (!BRANCH_PUSHED_FAILED_KINDS.has(kind)) return null;
+  const headline = firstMeaningfulLine(message);
+  if (!headline.startsWith(BRANCH_PUSHED_FAILED_LEAD)) return null;
+  if (network === null) return headline;
+  const cause = headline.indexOf(
+    BRANCH_PUSHED_FAILED_CAUSE,
+    BRANCH_PUSHED_FAILED_LEAD.length,
+  );
+  return cause === -1
+    ? headline
+    : `${headline.slice(0, cause + BRANCH_PUSHED_FAILED_CAUSE.length)}${network}`;
+}
+
+/** Rust's unread-reply sentence after its host (`UNREAD_REPLY_LEAD` in
+ *  forge/mod.rs), and the lead a create that pushed its branch first puts before
+ *  it. Module-private: callers ask `mayHaveLanded`, never match the text. */
 const UNREAD_REPLY_LEAD =
   " accepted the request but its reply couldn't be read, so the ";
 const UNREAD_REPLY_PUSHED = "The branch was pushed. ";
 
-/** The forge kinds whose creates can answer with an unreadable reply. */
+/** The kinds whose creates can answer with an unreadable reply: the three
+ *  forges (`created_reply_unreadable`) and Jira (`jira_reply_unreadable`). */
 const UNREAD_REPLY_HOSTS: Partial<Record<AppError["kind"], string>> = {
   gh: FORGE_KIND_HOSTS.gh,
   glab: FORGE_KIND_HOSTS.glab,
   bitbucket: FORGE_KIND_HOSTS.bitbucket,
+  jira: FORGE_KIND_HOSTS.jira,
 };
 
-/** Whether an error's forge write may have reached the forge: a GitHub or
- *  GitLab create, edit or comment write that timed out (`AppError::WriteTimedOut`
- *  from `write_timed_out`, kind `timeout`, told from a bare timeout by the bare
- *  one's Rust lead), or a GitHub, GitLab or Bitbucket create the forge accepted
- *  whose reply couldn't be read (`created_reply_unreadable`, under that forge's
- *  own kind and host). False for every other error, a bare timeout included.
- *  Both producers are pinned by scripts/attached-failure-leads.test.mjs. */
+/** Whether an error's write may have reached the forge: a write that timed out
+ *  after it was sent (`AppError::WriteTimedOut` from `write_timed_out` or
+ *  `request_timed_out`, kind `timeout`, told from a bare timeout by the bare
+ *  one's Rust lead), or a GitHub, GitLab, Bitbucket or Jira create the forge
+ *  accepted whose reply couldn't be read (`created_reply_unreadable` or
+ *  `jira_reply_unreadable`, under that host's own kind). False for every other
+ *  error, a bare timeout included. Both producers are pinned by
+ *  scripts/attached-failure-leads.test.mjs. */
 export function mayHaveLanded(error: unknown): boolean {
   if (!isAppError(error)) return false;
   const message = error.message ?? "";
@@ -1044,6 +1079,7 @@ export function presentError(e: unknown): ErrorPresentation {
       createdDisclosure(e.kind, message) ??
       savedDisclosure(e.kind, message) ??
       nothingExistsDisclosure(e.kind, message) ??
+      branchPushedFailure(e.kind, message, network) ??
       longPathSummary(combined) ??
       (isConflict
         ? conflictSummary(combined)
@@ -1053,10 +1089,10 @@ export function presentError(e: unknown): ErrorPresentation {
           (firstMeaningfulLine(displayRegister(e.kind, message)) || label)));
 
     const distinctStderr = stderr !== "" && !message.includes(stderr);
-    // A network rewrite replaces even a one-line message, so the raw text is
-    // reachable only through Details.
+    // A network rewrite replaces even a one-line message (whole, or after a
+    // push lead), so the raw text is reachable only through Details.
     const long =
-      (network !== null && summary === network) ||
+      (network !== null && summary.endsWith(network)) ||
       nonEmptyLineCount(message) > 1 ||
       distinctStderr ||
       fullText.length > 140;

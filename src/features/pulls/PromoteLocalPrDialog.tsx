@@ -18,7 +18,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { createdNumberOf } from "@/lib/attachments/references";
-import { mayHaveLanded, presentError } from "@/lib/error-summary";
+import {
+  BRANCH_PUSHED_FAILED_LEAD,
+  mayHaveLanded,
+  presentError,
+} from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
 import { useBranches, useCreatePr, useForgeStatus } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
@@ -353,16 +357,20 @@ export function PromoteLocalPrDialog({
           reopenError = err;
         }
         if (reopenError === null) toastError(e);
-        else
+        else {
+          // A pushed-branch line already says the create failed.
+          const { summary } = presentError(e);
           toastComposedError({
-            title: mayHaveLanded(e)
-              ? presentError(e).summary
-              : `Couldn't create the ${prNoun}: ${presentError(e).summary}`,
+            title:
+              mayHaveLanded(e) || summary.startsWith(BRANCH_PUSHED_FAILED_LEAD)
+                ? summary
+                : `Couldn't create the ${prNoun}: ${summary}`,
             description:
               "The local PR couldn't be reopened — reopen it from its view.",
             errors: [e, reopenError],
             headings: [`Creating the ${prNoun}`, "Reopening the local PR"],
           });
+        }
         // The toast fades in seconds; this outlives it for a user who moved on.
         notifyPrCreateFailed({
           repoPath,

@@ -21,18 +21,31 @@ export function partialCommentNotice(failed: readonly string[]): string {
 }
 
 /** What a create or edit wrote. The default nouns are GitHub's; a caller whose
- *  forge names the item differently passes its own noun to `createdWarning`. */
+ *  forge names the item differently passes its own lower-case noun. */
 export type ItemKind = "issue" | "pr";
 
 const ITEM_NOUN: Record<ItemKind, string> = {
-  issue: "Issue",
-  pr: "Pull request",
+  issue: "issue",
+  pr: "pull request",
 };
 
-const FOLLOWUP_WARNING: Record<ItemKind, string> = {
-  issue:
+/** `noun`, or `kind`'s default, with its first letter upper-cased to open a
+ *  sentence. */
+function sentenceNoun(kind: ItemKind, noun?: string): string {
+  const word = noun ?? ITEM_NOUN[kind];
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/** The success toast of an edit save: "Pull request updated". */
+export function updatedToast(kind: ItemKind, noun?: string): string {
+  return `${sentenceNoun(kind, noun)} updated`;
+}
+
+const FOLLOWUP_WARNING: Record<ItemKind, (noun: string) => string> = {
+  issue: () =>
     "Issue created, but some of its details weren't applied. Check its labels, assignees, milestone and type.",
-  pr: "Pull request created, but its labels and assignees weren't applied. Add them from the pull request.",
+  pr: (noun) =>
+    `${sentenceNoun("pr", noun)} created, but its labels and assignees weren't applied. Add them from the ${noun}.`,
 };
 
 /** The Details heading over a follow-up reason. */
@@ -63,8 +76,8 @@ const SKIPPED_STEP: Record<SkippedFollowup, string> = {
 
 /** The warning that replaces a create's success toast; null when the create
  *  left nothing to warn about. A follow-up failure leads, so the sentence
- *  never opens with a file name. `noun` is the item's lower-case noun, used
- *  only when a step was skipped. */
+ *  never opens with a file name. `noun` is the item's lower-case noun; every
+ *  sentence names the item with it. */
 export function createdWarning(
   kind: ItemKind,
   failed: readonly string[],
@@ -72,8 +85,8 @@ export function createdWarning(
   opts?: { skipped?: readonly SkippedFollowup[]; noun?: string },
 ): string | null {
   const skipped = opts?.skipped ?? [];
+  const noun = opts?.noun ?? ITEM_NOUN[kind];
   if (skipped.length > 0) {
-    const noun = opts?.noun ?? ITEM_NOUN[kind].toLowerCase();
     const steps = skipped.map((s) => SKIPPED_STEP[s]).join(" and ");
     let text = `Opened ${noun}, but its number couldn't be read, so ${steps}. Finish that from the ${noun}.`;
     if (followupError !== null) text += ` ${FOLLOWUP_HEADING[kind]}.`;
@@ -82,19 +95,21 @@ export function createdWarning(
   }
   if (followupError !== null)
     return failed.length > 0
-      ? `${FOLLOWUP_WARNING[kind]} Also, ${didntUpload(failed)}`
-      : FOLLOWUP_WARNING[kind];
+      ? `${FOLLOWUP_WARNING[kind](noun)} Also, ${didntUpload(failed)}`
+      : FOLLOWUP_WARNING[kind](noun);
   if (failed.length > 0)
-    return `${ITEM_NOUN[kind]} created, but ${didntUpload(failed)}`;
+    return `${sentenceNoun(kind, noun)} created, but ${didntUpload(failed)}`;
   return null;
 }
 
-/** An edit that saved without its failed images and closed anyway. */
+/** An edit that saved without its failed images and closed anyway. `noun` is
+ *  the item's lower-case noun. */
 export function updatedWarning(
   kind: ItemKind,
   failed: readonly string[],
+  noun?: string,
 ): string {
-  return `${ITEM_NOUN[kind]} updated, but ${didntUpload(failed)}`;
+  return `${updatedToast(kind, noun)}, but ${didntUpload(failed)}`;
 }
 
 /** The in-dialog line of an edit that saved while its failed images stay

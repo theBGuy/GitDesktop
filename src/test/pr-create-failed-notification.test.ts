@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { presentError } from "@/lib/error-summary";
+import {
+  BRANCH_PUSHED_DISCLOSURE,
+  BRANCH_PUSHED_FAILED_LEAD,
+  presentError,
+} from "@/lib/error-summary";
 import { emitNotification } from "@/lib/notifications/emit";
 import { notifyPrCreateFailed } from "@/lib/notifications/pr-create-failed";
 
@@ -142,4 +146,73 @@ describe("notifyPrCreateFailed", () => {
       });
     }
   });
+
+  it.each(NOUNS)(
+    "says pushing the branch failed for a git-kind %s failure",
+    (noun) => {
+      const error = PUSH_REJECTED;
+      const got = emitted(noun, error);
+      const title = `Pushing my-branch failed, so the ${noun} wasn't created`;
+      expect(got).toEqual({
+        title,
+        osTitle: title,
+        subtitle: presentError(error).summary,
+      });
+    },
+  );
+
+  it.each(NOUNS)(
+    "keeps wasn't created for a %s failing after its push, a bare timeout, a missing CLI and each push refusal",
+    (noun) => {
+      for (const error of NOT_AT_PUSH(noun)) {
+        const got = emitted(noun, error);
+        expect(got.title).toBe(`The ${noun} for my-branch wasn't created`);
+        expect(got.osTitle).toBe(got.title);
+      }
+    },
+  );
 });
+
+/** A rejected push as `run_git_mutating_with_creds_for_branch` returns it. */
+const PUSH_REJECTED = {
+  kind: "git",
+  code: 1,
+  message: "git push failed",
+  stderr:
+    "To github.com:o/r.git\n ! [rejected]        my-branch -> my-branch (fetch first)\nerror: failed to push some refs to 'github.com:o/r.git'\nhint: Updates were rejected because the remote contains work that you do not",
+};
+
+/** Rejections that are not the push failing: the forge-kind leads every
+ *  create route wraps an after-push failure in, a bare timeout, a missing
+ *  GitHub CLI, and the push refusals, which carry kinds of their own. */
+const NOT_AT_PUSH = (noun: string) => [
+  {
+    kind: "gh",
+    message: `${BRANCH_PUSHED_DISCLOSURE}GitHub refused it: Head sha can't be blank`,
+  },
+  {
+    kind: "glab",
+    message: `${BRANCH_PUSHED_FAILED_LEAD}${noun} failed: 409 Conflict`,
+  },
+  {
+    kind: "bitbucket",
+    message: `${BRANCH_PUSHED_FAILED_LEAD}${noun} failed: Bitbucket API error (400): source branch not found`,
+  },
+  { kind: "timeout", message: "git operation timed out after 120s" },
+  { kind: "ghNotFound", message: "GitHub CLI not found" },
+  {
+    kind: "branchKeptLocal",
+    message: "my-branch is kept local",
+    branch: "my-branch",
+  },
+  {
+    kind: "branchIsAgentSession",
+    message: "my-branch is an agent session branch",
+    branch: "my-branch",
+  },
+  {
+    kind: "pushRemoteIsMirror",
+    message: "origin is a mirror",
+    remote: "origin",
+  },
+];

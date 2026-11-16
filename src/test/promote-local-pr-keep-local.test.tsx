@@ -17,7 +17,11 @@ import {
 } from "vitest";
 import { PromoteLocalPrDialog } from "@/features/pulls/PromoteLocalPrDialog";
 import { keptLocalPromoteReason } from "@/features/repository/keep-local-copy";
-import { mayHaveLanded, presentError } from "@/lib/error-summary";
+import {
+  BRANCH_PUSHED_FAILED_LEAD,
+  mayHaveLanded,
+  presentError,
+} from "@/lib/error-summary";
 import { forgePrComment, forgeStatus, gitBranches } from "@/lib/git/api";
 import { prChecksRecheck, repoKeys } from "@/lib/git/queries";
 import { recheckRunsAfterPush } from "@/lib/git/queries/push-writes";
@@ -275,7 +279,7 @@ describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", 
   const REOPEN = "The local PR couldn't be reopened — reopen it from its view.";
 
   /** The close lands, the forge create rejects, the reopen rejects too. */
-  async function failBoth() {
+  async function failBoth(rejected: unknown = rejection) {
     vi.mocked(gitBranches).mockResolvedValue([
       row("main", false),
       row("feat", false),
@@ -283,7 +287,7 @@ describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", 
     vi.mocked(updateLocalPr)
       .mockResolvedValueOnce({ ...PR, status: "closed" })
       .mockRejectedValueOnce(new Error("reopen refused"));
-    forgePrCreate.mockRejectedValueOnce(rejection);
+    forgePrCreate.mockRejectedValueOnce(rejected);
     const error = vi.spyOn(toast, "error").mockImplementation(() => "");
     const user = userEvent.setup();
     renderDialog();
@@ -307,6 +311,18 @@ describe("PromoteLocalPrDialog when the create and the reopen both fail (T29)", 
     expect(title).toBe(
       `Couldn't create the pull request: ${presentError(rejection).summary}`,
     );
+    expect(options.description).toBe(REOPEN);
+  });
+
+  it("titles the toast with the pushed-branch line alone after the push landed", async () => {
+    vi.mocked(mayHaveLanded).mockImplementation(() => false);
+    const pushed = {
+      kind: "gh",
+      message: `${BRANCH_PUSHED_FAILED_LEAD}pull request failed: HTTP 422`,
+    };
+    const [title, options] = await failBoth(pushed);
+    expect(title).toBe(presentError(pushed).summary);
+    expect(title.startsWith(BRANCH_PUSHED_FAILED_LEAD)).toBe(true);
     expect(options.description).toBe(REOPEN);
   });
 });
