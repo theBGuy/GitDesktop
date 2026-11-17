@@ -154,6 +154,8 @@ Click the **⋮** menu next to the repo name for repo-wide actions:
 **Submodules…** (in the ⋮ menu, or the command palette) manages the repositories this one
 references. Each row shows the submodule's folder, the commit it's checked out at,
 and a status badge — **Up to date**, **Not initialized**, **Modified**, or **Conflict**.
+A submodule marked **Conflict** resolves in the conflict editor: select its row in
+**Changes** and pick the commit to keep (see *Resolving conflicts* below).
 Arrow keys move between rows and Enter runs the row's button, which reads **Initialize**
 for a submodule that has never been checked out and **Update** for the rest.
 
@@ -682,9 +684,12 @@ the last list up, with a line above it saying it couldn't refresh.
   only changes are whitespace says so. The line counts in file lists keep counting
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
-  flips it too. While you're writing a line comment on one of these diffs, it stays
-  locked until you finish or close the comment, so the draft isn't lost. Diffs of pull
-  requests on a forge always show whitespace.
+  flips it too. While you're writing a line comment on one of these diffs, or
+  editing one of the open file's line comments in the list below the diff, it
+  stays locked until you finish or close the comment, so the draft isn't lost. A
+  commit comment on a line hidden this way stays in the comment list; while its
+  file is open, **Show whitespace** sits beside it. Diffs of pull requests on a
+  forge always show whitespace.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both
@@ -795,9 +800,10 @@ the failed part's line when one shows.
   latest commit it opens a small dialog that changes only the dates: the message and
   your staged and unstaged changes stay as they are, and the commit gets a new ID. If
   that commit is already pushed to the branch's upstream, the dialog warns that the
-  branch will need a force push, and a protected branch refuses. On an older unpushed
-  commit it opens **Edit history** with that commit's date editor open. Elsewhere the
-  item is held and says why. It's in the command palette too (palette-only by default;
+  branch will need a force push, and a protected branch refuses. On a branch with no
+  upstream, it also warns when a remote branch already has that commit. On an older
+  unpushed commit it opens **Edit history** with that commit's date editor open. Elsewhere
+  the item is held and says why. It's in the command palette too (palette-only by default;
   bind a key in Settings). Type a date as \`YYYY-MM-DD HH:MM:SS ±HH:MM\`; a \`T\`
   separator, \`±HHMM\`, \`Z\`, no seconds, and a date pasted from \`git log\`, in its
   default or \`--date=iso\` form and with its \`Date:\` label, all work. Where your
@@ -1560,6 +1566,18 @@ file, or one it can't read. A file too large to show, or a binary one, offers **
 resolved** in its pane once you've resolved it on disk: it stages the file exactly as it is
 on disk and always asks first, because GitDesktop can't check it for conflict markers.
 **Mark conflict resolved** in the command palette works there too.
+
+A conflicted submodule has no text to merge, so the editor shows its two commits instead:
+**Current (ours)** over **Incoming (theirs)**, each with its short ID, plus its subject
+and date once the commit is fetched in the submodule. A line between them says which
+one includes the other, and that side's button adds "(newer)", or that the two have
+diverged. **Accept current** or **Accept incoming** stages that commit as the one your
+repository records. A note under them says what happens to the submodule's own checkout
+before you pick: when the submodule is checked out with no local changes, it moves to the
+commit you pick. It stays as it is when it has local changes, isn't checked out or
+initialized here, can't be read as a submodule, is detached at a commit the conflict
+doesn't record, or doesn't have the picked commit fetched. A side that removed the
+submodule or put a file in its place has no Accept button; resolve that one in a terminal.
 
 {{ai}}## Resolve conflicts with AI
 

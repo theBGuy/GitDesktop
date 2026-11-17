@@ -19,8 +19,11 @@ const LINK_TO_BINARY =
   "--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-target\n" +
   "diff --git a/x b/x\nnew file mode 100644\nindex 0000000..4444ddd\n" +
   "Binary files /dev/null and b/x differ\n";
-/** The symlink's deletion alone: a text diff, so the binary-arm fallback is off. */
-const LINK_ONLY = LINK_TO_BINARY.slice(0, LINK_TO_BINARY.indexOf("diff", 1));
+/** A plain text edit of x that draws new-side line 1, so the binary-arm
+ *  fallback is off and line 1's comment renders inline. */
+const PLAIN_TEXT_EDIT =
+  "diff --git a/x b/x\nindex 3333ccc..4444ddd 100644\n" +
+  "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-target\n+other\n";
 
 const COMMENT: CommitCommentOut = {
   id: "1",
@@ -104,7 +107,7 @@ describe("CommitComments over a file the binary arm renders", () => {
 
   it("keeps a text diff's line comment out of the labelled group", async () => {
     vi.mocked(forgeCommitComments).mockResolvedValue([COMMENT, WHOLE_COMMIT]);
-    renderPane(LINK_ONLY);
+    renderPane(PLAIN_TEXT_EDIT);
     expect(await screen.findByText("note on the whole commit")).toBeTruthy();
     expect(screen.queryByText("note on the link line")).toBeNull();
   });

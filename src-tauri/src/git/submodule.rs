@@ -1,9 +1,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::git::conflict::{
+    conflict_rel_path, refuse_linked_path, unmerged_entries, UnmergedEntry, GITLINK_MODE,
+    NOT_CONFLICTED_REFUSAL,
+};
 use crate::git::runner::{
     acquire_repo_lock, config_lock_busy, is_config_lock_contention, run_git, run_git_config_write,
     run_git_config_write_held, run_git_raw, run_git_raw_index_retry, with_config_write_lock,
@@ -20,6 +27,11 @@ use crate::state::AppState;
 /// probes — the remove path's submodule-worktree check and
 /// [`refuse_unsettled_gitmodules`] — carry it.
 const UNTRACKED_NORMAL: &str = "--untracked-files=normal";
+
+/// The conflict read's refusal once a path's conflict holds no gitlink. The
+/// frontend matches it (workingtree.ts NOT_SUBMODULE_CONFLICT), pinned by
+/// scripts/conflict-prefilter.test.mjs.
+pub(crate) const NOT_SUBMODULE_CONFLICT: &str = "not a submodule conflict";
 
 /// A caller-supplied path that git will resolve inside the repo. Rejected before
 /// it reaches argv: a leading `-` parses as an option, and an absolute or
@@ -901,7 +913,11 @@ fn submodule_status_args(staged: bool) -> [&'static str; 5] {
 /// The index's stage-0 gitlink at exactly `path`; a pathspec naming a directory also
 /// lists the entries under it. A failed read (no repository, an unreadable index) is
 /// an Err carrying git's stderr, never None, which would read as "no gitlink here".
-async fn index_gitlink(repo_path: &str, path: &str, spec: &str) -> AppResult<Option<String>> {
+pub(crate) async fn index_gitlink(
+    repo_path: &str,
+    path: &str,
+    spec: &str,
+) -> AppResult<Option<String>> {
     let out = run_git_raw(
         Some(repo_path),
         &["ls-files", "-s", "-z", "--", spec],
@@ -1040,6 +1056,566 @@ fn nonempty_reason(message: String) -> String {
         "git could not run in the submodule".to_string()
     } else {
         message
+    }
+}
+
+/// A conflicted gitlink: the stage shas and what the submodule knows of each.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleConflict {
+    /// Stage shas. All three `None` = the path is no longer conflicted.
+    pub base: Option<String>,
+    pub ours: Option<SubmoduleConflictSide>,
+    pub theirs: Option<SubmoduleConflictSide>,
+    pub relation: SubmoduleConflictRelation,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleConflictSide {
+    pub sha: String,
+    /// False: this stage's mode is not 160000 (a file sits on this side).
+    pub gitlink: bool,
+    /// Some exactly when the submodule's object store has the commit.
+    pub commit: Option<SubmoduleConflictCommit>,
+    /// What accepting this side would do to the submodule's checkout as of this read;
+    /// None when `gitlink` is false. Advisory: the accept plans again under the lock.
+    pub plan: Option<SubmoduleCheckoutPlan>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleConflictCommit {
+    pub subject: String,
+    /// The committer date, `%cI`.
+    pub committed_at: String,
+}
+
+/// How the two sides' commits relate; measured only when the submodule has both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SubmoduleConflictRelation {
+    Unknown,
+    OursContainsTheirs { ahead: u32 },
+    TheirsContainsOurs { ahead: u32 },
+    Diverged,
+}
+
+/// What accepting a side does to the submodule's own checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubmoduleCheckoutPlan {
+    CheckOut,
+    AlreadyThere,
+    NotInitialized,
+    Unusable,
+    Dirty,
+    DetachedElsewhere,
+    NotFetched,
+}
+
+/// What one probe plus one status read measured inside the submodule.
+struct SubmoduleCheckoutState {
+    checkout: SubmoduleCheckout,
+    head: Option<String>,
+    detached: bool,
+    dirty: bool,
+}
+
+/// Pure, no I/O; first match wins. `recorded` = the conflict's listed stage shas.
+/// The tree-wide reasons outrank `present`, so two sides of one read differ only by
+/// `AlreadyThere` / `NotFetched` / `CheckOut`. A HEAD detached at none of the
+/// recorded commits stays put: moving it would orphan a commit no ref names.
+fn plan_checkout(
+    state: &SubmoduleCheckoutState,
+    sha: &str,
+    present: bool,
+    recorded: &[&str],
+) -> SubmoduleCheckoutPlan {
+    match state.checkout {
+        SubmoduleCheckout::NotInitialized | SubmoduleCheckout::Missing => {
+            return SubmoduleCheckoutPlan::NotInitialized
+        }
+        SubmoduleCheckout::Replaced | SubmoduleCheckout::Unreadable => {
+            return SubmoduleCheckoutPlan::Unusable
+        }
+        SubmoduleCheckout::Ok => {}
+    }
+    let head = state.head.as_deref();
+    if head == Some(sha) {
+        SubmoduleCheckoutPlan::AlreadyThere
+    } else if state.dirty {
+        SubmoduleCheckoutPlan::Dirty
+    } else if state.detached && !head.is_some_and(|head| recorded.contains(&head)) {
+        SubmoduleCheckoutPlan::DetachedElsewhere
+    } else if !present {
+        SubmoduleCheckoutPlan::NotFetched
+    } else {
+        SubmoduleCheckoutPlan::CheckOut
+    }
+}
+
+/// The stage shas a pick was made from, compared against the live index.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmoduleConflictStages {
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SubmoduleAcceptOutcome {
+    /// The pointer is staged at `sha`; `checkout` says what happened inside the submodule.
+    Staged {
+        sha: String,
+        checkout: SubmoduleAcceptCheckout,
+    },
+    /// The stages, or the checkout the pane promised, no longer match the read the
+    /// pick was made from. Nothing was staged.
+    Changed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SubmoduleAcceptCheckout {
+    CheckedOut,
+    AlreadyThere,
+    Left {
+        why: SubmoduleCheckoutLeft,
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubmoduleCheckoutLeft {
+    NotInitialized,
+    Unusable,
+    Dirty,
+    DetachedElsewhere,
+    NotFetched,
+    Failed,
+}
+
+/// The unmerged records at exactly `path` (git's spelling from the path gate).
+async fn conflict_entries(repo_path: &str, path: &str) -> AppResult<Vec<UnmergedEntry>> {
+    let spec = crate::git::pathspec::literal(path);
+    let mut entries = unmerged_entries(repo_path, &spec).await?;
+    entries.retain(|entry| entry.path == path);
+    Ok(entries)
+}
+
+fn stage_entry(entries: &[UnmergedEntry], stage: u8) -> Option<&UnmergedEntry> {
+    entries.iter().find(|entry| entry.stage == stage)
+}
+
+fn live_stages(entries: &[UnmergedEntry]) -> SubmoduleConflictStages {
+    let sha = |stage| stage_entry(entries, stage).map(|entry| entry.sha.clone());
+    SubmoduleConflictStages {
+        base: sha(1),
+        ours: sha(2),
+        theirs: sha(3),
+    }
+}
+
+/// The submodule's folder and its checkout state. No git runs inside unless the
+/// probe found a `.git` of its own: git in a folder without one answers for the
+/// PARENT (measured, git 2.51.1). A failed status read is `Unreadable`, never clean.
+async fn submodule_checkout_state(repo_path: &str, path: &str) -> (String, SubmoduleCheckoutState) {
+    let worktree = Path::new(repo_path).join(path);
+    let (checkout, _) = checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
+        worktree.join(".git").try_exists()
+    });
+    let dir = worktree.to_string_lossy().into_owned();
+    let mut state = SubmoduleCheckoutState {
+        checkout,
+        head: None,
+        detached: false,
+        dirty: false,
+    };
+    if checkout == SubmoduleCheckout::Ok {
+        let args = [
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            UNTRACKED_NORMAL,
+            "-z",
+        ];
+        match run_git_raw(Some(&dir), &args, DEFAULT_TIMEOUT).await {
+            Ok(out) if out.code == 0 => {
+                let status = crate::git::status::parse_status_v2(&out.stdout_lossy());
+                state.head = status.branch.oid;
+                state.detached = status.branch.detached;
+                state.dirty = !status.entries.is_empty();
+            }
+            _ => state.checkout = SubmoduleCheckout::Unreadable,
+        }
+    }
+    (dir, state)
+}
+
+/// Whether the submodule's object store has `sha` as a commit. Only a run that
+/// answered decides: a spawn error or timeout is an Err, never "absent".
+async fn commit_present(dir: &str, sha: &str) -> AppResult<bool> {
+    let object = format!("{sha}^{{commit}}");
+    let out = run_git_raw(Some(dir), &["cat-file", "-e", &object], DEFAULT_TIMEOUT).await?;
+    Ok(out.code == 0)
+}
+
+/// Whether `sha` may be looked up inside an initialized submodule at all.
+async fn side_present(dir: &str, state: &SubmoduleCheckoutState, sha: &str) -> AppResult<bool> {
+    if state.checkout != SubmoduleCheckout::Ok || !is_full_oid(sha) {
+        return Ok(false);
+    }
+    commit_present(dir, sha).await
+}
+
+/// A present commit's subject and committer date; a failed read is an Err, never
+/// a commit reported as missing.
+async fn conflict_commit(dir: &str, sha: &str) -> AppResult<SubmoduleConflictCommit> {
+    let out = run_git(
+        Some(dir),
+        &[
+            "log",
+            "--no-walk",
+            "--no-color",
+            "--no-show-signature",
+            "--format=%s%x1f%cI",
+            sha,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let line = out.stdout_lossy();
+    let (subject, committed_at) = line
+        .trim_end_matches(['\r', '\n'])
+        .split_once('\x1f')
+        .ok_or_else(|| AppError::Command(format!("unreadable commit {sha} in the submodule")))?;
+    Ok(SubmoduleConflictCommit {
+        subject: subject.to_string(),
+        committed_at: committed_at.to_string(),
+    })
+}
+
+/// `ours...theirs` counted inside the submodule; any failure reads `Unknown`. A
+/// shallow submodule can read `Diverged` where full history would read contained,
+/// never the reverse.
+async fn conflict_relation(dir: &str, ours: &str, theirs: &str) -> SubmoduleConflictRelation {
+    let range = format!("{ours}...{theirs}");
+    let counted = run_git_raw(
+        Some(dir),
+        &["rev-list", "--left-right", "--count", &range],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    let Ok(out) = counted else {
+        return SubmoduleConflictRelation::Unknown;
+    };
+    let text = out.stdout_lossy();
+    let counts = (out.code == 0)
+        .then(|| text.trim().split_once('\t'))
+        .flatten()
+        .and_then(|(left, right)| Some((left.parse::<u32>().ok()?, right.parse::<u32>().ok()?)));
+    match counts {
+        Some((0, right)) if right > 0 => {
+            SubmoduleConflictRelation::TheirsContainsOurs { ahead: right }
+        }
+        Some((left, 0)) if left > 0 => {
+            SubmoduleConflictRelation::OursContainsTheirs { ahead: left }
+        }
+        Some((left, right)) if left > 0 && right > 0 => SubmoduleConflictRelation::Diverged,
+        _ => SubmoduleConflictRelation::Unknown,
+    }
+}
+
+/// The two sides of a submodule conflict, for the conflict pane. Read-only and
+/// lock-free; every git run is sequential, so the command future stays small.
+#[tauri::command]
+pub async fn git_submodule_conflict(
+    repo_path: String,
+    path: String,
+) -> AppResult<SubmoduleConflict> {
+    git_submodule_conflict_core(&repo_path, &path).await
+}
+
+pub(crate) async fn git_submodule_conflict_core(
+    repo_path: &str,
+    path: &str,
+) -> AppResult<SubmoduleConflict> {
+    let path = conflict_rel_path(path)?;
+    refuse_linked_path(repo_path, &path, true).await?;
+    let entries = conflict_entries(repo_path, &path).await?;
+    if entries.is_empty() {
+        return Ok(SubmoduleConflict {
+            base: None,
+            ours: None,
+            theirs: None,
+            relation: SubmoduleConflictRelation::Unknown,
+        });
+    }
+    if !entries.iter().any(|entry| entry.mode == GITLINK_MODE) {
+        return Err(AppError::InvalidArgument(NOT_SUBMODULE_CONFLICT.into()));
+    }
+    let (dir, state) = submodule_checkout_state(repo_path, &path).await;
+    let recorded: Vec<&str> = entries.iter().map(|entry| entry.sha.as_str()).collect();
+    let mut sides = [None, None];
+    for (slot, stage) in sides.iter_mut().zip([2u8, 3]) {
+        let Some(entry) = stage_entry(&entries, stage) else {
+            continue;
+        };
+        if entry.mode != GITLINK_MODE {
+            *slot = Some(SubmoduleConflictSide {
+                sha: entry.sha.clone(),
+                gitlink: false,
+                commit: None,
+                plan: None,
+            });
+            continue;
+        }
+        let present = side_present(&dir, &state, &entry.sha).await?;
+        let commit = if present {
+            Some(conflict_commit(&dir, &entry.sha).await?)
+        } else {
+            None
+        };
+        *slot = Some(SubmoduleConflictSide {
+            sha: entry.sha.clone(),
+            gitlink: true,
+            commit,
+            plan: Some(plan_checkout(&state, &entry.sha, present, &recorded)),
+        });
+    }
+    let [ours, theirs] = sides;
+    let relation = match (&ours, &theirs) {
+        (Some(o), Some(t)) if o.commit.is_some() && t.commit.is_some() => {
+            conflict_relation(&dir, &o.sha, &t.sha).await
+        }
+        _ => SubmoduleConflictRelation::Unknown,
+    };
+    Ok(SubmoduleConflict {
+        base: stage_entry(&entries, 1).map(|entry| entry.sha.clone()),
+        ours,
+        theirs,
+        relation,
+    })
+}
+
+/// Resolves a submodule conflict by staging one side's commit, then checks that
+/// commit out inside the submodule when the plan allows. `expected` is the stage
+/// shas the pick was made from and `expect_checkout` the pane's promise for this
+/// side (its read's plan was `CheckOut`); either moving returns `Changed`.
+#[tauri::command]
+pub async fn git_accept_submodule_conflict_side(
+    state: State<'_, AppState>,
+    repo_path: String,
+    path: String,
+    side: String,
+    expected: SubmoduleConflictStages,
+    expect_checkout: bool,
+) -> AppResult<SubmoduleAcceptOutcome> {
+    git_accept_submodule_conflict_side_core(
+        &state,
+        &repo_path,
+        &path,
+        &side,
+        &expected,
+        expect_checkout,
+    )
+    .await
+}
+
+pub(crate) async fn git_accept_submodule_conflict_side_core(
+    state: &AppState,
+    repo_path: &str,
+    path: &str,
+    side: &str,
+    expected: &SubmoduleConflictStages,
+    expect_checkout: bool,
+) -> AppResult<SubmoduleAcceptOutcome> {
+    accept_submodule_side_within(
+        state,
+        repo_path,
+        path,
+        side,
+        expected,
+        expect_checkout,
+        LOCK_WAIT_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Called as the accept it is scoped to starts waiting for the submodule's own working
+    /// tree, so a test can move the parent's stages during that wait.
+    static CHILD_WAIT_HOOK: Arc<dyn Fn() + Send + Sync>;
+}
+
+/// The accept, with the bound on its wait for the submodule's own working tree
+/// as a parameter so a test can shorten it.
+async fn accept_submodule_side_within(
+    state: &AppState,
+    repo_path: &str,
+    path: &str,
+    side: &str,
+    expected: &SubmoduleConflictStages,
+    expect_checkout: bool,
+    submodule_wait: Duration,
+) -> AppResult<SubmoduleAcceptOutcome> {
+    let path = conflict_rel_path(path)?;
+    let stage = match side {
+        "ours" => 2u8,
+        "theirs" => 3u8,
+        _ => {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid conflict side: {side}"
+            )))
+        }
+    };
+    for sha in [&expected.base, &expected.ours, &expected.theirs]
+        .into_iter()
+        .flatten()
+    {
+        if !is_full_oid(sha) {
+            return Err(AppError::InvalidArgument(format!(
+                "invalid commit id: {sha}"
+            )));
+        }
+    }
+
+    // One hold across compare, plan, swap and checkout. Lock-free runners only
+    // while held (see `run_git_mutating`).
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a conflict resolution").await?;
+    refuse_linked_path(repo_path, &path, true).await?;
+
+    // A resolved path refuses: `--cacheinfo` on one exits 0 and re-points it
+    // (measured, git 2.51.1), so a stale second press would move a settled pointer.
+    let entries = conflict_entries(repo_path, &path).await?;
+    if entries.is_empty() {
+        return Err(AppError::InvalidArgument(NOT_CONFLICTED_REFUSAL.into()));
+    }
+    if live_stages(&entries) != *expected {
+        return Ok(SubmoduleAcceptOutcome::Changed);
+    }
+    let Some(target) = stage_entry(&entries, stage).filter(|entry| entry.mode == GITLINK_MODE)
+    else {
+        return Err(AppError::InvalidArgument(
+            "that side has no submodule commit to accept".to_string(),
+        ));
+    };
+    // The LISTED sha, never re-resolved from a ref.
+    let sha = target.sha.clone();
+
+    // A submodule opened as its own repository takes its own working-tree domain:
+    // hold it too, parent then child (no path takes them the other way), so a
+    // switch there can't land between the plan and the checkout. Only a folder
+    // with its own `.git` has one; git resolves any other to the parent's checkout.
+    let worktree = Path::new(repo_path).join(&path);
+    let has_git = worktree.join(".git").try_exists().unwrap_or(false);
+    let submodule_domain = if has_git {
+        Some(state.working_tree_lock(&worktree.to_string_lossy()).await)
+    } else {
+        None
+    }
+    .filter(|child| !Arc::ptr_eq(&child.lock(), &domain.lock()));
+    let _submodule_guard = match &submodule_domain {
+        Some(child) => {
+            #[cfg(test)]
+            let _ = CHILD_WAIT_HOOK.try_with(|hook| hook());
+            Some(acquire_repo_lock(child, submodule_wait, "a conflict resolution").await?)
+        }
+        None => None,
+    };
+
+    let (dir, live) = submodule_checkout_state(repo_path, &path).await;
+    // A checkout that appeared after the hold was decided would be moved unheld.
+    if live.checkout == SubmoduleCheckout::Ok && !has_git {
+        return Ok(SubmoduleAcceptOutcome::Changed);
+    }
+    let present = side_present(&dir, &live, &sha).await?;
+    let recorded: Vec<&str> = entries.iter().map(|entry| entry.sha.as_str()).collect();
+    let plan = plan_checkout(&live, &sha, present, &recorded);
+    // The pane said the checkout would stay: re-read and say the new truth before
+    // anything moves. Staying when a checkout was promised is always safe.
+    if plan == SubmoduleCheckoutPlan::CheckOut && !expect_checkout {
+        return Ok(SubmoduleAcceptOutcome::Changed);
+    }
+
+    // The stages again, after the child wait and the probes: git outside the app can move
+    // them meanwhile, and git's CLI has no index compare-and-swap, so this narrows the
+    // window to the gap between this read and the write.
+    let now = conflict_entries(repo_path, &path).await?;
+    if now.is_empty() {
+        return Err(AppError::InvalidArgument(NOT_CONFLICTED_REFUSAL.into()));
+    }
+    if live_stages(&now) != *expected {
+        return Ok(SubmoduleAcceptOutcome::Changed);
+    }
+    // A path, not a pathspec: git's spelling from the gate, passed raw.
+    let info = format!("{GITLINK_MODE},{sha},{path}");
+    run_git_raw_index_retry(
+        repo_path,
+        &["update-index", "--cacheinfo", &info],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .exit_verdict()?;
+
+    let left = |why| SubmoduleAcceptCheckout::Left { why, reason: None };
+    let checkout = match plan {
+        SubmoduleCheckoutPlan::CheckOut => checkout_staged_commit(&dir, &sha).await,
+        SubmoduleCheckoutPlan::AlreadyThere => SubmoduleAcceptCheckout::AlreadyThere,
+        SubmoduleCheckoutPlan::NotInitialized => left(SubmoduleCheckoutLeft::NotInitialized),
+        SubmoduleCheckoutPlan::Unusable => left(SubmoduleCheckoutLeft::Unusable),
+        SubmoduleCheckoutPlan::Dirty => left(SubmoduleCheckoutLeft::Dirty),
+        SubmoduleCheckoutPlan::DetachedElsewhere => left(SubmoduleCheckoutLeft::DetachedElsewhere),
+        SubmoduleCheckoutPlan::NotFetched => left(SubmoduleCheckoutLeft::NotFetched),
+    };
+    Ok(SubmoduleAcceptOutcome::Staged { sha, checkout })
+}
+
+/// Detaches the submodule at the staged commit. A failure is an outcome, never an
+/// Err: the pointer is already staged and the caller must hear so. Never `submodule
+/// update`, which fetches; `--no-overwrite-ignore` because a plain checkout replaces
+/// an ignored file the target tracks while status calls the tree clean (measured,
+/// git 2.51.1). `--no-recurse-submodules` keeps nested submodules where they are,
+/// whatever `submodule.recurse` the repo, user or submodule configures.
+async fn checkout_staged_commit(dir: &str, sha: &str) -> SubmoduleAcceptCheckout {
+    let failed = |reason| SubmoduleAcceptCheckout::Left {
+        why: SubmoduleCheckoutLeft::Failed,
+        reason: Some(reason),
+    };
+    match run_git_raw(
+        Some(dir),
+        &[
+            "checkout",
+            "--no-recurse-submodules",
+            "--no-overwrite-ignore",
+            "--detach",
+            sha,
+        ],
+        WORKTREE_OP_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) if out.code == 0 => SubmoduleAcceptCheckout::CheckedOut,
+        Ok(out) => failed(unreadable_reason(&out.stderr, out.code)),
+        Err(e) => failed(nonempty_reason(e.to_string())),
     }
 }
 
@@ -2985,5 +3561,1023 @@ mod tests {
             .await
             .unwrap();
         assert!(exists(&deep, "libs/dep/dep.txt"));
+    }
+
+    /// A host whose `libs/dep` submodule sits on `main` at `c2`, with `c1` its parent
+    /// and `c0` the pointer the host committed.
+    struct GitlinkFixture {
+        _dir: tempfile::TempDir,
+        host: String,
+        sub: String,
+        dep: String,
+        c0: String,
+        c1: String,
+        c2: String,
+    }
+
+    async fn gitlink_fixture(marker: &str) -> GitlinkFixture {
+        let (dir, host, dep) = host_with_submodule(marker).await;
+        let sub = sub_dir(&host);
+        let c0 = head_of(&sub).await;
+        let c1 = commit_in(&sub, "a.txt", "one").await;
+        let c2 = commit_in(&sub, "b.txt", "two").await;
+        GitlinkFixture {
+            _dir: dir,
+            host,
+            sub,
+            dep,
+            c0,
+            c1,
+            c2,
+        }
+    }
+
+    async fn head_of(repo: &str) -> String {
+        git(repo, &["rev-parse", "HEAD"]).await.trim().to_string()
+    }
+
+    /// The parent's tree with `libs/dep` at `sha`, or without it; the index stays there.
+    async fn tree_with(host: &str, sha: Option<&str>) -> String {
+        match sha {
+            Some(sha) => stage_gitlink(host, sha).await,
+            None => {
+                git(host, &["update-index", "--force-remove", "libs/dep"]).await;
+            }
+        }
+        git(host, &["write-tree"]).await.trim().to_string()
+    }
+
+    /// Unmerged `libs/dep` stages from three trees, with no merge machinery involved.
+    async fn conflict_at(host: &str, base: Option<&str>, ours: Option<&str>, theirs: Option<&str>) {
+        let base_tree = tree_with(host, base).await;
+        let theirs_tree = tree_with(host, theirs).await;
+        // Last, so the index read-tree merges into is the ours tree.
+        let ours_tree = tree_with(host, ours).await;
+        git(
+            host,
+            &["read-tree", "-m", &base_tree, &ours_tree, &theirs_tree],
+        )
+        .await;
+    }
+
+    fn stages_of(
+        base: Option<&str>,
+        ours: Option<&str>,
+        theirs: Option<&str>,
+    ) -> SubmoduleConflictStages {
+        SubmoduleConflictStages {
+            base: base.map(Into::into),
+            ours: ours.map(Into::into),
+            theirs: theirs.map(Into::into),
+        }
+    }
+
+    async fn read_conflict(host: &str) -> SubmoduleConflict {
+        git_submodule_conflict_core(host, "libs/dep")
+            .await
+            .expect("submodule conflict read")
+    }
+
+    async fn accept(
+        host: &str,
+        side: &str,
+        expected: &SubmoduleConflictStages,
+        expect_checkout: bool,
+    ) -> AppResult<SubmoduleAcceptOutcome> {
+        git_accept_submodule_conflict_side_core(
+            &AppState::default(),
+            host,
+            "libs/dep",
+            side,
+            expected,
+            expect_checkout,
+        )
+        .await
+    }
+
+    fn staged_left(sha: &str, why: SubmoduleCheckoutLeft) -> SubmoduleAcceptOutcome {
+        SubmoduleAcceptOutcome::Staged {
+            sha: sha.to_string(),
+            checkout: SubmoduleAcceptCheckout::Left { why, reason: None },
+        }
+    }
+
+    async fn unmerged(host: &str) -> String {
+        git(host, &["ls-files", "-u"]).await
+    }
+
+    async fn index_entries(host: &str) -> String {
+        git(host, &["ls-files", "-s"]).await
+    }
+
+    /// The resolved pointer: `libs/dep` at stage 0 with `sha`, and no unmerged stage left.
+    async fn assert_pointer_staged(host: &str, sha: &str) {
+        assert_eq!(unmerged(host).await, "", "still conflicted");
+        let entry = git(host, &["ls-files", "-s", "--", "libs/dep"]).await;
+        assert_eq!(entry.trim(), format!("160000 {sha} 0\tlibs/dep"));
+    }
+
+    fn assert_invalid<T>(result: AppResult<T>, want: &str) {
+        match result {
+            Err(AppError::InvalidArgument(message)) => assert_eq!(message, want),
+            Err(other) => panic!("expected InvalidArgument({want}), got {other:?}"),
+            Ok(_) => panic!("expected InvalidArgument({want}), got Ok"),
+        }
+    }
+
+    fn side(read: &Option<SubmoduleConflictSide>) -> &SubmoduleConflictSide {
+        read.as_ref().expect("side present")
+    }
+
+    #[tokio::test]
+    async fn conflict_read_measures_a_descendant_both_ways() {
+        let f = gitlink_fixture("conflict-desc").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let read = read_conflict(&f.host).await;
+        assert_eq!(read.base.as_deref(), Some(f.c0.as_str()));
+        let (ours, theirs) = (side(&read.ours), side(&read.theirs));
+        assert_eq!(
+            (ours.sha.as_str(), theirs.sha.as_str()),
+            (f.c1.as_str(), f.c2.as_str())
+        );
+        assert!(ours.gitlink && theirs.gitlink);
+        let commit = ours.commit.as_ref().expect("ours is in the submodule");
+        assert_eq!(commit.subject, "one");
+        // `%cI`: strict ISO 8601, `YYYY-MM-DDTHH:MM:SS` then `±HH:MM`, or `Z` when the
+        // committer's zone is UTC (git 2.51.1; CI runners).
+        let date = commit.committed_at.as_bytes();
+        let zone_ok = (date.len() == 20 && date[19] == b'Z')
+            || (date.len() == 25 && matches!(date[19], b'+' | b'-'));
+        assert!(
+            zone_ok && date[10] == b'T',
+            "{}",
+            commit.committed_at
+        );
+        assert_eq!(theirs.commit.as_ref().unwrap().subject, "two");
+        assert_eq!(ours.plan, Some(SubmoduleCheckoutPlan::CheckOut));
+        assert_eq!(theirs.plan, Some(SubmoduleCheckoutPlan::AlreadyThere));
+        assert_eq!(
+            read.relation,
+            SubmoduleConflictRelation::TheirsContainsOurs { ahead: 1 }
+        );
+
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c2), Some(&f.c1)).await;
+        assert_eq!(
+            read_conflict(&f.host).await.relation,
+            SubmoduleConflictRelation::OursContainsTheirs { ahead: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_read_add_add_has_no_base_and_diverged_sides_say_so() {
+        let f = gitlink_fixture("conflict-diverged").await;
+        git(&f.sub, &["checkout", "-q", "-b", "side", &f.c0]).await;
+        let c3 = commit_in(&f.sub, "c.txt", "three").await;
+        git(&f.sub, &["checkout", "-q", "main"]).await;
+        conflict_at(&f.host, None, Some(&f.c2), Some(&c3)).await;
+        let read = read_conflict(&f.host).await;
+        assert_eq!(read.base, None);
+        assert_eq!(read.relation, SubmoduleConflictRelation::Diverged);
+        assert_eq!(side(&read.ours).commit.as_ref().unwrap().subject, "two");
+        assert_eq!(side(&read.theirs).commit.as_ref().unwrap().subject, "three");
+        assert_eq!(
+            side(&read.ours).plan,
+            Some(SubmoduleCheckoutPlan::AlreadyThere)
+        );
+        assert_eq!(
+            side(&read.theirs).plan,
+            Some(SubmoduleCheckoutPlan::CheckOut)
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_of_an_unfetched_commit_stages_it_and_leaves_the_checkout() {
+        let f = gitlink_fixture("conflict-unfetched").await;
+        let upstream = commit_in(&f.dep, "x.txt", "upstream").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c2), Some(&upstream)).await;
+        let read = read_conflict(&f.host).await;
+        assert!(side(&read.theirs).commit.is_none());
+        assert_eq!(
+            side(&read.theirs).plan,
+            Some(SubmoduleCheckoutPlan::NotFetched)
+        );
+        assert_eq!(
+            side(&read.ours).plan,
+            Some(SubmoduleCheckoutPlan::AlreadyThere)
+        );
+        assert_eq!(read.relation, SubmoduleConflictRelation::Unknown);
+
+        let expected = stages_of(Some(&f.c0), Some(&f.c2), Some(&upstream));
+        let outcome = accept(&f.host, "theirs", &expected, false).await.unwrap();
+        assert_eq!(
+            outcome,
+            staged_left(&upstream, SubmoduleCheckoutLeft::NotFetched)
+        );
+        assert_pointer_staged(&f.host, &upstream).await;
+        assert_eq!(head_of(&f.sub).await, f.c2);
+    }
+
+    #[tokio::test]
+    async fn accept_leaves_a_dirty_checkout_tracked_or_untracked() {
+        for (marker, file) in [
+            ("conflict-dirty-tracked", "dep.txt"),
+            ("conflict-dirty-untracked", "new.txt"),
+        ] {
+            let f = gitlink_fixture(marker).await;
+            conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+            let edited = Path::new(&f.sub).join(file);
+            std::fs::write(&edited, "local edit\n").unwrap();
+            let read = read_conflict(&f.host).await;
+            assert_eq!(
+                side(&read.ours).plan,
+                Some(SubmoduleCheckoutPlan::Dirty),
+                "{file}"
+            );
+            // HEAD's own commit outranks the dirty tree.
+            assert_eq!(
+                side(&read.theirs).plan,
+                Some(SubmoduleCheckoutPlan::AlreadyThere)
+            );
+
+            // Promised a checkout, then the tree turned dirty: staged, checkout left.
+            let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+            let outcome = accept(&f.host, "ours", &expected, true).await.unwrap();
+            assert_eq!(
+                outcome,
+                staged_left(&f.c1, SubmoduleCheckoutLeft::Dirty),
+                "{file}"
+            );
+            assert_pointer_staged(&f.host, &f.c1).await;
+            assert_eq!(head_of(&f.sub).await, f.c2, "{file}");
+            assert_eq!(std::fs::read(&edited).unwrap(), b"local edit\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_into_an_uninitialized_folder_runs_nothing_inside_it() {
+        let f = gitlink_fixture("conflict-uninit").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        std::fs::remove_dir_all(&f.sub).unwrap();
+        std::fs::create_dir(&f.sub).unwrap();
+        let head = head_of(&f.host).await;
+        let branch = git(&f.host, &["symbolic-ref", "HEAD"]).await;
+        let read = read_conflict(&f.host).await;
+        for s in [side(&read.ours), side(&read.theirs)] {
+            assert_eq!(s.plan, Some(SubmoduleCheckoutPlan::NotInitialized));
+            assert!(s.commit.is_none());
+        }
+        assert_eq!(read.relation, SubmoduleConflictRelation::Unknown);
+
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let outcome = accept(&f.host, "theirs", &expected, false).await.unwrap();
+        assert_eq!(
+            outcome,
+            staged_left(&f.c2, SubmoduleCheckoutLeft::NotInitialized)
+        );
+        assert_pointer_staged(&f.host, &f.c2).await;
+        assert!(!exists(&f.host, "libs/dep/.git"));
+        assert_eq!(head_of(&f.host).await, head);
+        assert_eq!(git(&f.host, &["symbolic-ref", "HEAD"]).await, branch);
+    }
+
+    #[tokio::test]
+    async fn a_removed_side_reads_none_and_cannot_be_accepted() {
+        let f = gitlink_fixture("conflict-removed").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), None).await;
+        let read = read_conflict(&f.host).await;
+        assert!(read.theirs.is_none());
+        assert_eq!(side(&read.ours).sha, f.c1);
+        let before = index_entries(&f.host).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), None);
+        assert_invalid(
+            accept(&f.host, "theirs", &expected, false).await,
+            "that side has no submodule commit to accept",
+        );
+        assert_eq!(index_entries(&f.host).await, before);
+
+        conflict_at(&f.host, Some(&f.c0), None, Some(&f.c2)).await;
+        let read = read_conflict(&f.host).await;
+        assert!(read.ours.is_none());
+        assert_eq!(side(&read.theirs).sha, f.c2);
+    }
+
+    /// Rewrites `path`'s index entries from `--index-info` lines.
+    async fn inject_stages(host: &str, path: &str, stages: &[(&str, &str, u8)]) {
+        let zero = "0".repeat(40);
+        let mut info = format!("0 {zero}\t{path}\n");
+        for (mode, sha, stage) in stages {
+            info.push_str(&format!("{mode} {sha} {stage}\t{path}\n"));
+        }
+        crate::git::runner::run_git_input(
+            Some(host),
+            &["update-index", "--index-info"],
+            Some(&info),
+            TEST_GIT_HANG_GUARD,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn blob(host: &str, text: &str) -> String {
+        std::fs::write(Path::new(host).join("blob.tmp"), text).unwrap();
+        let sha = git(host, &["hash-object", "-w", "blob.tmp"]).await;
+        std::fs::remove_file(Path::new(host).join("blob.tmp")).unwrap();
+        sha.trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_file_side_reads_as_no_gitlink_and_a_file_conflict_is_refused() {
+        let f = gitlink_fixture("conflict-mixed").await;
+        let file = blob(&f.host, "text\n").await;
+        inject_stages(
+            &f.host,
+            "libs/dep",
+            &[
+                (GITLINK_MODE, &f.c0, 1),
+                (GITLINK_MODE, &f.c1, 2),
+                ("100644", &file, 3),
+            ],
+        )
+        .await;
+        let read = read_conflict(&f.host).await;
+        let theirs = side(&read.theirs);
+        assert!(!theirs.gitlink);
+        assert_eq!((theirs.commit.is_none(), theirs.plan), (true, None));
+        assert!(side(&read.ours).gitlink);
+        assert_eq!(read.relation, SubmoduleConflictRelation::Unknown);
+        let before = index_entries(&f.host).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&file));
+        assert_invalid(
+            accept(&f.host, "theirs", &expected, false).await,
+            "that side has no submodule commit to accept",
+        );
+        assert_eq!(index_entries(&f.host).await, before);
+
+        inject_stages(
+            &f.host,
+            "plain.txt",
+            &[
+                ("100644", &file, 1),
+                ("100644", &file, 2),
+                ("100644", &file, 3),
+            ],
+        )
+        .await;
+        assert_invalid(
+            git_submodule_conflict_core(&f.host, "plain.txt").await,
+            NOT_SUBMODULE_CONFLICT,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolved_gitlink_reads_resolved_in_both_reads() {
+        let (_dir, host, _dep) = host_with_submodule("conflict-resolved").await;
+        let read = read_conflict(&host).await;
+        assert_eq!(
+            (read.base, read.ours.is_none(), read.theirs.is_none()),
+            (None, true, true)
+        );
+        assert_eq!(read.relation, SubmoduleConflictRelation::Unknown);
+        let sides = crate::git::conflict::git_conflict_sides(host, "libs/dep".into(), vec![])
+            .await
+            .expect("a resolved gitlink is no io error");
+        assert_eq!((sides.base, sides.ours, sides.theirs), (None, None, None));
+        assert!(!sides.working_exists);
+        assert_eq!(sides.working_hash, None);
+    }
+
+    #[tokio::test]
+    async fn text_reads_and_whole_side_accepts_refuse_a_gitlink_conflict() {
+        let f = gitlink_fixture("conflict-refusal").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let sides =
+            || crate::git::conflict::git_conflict_sides(f.host.clone(), "libs/dep".into(), vec![]);
+        let refusal = crate::git::conflict::SUBMODULE_REFUSAL;
+        // A folder, a text file, nothing: no working read decides it.
+        assert_invalid(sides().await, refusal);
+        let before = unmerged(&f.host).await;
+        assert_invalid(
+            crate::git::conflict::git_checkout_conflict_side_core(
+                &AppState::default(),
+                f.host.clone(),
+                "libs/dep".into(),
+                "theirs".into(),
+            )
+            .await,
+            refusal,
+        );
+        assert_eq!(unmerged(&f.host).await, before);
+        assert_eq!(before.lines().count(), 3, "{before}");
+        std::fs::remove_dir_all(&f.sub).unwrap();
+        std::fs::write(&f.sub, "text\n").unwrap();
+        assert_invalid(sides().await, refusal);
+        std::fs::remove_file(&f.sub).unwrap();
+        assert_invalid(sides().await, refusal);
+    }
+
+    #[tokio::test]
+    async fn a_detached_checkout_elsewhere_stays_and_its_promise_is_kept() {
+        let f = gitlink_fixture("conflict-detached").await;
+        git(&f.sub, &["checkout", "-q", "-b", "other", &f.c0]).await;
+        let c3 = commit_in(&f.sub, "d.txt", "four").await;
+        git(&f.sub, &["checkout", "-q", "--detach", &c3]).await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let read = read_conflict(&f.host).await;
+        for s in [side(&read.ours), side(&read.theirs)] {
+            assert_eq!(s.plan, Some(SubmoduleCheckoutPlan::DetachedElsewhere));
+        }
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let outcome = accept(&f.host, "theirs", &expected, false).await.unwrap();
+        assert_eq!(
+            outcome,
+            staged_left(&f.c2, SubmoduleCheckoutLeft::DetachedElsewhere)
+        );
+        assert_pointer_staged(&f.host, &f.c2).await;
+        assert_eq!(head_of(&f.sub).await, c3);
+
+        // The pane said "stays as is"; the commit then went on a branch.
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        git(&f.sub, &["checkout", "-q", "other"]).await;
+        let before = unmerged(&f.host).await;
+        let outcome = accept(&f.host, "theirs", &expected, false).await.unwrap();
+        assert_eq!(outcome, SubmoduleAcceptOutcome::Changed);
+        assert_eq!(unmerged(&f.host).await, before);
+        assert_eq!(head_of(&f.sub).await, c3);
+
+        let outcome = accept(&f.host, "theirs", &expected, true).await.unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: f.c2.clone(),
+                checkout: SubmoduleAcceptCheckout::CheckedOut,
+            }
+        );
+        assert_pointer_staged(&f.host, &f.c2).await;
+        assert_eq!(head_of(&f.sub).await, f.c2);
+    }
+
+    #[tokio::test]
+    async fn a_dirty_read_then_cleaned_tree_returns_changed() {
+        let f = gitlink_fixture("conflict-promise").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let tracked = Path::new(&f.sub).join("dep.txt");
+        let original = std::fs::read(&tracked).unwrap();
+        std::fs::write(&tracked, "local edit\n").unwrap();
+        assert_eq!(
+            side(&read_conflict(&f.host).await.ours).plan,
+            Some(SubmoduleCheckoutPlan::Dirty)
+        );
+        std::fs::write(&tracked, &original).unwrap();
+        let before = unmerged(&f.host).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let outcome = accept(&f.host, "ours", &expected, false).await.unwrap();
+        assert_eq!(outcome, SubmoduleAcceptOutcome::Changed);
+        assert_eq!(unmerged(&f.host).await, before);
+        assert_eq!(head_of(&f.sub).await, f.c2);
+
+        // Staying is always safe: AlreadyThere stages whatever the promise said.
+        let outcome = accept(&f.host, "theirs", &expected, false).await.unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: f.c2.clone(),
+                checkout: SubmoduleAcceptCheckout::AlreadyThere,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_outranks_not_fetched_on_one_side() {
+        let f = gitlink_fixture("conflict-dirty-unfetched").await;
+        let upstream = commit_in(&f.dep, "x.txt", "upstream").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c2), Some(&upstream)).await;
+        std::fs::write(Path::new(&f.sub).join("dep.txt"), "local edit\n").unwrap();
+        let theirs = read_conflict(&f.host).await.theirs.unwrap();
+        assert_eq!(theirs.plan, Some(SubmoduleCheckoutPlan::Dirty));
+        assert!(theirs.commit.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_ignored_file_the_target_tracks_fails_the_checkout_and_keeps_its_bytes() {
+        let f = gitlink_fixture("conflict-ignored").await;
+        git(&f.sub, &["checkout", "-q", "-b", "ign"]).await;
+        let tracks = commit_in(&f.sub, "ign.txt", "tracked").await;
+        git(&f.sub, &["checkout", "-q", "main"]).await;
+        let exclude = git(&f.sub, &["rev-parse", "--git-path", "info/exclude"]).await;
+        let exclude = Path::new(&f.sub).join(exclude.trim());
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "ign.txt\n").unwrap();
+        let ignored = Path::new(&f.sub).join("ign.txt");
+        std::fs::write(&ignored, "LOCAL BYTES\n").unwrap();
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c2), Some(&tracks)).await;
+        let read = read_conflict(&f.host).await;
+        assert_eq!(
+            side(&read.theirs).plan,
+            Some(SubmoduleCheckoutPlan::CheckOut)
+        );
+
+        let expected = stages_of(Some(&f.c0), Some(&f.c2), Some(&tracks));
+        let outcome = accept(&f.host, "theirs", &expected, true).await.unwrap();
+        match &outcome {
+            SubmoduleAcceptOutcome::Staged {
+                sha,
+                checkout:
+                    SubmoduleAcceptCheckout::Left {
+                        why: SubmoduleCheckoutLeft::Failed,
+                        reason: Some(reason),
+                    },
+            } => {
+                assert_eq!(sha, &tracks);
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected a failed checkout, got {other:?}"),
+        }
+        assert_pointer_staged(&f.host, &tracks).await;
+        assert_eq!(head_of(&f.sub).await, f.c2);
+        assert_eq!(std::fs::read(&ignored).unwrap(), b"LOCAL BYTES\n");
+    }
+
+    #[tokio::test]
+    async fn accept_compares_the_stages_and_never_repoints_a_resolved_path() {
+        let f = gitlink_fixture("conflict-cas").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let before = index_entries(&f.host).await;
+        let swapped = stages_of(Some(&f.c0), Some(&f.c2), Some(&f.c1));
+        let outcome = accept(&f.host, "ours", &swapped, true).await.unwrap();
+        assert_eq!(outcome, SubmoduleAcceptOutcome::Changed);
+        assert_eq!(index_entries(&f.host).await, before);
+
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let outcome = accept(&f.host, "ours", &expected, true).await.unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: f.c1.clone(),
+                checkout: SubmoduleAcceptCheckout::CheckedOut,
+            }
+        );
+        assert_pointer_staged(&f.host, &f.c1).await;
+        assert_eq!(head_of(&f.sub).await, f.c1);
+
+        let after = index_entries(&f.host).await;
+        assert_invalid(
+            accept(&f.host, "theirs", &expected, true).await,
+            crate::git::conflict::NOT_CONFLICTED_REFUSAL,
+        );
+        assert_eq!(index_entries(&f.host).await, after);
+    }
+
+    #[tokio::test]
+    async fn submodule_conflict_cores_refuse_hostile_paths_and_bad_input() {
+        let f = gitlink_fixture("conflict-hostile").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let before = index_entries(&f.host).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let absolute = format!("{}/libs/dep", f.host.replace('\\', "/"));
+        for path in [".git/x", "../x", "-x", absolute.as_str()] {
+            assert!(
+                matches!(
+                    git_submodule_conflict_core(&f.host, path).await,
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "read {path}"
+            );
+            let accepted = git_accept_submodule_conflict_side_core(
+                &AppState::default(),
+                &f.host,
+                path,
+                "theirs",
+                &expected,
+                true,
+            )
+            .await;
+            assert!(
+                matches!(accepted, Err(AppError::InvalidArgument(_))),
+                "accept {path}"
+            );
+        }
+        assert_invalid(
+            accept(&f.host, "both", &expected, true).await,
+            "invalid conflict side: both",
+        );
+        let short = stages_of(Some("abc"), Some(&f.c1), Some(&f.c2));
+        assert_invalid(
+            accept(&f.host, "theirs", &short, true).await,
+            "invalid commit id: abc",
+        );
+        assert_eq!(index_entries(&f.host).await, before);
+    }
+
+    #[test]
+    fn plan_checkout_takes_the_first_matching_arm() {
+        use SubmoduleCheckoutPlan as P;
+        let (sha, other, stray) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let recorded = [sha.as_str(), other.as_str()];
+        let state = |checkout, head: Option<&str>, detached, dirty| SubmoduleCheckoutState {
+            checkout,
+            head: head.map(Into::into),
+            detached,
+            dirty,
+        };
+        let ok = SubmoduleCheckout::Ok;
+        let rows = [
+            // Tree-wide reasons outrank every per-side one, the head match included.
+            (
+                state(SubmoduleCheckout::NotInitialized, None, false, false),
+                true,
+                P::NotInitialized,
+            ),
+            (
+                state(SubmoduleCheckout::Missing, None, false, false),
+                true,
+                P::NotInitialized,
+            ),
+            (
+                state(SubmoduleCheckout::Replaced, None, false, false),
+                true,
+                P::Unusable,
+            ),
+            (
+                state(SubmoduleCheckout::Unreadable, None, false, false),
+                true,
+                P::Unusable,
+            ),
+            (state(ok, Some(&sha), true, true), false, P::AlreadyThere),
+            (state(ok, Some(&other), false, true), false, P::Dirty),
+            (state(ok, Some(&stray), true, true), true, P::Dirty),
+            (
+                state(ok, Some(&stray), true, false),
+                false,
+                P::DetachedElsewhere,
+            ),
+            (state(ok, None, true, false), true, P::DetachedElsewhere),
+            (state(ok, Some(&other), true, false), false, P::NotFetched),
+            (state(ok, Some(&stray), false, false), false, P::NotFetched),
+            (state(ok, Some(&other), true, false), true, P::CheckOut),
+            (state(ok, Some(&stray), false, false), true, P::CheckOut),
+        ];
+        for (i, (state, present, want)) in rows.iter().enumerate() {
+            assert_eq!(
+                plan_checkout(state, &sha, *present, &recorded),
+                *want,
+                "row {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn submodule_conflict_wire_shapes_are_camel_case() {
+        fn keys(value: &serde_json::Value) -> Vec<String> {
+            let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+            keys.sort_unstable();
+            keys
+        }
+        let conflict = SubmoduleConflict {
+            base: Some("b".into()),
+            ours: Some(SubmoduleConflictSide {
+                sha: "o".into(),
+                gitlink: true,
+                commit: Some(SubmoduleConflictCommit {
+                    subject: "s".into(),
+                    committed_at: "2026-01-02T03:04:05+00:00".into(),
+                }),
+                plan: Some(SubmoduleCheckoutPlan::DetachedElsewhere),
+            }),
+            theirs: Some(SubmoduleConflictSide {
+                sha: "t".into(),
+                gitlink: false,
+                commit: None,
+                plan: None,
+            }),
+            relation: SubmoduleConflictRelation::Unknown,
+        };
+        let json = serde_json::to_value(&conflict).unwrap();
+        assert_eq!(keys(&json), ["base", "ours", "relation", "theirs"]);
+        assert_eq!(keys(&json["ours"]), ["commit", "gitlink", "plan", "sha"]);
+        assert_eq!(keys(&json["ours"]["commit"]), ["committedAt", "subject"]);
+        assert_eq!(json["theirs"]["commit"], serde_json::Value::Null);
+        assert_eq!(json["theirs"]["plan"], serde_json::Value::Null);
+        let text = json.to_string();
+        assert!(!text.contains("committed_at"), "{text}");
+
+        use SubmoduleCheckoutPlan as P;
+        for (plan, wire) in [
+            (P::CheckOut, "checkOut"),
+            (P::AlreadyThere, "alreadyThere"),
+            (P::NotInitialized, "notInitialized"),
+            (P::Unusable, "unusable"),
+            (P::Dirty, "dirty"),
+            (P::DetachedElsewhere, "detachedElsewhere"),
+            (P::NotFetched, "notFetched"),
+        ] {
+            assert_eq!(serde_json::to_value(plan).unwrap(), serde_json::json!(wire));
+        }
+        use SubmoduleConflictRelation as R;
+        for (relation, wire) in [
+            (R::Unknown, serde_json::json!({ "kind": "unknown" })),
+            (R::Diverged, serde_json::json!({ "kind": "diverged" })),
+            (
+                R::OursContainsTheirs { ahead: 2 },
+                serde_json::json!({ "kind": "oursContainsTheirs", "ahead": 2 }),
+            ),
+            (
+                R::TheirsContainsOurs { ahead: 3 },
+                serde_json::json!({ "kind": "theirsContainsOurs", "ahead": 3 }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(relation).unwrap(), wire);
+        }
+
+        assert_eq!(
+            serde_json::to_value(SubmoduleAcceptOutcome::Changed).unwrap(),
+            serde_json::json!({ "kind": "changed" })
+        );
+        use SubmoduleAcceptCheckout as C;
+        for (checkout, wire) in [
+            (C::CheckedOut, serde_json::json!({ "kind": "checkedOut" })),
+            (
+                C::AlreadyThere,
+                serde_json::json!({ "kind": "alreadyThere" }),
+            ),
+        ] {
+            let staged = SubmoduleAcceptOutcome::Staged {
+                sha: "s".into(),
+                checkout,
+            };
+            assert_eq!(
+                serde_json::to_value(staged).unwrap(),
+                serde_json::json!({ "kind": "staged", "sha": "s", "checkout": wire })
+            );
+        }
+        use SubmoduleCheckoutLeft as L;
+        for (why, wire) in [
+            (L::NotInitialized, "notInitialized"),
+            (L::Unusable, "unusable"),
+            (L::Dirty, "dirty"),
+            (L::DetachedElsewhere, "detachedElsewhere"),
+            (L::NotFetched, "notFetched"),
+            (L::Failed, "failed"),
+        ] {
+            let reason = (why == L::Failed).then(|| "r".to_string());
+            assert_eq!(
+                serde_json::to_value(C::Left {
+                    why,
+                    reason: reason.clone()
+                })
+                .unwrap(),
+                serde_json::json!({ "kind": "left", "why": wire, "reason": reason })
+            );
+        }
+
+        let stages: SubmoduleConflictStages =
+            serde_json::from_value(serde_json::json!({ "base": null, "ours": "o", "theirs": "t" }))
+                .unwrap();
+        assert_eq!(stages, stages_of(None, Some("o"), Some("t")));
+    }
+
+    /// A submodule opened as its own repository holds its own working-tree domain,
+    /// spelled as git spells its toplevel. The accept waits on it, then stages
+    /// nothing; once it is free the accept proceeds.
+    #[tokio::test]
+    async fn accept_waits_on_the_submodules_own_working_tree() {
+        let f = gitlink_fixture("conflict-child-lock").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let before = index_entries(&f.host).await;
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let wait = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let err = accept_submodule_side_within(
+            &state, &f.host, "libs/dep", "ours", &expected, true, wait,
+        )
+        .await
+        .expect_err("the accept meets the tab's hold");
+        assert!(
+            matches!(&err, AppError::Busy { holder } if holder == "a test hold"),
+            "got {err:?}"
+        );
+        assert!(started.elapsed() >= wait, "it waited before giving up");
+        assert_eq!(index_entries(&f.host).await, before, "nothing staged");
+        assert_eq!(head_of(&f.sub).await, f.c2);
+        drop(held);
+
+        let outcome = git_accept_submodule_conflict_side_core(
+            &state, &f.host, "libs/dep", "ours", &expected, true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: f.c1.clone(),
+                checkout: SubmoduleAcceptCheckout::CheckedOut,
+            }
+        );
+        assert_pointer_staged(&f.host, &f.c1).await;
+        assert_eq!(head_of(&f.sub).await, f.c1);
+    }
+
+    /// Stages moved by git outside the app while the accept waits on the submodule's own
+    /// working tree: the accept re-reads them before it writes and says Changed, the new
+    /// stages and the checkout left as they are.
+    #[tokio::test]
+    async fn accept_rereads_the_stages_after_waiting_on_the_submodules_own_working_tree() {
+        let f = gitlink_fixture("conflict-child-reread").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+        let accept = CHILD_WAIT_HOOK.scope(
+            hook,
+            git_accept_submodule_conflict_side_core(
+                &state, &f.host, "libs/dep", "ours", &expected, true,
+            ),
+        );
+        let (host, c0, c1, c2) = (&f.host, &f.c0, &f.c1, &f.c2);
+        let moved = async move {
+            rx.await
+                .expect("the accept waits on the submodule's working tree");
+            conflict_at(host, Some(c0), Some(c2), Some(c1)).await;
+            let stages = unmerged(host).await;
+            drop(held);
+            stages
+        };
+        let (outcome, stages) = tokio::join!(accept, moved);
+        assert_eq!(outcome.unwrap(), SubmoduleAcceptOutcome::Changed);
+        assert!(
+            stages.contains(&format!("{} 2\tlibs/dep", f.c2)),
+            "{stages}"
+        );
+        assert_eq!(unmerged(&f.host).await, stages, "the new stages stay");
+        assert_eq!(head_of(&f.sub).await, f.c2, "the checkout stays");
+    }
+
+    /// The path resolved by git outside the app while the accept waits on the submodule's
+    /// own working tree: the re-read refuses it as not conflicted, as the first read
+    /// would, and the accept stages nothing.
+    #[tokio::test]
+    async fn accept_refuses_a_path_resolved_during_the_child_wait() {
+        let f = gitlink_fixture("conflict-child-resolved").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+        let accept = CHILD_WAIT_HOOK.scope(
+            hook,
+            git_accept_submodule_conflict_side_core(
+                &state, &f.host, "libs/dep", "ours", &expected, true,
+            ),
+        );
+        let (host, c2) = (&f.host, &f.c2);
+        let resolved = async move {
+            rx.await
+                .expect("the accept waits on the submodule's working tree");
+            stage_gitlink(host, c2).await;
+            drop(held);
+        };
+        let (outcome, ()) = tokio::join!(accept, resolved);
+        assert_invalid(outcome, NOT_CONFLICTED_REFUSAL);
+        assert_pointer_staged(&f.host, &f.c2).await;
+        assert_eq!(head_of(&f.sub).await, f.c2, "the checkout stays");
+    }
+
+    /// `submodule.recurse=true` would carry the accept's checkout into a nested
+    /// submodule whose recorded commit differs between the two sides.
+    #[tokio::test]
+    async fn accept_leaves_a_nested_submodule_under_submodule_recurse() {
+        allow_file_submodules();
+        let dir = temp("conflict-nested");
+        let root = dir.path();
+        let leaf = seed_repo(root, "leaf").await;
+        let mid = seed_repo(root, "mid").await;
+        let host = seed_repo(root, "host").await;
+        let state = AppState::default();
+        git_submodule_add_core(
+            &state,
+            mid.clone(),
+            "../leaf".into(),
+            Some("deep/leaf".into()),
+            None,
+        )
+        .await
+        .unwrap();
+        git(&mid, &["commit", "-qm", "add leaf"]).await;
+        let m0 = head_of(&mid).await;
+        let l1 = commit_in(&leaf, "leaf.txt", "v1").await;
+        let mid_leaf = Path::new(&mid)
+            .join("deep/leaf")
+            .to_string_lossy()
+            .into_owned();
+        git(&mid_leaf, &["fetch", "-q", "origin"]).await;
+        git(&mid_leaf, &["checkout", "-q", &l1]).await;
+        git(&mid, &["add", "deep/leaf"]).await;
+        git(&mid, &["commit", "-qm", "leaf v1"]).await;
+        let m1 = head_of(&mid).await;
+        git_submodule_add_core(
+            &state,
+            host.clone(),
+            "../mid".into(),
+            Some("libs/dep".into()),
+            Some("main".into()),
+        )
+        .await
+        .unwrap();
+        git(&host, &["commit", "-qm", "add mid"]).await;
+        let sub = sub_dir(&host);
+        git(&sub, &["submodule", "update", "--init", "-q"]).await;
+        let nested = Path::new(&sub)
+            .join("deep/leaf")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            head_of(&nested).await,
+            l1,
+            "fixture: nested sits at what m1 records"
+        );
+        git(&sub, &["config", "submodule.recurse", "true"]).await;
+
+        conflict_at(&host, None, Some(&m1), Some(&m0)).await;
+        let expected = stages_of(None, Some(&m1), Some(&m0));
+        let outcome = accept(&host, "theirs", &expected, true).await.unwrap();
+        assert_eq!(
+            outcome,
+            SubmoduleAcceptOutcome::Staged {
+                sha: m0.clone(),
+                checkout: SubmoduleAcceptCheckout::CheckedOut,
+            }
+        );
+        assert_eq!(head_of(&sub).await, m0);
+        assert_eq!(head_of(&nested).await, l1, "the nested checkout stays put");
+    }
+
+    #[test]
+    fn submodule_conflict_cores_gate_the_path_and_lock_before_writing() {
+        fn body(source: &str, name: &str) -> String {
+            let start = source.find(&format!("fn {name}(")).expect(name);
+            let rest = &source[start..];
+            let end = rest.find("\n}").expect(name);
+            rest[..end]
+                .lines()
+                .map(|line| line.split("//").next().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        let source = include_str!("submodule.rs");
+        let read = body(source, "git_submodule_conflict_core");
+        assert!(read.contains("conflict_rel_path("));
+        let core = body(source, "git_accept_submodule_conflict_side_core");
+        assert!(
+            core.contains("LOCK_WAIT_TIMEOUT"),
+            "the app waits the bounded default"
+        );
+        let write = body(source, "accept_submodule_side_within");
+        let at = |needle: &str| write.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        assert!(at("conflict_rel_path(") < at("working_tree_lock("));
+        assert!(at("working_tree_lock(") < at("acquire_repo_lock("));
+        assert!(at("acquire_repo_lock(") < at("\"update-index\""));
+        assert!(at("acquire_repo_lock(") < at("checkout_staged_commit("));
+        // The submodule's own hold: bounded, and taken before anything reads inside it.
+        let child = write
+            .find("acquire_repo_lock(child, submodule_wait")
+            .expect("child hold");
+        assert!(at("acquire_repo_lock(") < child);
+        assert!(child < at("submodule_checkout_state("));
+        assert!(!write.contains("acquire_repo_lock_unbounded"));
     }
 }

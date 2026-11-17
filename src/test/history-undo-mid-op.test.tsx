@@ -105,6 +105,7 @@ const summary = (hash: string, subject: string): CommitSummary => ({
   author: "Ada",
   authorEmail: "",
   date: "2026-11-01T10:00:00Z",
+  committerDate: "2026-11-01T10:00:00Z",
   tags: [],
   isMerge: false,
 });

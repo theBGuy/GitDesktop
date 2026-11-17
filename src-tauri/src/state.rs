@@ -256,7 +256,9 @@ impl AppState {
     /// concurrent removal from a linked worktree's mutations, and
     /// `git_delete_branch_core` a worktree add of the branch it deletes) — never
     /// either reverse as a blocking wait (try-acquires are exempt), and no task takes
-    /// two locks of one domain. The config-write mutex is the leaf under all of them.
+    /// two locks of one domain except the submodule accept, which takes the parent
+    /// checkout's WORKING-TREE lock and then the submodule's own (never child first).
+    /// The config-write mutex is the leaf under all of them.
     pub(crate) async fn working_tree_lock(&self, repo_path: &str) -> LockDomain {
         let key = self.resolve_lock_keys(repo_path).await.checkout;
         self.checkout_domains

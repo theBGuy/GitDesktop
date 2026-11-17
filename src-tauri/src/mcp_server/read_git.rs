@@ -104,8 +104,10 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "List recent commits (sha, author, authorEmail, date (the author date), subject). \
-                       Supports paging via limit/skip and an optional message/author search filter."
+        description = "List recent commits (hash, subject, author, authorEmail, date (the author \
+                       date), committerDate (when the commit object was made), tags, isMerge). \
+                       Supports paging via limit/skip and an optional case-insensitive commit \
+                       message search."
     )]
     async fn log(&self, Parameters(args): Parameters<LogArgs>) -> Result<CallToolResult, McpError> {
         let commits = crate::git::history::git_log(
@@ -123,7 +125,8 @@ impl GitDesktopMcp {
         description = "List the commits that touched a single file (newest first), following \
                        renames within the repository directory this server is bound to. Each \
                        entry carries `path`: the file's path as of that commit, relative to \
-                       that directory. Each entry's `date` is the author date."
+                       that directory. Each entry's `date` is the author date, and its \
+                       `committerDate` when the commit object was made."
     )]
     async fn file_history(
         &self,

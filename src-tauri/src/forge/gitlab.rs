@@ -9464,7 +9464,7 @@ fn map_ci_status(s: &str) -> (String, String) {
         "running" => ("in_progress", ""),
         "pending" => ("pending", ""),
         "created" | "preparing" => ("queued", ""),
-        "waiting_for_resource" | "scheduled" => ("waiting", ""),
+        "waiting_for_resource" | "scheduled" | "waiting_for_callback" => ("waiting", ""),
         // Canceling must stay active so polling reaches the final canceled state.
         "canceling" => ("in_progress", ""),
         // Unknown/new GitLab state — treat as finished-neutral rather than guess.
@@ -17955,6 +17955,33 @@ mod tests {
             map_ci_status("canceling"),
             ("in_progress".into(), String::new())
         );
+    }
+
+    #[test]
+    fn ci_status_documented_names_have_explicit_lifecycles() {
+        for (name, status, conclusion) in [
+            ("created", "queued", ""),
+            ("waiting_for_resource", "waiting", ""),
+            ("preparing", "queued", ""),
+            ("waiting_for_callback", "waiting", ""),
+            ("pending", "pending", ""),
+            ("running", "in_progress", ""),
+            ("success", "completed", "success"),
+            ("failed", "completed", "failure"),
+            ("canceling", "in_progress", ""),
+            ("canceled", "completed", "cancelled"),
+            ("skipped", "completed", "skipped"),
+            ("manual", "completed", "action_required"),
+            ("scheduled", "waiting", ""),
+        ] {
+            assert_eq!(
+                map_ci_status(name),
+                (status.into(), conclusion.into()),
+                "{name}"
+            );
+        }
+        assert_eq!(map_ci_status("cancelled"), map_ci_status("canceled"));
+        assert_eq!(map_ci_status("novel"), ("completed".into(), "".into()));
     }
 
     #[test]

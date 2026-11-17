@@ -253,7 +253,6 @@ const STATUS = {
     "PAUSED",
     "HALTED",
     "BUILDING",
-    "ERROR",
     "PASSED",
     "FAILED",
     "STOPPED",
@@ -272,9 +271,17 @@ test("STATUS_FACETS lists each forge's native status values", () => {
     ...filters.STATUS_FACETS,
     github: filters.STATUS_FACETS.github.filter((s) => s !== "startup_failure"),
   });
+  pinWithMutant(check, filters.STATUS_FACETS, {
+    ...filters.STATUS_FACETS,
+    bitbucket: [
+      ...filters.STATUS_FACETS.bitbucket.slice(0, 5),
+      "ERROR",
+      ...filters.STATUS_FACETS.bitbucket.slice(5),
+    ],
+  });
   assert.equal(STATUS.github.length, 15);
   assert.equal(STATUS.gitlab.length, 13);
-  assert.equal(STATUS.bitbucket.length, 10);
+  assert.equal(STATUS.bitbucket.length, 9);
 });
 
 test("EVENT_FACETS: GitHub's list ends in dynamic, GitLab's 15 sources, Bitbucket's 4 trigger types", () => {

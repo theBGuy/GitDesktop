@@ -468,13 +468,16 @@ pub(crate) async fn git_switch_autostash_core(
     let session_name = crate::git::branches::is_session_branch_name(&name);
     if let Some(remote) = &remote {
         validate_ref_name(remote)?;
+        // This arm creates `name`, so it takes the branch-name gate every creator takes.
+        crate::git::branches::validate_branch_name(&name)?;
         crate::git::branches::refuse_session_branch_name(&name)?;
     } else if session_name && !crate::git::branches::branch_exists_exact(&repo_path, &name).await? {
         // Refuse only guess-creation so existing session-named branches stay reachable.
         crate::git::branches::refuse_session_branch_name(&name)?;
     }
-    // The full ref, as `git_checkout_remote_branch_core` passes it: a tag or local
-    // branch named `<remote>/<name>` makes the bare form ambiguous, and git refuses it.
+    // The full ref with `name` given, as `git_checkout_remote_branch_core` passes them: a
+    // tag or local branch named `<remote>/<name>` makes the bare form ambiguous, and git
+    // refuses it; `--track` alone would derive `fork/<name>` from a remote `team/fork`.
     let tracking = remote.map(|remote| format!("refs/remotes/{remote}/{name}"));
 
     let domain = state.working_tree_lock(&repo_path).await;
@@ -483,6 +486,11 @@ pub(crate) async fn git_switch_autostash_core(
     // Ahead of the stash: the switch would fail on the update's hold anyway, after
     // pushing and popping the user's changes for nothing.
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
+    if tracking.is_some() {
+        // Ahead of the stash for the same reason; the check under the mutex below is the
+        // authoritative one.
+        crate::git::branches::refuse_new_name_twin(&repo_path, &name, None).await?;
+    }
 
     let stashed = autostash_push(&repo_path).await?;
     let op = match &tracking {
@@ -491,7 +499,9 @@ pub(crate) async fn git_switch_autostash_core(
         Some(tracking) => {
             let (repo, name) = (repo_path.as_str(), name.as_str());
             with_config_write_lock(repo, |held| async move {
-                let args = ["switch", "--track", tracking.as_str()];
+                // Inside the mutex, so a twin another creator mints during the wait is seen.
+                crate::git::branches::refuse_new_name_twin(repo, name, None).await?;
+                let args = ["switch", "--track", "-c", name, tracking.as_str()];
                 let out = run_git_raw(Some(repo), &args, DEFAULT_TIMEOUT).await?;
                 let by = TrackedBy::ExplicitTrack;
                 let finished =
@@ -1750,6 +1760,196 @@ mod tests {
         assert_eq!(head_branch(&clone).await, "feat");
         assert_eq!(read(&clone_dir, "a.txt"), "feat\n");
         assert_eq!(read(&clone_dir, "b.txt"), "mine\n");
+    }
+
+    /// The new-name refusal for `Feat` beside the stored `feat`.
+    const NEW_NAME_TWIN_REFUSAL: &str = "Feat differs from the existing branch feat only in \
+        letter case, which this disk can't keep apart. Use a different name, or rename feat \
+        first.";
+
+    /// `setup_repo` plus an `origin` whose `Feat` tracking ref sits at HEAD, `feat` stored
+    /// packed-only when `twin` is set, and whether refs alias, read by git alone over a
+    /// loose `oracle-loose` spelled `ORACLE-LOOSE` and asserted equal to the product's
+    /// verdict.
+    async fn case_twin_fixture(marker: &str, twin: bool) -> (tempfile::TempDir, String, bool) {
+        use crate::git::branches::tests::is_aliased;
+        let (dir, repo) = setup_repo(marker).await;
+        git(&repo, &["remote", "add", "origin", &repo]).await;
+        git(&repo, &["update-ref", "refs/remotes/origin/Feat", "HEAD"]).await;
+        if twin {
+            git(&repo, &["branch", "feat"]).await;
+            git(&repo, &["pack-refs", "--all"]).await;
+        }
+        git(&repo, &["branch", "oracle-loose"]).await;
+        let observed = is_aliased(&repo, "ORACLE-LOOSE").await;
+        assert_eq!(
+            crate::git::branches::refs_can_alias(&repo).await,
+            observed,
+            "the alias verdict matches git's own reads"
+        );
+        (dir, repo, observed)
+    }
+
+    /// Every stored branch name, read with raw git.
+    async fn case_twin_listed(repo: &str) -> Vec<String> {
+        git(
+            repo,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await
+        .lines()
+        .filter_map(|line| line.strip_prefix("refs/heads/"))
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// The tracking switch onto `Feat` beside the packed-only `feat`, clean or dirty: where
+    /// refs alias it is refused before anything is stashed, the tree and branches as they
+    /// were; where they don't, `Feat` is created and checked out as today.
+    #[tokio::test]
+    async fn switch_autostash_refuses_a_case_twin_before_stashing() {
+        for (dirty, reapply) in [(false, true), (true, true), (true, false)] {
+            let row = format!("dirty={dirty} reapply={reapply}");
+            let (dir, repo, aliases) = case_twin_fixture("switch-case-twin", true).await;
+            if dirty {
+                write(dir.path(), "b.txt", "mine\n");
+            }
+            let result = git_switch_autostash_core(
+                &AppState::default(),
+                repo.clone(),
+                "Feat".into(),
+                Some("origin".into()),
+                reapply,
+            )
+            .await;
+            let listed = case_twin_listed(&repo).await;
+            assert!(listed.iter().any(|b| b == "feat"), "{row}: {listed:?}");
+            if aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(stash_list(&repo).await.is_empty(), "{row}: nothing stashed");
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(head_branch(&repo).await, "main", "{row}");
+            } else {
+                let outcome = result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                let expected = match (dirty, reapply) {
+                    (false, _) => matches!(outcome, AutostashOutcome::NothingStashed),
+                    (true, true) => matches!(outcome, AutostashOutcome::Reapplied),
+                    (true, false) => matches!(outcome, AutostashOutcome::StashedOnly),
+                };
+                assert!(expected, "{row}: {outcome:?}");
+                assert_eq!(head_branch(&repo).await, "Feat", "{row}");
+            }
+            if dirty && (aliases || reapply) {
+                assert_eq!(read(dir.path(), "b.txt"), "mine\n", "{row}");
+            }
+        }
+    }
+
+    /// The tracking switch onto `Feat` of a remote named `team/fork` creates `Feat`
+    /// tracking `team/fork/Feat`, never the `fork/Feat` git derives from the start ref
+    /// alone; beside a packed-only `feat` where refs alias, it is refused with the twin
+    /// sentence before anything is created.
+    #[tokio::test]
+    async fn switch_autostash_under_a_slash_named_remote_creates_the_named_branch() {
+        for twin in [false, true] {
+            let row = format!("twin={twin}");
+            let (_dir, repo, aliases) = case_twin_fixture("switch-slash-remote", twin).await;
+            git(&repo, &["remote", "add", "team/fork", &repo]).await;
+            git(
+                &repo,
+                &["update-ref", "refs/remotes/team/fork/Feat", "HEAD"],
+            )
+            .await;
+            let result = git_switch_autostash_core(
+                &AppState::default(),
+                repo.clone(),
+                "Feat".into(),
+                Some("team/fork".into()),
+                true,
+            )
+            .await;
+            let listed = case_twin_listed(&repo).await;
+            assert!(
+                !listed.iter().any(|b| b == "fork/Feat"),
+                "{row}: {listed:?}"
+            );
+            if twin && aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(head_branch(&repo).await, "main", "{row}");
+            } else {
+                let outcome = result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(
+                    matches!(outcome, AutostashOutcome::NothingStashed),
+                    "{row}: {outcome:?}"
+                );
+                assert_eq!(head_branch(&repo).await, "Feat", "{row}");
+                let tracking = git(&repo, &["rev-parse", "--abbrev-ref", "Feat@{upstream}"]).await;
+                assert_eq!(tracking.trim(), "team/fork/Feat", "{row}");
+            }
+        }
+    }
+
+    /// A twin minted while the tracking switch waits on the config-write mutex, the user's
+    /// changes already stashed: refused under the mutex, the changes popped back and the
+    /// refusal reported as the failed switch it is.
+    #[tokio::test]
+    async fn switch_autostash_refuses_a_case_twin_minted_during_the_mutex_wait() {
+        use crate::git::branches::tests::{hold_config_mutex, on_first_waiting};
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        for reapply in [true, false] {
+            let row = format!("reapply={reapply}");
+            let (dir, repo, aliases) = case_twin_fixture("switch-case-twin-mutex", false).await;
+            write(dir.path(), "b.txt", "mine\n");
+            let (holder, release) = hold_config_mutex(&repo).await;
+            let (events, waiting) = on_first_waiting();
+            let switch = tokio::spawn({
+                let repo = repo.clone();
+                CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                    let state = AppState::default();
+                    let remote = Some("origin".into());
+                    git_switch_autostash_core(&state, repo, "Feat".into(), remote, reapply).await
+                })
+            });
+            waiting
+                .await
+                .expect("the switch reached the config-write mutex");
+            git(&repo, &["branch", "feat"]).await;
+            git(&repo, &["pack-refs", "--all"]).await;
+            release.send(()).unwrap();
+            holder.await.unwrap();
+            let result = tokio::time::timeout(TEST_GIT_HANG_GUARD, switch)
+                .await
+                .expect("the switch finishes once released")
+                .unwrap();
+            let listed = case_twin_listed(&repo).await;
+            let outcome = result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+            if aliases {
+                assert!(
+                    matches!(&outcome, AutostashOutcome::OpFailedRestored { stderr }
+                        if stderr == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {outcome:?}"
+                );
+                assert_eq!(read(dir.path(), "b.txt"), "mine\n", "{row}: changes back");
+                assert!(stash_list(&repo).await.is_empty(), "{row}: stash popped");
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(head_branch(&repo).await, "main", "{row}");
+            } else {
+                let expected = if reapply {
+                    matches!(outcome, AutostashOutcome::Reapplied)
+                } else {
+                    matches!(outcome, AutostashOutcome::StashedOnly)
+                };
+                assert!(expected, "{row}: {outcome:?}");
+                assert_eq!(head_branch(&repo).await, "Feat", "{row}");
+            }
+        }
     }
 
     // ---- contract ---------------------------------------------------------

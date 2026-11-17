@@ -4,7 +4,11 @@ export interface CommitSummary {
   author: string;
   /** Author email (%ae) — drives the History-tab commit avatar. May be "". */
   authorEmail: string;
+  /** Author date (strict ISO 8601, %aI). */
   date: string;
+  /** Committer date (strict ISO 8601, %cI): when this commit object was made,
+   *  which a rewrite restamps. */
+  committerDate: string;
   /** Tags pointing at this commit. */
   tags: string[];
   /** More than one parent — history rewriting must not cross it. */

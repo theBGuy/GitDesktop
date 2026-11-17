@@ -1718,11 +1718,15 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             .to_string(),
     };
 
+    // A target with a case twin is refused before anything is journaled or switched where
+    // refs alias: `git switch` opens the loose file either twin's spelling reads, so the
+    // tip read below could anchor the rollback on the other branch.
+    crate::git::branches::bare_move_tip(repo_path, target_branch).await?;
+
     // The target's tip before we touch it, for the rollback's `reset --hard`: the branch by
-    // its exact name, never a tag or git's ref search, though two branches whose names
-    // differ only in letter case are beyond what it tells apart. `branch_tip_sha`, not
-    // `exact_branch_tip`, because the read must answer for the spelling `git switch` opens,
-    // a loose ref under another letter case included.
+    // its exact name, never a tag or git's ref search. `branch_tip_sha`, not
+    // `exact_branch_tip` or `bare_move_tip`'s answer, because the read must answer for the
+    // spelling `git switch` opens, a loose ref under another letter case included.
     let Some(target_tip) = crate::git::branches::branch_tip_sha(repo_path, target_branch).await?
     else {
         return Err(AppError::InvalidArgument(format!(
@@ -1764,9 +1768,12 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // write lands in a branch delete's guarded window; the picks, `--skip`, `--abort`
         // and reset don't. The wait is unbounded, so the switch first re-reads the exact
         // branch ref it lands on, never a tag or git's ref search, and refuses unless it
-        // still reads `target_tip`; a read that can't run is the error.
+        // still reads `target_tip`; a read that can't run is the error. The twin check runs
+        // again first: a loose twin minted during the wait at the same tip passes the tip
+        // compare, and the picks would then write through the twin's loose ref.
         let tip = target_tip.as_str();
         let switched = match with_config_write_lock(repo_path, |_held| async move {
+            crate::git::branches::bare_move_tip(repo_path, target_branch).await?;
             let tip_now = crate::git::branches::branch_tip_sha(repo_path, target_branch).await?;
             if tip_now.as_deref() != Some(tip) {
                 return Err(AppError::Command(format!(
@@ -4256,11 +4263,14 @@ fn merge_target_moved(base: &str) -> String {
 
 /// Refuses, before anything is merged, a target [`finalize_branch`]'s bare arm would
 /// refuse as a case twin: one that neither `current` nor a listed worktree holds, where
-/// refs can alias. A held twin passes, since its arm moves it through that checkout.
+/// refs can alias (folded twins whatever the disk probe says, as the bare arm refuses
+/// them). A held twin passes, since its arm moves it through that checkout.
 async fn refuse_unheld_twin(repo_path: &str, branch: &str, current: &str) -> AppResult<()> {
-    use crate::git::branches::{branch_spelling, BranchSpelling};
-    let BranchSpelling::Twin { twin, .. } = branch_spelling(repo_path, branch, true).await? else {
-        return Ok(());
+    use crate::git::branches::{branch_spelling, twin_refusal, BranchSpelling};
+    let (refusal, probe_disk) = match branch_spelling(repo_path, branch, true).await? {
+        BranchSpelling::Twin { twin, .. } => (twin_refusal(branch, &twin), true),
+        BranchSpelling::FoldedTwins { first, second } => (twin_refusal(&first, &second), false),
+        _ => return Ok(()),
     };
     if is_current_branch(repo_path, current, branch).await? {
         return Ok(());
@@ -4274,11 +4284,11 @@ async fn refuse_unheld_twin(repo_path: &str, branch: &str, current: &str) -> App
     if worktree_holding(&listed.stdout_lossy(), repo_path, branch)
         .await
         .is_some()
-        || !crate::git::branches::refs_can_alias(repo_path).await
+        || (probe_disk && !crate::git::branches::refs_can_alias(repo_path).await)
     {
         return Ok(());
     }
-    Err(crate::git::branches::twin_refusal(branch, &twin))
+    Err(refusal)
 }
 
 /// Refuses `branch` while a rebase or bisect records it, as `branch_operation_refusal`
@@ -27115,15 +27125,33 @@ detached
         }
     }
 
-    /// `Feat` packed at `a` and `feat` loose at its child `b`, with `up` a child of `b`: a
-    /// read by the spelling `Feat` opens `feat`'s loose file. `checkout` puts `feat` in
-    /// this checkout (`"main"`), a linked worktree (`"linked"`) or nowhere. Returns
-    /// (guard, repo, checkout, a, b, up), or `None` when raw git reads the two apart: a
-    /// case-sensitive filesystem or a non-files ref backend.
+    /// [`packed_twin_fixture`] where raw git reads `Feat` as `feat`'s loose file, else `None`:
+    /// a case-sensitive filesystem.
     async fn packed_twin_finalize_fixture(
         tag: &str,
         checkout: &str,
     ) -> Option<(tempfile::TempDir, String, String, String, String, String)> {
+        let (dir, repo, at, a, b, up, aliased) = packed_twin_fixture(tag, checkout).await;
+        aliased.then_some((dir, repo, at, a, b, up))
+    }
+
+    /// `Feat` packed at `a` and `feat` loose at its child `b`, with `up` a child of `b`, in a
+    /// files-backend repository. `checkout` puts `feat` in this checkout (`"main"`), a
+    /// linked worktree (`"linked"`) or nowhere. Returns (guard, repo, checkout, a, b, up,
+    /// aliased), `aliased` being raw git's own observation that a read by the spelling
+    /// `Feat` opens `feat`'s loose file while the listing still answers the packed `a`.
+    async fn packed_twin_fixture(
+        tag: &str,
+        checkout: &str,
+    ) -> (
+        tempfile::TempDir,
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+    ) {
         let dir = tempfile::Builder::new()
             .prefix(&format!("gd-finalize-{tag}-"))
             .tempdir()
@@ -27152,9 +27180,7 @@ detached
             &["for-each-ref", "--format=%(objectname)", "refs/heads/Feat"],
         )
         .await;
-        if shown.trim() != b || listed.trim() != a {
-            return None;
-        }
+        let aliased = shown.trim() == b && listed.trim() == a;
         let at = match checkout {
             "main" => {
                 git(&repo, &["switch", "-q", "feat"]).await;
@@ -27167,7 +27193,7 @@ detached
             }
             _ => repo.clone(),
         };
-        Some((dir, repo, at, a, b, up))
+        (dir, repo, at, a, b, up, aliased)
     }
 
     /// A finalize of `Feat` while `feat` beside it shares its loose file: refused as
@@ -27278,12 +27304,25 @@ detached
         assert_ne!(attached.code, 0, "still detached");
     }
 
-    /// A start refused as twins left nothing behind: no journal entry for `op`, no resolve
-    /// worktree, and `Feat` at `a` and `feat` at `b` still.
-    async fn assert_twin_start_refused(repo: &str, op: &str, err: &AppError, a: &str, b: &str) {
+    /// `twin_refusal`'s sentence for a target `Feat` beside `feat`, and for `feat` beside
+    /// `Feat`.
+    const FEAT_TWIN_REFUSAL: &str = "Feat and feat differ only in letter case, which this \
+        disk can't keep apart. Rename one of them, then try again.";
+    const FEAT_LOWER_TWIN_REFUSAL: &str = "feat and Feat differ only in letter case, which \
+        this disk can't keep apart. Rename one of them, then try again.";
+
+    /// A start refused as twins with `expected` left nothing behind: no journal entry for
+    /// `op`, no resolve worktree, and `Feat` at `a` and `feat` at `b` still.
+    async fn assert_twin_start_refused(
+        repo: &str,
+        op: &str,
+        err: &AppError,
+        expected: &str,
+        a: &str,
+        b: &str,
+    ) {
         assert!(
-            matches!(err, AppError::Command(m) if m == "Feat and feat differ only in letter \
-                case, which this disk can't keep apart. Rename one of them, then try again."),
+            matches!(err, AppError::Command(m) if m == expected),
             "{err:?}"
         );
         let entries = crate::oplog::git_oplog_list(repo.to_string())
@@ -27327,68 +27366,318 @@ detached
         assert!(!is_current_branch(&path, "other", "topic/x").await.unwrap());
     }
 
-    /// A local-PR merge into `Feat` while `feat` beside it shares its loose file and no
+    /// A local-PR merge into `Feat`, or into `FEAT` (which neither twin stores and git reads
+    /// through the loose `feat`), while `feat` beside `Feat` shares its loose file and no
     /// checkout holds either: refused as twins before anything starts. Returns early on a
     /// case-sensitive filesystem or a non-files ref backend.
     #[tokio::test]
     async fn merge_local_pr_refuses_an_unheld_case_twin_base_before_starting() {
-        let Some((_g, repo, _, a, b, _up)) =
-            packed_twin_finalize_fixture("twin-merge", "none").await
-        else {
-            return;
-        };
-        let head = crate::git::branches::current_branch_name(&repo)
-            .await
-            .unwrap()
-            .unwrap();
-        let root_holder = tempfile::tempdir().expect("create temp dir");
-        let root = root_holder.path().join("root");
-        let merged = merge_local_pr(
-            &AppState::default(),
-            &repo,
-            "Feat",
-            &head,
-            "m",
-            "merge",
-            &root,
-        )
-        .await;
-        let Err(err) = merged else {
-            panic!("the merge started");
-        };
-        assert_twin_start_refused(&repo, MERGE_LOCAL_PR_OP, &err, &a, &b).await;
+        for base in ["Feat", "FEAT"] {
+            let Some((_g, repo, _, a, b, _up)) =
+                packed_twin_finalize_fixture("twin-merge", "none").await
+            else {
+                return;
+            };
+            let head = crate::git::branches::current_branch_name(&repo)
+                .await
+                .unwrap()
+                .unwrap();
+            let root_holder = tempfile::tempdir().expect("create temp dir");
+            let root = root_holder.path().join("root");
+            let merged = merge_local_pr(
+                &AppState::default(),
+                &repo,
+                base,
+                &head,
+                "m",
+                "merge",
+                &root,
+            )
+            .await;
+            let Err(err) = merged else {
+                panic!("{base}: the merge started");
+            };
+            assert_twin_start_refused(&repo, MERGE_LOCAL_PR_OP, &err, FEAT_TWIN_REFUSAL, &a, &b)
+                .await;
+        }
     }
 
-    /// A local-PR update of `Feat` while `feat` beside it shares its loose file and no
-    /// checkout holds either: refused as twins before anything starts. Returns early on a
-    /// case-sensitive filesystem or a non-files ref backend.
+    /// A local-PR update of `Feat`, or of `FEAT` (read through the loose `feat`), while
+    /// `feat` beside `Feat` shares its loose file and no checkout holds either: refused as
+    /// twins before anything starts. Returns early on a case-sensitive filesystem or a
+    /// non-files ref backend.
     #[tokio::test]
     async fn update_local_pr_head_refuses_an_unheld_case_twin_head_before_starting() {
-        let Some((_g, repo, _, a, b, _up)) =
-            packed_twin_finalize_fixture("twin-update", "none").await
-        else {
-            return;
-        };
-        let base = crate::git::branches::current_branch_name(&repo)
+        for head in ["Feat", "FEAT"] {
+            let Some((_g, repo, _, a, b, _up)) =
+                packed_twin_finalize_fixture("twin-update", "none").await
+            else {
+                return;
+            };
+            let base = crate::git::branches::current_branch_name(&repo)
+                .await
+                .unwrap()
+                .unwrap();
+            let roots = tempfile::tempdir().expect("create temp dir");
+            let managed = roots.path().join("managed");
+            let root = managed.join("root");
+            let sessions = std::collections::HashSet::new();
+            let err = update_local_pr_head(
+                &AppState::default(),
+                &repo,
+                &base,
+                head,
+                &root,
+                &managed,
+                &sessions,
+            )
             .await
-            .unwrap()
-            .unwrap();
-        let roots = tempfile::tempdir().expect("create temp dir");
-        let managed = roots.path().join("managed");
-        let root = managed.join("root");
-        let sessions = std::collections::HashSet::new();
-        let err = update_local_pr_head(
-            &AppState::default(),
+            .unwrap_err();
+            assert_twin_start_refused(
+                &repo,
+                UPDATE_LOCAL_PR_HEAD_OP,
+                &err,
+                FEAT_TWIN_REFUSAL,
+                &a,
+                &b,
+            )
+            .await;
+        }
+    }
+
+    /// Cherry-pick onto either twin of a pair, one commit or a batch, from a branch that is
+    /// neither: where refs alias, refused with `twin_refusal`'s sentence naming the target
+    /// first before anything is journaled or switched; where they don't, the commits land
+    /// on the exact target ref and its twin is unchanged.
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_a_case_twin_target_before_starting() {
+        let rows = [
+            ("Feat", false, FEAT_TWIN_REFUSAL),
+            ("Feat", true, FEAT_TWIN_REFUSAL),
+            ("feat", false, FEAT_LOWER_TWIN_REFUSAL),
+            ("feat", true, FEAT_LOWER_TWIN_REFUSAL),
+        ];
+        for (i, (target, batch, expected)) in rows.into_iter().enumerate() {
+            let case = format!("{target}, batch {batch}");
+            let (_g, repo, _, a, b, up, aliased) =
+                packed_twin_fixture(&format!("pick-twin-{i}"), "none").await;
+            assert_eq!(
+                crate::git::branches::refs_can_alias(&repo).await,
+                aliased,
+                "{case}"
+            );
+            commit_file(&repo, Path::new(&repo), "d.txt", "d\n", "d").await;
+            let d = rev(&repo, "HEAD").await;
+            let hashes = if batch { vec![up, d] } else { vec![up] };
+            let head_before = head_ref(&repo).await;
+            let sha_before = rev(&repo, "HEAD").await;
+            let (own_ref, own_before, twin_ref, twin_before) = if target == "Feat" {
+                ("refs/heads/Feat", a.clone(), "refs/heads/feat", b.clone())
+            } else {
+                ("refs/heads/feat", b.clone(), "refs/heads/Feat", a.clone())
+            };
+
+            let result = cherry_pick_onto(&AppState::default(), &repo, &hashes, target, None).await;
+
+            if aliased {
+                let Err(err) = result else {
+                    panic!("{case}: the pick started");
+                };
+                assert_twin_start_refused(&repo, "cherry_pick_onto", &err, expected, &a, &b).await;
+                assert_eq!(head_ref(&repo).await, head_before, "{case}");
+                assert_eq!(rev(&repo, "HEAD").await, sha_before, "{case}");
+                assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
+                let loose: Vec<String> =
+                    std::fs::read_dir(Path::new(&repo).join(".git/refs/heads"))
+                        .unwrap()
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                assert!(loose.contains(&"feat".to_string()), "{case}: {loose:?}");
+                assert!(!loose.contains(&"Feat".to_string()), "{case}: {loose:?}");
+            } else {
+                let out = result.unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                assert_eq!(out.applied, hashes.len(), "{case}");
+                let back = format!("{own_ref}~{}", hashes.len());
+                assert_eq!(rev(&repo, &back).await, own_before, "{case}");
+                assert_eq!(rev(&repo, twin_ref).await, twin_before, "{case}");
+            }
+        }
+    }
+
+    /// Cherry-pick onto `FEAT`, which neither twin stores and git reads through the loose
+    /// `feat`: where refs alias, refused with the pair's twin sentence before anything is
+    /// journaled or switched; where they don't, no ref answers to `FEAT`, so it is an
+    /// unknown branch. Nothing is picked either way.
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_a_third_spelling_of_a_case_twin_pair() {
+        let (_g, repo, _, a, b, up, aliased) =
+            packed_twin_fixture("pick-folded-twin", "none").await;
+        let head_before = head_ref(&repo).await;
+        let sha_before = rev(&repo, "HEAD").await;
+
+        let result = cherry_pick_onto(&AppState::default(), &repo, &[up], "FEAT", None).await;
+
+        let Err(err) = result else {
+            panic!("the pick started");
+        };
+        if aliased {
+            assert_twin_start_refused(&repo, "cherry_pick_onto", &err, FEAT_TWIN_REFUSAL, &a, &b)
+                .await;
+        } else {
+            assert!(
+                matches!(&err, AppError::InvalidArgument(m) if m == "unknown branch: FEAT"),
+                "{err:?}"
+            );
+        }
+        assert_eq!(head_ref(&repo).await, head_before);
+        assert_eq!(rev(&repo, "HEAD").await, sha_before);
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
+        let refs = git(
             &repo,
-            &base,
-            "Feat",
-            &root,
-            &managed,
-            &sessions,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/",
+            ],
+        )
+        .await;
+        assert!(refs.contains(&format!("refs/heads/Feat {a}")), "{refs}");
+        assert!(refs.contains(&format!("refs/heads/feat {b}")), "{refs}");
+    }
+
+    /// A loose `feat` minted at `Feat`'s tip while the cherry-pick waits on the config-write
+    /// mutex: the tip compare still passes, so where refs alias the check under the mutex
+    /// refuses with nothing picked and HEAD where it was; where they don't, the pick lands
+    /// on `Feat` and `feat` stays put.
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_a_case_twin_minted_during_the_mutex_wait() {
+        use crate::git::branches::tests::{hold_config_mutex, is_aliased, on_first_waiting};
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        let (dir, repo) = setup_repo("pick-onto-twin-mutex").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["branch", "Feat"]).await;
+        git(&repo, &["pack-refs", "--all"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["branch", "oracle-loose"]).await;
+        let aliased = is_aliased(&repo, "ORACLE-LOOSE").await;
+        assert_eq!(crate::git::branches::refs_can_alias(&repo).await, aliased);
+        let (head_before, sha_before) = (head_ref(&repo).await, rev(&repo, "HEAD").await);
+
+        let (holder, release) = hold_config_mutex(&repo).await;
+        let (events, waiting) = on_first_waiting();
+        let pick = tokio::spawn({
+            let (repo, c1) = (repo.clone(), c1.clone());
+            CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                cherry_pick_onto(&AppState::default(), &repo, &[c1], "Feat", None).await
+            })
+        });
+        waiting
+            .await
+            .expect("the cherry-pick reached the config-write mutex");
+        git(&repo, &["branch", "feat", "Feat"]).await;
+        release.send(()).unwrap();
+        holder.await.unwrap();
+        let result = tokio::time::timeout(TEST_GIT_HANG_GUARD, pick)
+            .await
+            .expect("the cherry-pick finishes once released")
+            .unwrap();
+
+        let tips = git(
+            &repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/Feat",
+                "refs/heads/feat",
+            ],
+        )
+        .await;
+        if aliased {
+            assert!(
+                matches!(&result, Err(AppError::Command(m)) if m == FEAT_TWIN_REFUSAL),
+                "{:?}",
+                result.as_ref().err()
+            );
+            assert_eq!(head_ref(&repo).await, head_before);
+            assert_eq!(rev(&repo, "HEAD").await, sha_before);
+            assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
+            assert!(tips.contains(&format!("refs/heads/Feat {base}")), "{tips}");
+            assert!(tips.contains(&format!("refs/heads/feat {base}")), "{tips}");
+        } else {
+            let out = result.unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(out.applied, 1);
+            assert_eq!(rev(&repo, "refs/heads/Feat~1").await, base);
+            assert_eq!(rev(&repo, "refs/heads/feat").await, base);
+        }
+    }
+
+    /// One loose branch named by another letter case is no twin, so the up-front check
+    /// lets it through: where refs alias the pick runs onto the branch `git switch` opens
+    /// for that spelling; where they don't, the spelling names no branch.
+    #[tokio::test]
+    async fn cherry_pick_onto_case_twin_check_leaves_an_aliased_spelling_alone() {
+        let (dir, repo) = setup_repo("pick-onto-aliased-spelling").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["branch", "target"]).await;
+        git(&repo, &["checkout", "-q", "-b", "feature"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        let listed = git(
+            &repo,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/heads/TARGET",
+            ],
+        )
+        .await;
+        let shown = run_git_raw(
+            Some(&repo),
+            &["show-ref", "--verify", "--hash", "refs/heads/TARGET"],
+            TEST_GIT_HANG_GUARD,
         )
         .await
-        .unwrap_err();
-        assert_twin_start_refused(&repo, UPDATE_LOCAL_PR_HEAD_OP, &err, &a, &b).await;
+        .unwrap();
+        let aliased = listed.trim().is_empty() && shown.code == 0;
+        assert_eq!(crate::git::branches::refs_can_alias(&repo).await, aliased);
+
+        let result = cherry_pick_onto(
+            &AppState::default(),
+            &repo,
+            std::slice::from_ref(&c1),
+            "TARGET",
+            None,
+        )
+        .await;
+
+        if aliased {
+            let out = result.unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!((out.applied, out.skipped), (1, 0));
+            assert_eq!(rev(&repo, "refs/heads/target~1").await, base);
+            // git's write by the switched spelling may rename the loose file (NTFS lists
+            // `TARGET` afterwards), but it stays one branch.
+            let refs = git(
+                &repo,
+                &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+            )
+            .await;
+            let spellings = refs
+                .lines()
+                .filter(|l| *l == "refs/heads/target" || *l == "refs/heads/TARGET")
+                .count();
+            assert_eq!(spellings, 1, "{refs}");
+        } else {
+            assert!(
+                matches!(&result, Err(AppError::InvalidArgument(m))
+                    if m == "unknown branch: TARGET"),
+                "{:?}",
+                result.as_ref().err()
+            );
+            assert_eq!(rev(&repo, "refs/heads/target").await, base);
+            assert_eq!(head_ref(&repo).await, "refs/heads/feature");
+        }
     }
 
     /// The call names `Chore/z` while `chore/z`, checked out here, is stored packed only,

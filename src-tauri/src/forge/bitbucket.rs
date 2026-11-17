@@ -14,8 +14,8 @@
 //! Pagination default: one page at the endpoint's max `pagelen`, no `next`-following
 //! (the PR-list endpoint caps at 50; repos/pipelines allow 100). Readers that DO follow
 //! `next` go through [`bb_paginate`], or walk inline when they need a different failure
-//! posture; either way [`BB_MAX_PAGES`] bounds them, and each states that bound at its
-//! call site.
+//! posture; [`BB_MAX_PAGES`] bounds them except the Failed two-stream walker, which
+//! is bounded by page depth as stated at [`run_page`]. Other readers state their bound locally.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2409,8 +2409,9 @@ pub async fn commit_comment_delete(
 // ── Pipelines (CI, read) ───────────────────────────────────────────────────────
 
 /// Collapse Bitbucket's pipeline/step state onto GitHub's two-field
-/// `(status, conclusion)` model. `state_name` is PENDING/IN_PROGRESS/COMPLETED;
-/// `result_name` (present when COMPLETED) is SUCCESSFUL/FAILED/ERROR/STOPPED.
+/// `(status, conclusion)` model. States are PENDING/READY/IN_PROGRESS/COMPLETED;
+/// completed results are SUCCESSFUL/FAILED/ERROR/STOPPED/NOT_RUN/EXPIRED.
+/// `READY` and `NOT_RUN` are step-only state/result names, harmless on pipelines.
 fn map_bb_pipeline_status(state_name: &str, result_name: &str) -> (String, String) {
     let (status, conclusion) = match state_name {
         "COMPLETED" => match result_name {
@@ -2418,11 +2419,14 @@ fn map_bb_pipeline_status(state_name: &str, result_name: &str) -> (String, Strin
             "FAILED" => ("completed", "failure"),
             "ERROR" => ("completed", "failure"),
             "STOPPED" => ("completed", "cancelled"),
+            "NOT_RUN" => ("completed", "skipped"),
+            "EXPIRED" => ("completed", "cancelled"),
             // COMPLETED with a missing/unknown result — finished, neutral.
             _ => ("completed", ""),
         },
         "IN_PROGRESS" => ("in_progress", ""),
         "PENDING" => ("queued", ""),
+        "READY" => ("queued", ""),
         // Unknown/new Bitbucket state — treat as finished-neutral rather than guess.
         _ => ("completed", ""),
     };
@@ -2575,11 +2579,103 @@ fn refuse_workflow_facet(filters: &RunFilters) -> AppResult<()> {
     Ok(())
 }
 
-/// One page of pipelines for this repo, newest first; optionally narrowed by
-/// `filters` (event → `trigger_type`, actor → `creator.uuid`), each value sent as
-/// given. `page` is 1-based. Note the TRAILING SLASH on `pipelines/` (required).
-/// The envelope's own `next`/`size` answer both paging questions, so this asks for
-/// exactly one page and never follows the link itself.
+fn bb_status_values(status: Option<&str>) -> Vec<&str> {
+    match status {
+        None | Some("") => Vec::new(),
+        Some("FAILED") => vec!["FAILED", "ERROR"],
+        Some(value) => vec![value],
+    }
+}
+
+fn pipelines_list_path(
+    ws: &str,
+    slug: &str,
+    pagelen: u32,
+    page: u32,
+    filters: &RunFilters,
+    status: Option<&str>,
+) -> String {
+    let mut path = format!(
+        "repositories/{}/{}/pipelines/?sort=-created_on&pagelen={pagelen}&page={page}",
+        encode_query_value(ws),
+        encode_query_value(slug),
+    );
+    for (key, value) in [
+        ("target.branch", filters.branch.as_deref()),
+        ("trigger_type", filters.event.as_deref()),
+        ("status", status),
+        ("creator.uuid", filters.actor.as_deref()),
+    ] {
+        if let Some(v) = value.filter(|s| !s.is_empty()) {
+            path.push_str(&format!("&{key}={}", encode_query_value(v)));
+        }
+    }
+    path
+}
+
+struct StatusStream {
+    items: Vec<BbPipeline>,
+    size: Option<u64>,
+    more: bool,
+}
+
+async fn collect_status_stream<F, Fut>(need: usize, mut fetch: F) -> AppResult<StatusStream>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = AppResult<BbPage<BbPipeline>>>,
+{
+    let mut stream = StatusStream {
+        items: Vec::new(),
+        size: None,
+        more: false,
+    };
+    let mut page_no = 1;
+    loop {
+        let page = fetch(page_no).await?;
+        if page_no == 1 {
+            stream.size = page.size;
+        }
+        let empty = page.values.is_empty();
+        stream.more = !empty && page.next.is_some();
+        stream.items.extend(page.values);
+        if stream.items.len() >= need || page.next.is_none() || empty {
+            return Ok(stream);
+        }
+        page_no += 1;
+    }
+}
+
+fn merge_status_streams(
+    streams: Vec<StatusStream>,
+    per_page: usize,
+    page_num: usize,
+) -> (Vec<BbPipeline>, Option<u64>, bool) {
+    let total = streams.iter().map(|stream| stream.size).sum();
+    let more = streams.iter().any(|stream| stream.more);
+    let mut items: Vec<_> = streams
+        .into_iter()
+        .flat_map(|stream| stream.items)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    // Both identity fields have serde defaults, so (0, "") cannot establish a duplicate.
+    items.retain(|p| {
+        (p.build_number == 0 && p.uuid.is_empty()) || seen.insert((p.build_number, p.uuid.clone()))
+    });
+    // Descending build numbers order by creation, avoiding varying-precision created_on strings.
+    items.sort_by_key(|p| std::cmp::Reverse(p.build_number));
+    let end = page_num.saturating_mul(per_page);
+    let start = page_num.saturating_sub(1).saturating_mul(per_page);
+    let has_more = items.len() > end || more;
+    let page = items.into_iter().skip(start).take(per_page).collect();
+    (page, total, has_more)
+}
+
+/// One page of pipelines, newest first; `page` is 1-based and filters retain their
+/// wire values (event → `trigger_type`, actor → `creator.uuid`). Failed reads both
+/// FAILED and ERROR because rows label them alike, at a cost growing with depth:
+/// at most `2 * ceil(page * limit / 100)` requests with full pages after clamping page and limit.
+/// Other statuses take one request. Paths keep the required `pipelines/` slash;
+/// page numbers advance locally, never following the envelope's `next` URL.
 pub async fn run_page(
     repo_path: &str,
     limit: u32,
@@ -2591,28 +2687,42 @@ pub async fn run_page(
     let (ws, slug) = workspace_slug(repo_path).await?;
     let per_page = limit.clamp(1, 100);
     let page_num = page.max(1);
-    let mut path = format!(
-        "repositories/{}/{}/pipelines/?sort=-created_on&pagelen={per_page}&page={page_num}",
-        encode_query_value(&ws),
-        encode_query_value(&slug),
-    );
-    for (key, value) in [
-        ("target.branch", &filters.branch),
-        ("trigger_type", &filters.event),
-        ("status", &filters.status),
-        ("creator.uuid", &filters.actor),
-    ] {
-        if let Some(v) = value.as_deref().filter(|s| !s.is_empty()) {
-            path.push_str(&format!("&{key}={}", encode_query_value(v)));
-        }
+    let statuses = bb_status_values(filters.status.as_deref());
+    if let [first, second] = statuses[..] {
+        let need = (per_page as usize).saturating_mul(page_num as usize);
+        let collect_stream = |status| {
+            let (creds, ws, slug, filters) = (&creds, &ws, &slug, &filters);
+            collect_status_stream(need, move |stream_page| {
+                let path = pipelines_list_path(ws, slug, 100, stream_page, filters, Some(status));
+                async move { http::bb_get_json(creds, &path, "pipelines", BbOpKind::Read).await }
+            })
+        };
+        let (failed, error) = tokio::try_join!(
+            Box::pin(collect_stream(first)),
+            Box::pin(collect_stream(second)),
+        )?;
+        let streams = vec![failed, error];
+        let (items, total_count, has_more) =
+            merge_status_streams(streams, per_page as usize, page_num as usize);
+        return Ok(CiRunPage {
+            total_count,
+            has_more,
+            runs: items
+                .into_iter()
+                .map(|p| from_bb_pipeline(p, &ws, &slug))
+                .collect(),
+        });
     }
-    let fetched: BbPage<BbPipeline> = http::bb_get_json(
-        &creds,
-        &path,
-        "pipelines",
-        BbOpKind::Read,
-    )
-    .await?;
+    let path = pipelines_list_path(
+        &ws,
+        &slug,
+        per_page,
+        page_num,
+        &filters,
+        statuses.first().copied(),
+    );
+    let fetched: BbPage<BbPipeline> =
+        http::bb_get_json(&creds, &path, "pipelines", BbOpKind::Read).await?;
     Ok(CiRunPage {
         total_count: fetched.size,
         has_more: fetched.next.is_some(),
@@ -7709,6 +7819,304 @@ mod tests {
         assert!(!c[1].viewer_did_author);
         // Reply by the viewer → true (per-comment, works on replies too).
         assert!(c[2].viewer_did_author);
+    }
+
+    #[test]
+    fn pipeline_status_matrix_documented_names_and_fallbacks() {
+        for (state, result, status, conclusion) in [
+            ("PENDING", "", "queued", ""),
+            ("READY", "", "queued", ""),
+            ("IN_PROGRESS", "", "in_progress", ""),
+            ("COMPLETED", "SUCCESSFUL", "completed", "success"),
+            ("COMPLETED", "FAILED", "completed", "failure"),
+            ("COMPLETED", "ERROR", "completed", "failure"),
+            ("COMPLETED", "STOPPED", "completed", "cancelled"),
+            ("COMPLETED", "NOT_RUN", "completed", "skipped"),
+            ("COMPLETED", "EXPIRED", "completed", "cancelled"),
+            ("COMPLETED", "", "completed", ""),
+            ("COMPLETED", "NOVEL", "completed", ""),
+            ("NOVEL", "", "completed", ""),
+        ] {
+            assert_eq!(
+                map_bb_pipeline_status(state, result),
+                (status.into(), conclusion.into()),
+                "{state}/{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_status_expands_to_both_failure_conclusions() {
+        for (input, expected) in [
+            (None, vec![]),
+            (Some(""), vec![]),
+            (Some("FAILED"), vec!["FAILED", "ERROR"]),
+            (Some("ERROR"), vec!["ERROR"]),
+            (Some("failed"), vec!["failed"]),
+            (Some("PASSED"), vec!["PASSED"]),
+        ] {
+            assert_eq!(bb_status_values(input), expected, "{input:?}");
+        }
+        for result in bb_status_values(Some("FAILED")) {
+            assert_eq!(map_bb_pipeline_status("COMPLETED", result).1, "failure");
+        }
+    }
+
+    #[test]
+    fn pipelines_list_path_preserves_encoding_and_status_slot() {
+        assert_eq!(
+            pipelines_list_path("ws", "repo", 40, 2, &RunFilters::default(), None),
+            "repositories/ws/repo/pipelines/?sort=-created_on&pagelen=40&page=2"
+        );
+        let filters = RunFilters {
+            branch: Some("feature/a & b".into()),
+            event: Some("MANUAL".into()),
+            status: Some("FAILED".into()),
+            actor: Some("{actor}".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            pipelines_list_path("ws", "repo", 40, 3, &filters, Some("FAILED")),
+            "repositories/ws/repo/pipelines/?sort=-created_on&pagelen=40&page=3&target.branch=feature%2Fa%20%26%20b&trigger_type=MANUAL&status=FAILED&creator.uuid=%7Bactor%7D"
+        );
+        for status in bb_status_values(filters.status.as_deref()) {
+            assert_eq!(
+                pipelines_list_path("ws", "repo", 100, 2, &filters, Some(status)),
+                format!("repositories/ws/repo/pipelines/?sort=-created_on&pagelen=100&page=2&target.branch=feature%2Fa%20%26%20b&trigger_type=MANUAL&status={status}&creator.uuid=%7Bactor%7D")
+            );
+        }
+        assert_eq!(
+            pipelines_list_path("ws", "repo", 1, 1, &RunFilters::default(), Some("")),
+            "repositories/ws/repo/pipelines/?sort=-created_on&pagelen=1&page=1"
+        );
+    }
+
+    fn status_pipeline(build_number: u64, uuid: &str) -> BbPipeline {
+        serde_json::from_value(serde_json::json!({
+            "build_number": build_number,
+            "uuid": uuid,
+        }))
+        .unwrap()
+    }
+
+    fn status_stream(builds: &[u64], size: Option<u64>, more: bool) -> StatusStream {
+        StatusStream {
+            items: builds
+                .iter()
+                .map(|n| status_pipeline(*n, &n.to_string()))
+                .collect(),
+            size,
+            more,
+        }
+    }
+
+    #[test]
+    fn status_merge_orders_and_slices_interleaved_streams() {
+        for (limit, page, expected, more) in [
+            (2, 1, vec![9, 8], true),
+            (2, 2, vec![7, 4], true),
+            (2, 3, vec![3], false),
+            (2, 4, vec![], false),
+            (1, 5, vec![3], false),
+            (100, 1, vec![9, 8, 7, 4, 3], false),
+        ] {
+            let (items, total, has_more) = merge_status_streams(
+                vec![
+                    status_stream(&[9, 7, 3], Some(3), false),
+                    status_stream(&[8, 4], Some(2), false),
+                ],
+                limit,
+                page,
+            );
+            assert_eq!(
+                items.iter().map(|p| p.build_number).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(total, Some(5));
+            assert_eq!(has_more, more);
+        }
+    }
+
+    #[test]
+    fn status_merge_empty_totals_and_stream_remainders() {
+        for (failed, errors, total, more, expected) in [
+            (
+                status_stream(&[], Some(0), false),
+                status_stream(&[8, 4], Some(2), false),
+                Some(2),
+                false,
+                vec![8, 4],
+            ),
+            (
+                status_stream(&[], Some(0), false),
+                status_stream(&[], Some(0), false),
+                Some(0),
+                false,
+                vec![],
+            ),
+            (
+                status_stream(&[9], None, false),
+                status_stream(&[8], Some(1), false),
+                None,
+                false,
+                vec![9, 8],
+            ),
+            (
+                status_stream(&[9], Some(9), true),
+                status_stream(&[8], Some(1), false),
+                Some(10),
+                true,
+                vec![9, 8],
+            ),
+        ] {
+            let (items, count, has_more) = merge_status_streams(vec![failed, errors], 2, 1);
+            assert_eq!(
+                items.iter().map(|p| p.build_number).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(count, total);
+            assert_eq!(has_more, more);
+        }
+    }
+
+    #[test]
+    fn status_merge_deduplicates_identity_pairs() {
+        let (items, _, more) = merge_status_streams(
+            vec![
+                status_stream(&[9, 7], Some(2), false),
+                status_stream(&[9, 8], Some(2), false),
+            ],
+            3,
+            1,
+        );
+        assert_eq!(
+            items.iter().map(|p| p.build_number).collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+        assert!(!more);
+        let (items, _, _) = merge_status_streams(
+            vec![StatusStream {
+                items: vec![
+                    status_pipeline(9, "a"),
+                    status_pipeline(9, "b"),
+                    status_pipeline(8, "a"),
+                ],
+                size: None,
+                more: false,
+            }],
+            100,
+            1,
+        );
+        assert_eq!(
+            items.iter().map(|p| p.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "a"]
+        );
+    }
+
+    #[test]
+    fn status_merge_keeps_every_row_without_identity() {
+        for across_streams in [false, true] {
+            let mut streams = vec![StatusStream {
+                items: vec![status_pipeline(0, "")],
+                size: None,
+                more: false,
+            }];
+            if across_streams {
+                streams.push(StatusStream {
+                    items: vec![status_pipeline(0, "")],
+                    size: None,
+                    more: false,
+                });
+            } else {
+                streams[0].items.push(status_pipeline(0, ""));
+            }
+            let (items, _, more) = merge_status_streams(streams, 100, 1);
+            assert_eq!(items.len(), 2, "across_streams={across_streams}");
+            assert!(!more);
+        }
+    }
+
+    fn status_page(builds: &[u64], size: Option<u64>, next: bool) -> AppResult<BbPage<BbPipeline>> {
+        Ok(BbPage {
+            values: status_stream(builds, size, next).items,
+            size,
+            next: next.then(|| "https://untrusted.invalid/ignored".into()),
+        })
+    }
+
+    async fn scripted_status_stream(
+        need: usize,
+        pages: Vec<AppResult<BbPage<BbPipeline>>>,
+    ) -> (AppResult<StatusStream>, Vec<u32>) {
+        let mut pages = pages.into_iter();
+        let mut calls = Vec::new();
+        let result = collect_status_stream(need, |page| {
+            calls.push(page);
+            std::future::ready(pages.next().expect("fetch exceeded bounded page script"))
+        })
+        .await;
+        (result, calls)
+    }
+
+    #[tokio::test]
+    async fn status_collect_stops_at_need_and_exhaustion() {
+        let hundred: Vec<_> = (1..=100).rev().collect();
+        let (result, calls) =
+            scripted_status_stream(100, vec![status_page(&hundred, Some(102), true)]).await;
+        let stream = result.unwrap();
+        assert_eq!(calls, vec![1]);
+        assert_eq!(stream.items.len(), 100);
+        assert!(stream.more);
+        let (result, calls) = scripted_status_stream(
+            101,
+            vec![
+                status_page(&hundred, Some(102), true),
+                status_page(&[0], Some(999), false),
+            ],
+        )
+        .await;
+        let stream = result.unwrap();
+        assert_eq!(calls, vec![1, 2]);
+        assert_eq!(stream.items.len(), 101);
+        assert_eq!(stream.size, Some(102));
+        assert!(!stream.more);
+        let (result, calls) =
+            scripted_status_stream(101, vec![status_page(&[9], None, false)]).await;
+        assert_eq!(calls, vec![1]);
+        assert_eq!(result.unwrap().items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn status_collect_stops_on_empty_page_with_next() {
+        let (result, calls) = scripted_status_stream(
+            101,
+            vec![
+                status_page(&[9], Some(1), true),
+                status_page(&[], Some(99), true),
+            ],
+        )
+        .await;
+        let stream = result.unwrap();
+        assert_eq!(calls, vec![1, 2]);
+        assert_eq!(stream.items.len(), 1);
+        assert_eq!(stream.size, Some(1));
+        assert!(!stream.more);
+    }
+
+    #[tokio::test]
+    async fn status_collect_propagates_page_errors() {
+        let (result, calls) = scripted_status_stream(
+            101,
+            vec![
+                status_page(&[9], Some(2), true),
+                Err(AppError::InvalidArgument("scripted page error".into())),
+            ],
+        )
+        .await;
+        assert_eq!(calls, vec![1, 2]);
+        assert!(
+            matches!(result, Err(AppError::InvalidArgument(message)) if message == "scripted page error")
+        );
     }
 
     #[test]

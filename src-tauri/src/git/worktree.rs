@@ -326,6 +326,11 @@ pub(crate) async fn git_worktree_add_user_core(
     }
     refuse_ambiguous_worktree_path(path, cfg!(windows))?;
     crate::git::branches::refuse_session_branch_name(branch)?;
+    if new_branch {
+        // `-b` mints the name, and git would expand rev syntax such as `@{-1}` to another
+        // branch's name, which the case-twin check never saw.
+        crate::git::branches::validate_branch_name(branch)?;
+    }
     if std::path::Path::new(repo_path).join(path).exists() {
         return Err(AppError::InvalidArgument(format!(
             "{path} already exists — choose a new folder"
@@ -349,12 +354,14 @@ pub(crate) async fn git_worktree_add_user_core(
 }
 
 /// The worktree manager's `worktree add -b`, run under the held admin domain without the
-/// config-write mutex. If its child `git branch` loses the config lock (branch created,
-/// no upstream, no worktree), it finishes as `finish_tracking_setup` does: the worktree
-/// leg runs first, whatever the upstream's fate, then only an upstream git itself would
-/// have pinned is restored, under the mutex as a leaf (`inherit` is never guessed). One
-/// that can't be pinned leaves git's error, and one whose repair fails says what landed;
-/// either way the worktree was added.
+/// config-write mutex; the case-twin check before it takes a short hold of the mutex,
+/// released before the add, so it runs after any create in flight while the checkout
+/// stays off the mutex. If the add's child `git branch` loses the config lock (branch
+/// created, no upstream, no worktree), it finishes as `finish_tracking_setup` does: the
+/// worktree leg runs first, whatever the upstream's fate, then only an upstream git itself
+/// would have pinned is restored, under the mutex as a leaf (`inherit` is never guessed).
+/// One that can't be pinned leaves git's error, and one whose repair fails says what
+/// landed; either way the worktree was added.
 async fn add_worktree_on_new_branch(
     state: &AppState,
     repo_path: &str,
@@ -364,6 +371,10 @@ async fn add_worktree_on_new_branch(
 ) -> AppResult<()> {
     let domain = state.worktree_admin_lock(repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a worktree operation").await?;
+    with_config_write_lock(repo_path, |_held| {
+        crate::git::branches::refuse_new_name_twin(repo_path, branch, None)
+    })
+    .await?;
     let args = ["worktree", "add", "-b", branch, path, base];
     let out = run_git_raw(Some(repo_path), &args, WORKTREE_OP_TIMEOUT).await?;
     let lost_upstream =
@@ -3485,9 +3496,10 @@ prunable gitdir file points to non-existent location
 
     /// Every `branch.autoSetupMerge` mode × start in which `worktree add -b` tracks
     /// (the create table's, measured, git 2.51.1). A lost upstream ends where an
-    /// uncontended twin does, with the worktree checked out before the config-write
-    /// mutex is ever requested; `inherit`, whose upstream can't be pinned, keeps
-    /// git's error with no upstream, the worktree still added.
+    /// uncontended run does; the case-twin check's mutex hold ends before the checkout
+    /// exists and the repair's starts after it, so the checkout never runs under the
+    /// mutex. `inherit`, whose upstream can't be pinned, keeps git's error with no
+    /// upstream, the worktree still added.
     #[tokio::test]
     async fn a_new_branch_worktree_repairs_only_what_git_itself_would_write() {
         use crate::git::branches::UPSTREAM_WRITE_FAILED;
@@ -3575,19 +3587,21 @@ prunable gitdir file points to non-existent location
             );
             let got = tracking_of(&repo_s, name).await;
             let log = log.lock().unwrap().clone();
+            let check_hold = [("waiting", false), ("acquired", false), ("freed", false)];
             if !contended {
                 added.unwrap_or_else(|e| panic!("{case}: {e}"));
                 assert_eq!(got, want, "{case}");
                 assert_eq!(attempts.load(Ordering::SeqCst), 0, "{case}: no repair");
-                assert!(log.is_empty(), "{case}: no mutex uncontended");
+                assert_eq!(log, check_hold, "{case}: only the check's hold");
             } else if repaired {
                 added.unwrap_or_else(|e| panic!("{case}: {e}"));
                 assert_eq!(got, want, "{case}: what git would have written");
                 assert_eq!(attempts.load(Ordering::SeqCst), 2, "{case}");
+                let repair_hold = [("waiting", true), ("acquired", true), ("freed", true)];
                 assert_eq!(
                     log,
-                    [("waiting", true), ("acquired", true), ("freed", true)],
-                    "{case}: the checkout came before the hold"
+                    [check_hold, repair_hold].concat(),
+                    "{case}: the check's hold ended before the checkout, the repair's began after"
                 );
             } else {
                 let err = added.expect_err("an unpinnable upstream surfaces git's error");
@@ -3596,9 +3610,162 @@ prunable gitdir file points to non-existent location
                 };
                 assert!(stderr.contains(UPSTREAM_WRITE_FAILED), "{stderr}");
                 assert_eq!(got, (None, None), "{case}: no guessed upstream");
-                assert!(log.is_empty(), "{case}: nothing to write");
+                assert_eq!(log, check_hold, "{case}: nothing to write");
             }
         }
+    }
+
+    /// The new-name refusal for `Feat` beside the stored `feat`.
+    const NEW_NAME_TWIN_REFUSAL: &str = "Feat differs from the existing branch feat only in \
+        letter case, which this disk can't keep apart. Use a different name, or rename feat \
+        first.";
+
+    /// `setup_repo` plus `feat` stored packed-only when `twin` is set, and whether refs
+    /// alias, read by git alone over a loose `oracle-loose` spelled `ORACLE-LOOSE` and
+    /// asserted equal to the product's verdict.
+    async fn case_twin_fixture(marker: &str, twin: bool) -> (tempfile::TempDir, String, bool) {
+        use crate::git::branches::tests::is_aliased;
+        let (base, repo) = setup_repo(marker).await;
+        if twin {
+            run(&repo, &["branch", "feat"]).await;
+            run(&repo, &["pack-refs", "--all"]).await;
+        }
+        run(&repo, &["branch", "oracle-loose"]).await;
+        let observed = is_aliased(&repo, "ORACLE-LOOSE").await;
+        assert_eq!(
+            crate::git::branches::refs_can_alias(&repo).await,
+            observed,
+            "the alias verdict matches git's own reads"
+        );
+        (base, repo, observed)
+    }
+
+    /// Every stored branch name, read with raw git.
+    async fn case_twin_listed(repo: &str) -> Vec<String> {
+        run(
+            repo,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await
+        .lines()
+        .filter_map(|line| line.strip_prefix("refs/heads/"))
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// `worktree add -b Feat` beside the packed-only `feat`, the twin stored up front or
+    /// minted while the add waits on the config-write mutex: refused where refs alias with
+    /// no folder, worktree or branch written; added beside `feat` where they don't.
+    #[tokio::test]
+    async fn new_branch_worktree_add_refuses_a_case_twin() {
+        use crate::git::branches::tests::{hold_config_mutex, on_first_waiting};
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        for during_wait in [true, false] {
+            let (base, repo, aliases) = case_twin_fixture("wt-case-twin", !during_wait).await;
+            let wt = base.path().join("wt-feat");
+            let wt_s = wt.to_string_lossy().into_owned();
+            let add = {
+                let (repo, wt_s) = (repo.clone(), wt_s.clone());
+                async move {
+                    let state = AppState::default();
+                    git_worktree_add_user_core(&state, &repo, &wt_s, "Feat", true, None).await
+                }
+            };
+            let result = if during_wait {
+                let (holder, release) = hold_config_mutex(&repo).await;
+                let (events, waiting) = on_first_waiting();
+                let add = tokio::spawn(CONFIG_WRITE_LOCK_EVENTS.scope(events, add));
+                waiting
+                    .await
+                    .expect("the add reached the config-write mutex");
+                run(&repo, &["branch", "feat"]).await;
+                run(&repo, &["pack-refs", "--all"]).await;
+                release.send(()).unwrap();
+                holder.await.unwrap();
+                tokio::time::timeout(TEST_GIT_HANG_GUARD, add)
+                    .await
+                    .expect("the add finishes once released")
+                    .unwrap()
+            } else {
+                add.await
+            };
+            let row = format!("during_wait={during_wait}");
+            let listed = case_twin_listed(&repo).await;
+            assert!(listed.iter().any(|b| b == "feat"), "{row}: {listed:?}");
+            if aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(!wt.exists(), "{row}: no worktree folder");
+                let list = run(&repo, &["worktree", "list", "--porcelain"]).await;
+                let entries = list.lines().filter(|l| l.starts_with("worktree ")).count();
+                assert_eq!(entries, 1, "{row}: {list}");
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+            } else {
+                result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(wt.join("a.txt").exists(), "{row}: the worktree was added");
+                assert!(listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+            }
+        }
+    }
+
+    /// `worktree add -b @{-1}` creates the previous branch's name (measured, git 2.51.1),
+    /// so a deleted `Feat` would come back beside a packed `feat`: refused as a branch
+    /// name before any worktree or ref exists.
+    #[tokio::test]
+    async fn new_branch_worktree_add_refuses_a_previous_branch_expression() {
+        let (base, repo) = setup_repo("wt-previous-branch").await;
+        let home = run(&repo, &["branch", "--show-current"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["switch", "-c", "Feat"]).await;
+        run(&repo, &["switch", &home]).await;
+        run(&repo, &["branch", "-D", "Feat"]).await;
+        run(&repo, &["branch", "feat"]).await;
+        run(&repo, &["pack-refs", "--all"]).await;
+        let expanded = run(&repo, &["check-ref-format", "--branch", "@{-1}"]).await;
+        assert_eq!(expanded.trim(), "Feat", "fixture sanity");
+        let wt = base.path().join("wt-prev");
+        let wt_s = wt.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let result = git_worktree_add_user_core(&state, &repo, &wt_s, "@{-1}", true, None).await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(m))
+                if m == "invalid branch name: @{-1}"),
+            "{result:?}"
+        );
+        assert!(!wt.exists(), "no worktree folder");
+        let listed = run(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await;
+        assert!(!listed.lines().any(|l| l == "refs/heads/Feat"), "{listed}");
+        assert!(listed.lines().any(|l| l == "refs/heads/feat"), "{listed}");
+    }
+
+    /// An uncontended new-branch add takes the config-write mutex only for the case-twin
+    /// check, whose hold ends before the checkout exists.
+    #[tokio::test]
+    async fn new_branch_worktree_case_twin_check_ends_its_hold_before_the_checkout() {
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        let (base, repo) = setup_repo("wt-case-twin-hold").await;
+        let wt = base.path().join("wt-hold");
+        let wt_s = wt.to_string_lossy().into_owned();
+        let probe = wt.join("a.txt");
+        let (events, log) = lock_events(move || probe.exists());
+        let state = AppState::default();
+        let add = git_worktree_add_user_core(&state, &repo, &wt_s, "hold", true, None);
+        CONFIG_WRITE_LOCK_EVENTS
+            .scope(events, add)
+            .await
+            .expect("the add succeeds");
+        assert!(wt.join("a.txt").exists(), "the worktree was added");
+        let log = log.lock().unwrap().clone();
+        assert!(!log.is_empty(), "the check took the mutex");
+        assert!(log.iter().all(|(_, seeded)| !seeded), "{log:?}");
     }
 
     /// A lock held through the upstream repair's retry still adds the worktree, and the

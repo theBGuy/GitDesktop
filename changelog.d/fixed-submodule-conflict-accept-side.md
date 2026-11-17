@@ -1,0 +1,1 @@
+- Taking a side of a conflicted submodule stages the commit you picked.

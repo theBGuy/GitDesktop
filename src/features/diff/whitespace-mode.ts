@@ -59,12 +59,17 @@ export function lineComposerOpen(): boolean {
 }
 
 /** The whitespace probe: a composer is open on a diff a whitespace flip
- *  re-reads. Its wrapper's `data-diff-line-widget` is "whitespace" exactly on
- *  a host with a whitespace mode (DiffContent's `whitespaceControl`); a forge
- *  patch ("layout") never changes with the setting. */
+ *  re-reads, or a comment edit is open in a commit-comments row the flip may
+ *  drop. The composer wrapper's `data-diff-line-widget` is "whitespace"
+ *  exactly on a host with a whitespace mode (DiffContent's
+ *  `whitespaceControl`); a forge patch ("layout") never changes with the
+ *  setting. A row marked `data-whitespace-row` unmounts with its Thread, whose
+ *  root carries `data-thread-editing` while its editor is open. */
 export function whitespaceComposerOpen(): boolean {
   return (
-    document.querySelector('[data-diff-line-widget="whitespace"]') !== null
+    document.querySelector(
+      '[data-diff-line-widget="whitespace"], [data-whitespace-row] [data-thread-editing]',
+    ) !== null
   );
 }
 
