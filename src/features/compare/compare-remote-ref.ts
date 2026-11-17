@@ -150,9 +150,11 @@ function remoteRank(remote: string): number {
  * `origin/x` would make two identical combobox values). A remote branch merely
  * sharing a local's bare name stays offered. Ordered by remote (upstream,
  * origin, then alphabetical), each remote's rows by recency. Each row is
- * re-split against `remotes` first: the backend splits at the first "/", which
- * mis-splits a remote whose name holds one, so its HEAD filter misses that
- * remote's HEAD and it is dropped here after the re-split.
+ * re-split against `remotes` first: the backend already splits at the longest
+ * configured remote, and the re-split keeps each row congruent with
+ * `parseRemoteCompareValue` when this list and the backend's read differ (a
+ * remote added or removed between them), and the HEAD filter here covers that
+ * window.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
