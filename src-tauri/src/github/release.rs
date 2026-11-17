@@ -275,7 +275,15 @@ pub async fn gh_release_create(
         latest,
     );
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_gh_text_write(&repo_path, &arg_refs, "--notes-file", notes.trim()).await?;
+    let out = run_gh_text_write(&repo_path, &arg_refs, "--notes-file", notes.trim())
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(
+                e,
+                "GitHub",
+                crate::forge::LandedWrite::Created("release"),
+            )
+        })?;
     Ok(out.stdout_lossy().trim().to_string())
 }
 
@@ -362,16 +370,25 @@ pub async fn gh_release_edit(
         latest,
     );
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let saved = |e: AppError| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Saved("release"))
+    };
     match release_notes_write(notes.trim(), clear_notes) {
         NotesWrite::Clear => {
             let clear = [arg_refs.as_slice(), &["--notes-file", "-"]].concat();
-            run_gh_input(Some(&repo_path), &clear, "", GH_NETWORK_TIMEOUT).await?;
+            run_gh_input(Some(&repo_path), &clear, "", GH_NETWORK_TIMEOUT)
+                .await
+                .map_err(saved)?;
         }
         NotesWrite::Keep => {
-            run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+            run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)
+                .await
+                .map_err(saved)?;
         }
         NotesWrite::Send(text) => {
-            run_gh_text_write(&repo_path, &arg_refs, "--notes-file", text).await?;
+            run_gh_text_write(&repo_path, &arg_refs, "--notes-file", text)
+                .await
+                .map_err(saved)?;
         }
     }
     Ok(())
@@ -458,7 +475,11 @@ pub async fn gh_release_delete(
     validate_tag(&tag)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let args = release_delete_args(&slug, &tag, cleanup_tag);
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -486,7 +507,8 @@ pub async fn gh_release_upload_asset(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -513,7 +535,8 @@ pub async fn gh_release_delete_asset(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -637,7 +660,8 @@ pub async fn gh_release_sync_updater_notes(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed));
     if let Err(e) = upload {
         return Err(match save_updater_recovery_copy(path).await {
             Some(saved) => AppError::Gh(format!(
@@ -719,30 +743,78 @@ mod tests {
         );
     }
 
-    /// The create hands its trimmed notes to the one stdin choke point, and neither
-    /// release write maps its timeout itself (the edit's notes plan is pinned below).
+    /// The create hands its trimmed notes to the one stdin choke point, and each release
+    /// write maps its timeout to the hedge with its noun: the create once after its run,
+    /// the edit through one closure each notes arm applies to its own run (its plan is
+    /// pinned below).
     #[test]
     fn release_writes_send_their_notes_on_stdin() {
         let src = include_str!("release.rs");
         let src = src.split("\nmod tests {").next().unwrap();
-        let unmapped = |body: &str| !body.contains("timed_out_write(");
         let on_stdin = |body: &str| {
             let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
             flat.contains("run_gh_text_write(")
                 && flat.contains("\"--notes-file\", notes.trim())")
                 && !flat.contains("run_gh(")
-                && unmapped(&flat)
         };
         let body = crate::github::repo_meta::tests::wiring_body(src, "gh_release_create");
         assert!(on_stdin(&body), "{body}");
         let argv = format!("{body}\nrun_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT)");
         assert!(!on_stdin(&argv), "an argv run must flip");
-        for name in ["gh_release_create", "gh_release_edit"] {
-            let body = crate::github::repo_meta::tests::wiring_body(src, name);
-            assert!(unmapped(&body), "{name}: {body}");
-            let mapped = format!("{body}\n.map_err(|e| timed_out_write(e, \"GitHub\", landed))");
-            assert!(!unmapped(&mapped), "{name}: a timeout map must flip");
-        }
+
+        let create_mapped = |body: &str| {
+            body.matches("timed_out_write(").count() == 1
+                && body.contains("LandedWrite::Created(\"release\")")
+                && body
+                    .find("run_gh_text_write(")
+                    .zip(body.find("timed_out_write("))
+                    .is_some_and(|(run, map)| run < map)
+        };
+        assert!(create_mapped(&body), "{body}");
+        let deleted = body.replacen("timed_out_write(", "mapped(", 1);
+        assert!(!create_mapped(&deleted), "create: a deleted map must flip");
+
+        let edit = crate::github::repo_meta::tests::wiring_body(src, "gh_release_edit");
+        // Each notes arm, read up to the next arm, maps its own run once.
+        let arms = [
+            ("NotesWrite::Clear =>", "run_gh_input("),
+            ("NotesWrite::Keep =>", "run_gh("),
+            ("NotesWrite::Send(text) =>", "run_gh_text_write("),
+        ];
+        let edit_mapped = |body: &str| {
+            body.matches("timed_out_write(").count() == 1
+                && body.contains("LandedWrite::Saved(\"release\")")
+                && arms.iter().all(|(arm, run)| {
+                    body.split_once(arm).is_some_and(|(_, rest)| {
+                        let own = rest.split("NotesWrite::").next().unwrap();
+                        own.matches(".map_err(saved)").count() == 1
+                            && own
+                                .find(run)
+                                .zip(own.find(".map_err(saved)"))
+                                .is_some_and(|(run, map)| run < map)
+                    })
+                })
+        };
+        assert!(edit_mapped(&edit), "{edit}");
+        let deleted = edit.replacen("timed_out_write(", "mapped(", 1);
+        assert!(!edit_mapped(&deleted), "edit: a deleted map must flip");
+        let bare_arm = edit.replacen(".map_err(saved)?;", "?;", 1);
+        assert!(!edit_mapped(&bare_arm), "edit: an unmapped arm must flip");
+        let (head, keep) = edit.split_once("NotesWrite::Keep =>").unwrap();
+        let swapped = format!(
+            "{}NotesWrite::Keep =>{}",
+            head.replacen(
+                "release_edit_args(",
+                ".map_err(saved)?; release_edit_args(",
+                1
+            ),
+            keep.replacen(".map_err(saved)?;", "?;", 1)
+        );
+        assert_eq!(swapped.matches(".map_err(saved)?;").count(), 3);
+        assert!(
+            !edit_mapped(&swapped),
+            "edit: a map moved off its arm must flip"
+        );
     }
 
     /// The clear signal acts only on empty notes; everything else behaves as before.

@@ -182,7 +182,11 @@ pub async fn gh_secret_set(
         args.push("--env");
         args.push(env);
     }
-    run_gh_input(Some(&repo_path), &args, &value, GH_NETWORK_TIMEOUT).await?;
+    run_gh_input(Some(&repo_path), &args, &value, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -210,7 +214,11 @@ pub async fn gh_secret_delete(
         args.push("--env");
         args.push(env);
     }
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -259,7 +267,11 @@ pub async fn gh_variable_set(
         args.push("--env");
         args.push(env);
     }
-    run_gh_input(Some(&repo_path), &args, &value, GH_NETWORK_TIMEOUT).await?;
+    run_gh_input(Some(&repo_path), &args, &value, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -276,7 +288,11 @@ pub async fn gh_variable_delete(
         args.push("--env");
         args.push(env);
     }
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 

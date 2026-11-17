@@ -423,7 +423,8 @@ pub async fn gh_hook_delete(repo_path: String, id: u64) -> AppResult<()> {
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -441,7 +442,8 @@ pub async fn gh_hook_ping(repo_path: String, id: u64) -> AppResult<()> {
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -459,7 +461,8 @@ pub async fn gh_hook_test(repo_path: String, id: u64) -> AppResult<()> {
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -590,7 +593,8 @@ pub async fn gh_hook_redeliver(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -841,6 +845,13 @@ pub async fn gh_repo_settings_update(
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(
+            e,
+            "GitHub",
+            crate::forge::LandedWrite::Saved("repository settings"),
+        )
+    });
     let out = result?;
     let text = out.stdout_lossy();
     let mut settings: RepoSettings = serde_json::from_str(&text).map_err(|e| {
@@ -884,6 +895,13 @@ pub async fn gh_repo_settings_update(
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(
+            e,
+            "GitHub",
+            crate::forge::LandedWrite::Saved("repository settings"),
+        )
+    });
     let topics_out = result?;
     #[derive(Deserialize)]
     struct TopicsResp {

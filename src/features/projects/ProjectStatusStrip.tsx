@@ -777,9 +777,8 @@ export function ProjectStatusUpdateDialog({
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
             <form.AppField name="status">
               {(field) => (
-                // A raw Select rather than `SelectField`, which draws no
-                // placeholder: a post starts with no status, and the empty field
-                // has to say it's the step to take.
+                // Placeholder on purpose: a post starts with no status, and the
+                // empty field has to say it's the step to take.
                 <div className="space-y-2">
                   <Label htmlFor={statusId}>Status</Label>
                   <Select

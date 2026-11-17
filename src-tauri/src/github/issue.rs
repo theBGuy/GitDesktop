@@ -831,7 +831,8 @@ pub async fn gh_issue_set_assignees(
         &input,
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -857,7 +858,8 @@ pub async fn gh_issue_set_milestone(
         &input,
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -940,7 +942,11 @@ pub async fn gh_issue_set_type(
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args = issue_set_type_args(&slug, &n, type_name.as_deref());
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -1011,6 +1017,9 @@ pub async fn gh_issue_close(
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -1026,6 +1035,9 @@ pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -1107,7 +1119,8 @@ pub async fn gh_issue_pin(repo_path: String, number: u64, lens: Option<String>) 
         &["issue", "pin", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1120,7 +1133,8 @@ pub async fn gh_issue_unpin(repo_path: String, number: u64, lens: Option<String>
         &["issue", "unpin", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1144,7 +1158,11 @@ pub async fn gh_issue_lock(
         args.push("--reason");
         args.push(r);
     }
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -1156,7 +1174,8 @@ pub async fn gh_issue_unlock(repo_path: String, number: u64, lens: Option<String
         &["issue", "unlock", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1263,7 +1282,8 @@ pub async fn gh_add_reaction(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1287,7 +1307,8 @@ pub async fn gh_remove_reaction(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1319,6 +1340,9 @@ pub async fn gh_issue_transfer(
     if let Some(destination_slug) = crate::github::repo_meta::transfer_destination(destination) {
         invalidate_repo_meta_after(&destination_slug, &result);
     }
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     let out = result?;
     // gh prints the transferred issue's URL on success.
     Ok(out.stdout_lossy().trim().to_string())
@@ -1336,6 +1360,9 @@ pub async fn gh_issue_delete(repo_path: String, number: u64, lens: Option<String
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -1476,7 +1503,8 @@ pub async fn gh_issue_add_sub_issue(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1502,7 +1530,8 @@ pub async fn gh_issue_remove_sub_issue(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1599,7 +1628,8 @@ pub async fn gh_issue_set_dependency(
         &["issue", "edit", &n, "--repo", &slug, flag, &t],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1802,7 +1832,8 @@ pub async fn gh_issue_create_linked_branch(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 

@@ -1007,15 +1007,32 @@ one grep away on the named symbol. Grows via Conventions-sync.
   and not answered (never a connect timeout; `send_error` in forge/http.rs
   builds it). A CLI write hedges only when its Err passes through
   `timed_out_write`, which also re-leads a generic sentence with its caller's
-  noun: at a helper (`glab_write_fields`, `run_gh_api_write` /
+  noun: at a helper (`glab_write`, `glab_write_fields`, `run_gh_api_write` /
   `run_gh_api_write_json`, `discussion_write_error`, the Projects reply
   helpers `project_reply`, `write_reply` and `bulk_response`) or in a direct
   call at the write (the GitHub issue create and REST edits, the webhook
   saves, a card's field edit, the Bitbucket repository create, GitLab's
-  positioned commit comment); `run_gh_maybe_attached` maps through
-  `gh_write_error` (github/pr.rs). A write with no noun at its helper takes
-  `LandedWrite::Changed`. Any other write keeps the bare timeout. A Bitbucket
-  or Jira write reads a received 2xx whose body couldn't be read through its
+  positioned commit comment). Direct calls also cover every other GitHub
+  write under `src-tauri/src/github` and forge/github.rs, one roster row each
+  in `every_listed_github_write_hedges_its_timeout` (github/repo_meta.rs,
+  which sees only its rows), and GitLab's JSON-body and raw writes (a new
+  review thread, a pipeline run, the webhook saves, a CI variable, the merge,
+  fork and star) and its reviewer save (`set_pr_reviewers`), a set
+  `every_gitlab_write_route_hedges_or_is_listed` (forge/gitlab.rs) closes. A
+  new GitHub or GitLab write adds its map and its roster row in the same
+  change. `run_gh_maybe_attached` maps through `gh_write_error`
+  (github/pr.rs). A write with no noun at its helper takes
+  `LandedWrite::Changed`. Left bare on purpose: on GitHub, the publish create
+  (its own sentence under kind `gh`) and the writes reported under a sentence
+  that says they did not happen (the head-branch delete after a merge; the
+  label, assignee and detail follow-ups of a create); on GitLab, an image
+  upload (its refusal says nothing was posted or saved, or carries the pushed
+  lead on a new merge request), a review's draft notes, the merge's attribute
+  PUT, the reviewer add ahead of a change request, and publish (its older
+  sentence). A review's publish step has its own may-or-may-not sentence
+  under kind `glab`. A read keeps the bare timeout, and so does a read that
+  runs before a write in the same function. A Bitbucket or Jira write reads
+  a received 2xx whose body couldn't be read through its
   classifier (`bb_write_answer` in forge/http.rs; `merge_answer`,
   `created_pr_response` and `created_repo_response` in forge/bitbucket.rs;
   `write_answer` in forge/jira.rs), never as the transport error. The outcome

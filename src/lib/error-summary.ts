@@ -830,6 +830,10 @@ const PARTIAL_STATE_WRAPS: readonly {
   },
   {
     kind: "glab",
+    lead: /^GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted\. Check the merge request on GitLab before retrying\. \(/,
+  },
+  {
+    kind: "glab",
     lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on GitLab\. \(/,
   },
 ];

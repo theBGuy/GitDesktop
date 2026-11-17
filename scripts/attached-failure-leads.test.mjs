@@ -1138,6 +1138,7 @@ const WRAP_SOURCES = {
       [1, "review comments as drafts before the failure", "({first}){rest}", "review comment"],
       [1, "draft notes couldn't be published", "({first}){rest}", "review"],
       [1, "The review was posted, but the {action} step failed", "({first}){rest}", null],
+      [1, "while publishing the review's draft notes", "({first}){rest}", "review"],
     ],
   },
 };
@@ -1399,7 +1400,7 @@ test("a compound review failure over a network cause keeps what already posted",
   const bbAll = forgeWraps(bb, "bitbucket");
   const glAll = forgeWraps(gl, "glab");
   assert.equal(bbAll.length, 5);
-  assert.equal(glAll.length, 6);
+  assert.equal(glAll.length, 7);
   // The copy as it ships.
   const summary = (kind, wrap) =>
     presentError({ kind, message: wrap(ONE_LINE_CAUSE[kind]) }).summary;

@@ -1053,7 +1053,11 @@ pub async fn gh_run_rerun(
     let id = run_id.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args = run_rerun_args(&slug, &id, failed);
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -1068,7 +1072,11 @@ pub async fn gh_run_rerun_job(
     let id = job_id.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args = run_rerun_job_args(&slug, &id);
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -1089,7 +1097,8 @@ pub async fn gh_run_approve(repo_path: String, run_id: u64, lens: Option<String>
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1103,7 +1112,8 @@ pub async fn gh_run_cancel(repo_path: String, run_id: u64) -> AppResult<()> {
         &["run", "cancel", "-R", &slug, &id],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -1646,7 +1656,11 @@ pub async fn gh_workflow_run(
             }
             AppError::Gh(message)
         }
-        other => other,
+        other => crate::forge::timed_out_write(
+            other,
+            "GitHub",
+            crate::forge::LandedWrite::Created("workflow run"),
+        ),
     })?;
     Ok(())
 }

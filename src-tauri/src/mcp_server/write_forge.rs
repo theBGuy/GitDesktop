@@ -586,7 +586,7 @@ async fn sync_release_updater_notes(
             .map_err(|e| {
                 format!(
                     "The release was updated, but its {UPDATER_MANIFEST} updater manifest \
-                     was not: {e}"
+                     may not have been: {e}"
                 )
             }),
     )

@@ -1,7 +1,7 @@
-- When a forge doesn't answer in time on one of these changes, the app says
-  the change may still have gone through and to check before trying again. That
-  covers new pull requests, merge requests, issues and comments and title or
-  description edits on GitHub and GitLab; GitHub discussions, pull request
-  stacks, webhook saves and Projects changes to projects, views, items and
-  status updates; GitLab commit comments, comment edits, review-thread replies,
-  releases and project settings; and changes sent to Bitbucket or Jira.
+- When a forge doesn't answer in time on a change you made, the app says the
+  change may still have gone through and to check before trying again. That
+  covers what the app sends to GitHub, GitLab, Bitbucket and Jira: new pull
+  requests, merge requests, issues, comments and review threads; edits,
+  merges, approvals, labels, assignees, reviewers and milestones; releases;
+  workflow and pipeline actions; and repository settings, members, webhooks,
+  secrets and variables.

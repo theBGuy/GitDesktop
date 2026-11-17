@@ -1839,8 +1839,9 @@ and stays open with the failed ones still attached, so pressing **Save** again a
 (when the saved description can't be read back, it closes with a warning instead); if the
 first image fails, the description isn't saved (your other changes, such as the title,
 are) and an error says so. On GitLab an upload is all or nothing: if an image
-isn't accepted, nothing is posted or saved. Images need GitHub CLI 2.99 or newer on
-GitHub.com or GitHub Enterprise Cloud (not GitHub Enterprise Server) with write access to
+isn't accepted, nothing is posted or saved. A new merge request's branch is already
+pushed by then, and the error says so. Images need GitHub CLI 2.99 or newer on GitHub.com
+or GitHub Enterprise Cloud (not GitHub Enterprise Server) with write access to
 the repository, or GitLab CLI 1.91 or newer; Bitbucket has no image attachments. With some
 GitHub CLI sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so
 when you post. Where they aren't available, the button stays visible, disabled, and says

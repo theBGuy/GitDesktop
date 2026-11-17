@@ -84,7 +84,8 @@ pub async fn gh_ruleset_create(repo_path: String, body: Value) -> AppResult<()> 
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -104,7 +105,8 @@ pub async fn gh_ruleset_update(repo_path: String, id: u64, body: Value) -> AppRe
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -121,7 +123,8 @@ pub async fn gh_ruleset_delete(repo_path: String, id: u64) -> AppResult<()> {
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
