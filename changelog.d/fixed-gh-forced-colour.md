@@ -1,1 +1,0 @@
-- GitHub data loads correctly when `CLICOLOR_FORCE` is set in your environment.

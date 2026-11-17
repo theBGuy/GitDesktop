@@ -12,6 +12,411 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-17
+
+### Added
+
+- **Find the run you want on the Actions tab.** Filter the run list by
+  **workflow, event, status, branch, or actor** from the funnel beside the
+  search box; each filter shows as a chip you can remove. A **Workflows**
+  section at the top of the list shows every workflow with its latest run's
+  status when that run is among the most recent, and opening one lists only
+  its runs. **Open on GitHub** beside Refresh links to the repository's
+  Actions caches, deployments, attestations, runners, and usage and
+  performance metrics. GitLab and Bitbucket pipelines take the event,
+  status, branch, and actor filters, with their own links.
+- **Go back and forward inside a repository.** Open an issue from a project
+  board, follow a `#123` link or jump to a linked pull request, then press
+  `Alt`+`←` (`⌘`+`[` on macOS) or your mouse's back button to return to where
+  you were; `Alt`+`→` (`⌘`+`]`) or the forward button takes you forward again.
+  On a roadmap row those keys keep shifting the item's dates; the mouse buttons
+  and the command palette still go back and forward there. Every tab you switch
+  to is on the way back too, while moving through a list is not. Returning to a
+  board puts you on the same project, view and card. Both shortcuts can be
+  rebound in **Settings → Keyboard** and are in the command palette, and a
+  shortcut of your own on the same keys keeps working: yours wins, and Go back
+  or Go forward stays unbound while yours holds those keys.
+- **Drag cards on a project board.** Press a card and drag it with the mouse
+  to a new place in its column or into another column; a line shows where it
+  will land, and the new order is saved as the project's own, so everyone
+  sees it on GitHub. `Esc` cancels a drag, and the keyboard moves work as
+  before.
+- **Double-click a changed file to open it.** In the Changes list, a
+  double-click opens the file in your external editor, or in its default
+  program when no editor is set (a file your system would run instead gets a
+  note with **Show in Explorer**), and the command palette's **Open changed
+  file** does the same for the file you're viewing. A file deleted from your
+  working tree has nothing to open, so you get a short note instead.
+- **Edit commit dates.** Change a commit's author and committer dates from
+  History. **Edit dates…** on the latest commit changes just its dates, and
+  each row in **Edit history** shows its date and edits it in place, alongside
+  reword, squash and reorder. Select several commits to give them one date.
+  Dates are typed (one pasted from `git log` works) or picked. A commit's
+  own date editor keeps its UTC offset unless you type another, and one date
+  set on several rows gives them all one offset. A commit that would end up
+  dated before its parent is flagged and confirmed first. Changing only dates
+  runs no Git hooks, so every commit in the rewrite keeps its message.
+- **Interface zoom.** Scale the whole app, diffs included, from 80% up to 200%
+  (capped to what your display fits): press `Ctrl`/`⌘`+`=` or
+  `Ctrl`/`⌘`+`-`, hold `Ctrl`/`⌘` and scroll, or use the stepper in
+  **Settings → Appearance**. `Ctrl`/`⌘`+`0` or its Reset button puts you back
+  at 100%. Over the file, commit and project lists, `Ctrl`/`⌘` and scroll
+  keeps scrolling, so you can extend a `Ctrl`/`⌘`-click selection.
+- **Hide whitespace changes.** The **Diff options** sheet, behind the gear in
+  the diff toolbar, hides changes that only touch spaces, tabs or line endings
+  in every local diff: the working tree, commit details, file history, branch
+  compare, stashes and agent session changes. It stays on until you turn it
+  off, and with a diff on screen *Show or hide whitespace changes* in the
+  command palette flips it too; while you're writing a line comment or editing
+  a commit comment, it waits for you to finish or close that first. While it is
+  on, the Changes diff turns off line and hunk staging, unstaging and discards;
+  **Show whitespace** brings them back. A file whose only changes are
+  whitespace says so.
+- **Images in comments and descriptions.** Paste a screenshot, or pick
+  files with the formatting toolbar's **Attach image** button, in GitHub
+  and GitLab issue and pull request comments, in new issue and pull request
+  descriptions (sub-issues included), and in the **Edit** dialog for an
+  issue's or pull request's title and description. PNG, JPEG, GIF and WebP
+  images up to 10 MB and 40 megapixels each, 10 per draft, show as chips
+  under the editor and in place in Preview, and nothing uploads until you
+  post. If an image fails to upload, the app says what was posted and how
+  to add it again; on GitLab nothing is posted unless every image is
+  accepted. Images need GitHub CLI 2.99 or newer (2.103.2 with some sign-in
+  types) on GitHub.com or GitHub Enterprise Cloud with write access to the
+  repository, or GitLab CLI 1.91 or newer; Bitbucket has no image
+  attachments.
+- **Star history on Insights.** GitHub repositories get a **Star history**
+  card on the Insights tab: the repository's stars as a cumulative curve,
+  week by week, over the last 52 weeks or, with **All time**, its whole life.
+  Each week's new stars are in the tooltip and the data table.
+- **Keep a branch local.** Mark a branch **Keep local** from its menu in the
+  branch switcher (or toggle the current branch from the command palette) and
+  GitDesktop holds Push, Publish, force push, Create PR, publishing a local
+  pull request and publishing the repository for it, each saying why, and
+  resolving a hosted pull request's conflicts won't push it either; the MCP
+  server's push, force-push and pull-request creation tools refuse it too.
+  The row wears a "kept local" chip, and one more menu item (also in the
+  command palette) adds an optional pre-push hook so `git push` from a
+  terminal stops as well (this clone only; `git push --no-verify` skips it).
+  The Git hooks dialog labels that hook **Managed by GitDesktop** and asks
+  before you save over, disable or delete it.
+- **Resolve a local PR's conflicts before it's approved.** When a local pull
+  request is predicted to conflict, **Resolve conflicts** in its strip merges
+  the base into the PR's branch in an isolated worktree and opens the conflict
+  editor. **Finish update** moves the branch and the PR stays open (an
+  earlier approval is cleared); an unfinished resolution is kept until you
+  continue or discard it.
+- **GitHub Projects over MCP.** An agent connected through GitDesktop's MCP
+  server can read this repository's GitHub project boards (its linked projects
+  and its owner's): their fields, cards, saved views and status updates. With
+  remote writes enabled it can also add cards and drafts, move cards between
+  columns and within a column, set their fields, archive and restore them, edit
+  drafts and post status updates.
+- **Reopen a repository in the worktree you left.** Leave a repository from
+  one of its linked worktrees, and opening it again from the Repositories
+  list, the header's repository switcher or File → Open Recent on macOS
+  lands you back in that worktree; its row names the worktree under the
+  path. Shift-click or Shift+Enter opens the main workspace instead, as does
+  **Open in main workspace** in the row's context menu. If the worktree is
+  gone, the main workspace opens.
+- **Restore deleted branches.** Deleting a branch from the branch switcher
+  leaves a notice that names the commit it pointed at and offers **Restore**,
+  which re-creates the branch there without checking it out, with its Keep
+  local mark if it had one. Clean up branches offers **Restore all** for a
+  batch of several, and Recover lost work lists your recent deletes under
+  **Deleted branches**, so a branch can still be restored after the notice is
+  gone.
+- **Submodule changes you can read.** A changed submodule is tagged in Changes
+  with what changed (commit changed, modified files, untracked files).
+  Selecting it lists the commits the submodule moved across, and its unstaged
+  row lists the uncommitted files inside. **Open submodule** opens it as its
+  own repository, and so does a double-click on the row. A stash can't save a
+  submodule's commit or the files inside it, so its row stays out of **Stash
+  change**.
+- **Workflow inputs, filled in.** Run workflow… reads the inputs a workflow
+  declares under `workflow_dispatch` and shows a field for each: a picker for a
+  choice, a checkbox for a boolean, and a text field for the rest, with defaults
+  filled in and required inputs marked, so it's clear what a run needs
+  before it starts. Inputs the file doesn't declare still go in by name
+  under **Additional inputs**.
+
+### Changed
+
+- In the branch switcher, a branch that still tracks the remote's default branch
+  it started from reads as not published (or points to the remote's branch of
+  its name when there is one), and a branch tracking a differently named
+  branch names that branch beside its push and pull arrows.
+- Held buttons now say why they're held and stay reachable from the keyboard:
+  Clean up branches' controls while a batch runs, Drop, Apply, Pop, Rescan and
+  Restore to working tree in the stash dialog, Save, Enable/Disable and Delete…
+  in the Git hooks dialog, Mark resolved in the conflict pane, and Save in the
+  pull request **Edit** dialogs while an AI draft is being generated.
+- A conflicted file that is too large to show, or binary, can be marked
+  resolved from its conflict pane once you've resolved it on disk: **Mark
+  resolved** asks first, then stages the file exactly as it is.
+- Pull request and issue headers keep their buttons pinned to the right, and
+  long titles wrap beside them.
+- **Diff layout in Diff options.** The **Unified** and **Split** layouts are
+  picked in the **Diff options** sheet behind the diff toolbar's gear, and
+  *Use unified or split diff* in the command palette switches between them.
+- When pushing the branch fails or times out in **Create pull request** or
+  **Create merge request**, or while promoting a local pull request, the
+  message and its notification say the push is what failed or timed out.
+- **Commit lists keep their original dates.** History, File history and Compare date
+  each commit by when it was written, so a range you rebase or reword keeps the dates
+  it had. When a commit's authored and committed dates differ by a minute or more, its
+  details show both.
+- Screen readers now announce each Insights card, chart and data table by name.
+- Local pull requests show their merge status in a strip under the header, like
+  hosted ones: conflicts with the base and the files involved, how far the
+  branch is behind (with **Update branch** beside it unless a conflict is
+  predicted), or that nothing conflicts.
+  **Approve** sits beside **Merge** on every tab.
+- The MCP server's `delete_branch` tool reports the full commit id the branch
+  pointed at, so `create_branch` with `from` set to it can restore the branch,
+  and takes an optional `expectedTip` (a full commit id) that deletes the
+  branch only while it still points at that commit.
+- Pushes to a mirror remote, tag pushes and remote branch or tag deletes
+  included, stop with the reason before Git runs, so a push from GitDesktop
+  doesn't remove branches on a mirror.
+- The **More** tab menu lists its tabs alphabetically, each showing its keyboard
+  shortcut when it has one.
+- When a locked or archived pull or merge request can't take comments, the
+  reason sits on its own line above the comment box.
+- A conflicted submodule shows both of its commits in the conflict editor, says
+  which one is newer when one includes the other, and resolves with **Accept
+  current** or **Accept incoming**. Before you pick, the editor says whether the
+  submodule's checkout will move to that commit or stay as it is.
+- **Discard all changes** and **Stash all changes** say when a submodule keeps
+  the commit it has checked out and the files inside it, and warn before
+  deleting a repository that replaced a tracked file. **Discard all changes**
+  keeps the files inside submodules even when `submodule.recurse` is set.
+
+### Fixed
+
+- AI reviews on an API provider now stop with a clear message when the provider
+  reports that the model declined to review the change, and the refusal is not
+  saved or posted as the review.
+- When a Bitbucket or GitLab review or request for changes fails partway
+  because the connection dropped, the error says what was already posted
+  before suggesting you check your connection, so you know what's safe to
+  retry.
+- On a project board, a keyboard shortcut that combines Space with a modifier
+  key, pressed while a card has focus, runs only the shortcut and leaves the
+  card as it is.
+- On disks that ignore letter case (the Windows and macOS default), creating or
+  renaming a branch, checking out a remote branch, or adding a worktree on a new
+  branch keeps you from ending up with two branches whose names differ only in
+  capitalization, and cherry-picking onto a branch that has such a look-alike
+  stops before anything moves. A branch checked out under a different
+  capitalization of its name counts as checked out, so deleting, resetting or
+  updating it from the branch menu keeps the branch and its working tree
+  together.
+- Undo last commit, Reset to commit, Amend last commit, squashing, Edit
+  history, Cherry-pick to branch, and a local pull request's merge and Update
+  branch are turned away with the reason while the branch they would move is
+  pushing, and branch actions respect a push running in another worktree of
+  the same repository.
+- When a branch still tracks the remote's default branch it started from,
+  **Publish as _origin/name_** stays available after the default branch moves
+  ahead, so you can publish the branch under its own name without pulling
+  first. Any branch tracking a differently named branch also offers that item
+  in its branch-switcher menu.
+- When creating a pull request or merge request fails after its branch was
+  pushed, the error says the branch was pushed, on GitHub and GitLab as on
+  Bitbucket.
+- Deleting a branch removes it only at the commit you saw: **Clean up
+  branches** deletes each branch at the commit its list showed, and the branch
+  menu's Delete at the commit the branch had when its confirmation opened. A
+  branch that gains commits while you decide is kept, and in Clean up branches
+  it stays listed and is checked again.
+- A commit comment on a line the diff doesn't show appears in the comment list
+  under the diff, so every comment on the commit stays in view.
+- When the conflict editor can't read a conflicted file, its explanation stays
+  on screen while the editor checks the file again.
+- Text copied with the app's Copy buttons on Windows (MCP server config, logs,
+  error details, review text) pastes with its original line endings, so a
+  copied command or config works as pasted. The MCP server config's Copy button
+  shows "Copied" only after the copy succeeds, for the full second and a half
+  each time.
+- **Create issue**, **New local pull request**, **New discussion**, **New
+  release** and **New local issue** create one item per draft: submitting again
+  while the create runs starts nothing, even if an earlier draft's create
+  finishes in the meantime. **Create issue** and **New local pull request** also
+  keep the draft while it's being created: reopen the dialog in the same
+  repository and it's there with **Create issue** or **Create local PR** held,
+  and if the create fails, it's there to retry, even when the dialog was closed
+  at the time.
+- When a forge accepts a write but its reply comes back incomplete or
+  unreadable, the app says where things stand, so a retry doesn't make a
+  duplicate. A new pull request, merge request, issue, discussion or GitLab
+  release whose reply lacks its number or link shows as created, and the MCP
+  server's create tools return it with a `created_warning`. Promoting a local
+  pull request or issue does the same, with a link to view the new item when
+  the reply has one, and the note says the local item isn't linked to it and,
+  if it had comments, that they weren't carried over. For other new items
+  (Bitbucket comments, tasks, pipelines, repository settings and forks; GitLab
+  forks and time entries; Jira issues, comments and worklogs; GitHub projects,
+  views, project items, status updates and webhooks), an unreadable reply says
+  the item may already exist, so you can check before creating it again. A
+  Bitbucket edit, or a Jira comment or worklog edit, says the change may
+  already be saved, and a delete, approval, merge or Jira issue field change
+  shows as done.
+- When GitHub creates a pull request but can't apply its labels or
+  assignees, the app reports the new pull request as created, with a
+  warning to add them from the pull request. The MCP server's
+  `create_pull_request` tool returns the created pull request with a
+  `followup_warning` in that case.
+- **Line comment drafts survive a layout switch.** While a line comment is open
+  anywhere in the app, **Unified** and **Split** stay held, saying why, until
+  you finish or close the comment.
+- Draft GitHub releases in the Tags list show no release age until they're published.
+- The **Edit** dialog for the title and description of a GitHub or GitLab
+  issue, or of a GitHub, GitLab or Bitbucket pull request, keeps the fields you
+  haven't changed up to date while it's open, so **Save** sends your edits with
+  the item's latest title, description and base branch. It also keeps your
+  draft while it saves: reopen it on the same item before opening it on
+  another, and the draft is still there with **Save** held until the save is
+  done; if the save fails while the dialog is closed, the text is there to
+  retry.
+- Saving an edited pull request or merge request description keeps its
+  `Closes #N` and Jira reference lines even if the **Linked issues** row goes
+  away while the **Edit** dialog is open. A local pull request's **Edit** keeps
+  its `Closes #N` and `Relates to #N` lines the same way.
+- GitHub data loads correctly when `CLICOLOR_FORCE` is set in your environment.
+- Publishing a repository to GitHub gives a large first push as much time as
+  any other push, and checks for an existing `origin`, a detached HEAD or a
+  repository with no commits before it creates anything on GitHub.
+- The user guide's **Pull requests** section shows its headings, bold text and
+  lists from the review comments through to the end of the section.
+- On a branch with no upstream, History's unpushed markers and the Edit
+  history range follow a push or fetch made in a terminal or another worktree
+  within a few seconds, and Squash and Edit history are ready sooner there.
+- The Git hooks dialog lists and edits hooks in the folder Git itself uses for
+  `core.hooksPath`, so a path written with `~` points at your home folder.
+- In the Git hooks dialog, keyboard focus stays on the Enable/Disable button
+  after you press it, so you can keep working from the keyboard.
+- Opening an image from a comment or document shows the exact picture on
+  screen, including GitHub's light and dark theme variants and images that
+  list several sizes.
+- On the Insights tab, a fork's **Compare** leaves your keyboard focus where
+  you put it if you move on before its ahead/behind counts arrive.
+- A rejected issue edit on GitHub shows GitHub's reason.
+- The issue pickers (Link issue, sub-issues, dependencies) say **Loading…**
+  while issues load, say so when they couldn't be loaded, and show long issue
+  titles in full on hover.
+- On GitHub, linked-issue chips detected from the branch name or a commit
+  message are only ever issues: a number that belongs to a pull request adds no
+  chip. This holds in **Create pull request**, the **Edit** dialog and local
+  pull requests.
+- The **Linked issues** row in the pull request **Edit** dialogs says its lines
+  are added to the description when you save.
+- Merging a local pull request leaves its base branch alone while a rebase
+  or bisect is working on it, and says where to finish that operation first.
+- On Windows, long text on GitHub and GitLab now sends in full: a new comment or
+  description on a pull request, merge request or issue, a comment edit, a review or
+  review-thread reply, a GitHub discussion post, a GitLab commit comment, release notes,
+  and the inputs of a manually run GitHub workflow. Multi-line text sends there too when
+  the GitHub or GitLab CLI is installed as a `.cmd` wrapper.
+- The MCP server's `push`, `force_push` and `create_pull_request` tools,
+  and Push, Publish, Create PR and Publish repository in the app, keep
+  agent-session branches (`gd/session/*`) off your remotes: each refuses to
+  publish one, and the push tools also refuse a push that would land on one
+  through another branch. On an agent-session branch the sync bar holds
+  Push, Publish and Force push and says why.
+- On GitLab, saving an edited merge request confirms with "Merge request
+  updated", and the **Convert to draft** tooltip says merge request.
+- **Open with default program** won't start a file your system would run
+  instead of opening it (scripts, installers, shortcuts and app bundles): you
+  get a note with **Show in Explorer** one click away. The binary file pane and
+  an agent session's file links follow the same rule.
+- A merge, cherry-pick or revert that stops or is aborted in a terminal shows
+  in the conflict banner and the History menu within a few seconds, without
+  switching tabs.
+- GitLab pipelines and jobs waiting on a callback read **Waiting** and keep
+  refreshing until they finish. On Bitbucket, steps that are waiting to run read
+  **Queued**, steps that were not run read **Skipped**, and expired pipelines
+  read **Cancelled**.
+- **Create pull request** (**Create merge request** on GitLab) and **New local
+  pull request** start from the branch you're on, with the default branch as
+  the base, unless you opened them with branches already picked. When the
+  dialog can't tell which branch you mean (on your own repository's default
+  branch, say, or when the default branch isn't known), it leaves that picker
+  for you to choose and focuses it. On GitHub, GitLab and Bitbucket, the commit
+  count and a generated description compare against the remote's copy of the
+  base branch (as of your last fetch) when there is one, so they match the
+  request you're about to open.
+- A reference you typed on a line of its own in a pull or merge request
+  description (`Closes #12`, `Relates to #12`, `Relates to PROJ-7` and the like)
+  is written once when you also pick it as a linked-issue or Jira chip. A
+  closing line you typed is never dropped or downgraded, and a chip set to
+  close the issue still adds its `Closes` line when your text only relates to
+  it.
+- The pull request list's filter row stays on one line in a narrow sidebar.
+- Images attached on GitHub.com or GitHub Enterprise Cloud (GitHub's
+  `user-attachments` links) in issue and pull request descriptions, comments,
+  review threads, discussions and release notes now show in the app, and in
+  Preview while you write a GitHub issue, pull request, comment, review,
+  discussion or release, for private repositories too. They load through
+  your GitHub CLI sign-in. An image that can't load shows a short reason
+  and, unless it is itself a link, an **Open on GitHub** link.
+- Pushing a branch into the local branch it tracks stops with a clear reason,
+  from the sync bar and from the MCP server's push tools, and leaves that local
+  branch where it was.
+- While a branch pushes, its row in the branch switcher reads **Publishing**
+  only when the push creates the branch on the remote, **Pushing** when it
+  updates one, and **Preparing to push** while GitDesktop checks which it is,
+  naming where the push is going whenever it can tell.
+- Screen readers now name the review verdict choices when you submit a review,
+  the branch choice when you add a worktree, and how you'll use a new fork.
+- Emptying a release's notes in the **Edit release** dialog and saving clears them on
+  GitHub and GitLab.
+- The Push menu recognises the remote's default branch when the remote uses a
+  custom fetch refspec, so a branch tracking it under another name is offered
+  **Publish as _origin/name_** rather than a one-click push into it.
+- After you save repository settings with new topics on GitLab, the settings
+  show as saved.
+- On a roadmap, the dates you shift with the keyboard are saved as you left
+  them, even when a push, merge or other repository operation finishes
+  while they are still saving.
+- The search box in the board's "Add issue or pull request" dialog and in
+  Browse MCP servers stays in place while you type, as results come and go
+  and when you switch between the official registry and GitHub.
+- Branches on a remote whose name contains a slash (such as `team/fork`) list
+  under that remote with their own name in the branch menu, check out under
+  that name, and delete from that remote. Agent session branches and the
+  remote's `HEAD` entry on such a remote stay out of the branch menu and the
+  new-branch base picker.
+- **Stash all changes** says up front when new files with Windows-reserved
+  names (like `nul`) will stay in your working tree, and **Discard all changes**
+  from the branch menu says when such files skip the recycle bin.
+- **Submit review** asks before sending a review again from the same dialog
+  when the last attempt posted some of its comments or summary, or may have,
+  so a retry doesn't post them twice by accident.
+- Taking a side of a conflicted submodule stages the commit you picked.
+- When a forge doesn't answer in time on a change you made, the app says the
+  change may still have gone through and to check before trying again. That
+  covers what the app sends to GitHub, GitLab, Bitbucket and Jira: new pull
+  requests, merge requests, issues, comments and review threads; edits,
+  merges, approvals, labels, assignees, reviewers and milestones; deletions,
+  stars and forks; releases; workflow and pipeline actions; GitHub
+  discussions, pull request stacks and Projects changes; and repository
+  settings, members, webhooks, secrets and variables.
+- Pop-up messages now match the theme you picked in GitDesktop, so their text
+  stays readable when your system uses a different light or dark setting.
+- **Undo** is offered only when the latest commit is yours to take back: on a
+  branch with no upstream it holds once a remote branch has the commit, and
+  with unresolved conflicts its menu item says to resolve them first.
+- Discarding lines or a hunk from an untracked file now checks the file still
+  matches the diff, and asks you to review the refreshed diff instead of
+  removing lines that moved.
+- Updating the current branch from another branch or from its upstream says
+  it's already up to date when there was nothing to bring in.
+- The **Assignees** and **Reviewers** pickers scroll inside the window, filter
+  as you type and list the people already selected first. They, `@` mentions
+  and the MCP `list_assignable_users` tool list up to 1,000 people on GitHub
+  and GitLab, and the pickers and the tool say when a list stops there.
+
 ## [0.14.0] - 2026-11-08
 
 ### Added
@@ -5784,7 +6189,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/theBGuy/GitDesktop/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/theBGuy/GitDesktop/compare/v0.13.8...v0.14.0
 [0.13.8]: https://github.com/theBGuy/GitDesktop/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/theBGuy/GitDesktop/compare/v0.13.6...v0.13.7

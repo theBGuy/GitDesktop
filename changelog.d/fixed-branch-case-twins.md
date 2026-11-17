@@ -1,8 +1,0 @@
-- On disks that ignore letter case (the Windows and macOS default), creating or
-  renaming a branch, checking out a remote branch, or adding a worktree on a new
-  branch keeps you from ending up with two branches whose names differ only in
-  capitalization, and cherry-picking onto a branch that has such a look-alike
-  stops before anything moves. A branch checked out under a different
-  capitalization of its name counts as checked out, so deleting, resetting or
-  updating it from the branch menu keeps the branch and its working tree
-  together.

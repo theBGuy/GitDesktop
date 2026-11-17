@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "gitdesktop"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",

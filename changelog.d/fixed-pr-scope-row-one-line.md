@@ -1,1 +1,0 @@
-- The pull request list's filter row stays on one line in a narrow sidebar.

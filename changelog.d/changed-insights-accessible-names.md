@@ -1,1 +1,0 @@
-- Screen readers now announce each Insights card, chart and data table by name.
