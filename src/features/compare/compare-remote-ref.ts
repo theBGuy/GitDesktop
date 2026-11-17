@@ -13,7 +13,7 @@ export const ADD_UPSTREAM_VALUE = "::add-upstream::";
 
 /** Splits `remote/name` at the longest known remote followed by "/", since a
  *  remote name may itself hold "/". Unknown remotes (or none matching) fall
- *  back to the first "/", the backend's own split. */
+ *  back to the first "/", as the backend does for a remote it doesn't know. */
 function splitRemoteDisplay(
   display: string,
   remotes: readonly string[] | undefined,
@@ -49,12 +49,15 @@ function notifyPickRemotes() {
 
 /** Records only a remote the KNOWN remotes list names: a split made without
  *  one, or a first-slash fallback no listed remote matched, is a guess, and a
- *  recorded guess would outrank the right split once the list catches up.
+ *  recorded guess would outrank the right split once the list catches up. The
+ *  backend's split from `listed` is a guess too (it falls back to the first
+ *  "/" for an unconfigured remote), so it only resolves, never records.
  *  Returns the pick as {@link resolvePick} now reads it. */
 export function recordPickRemote(
   repo: string,
   value: string,
   remotes: readonly string[] | undefined,
+  listed?: readonly RemoteBranch[],
 ): { remote: string; name: string; display: string } | null {
   const key = pickRemoteKey(repo, value);
   const split = parseRemoteCompareValue(value, remotes);
@@ -64,7 +67,7 @@ export function recordPickRemote(
       notifyPickRemotes();
     }
   }
-  return resolvePick(value, remotes, pickRemotes.get(key) ?? null);
+  return resolvePick(value, remotes, pickRemotes.get(key) ?? null, listed);
 }
 
 /** Test-only: module state would otherwise carry records between cases. */
@@ -94,19 +97,30 @@ export function usePickRemote(
 /** The one identity of a stored pick: its recorded remote when that still
  *  prefixes it, else the split against the current remotes list. A listed
  *  remote strictly longer than the record wins: the record came from an older
- *  list that didn't have it yet. */
+ *  list that didn't have it yet. While the list is unknown, an unrecorded pick
+ *  takes the backend's split from its row in `listed` (the first "/" only when
+ *  no row matches), as {@link remoteCompareRows} does. A backend split longer
+ *  than the record also wins: it can only name a configured remote, since the
+ *  backend falls back to the first "/". */
 export function resolvePick(
   value: string | null,
   remotes: readonly string[] | undefined,
   recorded: string | null,
+  listed?: readonly RemoteBranch[],
 ): { remote: string; name: string; display: string } | null {
-  const split = parseRemoteCompareValue(value, remotes);
+  const parsed = parseRemoteCompareValue(value, remotes);
+  const listedSplit =
+    parsed !== null && remotes === undefined
+      ? listedPick(parsed.display, listed)
+      : null;
+  const split = listedSplit ?? parsed;
   if (
     split === null ||
     recorded === null ||
     !split.display.startsWith(`${recorded}/`) ||
     split.display.length === recorded.length + 1 ||
-    (split.remote.startsWith(`${recorded}/`) && remotes?.includes(split.remote))
+    (split.remote.startsWith(`${recorded}/`) &&
+      (remotes?.includes(split.remote) || listedSplit !== null))
   )
     return split;
   return {
@@ -114,6 +128,17 @@ export function resolvePick(
     name: split.display.slice(recorded.length + 1),
     display: split.display,
   };
+}
+
+/** The backend row whose `remote/name` is `display`, as a pick. */
+function listedPick(
+  display: string,
+  listed: readonly RemoteBranch[] | undefined,
+): { remote: string; name: string; display: string } | null {
+  const row = listed?.find((b) => `${b.remote}/${b.name}` === display);
+  return row === undefined
+    ? null
+    : { remote: row.remote, name: row.name, display };
 }
 
 export function remoteCompareValue(remote: string, name: string): string {
@@ -149,10 +174,12 @@ function remoteRank(remote: string): number {
  * `remote/name` equals an offered local name (a local literally named
  * `origin/x` would make two identical combobox values). A remote branch merely
  * sharing a local's bare name stays offered. Ordered by remote (upstream,
- * origin, then alphabetical), each remote's rows by recency. Each row is
- * re-split against `remotes` first: the backend splits at the first "/", which
- * mis-splits a remote whose name holds one, so its HEAD filter misses that
- * remote's HEAD and it is dropped here after the re-split.
+ * origin, then alphabetical), each remote's rows by recency. The backend
+ * already splits at the longest configured remote. When `remotes` is known each
+ * row is re-split against it first, so it stays congruent with
+ * `parseRemoteCompareValue` when this list and the backend's read differ (a
+ * remote added or removed between them), and the HEAD filter covers that
+ * window; without a list the backend's split stands.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
@@ -161,7 +188,9 @@ export function remoteCompareRows(
 ): RemoteCompareRow[] {
   return (remoteBranches ?? [])
     .map((b) => ({
-      ...(splitRemoteDisplay(`${b.remote}/${b.name}`, remotes) ?? b),
+      ...(remotes === undefined
+        ? b
+        : (splitRemoteDisplay(`${b.remote}/${b.name}`, remotes) ?? b)),
       lastCommitDate: b.lastCommitDate,
     }))
     .filter((b) => b.name !== "HEAD" && !isSessionBranchName(b.name))

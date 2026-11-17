@@ -47,6 +47,7 @@ import {
 import {
   displayCompareValue,
   GONE_PICK_COPY,
+  parseRemoteCompareValue,
   recordPickRemote,
   remoteCompareRows,
   remoteCompareValue,
@@ -231,23 +232,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const isGitLab = gh.data?.provider === "gitlab";
   const prNoun = isGitLab ? "merge request" : "pull request";
   const lensGate = useLensGate(repoPath);
-  // The ONE pick identity every consumer reads (fetch, PR routing and preset,
-  // own-copy line, duplicate probe, gone/pruned hold and copy).
   const remotes = useRemotes(repoPath);
   const recordedRemote = usePickRemote(repoPath, compareBranch);
-  const pick = resolvePick(compareBranch, remotes.data, recordedRemote);
-  // A listed remote that names an unrecorded pick, or outranks a shorter
-  // record, gets recorded: else the shorter split wins again once that remote
-  // is removed. recordPickRemote refuses an unlisted (fallback) split.
-  const resolvedRemote = pick?.remote ?? null;
-  useEffect(() => {
-    if (
-      compareBranch !== null &&
-      resolvedRemote !== null &&
-      resolvedRemote !== recordedRemote
-    )
-      recordPickRemote(repoPath, compareBranch, remotes.data);
-  }, [repoPath, compareBranch, recordedRemote, resolvedRemote, remotes.data]);
+  // resolvePick is null exactly when this parse is: a backend row always has a
+  // non-empty remote and name, so its full ref always parses.
+  const hasRemotePick =
+    parseRemoteCompareValue(compareBranch, remotes.data) !== null;
   // A remote pick is stored as its full ref; every user-facing string shows it
   // as `remote/name`.
   const compareDisplay =
@@ -265,12 +255,32 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // state must know whether remotes exist).
   const remoteRead = useRemoteBranches(
     repoPath,
-    pickerOpen || pick !== null || otherBranches.length === 0,
+    pickerOpen || hasRemotePick || otherBranches.length === 0,
   );
-  // Rows wait for the remotes list: a remote whose name holds "/" splits only
-  // against it. A failed read with no data leaves the backend's first-slash
-  // split, the only one left, held through its retry polls so the rows don't
-  // blink with each one.
+  // The ONE pick identity every consumer reads (fetch, PR routing and preset,
+  // own-copy line, duplicate probe, gone/pruned hold and copy).
+  const pick = resolvePick(
+    compareBranch,
+    remotes.data,
+    recordedRemote,
+    remoteRead.data,
+  );
+  // A listed remote that names an unrecorded pick, or outranks a shorter
+  // record, gets recorded: else the shorter split wins again once that remote
+  // is removed. recordPickRemote refuses an unlisted (fallback) split.
+  const resolvedRemote = pick?.remote ?? null;
+  useEffect(() => {
+    if (
+      compareBranch !== null &&
+      resolvedRemote !== null &&
+      resolvedRemote !== recordedRemote
+    )
+      recordPickRemote(repoPath, compareBranch, remotes.data);
+  }, [repoPath, compareBranch, recordedRemote, resolvedRemote, remotes.data]);
+  // Rows wait for the remotes list, so each row splits against the same list
+  // the stored pick is parsed with. A failed read with no data keeps the
+  // backend's split (the longest configured remote), held through its retry
+  // polls so the rows don't blink with each one.
   const remotesKnown =
     remotes.data !== undefined || failedSinceLastSuccess(remotes);
   const remoteRows = remotesKnown
@@ -528,7 +538,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   function pickCompare(stored: string) {
     fetcher.clearFollowUp();
     setCompareBranch(stored);
-    const remotePick = recordPickRemote(repoPath, stored, remotes.data);
+    const remotePick = recordPickRemote(
+      repoPath,
+      stored,
+      remotes.data,
+      remoteRead.data,
+    );
     if (remotePick && currentName)
       void fetcher.fire({
         repo: repoPath,

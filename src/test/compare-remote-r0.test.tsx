@@ -3,14 +3,24 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import {
   clearPickRemotesForTests,
   parseRemoteCompareValue,
+  recordPickRemote,
   remoteCompareRows,
+  resolvePick,
+  usePickRemote,
 } from "@/features/compare/compare-remote-ref";
 import { TabPanel } from "@/features/repository/TabPanel";
 import {
@@ -576,7 +586,7 @@ describe("Compare remote names holding a slash", () => {
       name: "main",
       display: "team/fork/main",
     });
-    // Unknown remotes keep the backend's first-slash split.
+    // Without a remotes list the value splits at the first slash.
     expect(parseRemoteCompareValue("refs/remotes/team/fork/main")).toEqual({
       remote: "team",
       name: "fork/main",
@@ -587,6 +597,16 @@ describe("Compare remote names holding a slash", () => {
         [remote("team", "fork/gd/session/x"), remote("team", "fork/main")],
         new Set(),
         ["team/fork"],
+      ).map((r) => r.display),
+    ).toEqual(["team/fork/main"]);
+  });
+
+  it("keeps the backend's split when the remotes list is unknown", () => {
+    expect(
+      remoteCompareRows(
+        [remote("team/fork", "gd/session/x"), remote("team/fork", "main")],
+        new Set(),
+        undefined,
       ).map((r) => r.display),
     ).toEqual(["team/fork/main"]);
   });
@@ -616,6 +636,70 @@ describe("Compare remote names holding a slash", () => {
     // The pick is still listed, so nothing calls it deleted.
     await settle();
     expect(screen.queryByText(/was deleted on/)).toBeNull();
+  });
+
+  it("resolves an unknown-list pick through its backend row, never recording it", () => {
+    const value = "refs/remotes/team/fork/main";
+    const listed = [remote("team/fork", "main")];
+    expect(resolvePick(value, undefined, null, listed)).toEqual({
+      remote: "team/fork",
+      name: "main",
+      display: "team/fork/main",
+    });
+    // A known list ignores the backend rows.
+    expect(resolvePick(value, ["origin", "team"], null, listed)).toEqual({
+      remote: "team",
+      name: "fork/main",
+      display: "team/fork/main",
+    });
+    expect(recordPickRemote(REPO, value, undefined, listed)?.remote).toBe(
+      "team/fork",
+    );
+    const { result } = renderHook(() => usePickRemote(REPO, value));
+    expect(result.current).toBeNull();
+  });
+
+  it("weighs an unknown-list backend split against the record by length", () => {
+    const value = "refs/remotes/team/fork/main";
+    const slashSplit = {
+      remote: "team/fork",
+      name: "main",
+      display: "team/fork/main",
+    };
+    // A longer backend split outranks a shorter, stale record.
+    expect(
+      resolvePick(value, undefined, "team", [remote("team/fork", "main")]),
+    ).toEqual(slashSplit);
+    // A shorter backend split leaves a longer record in charge.
+    expect(
+      resolvePick(value, undefined, "team/fork", [remote("team", "fork/main")]),
+    ).toEqual(slashSplit);
+    // With no backend row the record still wins over the first-slash parse.
+    expect(resolvePick(value, undefined, "team", [])).toEqual({
+      remote: "team",
+      name: "fork/main",
+      display: "team/fork/main",
+    });
+  });
+
+  it("fetches the backend's remote for a pick made while the remotes read fails", async () => {
+    vi.mocked(gitRemotes).mockRejectedValue(new Error("remotes boom"));
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      remote("team/fork", "main"),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(gitRemotes).toHaveBeenCalled());
+    await user.click(await trigger());
+    await user.click(
+      await within(await popup()).findByRole("option", {
+        name: /^team\/fork\/main/,
+      }),
+    );
+    await waitFor(() =>
+      expect(gitFetchRemote).toHaveBeenCalledWith(REPO, "team/fork"),
+    );
+    expect(fetchedRemotes()).not.toContain("team");
   });
 
   it("offers remote rows only once the remotes list is known", async () => {

@@ -412,22 +412,44 @@ fn parse_upstream_track(track: &str) -> (u32, u32, bool) {
     (ahead, behind, gone)
 }
 
-/// Branches that exist on a remote, for the switcher's "Remote" group. Returns
-/// every `refs/remotes/<remote>/<branch>` (skipping each remote's symbolic
-/// `HEAD`); the frontend drops the ones already checked out locally and the
-/// internal `gd/session/*` branches. The list reflects the last fetch.
+/// Splits a remote-tracking ref past `refs/remotes/` at the longest configured
+/// remote followed by `/` (a remote name may itself hold `/`), else at the first
+/// `/`; `None` when either side would be empty. The same rule as Compare's
+/// `splitRemoteDisplay`, so against the same remote list the two agree on every row.
+fn split_remote_tracking<'a>(rest: &'a str, remotes: &[String]) -> Option<(&'a str, &'a str)> {
+    let mut slash = rest.find('/')?;
+    for remote in remotes {
+        if remote.len() > slash
+            && rest
+                .strip_prefix(remote.as_str())
+                .is_some_and(|tail| tail.starts_with('/'))
+        {
+            slash = remote.len();
+        }
+    }
+    let (remote, name) = (&rest[..slash], &rest[slash + 1..]);
+    (!remote.is_empty() && !name.is_empty()).then_some((remote, name))
+}
+
+/// Branches that exist on a remote, feeding every remote-branch list. Returns
+/// every `refs/remotes/<remote>/<branch>`, skipping each configured remote's
+/// symbolic `HEAD`; consumers drop what they don't offer (such as
+/// `gd/session/*`). The list reflects the last fetch. A failed
+/// remotes read fails the list: a guessed split would leak session branches.
 #[tauri::command]
 pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranch>> {
-    let out = run_git(
-        Some(&repo_path),
-        &[
-            "for-each-ref",
-            "refs/remotes",
-            "--format=%(refname)%00%(committerdate:iso8601-strict)",
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    let (out, remotes) = tokio::try_join!(
+        run_git(
+            Some(&repo_path),
+            &[
+                "for-each-ref",
+                "refs/remotes",
+                "--format=%(refname)%00%(committerdate:iso8601-strict)",
+            ],
+            DEFAULT_TIMEOUT,
+        ),
+        crate::git::remote::git_remotes(repo_path.clone()),
+    )?;
     let mut branches = Vec::new();
     for line in out.stdout_lossy().lines() {
         let mut parts = line.split('\0');
@@ -436,16 +458,16 @@ pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranc
         };
         // Full ref, stripped of exactly `refs/remotes/`: the short form turns into
         // `remotes/<remote>/<branch>` when a local ref is named `<remote>/<branch>`.
-        // Split once so a branch name containing `/` stays intact (a remote name
-        // containing `/` still mis-splits).
+        // A `/` inside a branch name or a configured remote's name stays whole; a ref
+        // under no configured remote splits at its first `/`.
         let Some((remote, name)) = refname
             .strip_prefix("refs/remotes/")
-            .and_then(|r| r.split_once('/'))
+            .and_then(|r| split_remote_tracking(r, &remotes))
         else {
             continue;
         };
         // Skip the remote's symbolic HEAD (`origin/HEAD` → points at the default).
-        if name == "HEAD" || name.is_empty() {
+        if name == "HEAD" {
             continue;
         }
         branches.push(RemoteBranch {
@@ -5472,6 +5494,88 @@ pub(crate) mod tests {
             vec![
                 ("origin".to_string(), "feat/x".to_string()),
                 ("origin".to_string(), "main".to_string()),
+            ]
+        );
+    }
+
+    /// The split takes the longest configured remote followed by `/`, whatever the
+    /// list's order, and falls back to the first `/` (the rule Compare's
+    /// `splitRemoteDisplay` applies).
+    #[test]
+    fn split_remote_tracking_takes_the_longest_configured_remote() {
+        type Case<'a> = (&'a str, &'a [String], Option<(&'a str, &'a str)>);
+        let list = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let slash_remote = list(&["origin", "team/fork"]);
+        let longer_first = list(&["team/fork", "team"]);
+        let shorter_first = list(&["team", "team/fork"]);
+        let only_slash = list(&["team/fork"]);
+        let cases: &[Case] = &[
+            ("origin/main", &slash_remote, Some(("origin", "main"))),
+            ("origin/feat/x", &slash_remote, Some(("origin", "feat/x"))),
+            ("team/fork/Feat", &slash_remote, Some(("team/fork", "Feat"))),
+            (
+                "team/fork/gd/session/abc",
+                &slash_remote,
+                Some(("team/fork", "gd/session/abc")),
+            ),
+            ("ghost/x/y", &slash_remote, Some(("ghost", "x/y"))),
+            ("team/fork/x", &shorter_first, Some(("team/fork", "x"))),
+            ("team/other", &shorter_first, Some(("team", "other"))),
+            ("team/fork/x", &longer_first, Some(("team/fork", "x"))),
+            ("team/other", &longer_first, Some(("team", "other"))),
+            ("team/fork", &only_slash, Some(("team", "fork"))),
+            ("lonely", &slash_remote, None),
+        ];
+        for (rest, remotes, want) in cases {
+            assert_eq!(
+                super::split_remote_tracking(rest, remotes),
+                *want,
+                "{rest} against {remotes:?}"
+            );
+        }
+    }
+
+    /// A remote whose name holds `/` lists its branches under its whole name, its
+    /// session branches keep their full `gd/session/*` name, and its symbolic HEAD
+    /// stays out of the list.
+    #[tokio::test]
+    async fn git_remote_branches_split_at_a_slash_named_remote() {
+        let (_base, base) = temp_base("remote-list-slash-remote");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        run(&repo_s, &["remote", "add", "team/fork", &repo_s]).await;
+        for refname in [
+            "refs/remotes/origin/main",
+            "refs/remotes/team/fork/Feat",
+            "refs/remotes/team/fork/gd/session/abc",
+        ] {
+            run(&repo_s, &["update-ref", refname, "HEAD"]).await;
+        }
+        run(
+            &repo_s,
+            &[
+                "symbolic-ref",
+                "refs/remotes/team/fork/HEAD",
+                "refs/remotes/team/fork/Feat",
+            ],
+        )
+        .await;
+
+        let rows = super::git_remote_branches(repo_s.clone())
+            .await
+            .expect("list remote branches");
+        let mut pairs: Vec<(String, String)> =
+            rows.into_iter().map(|b| (b.remote, b.name)).collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("origin".to_string(), "main".to_string()),
+                ("team/fork".to_string(), "Feat".to_string()),
+                ("team/fork".to_string(), "gd/session/abc".to_string()),
             ]
         );
     }
