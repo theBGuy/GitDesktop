@@ -220,7 +220,7 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
-      "In-app conflict editor — current / incoming / both, a conflicts-left count with next / previous jumps, or mark files resolved as they stand on disk",
+      "In-app conflict editor — current / incoming / both, a conflicts-left count with next / previous jumps, submodule conflicts resolved by picking a commit, or mark files resolved as they stand on disk",
   },
   { group: "Rewrite & recovery", label: "Stash browser" },
   {

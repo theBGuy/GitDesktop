@@ -34,7 +34,10 @@ import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { PROVIDER_LABELS } from "@/lib/ai/providers";
 import { useAiTextStream } from "@/lib/ai/stream";
 import { presentError } from "@/lib/error-summary";
-import { readRepoInstructions } from "@/lib/git/api";
+import {
+  isSubmoduleConflictRefusal,
+  readRepoInstructions,
+} from "@/lib/git/api";
 import {
   type ConflictSides,
   changedOnDiskCopy,
@@ -101,6 +104,11 @@ const PATH_REFUSAL_GUIDANCE = {
   other: "Resolve it in your editor or a terminal.",
 } as const;
 
+/** The blocked body for a gitlink conflict, which the sides read refuses: a
+ *  single-file start reaches it, since Resolve all skips one. */
+const SUBMODULE_BLOCKED_COPY =
+  "This is a submodule conflict, so there's no text for a model to merge. Pick a commit in the conflict editor instead.";
+
 /** Where focus goes once Accept settles without leaving this view, pinned to
  *  the file it was armed for and the element focused at the press. */
 type LandRequest = {
@@ -148,6 +156,8 @@ export function ConflictResolveView({
     summary: string;
     linkedLeaf: boolean;
   } | null>(null);
+  // The sides read refused a gitlink conflict: blocked, with its own body.
+  const [submoduleConflict, setSubmoduleConflict] = useState(false);
   const [proposed, setProposed] = useState("");
   const [previewDiff, setPreviewDiff] = useState<string | null>(null);
   const [view, setView] = useState<ViewKey>("diff");
@@ -235,6 +245,7 @@ export function ConflictResolveView({
     reset();
     setSides(null);
     setPathRefusal(null);
+    setSubmoduleConflict(false);
     setProposed("");
     setPreviewDiff(null);
     setPhase("loading");
@@ -253,13 +264,16 @@ export function ConflictResolveView({
     } catch (e) {
       if (gen === genRef.current && !interruptedRef.current) {
         runningRef.current = false;
-        // Only a path-gate refusal blocks; any other failure can heal, so it
-        // keeps its toast and Try again. The blocked body names the refusal.
+        // Only a path-gate refusal or a gitlink conflict blocks; any other
+        // failure can heal, so it keeps its toast and Try again. The blocked
+        // body names the refusal.
         const refusal = isAppError(e)
           ? conflictPathRefusal(e.kind, presentError(e).summary)
           : null;
-        if (refusal !== null) {
+        const submodule = isSubmoduleConflictRefusal(e);
+        if (refusal !== null || submodule) {
           setPathRefusal(refusal);
+          setSubmoduleConflict(submodule);
           setPhase("blocked");
         } else {
           toastError(e);
@@ -630,9 +644,13 @@ export function ConflictResolveView({
       <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
+            {/* scripts/conflict-walk-refusal.test.mjs pins this ternary's
+                shape: a path refusal never reaches the ignore-pattern copy. */}
             {pathRefusal !== null
               ? `${pathRefusal.summary} ${PATH_REFUSAL_GUIDANCE[pathRefusal.linkedLeaf ? "leaf" : "other"]}`
-              : BLOCKED_COPY[blockedReason(sides)](baseName(path))}
+              : submoduleConflict
+                ? SUBMODULE_BLOCKED_COPY
+                : BLOCKED_COPY[blockedReason(sides)](baseName(path))}
           </p>
         ) : phase === "loading" ? (
           <p className="flex items-center gap-2 p-4 text-xs text-muted-foreground">

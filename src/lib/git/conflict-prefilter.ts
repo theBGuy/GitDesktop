@@ -17,10 +17,12 @@ export type ConflictBlockReason =
   | "excluded";
 
 /** A sides read the backend refuses on every retry: the file is binary, past
- *  the AI size cap, a symbolic link itself, or reached through a link. */
+ *  the AI size cap, a submodule conflict (no text to merge), a symbolic link
+ *  itself, or reached through a link. */
 export type ConflictRefusal =
   | "binary"
   | "tooLarge"
+  | "submodule"
   | "linkedLeaf"
   | "linkedPath";
 
@@ -36,6 +38,11 @@ export type ConflictSkipReason =
 // scripts/conflict-prefilter.test.mjs pins each congruent.
 export const TOO_LARGE_REFUSAL = "file is too large for AI conflict resolution";
 export const BINARY_REFUSAL = "binary file — resolve this conflict by hand";
+// Twin of conflict.rs's SUBMODULE_REFUSAL (and api/submodules.ts's
+// SUBMODULE_CONFLICT_REFUSAL, which this module can't import);
+// scripts/conflict-prefilter.test.mjs pins all three equal.
+export const SUBMODULE_REFUSAL =
+  "submodule conflict — pick a commit to resolve it";
 export const LINKED_ANCESTOR_TAIL =
   " — it's reached through a symbolic link or junction. Nothing was changed.";
 
@@ -50,6 +57,7 @@ export function sidesRefusal(
 ): ConflictRefusal | null {
   if (detail === TOO_LARGE_REFUSAL) return "tooLarge";
   if (detail === BINARY_REFUSAL) return "binary";
+  if (detail === SUBMODULE_REFUSAL) return "submodule";
   if (pathRefusal === null) return null;
   if (pathRefusal.linkedLeaf) return "linkedLeaf";
   if (pathRefusal.summary.endsWith(LINKED_ANCESTOR_TAIL)) return "linkedPath";
@@ -149,6 +157,11 @@ const SKIP_COPY: Record<
     one: "it's too large for AI",
     count: (n) => (n === 1 ? "is too large for AI" : "are too large for AI"),
   },
+  submodule: {
+    one: "it's a submodule conflict",
+    count: (n) =>
+      n === 1 ? "is a submodule conflict" : "are submodule conflicts",
+  },
   linkedLeaf: {
     one: "it's a symbolic link",
     count: (n) => (n === 1 ? "is a symbolic link" : "are symbolic links"),
@@ -178,6 +191,7 @@ const REASON_ORDER: ConflictSkipReason[] = [
   "partUndecodable",
   "binary",
   "tooLarge",
+  "submodule",
   "linkedLeaf",
   "linkedPath",
   "unreadableName",

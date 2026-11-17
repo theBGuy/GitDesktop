@@ -782,6 +782,7 @@ const WRITER_ROSTER = {
   [SURFACE]: { useSetHideWhitespace: 1, useDiffViewMode: 2 },
   [VIEWER]: { useSetHideWhitespace: 1, useDiffViewMode: 1 },
   [TRANSCRIPT_FILE]: { useSetHideWhitespace: 1 },
+  "src/features/pulls/CommitComments.tsx": { useSetHideWhitespace: 1 },
 };
 /** Writes held instead by a `readOnly` the probe sets when the sheet opens:
  *  [file, the write's trimmed line, the source lines the hold rides]. */

@@ -112,6 +112,7 @@ import {
   OP_IN_PROGRESS_HINT,
   revertCommitConfirm,
 } from "./commit-confirms";
+import { drawnDiffFor } from "./drawn-diff";
 import { EditDatesDialog, type EditDatesTarget } from "./EditDatesDialog";
 import { RESOLVE_CONFLICTS_HINT } from "./edit-dates-route";
 import { headAgrees } from "./editable-set";
@@ -364,6 +365,13 @@ export function CommitDetailView({
   // file's stay in its group.
   const selectedPathProp =
     !shownIsRendered && !selectedBinary ? null : anchorPath;
+  const drawnDiff = drawnDiffFor({
+    selectedPathProp,
+    shownDiff,
+    hash,
+    renderedHash,
+    retainedDiff,
+  });
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.
   const stale = details.isPlaceholderData || files.isPlaceholderData;
@@ -1032,6 +1040,7 @@ export function CommitDetailView({
           // anchors are off then (the slots' `anchorsOn`).
           selectedPath={selectedPathProp}
           selectedBinary={selectedBinary}
+          drawnDiff={drawnDiff}
           onSelectFile={selectFileFromComments}
           lens="origin"
           stale={stale}

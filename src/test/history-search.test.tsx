@@ -78,6 +78,7 @@ const summary = (h: string, subject = `Commit ${h.slice(0, 7)}`) =>
     author: "Ada",
     authorEmail: "",
     date: "2026-11-01T10:00:00Z",
+    committerDate: "2026-11-01T10:00:00Z",
     tags: [],
     isMerge: false,
   }) satisfies CommitSummary;

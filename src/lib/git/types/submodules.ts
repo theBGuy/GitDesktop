@@ -67,3 +67,71 @@ export interface SubmoduleChanges {
   files: FileEntry[];
   filesTotal: number;
 }
+
+/** A conflict side's commit, read inside the submodule. */
+export interface SubmoduleConflictCommit {
+  subject: string;
+  /** The committer date, ISO 8601 (`%cI`). */
+  committedAt: string;
+}
+
+/** What accepting a side would do to the submodule's own checkout. */
+export type SubmoduleCheckoutPlan =
+  | "checkOut"
+  | "alreadyThere"
+  | "notInitialized"
+  | "unusable"
+  | "dirty"
+  | "detachedElsewhere"
+  | "notFetched";
+
+export interface SubmoduleConflictSide {
+  sha: string;
+  /** False: a file sits on this side, not a submodule commit. */
+  gitlink: boolean;
+  /** Non-null exactly when the submodule's object store has the commit. */
+  commit: SubmoduleConflictCommit | null;
+  /** As of this read; null when `gitlink` is false. The accept plans again. */
+  plan: SubmoduleCheckoutPlan | null;
+}
+
+/** How the two sides' commits relate; measured only when the submodule has both. */
+export type SubmoduleConflictRelation =
+  | { kind: "unknown" }
+  | { kind: "diverged" }
+  | { kind: "oursContainsTheirs"; ahead: number }
+  | { kind: "theirsContainsOurs"; ahead: number };
+
+/** A conflicted gitlink. Every stage null = the path is no longer conflicted. */
+export interface SubmoduleConflict {
+  base: string | null;
+  ours: SubmoduleConflictSide | null;
+  theirs: SubmoduleConflictSide | null;
+  relation: SubmoduleConflictRelation;
+}
+
+/** The stage shas an accept was picked from; any difference returns `changed`. */
+export interface SubmoduleConflictStages {
+  base: string | null;
+  ours: string | null;
+  theirs: string | null;
+}
+
+export type SubmoduleCheckoutLeft =
+  | "notInitialized"
+  | "unusable"
+  | "dirty"
+  | "detachedElsewhere"
+  | "notFetched"
+  | "failed";
+
+export type SubmoduleAcceptCheckout =
+  | { kind: "checkedOut" }
+  | { kind: "alreadyThere" }
+  | { kind: "left"; why: SubmoduleCheckoutLeft; reason: string | null };
+
+/** `changed`: the stages, or the checkout the pane promised, moved since the
+ *  read. Nothing was staged. */
+export type SubmoduleAcceptOutcome =
+  | { kind: "staged"; sha: string; checkout: SubmoduleAcceptCheckout }
+  | { kind: "changed" };

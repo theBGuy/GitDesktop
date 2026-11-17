@@ -584,11 +584,13 @@ fn is_full_hex_id(id: &str) -> bool {
     matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The `%H%x00%s%x00%an%x00%ae%x00%aI%x00%D%x00%P` log format, one commit per line;
-/// field 5 is the AUTHOR date, so a rewritten range keeps the dates it was written
-/// with. Paired with `parse_commit_log` — the history and compare listings share
-/// both, so those paths can't drift into reporting empty tags or merge flags.
-pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%D%x00%P";
+/// The `%H%x00%s%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%P` log format, one commit per
+/// line; field 5 is the AUTHOR date (a rewritten range keeps the dates it was written
+/// with) and field 6 the committer date. `%P` stays last: `parse_file_log` reads the
+/// status row right after it. Paired with `parse_commit_log` — the history and compare
+/// listings share both, so those paths can't drift into reporting empty tags or merge
+/// flags.
+pub(crate) const LOG_FORMAT: &str = "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%P";
 
 pub(crate) fn parse_commit_log(text: &str) -> Vec<CommitSummary> {
     text.lines()
@@ -604,6 +606,7 @@ fn parse_commit_record<'a>(parts: &mut impl Iterator<Item = &'a str>) -> Option<
         author: parts.next()?.to_string(),
         author_email: parts.next()?.to_string(),
         date: parts.next()?.to_string(),
+        committer_date: parts.next()?.to_string(),
         // %D: "HEAD -> main, tag: v1.0, origin/main" — keep the tags.
         tags: parts
             .next()
@@ -1592,15 +1595,18 @@ mod tests {
     fn log_format_field_order() {
         assert_eq!(
             LOG_FORMAT,
-            "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%D%x00%P"
+            "--format=%H%x00%s%x00%an%x00%ae%x00%aI%x00%cI%x00%D%x00%P"
         );
         let text =
-            "abc\0subject\0Ann\0a@x\x002020-01-02T03:04:05+02:00\0HEAD -> main, tag: v1\0p1 p2\n";
+            "abc\0subject\0Ann\0a@x\x002020-01-02T03:04:05+02:00\x002021-05-06T07:08:09-05:00\0HEAD -> main, tag: v1\0p1 p2\n";
         let rows = parse_commit_log(text);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].date, "2020-01-02T03:04:05+02:00");
+        assert_eq!(rows[0].committer_date, "2021-05-06T07:08:09-05:00");
         assert_eq!(rows[0].tags, vec!["v1".to_string()]);
         assert!(rows[0].is_merge);
+        // A record that stops before the committer date yields no row.
+        assert!(parse_commit_log("abc\0subject\0Ann\0a@x\0d\n").is_empty());
     }
 
     #[test]
@@ -1684,24 +1690,28 @@ mod tests {
         let log = git_log(repo.clone(), 10, 0, None).await.unwrap();
         assert_eq!(log[0].hash, sha);
         assert_eq!(log[0].date, AUTHORED, "git_log");
+        assert_eq!(log[0].committer_date, REWRITTEN, "git_log");
 
         let file_log = git_file_log(repo.clone(), "f.txt".into(), 10, 0)
             .await
             .unwrap();
         assert_eq!(file_log[0].commit.hash, sha);
         assert_eq!(file_log[0].commit.date, AUTHORED, "git_file_log");
+        assert_eq!(file_log[0].commit.committer_date, REWRITTEN, "git_file_log");
 
         let found = commits_by_prefix(&repo, &sha[..8], PREFIX_MATCH_CAP)
             .await
             .unwrap();
         let hit = found.iter().find(|m| m.commit.hash == sha).unwrap();
         assert_eq!(hit.commit.date, AUTHORED, "commits_by_prefix");
+        assert_eq!(hit.commit.committer_date, REWRITTEN, "commits_by_prefix");
 
         let recent = crate::git::commit::git_recent_commits(repo.clone(), 5)
             .await
             .unwrap();
         assert_eq!(recent[0].hash, sha);
         assert_eq!(recent[0].date, AUTHORED, "git_recent_commits");
+        assert_eq!(recent[0].committer_date, REWRITTEN, "git_recent_commits");
 
         let topic = crate::git::branches::current_branch_name(&repo)
             .await
@@ -1714,6 +1724,7 @@ mod tests {
         assert_eq!(ahead.len(), 1);
         assert_eq!(ahead[0].hash, sha);
         assert_eq!(ahead[0].date, AUTHORED, "git_branch_ahead");
+        assert_eq!(ahead[0].committer_date, REWRITTEN, "git_branch_ahead");
 
         let details = git_commit_details(repo.clone(), sha.clone()).await.unwrap();
         assert_eq!(details.date, AUTHORED);
@@ -1860,6 +1871,7 @@ mod tests {
                 author: "a".into(),
                 author_email: "a@x".into(),
                 date: "d".into(),
+                committer_date: "c".into(),
                 tags: vec![],
                 is_merge: false,
             },
@@ -1872,6 +1884,7 @@ mod tests {
             "author",
             "authorEmail",
             "date",
+            "committerDate",
             "tags",
             "isMerge",
             "path",
@@ -1880,6 +1893,7 @@ mod tests {
         }
         assert!(json.get("commit").is_none(), "{json}");
         assert!(json.get("author_email").is_none(), "{json}");
+        assert!(json.get("committer_date").is_none(), "{json}");
     }
 
     #[tokio::test]
@@ -2129,9 +2143,9 @@ mod tests {
     fn parse_file_log_reads_the_measured_z_stream() {
         let (h3, h2, h1) = ("c".repeat(40), "b".repeat(40), "a".repeat(40));
         let text = format!(
-            "{h3}\0rename\0t\0t@t\0d3\0HEAD -> main\0{h2}\0\nR100\0f.txt\0g.txt\0\
-             {h2}\0edit\0t\0t@t\0d2\0\0{h1}\0\nM\0f.txt\0\
-             {h1}\0root\0t\0t@t\0d1\0tag: v1\0\0\nA\0f.txt\0"
+            "{h3}\0rename\0t\0t@t\0d3\0c3\0HEAD -> main\0{h2}\0\nR100\0f.txt\0g.txt\0\
+             {h2}\0edit\0t\0t@t\0d2\0c2\0\0{h1}\0\nM\0f.txt\0\
+             {h1}\0root\0t\0t@t\0d1\0c1\0tag: v1\0\0\nA\0f.txt\0"
         );
         let entries = parse_file_log(&text, "g.txt");
         let got: Vec<(&str, &str)> = entries
@@ -2163,10 +2177,10 @@ mod tests {
             "a".repeat(64),
         );
         let text = format!(
-            "{h4}\0edit\0t\0t@t\0d4\0\0{h3}\0\nM\0g.txt\0\
-             {h3}\0rename\0t\0t@t\0d3\0\0{h2}\0\nR087\0f.txt\0g.txt\0\
-             {h2}\0merge\0t\0t@t\0d2\0\0{h1} {h1}\0\
-             {h1}\0root\0t\0t@t\0d1\0\0\0\nA\0f.txt\0"
+            "{h4}\0edit\0t\0t@t\0d4\0c4\0\0{h3}\0\nM\0g.txt\0\
+             {h3}\0rename\0t\0t@t\0d3\0c3\0\0{h2}\0\nR087\0f.txt\0g.txt\0\
+             {h2}\0merge\0t\0t@t\0d2\0c2\0\0{h1} {h1}\0\
+             {h1}\0root\0t\0t@t\0d1\0c1\0\0\0\nA\0f.txt\0"
         );
         let page2 = file_log_page(&text, "g.txt", 2);
         let got: Vec<(&str, &str, bool)> = page2
@@ -2181,7 +2195,7 @@ mod tests {
         // Statusless first record: the queried path; a `\n` before the next
         // record's hash is tolerated.
         let lead = format!(
-            "{h2}\0merge\0t\0t@t\0d2\0\0{h1} {h1}\0\n{h1}\0root\0t\0t@t\0d1\0\0\0\nA\0f.txt\0"
+            "{h2}\0merge\0t\0t@t\0d2\0c2\0\0{h1} {h1}\0\n{h1}\0root\0t\0t@t\0d1\0c1\0\0\0\nA\0f.txt\0"
         );
         let entries = parse_file_log(&lead, "f.txt");
         assert_eq!(page_hashes(&entries), vec![h2.as_str(), h1.as_str()]);
@@ -2197,9 +2211,9 @@ mod tests {
     fn parse_file_log_reads_every_row_of_a_record() {
         let (h3, h2, h1) = ("c".repeat(40), "b".repeat(40), "a".repeat(40));
         let text = format!(
-            "{h3}\0edit\0t\0t@t\0d3\0\0{h2}\0\nM\0a\0\
-             {h2}\0swap\0t\0t@t\0d2\0\0{h1}\0\nD\0a/x\0R090\0b\0a\0M\0a/y\0\
-             {h1}\0root\0t\0t@t\0d1\0\0\0\nA\0b\0"
+            "{h3}\0edit\0t\0t@t\0d3\0c3\0\0{h2}\0\nM\0a\0\
+             {h2}\0swap\0t\0t@t\0d2\0c2\0\0{h1}\0\nD\0a/x\0R090\0b\0a\0M\0a/y\0\
+             {h1}\0root\0t\0t@t\0d1\0c1\0\0\0\nA\0b\0"
         );
         let entries = parse_file_log(&text, "a");
         let got: Vec<(&str, &str, &str)> = entries
@@ -3066,6 +3080,7 @@ mod tests {
                 author: "t".into(),
                 author_email: "t@t".into(),
                 date: "d".into(),
+                committer_date: "c".into(),
                 tags: vec![],
                 is_merge: false,
             },
@@ -3083,6 +3098,7 @@ mod tests {
             [
                 "author",
                 "authorEmail",
+                "committerDate",
                 "date",
                 "hash",
                 "isMerge",

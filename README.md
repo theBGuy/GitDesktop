@@ -370,7 +370,8 @@ editing stage the change for you to commit, and the clone dialog can bring
 every submodule down with the repo. A changed submodule is tagged in Changes
 with what changed; selecting it lists the commits the submodule moved across,
 its unstaged row lists the uncommitted files inside, and **Open submodule** is
-one click away.
+one click away. A conflicted submodule resolves in the conflict editor by
+picking the commit to keep.
 
 ### Syncing and conflicts
 

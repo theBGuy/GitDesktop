@@ -154,7 +154,12 @@ function pinEffect(source, busy) {
   return body;
 }
 
-const VIEW_ARMS = { acceptRegion: 2, acceptAll: 3, markResolved: 4 };
+const VIEW_ARMS = {
+  acceptRegion: 2,
+  acceptAll: 3,
+  markResolved: 4,
+  acceptSubmoduleSide: 3,
+};
 
 /** The root's input-takeover latch: a click, wheel, touch or pane scroll key
  *  inside the view clears the press marker, and the press sets it. */

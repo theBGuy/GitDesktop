@@ -51,6 +51,7 @@ const commit = (char: string, subject: string): CommitSummary => ({
   author: "Ada",
   authorEmail: "",
   date: "2026-11-01T10:00:00+01:00",
+  committerDate: "2026-11-01T10:00:00+01:00",
   tags: [],
   isMerge: false,
 });

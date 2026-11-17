@@ -1190,7 +1190,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   composer, so any writer of `diffHideWhitespace` or `diffViewMode` checks the
   shared probe first (`whitespaceComposerOpen` / `lineComposerOpen`,
   `src/features/diff/whitespace-mode.ts`); that test's writer roster fails a
-  new unguarded writer.
+  new unguarded writer. The probe also counts an open Thread edit
+  (`data-thread-editing` on the Thread's root) inside a row a flip may drop
+  (`data-whitespace-row`, CommitComments' hidden list), so a new host whose
+  rows a flip replaces marks them the same way.
 - **Queries package boundary** — import the git query layer through the
   `@/lib/git/queries` barrel; `queries/internal.ts` is package-private. Modules
   inside the package may import it but never re-export it, since `export *`

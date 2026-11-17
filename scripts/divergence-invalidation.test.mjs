@@ -46,6 +46,7 @@ const ALLOWLIST = {
   useDiscardUntrackedLines: TREE_ONLY,
   useResolveConflict: TREE_ONLY,
   useCheckoutConflictSide: TREE_ONLY,
+  useAcceptSubmoduleConflictSide: TREE_ONLY,
   useApplySuggestion: TREE_ONLY,
   useAppendRepoAiIgnore: "edits .gitdesktop/aiignore, no ref",
   useRemoveRepoAiIgnore: "edits .gitdesktop/aiignore, no ref",

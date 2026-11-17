@@ -247,12 +247,12 @@ export const STATUS_FACETS: Record<ForgeProvider, readonly string[]> = {
     "scheduled",
   ],
   bitbucket: [
+    // No ERROR: rows label it like FAILED; the backend's Failed read covers both.
     "PARSING",
     "PENDING",
     "PAUSED",
     "HALTED",
     "BUILDING",
-    "ERROR",
     "PASSED",
     "FAILED",
     "STOPPED",

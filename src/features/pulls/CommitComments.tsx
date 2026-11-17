@@ -1,4 +1,12 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
@@ -12,7 +20,19 @@ import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialo
 import { sectionReadNotice } from "@/features/conversations/remote-section-state";
 import { Thread } from "@/features/conversations/Thread";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import {
+  capDiffText,
+  DIFF_LINE_CAP,
+  DIFF_MEGA_LINE_CHARS,
+  longestLineLength,
+} from "@/features/diff/cap-diff";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
+import {
+  SHOW_WHITESPACE_LABEL,
+  WHITESPACE_COMPOSER_HELD,
+  whitespaceComposerOpen,
+} from "@/features/diff/whitespace-mode";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { splitUnifiedDiff } from "@/lib/git/diff-split";
@@ -23,6 +43,7 @@ import {
   forgeReady,
   pendingWriteMatching,
   useCommitComments,
+  useCommitFilePlainDiff,
   useCreateCommitComment,
   useDeleteCommitComment,
   useEditCommitComment,
@@ -31,6 +52,7 @@ import {
 } from "@/lib/git/queries";
 import type {
   CommitCommentOut,
+  FileDiff,
   ForgeProvider,
   PrThreadOut,
   RemoteLens,
@@ -41,9 +63,14 @@ import {
   COMMENT_POST_PENDING_REASON,
   pendingWriteReason,
 } from "@/lib/offline-writes";
+import {
+  useHideWhitespace,
+  useSetHideWhitespace,
+} from "@/lib/settings/hide-whitespace";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
+import { useLatestRef } from "@/lib/use-latest-ref";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
 
@@ -165,6 +192,94 @@ export function positionFromLine(
   return null;
 }
 
+const HUNK_COUNTS = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * The new-side line numbers a unified diff text can draw, counted as
+ * {@link lineFromPosition} counts them. Each hunk is bounded by its header's
+ * counts (an omitted count is 1), so a second file's header inside a joined
+ * section is never read as a line.
+ */
+export function newSideLines(text: string): Set<number> {
+  const out = new Set<number>();
+  let oldLeft = 0;
+  let newLeft = 0;
+  let newLine = 0;
+  for (const l of text.split("\n")) {
+    if (oldLeft <= 0 && newLeft <= 0) {
+      const m = HUNK_COUNTS.exec(l);
+      if (m) {
+        oldLeft = m[1] === undefined ? 1 : Number(m[1]);
+        newLine = Number(m[2]);
+        newLeft = m[3] === undefined ? 1 : Number(m[3]);
+      }
+      continue;
+    }
+    if (l.startsWith("\\")) continue;
+    if (l.startsWith("-")) {
+      oldLeft--;
+      continue;
+    }
+    if (!l.startsWith("+")) oldLeft--;
+    if (newLeft > 0) out.add(newLine);
+    newLine++;
+    newLeft--;
+  }
+  return out;
+}
+
+/** A truncated read's text minus its last line, which the cut may have split. */
+function withoutLastLine(text: string): string {
+  const body = text.endsWith("\n") ? text.slice(0, -1) : text;
+  return body.slice(0, body.lastIndexOf("\n") + 1);
+}
+
+/** The new-side lines the pane draws by default from a whitespace-shown read:
+ *  line-capped, none for a binary or generated-looking file. */
+function linesShownByDefault(plain: FileDiff | undefined): Set<number> {
+  if (
+    plain === undefined ||
+    plain.isBinary ||
+    longestLineLength(plain.text) > DIFF_MEGA_LINE_CHARS
+  )
+    return new Set();
+  const text = plain.isTruncated ? withoutLastLine(plain.text) : plain.text;
+  return newSideLines(capDiffText(text, DIFF_LINE_CAP).text);
+}
+
+/** The note a listed comment on the open file carries. */
+type HiddenReason = "unplaced" | "whitespace";
+const HIDDEN_REASON_COPY: Record<HiddenReason, string> = {
+  unplaced: " · couldn't place in this diff",
+  whitespace: " · on a line hidden by Hide whitespace",
+};
+
+/** How long a Show whitespace press waits for its thread to draw inline,
+ *  counted from the press: a flip that never renders its shown mode (rolled
+ *  back or coalesced) must not leave the landing armed for a later flip. */
+const LANDING_TIMEOUT_MS = 2000;
+
+/** Watches anywhere for what `whitespaceComposerOpen` reads: a line composer
+ *  mounting or unmounting, and the marks on composer wrappers, row wrappers and
+ *  Thread roots changing. The probe is a DOM query, and none of those changes
+ *  this component's React state. */
+function subscribeBodyMutations(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: [
+      "data-diff-line-widget",
+      "data-whitespace-row",
+      "data-thread-editing",
+    ],
+  });
+  return () => observer.disconnect();
+}
+const subscribeNothing = () => () => undefined;
+const notHeld = () => false;
+
 /**
  * The inline diff anchors for a commit's line-anchored comments on ONE file:
  * every comment on `path` that resolves to a new-side line, grouped by that line
@@ -210,10 +325,17 @@ export function useCommitLineAnchors(
     return [...byLine.entries()].map(([line, group]) => ({
       side: "new" as const,
       line,
+      // A programmatic focus target (the Show whitespace landing), never a tab stop.
       render: () => (
-        <div className="space-y-2">
+        <div
+          tabIndex={-1}
+          role="group"
+          aria-label={`Comments on line ${line}`}
+          data-commit-comment-line={line}
+          className="space-y-2 outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
+        >
           {group.map((c) => (
-            <div key={c.id} className="space-y-1">
+            <div key={c.id} data-commit-comment-id={c.id} className="space-y-1">
               <div className="flex items-center gap-1.5">
                 {c.startLine != null && c.startLine !== line && (
                   <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
@@ -280,6 +402,7 @@ export function CommitComments({
   held = false,
   enabled = true,
   diffReady = true,
+  drawnDiff,
 }: {
   repoPath: string;
   sha: string;
@@ -314,6 +437,11 @@ export function CommitComments({
    *  line unresolvable, so the couldn't-place marker is withheld rather than blaming
    *  the comment for a missing patch. */
   diffReady?: boolean;
+  /** The diff the selected file's pane draws, on a host that draws the local
+   *  commit view diff (which follows Hide whitespace): its settled read for
+   *  exactly `sha` + `selectedPath`, or null while that isn't known. Omitted =
+   *  the pane draws `diffSections`' section. */
+  drawnDiff?: FileDiff | null;
 }) {
   const comments = useCommitComments(
     repoPath,
@@ -401,8 +529,40 @@ export function CommitComments({
     }
   });
 
+  // What the selected file's pane draws, or null when that isn't known. A `-w`
+  // read while the setting is already off is a flip in flight: the pane stops
+  // painting it then, so it judges nothing.
+  const hide = useHideWhitespace();
+  const drawn = (() => {
+    if (drawnDiff === undefined) {
+      const section = selectedPath
+        ? diffSections?.get(selectedPath)
+        : undefined;
+      return diffReady && section !== undefined
+        ? { text: section, fromHost: false, whitespaceHidden: false }
+        : null;
+    }
+    if (drawnDiff === null || (drawnDiff.whitespaceHidden === true && !hide))
+      return null;
+    return {
+      text: drawnDiff.text,
+      fromHost: true,
+      // A truncated read can't prove a line missing for whitespace's sake.
+      whitespaceHidden:
+        drawnDiff.whitespaceHidden === true && drawnDiff.isTruncated !== true,
+    };
+  })();
+  const drawnText = drawn?.text;
+  const drawnLines = useMemo(
+    () => (drawnText === undefined ? null : newSideLines(drawnText)),
+    [drawnText],
+  );
+  const whitespaceCanExplain =
+    drawn !== null && drawn.fromHost && drawn.whitespaceHidden;
+
   // Anchored comments NOT visible inline: one renders inline only when it's on the
-  // selected file, resolves to a new-side line, and the file isn't drawn by the
+  // selected file, resolves to a new-side line the pane draws (any resolved line
+  // while that's unknown), and the file isn't drawn by the
   // binary arm (which draws no lines). Everything else surfaces below
   // under its `path:line` label, with the resolved line when we have one. Until
   // `diffReady`, no patch-derived line counts as resolved — its inline anchor doesn't
@@ -424,13 +584,181 @@ export function CommitComments({
       })
       .filter(
         ({ path, line }) =>
-          !(path === selectedPath && line != null && !selectedBinary),
+          !(
+            path === selectedPath &&
+            line != null &&
+            !selectedBinary &&
+            (drawnLines === null || drawnLines.has(line))
+          ),
       );
     return [
       ...retained.filter(({ path }) => path === selectedPath),
       ...retained.filter(({ path }) => path !== selectedPath),
     ];
-  }, [anchored, diffSections, selectedPath, selectedBinary, diffReady]);
+  }, [
+    anchored,
+    diffSections,
+    selectedPath,
+    selectedBinary,
+    diffReady,
+    drawnLines,
+  ]);
+
+  // The whitespace-shown read is positive evidence a listed line is hidden by
+  // the mode; read only while a listed comment could be one.
+  const needsPlain =
+    whitespaceCanExplain &&
+    !selectedBinary &&
+    orderedHidden.some(
+      ({ path, line }) => path === selectedPath && line != null,
+    );
+  const plainDiff = useCommitFilePlainDiff(
+    repoPath,
+    sha,
+    selectedPath ?? null,
+    needsPlain,
+  );
+  const plainData = plainDiff.data;
+  const plainFailed = plainDiff.isError;
+  const shownLines = useMemo(() => linesShownByDefault(plainData), [plainData]);
+  // The note on a listed comment of the open file; null = no note yet.
+  // A resolved line here is one the drawn diff lacks, so it needs no forge patch.
+  const reasonFor = (line: number | null): HiddenReason | null => {
+    if (line == null || selectedBinary) return diffReady ? "unplaced" : null;
+    if (!whitespaceCanExplain) return "unplaced";
+    if (plainData !== undefined)
+      return shownLines.has(line) ? "whitespace" : "unplaced";
+    return plainFailed ? "unplaced" : null;
+  };
+  const rows = orderedHidden.map((r) => ({
+    ...r,
+    reason: r.path === selectedPath ? reasonFor(r.line) : null,
+  }));
+  const showsWhitespaceRow =
+    enabled &&
+    comments.data !== undefined &&
+    rows.some((r) => r.reason === "whitespace");
+  // On a host whose diff follows the setting (the one passing `drawnDiff`),
+  // any selected-file row with a resolved line may leave on a flip, so an edit
+  // open in one holds it. Turning the setting off leaves the `-w` read in hand
+  // judging nothing until the shown read lands; turning it on draws a `-w` read
+  // whose hunks git can align over lines no shown hunk covers, or past a
+  // truncated shown read's cut. Null is that host before its read settles.
+  const flipDropsRows = drawnDiff !== undefined && !selectedBinary;
+
+  // Live while a Show whitespace button is mounted: a composer can open or
+  // close under a button that stays.
+  const composerHeld = useSyncExternalStore(
+    showsWhitespaceRow ? subscribeBodyMutations : subscribeNothing,
+    showsWhitespaceRow ? whitespaceComposerOpen : notHeld,
+  );
+  const listRef = useRef<HTMLDivElement>(null);
+  // A flip by another route (palette, gear sheet, another window) unmounts a
+  // focused button; only that edge is rescued. Blur from a node being removed
+  // keeps the flag, since the rescue needs it.
+  const buttonFocused = useRef(false);
+  useFocusOnControlsSwap(showsWhitespaceRow, listRef, buttonFocused);
+  const labelIdBase = useId();
+  const setHideWhitespace = useSetHideWhitespace();
+  const landing = useRef<{
+    identity: string;
+    path: string | null;
+    commentId: string;
+    deadline: number;
+  } | null>(null);
+  const live = useLatestRef({ commitIdentity, selectedPath });
+
+  function showWhitespace(commentId: string) {
+    if (whitespaceComposerOpen()) {
+      toast.info(WHITESPACE_COMPOSER_HELD);
+      return;
+    }
+    // The pressed button leaves with its row; the list holds focus until the
+    // thread draws inline.
+    listRef.current?.focus({ preventScroll: true });
+    landing.current = {
+      identity: commitIdentity,
+      path: selectedPath ?? null,
+      commentId,
+      deadline: performance.now() + LANDING_TIMEOUT_MS,
+    };
+    setHideWhitespace(false);
+  }
+
+  // Lands focus on the thread once the whitespace-shown diff draws it. Any
+  // commit or file change drops the landing, re-checked when the node appears,
+  // since a mutation callback can run before this effect re-keys.
+  useEffect(() => {
+    const armed = landing.current;
+    if (armed === null) return;
+    if (
+      armed.identity !== commitIdentity ||
+      armed.path !== (selectedPath ?? null)
+    ) {
+      landing.current = null;
+      return;
+    }
+    if (hide) return;
+    const remaining = armed.deadline - performance.now();
+    if (remaining <= 0) {
+      landing.current = null;
+      return;
+    }
+    const root = paneRef.current?.parentElement;
+    const sink = listRef.current;
+    if (!root) {
+      landing.current = null;
+      return;
+    }
+    const tryLand = (): boolean => {
+      const now = live.current;
+      if (
+        landing.current !== armed ||
+        performance.now() > armed.deadline ||
+        now.commitIdentity !== armed.identity ||
+        (now.selectedPath ?? null) !== armed.path
+      ) {
+        if (landing.current === armed) landing.current = null;
+        return true;
+      }
+      const target = Array.from(
+        root.querySelectorAll<HTMLElement>("[data-commit-comment-id]"),
+      ).find(
+        (el) =>
+          el.dataset.commitCommentId === armed.commentId &&
+          el.closest("[inert]") === null,
+      );
+      const group = target?.closest<HTMLElement>("[data-commit-comment-line]");
+      if (!group) return false;
+      landing.current = null;
+      const active = document.activeElement;
+      if (active === sink || active === document.body || active === null)
+        group.focus();
+      return true;
+    };
+    if (tryLand()) return;
+    const observer = new MutationObserver(() => {
+      if (tryLand()) observer.disconnect();
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    const timer = setTimeout(() => {
+      if (landing.current === armed) landing.current = null;
+      observer.disconnect();
+    }, remaining);
+    // A re-key (the mode flipping back, a commit or file change) ends this
+    // landing; a later flip by another route must not land it.
+    return () => {
+      observer.disconnect();
+      clearTimeout(timer);
+      if (landing.current === armed) landing.current = null;
+    };
+  }, [hide, commitIdentity, selectedPath]);
+  useEffect(
+    () => () => {
+      landing.current = null;
+    },
+    [],
+  );
 
   // Parents serve the previous commit's content (or on-remote verdict) as
   // placeholder while arrowing through history, so hold writes until the shown
@@ -527,6 +855,10 @@ export function CommitComments({
       }
     >
       <div
+        ref={listRef}
+        tabIndex={-1}
+        role="group"
+        aria-label="Commit comments"
         className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3"
         aria-busy={held || undefined}
       >
@@ -561,92 +893,134 @@ export function CommitComments({
               />
             ))}
 
-            {orderedHidden.length > 0 && (
+            {rows.length > 0 && (
               <div className="space-y-3">
-                {orderedHidden.map(({ comment: c, path, line, startLine }) => {
-                  // A valid range labels `path:start–end`; a single line (or an
-                  // unresolved line) keeps `path:line` / `path`.
-                  const lineLabel =
-                    line == null
-                      ? ""
-                      : startLine != null && startLine !== line
-                        ? `:${startLine}–${line}`
-                        : `:${line}`;
-                  const label = `${path}${lineLabel}`;
-                  // The open file never offers a jump (it's already shown), and only
-                  // claims the comment is unplaceable once the patch has been walked:
-                  // an unread patch resolves no line either, and would blame the
-                  // comment for a diff that simply hasn't loaded.
-                  const ownFile = path === selectedPath;
-                  const labelNode = (() => {
-                    switch (true) {
-                      case ownFile && diffReady:
-                        // The annotation is the point of this label, so only the
-                        // path truncates — it keeps its own clipped-text tooltip.
-                        return (
-                          <p className="flex items-baseline text-[11px] text-muted-foreground">
-                            <span
-                              className="min-w-0 truncate font-mono"
-                              onMouseEnter={clipTitleFromText}
+                {rows.map(
+                  ({ comment: c, path, line, startLine, reason }, i) => {
+                    // A valid range labels `path:start–end`; a single line (or an
+                    // unresolved line) keeps `path:line` / `path`.
+                    const lineLabel =
+                      line == null
+                        ? ""
+                        : startLine != null && startLine !== line
+                          ? `:${startLine}–${line}`
+                          : `:${line}`;
+                    const label = `${path}${lineLabel}`;
+                    // The open file never offers a jump (it's already shown), and
+                    // carries a note only once its reason is known (`reason`).
+                    const ownFile = path === selectedPath;
+                    const note =
+                      reason === null ? null : HIDDEN_REASON_COPY[reason];
+                    const labelId = `${labelIdBase}-${i}`;
+                    const labelNode = (() => {
+                      switch (true) {
+                        case ownFile && note !== null: {
+                          // The annotation is the point of this label, so only the
+                          // path truncates — it keeps its own clipped-text tooltip.
+                          const annotated = (
+                            <p
+                              id={labelId}
+                              className="flex min-w-0 items-baseline text-[11px] text-muted-foreground"
                             >
-                              {path}
-                            </span>
-                            {lineLabel && (
-                              <span className="shrink-0 font-mono">
-                                {lineLabel}
+                              <span
+                                className="min-w-0 truncate font-mono"
+                                onMouseEnter={clipTitleFromText}
+                              >
+                                {path}
                               </span>
-                            )}
-                            <span className="shrink-0 font-sans">
-                              {" · couldn't place in this diff"}
-                            </span>
-                          </p>
-                        );
-                      case ownFile:
-                        return (
-                          <p className="truncate font-mono text-[11px] text-muted-foreground">
-                            {label}
-                          </p>
-                        );
-                      case onSelectFile !== undefined:
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => onSelectFile(path)}
-                            className="block max-w-full cursor-pointer truncate text-left font-mono text-[11px] text-muted-foreground hover:text-foreground hover:underline"
-                            title={`Open ${label} in the diff`}
-                          >
-                            {label}
-                          </button>
-                        );
-                      default:
-                        return (
-                          <p className="truncate font-mono text-[11px] text-muted-foreground">
-                            {label}
-                          </p>
-                        );
-                    }
-                  })();
-                  return (
-                    <div key={c.id} className="space-y-1">
-                      {labelNode}
-                      <Thread
-                        thread={toThread(c)}
-                        onSaveEdit={
-                          c.viewerDidAuthor && !writesHeld
-                            ? (next) => void saveEdit(c.id, next)
-                            : undefined
+                              {lineLabel && (
+                                <span className="shrink-0 font-mono">
+                                  {lineLabel}
+                                </span>
+                              )}
+                              <span className="shrink-0 font-sans">{note}</span>
+                            </p>
+                          );
+                          if (reason !== "whitespace") return annotated;
+                          return (
+                            <div className="flex items-center gap-2">
+                              {annotated}
+                              <DisabledReasonButton
+                                variant="ghost"
+                                size="xs"
+                                className="shrink-0"
+                                disabled={composerHeld}
+                                reason={
+                                  composerHeld ? WHITESPACE_COMPOSER_HELD : null
+                                }
+                                aria-describedby={labelId}
+                                onFocus={() => {
+                                  buttonFocused.current = true;
+                                }}
+                                onBlur={(e) => {
+                                  if (e.currentTarget.isConnected)
+                                    buttonFocused.current = false;
+                                }}
+                                onClick={() => showWhitespace(c.id)}
+                              >
+                                {SHOW_WHITESPACE_LABEL}
+                              </DisabledReasonButton>
+                            </div>
+                          );
                         }
-                        editHeld={writesHeld}
-                        onDelete={
-                          c.viewerDidAuthor && !writesHeld
-                            ? () => setDeletingId(c.id)
-                            : undefined
+                        case ownFile:
+                          return (
+                            <p className="truncate font-mono text-[11px] text-muted-foreground">
+                              {label}
+                            </p>
+                          );
+                        case onSelectFile !== undefined:
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => onSelectFile(path)}
+                              className="block max-w-full cursor-pointer truncate text-left font-mono text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+                              title={`Open ${label} in the diff`}
+                            >
+                              {label}
+                            </button>
+                          );
+                        default:
+                          return (
+                            <p className="truncate font-mono text-[11px] text-muted-foreground">
+                              {label}
+                            </p>
+                          );
+                      }
+                    })();
+                    return (
+                      // A row the flip may drop marks itself, so its open editor
+                      // holds the flip (`whitespaceComposerOpen`).
+                      <div
+                        key={c.id}
+                        className="space-y-1"
+                        data-whitespace-row={
+                          (flipDropsRows &&
+                            path === selectedPath &&
+                            line != null) ||
+                          undefined
                         }
-                        mentions={mentions}
-                      />
-                    </div>
-                  );
-                })}
+                      >
+                        {labelNode}
+                        <Thread
+                          thread={toThread(c)}
+                          onSaveEdit={
+                            c.viewerDidAuthor && !writesHeld
+                              ? (next) => void saveEdit(c.id, next)
+                              : undefined
+                          }
+                          editHeld={writesHeld}
+                          onDelete={
+                            c.viewerDidAuthor && !writesHeld
+                              ? () => setDeletingId(c.id)
+                              : undefined
+                          }
+                          mentions={mentions}
+                        />
+                      </div>
+                    );
+                  },
+                )}
               </div>
             )}
 

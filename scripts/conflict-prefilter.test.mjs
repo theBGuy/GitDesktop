@@ -23,6 +23,7 @@ import {
   partition,
   prefilterToast,
   SIDES_READ_CHUNK,
+  SUBMODULE_REFUSAL,
   sidesRefusal,
   TOO_LARGE_REFUSAL,
 } from "../src/lib/git/conflict-prefilter.ts";
@@ -368,9 +369,31 @@ const RUST_BINARY =
 const RUST_SENTENCE =
   /AppError::InvalidArgument\(format!\(\s*"[^"{]* \{shown\}([^"{]*)\{why\}([^"{]*)"/;
 const OPS_LINKED = /^pub\(crate\) const DISCARD_LINKED: &str = "([^"\\]*)";$/m;
+const API = "src/lib/git/api/submodules.ts";
+const RUST_SUBMODULE =
+  /^pub\(crate\) const SUBMODULE_REFUSAL: &str =\s*"([^"\\]*)";$/m;
+const API_SUBMODULE =
+  /^export const SUBMODULE_CONFLICT_REFUSAL =\s*"([^"\\]*)";$/m;
 
-/** Throws unless each refusal twin matches the backend's spelling. */
-function pinRefusalStrings(rust, ops) {
+/** Throws unless each refusal twin matches the backend's spelling. `api` is
+ *  api/submodules.ts and `submodule` this module's own copy of that sentence. */
+function pinRefusalStrings(
+  rust,
+  ops,
+  api = read(API),
+  submodule = SUBMODULE_REFUSAL,
+) {
+  const rustSubmodule = RUST_SUBMODULE.exec(rust);
+  assert.ok(rustSubmodule, "conflict.rs must declare SUBMODULE_REFUSAL");
+  const apiSubmodule = API_SUBMODULE.exec(api);
+  assert.ok(apiSubmodule, `${API} must declare SUBMODULE_CONFLICT_REFUSAL`);
+  assert.equal(submodule, rustSubmodule[1]);
+  assert.equal(apiSubmodule[1], rustSubmodule[1]);
+  // Raised by the sides read and the whole-side accept, through the constant.
+  assert.ok(
+    rust.split("InvalidArgument(SUBMODULE_REFUSAL.into())").length - 1 >= 2,
+    "conflict.rs must raise SUBMODULE_REFUSAL through its constant twice",
+  );
   const tooLarge = RUST_TOO_LARGE.exec(rust);
   assert.ok(tooLarge, "conflict.rs must declare RESOLVE_TOO_LARGE_REFUSAL");
   const binary = RUST_BINARY.exec(rust);
@@ -425,6 +448,80 @@ test("the refusal twins match the backend's strings", () => {
       ops,
     ),
   );
+  // Each copy of the submodule sentence, and its raise through the constant.
+  assert.throws(() =>
+    pinRefusalStrings(
+      mutate(rust, "submodule conflict — pick", "submodule conflict - pick"),
+      ops,
+    ),
+  );
+  assert.throws(() =>
+    pinRefusalStrings(
+      rust,
+      ops,
+      mutate(read(API), "pick a commit to resolve it", "pick a commit"),
+    ),
+  );
+  assert.throws(() =>
+    pinRefusalStrings(rust, ops, undefined, "submodule conflict"),
+  );
+  assert.throws(() =>
+    pinRefusalStrings(
+      mutate(
+        rust,
+        "InvalidArgument(SUBMODULE_REFUSAL.into())",
+        'InvalidArgument("submodule conflict — pick a commit to resolve it".into())',
+      ),
+      ops,
+    ),
+  );
+});
+
+// The submodule read's "not a submodule conflict" refusal and its frontend twin,
+// which the submodule query matches to re-read the file.
+const SUBMODULE_RS = "src-tauri/src/git/submodule.rs";
+const WORKINGTREE = "src/lib/git/queries/workingtree.ts";
+const RUST_NOT_SUBMODULE =
+  /^pub\(crate\) const NOT_SUBMODULE_CONFLICT: &str = "([^"\\]*)";$/m;
+const TS_NOT_SUBMODULE = /^const NOT_SUBMODULE_CONFLICT = "([^"\\]*)";$/m;
+
+function pinNotSubmoduleConflict(rust, ts) {
+  const rustConst = RUST_NOT_SUBMODULE.exec(rust);
+  assert.ok(rustConst, "submodule.rs must declare NOT_SUBMODULE_CONFLICT");
+  const tsConst = TS_NOT_SUBMODULE.exec(ts);
+  assert.ok(tsConst, `${WORKINGTREE} must declare NOT_SUBMODULE_CONFLICT`);
+  assert.equal(tsConst[1], rustConst[1]);
+  // Raised through the constant, and spelled nowhere else in the Rust file.
+  assert.match(rust, /InvalidArgument\(NOT_SUBMODULE_CONFLICT\.into\(\)\)/);
+  assert.equal(rust.split(`"${rustConst[1]}"`).length - 1, 1);
+}
+
+test("the not-a-submodule-conflict twin matches the backend's string", () => {
+  const rust = read(SUBMODULE_RS);
+  const ts = read(WORKINGTREE);
+  pinNotSubmoduleConflict(rust, ts);
+  assert.throws(() =>
+    pinNotSubmoduleConflict(
+      mutate(rust, '"not a submodule conflict"', '"not a submodule conflict!"'),
+      ts,
+    ),
+  );
+  assert.throws(() =>
+    pinNotSubmoduleConflict(
+      rust,
+      mutate(ts, '"not a submodule conflict"', '"no submodule conflict"'),
+    ),
+  );
+  assert.throws(() =>
+    pinNotSubmoduleConflict(
+      mutate(
+        rust,
+        "InvalidArgument(NOT_SUBMODULE_CONFLICT.into())",
+        'InvalidArgument("not a submodule conflict".into())',
+      ),
+      ts,
+    ),
+  );
 });
 
 const pathRefusal = (why, linkedLeaf = false) => ({
@@ -436,6 +533,7 @@ test("only refusals no retry can heal classify", () => {
   const rows = [
     [TOO_LARGE_REFUSAL, null, "tooLarge"],
     [BINARY_REFUSAL, null, "binary"],
+    [SUBMODULE_REFUSAL, null, "submodule"],
     ["x", pathRefusal("it's a symbolic link", true), "linkedLeaf"],
     [
       "x",
@@ -446,6 +544,7 @@ test("only refusals no retry can heal classify", () => {
     ["x", pathRefusal('its path starts with "-"'), null],
     // presentError's summary capitalizes; only the lead-stripped message matches.
     ["Binary file — resolve this conflict by hand", null, null],
+    ["Submodule conflict — pick a commit to resolve it", null, null],
     ["file is too large", null, null],
     ["", null, null],
   ];
@@ -521,6 +620,52 @@ test("partition skips a classified refusal and queues the rest in order", () => 
         ],
       },
       "Nothing to resolve with AI: 1 file has a part that isn't UTF-8 text, 2 are binary, 2 are too large for AI, 2 have paths through a link.",
+    ],
+  ];
+  for (const [input, want] of rows)
+    assert.equal(prefilterToast(input), want, JSON.stringify(input));
+});
+
+test("Resolve all skips a submodule conflict with its reason", () => {
+  const split = partition(
+    ["libs/SoloPlay", "ok.ts"],
+    [ok({ refused: "submodule" }), ok(verdict())],
+  );
+  assert.deepEqual(split, {
+    queued: ["ok.ts"],
+    skipped: [{ path: "libs/SoloPlay", reason: "submodule" }],
+  });
+  const rows = [
+    [
+      { total: 2, ...split },
+      "Resolving 1 of 2 files with AI. Skipped SoloPlay (it's a submodule conflict).",
+    ],
+    [
+      { total: 1, queued: [], skipped: [skip("libs/SoloPlay", "submodule")] },
+      "Nothing to resolve with AI: SoloPlay is a submodule conflict.",
+    ],
+    [
+      {
+        total: 3,
+        queued: ["a"],
+        skipped: [skip("b", "submodule"), skip("c", "submodule")],
+      },
+      "Resolving 1 of 3 files with AI. Skipped 2 files: 2 are submodule conflicts.",
+    ],
+    // REASON_ORDER: right after tooLarge, ahead of the link reasons.
+    [
+      {
+        total: 5,
+        queued: [],
+        skipped: [
+          skip("a", "linkedLeaf"),
+          skip("b", "submodule"),
+          skip("c", "submodule"),
+          skip("d", "tooLarge"),
+          skip("e", "binary"),
+        ],
+      },
+      "Nothing to resolve with AI: 1 file is binary, 1 is too large for AI, 2 are submodule conflicts, 1 is a symbolic link.",
     ],
   ];
   for (const [input, want] of rows)

@@ -34,6 +34,13 @@ pub(crate) const NOT_CONFLICTED_REFUSAL: &str = "This file is no longer conflict
 pub(crate) const RESOLVE_TOO_LARGE_REFUSAL: &str = "file is too large for AI conflict resolution";
 pub(crate) const RESOLVE_BINARY_REFUSAL: &str = "binary file — resolve this conflict by hand";
 
+/// Twin of conflict-prefilter.ts's SUBMODULE_REFUSAL and api/submodules.ts's
+/// SUBMODULE_CONFLICT_REFUSAL, pinned equal by scripts/conflict-prefilter.test.mjs.
+pub(crate) const SUBMODULE_REFUSAL: &str = "submodule conflict — pick a commit to resolve it";
+
+/// The index mode of a gitlink (a submodule pointer).
+pub(crate) const GITLINK_MODE: &str = "160000";
+
 /// The clean and marked versions of one conflicted file.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,7 +166,7 @@ fn conflict_path_refusal(path: &str, why: &str) -> AppError {
 
 /// Refuse leading-dash paths with a sentence before the three `invalid path:` refusals;
 /// the shared gate then refuses or returns git's spelling.
-fn conflict_rel_path(path: &str) -> AppResult<String> {
+pub(crate) fn conflict_rel_path(path: &str) -> AppResult<String> {
     if path.starts_with('-') {
         return Err(conflict_path_refusal(path, "its path starts with \"-\""));
     }
@@ -206,7 +213,11 @@ fn leaf_is_directory_link(_base: &str, _rel: &str) -> std::io::Result<bool> {
 /// other leaf link when `include_leaf` (`CONFLICT_LINKED_LEAF`). `base` must be
 /// the root the caller's read or write joins, so the walk covers exactly the
 /// path that gets opened.
-async fn refuse_linked_path(base: &str, path: &str, include_leaf: bool) -> AppResult<()> {
+pub(crate) async fn refuse_linked_path(
+    base: &str,
+    path: &str,
+    include_leaf: bool,
+) -> AppResult<()> {
     let (walk_base, walk_rel) = (base.to_string(), path.to_string());
     let why = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<_> {
         use crate::git::ops::linked_component;
@@ -230,7 +241,7 @@ async fn refuse_linked_path(base: &str, path: &str, include_leaf: bool) -> AppRe
 }
 
 /// Reads a blob from an unmerged index stage (1 = base, 2 = ours, 3 = theirs).
-/// `present` is the caller's `unmerged_stages` listing: a stage missing from it
+/// `present` is the caller's [`unmerged_entries`] stages: a stage missing from it
 /// (a side added or deleted the file) is `None` without a spawn. A listed stage
 /// whose read fails is re-listed once: gone now means an outside resolve landed
 /// after the listing (`None`, agreeing with the index); still listed is an
@@ -265,28 +276,62 @@ async fn stage_blob(
 }
 
 /// The unmerged index stages present for `spec` (1 = base, 2 = ours, 3 = theirs).
-/// Empty when the path isn't conflicted at all. The presence truth for both the
-/// take-a-side removal gate and `git_conflict_sides`' blob reads.
+/// Empty when the path isn't conflicted at all. [`stage_blob`]'s re-list after a
+/// failed read: whether that stage is still listed.
 ///
 /// One `ls-files -u` spawn answers for every stage and returns only mode/sha/stage
 /// metadata; `git show :N:` costs the same spawn but materializes the whole blob
 /// (up to the 256 KB cap, binary bytes included) just to test for presence.
 async fn unmerged_stages(repo: &str, spec: &str) -> AppResult<Vec<u8>> {
-    let out = run_git(Some(repo), &["ls-files", "-u", "--", spec], DEFAULT_TIMEOUT).await?;
+    Ok(unmerged_entries(repo, spec)
+        .await?
+        .into_iter()
+        .map(|entry| entry.stage)
+        .collect())
+}
+
+/// One unmerged index record.
+pub(crate) struct UnmergedEntry {
+    pub path: String,
+    pub mode: String,
+    pub sha: String,
+    pub stage: u8,
+}
+
+/// One `ls-files -u -z -- <spec>` spawn; every listed record, path verbatim. A
+/// literal pathspec naming a folder also lists the entries under it, so a caller
+/// deciding about one path filters on `entry.path` itself.
+pub(crate) async fn unmerged_entries(repo: &str, spec: &str) -> AppResult<Vec<UnmergedEntry>> {
+    let out = run_git(
+        Some(repo),
+        &["ls-files", "-u", "-z", "--", spec],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
     Ok(out
         .stdout_lossy()
-        .lines()
-        // `<mode> <sha> <stage>\t<path>` — read the stage from the metadata half
-        // only, so a path containing whitespace can't shift the field index.
-        .filter_map(|line| {
-            line.split('\t')
-                .next()?
-                .split_whitespace()
-                .nth(2)?
-                .parse()
-                .ok()
+        .split('\0')
+        // `<mode> <sha> <stage>\t<path>`: the metadata half is split alone, so a
+        // path containing whitespace can't shift a field.
+        .filter_map(|record| {
+            let (meta, path) = record.split_once('\t')?;
+            let mut meta = meta.split(' ');
+            let (mode, sha, stage) = (meta.next()?, meta.next()?, meta.next()?);
+            Some(UnmergedEntry {
+                path: path.to_string(),
+                mode: mode.to_string(),
+                sha: sha.to_string(),
+                stage: stage.parse().ok()?,
+            })
         })
         .collect())
+}
+
+/// Whether `path` itself (never an entry under it) has a gitlink stage.
+fn has_gitlink_stage(entries: &[UnmergedEntry], path: &str) -> bool {
+    entries
+        .iter()
+        .any(|entry| entry.path == path && entry.mode == GITLINK_MODE)
 }
 
 /// Whether the path matches any of the user's AI-ignore `exclude` patterns —
@@ -336,9 +381,37 @@ pub async fn git_conflict_sides(
 
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
 
-    let present = unmerged_stages(&repo_path, &crate::git::pathspec::literal(&path)).await?;
+    let spec = crate::git::pathspec::literal(&path);
+    let entries = unmerged_entries(&repo_path, &spec).await?;
     #[cfg(test)]
     let _ = CONFLICT_SIDES_LISTED_HOOK.try_with(|hook| hook());
+    // Before the working read: a submodule's folder is no text to merge, and the
+    // pane reads such a conflict through `git_submodule_conflict` instead.
+    if has_gitlink_stage(&entries, &path) {
+        return Err(AppError::InvalidArgument(SUBMODULE_REFUSAL.into()));
+    }
+    // A submodule conflict just resolved reads as resolved, not as an `Io` error
+    // on its folder, so the pane's re-read after an accept lands "no longer
+    // conflicted".
+    if entries.is_empty()
+        && crate::git::submodule::index_gitlink(&repo_path, &path, &spec)
+            .await?
+            .is_some()
+    {
+        return Ok(ConflictSides {
+            working: String::new(),
+            base: None,
+            ours: None,
+            theirs: None,
+            ai_ignored,
+            working_exists: false,
+            working_undecodable: false,
+            undecodable: false,
+            working_hash: None,
+            working_matches_survivor: None,
+        });
+    }
+    let present: Vec<u8> = entries.iter().map(|entry| entry.stage).collect();
 
     // NotFound means the file is gone (a side or the user deleted it): it reads
     // as "" with `working_exists` false. Every other read failure refuses the
@@ -530,7 +603,13 @@ pub(crate) async fn git_checkout_conflict_side_core(
     // Gated on the path being unmerged RIGHT NOW: on an already-resolved path
     // `git rm` exits 0 and deletes the file, turning a stale second click into
     // data loss.
-    let stages = unmerged_stages(&repo_path, &spec).await?;
+    let entries = unmerged_entries(&repo_path, &spec).await?;
+    // `checkout --theirs` leaves a submodule's folder alone (exit 0) and `add` would
+    // then stage its CURRENT checkout as the chosen side.
+    if has_gitlink_stage(&entries, &path) {
+        return Err(AppError::InvalidArgument(SUBMODULE_REFUSAL.into()));
+    }
+    let stages: Vec<u8> = entries.iter().map(|entry| entry.stage).collect();
     if !stages.is_empty() && !stages.contains(&stage) {
         run_git(Some(&repo_path), &["rm", "--", &spec], DEFAULT_TIMEOUT).await?;
         return Ok(());
@@ -1032,6 +1111,30 @@ mod tests {
             !staged.contains("src/app/s/page.tsx"),
             "the glob-sibling was staged: {staged}"
         );
+    }
+
+    #[tokio::test]
+    async fn unmerged_entries_carry_each_record_and_stages_project_them() {
+        let (_dir, repo) = conflicted_repo("entries", "dir name/file.txt", &[]).await;
+        let spec = crate::git::pathspec::literal("dir name/file.txt");
+        let entries = unmerged_entries(&repo, &spec).await.unwrap();
+        let stages: Vec<u8> = entries.iter().map(|e| e.stage).collect();
+        assert_eq!(stages, [1, 2, 3]);
+        for entry in &entries {
+            assert_eq!(entry.path, "dir name/file.txt");
+            assert_eq!(entry.mode, "100644");
+            assert_eq!(entry.sha.len(), 40, "{}", entry.sha);
+        }
+        // Each side's own blob, so no two stages share a sha.
+        assert_ne!(entries[1].sha, entries[2].sha);
+        assert_eq!(unmerged_stages(&repo, &spec).await.unwrap(), [1, 2, 3]);
+        // A folder's pathspec lists the records under it; the gitlink verdict reads
+        // only the exact path.
+        let folder = unmerged_entries(&repo, &crate::git::pathspec::literal("dir name"))
+            .await
+            .unwrap();
+        assert_eq!(folder.len(), 3);
+        assert!(!has_gitlink_stage(&folder, "dir name"));
     }
 
     async fn git_ok(repo: &str, args: &[&str]) {

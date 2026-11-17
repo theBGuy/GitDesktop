@@ -1603,16 +1603,19 @@ export function LocalPrView({
 
                 // Commits from `ahead` — carried as bare markers; adjacent runs
                 // coalesce into a single "pushed N commits" row after sorting.
-                for (const c of ahead) {
+                // Ordered and shown by committer date (a rewrite restamps it), and
+                // pushed oldest-first from a copy: commits replayed in one rewrite
+                // share a committer second, and the stable sort keeps their order.
+                for (const c of [...ahead].reverse()) {
                   entries.push({
-                    date: c.date,
+                    date: c.committerDate,
                     sortKey: 1,
                     commit: {
                       id: c.hash,
                       subject: c.subject,
                       shortSha: c.hash.slice(0, 7),
                       author: c.author,
-                      date: c.date,
+                      date: c.committerDate,
                     },
                   });
                 }
