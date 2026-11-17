@@ -2143,11 +2143,13 @@ pub(crate) async fn git_checkout_branch_core(
 }
 
 /// Check out a remote-only branch as a new local tracking branch of a SPECIFIC
-/// remote. We pass `--track refs/remotes/<remote>/<name>` explicitly rather than plain
-/// `switch <name>` because when the same branch name exists on 2+ remotes git's
-/// DWIM refuses ("matched multiple remote tracking branches"), and even in the
+/// remote. We pass `--track -c <name> refs/remotes/<remote>/<name>` explicitly rather
+/// than plain `switch <name>` because when the same branch name exists on 2+ remotes
+/// git's DWIM refuses ("matched multiple remote tracking branches"), and even in the
 /// single-remote case the switcher row promised the user this exact remote — so
-/// we honor it by construction instead of trusting git's guess.
+/// we honor it by construction instead of trusting git's guess. The local name is
+/// explicit because `--track` alone strips only the start's first component after
+/// `refs/remotes/`, so a remote named `team/fork` would mint `fork/<name>`.
 #[tauri::command]
 pub async fn git_checkout_remote_branch(
     state: State<'_, AppState>,
@@ -2177,7 +2179,7 @@ pub(crate) async fn git_checkout_remote_branch_core(
     let out = run_minting_write(
         state,
         repo,
-        &["switch", "--track", start_s],
+        &["switch", "--track", "-c", local, start_s],
         local,
         None,
         |out, held| async move {
@@ -3891,8 +3893,13 @@ pub(crate) enum BranchSpelling {
     StoredAs(String),
     /// An exact ref at `tip`, and `twin`, another stored name equal to it ignoring case.
     Twin { tip: String, twin: String },
-    /// No exact ref, and either git reads no ref by this spelling or no single stored
-    /// name equals it ignoring case.
+    /// No exact ref, git reads a ref by this spelling, and two or more stored names equal
+    /// it ignoring case; `first` and `second` are the first two in refname order. git
+    /// reads the one loose twin, and no tip is offered: a write would move it by a name
+    /// it doesn't store.
+    FoldedTwins { first: String, second: String },
+    /// No exact ref, and either git reads no ref by this spelling or no stored name
+    /// equals it ignoring case.
     Missing,
 }
 
@@ -3925,12 +3932,14 @@ pub(crate) async fn branch_spelling(
         (Some(tip), None, _) => BranchSpelling::Own { tip },
         (Some(tip), Some(twin), _) => BranchSpelling::Twin { tip, twin },
         (None, Some(stored), None) => BranchSpelling::StoredAs(stored),
-        (None, _, _) => BranchSpelling::Missing,
+        (None, Some(first), Some(second)) => BranchSpelling::FoldedTwins { first, second },
+        (None, None, _) => BranchSpelling::Missing,
     })
 }
 
 /// `name` as git stores it: the stored name when git reads `name` as that one case
-/// variant's ref ([`BranchSpelling::StoredAs`]), else `name` itself.
+/// variant's ref ([`BranchSpelling::StoredAs`]), else `name` itself, folded twins
+/// included: no single stored name answers there, and [`bare_move_tip`] refuses them.
 pub(crate) async fn stored_branch_spelling(repo_path: &str, name: &str) -> AppResult<String> {
     Ok(match branch_spelling(repo_path, name, false).await? {
         BranchSpelling::StoredAs(stored) => stored,
@@ -4035,8 +4044,8 @@ fn case_twin_of<'a>(stored: &'a [String], name: &str, replaces: Option<&str>) ->
 /// ([`refs_can_alias`]), since git refuses only a twin of a LOOSE ref. Takes no lock: each
 /// caller supplies its hold, and only a call inside the config-write mutex held through
 /// the write makes check-then-create atomic. A failed listing is the `Err`; the disk is
-/// probed only when a stored name folds to `name`. `name` must pass
-/// [`validate_branch_name`] first, so a route that mints through here can't compare a rev
+/// probed only when a stored name folds to `name`. It first refuses any `name` that
+/// [`validate_branch_name`] refuses, so a route that mints through here can't compare a rev
 /// expression's literal spelling while git creates the branch it expands to.
 pub(crate) async fn refuse_new_name_twin(
     repo_path: &str,
@@ -4058,7 +4067,7 @@ pub(crate) async fn refuse_new_name_twin(
 /// against: the exact tip of a branch with its own ref, a twin's included where refs
 /// can't alias; `None` without an exact ref. A twin where refs can alias is the
 /// [`twin_refusal`]: git writes a loose file that the twin's spelling also reads, under
-/// any checkout on the twin. A failed read is the `Err`.
+/// any checkout on the twin. Folded twins are refused too. A failed read is the `Err`.
 pub(crate) async fn bare_move_tip(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
     let spelling = branch_spelling(repo_path, branch, true).await?;
     let can_alias =
@@ -4077,6 +4086,9 @@ fn bare_move_gate(
         BranchSpelling::Own { tip } => Ok(Some(tip)),
         BranchSpelling::Twin { twin, .. } if can_alias => Err(twin_refusal(branch, &twin)),
         BranchSpelling::Twin { tip, .. } => Ok(Some(tip)),
+        // Whatever the disk probe says: git read `branch` through a name it doesn't store,
+        // which only aliasing does. The pair named is the variant's first two stored names.
+        BranchSpelling::FoldedTwins { first, second } => Err(twin_refusal(&first, &second)),
         BranchSpelling::StoredAs(_) | BranchSpelling::Missing => Ok(None),
     }
 }
@@ -10377,7 +10389,13 @@ pub(crate) mod tests {
         let head = run(&repo_s, &["symbolic-ref", "HEAD"]).await;
         let cases: [(&'static [&'static str], &str); 3] = [
             (
-                &["switch", "--track", "origin/shape-remote"],
+                &[
+                    "switch",
+                    "--track",
+                    "-c",
+                    "shape-remote",
+                    "origin/shape-remote",
+                ],
                 "shape-remote",
             ),
             (
@@ -11902,6 +11920,14 @@ pub(crate) mod tests {
                 bare_move_gate("Feat", BranchSpelling::Missing, can_alias).unwrap(),
                 None
             );
+            let folded = BranchSpelling::FoldedTwins {
+                first: "Feat".into(),
+                second: "feat".into(),
+            };
+            assert!(matches!(
+                bare_move_gate("FEAT", folded, can_alias),
+                Err(AppError::Command(m)) if m == TWIN_REFUSAL
+            ));
         }
         assert!(matches!(
             bare_move_gate("Feat", twin(), true),
@@ -12654,7 +12680,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// The classifier reads the packed-twin fixture as twins, and the disk probe says refs
+    /// The classifier reads the packed-twin fixture as twins (and a third spelling, which
+    /// git reads through the loose twin, as folded twins), and the disk probe says refs
     /// can alias here whatever `core.ignorecase` says, so the bare-move gate refuses both
     /// twins with the key set false too (the move itself is not run). Returns early on a
     /// case-sensitive filesystem or a non-files ref backend.
@@ -12675,10 +12702,22 @@ pub(crate) mod tests {
             super::branch_spelling(&repo, "Feat", false).await.unwrap(),
             super::BranchSpelling::Own { tip: seed.clone() }
         );
-        assert_eq!(
-            super::branch_spelling(&repo, "FEAT", true).await.unwrap(),
-            super::BranchSpelling::Missing
-        );
+        for find_twin in [false, true] {
+            assert_eq!(
+                super::branch_spelling(&repo, "FEAT", find_twin)
+                    .await
+                    .unwrap(),
+                super::BranchSpelling::FoldedTwins {
+                    first: "Feat".to_string(),
+                    second: "feat".to_string()
+                },
+                "find_twin {find_twin}"
+            );
+        }
+        assert!(matches!(
+            super::bare_move_tip(&repo, "FEAT").await,
+            Err(AppError::Command(m)) if m == TWIN_REFUSAL
+        ));
         assert_eq!(
             super::branch_spelling(&repo, "UP", false).await.unwrap(),
             super::BranchSpelling::StoredAs("up".to_string())
@@ -16133,5 +16172,65 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(full_ref_tip(&repo, "refs/heads/feat").await, feat);
+    }
+
+    /// Checking out `Feat` from a remote named `team/fork` creates `Feat` tracking
+    /// `team/fork/Feat`, never the `fork/Feat` git derives from the start ref alone; beside
+    /// a packed-only `feat` where refs alias, it is refused with the twin sentence and
+    /// creates nothing.
+    #[tokio::test]
+    async fn remote_checkout_under_a_slash_named_remote_creates_the_named_branch() {
+        for twin in [false, true] {
+            let (_g, repo, refused) = if twin {
+                case_twin_fixture("slash-remote-twin", TwinStorage::PackedOnly).await
+            } else {
+                let (g, base) = temp_base("slash-remote");
+                let repo = base.join("repo").to_string_lossy().into_owned();
+                std::fs::create_dir_all(&repo).unwrap();
+                init_repo(&repo, "r.txt").await;
+                (g, repo, false)
+            };
+            run(&repo, &["remote", "add", "team/fork", &repo]).await;
+            run(
+                &repo,
+                &["update-ref", "refs/remotes/team/fork/Feat", "HEAD"],
+            )
+            .await;
+            let before = case_twin_snapshot(&repo).await;
+            let result = git_checkout_remote_branch_core(
+                &AppState::default(),
+                repo.clone(),
+                "team/fork".into(),
+                "Feat".into(),
+            )
+            .await;
+            let listed = case_twin_listed(&repo).await;
+            let row = format!("twin={twin}");
+            assert!(
+                !listed.iter().any(|b| b == "fork/Feat"),
+                "{row}: {listed:?}"
+            );
+            if refused {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(case_twin_snapshot(&repo).await, before, "{row}");
+            } else {
+                result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(
+                    symbolic_head(&repo).await.as_deref(),
+                    Some("refs/heads/Feat"),
+                    "{row}"
+                );
+                assert_eq!(
+                    upstream_of(&repo, "Feat").await.as_deref(),
+                    Some("team/fork/Feat"),
+                    "{row}"
+                );
+            }
+        }
     }
 }

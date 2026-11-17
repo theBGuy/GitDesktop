@@ -475,8 +475,9 @@ pub(crate) async fn git_switch_autostash_core(
         // Refuse only guess-creation so existing session-named branches stay reachable.
         crate::git::branches::refuse_session_branch_name(&name)?;
     }
-    // The full ref, as `git_checkout_remote_branch_core` passes it: a tag or local
-    // branch named `<remote>/<name>` makes the bare form ambiguous, and git refuses it.
+    // The full ref with `name` given, as `git_checkout_remote_branch_core` passes them: a
+    // tag or local branch named `<remote>/<name>` makes the bare form ambiguous, and git
+    // refuses it; `--track` alone would derive `fork/<name>` from a remote `team/fork`.
     let tracking = remote.map(|remote| format!("refs/remotes/{remote}/{name}"));
 
     let domain = state.working_tree_lock(&repo_path).await;
@@ -500,7 +501,7 @@ pub(crate) async fn git_switch_autostash_core(
             with_config_write_lock(repo, |held| async move {
                 // Inside the mutex, so a twin another creator mints during the wait is seen.
                 crate::git::branches::refuse_new_name_twin(repo, name, None).await?;
-                let args = ["switch", "--track", tracking.as_str()];
+                let args = ["switch", "--track", "-c", name, tracking.as_str()];
                 let out = run_git_raw(Some(repo), &args, DEFAULT_TIMEOUT).await?;
                 let by = TrackedBy::ExplicitTrack;
                 let finished =
@@ -1843,6 +1844,54 @@ mod tests {
             }
             if dirty && (aliases || reapply) {
                 assert_eq!(read(dir.path(), "b.txt"), "mine\n", "{row}");
+            }
+        }
+    }
+
+    /// The tracking switch onto `Feat` of a remote named `team/fork` creates `Feat`
+    /// tracking `team/fork/Feat`, never the `fork/Feat` git derives from the start ref
+    /// alone; beside a packed-only `feat` where refs alias, it is refused with the twin
+    /// sentence before anything is created.
+    #[tokio::test]
+    async fn switch_autostash_under_a_slash_named_remote_creates_the_named_branch() {
+        for twin in [false, true] {
+            let row = format!("twin={twin}");
+            let (_dir, repo, aliases) = case_twin_fixture("switch-slash-remote", twin).await;
+            git(&repo, &["remote", "add", "team/fork", &repo]).await;
+            git(
+                &repo,
+                &["update-ref", "refs/remotes/team/fork/Feat", "HEAD"],
+            )
+            .await;
+            let result = git_switch_autostash_core(
+                &AppState::default(),
+                repo.clone(),
+                "Feat".into(),
+                Some("team/fork".into()),
+                true,
+            )
+            .await;
+            let listed = case_twin_listed(&repo).await;
+            assert!(
+                !listed.iter().any(|b| b == "fork/Feat"),
+                "{row}: {listed:?}"
+            );
+            if twin && aliases {
+                assert!(
+                    matches!(&result, Err(AppError::Command(m)) if m == NEW_NAME_TWIN_REFUSAL),
+                    "{row}: {result:?}"
+                );
+                assert!(!listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
+                assert_eq!(head_branch(&repo).await, "main", "{row}");
+            } else {
+                let outcome = result.unwrap_or_else(|e| panic!("{row}: {e:?}"));
+                assert!(
+                    matches!(outcome, AutostashOutcome::NothingStashed),
+                    "{row}: {outcome:?}"
+                );
+                assert_eq!(head_branch(&repo).await, "Feat", "{row}");
+                let tracking = git(&repo, &["rev-parse", "--abbrev-ref", "Feat@{upstream}"]).await;
+                assert_eq!(tracking.trim(), "team/fork/Feat", "{row}");
             }
         }
     }
