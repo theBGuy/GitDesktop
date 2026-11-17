@@ -99,7 +99,9 @@ export function usePickRemote(
  *  remote strictly longer than the record wins: the record came from an older
  *  list that didn't have it yet. While the list is unknown, an unrecorded pick
  *  takes the backend's split from its row in `listed` (the first "/" only when
- *  no row matches), as {@link remoteCompareRows} does. */
+ *  no row matches), as {@link remoteCompareRows} does. A backend split longer
+ *  than the record also wins: it can only name a configured remote, since the
+ *  backend falls back to the first "/". */
 export function resolvePick(
   value: string | null,
   remotes: readonly string[] | undefined,
@@ -107,16 +109,18 @@ export function resolvePick(
   listed?: readonly RemoteBranch[],
 ): { remote: string; name: string; display: string } | null {
   const parsed = parseRemoteCompareValue(value, remotes);
-  const split =
+  const listedSplit =
     parsed !== null && remotes === undefined
-      ? (listedPick(parsed.display, listed) ?? parsed)
-      : parsed;
+      ? listedPick(parsed.display, listed)
+      : null;
+  const split = listedSplit ?? parsed;
   if (
     split === null ||
     recorded === null ||
     !split.display.startsWith(`${recorded}/`) ||
     split.display.length === recorded.length + 1 ||
-    (split.remote.startsWith(`${recorded}/`) && remotes?.includes(split.remote))
+    (split.remote.startsWith(`${recorded}/`) &&
+      (remotes?.includes(split.remote) || listedSplit !== null))
   )
     return split;
   return {

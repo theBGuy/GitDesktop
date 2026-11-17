@@ -659,6 +659,29 @@ describe("Compare remote names holding a slash", () => {
     expect(result.current).toBeNull();
   });
 
+  it("weighs an unknown-list backend split against the record by length", () => {
+    const value = "refs/remotes/team/fork/main";
+    const slashSplit = {
+      remote: "team/fork",
+      name: "main",
+      display: "team/fork/main",
+    };
+    // A longer backend split outranks a shorter, stale record.
+    expect(
+      resolvePick(value, undefined, "team", [remote("team/fork", "main")]),
+    ).toEqual(slashSplit);
+    // A shorter backend split leaves a longer record in charge.
+    expect(
+      resolvePick(value, undefined, "team/fork", [remote("team", "fork/main")]),
+    ).toEqual(slashSplit);
+    // With no backend row the record still wins over the first-slash parse.
+    expect(resolvePick(value, undefined, "team", [])).toEqual({
+      remote: "team",
+      name: "fork/main",
+      display: "team/fork/main",
+    });
+  });
+
   it("fetches the backend's remote for a pick made while the remotes read fails", async () => {
     vi.mocked(gitRemotes).mockRejectedValue(new Error("remotes boom"));
     vi.mocked(gitRemoteBranches).mockResolvedValue([

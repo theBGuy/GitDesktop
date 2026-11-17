@@ -275,15 +275,8 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       resolvedRemote !== null &&
       resolvedRemote !== recordedRemote
     )
-      recordPickRemote(repoPath, compareBranch, remotes.data, remoteRead.data);
-  }, [
-    repoPath,
-    compareBranch,
-    recordedRemote,
-    resolvedRemote,
-    remotes.data,
-    remoteRead.data,
-  ]);
+      recordPickRemote(repoPath, compareBranch, remotes.data);
+  }, [repoPath, compareBranch, recordedRemote, resolvedRemote, remotes.data]);
   // Rows wait for the remotes list, so each row splits against the same list
   // the stored pick is parsed with. A failed read with no data keeps the
   // backend's split (the longest configured remote), held through its retry
