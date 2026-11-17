@@ -2359,10 +2359,11 @@ them as links you can click through. Rename a branch in GitDesktop (in the app o
 its MCP server) and open local PRs whose head or base used the old name follow it.
 The create dialog, **New local pull request**, opens its **Merge** and **Base** pickers the
 way the hosted **Create pull request** dialog does for a pull request within your own
-repository, with the same lines for an unchosen side, and counts the commits the merge would bring in against your local base branch. When
-the head branch is already in the base it says **Nothing to merge** and holds **Create local
-PR**; a count that can't be read says so and leaves **Create local PR** available. Merged
-and closed local PRs move to the **Merged** and **Closed** tabs.
+repository, with the same lines for an unchosen side, and counts the commits the merge
+would bring in against your local base branch. When the head branch is already in the
+base it says **Nothing to merge** and holds **Create local PR**; a count that can't be
+read says so and leaves **Create local PR** available. Merged and closed local PRs move to
+the **Merged** and **Closed** tabs.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA

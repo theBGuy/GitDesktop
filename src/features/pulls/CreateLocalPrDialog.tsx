@@ -455,17 +455,30 @@ export function CreateLocalPrDialog({
       () => surface.noteRunSettled(false),
     );
   }
+  const isSubmitting = createHold.running;
+  // Generate's hold. A running create says why with Generate's own sentence;
+  // an unchosen side with Create's. The same branch, nothing to merge and a
+  // count still running or failed (no commits read) stay plain disables.
+  const generateHeld =
+    unchosen !== null || sameBranch || ahead.length === 0 || isSubmitting;
+  const generateReason = (() => {
+    switch (true) {
+      case isSubmitting:
+        return CREATE_PENDING_GENERATE_REASON;
+      case unchosen !== null:
+        return UNCHOSEN_COPY[unchosen];
+      default:
+        return undefined;
+    }
+  })();
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
   // the chord falls through instead of being swallowed for nothing. A running
-  // create holds it like the button: the draft it would revise has been sent.
-  const isSubmitting = createHold.running;
+  // create holds it like the button: the draft it would revise has been sent
+  // (`generateHeld` covers it; the explicit conjunct is what the
+  // generate-held-while-submitting guard reads).
   const generateChord = useGenerateChord({
-    enabled:
-      !generating &&
-      unchosen === null &&
-      !(sameBranch || ahead.length === 0) &&
-      !isSubmitting,
+    enabled: !generating && !generateHeld && !isSubmitting,
     run: aiEnabled ? runGenerate : undefined,
   });
   const generateHint = generateChord.hint;
@@ -683,36 +696,17 @@ export function CreateLocalPrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      // A running create says why with Generate's own sentence;
-                      // an unchosen side with Create's. The same branch, nothing
-                      // to merge and a count still running or failed (no
-                      // commits read) stay plain disables.
                       <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={
-                          unchosen !== null ||
-                          sameBranch ||
-                          ahead.length === 0 ||
-                          isSubmitting
-                        }
-                        reason={(() => {
-                          switch (true) {
-                            case isSubmitting:
-                              return CREATE_PENDING_GENERATE_REASON;
-                            case unchosen !== null:
-                              return UNCHOSEN_COPY[unchosen];
-                            default:
-                              return undefined;
-                          }
-                        })()}
+                        disabled={generateHeld}
+                        reason={generateReason}
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          unchosen === null &&
-                          !(sameBranch || ahead.length === 0 || isSubmitting)
+                          !generateHeld
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }
