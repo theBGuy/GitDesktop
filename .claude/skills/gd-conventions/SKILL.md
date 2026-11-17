@@ -890,6 +890,14 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   (`src/features/diff/use-hidden-trigger-focus.ts`): change-only by design so
   a mount never steals focus; its sibling `useHiddenTriggerFocus` owns the
   container-query-hidden-trigger close arm. Never a hand-rolled focus effect.
+- A dialog whose controls can go natively `disabled` while focused (a picker
+  or Generate held by a pending read) calls `useLandStrandedFocus(landId)`
+  (`src/features/pulls/use-land-stranded-focus.ts`): the element `landId`
+  names (Title in the create dialogs) takes focus before the browser blurs the
+  dead control to `<body>`. It acts only inside the open popup (`data-open`)
+  holding `landId`, and leaves a reasoned `aria-disabled` hold focused, since
+  that doesn't match `:disabled`. Pinned by
+  `src/test/land-stranded-focus.test.tsx`.
 
 ## Seam idioms (the spec template's "Idioms at this seam" field reads this list)
 
@@ -1081,19 +1089,21 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `@/lib/error-summary`, read by `createTimedOutAtPush` in
   `@/lib/notifications/pr-create-failed`, tied to `NETWORK_TIMEOUT` in
   git/runner.rs). The compound review wraps live in GitLab's `review_submit` and
-  the pure fns `verdict_step_error` and `change_request_comment_error`
-  (forge/gitlab.rs), and in Bitbucket's pure fns `change_request_comment_error`,
-  `review_summary_error`, `review_comment_error` and `verdict_step_error`
-  (forge/bitbucket.rs); `review_submit`, `request_changes_mr` and
-  `request_changes_pr` call them. The wraps that set the step's error in
-  parentheses (two on Bitbucket: a review comment and the verdict; four on
-  GitLab: the staged drafts, both publish wraps and the verdict) split it
-  through `paren_parts` (forge/mod.rs), so a multi-line error's first line
-  closes the parenthesis and the rest follows it. Each pure fn's timeout arm
-  holds only its error's cause in parentheses, from
-  `crate::forge::timed_out_cause` (nothing when it carried none); the other
-  wraps put the error after a colon. Every wrap keeps its partial-state line
-  ahead of the network rewrite through `PARTIAL_STATE_WRAPS`
+  the pure fns `publish_step_error`, `verdict_step_error` and
+  `change_request_comment_error` (forge/gitlab.rs), and in Bitbucket's pure fns
+  `change_request_comment_error`, `review_summary_error`, `review_comment_error`
+  and `verdict_step_error` (forge/bitbucket.rs); `review_submit`,
+  `request_changes_mr` and `request_changes_pr` call them. The wraps that set
+  the step's error in parentheses (two on Bitbucket: a review comment and the
+  verdict; three on GitLab: the staged drafts, the failed publish and the
+  verdict) split it through `paren_parts` (forge/mod.rs), so a multi-line
+  error's first line closes the parenthesis and the rest follows it. Each pure
+  fn's timeout arm holds only its error's cause in parentheses, from
+  `crate::forge::timed_out_cause` (nothing when it carried none;
+  `publish_step_error`, whose bare `run_glab` times out as a plain `Timeout`,
+  first builds `write_timed_out`'s error from its seconds and reads the cause
+  back); the other wraps put the error after a colon. Every wrap keeps its
+  partial-state line ahead of the network rewrite through `PARTIAL_STATE_WRAPS`
   (`@/lib/error-summary`): a new wrap literal in any of those fns joins that
   table. `reviewMayHavePosted` (same module) answers true for a `mayHaveLanded`
   error or for a table row not marked `nothingPosted`; a marked row answers
@@ -1788,7 +1798,10 @@ platform (`defaultBindingOf(a) === null`, palette-only) gets **no token at
 all** (it renders the literal word "palette" — the `PALETTE_ONLY` set in
 `src/features/help/resolve-body.ts`); mention it as plain prose. AI-only content
 gated with `ai: true` + `{{ai}}…{{/ai}}`. Verify every claim against code; sweep
-stale "coming soon" mentions when a feature ships.
+stale "coming soon" mentions when a feature ships. A guide line never STARTS
+with three backticks (or tildes) unless it opens a real fence that a later
+line closes: an unclosed fence turns the rest of its section into one raw code
+block (`src/test/help-guide-markdown.test.tsx` fails on one).
 
 ## Prevention standing rules (owner-adopted 2026-08-15)
 

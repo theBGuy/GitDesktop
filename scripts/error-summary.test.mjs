@@ -1593,6 +1593,8 @@ const LANDED_BB =
   "the 3 review comment(s) were already posted successfully — do NOT resubmit them; ";
 const LANDED_GL =
   "the 3 review note(s) were already posted successfully — do NOT resubmit them; ";
+// publish_step_error's sentence for a timed-out publish (forge/gitlab.rs).
+const GL_PUBLISH_TIMED_OUT = `GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted. Check the merge request on GitLab before retrying. (${GL_CAUSE})`;
 const POSTED_ROWS = [
   ["bitbucket", "Changes were requested, but posting the comment failed: Bitbucket API error (500): boom"],
   ["bitbucket", "Posted 2 of 5 review comments before the failure; the review was not submitted. Check the pull request on Bitbucket before retrying. (Bitbucket API error (500): boom)"],
@@ -1604,7 +1606,7 @@ const POSTED_ROWS = [
   ["glab", "Changes were requested, but posting the comment failed: GitLab API error (500): boom"],
   ["glab", "Saved 2 of 5 review comments as drafts before the failure; the review was not submitted. Check the merge request on GitLab before retrying. (GitLab API error (500): boom)"],
   ["glab", "The review's draft notes couldn't be published, so the review was not submitted. Check the merge request on GitLab before retrying. (GitLab API error (500): boom)"],
-  ["glab", `GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted. Check the merge request on GitLab before retrying. (${GL_CAUSE})`],
+  ["glab", GL_PUBLISH_TIMED_OUT],
   ["glab", `The review was posted, but the approve step failed: ${LANDED_GL}only re-run the approve action on GitLab. (GitLab API error (500): boom)`],
   ["glab", `The review was posted, but GitLab didn't answer in time on the approve step, so it may or may not have gone through: ${LANDED_GL}check the merge request on GitLab before running the approve action again. (${GL_CAUSE})`],
   ["glab", "Changes were requested, but GitLab didn't answer in time on the comment, so it may or may not have been posted. Check the merge request on GitLab before posting it again."],
@@ -1629,6 +1631,19 @@ test("a review failure may have posted unless it failed before the first post", 
   assert.equal(reviewMayHavePosted(appError("gh", POSTED_ROWS[0][1])), false);
   assert.equal(reviewMayHavePosted(new Error(POSTED_ROWS[0][1])), false);
   assert.equal(reviewMayHavePosted(undefined), false);
+});
+
+test("GitLab's timed-out publish keeps its own sentence, the CLI line in parentheses", () => {
+  const p = presentError(appError("glab", GL_PUBLISH_TIMED_OUT));
+  assert.equal(p.summary, GL_PUBLISH_TIMED_OUT);
+  assert.ok(!p.summary.includes("Couldn't reach"), p.summary);
+  assert.equal(reviewMayHavePosted(appError("glab", GL_PUBLISH_TIMED_OUT)), true);
+  // With no CLI line to read back the sentence ends at "retrying.", which only a
+  // lead ending `(?: \(|$)` still matches.
+  const bare = GL_PUBLISH_TIMED_OUT.slice(0, -` (${GL_CAUSE})`.length);
+  assert.ok(bare.endsWith("before retrying."), bare);
+  assert.equal(presentError(appError("glab", bare)).summary, bare);
+  assert.equal(reviewMayHavePosted(appError("glab", bare)), true);
 });
 
 test("a failed summary step may have posted when its own error is an unread reply", () => {

@@ -1124,9 +1124,9 @@ function parenFill(literal, e) {
 /** Each forge's compound review wraps: the fns holding them, and per wrap its
  *  fn, a marker naming its literal, how the literal embeds the error, and the
  *  create noun a reply hedge names (null for the verdict). A `{cause}` row is a
- *  timed-out step's own sentence, which embeds only its error's cause; it and
- *  any row marked `true` (GitLab's publish timeout) say the step may have gone
- *  through, so a network failure's summary is that sentence alone. */
+ *  timed-out step's own sentence, which embeds only its error's cause; it says
+ *  the step may have gone through, so a network failure's summary is that
+ *  sentence alone. */
 const WRAP_SOURCES = {
   bitbucket: {
     fns: [
@@ -1154,14 +1154,15 @@ const WRAP_SOURCES = {
       "review_submit",
       "verdict_step_error",
       "change_request_comment_error",
+      "publish_step_error",
     ],
     rows: [
       [3, "Changes were requested, but posting the comment failed", "{e}", "comment"],
       [1, "The review summary couldn't be saved as a draft", "{e}", "review summary"],
       [1, "review comments as drafts before the failure", "({first}){rest}", "review comment"],
-      [1, "draft notes couldn't be published", "({first}){rest}", "review"],
+      [4, "draft notes couldn't be published", "({first}){rest}", "review"],
       [2, "The review was posted, but the {action} step failed", "({first}){rest}", null],
-      [1, "while publishing the review's draft notes", "({first}){rest}", "review", true],
+      [4, "while publishing the review's draft notes", "{cause}", "review"],
       [2, "GitLab didn't answer in time on the {action} step", "{cause}", null],
       [3, "GitLab didn't answer in time on the comment", "{cause}", "comment"],
     ],
@@ -1207,7 +1208,8 @@ function forgeWraps(src, kind, sources = WRAP_SOURCES[kind]) {
   const posted = postedLead(bodies[fns.indexOf("verdict_step_error")] ?? "");
   if (posted === null) return "no posted lead in verdict_step_error";
   const wraps = [];
-  for (const [fn, marker, token, noun, timedOut = token === "{cause}"] of rows) {
+  for (const [fn, marker, token, noun] of rows) {
+    const timedOut = token === "{cause}";
     const literal = wrapLiteral(bodies[fn], marker);
     if (literal === null) return `no single literal holding ${marker}`;
     if (literal.split(token).length !== 2) return `${marker}: want one ${token}`;
@@ -1517,6 +1519,10 @@ test("a compound review failure over a network cause keeps what already posted",
   const timedOut = (wrap) =>
     presentError({ kind: "glab", message: wrap(GL_TIMED_OUT) }).summary;
   assert.equal(
+    timedOut(glAll[6][0]),
+    "GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted. Check the merge request on GitLab before retrying. (GitLab CLI timed out after 120s.)",
+  );
+  assert.equal(
     timedOut(glAll[7][0]),
     "The review was posted, but GitLab didn't answer in time on the approve step, so it may or may not have gone through: the 3 review note(s) were already posted successfully — do NOT resubmit them; check the merge request on GitLab before running the approve action again. (GitLab CLI timed out after 120s.)",
   );
@@ -1553,6 +1559,7 @@ test("a compound review failure over a network cause keeps what already posted",
     ["bitbucket", bb, "verdict timeout reworded", ["may or may not have gone through: {landed}check the pull request", "may have gone through: {landed}check the pull request"]],
     ["glab", gl, "summary draft reworded", ["couldn't be saved as a draft, so the review was not", "couldn't be saved as a draft, so nothing was"]],
     ["glab", gl, "publish reworded", ["draft notes couldn't be published, so the review was not", "draft notes couldn't be published, so the review wasn't"]],
+    ["glab", gl, "publish timeout reworded", ["before retrying.{cause}", "before trying again.{cause}"]],
     ["glab", gl, "verdict timeout reworded", ["on the {action} step, so \\", "on the {action} step, and so \\"]],
     ["glab", gl, "comment timeout reworded", ["may or may not have been posted. Check the merge", "may have been posted. Check the merge"]],
     ["glab", gl, "posted lead reworded", ['"The review was posted, but "', '"The review went up, but "']],

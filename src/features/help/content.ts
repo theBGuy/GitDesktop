@@ -2071,7 +2071,7 @@ once closed. Resolved threads tuck behind a per-file **✓ n resolved** expander
 open ones stay in view. On **GitHub**, an expanded thread also shows the **anchored code
 excerpt** — the diff hunk the comment was left on — above the first reply; GitLab and
 Bitbucket don't expose that hunk, so their cards show the line chip alone. Reviewer
-\`\`\`suggestion blocks render as a **Suggested change** diff — the anchored lines against
+\`suggestion\` blocks render as a **Suggested change** diff — the anchored lines against
 the proposed replacement (a labeled block of just the replacement where the originals
 can't be recovered). That block gets an **Apply** button on **GitHub, GitLab, and
 Bitbucket** PRs alike — GitDesktop's
@@ -2149,6 +2149,25 @@ Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare
 a **draft** if you like, and set its **labels** and **assignees** right in the dialog
 (GitHub and GitLab; Bitbucket PRs have neither, so it shows only its reviewers picker
 instead); the label picker says when labels couldn't be loaded.
+
+The dialog's pickers read **Merge** into **Base**. It opens with your current branch as Merge
+and the repository's default branch as Base. On your own repository's default branch, or on a
+detached HEAD, Merge opens unchosen with focus on it. Within your own repository, Base opens
+unchosen when the default branch isn't known. A pull request from your fork to its parent
+keeps your current branch, and its Base opens on one of the parent's branches. The Compare
+tab hands in its own pair. While a side is unchosen, the line under the pickers reads
+**Choose the branch to merge.** or **Choose the branch to merge into.** and **Create**
+waits{{ai}}, as does **Generate**, which gives the same reason{{/ai}}. For a pull request
+within your own repository the commit count is measured against \`origin\`'s copy of the
+base branch when \`origin\` has one, so a local base that's behind doesn't skew it{{ai}},
+and a generated description reads the same comparison{{/ai}}. Until the count answers, the
+line reads **Counting commits to merge…**, and if it can't be read it says **Couldn't
+count the commits to merge.**; **Create** waits either way. When the pull request targets
+your fork's parent, upstream's state takes the line's place first: **Fetching upstream
+branches…** while the parent's branches load, **Couldn't fetch upstream:** with the reason
+when the fetch fails, and **Couldn't read upstream branches:** with the reason and a
+**Retry** when the branches can't be read.
+
 On GitHub and GitLab the description takes pasted or attached images the same way the
 comment box does; if GitHub creates the pull request but an image doesn't upload, a notice
 says which image, or how many, didn't make it.
@@ -2338,9 +2357,12 @@ On a GitHub or GitLab repo the description and comment box complete **@** mentio
 **#** references (**!** merge requests too on GitLab) like the hosted ones, and render
 them as links you can click through. Rename a branch in GitDesktop (in the app or through
 its MCP server) and open local PRs whose head or base used the old name follow it.
-The create dialog counts the commits the merge would bring in. When the head branch is
-already in the base it says **Nothing to merge** and holds **Create**. Merged and closed
-local PRs move to the **Merged** and **Closed** tabs.
+The create dialog, **New local pull request**, opens its **Merge** and **Base** pickers the
+way the hosted **Create pull request** dialog does for a pull request within your own
+repository, with the same lines for an unchosen side, and counts the commits the merge would bring in against your local base branch. When
+the head branch is already in the base it says **Nothing to merge** and holds **Create local
+PR**; a count that can't be read says so and leaves **Create local PR** available. Merged
+and closed local PRs move to the **Merged** and **Closed** tabs.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA

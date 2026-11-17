@@ -1,7 +1,13 @@
 import { SparkleIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffectEvent,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -60,6 +66,7 @@ import {
   unchosenSide,
 } from "./pr-branch-defaults";
 import { ReviewerNotesField } from "./ReviewerNotesField";
+import { useLandStrandedFocus } from "./use-land-stranded-focus";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
@@ -501,6 +508,10 @@ export function CreateLocalPrDialog({
   // and the footer's copy stays out, so it is announced once.
   const unchosenAnnounced =
     unchosen !== null && blockedReason === UNCHOSEN_COPY[unchosen];
+  // A focused control that goes natively disabled (Link issue or Create on
+  // the generate chord) hands focus to Title, never a dead stop.
+  const titleId = useId();
+  useLandStrandedFocus(titleId);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -647,6 +658,7 @@ export function CreateLocalPrDialog({
             >
               {(field) => (
                 <field.TextField
+                  id={titleId}
                   label="Title"
                   placeholder="Summarize the change"
                 />
@@ -671,8 +683,10 @@ export function CreateLocalPrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      // Nothing to merge stays a plain disable; a running create
-                      // says why.
+                      // A running create says why with Generate's own sentence;
+                      // an unchosen side with Create's. The same branch, nothing
+                      // to merge and a count still running or failed (no
+                      // commits read) stay plain disables.
                       <DisabledReasonButton
                         type="button"
                         variant="outline"
@@ -683,11 +697,16 @@ export function CreateLocalPrDialog({
                           ahead.length === 0 ||
                           isSubmitting
                         }
-                        reason={
-                          isSubmitting
-                            ? CREATE_PENDING_GENERATE_REASON
-                            : undefined
-                        }
+                        reason={(() => {
+                          switch (true) {
+                            case isSubmitting:
+                              return CREATE_PENDING_GENERATE_REASON;
+                            case unchosen !== null:
+                              return UNCHOSEN_COPY[unchosen];
+                            default:
+                              return undefined;
+                          }
+                        })()}
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.

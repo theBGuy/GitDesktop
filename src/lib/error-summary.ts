@@ -787,7 +787,7 @@ function branchPushedFailure(
 }
 
 /** The compound review wraps that put a step's error after a partial-state line
- *  (GitLab's `review_submit`, `verdict_step_error` and
+ *  (GitLab's `review_submit`, `publish_step_error`, `verdict_step_error` and
  *  `change_request_comment_error`; Bitbucket's `change_request_comment_error`,
  *  `review_summary_error`, `review_comment_error` and `verdict_step_error`;
  *  pinned to those `format!` literals by scripts/attached-failure-leads.test.mjs).
@@ -860,7 +860,7 @@ const PARTIAL_STATE_WRAPS: readonly PartialStateWrap[] = [
   },
   {
     kind: "glab",
-    lead: /^GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted\. Check the merge request on GitLab before retrying\. \(/,
+    lead: /^GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted\. Check the merge request on GitLab before retrying\.(?: \(|$)/,
     timedOut: true,
   },
   {

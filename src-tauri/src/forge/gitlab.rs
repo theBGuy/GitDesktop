@@ -5263,19 +5263,20 @@ mod attach_tests {
     /// Each parenthesised review wrap embeds `paren_parts`' split of the step's error, bound
     /// between the error's binding and the wrap, so a multi-line cause closes the
     /// parenthesis on line one. The roster is every `({first}){rest}` wrap in `review_submit`
-    /// and in `verdict_step_error`, which takes the verdict step's error as its parameter.
+    /// and in `publish_step_error` and `verdict_step_error`, which take their step's error as
+    /// their parameter.
     #[test]
     fn review_wraps_split_the_error_they_embed() {
         use crate::github::repo_meta::tests::wiring_body;
         const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
-        let rosters: [(&str, &[&str]); 2] = [
+        let rosters: [(&str, &[&str]); 3] = [
             (
                 "review_submit",
-                &[
-                    "review comments as drafts before the failure",
-                    "The review's draft notes couldn't be published",
-                    "while publishing the review's draft notes",
-                ],
+                &["review comments as drafts before the failure"],
+            ),
+            (
+                "publish_step_error",
+                &["The review's draft notes couldn't be published"],
             ),
             (
                 "verdict_step_error",
@@ -5322,8 +5323,9 @@ mod attach_tests {
     }
 
     /// Each caller hands the step's bound error to its wrap fn itself (read whitespace-free):
-    /// the comment's binding straight into its call, and the verdict's past no `return`, `?`
-    /// or `let e =` / `let mut e =` rebind into its own.
+    /// the comment's binding straight into its call, the publish run's error straight into
+    /// `publish_step_error`, and the verdict's past no `return`, `?` or `let e =` /
+    /// `let mut e =` rebind into its own.
     #[test]
     fn review_callers_hand_the_error_to_their_wrap() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -5351,6 +5353,27 @@ mod attach_tests {
         };
         let submit = flat("review_submit");
         assert!(reaches(&submit), "{submit}");
+        let publish =
+            "&publish_endpoint],GLAB_NETWORK_TIMEOUT,).await.map_err(publish_step_error)?;";
+        assert!(submit.contains(publish), "{submit}");
+        // Controls: the publish error wrapped, replaced, or mapped before the hand-off.
+        for (from, to) in [
+            (
+                "map_err(publish_step_error)",
+                "map_err(|e|publish_step_error(AppError::Glab(e.to_string())))",
+            ),
+            (
+                "map_err(publish_step_error)",
+                "map_err(|_|publish_step_error(AppError::Timeout(150)))",
+            ),
+            (
+                ".map_err(publish_step_error)",
+                ".map_err(|e|AppError::Glab(e.to_string())).map_err(publish_step_error)",
+            ),
+        ] {
+            let mutant = submit.replacen(from, to, 1);
+            assert!(mutant != submit && !mutant.contains(publish), "{mutant}");
+        }
         // Controls: the bound error wrapped before the hand-off, and an early return.
         let wrapped = "AppError::Glab(e.to_string())";
         let mutant = changes.replacen(
@@ -5385,6 +5408,75 @@ mod attach_tests {
                 "a rebind of the verdict error must flip: {rebind}"
             );
         }
+    }
+
+    /// An unanswered publish gets its may-or-may-not sentence with the CLI's timeout in its
+    /// parentheses; any other failure keeps the not-submitted sentence over `paren_parts`.
+    /// The tail is checked typed (fails when the shared CLI line changes), derived from
+    /// `write_timed_out` + `timed_out_cause` (still passes then, so the change reads as that
+    /// line's), and by source shape (fails when the fn stops reading the shared line).
+    #[test]
+    fn publish_step_error_names_the_cli_timeout() {
+        let publish = |e: AppError| {
+            let out = publish_step_error(e);
+            assert!(matches!(out, AppError::Glab(_)), "{out:?}");
+            out.to_string()
+        };
+        let timed_out = publish(AppError::Timeout(150));
+        let shared = crate::forge::write_timed_out("GitLab", LandedWrite::Changed, 150);
+        let cause = crate::forge::timed_out_cause(&shared).expect("a CLI line");
+        assert_eq!(
+            timed_out,
+            format!(
+                "GitLab didn't answer in time while publishing the review's draft notes, so \
+                 the review may or may not have been submitted. Check the merge request on \
+                 GitLab before retrying. ({cause})"
+            )
+        );
+        assert_eq!(
+            timed_out,
+            "GitLab didn't answer in time while publishing the review's draft notes, so the \
+             review may or may not have been submitted. Check the merge request on GitLab \
+             before retrying. (GitLab CLI timed out after 150s.)"
+        );
+        assert!(
+            !timed_out.contains("git operation timed out"),
+            "{timed_out}"
+        );
+        assert!(!timed_out.contains('\n'), "{timed_out}");
+        assert_eq!(
+            publish(AppError::Glab("GitLab API error (500): boom".into())),
+            "The review's draft notes couldn't be published, so the review \
+             was not submitted. Check the merge request on GitLab before retrying. (GitLab API \
+             error (500): boom)"
+        );
+        assert_eq!(
+            publish(AppError::Glab(
+                "GitLab API error (500): boom\nsecond line".into()
+            )),
+            "The review's draft notes couldn't be published, so the review \
+             was not submitted. Check the merge request on GitLab before retrying. (GitLab API \
+             error (500): boom)\nsecond line"
+        );
+        // Source shape: the cause comes from the shared line, never a local CLI literal.
+        use crate::github::repo_meta::tests::wiring_body;
+        let shared_cause = |body: &str| {
+            body.contains(
+                "crate::forge::write_timed_out(\"GitLab\", LandedWrite::Changed, seconds)",
+            ) && body.contains("crate::forge::timed_out_cause(&timed_out)")
+                && !body.contains("CLI timed out")
+        };
+        let body = wiring_body(include_str!("gitlab.rs"), "publish_step_error");
+        assert!(shared_cause(&body), "{body}");
+        let local = body.replacen(
+            "let cause = crate::forge::timed_out_cause(&timed_out)",
+            "let cause = Some(format!(\"GitLab CLI timed out after {seconds}s.\"))",
+            1,
+        );
+        assert!(
+            local != body && !shared_cause(&local),
+            "a local CLI literal must flip"
+        );
     }
 
     /// A timed-out verdict step or change-request comment gets its own may-or-may-not
@@ -9179,22 +9271,7 @@ pub async fn review_submit(
             GLAB_NETWORK_TIMEOUT,
         )
         .await
-        .map_err(|e| {
-            let (first, rest) = paren_parts(&e);
-            // An unanswered publish may have submitted the review, so it never says it
-            // was not: a blind retry would publish every note twice.
-            if matches!(e, AppError::Timeout(_)) {
-                return AppError::Glab(format!(
-                    "GitLab didn't answer in time while publishing the review's draft notes, so \
-                     the review may or may not have been submitted. Check the merge request on \
-                     GitLab before retrying. ({first}){rest}"
-                ));
-            }
-            AppError::Glab(format!(
-                "The review's draft notes couldn't be published, so the review was not \
-                 submitted. Check the merge request on GitLab before retrying. ({first}){rest}"
-            ))
-        })?;
+        .map_err(publish_step_error)?;
     }
 
     // Apply the verdict. Approve / request-changes reuse the existing fns; comment
@@ -9229,6 +9306,30 @@ pub async fn review_submit(
         total,
         verdict_applied: verdict != "comment",
     })
+}
+
+/// `review_submit`'s error for a failed publish of the staged draft notes. An unanswered
+/// publish may have submitted the review, so it never says it was not (a blind retry would
+/// publish every note twice). The publish run is a bare `run_glab`, so its timeout is a plain
+/// `Timeout`; the parentheses hold `write_timed_out`'s CLI line read back through
+/// `timed_out_cause`, so that line has one spelling. The result stays kind `Glab`.
+fn publish_step_error(e: AppError) -> AppError {
+    if let AppError::Timeout(seconds) = e {
+        let timed_out = crate::forge::write_timed_out("GitLab", LandedWrite::Changed, seconds);
+        let cause = crate::forge::timed_out_cause(&timed_out)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Glab(format!(
+            "GitLab didn't answer in time while publishing the review's draft notes, so the \
+             review may or may not have been submitted. Check the merge request on GitLab \
+             before retrying.{cause}"
+        ));
+    }
+    let (first, rest) = paren_parts(&e);
+    AppError::Glab(format!(
+        "The review's draft notes couldn't be published, so the review was not \
+         submitted. Check the merge request on GitLab before retrying. ({first}){rest}"
+    ))
 }
 
 /// `review_submit`'s error for a verdict step that failed after the review posted, with

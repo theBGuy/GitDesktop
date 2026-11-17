@@ -172,6 +172,7 @@ import {
 } from "./pr-label-selection";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
+import { useLandStrandedFocus } from "./use-land-stranded-focus";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
@@ -1343,10 +1344,30 @@ export function CreatePrDialog({
   const readFailedAnnounced =
     statusArm === "parentReadFailed" &&
     offlineSubmit.blockedReason === parentReadLine;
-  // The failed line leaving takes its Retry along. A removed Retry that held
-  // focus leaves it on body at this commit (Base UI moves it to the popup in a
-  // later microtask), so only then, still open on the parent with no create
-  // running, does Title take it; focus the user moved elsewhere stays there.
+  // Generate's hold. The shared states reuse Create's sentences in Create's
+  // relative order; a running create comes first, with Generate's own
+  // sentence. Nothing to merge and an empty side the parent is about to fill
+  // stay plain disables the status line explains.
+  const generateHeld =
+    unchosen !== null || sideEmpty || nothingToMerge || shownSubmitting;
+  const generateReason = (() => {
+    switch (true) {
+      case shownSubmitting:
+        return CREATE_PENDING_GENERATE_REASON;
+      case baseUnreadable:
+        return parentReadLine;
+      case unchosen !== null:
+        return UNCHOSEN_COPY[unchosen];
+      default:
+        return undefined;
+    }
+  })();
+  // Any focused control that goes natively disabled hands focus to Title (the
+  // hook). The one body landing is a removed Retry: it leaves focus on body at
+  // this commit (Base UI moves it to the popup in a later microtask), so only
+  // on the failed line leaving, still on the parent with no create running,
+  // does Title take it; focus the user moved elsewhere stays there.
+  useLandStrandedFocus(titleId);
   const landReadRecovered = useEffectEvent(() => {
     if (!open || !targetIsParent || form.state.isSubmitting) return;
     const active = document.activeElement;
@@ -1973,32 +1994,17 @@ export function CreatePrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      // An unchosen or empty side and nothing to merge stay
-                      // plain disables whose reason is the status line; a
-                      // running create says why.
                       <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={
-                          unchosen !== null ||
-                          sideEmpty ||
-                          nothingToMerge ||
-                          shownSubmitting
-                        }
-                        reason={
-                          shownSubmitting
-                            ? CREATE_PENDING_GENERATE_REASON
-                            : undefined
-                        }
+                        disabled={generateHeld}
+                        reason={generateReason}
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          unchosen === null &&
-                          !sideEmpty &&
-                          !nothingToMerge &&
-                          !shownSubmitting
+                          !generateHeld
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }

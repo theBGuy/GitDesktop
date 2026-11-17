@@ -738,7 +738,10 @@ describe("CreatePrDialog preset under a lens-gate flip", () => {
       dialog.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
     );
     expect(
-      await screen.findByText("Choose the branch to merge into."),
+      // The status line; Generate's reason node repeats the sentence.
+      await screen.findByText("Choose the branch to merge into.", {
+        selector: "p",
+      }),
     ).toBeInTheDocument();
     expect(baseField()).toHaveTextContent("Choose a branch");
     // No guess: nothing counts against a local branch nobody picked.

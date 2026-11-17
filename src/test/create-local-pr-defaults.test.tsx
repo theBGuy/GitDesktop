@@ -16,6 +16,7 @@ import {
   UNCHOSEN_COPY,
 } from "@/features/pulls/pr-branch-defaults";
 import {
+  forgeStatus,
   gitBranchAhead,
   gitBranchDiff,
   gitBranches,
@@ -23,7 +24,12 @@ import {
   gitStatus,
 } from "@/lib/git/api";
 import { repoKeys } from "@/lib/git/queries";
-import type { Branch, CommitSummary, RepoStatus } from "@/lib/git/types";
+import type {
+  Branch,
+  CommitSummary,
+  ForgeStatus,
+  RepoStatus,
+} from "@/lib/git/types";
 import { createLocalPr } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -43,7 +49,14 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitBranches: vi.fn(),
   // Shell reads the dialog makes that these cases never need answered.
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
+  forgeIssueList: vi.fn(() => new Promise(() => undefined)),
   readRepoInstructions: vi.fn(async () => null),
+}));
+// The linked-issue cluster keys its state on the repo identity.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+  repoIdentity: async (p: string) => p,
+  repoIdentityStrict: async (p: string) => p,
 }));
 vi.mock("@/lib/ai/ignore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/ignore")>()),
@@ -100,6 +113,9 @@ function setRepo(opts: {
 
 const settle = () => act(() => new Promise((r) => setTimeout(r, 50)));
 
+/** The host's close handler; the host keeps the dialog open regardless. */
+const onOpenChange = vi.fn();
+
 /** Mounts closed, lets the shell reads answer, then opens. */
 async function openDialog(props: { defaultHead?: string } = {}) {
   const client = new QueryClient({
@@ -111,7 +127,7 @@ async function openDialog(props: { defaultHead?: string } = {}) {
         repoPath={REPO}
         defaultHead={props.defaultHead}
         open={open}
-        onOpenChange={() => undefined}
+        onOpenChange={onOpenChange}
       />
     </QueryClientProvider>
   );
@@ -134,9 +150,13 @@ const createButton = () =>
   screen.getByRole("button", { name: /Create local PR/ });
 const generateButton = () => screen.getByRole("button", { name: "Generate" });
 
-/** The one element saying `sentence` is Create's only description. */
+/** The one element saying `sentence` is Create's only description. Generate's
+ *  own reason node, which repeats Create's sentence by design, is left out. */
 function expectAnnouncedOnce(sentence: string) {
-  const shown = screen.getAllByText(sentence);
+  const generate = screen.queryByRole("button", { name: "Generate" });
+  const shown = screen
+    .getAllByText(sentence)
+    .filter((node) => !generate?.parentElement?.contains(node));
   expect(shown).toHaveLength(1);
   const ids = (createButton().getAttribute("aria-describedby") ?? "")
     .split(/\s+/)
@@ -163,23 +183,58 @@ async function tryEverySubmit(user: ReturnType<typeof userEvent.setup>) {
   await settle();
 }
 
-/** Generate and its chord hold on an unchosen side, even with an answer
- *  cached for the half-empty pair's count. */
+/** Generate, its keys and its chord hold, even with an answer cached for the
+ *  held pair's count. With a `reason` the held button stays focusable and
+ *  says it; without one it is a native disable. */
 async function expectGenerateHeld(
   user: ReturnType<typeof userEvent.setup>,
-  client: QueryClient,
-  cachedKey: readonly unknown[],
+  held: {
+    reason: string | null;
+    cached?: { client: QueryClient; key: readonly unknown[] };
+  },
 ) {
-  act(() => {
-    client.setQueryData(cachedKey, [COMMIT]);
-  });
-  await settle();
-  expect(generateButton()).toBeDisabled();
+  const { reason, cached } = held;
+  if (cached) {
+    act(() => {
+      cached.client.setQueryData(cached.key, [COMMIT]);
+    });
+    await settle();
+  }
+  const creates = vi.mocked(createLocalPr).mock.calls.length;
+  const button = generateButton();
+  if (reason === null) {
+    expect(button).toBeDisabled();
+    expect(button).not.toHaveAttribute("aria-describedby");
+  } else {
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveAccessibleDescription(reason);
+    expect(button.parentElement).toHaveAttribute("title", reason);
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    await user.keyboard("{Enter}{ }");
+    // The chord is consumed on the dialog, never run and never let through.
+    let consumed = false;
+    const seen = (e: KeyboardEvent) => {
+      consumed = e.defaultPrevented;
+    };
+    window.addEventListener("keydown", seen);
+    await user.keyboard("{Control>}g{/Control}");
+    window.removeEventListener("keydown", seen);
+    expect(consumed).toBe(true);
+    expect(document.activeElement).toBe(button);
+    // Every key but activation still reaches the dialog from the held button.
+    const closes = onOpenChange.mock.calls.length;
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledTimes(closes + 1);
+    expect(onOpenChange.mock.lastCall?.[0]).toBe(false);
+  }
   titleInput().focus();
   await user.keyboard("{Control>}g{/Control}");
   fireEvent.click(generateButton());
   await settle();
   expect(gitBranchDiff).not.toHaveBeenCalled();
+  expect(createLocalPr).toHaveBeenCalledTimes(creates);
 }
 
 beforeEach(() => {
@@ -188,6 +243,7 @@ beforeEach(() => {
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
   vi.mocked(gitBranchDiff).mockReturnValue(new Promise(() => undefined));
+  vi.mocked(forgeStatus).mockReturnValue(new Promise(() => undefined));
   vi.mocked(createLocalPr).mockImplementation(async (_repo, input) => ({
     id: "pr-1",
     ...input,
@@ -225,11 +281,47 @@ describe("New local pull request opened with nothing handed in", () => {
     setRepo({ current: "main", defaultBranch: "main" });
     const user = userEvent.setup();
     const client = await openDialog();
-    await expectGenerateHeld(
-      user,
-      client,
-      repoKeys.branchAhead(REPO, "refs/heads/main", ""),
-    );
+    // Create's sentence, so the two held buttons say the same thing.
+    await expectGenerateHeld(user, {
+      reason: UNCHOSEN_COPY.head,
+      cached: {
+        client,
+        key: repoKeys.branchAhead(REPO, "refs/heads/main", ""),
+      },
+    });
+    expectHeld(UNCHOSEN_COPY.head);
+    expectAnnouncedOnce(UNCHOSEN_COPY.head);
+  });
+
+  it("keeps Generate a plain disable on the same branch", async () => {
+    setRepo({ current: "main", defaultBranch: "main" });
+    const user = userEvent.setup();
+    const client = await openDialog();
+    await user.keyboard("{Enter}");
+    await user.click(await screen.findByRole("option", { name: "main" }));
+    expect(
+      await screen.findByText("Pick two different branches.", {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
+    await expectGenerateHeld(user, {
+      reason: null,
+      cached: {
+        client,
+        key: repoKeys.branchAhead(REPO, "refs/heads/main", "refs/heads/main"),
+      },
+    });
+  });
+
+  it("keeps Generate a plain disable with nothing to merge", async () => {
+    setRepo({ current: "feat", defaultBranch: "main" });
+    vi.mocked(gitBranchAhead).mockResolvedValue([]);
+    const user = userEvent.setup();
+    await openDialog();
+    expect(
+      await screen.findByText(/^Nothing to merge/, { selector: "p span" }),
+    ).toBeInTheDocument();
+    await expectGenerateHeld(user, { reason: null });
   });
 
   it("starts from the current branch and the default branch elsewhere (M2)", async () => {
@@ -254,11 +346,13 @@ describe("New local pull request opened with nothing handed in", () => {
     expectAnnouncedOnce(UNCHOSEN_COPY.base);
     expect(document.activeElement).toBe(baseField());
     expectHeld(UNCHOSEN_COPY.base);
-    await expectGenerateHeld(
-      user,
-      client,
-      repoKeys.branchAhead(REPO, "", "refs/heads/feat"),
-    );
+    await expectGenerateHeld(user, {
+      reason: UNCHOSEN_COPY.base,
+      cached: {
+        client,
+        key: repoKeys.branchAhead(REPO, "", "refs/heads/feat"),
+      },
+    });
   });
 
   it("asks for Merge on a detached HEAD, never the first branch (M4)", async () => {
@@ -398,5 +492,46 @@ describe("New local pull request handed a head only", () => {
     await openDialog({ defaultHead: "main" });
     expect(baseField()).toHaveTextContent(BRANCH_PLACEHOLDER);
     expect(document.activeElement).toBe(baseField());
+  });
+});
+
+describe("New local pull request stranded focus", () => {
+  it("lands on Title when the generate chord disables the focused Link issue", async () => {
+    setRepo({ current: "feat", defaultBranch: "main" });
+    vi.mocked(forgeStatus).mockResolvedValue({
+      provider: "github",
+      installed: true,
+      authenticated: true,
+      repo: "me/project",
+      host: "github.com",
+      login: "me",
+      capabilities: {},
+      implemented: { issues: true },
+    } as unknown as ForgeStatus);
+    const user = userEvent.setup();
+    await openDialog();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    const link = await screen.findByRole("button", { name: "Link an issue" });
+    link.focus();
+    expect(document.activeElement).toBe(link);
+    await user.keyboard("{Control>}g{/Control}");
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalled());
+    expect(
+      screen.getByRole("button", { name: "Link an issue" }),
+    ).toBeDisabled();
+    expect(document.activeElement).toBe(titleInput());
+  });
+
+  it("lands on Title when the generate chord disables the focused Create", async () => {
+    setRepo({ current: "feat", defaultBranch: "main" });
+    const user = userEvent.setup();
+    await openDialog();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    createButton().focus();
+    expect(document.activeElement).toBe(createButton());
+    await user.keyboard("{Control>}g{/Control}");
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalled());
+    expect(createButton()).toBeDisabled();
+    expect(document.activeElement).toBe(titleInput());
   });
 });

@@ -4,7 +4,8 @@
 /** What an unchosen branch picker shows. */
 export const BRANCH_PLACEHOLDER = "Choose a branch";
 
-/** The status line, and Create's reason, while that side is unchosen. */
+/** The status line, and Create's and Generate's reason, while that side is
+ *  unchosen. */
 export const UNCHOSEN_COPY: Record<"head" | "base", string> = {
   head: "Choose the branch to merge.",
   base: "Choose the branch to merge into.",
@@ -21,12 +22,12 @@ export const COUNT_FAILED_COPY = "Couldn't count the commits to merge.";
  *  failure included. */
 export const PARENT_FETCHING_COPY = "Fetching upstream branches…";
 
-/** Retry's reason while a refetch runs; the line beside it reads the fetching
- *  copy, worded apart so neither sentence is in the DOM twice. */
+/** Retry's reason while a refetch runs, worded apart from the fetching line
+ *  Retry sits beside, so its description doesn't repeat that line. */
 export const PARENT_RETRYING_REASON = "Already fetching the upstream branches.";
 
-/** The status line, and Create's reason over an empty Base, when the parent's
- *  branches couldn't be read and nothing is loaded. */
+/** The status line, and Create's and Generate's reason over an empty Base,
+ *  when the parent's branches couldn't be read and nothing is loaded. */
 export function parentReadFailedCopy(summary: string): string {
   return `Couldn't read upstream branches: ${summary}`;
 }
