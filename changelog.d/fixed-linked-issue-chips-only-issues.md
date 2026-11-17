@@ -1,3 +1,4 @@
-- Linked-issue chips are suggested only for issues, even when the branch name or a
-  commit message mentions a pull request number. This holds in **New pull request**,
-  the **Edit** dialog and local pull requests.
+- On GitHub, linked-issue chips detected from the branch name or a commit
+  message are only ever issues: a number that belongs to a pull request adds no
+  chip. This holds in **Create pull request**, the **Edit** dialog and local
+  pull requests.

@@ -761,7 +761,7 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
-      "Images in comments & descriptions — paste a screenshot or attach a file in GitHub & GitLab issue and pull request comments, new issues & pull requests, and title and description edits",
+      "Images in comments & descriptions — paste a screenshot or attach an image in GitHub & GitLab issue and pull request comments, new issues & pull requests, and title and description edits",
   },
   {
     group: "Keyboard & Markdown",

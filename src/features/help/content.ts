@@ -2175,12 +2175,13 @@ A **Linked issues** row (GitHub and GitLab, wherever the repo has an issue
 tracker) lets you reference real repo issues on create: chips are **auto-detected** from
 your branch name and commit subjects (a \`fix/123-…\` branch seeds \`#123\`, validated
 against your actual issues), and you can add more by hand with **Link issue**. Each chip
-starts as **Relates to** and a click (or Enter on the focused chip) flips it to
+starts as **Relates to** and a click (or {{key:enter}} on the focused chip) flips it to
 **Closes**, which asks the forge to close that issue when the PR merges; the chips become
 \`Closes #N\` / \`Relates to #N\` lines appended to the description on create. A chip adds no
 line when the app can tell the description already says as much on a plain line of its
-own, and a closing line you typed is kept. The row is keyboard-operable: **← / →** move
-between chips, Enter or Space toggles Closes / Relates, and Delete removes a chip. The
+own, and a closing line you typed is kept. The row is keyboard-operable: {{key:left}} /
+{{key:right}} move between chips, {{key:enter}} or {{key:space}} toggles Closes /
+Relates, and {{key:delete}} removes a chip. The
 **same row is on the Edit dialog** and on **local PRs** (create and edit, wherever the
 repo's forge has an issue tracker): opening Edit peels any trailing \`Closes #N\` /
 \`Relates to #N\` lines back out of the description into chips (when the block names an
@@ -2554,7 +2555,7 @@ to it — no default shortcut, so give it one in **Settings → Keyboard**. It f
 one-line strip and completes **@** mentions and **#** references the same way it does on
 the Pull Requests tab. On a GitHub or GitLab issue it also takes pasted or attached
 images, just as a pull request's comment box does, and so do the description fields of
-the **New issue** and **Edit** dialogs. On a long thread (local and Jira
+the **Create issue** and **Edit** dialogs. On a long thread (local and Jira
 issues included), the arrow buttons by the scrollbar jump to its top or bottom, and the
 command palette's **Jump to the top of the thread** and **Jump to the bottom of the
 thread** do the same.
@@ -2576,7 +2577,7 @@ duplicates, and same-project mentions.
   issue.
 - **Projects** — chips in the side rail show which **GitHub Projects** the issue belongs to,
   and a picker links or unlinks it across the repository's projects and the owner's; your
-  changes apply when the picker closes. The **New issue** dialog carries a **Projects**
+  changes apply when the picker closes. The **Create issue** dialog carries a **Projects**
   band under its description (**Add to project** picks a board, each one becomes a chip
   the arrows walk and **Delete** removes), so an issue can land on its boards as it's
   created; if the issue opens but a board refuses it, the dialog closes and says which
@@ -3373,8 +3374,8 @@ don't appear.`,
     body: `# GitHub Actions
 
 The **Actions** tab ({{kbd:tab-actions}}, in the More ▾ menu) is a cockpit for your GitHub
-Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab pipelines** show here too
-(see below).
+Actions workflow runs (needs \`gh\` + a GitHub remote). **GitLab** and **Bitbucket**
+pipelines show here too (see below).
 
 - The list shows recent runs with live status, refreshing while any run is active;
   loading older runs pauses the auto-refresh, and **Refresh** updates everything

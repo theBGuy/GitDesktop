@@ -803,7 +803,7 @@ one, usually above the archived cards directly over it too, and a drag
 dropped beside archived cards lands above them. A saved view that sorts says
 so instead, since its columns are drawn in the sort's order rather than the
 board's.
-Creating an issue puts it straight on a board too: the **New issue** dialog
+Creating an issue puts it straight on a board too: the **Create issue** dialog
 carries a **Projects** picker of its own. The board's **saved views** come
 along as lenses: pick one and GitHub filters the read for you, its sort
 orders the cards in each column (by **Title**, or by a text, number, date,

@@ -1,3 +1,4 @@
-- When a Bitbucket review or request for changes fails partway because the connection
-  dropped, the error still says what was already posted before suggesting you check
-  your connection. The same now holds for GitLab reviews and requests for changes.
+- When a Bitbucket or GitLab review or request for changes fails partway
+  because the connection dropped, the error says what was already posted
+  before suggesting you check your connection, so you know what's safe to
+  retry.

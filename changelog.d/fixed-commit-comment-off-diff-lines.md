@@ -1,2 +1,2 @@
-- A commit comment on a line outside the diff's hunks stays in the comment list
-  under the diff.
+- A commit comment on a line the diff doesn't show appears in the comment list
+  under the diff, so every comment on the commit stays in view.

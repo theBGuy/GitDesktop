@@ -5,18 +5,9 @@
   issue's or pull request's title and description. PNG, JPEG, GIF and WebP
   images up to 10 MB and 40 megapixels each, 10 per draft, show as chips
   under the editor and in place in Preview, and nothing uploads until you
-  post. If GitHub takes a comment but an image fails to upload, the comment
-  is posted and the image stays attached for a follow-up. If a later image
-  fails on a new issue or pull request, GitHub still creates it, with a
-  note to edit the description and add the image again; if the first one
-  fails, no issue or pull request is created (on GitHub, a new pull
-  request's branch is still pushed) and the dialog keeps your draft. On
-  GitHub, an edit whose image fails keeps its dialog open with the image
-  still attached, so pressing **Save** again adds it. On GitLab an upload
-  is all or nothing: if an image isn't accepted, nothing is posted or saved.
-  A new merge request's branch is already pushed by then, and the error
-  says so. Images need GitHub CLI 2.99 or newer on GitHub.com or GitHub
-  Enterprise Cloud with write access to the repository, or GitLab CLI 1.91
-  or newer; Bitbucket has no image attachments. With some GitHub CLI
-  sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the app
-  says so when you post.
+  post. If an image fails to upload, the app says what was posted and how
+  to add it again; on GitLab nothing is posted unless every image is
+  accepted. Images need GitHub CLI 2.99 or newer (2.103.2 with some sign-in
+  types) on GitHub.com or GitHub Enterprise Cloud with write access to the
+  repository, or GitLab CLI 1.91 or newer; Bitbucket has no image
+  attachments.
