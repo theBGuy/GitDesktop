@@ -33,7 +33,10 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { LABELS_PICKER_COPY } from "@/features/conversations/LabelsPopover";
-import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
+import {
+  emptyPickerCopy,
+  failedSinceLastSuccess,
+} from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
 import {
   CREATE_PENDING_GENERATE_REASON,
@@ -151,6 +154,9 @@ import {
   defaultPrPair,
   forgeStatusArm,
   forgeUnchosenSide,
+  PARENT_FETCHING_COPY,
+  PARENT_RETRYING_REASON,
+  parentReadFailedCopy,
   UNCHOSEN_COPY,
   unchosenSide,
 } from "./pr-branch-defaults";
@@ -255,7 +261,9 @@ export function CreatePrDialog({
   repoPath: string;
   /** Seeds the base ("into") branch; defaults to the repo's default branch. */
   defaultBase?: string;
-  /** Seeds the head ("merge") branch; defaults to the current branch. */
+  /** Seeds the head ("merge") branch; defaults to the current branch,
+   *  unchosen on a detached HEAD, and on the own repository's default branch
+   *  when no base is handed in either. */
   defaultHead?: string;
   preset?: CreatePrPreset;
   open: boolean;
@@ -480,6 +488,19 @@ export function CreatePrDialog({
     return rest;
   })();
   const baseLoading = targetIsParent && parentBranches.isPending;
+  // A refetch puts a dataless errored read back to pending (error null), and
+  // the failed state holds through it, Retry's or not. Not while its automatic
+  // retry is paused on a hidden window: that reads as loading, Retry leaves.
+  const parentReadFailed =
+    targetIsParent &&
+    parentBranches.data === undefined &&
+    failedSinceLastSuccess(parentBranches);
+  const parentReadSummary = parentBranches.error
+    ? presentError(parentBranches.error).summary
+    : "";
+  const parentReadLine = parentBranches.isFetching
+    ? PARENT_FETCHING_COPY
+    : parentReadFailedCopy(parentReadSummary);
 
   const form = useAppForm({
     defaultValues: {
@@ -908,6 +929,10 @@ export function CreatePrDialog({
     pickerFocusPending.current = null;
     pickerTrigger(node)?.focus();
   };
+  const retryParentRead = () => {
+    if (parentBranches.isFetching) return;
+    void parentBranches.refetch();
+  };
   const attachHeadPicker = (node: HTMLDivElement | null) =>
     attachPicker("head", node);
   const attachBasePicker = (node: HTMLDivElement | null) =>
@@ -1183,7 +1208,8 @@ export function CreatePrDialog({
   // with no preset ref it is origin's copy of the base when the local
   // remote-branch read lists one, since the forge opens the pull request
   // against that; the local branch once the read answered without it or
-  // failed, and undecided (null) until then so the count never flips refs.
+  // failed, and undecided (null) until then so nothing is counted against a
+  // guessed ref before the read answers.
   const remoteBranches = useRemoteBranches(repoPath, open);
   const countBaseRef = (() => {
     if (identityBaseRef === null) return null;
@@ -1239,12 +1265,16 @@ export function CreatePrDialog({
     head,
     base,
     baseLoading,
+    readFailed: parentReadFailed,
     targetIsParent,
     parentBase,
   });
   // Holds Create and Generate apart from the count: an empty side has no pair,
   // whatever the cache holds for the half-empty key.
   const sideEmpty = head === "" || base === "";
+  // Nothing to pick from; a Base that survived the reconcile (a preset's ref)
+  // stays shown and usable.
+  const baseUnreadable = parentReadFailed && base === "";
   const submitBlocked =
     headKeptLocal ||
     unchosen !== null ||
@@ -1273,6 +1303,8 @@ export function CreatePrDialog({
       switch (true) {
         case headKeptLocal:
           return keptLocalPrReason(head);
+        case baseUnreadable:
+          return parentReadLine;
         case unchosen !== null:
           return UNCHOSEN_COPY[unchosen];
         case generating:
@@ -1291,6 +1323,7 @@ export function CreatePrDialog({
   // The one line under the pickers, decided once: the render reads it, and so
   // does which element carries Create's reason id.
   const statusArm = forgeStatusArm({
+    parentReadFailed,
     baseLoading,
     fetchError: Boolean(parentFetchError),
     unchosen,
@@ -1306,6 +1339,26 @@ export function CreatePrDialog({
     statusArm === "unchosen" &&
     unchosen !== null &&
     offlineSubmit.blockedReason === UNCHOSEN_COPY[unchosen];
+  // The same carrier for the failed parent read's line.
+  const readFailedAnnounced =
+    statusArm === "parentReadFailed" &&
+    offlineSubmit.blockedReason === parentReadLine;
+  // The failed line leaving takes its Retry along. A removed Retry that held
+  // focus leaves it on body at this commit (Base UI moves it to the popup in a
+  // later microtask), so only then, still open on the parent with no create
+  // running, does Title take it; focus the user moved elsewhere stays there.
+  const landReadRecovered = useEffectEvent(() => {
+    if (!open || !targetIsParent || form.state.isSubmitting) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    document.getElementById(titleId)?.focus();
+  });
+  const readFailedBefore = useRef(parentReadFailed);
+  useLayoutEffect(() => {
+    const left = readFailedBefore.current && !parentReadFailed;
+    readFailedBefore.current = parentReadFailed;
+    if (left) landReadRecovered();
+  }, [parentReadFailed]);
 
   // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
   // the chip mutations live in the shared hook. Gated on a usable tracker AND the
@@ -1608,11 +1661,15 @@ export function CreatePrDialog({
                   {(field) => (
                     <field.SelectField
                       label="Base"
-                      items={baseLoading ? {} : baseItems}
+                      items={baseLoading || baseUnreadable ? {} : baseItems}
                       annotations={baseAnnotations}
-                      disabled={baseLoading}
+                      disabled={baseLoading || baseUnreadable}
                       sizeToContent
-                      placeholder={baseLoading ? undefined : BRANCH_PLACEHOLDER}
+                      placeholder={
+                        baseLoading || baseUnreadable
+                          ? undefined
+                          : BRANCH_PLACEHOLDER
+                      }
                     />
                   )}
                 </form.AppField>
@@ -1633,12 +1690,51 @@ export function CreatePrDialog({
               </p>
               {(() => {
                 switch (statusArm) {
-                  case "baseLoading":
+                  case "parentReadFailed":
+                  case "baseLoading": {
+                    // One tree for both arms, so the status region is already
+                    // mounted when the read's failure reaches it and only its
+                    // text changes; the count lines stay out of it. A refetch
+                    // holds Retry with a reason, so focus stays on it.
+                    const failed = statusArm === "parentReadFailed";
                     return (
-                      <p className="text-xs text-muted-foreground">
-                        Fetching upstream branches…
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <div role="status">
+                          <p
+                            id={
+                              readFailedAnnounced
+                                ? offlineSubmit.reasonId
+                                : undefined
+                            }
+                            className={cn(
+                              "text-xs",
+                              failed && !parentBranches.isFetching
+                                ? "text-warning"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {failed ? parentReadLine : PARENT_FETCHING_COPY}
+                          </p>
+                        </div>
+                        {failed ? (
+                          <DisabledReasonButton
+                            type="button"
+                            variant="outline"
+                            size="xs"
+                            disabled={parentBranches.isFetching}
+                            reason={
+                              parentBranches.isFetching
+                                ? PARENT_RETRYING_REASON
+                                : null
+                            }
+                            onClick={retryParentRead}
+                          >
+                            Retry
+                          </DisabledReasonButton>
+                        ) : null}
+                      </div>
                     );
+                  }
                   case "fetchError":
                     // Fetch failed but local upstream refs (if any) still
                     // populate the picker: surface the error inline, keep the
@@ -1878,8 +1974,8 @@ export function CreatePrDialog({
                       </Button>
                     ) : (
                       // An unchosen or empty side and nothing to merge stay
-                      // plain disables (the status line says which branch to
-                      // choose); a running create says why.
+                      // plain disables whose reason is the status line; a
+                      // running create says why.
                       <DisabledReasonButton
                         type="button"
                         variant="outline"
@@ -2006,7 +2102,8 @@ export function CreatePrDialog({
                     </form.SubmitButton>
                     {offlineSubmit.blockedReason &&
                     !headKeptLocal &&
-                    !unchosenAnnounced ? (
+                    !unchosenAnnounced &&
+                    !readFailedAnnounced ? (
                       <span id={offlineSubmit.reasonId} className="sr-only">
                         {offlineSubmit.blockedReason}
                       </span>

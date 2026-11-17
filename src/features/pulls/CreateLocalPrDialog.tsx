@@ -497,6 +497,10 @@ export function CreateLocalPrDialog({
       })(),
       title: SUBMIT_HINT,
     });
+  // While the reason is the unchosen line, that line is Create's description
+  // and the footer's copy stays out, so it is announced once.
+  const unchosenAnnounced =
+    unchosen !== null && blockedReason === UNCHOSEN_COPY[unchosen];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -592,7 +596,10 @@ export function CreateLocalPrDialog({
                 switch (true) {
                   case unchosen !== null:
                     return (
-                      <p className="text-xs text-muted-foreground">
+                      <p
+                        id={unchosenAnnounced ? reasonId : undefined}
+                        className="text-xs text-muted-foreground"
+                      >
                         {UNCHOSEN_COPY[unchosen]}
                       </p>
                     );
@@ -756,7 +763,7 @@ export function CreateLocalPrDialog({
                 >
                   Create local PR
                 </form.SubmitButton>
-                {blockedReason ? (
+                {blockedReason && !unchosenAnnounced ? (
                   <span id={reasonId} className="sr-only">
                     {blockedReason}
                   </span>

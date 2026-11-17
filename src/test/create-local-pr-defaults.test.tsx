@@ -22,6 +22,7 @@ import {
   gitDefaultBranch,
   gitStatus,
 } from "@/lib/git/api";
+import { repoKeys } from "@/lib/git/queries";
 import type { Branch, CommitSummary, RepoStatus } from "@/lib/git/types";
 import { createLocalPr } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
@@ -133,6 +134,17 @@ const createButton = () =>
   screen.getByRole("button", { name: /Create local PR/ });
 const generateButton = () => screen.getByRole("button", { name: "Generate" });
 
+/** The one element saying `sentence` is Create's only description. */
+function expectAnnouncedOnce(sentence: string) {
+  const shown = screen.getAllByText(sentence);
+  expect(shown).toHaveLength(1);
+  const ids = (createButton().getAttribute("aria-describedby") ?? "")
+    .split(/\s+/)
+    .filter(Boolean);
+  expect(ids).toEqual([shown[0].id]);
+  expect(document.querySelectorAll(`[id="${ids[0]}"]`)).toHaveLength(1);
+}
+
 function expectHeld(reason: string) {
   const button = createButton();
   expect(button).toHaveAttribute("aria-disabled", "true");
@@ -198,11 +210,11 @@ describe("New local pull request opened with nothing handed in", () => {
     await openDialog();
     expect(baseField()).toHaveTextContent("main");
     expect(mergeField()).toHaveTextContent(BRANCH_PLACEHOLDER);
-    expect(
-      screen.getByText(UNCHOSEN_COPY.head, { selector: "p" }),
-    ).toBeInTheDocument();
+    expectAnnouncedOnce(UNCHOSEN_COPY.head);
     expect(screen.queryByText(/\d+ commits? to merge\./)).toBeNull();
     expect(gitBranchAhead).not.toHaveBeenCalled();
+    // Pins the outcome only: Merge is also the dialog's default first focus;
+    // the Base-focus cases are what exercise the focus mark.
     expect(document.activeElement).toBe(mergeField());
     expectHeld(UNCHOSEN_COPY.head);
     await tryEverySubmit(user);
@@ -213,14 +225,11 @@ describe("New local pull request opened with nothing handed in", () => {
     setRepo({ current: "main", defaultBranch: "main" });
     const user = userEvent.setup();
     const client = await openDialog();
-    await expectGenerateHeld(user, client, [
-      "repo",
-      REPO,
-      "compare",
-      "refs/heads/main",
-      "",
-      "ahead",
-    ]);
+    await expectGenerateHeld(
+      user,
+      client,
+      repoKeys.branchAhead(REPO, "refs/heads/main", ""),
+    );
   });
 
   it("starts from the current branch and the default branch elsewhere (M2)", async () => {
@@ -231,6 +240,7 @@ describe("New local pull request opened with nothing handed in", () => {
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
     // This dialog has no focus rule of its own for a full pair: the dialog's
     // default first focus, which is the Merge trigger, never Base.
+    // Pins the outcome only; the Base-focus cases exercise the focus mark.
     expect(document.activeElement).not.toBe(baseField());
   });
 
@@ -241,19 +251,14 @@ describe("New local pull request opened with nothing handed in", () => {
     expect(mergeField()).toHaveTextContent("feat");
     expect(baseField()).toHaveTextContent(BRANCH_PLACEHOLDER);
     expect(baseField()).not.toHaveTextContent("aaa-old");
-    expect(
-      screen.getByText(UNCHOSEN_COPY.base, { selector: "p" }),
-    ).toBeInTheDocument();
+    expectAnnouncedOnce(UNCHOSEN_COPY.base);
     expect(document.activeElement).toBe(baseField());
     expectHeld(UNCHOSEN_COPY.base);
-    await expectGenerateHeld(user, client, [
-      "repo",
-      REPO,
-      "compare",
-      "",
-      "refs/heads/feat",
-      "ahead",
-    ]);
+    await expectGenerateHeld(
+      user,
+      client,
+      repoKeys.branchAhead(REPO, "", "refs/heads/feat"),
+    );
   });
 
   it("asks for Merge on a detached HEAD, never the first branch (M4)", async () => {
@@ -262,6 +267,8 @@ describe("New local pull request opened with nothing handed in", () => {
     expect(mergeField()).toHaveTextContent(BRANCH_PLACEHOLDER);
     expect(mergeField()).not.toHaveTextContent("aaa-old");
     expect(baseField()).toHaveTextContent("main");
+    // Pins the outcome only: Merge is also the dialog's default first focus;
+    // the Base-focus cases are what exercise the focus mark.
     expect(document.activeElement).toBe(mergeField());
   });
 
@@ -270,12 +277,12 @@ describe("New local pull request opened with nothing handed in", () => {
     await openDialog();
     expect(mergeField()).toHaveTextContent(BRANCH_PLACEHOLDER);
     expect(baseField()).toHaveTextContent(BRANCH_PLACEHOLDER);
-    expect(
-      screen.getByText(UNCHOSEN_COPY.head, { selector: "p" }),
-    ).toBeInTheDocument();
+    expectAnnouncedOnce(UNCHOSEN_COPY.head);
     expect(screen.queryByText("Pick two different branches.")).toBeNull();
     expect(screen.queryByText(COUNTING_COPY)).toBeNull();
     expectHeld(UNCHOSEN_COPY.head);
+    // Pins the outcome only: Merge is also the dialog's default first focus;
+    // the Base-focus cases are what exercise the focus mark.
     expect(document.activeElement).toBe(mergeField());
   });
 
@@ -285,6 +292,8 @@ describe("New local pull request opened with nothing handed in", () => {
     await openDialog();
     expect(mergeField()).toHaveTextContent(BRANCH_PLACEHOLDER);
     expect(baseField()).toHaveTextContent("main");
+    // Pins the outcome only: Merge is also the dialog's default first focus;
+    // the Base-focus cases are what exercise the focus mark.
     expect(document.activeElement).toBe(mergeField());
     expectHeld(UNCHOSEN_COPY.head);
     await user.keyboard("{Enter}");

@@ -30,6 +30,7 @@ const {
   NOTHING_EXISTS_DISCLOSURES,
   otherChangesSaved,
   presentError,
+  reviewMayHavePosted,
   SAVED_DISCLOSURE_LEAD,
 } = await import("@/lib/error-summary");
 
@@ -1083,10 +1084,12 @@ test("the after-push pin fails on a reworded, renamed or duplicated Rust source"
     assert.notEqual(pushWrapMismatch(mutant), null, `mutant passed: ${label}`);
 });
 
-// Bitbucket's compound review wraps (request_changes_pr, review_submit in
-// src-tauri/src/forge/bitbucket.rs) embed a step's error after their partial-state
-// line. A timed-out step makes the message two lines, so line one, disclosure
-// included, must stay the summary over the transport line beneath it.
+// Bitbucket's compound review wraps (the pure fns request_changes_pr and
+// review_submit call, in src-tauri/src/forge/bitbucket.rs) embed a step's error
+// after their partial-state line. Every wrap catches a timed-out step into its
+// own one-line sentence; the `{e}` and `({first}){rest}` rows still embed the
+// two-line hedge as a defensive fixture, whose line one, disclosure included,
+// must stay the summary.
 const BB_TIMED_OUT =
   "Bitbucket didn't answer in time, so your change may still have gone through. Check before trying again.\nBitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/repositories/ws/app/pullrequests/1/comments): request timed out";
 const BB_UNREAD = (noun) =>
@@ -1096,10 +1099,11 @@ const GL_TIMED_OUT =
   "GitLab didn't answer in time, so your comment may still have been posted. Check the conversation before posting again.\nGitLab CLI timed out after 120s.";
 const GL_UNREAD = (noun) =>
   `GitLab accepted the request but its reply couldn't be read, so the ${noun} may already exist. Check before creating it again.`;
-/** Per kind, the two-line timed-out cause and the create hedge a wrap embeds. */
+/** Per kind, the two-line timed-out cause, the create hedge a wrap embeds, and
+ *  whether that cause's line two is a transport line the summary rewrites. */
 const WRAP_CAUSES = {
-  bitbucket: { timedOut: BB_TIMED_OUT, unread: BB_UNREAD },
-  glab: { timedOut: GL_TIMED_OUT, unread: GL_UNREAD },
+  bitbucket: { timedOut: BB_TIMED_OUT, unread: BB_UNREAD, transport: true },
+  glab: { timedOut: GL_TIMED_OUT, unread: GL_UNREAD, transport: false },
 };
 /** The one `format!` literal in `body` holding `marker`, its line continuations
  *  joined, or null when not exactly one does. */
@@ -1119,42 +1123,91 @@ function parenFill(literal, e) {
 
 /** Each forge's compound review wraps: the fns holding them, and per wrap its
  *  fn, a marker naming its literal, how the literal embeds the error, and the
- *  create noun a reply hedge names (null for the verdict). */
+ *  create noun a reply hedge names (null for the verdict). A `{cause}` row is a
+ *  timed-out step's own sentence, which embeds only its error's cause; it and
+ *  any row marked `true` (GitLab's publish timeout) say the step may have gone
+ *  through, so a network failure's summary is that sentence alone. */
 const WRAP_SOURCES = {
   bitbucket: {
-    fns: ["request_changes_pr", "review_submit"],
+    fns: [
+      "request_changes_pr",
+      "review_submit",
+      "change_request_comment_error",
+      "review_summary_error",
+      "review_comment_error",
+      "verdict_step_error",
+    ],
     rows: [
-      [0, "Changes were requested, but posting the comment failed", "{e}", "comment"],
-      [1, "The review summary couldn't be posted", "{e}", "review summary"],
-      [1, "review comments before the failure", "({first}){rest}", "review comment"],
-      [1, "The review was posted, but the {action} step failed", "({first}){rest}", null],
+      [2, "Changes were requested, but posting the comment failed", "{e}", "comment"],
+      [3, "The review summary couldn't be posted", "{e}", "review summary"],
+      [4, "review comments before the failure", "({first}){rest}", "review comment"],
+      [5, "The review was posted, but the {action} step failed", "({first}){rest}", null],
+      [2, "Bitbucket didn't answer in time on the comment", "{cause}", "comment"],
+      [3, "Bitbucket didn't answer in time on the review summary", "{cause}", "review summary"],
+      [4, "Bitbucket didn't answer in time on the next one", "{cause}", "review comment"],
+      [5, "Bitbucket didn't answer in time on the {action} step", "{cause}", null],
     ],
   },
   glab: {
-    fns: ["request_changes_mr", "review_submit"],
+    fns: [
+      "request_changes_mr",
+      "review_submit",
+      "verdict_step_error",
+      "change_request_comment_error",
+    ],
     rows: [
-      [0, "Changes were requested, but posting the comment failed", "{e}", "comment"],
+      [3, "Changes were requested, but posting the comment failed", "{e}", "comment"],
       [1, "The review summary couldn't be saved as a draft", "{e}", "review summary"],
       [1, "review comments as drafts before the failure", "({first}){rest}", "review comment"],
       [1, "draft notes couldn't be published", "({first}){rest}", "review"],
-      [1, "The review was posted, but the {action} step failed", "({first}){rest}", null],
-      [1, "while publishing the review's draft notes", "({first}){rest}", "review"],
+      [2, "The review was posted, but the {action} step failed", "({first}){rest}", null],
+      [1, "while publishing the review's draft notes", "({first}){rest}", "review", true],
+      [2, "GitLab didn't answer in time on the {action} step", "{cause}", null],
+      [3, "GitLab didn't answer in time on the comment", "{cause}", "comment"],
     ],
   },
 };
 
-/** `[wrap, noun, token]` per compound wrap of `kind`, each filling its Rust
- *  literal the way the wrap embeds the error (the verdict wrap twice: approve
- *  with what landed, request changes with nothing), or the reason the source
- *  can't be read. */
+/** A timed-out step's own sentence ends with its error's cause (the first
+ *  non-empty line after the hedge, trimmed) in parentheses, or with nothing when
+ *  it carried none, as `timed_out_cause` in forge/mod.rs reads it. */
+function causeFill(literal, e) {
+  const cause =
+    e
+      .split(/\r?\n/)
+      .slice(1)
+      .map((line) => line.trim())
+      .find((line) => line !== "") ?? "";
+  return literal.replace("{cause}", () => (cause === "" ? "" : ` (${cause})`));
+}
+
+/** The lead a verdict step's timed-out sentence opens with when something
+ *  landed before it: the non-empty arm of `verdict_step_error`'s
+ *  `let posted = if landed.is_empty() { "" } else { "<lead>" };`, or null when
+ *  the body holds no such binding exactly once. */
+function postedLead(body) {
+  const all = [
+    ...body.matchAll(
+      /let posted = if landed\.is_empty\(\) \{\s*""\s*\} else \{\s*"((?:[^"\\]|\\[\s\S])*)"\s*\};/g,
+    ),
+  ];
+  return all.length === 1 && all[0][1] !== "" ? all[0][1] : null;
+}
+
+/** `[wrap, noun, token, timedOut]` per compound wrap of `kind`, each filling
+ *  its Rust literal the way the wrap embeds the error (the verdict wrap twice:
+ *  approve with what landed, request changes with nothing), or the reason the
+ *  source can't be read. */
 function forgeWraps(src, kind, sources = WRAP_SOURCES[kind]) {
   const { fns, rows } = sources;
   const bodies = fns.map((name) => fnBody(src, name));
   if (bodies.includes(null)) return "a wrap fn not found exactly once";
   const landed = wrapLiteral(bodies[1], "were already posted successfully");
   if (landed === null) return "no landed literal";
+  const posted = postedLead(bodies[fns.indexOf("verdict_step_error")] ?? "");
+  if (posted === null) return "no posted lead in verdict_step_error";
   const wraps = [];
-  for (const [fn, marker, token, noun] of rows) {
+  for (const [fn, marker, token, noun, timedOut = token === "{cause}"] of rows) {
     const literal = wrapLiteral(bodies[fn], marker);
     if (literal === null) return `no single literal holding ${marker}`;
     if (literal.split(token).length !== 2) return `${marker}: want one ${token}`;
@@ -1169,14 +1222,17 @@ function forgeWraps(src, kind, sources = WRAP_SOURCES[kind]) {
       const filled = literal
         .replace("{} of {}", "2 of 3")
         .replaceAll("{action}", action)
+        .replace("{posted}", () => (landedText === "" ? "" : posted))
         .replace("{landed}", () => landedText);
       const wrap = (e) =>
         token === "({first}){rest}"
           ? parenFill(filled, e)
-          : filled.replace(token, () => token.replace("{e}", e));
+          : token === "{cause}"
+            ? causeFill(filled, e)
+            : filled.replace(token, () => token.replace("{e}", e));
       if (/[{}\\]/.test(wrap("x")))
         return `${marker}: a placeholder or escape this pin can't fill`;
-      wraps.push([wrap, noun, token]);
+      wraps.push([wrap, noun, token, timedOut]);
     }
   }
   return wraps;
@@ -1200,8 +1256,36 @@ function balanced(line) {
 function wrapMismatch(src, kind, sources = WRAP_SOURCES[kind]) {
   const wraps = forgeWraps(src, kind, sources);
   if (typeof wraps === "string") return wraps;
-  const { timedOut, unread } = WRAP_CAUSES[kind];
-  for (const [wrap, noun] of wraps) {
+  const { timedOut, unread, transport } = WRAP_CAUSES[kind];
+  const [hedge] = timedOut.split("\n");
+  for (const [wrap, noun, token] of wraps) {
+    if (token === "{cause}") {
+      // Only a timed-out write reaches this arm: its hedge never repeats, and its
+      // cause sits in parentheses closed on line one, or is absent. A transport
+      // cause is dropped from the summary, which adds no network sentence (the
+      // request reached the forge). Each fill must match its table row.
+      for (const [e, tail] of [
+        [timedOut, ` (${timedOut.slice(hedge.length + 1)})`],
+        [hedge, ""],
+      ]) {
+        const message = wrap(e);
+        const line1 = message.split("\n")[0];
+        if (message !== line1) return `more than one line: ${message}`;
+        if (line1.includes(hedge)) return `the hedge twice: ${message}`;
+        if (!line1.endsWith(`.${tail}`)) return `cause not set as ${tail}: ${message}`;
+        if (!balanced(line1)) return `line one leaves a parenthesis open: ${line1}`;
+        if (!reviewMayHavePosted({ kind, message }))
+          return `no table row reads it as may have posted: ${message}`;
+        const summary = presentError({ kind, message }).summary;
+        const want =
+          transport && tail !== "" ? line1.slice(0, -tail.length) : line1;
+        if (summary !== want) return `summary ${JSON.stringify(summary)} for ${message}`;
+        if (!balanced(summary)) return `the summary leaves a parenthesis open: ${summary}`;
+        if (summary.split("may or may not").length !== 2)
+          return `the summary hedges other than once: ${summary}`;
+      }
+      continue;
+    }
     const embedded = noun === null ? [timedOut] : [timedOut, unread(noun)];
     for (const e of embedded) {
       const message = wrap(e);
@@ -1362,12 +1446,14 @@ const PLAIN_CAUSES = {
 };
 
 /** The summary a wrap's network failure should read as: the wrap up to where
- *  its error starts (an opening parenthesis dropped), then the network line. */
-function composedNetwork(wrap, token, network) {
+ *  its error starts (an opening parenthesis dropped), then the network line; a
+ *  timed-out row's sentence instead stands alone, its cause dropped. */
+function composedNetwork(wrap, token, network, timedOut) {
   const sentinel = "\u0001";
   const message = wrap(sentinel);
   const at = message.indexOf(token === "{e}" ? sentinel : `(${sentinel}`);
-  return `${message.slice(0, at)}${network}`;
+  const kept = message.slice(0, at);
+  return timedOut ? kept.trimEnd() : `${kept}${network}`;
 }
 
 /** Null when every wrap of `kind` composes its network failure and keeps line
@@ -1375,15 +1461,22 @@ function composedNetwork(wrap, token, network) {
 function networkWrapMismatch(src, kind) {
   const wraps = forgeWraps(src, kind);
   if (typeof wraps === "string") return wraps;
-  for (const [wrap, , token] of wraps) {
+  const [hedge] = WRAP_CAUSES[kind].timedOut.split("\n");
+  for (const [rawWrap, , token, timedOut] of wraps) {
+    // A timed-out step's error is its hedge over the transport line.
+    const wrap =
+      token === "{cause}" ? (e) => rawWrap(`${hedge}\n${e}`) : rawWrap;
     const message = wrap(ONE_LINE_CAUSE[kind]);
-    const want = composedNetwork(wrap, token, REACH[kind]);
+    const want = composedNetwork(wrap, token, REACH[kind], timedOut);
     const p = presentError({ kind, message });
     if (p.summary !== want) return `summary ${JSON.stringify(p.summary)} for ${message}`;
     if (!p.long) return `no Details for ${message}`;
     if (p.fullText !== message) return `fullText rewritten for ${message}`;
     for (const e of PLAIN_CAUSES[kind]) {
-      const plain = wrap(e);
+      // A timed-out step's transport cause is the network case above.
+      if (token === "{cause}" && e === WRAP_CAUSES[kind].timedOut && WRAP_CAUSES[kind].transport)
+        continue;
+      const plain = rawWrap(e);
       const summary = presentError({ kind, message: plain }).summary;
       if (summary !== plain.split("\n")[0])
         return `summary ${JSON.stringify(summary)} for ${plain}`;
@@ -1399,8 +1492,8 @@ test("a compound review failure over a network cause keeps what already posted",
   assert.equal(networkWrapMismatch(gl, "glab"), null);
   const bbAll = forgeWraps(bb, "bitbucket");
   const glAll = forgeWraps(gl, "glab");
-  assert.equal(bbAll.length, 5);
-  assert.equal(glAll.length, 7);
+  assert.equal(bbAll.length, 10);
+  assert.equal(glAll.length, 10);
   // The copy as it ships.
   const summary = (kind, wrap) =>
     presentError({ kind, message: wrap(ONE_LINE_CAUSE[kind]) }).summary;
@@ -1420,12 +1513,52 @@ test("a compound review failure over a network cause keeps what already posted",
     summary("glab", glAll[4][0]),
     "The review was posted, but the approve step failed: the 3 review note(s) were already posted successfully — do NOT resubmit them; only re-run the approve action on GitLab. Couldn't reach GitLab — check your network connection.",
   );
+  // A timed-out step keeps its own sentence, its CLI line in the parentheses.
+  const timedOut = (wrap) =>
+    presentError({ kind: "glab", message: wrap(GL_TIMED_OUT) }).summary;
+  assert.equal(
+    timedOut(glAll[7][0]),
+    "The review was posted, but GitLab didn't answer in time on the approve step, so it may or may not have gone through: the 3 review note(s) were already posted successfully — do NOT resubmit them; check the merge request on GitLab before running the approve action again. (GitLab CLI timed out after 120s.)",
+  );
+  assert.equal(
+    timedOut(glAll[8][0]),
+    "GitLab didn't answer in time on the request changes step, so it may or may not have gone through: check the merge request on GitLab before running the request changes action again. (GitLab CLI timed out after 120s.)",
+  );
+  assert.equal(
+    timedOut(glAll[9][0]),
+    "Changes were requested, but GitLab didn't answer in time on the comment, so it may or may not have been posted. Check the merge request on GitLab before posting it again. (GitLab CLI timed out after 120s.)",
+  );
+  // A timed-out Bitbucket step's cause is a transport line, but the request was
+  // sent: the step's own sentence stands alone, its cause left to Details.
+  const bbTimedOut = (wrap) =>
+    presentError({ kind: "bitbucket", message: wrap(BB_TIMED_OUT) });
+  assert.deepEqual(bbAll.slice(5).map(([wrap]) => bbTimedOut(wrap).summary), [
+    "Changes were requested, but Bitbucket didn't answer in time on the comment, so it may or may not have been posted. Check the pull request on Bitbucket before posting it again.",
+    "Bitbucket didn't answer in time on the review summary, so it may or may not have been posted. No review comment and no verdict was sent. Check the pull request on Bitbucket before retrying.",
+    "Posted 2 of 3 review comments, then Bitbucket didn't answer in time on the next one, so it may or may not have been posted. Nothing after it was sent. Check the pull request on Bitbucket before retrying.",
+    "The review was posted, but Bitbucket didn't answer in time on the approve step, so it may or may not have gone through: the 3 review comment(s) were already posted successfully — do NOT resubmit them; check the pull request on Bitbucket before running the approve action again.",
+    "Bitbucket didn't answer in time on the request changes step, so it may or may not have gone through: check the pull request on Bitbucket before running the request changes action again.",
+  ]);
+  for (const [wrap] of bbAll.slice(5)) {
+    const p = bbTimedOut(wrap);
+    assert.ok(p.long && p.fullText.includes(BB_TIMED_OUT.split("\n")[1]), p.fullText);
+  }
   // Controls: each a reworded Rust lead that the composition no longer reads.
   const mutants = [
     ["bitbucket", bb, "W3 reworded", ["retrying. ({first}){rest}", "trying again. ({first}){rest}"]],
     ["bitbucket", bb, "W1 reworded", ["posting the comment failed: {e}", "posting the comment failed; {e}"]],
+    ["bitbucket", bb, "comment timeout reworded", ["may or may not have been posted. Check the pull request on Bitbucket", "may have been posted. Check the pull request on Bitbucket"]],
+    ["bitbucket", bb, "summary timeout reworded", ["No review comment and no verdict was sent.", "Nothing else was sent."]],
+    ["bitbucket", bb, "next comment timeout reworded", ["Nothing after it was sent. Check", "Nothing else was sent after it. Check"]],
+    ["bitbucket", bb, "verdict timeout reworded", ["may or may not have gone through: {landed}check the pull request", "may have gone through: {landed}check the pull request"]],
     ["glab", gl, "summary draft reworded", ["couldn't be saved as a draft, so the review was not", "couldn't be saved as a draft, so nothing was"]],
     ["glab", gl, "publish reworded", ["draft notes couldn't be published, so the review was not", "draft notes couldn't be published, so the review wasn't"]],
+    ["glab", gl, "verdict timeout reworded", ["on the {action} step, so \\", "on the {action} step, and so \\"]],
+    ["glab", gl, "comment timeout reworded", ["may or may not have been posted. Check the merge", "may have been posted. Check the merge"]],
+    ["glab", gl, "posted lead reworded", ['"The review was posted, but "', '"The review went up, but "']],
+    ["bitbucket", bb, "posted lead reworded", ['"The review was posted, but "', '"The review went up, but "']],
+    ["glab", gl, "posted lead missing", ["let posted = if landed", "let lead = if landed"]],
+    ["bitbucket", bb, "posted lead missing", ["let posted = if landed", "let lead = if landed"]],
   ];
   for (const [kind, src, label, [from, to]] of mutants) {
     const mutant = src.replace(from, to);

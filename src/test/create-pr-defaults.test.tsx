@@ -24,8 +24,10 @@ import {
 import { CreatePrDialog } from "@/features/pulls/CreatePrDialog";
 import {
   BRANCH_PLACEHOLDER,
+  defaultPrPair,
   forgeStatusArm,
   forgeUnchosenSide,
+  PARENT_FETCHING_COPY,
   UNCHOSEN_COPY,
 } from "@/features/pulls/pr-branch-defaults";
 import { keptLocalPrReason } from "@/features/repository/keep-local-copy";
@@ -37,10 +39,13 @@ import {
   gitBranches,
   gitDefaultBranch,
   gitFetchRemote,
+  gitRemoteAdd,
   gitRemoteBranches,
+  gitRemoteDefaultBranch,
   gitRemotes,
   gitStatus,
 } from "@/lib/git/api";
+import { remotesOptions, repoKeys } from "@/lib/git/queries";
 import type {
   Branch,
   CommitSummary,
@@ -77,6 +82,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitStatus: vi.fn(),
   gitDefaultBranch: vi.fn(),
   gitFetchRemote: vi.fn(),
+  gitRemoteAdd: vi.fn(),
   forgePrCreate,
   forgePrComment: vi.fn(async () => ({ failedAttachments: [] })),
   gitRemoteDefaultBranch: vi.fn(async () => "main"),
@@ -289,6 +295,12 @@ async function expectGenerateHeld(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps implementations: drop the ones a test installs and
+  // nothing below re-installs (setRepo sets the three shell reads per test).
+  vi.mocked(gitRemoteAdd).mockReset();
+  vi.mocked(gitStatus).mockReset();
+  vi.mocked(gitDefaultBranch).mockReset();
+  vi.mocked(gitBranches).mockReset();
   useUiStore.setState({ repoPath: REPO });
   usePrCreateStore.setState({ byRepo: {} });
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
@@ -299,6 +311,7 @@ beforeEach(() => {
   vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
   vi.mocked(gitBranchDiff).mockReturnValue(new Promise(() => undefined));
   vi.mocked(gitFetchRemote).mockResolvedValue(undefined);
+  vi.mocked(gitRemoteDefaultBranch).mockResolvedValue("main");
   // No forge answer and only origin by default: the lens gate stays off.
   vi.mocked(forgeStatus).mockReturnValue(new Promise(() => undefined));
   vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
@@ -332,14 +345,11 @@ describe("CreatePrDialog opened with nothing handed in, own repository", () => {
     setRepo({ current: "main", defaultBranch: "main" });
     const user = userEvent.setup();
     const { client } = await openDialog();
-    await expectGenerateHeld(user, client, [
-      "repo",
-      REPO,
-      "compare",
-      "refs/heads/main",
-      "",
-      "ahead",
-    ]);
+    await expectGenerateHeld(
+      user,
+      client,
+      repoKeys.branchAhead(REPO, "refs/heads/main", ""),
+    );
     expectHeld(UNCHOSEN_COPY.head);
   });
 
@@ -352,7 +362,7 @@ describe("CreatePrDialog opened with nothing handed in, own repository", () => {
     await user.click(await screen.findByRole("option", { name: "feat" }));
     expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
     expect(mergeField()).toHaveTextContent("feat");
-    expect(document.activeElement).not.toBe(titleInput());
+    expect(document.activeElement).toBe(mergeField());
   });
 
   it("starts from the current branch and the default branch elsewhere (M2)", async () => {
@@ -374,14 +384,11 @@ describe("CreatePrDialog opened with nothing handed in, own repository", () => {
     expect(screen.getByText(UNCHOSEN_COPY.base)).toBeInTheDocument();
     expect(document.activeElement).toBe(baseField());
     expectHeld(UNCHOSEN_COPY.base);
-    await expectGenerateHeld(user, client, [
-      "repo",
-      REPO,
-      "compare",
-      "",
-      "refs/heads/feat",
-      "ahead",
-    ]);
+    await expectGenerateHeld(
+      user,
+      client,
+      repoKeys.branchAhead(REPO, "", "refs/heads/feat"),
+    );
   });
 
   it("leaves Merge unchosen on a detached HEAD, never the first branch (M4)", async () => {
@@ -528,14 +535,11 @@ describe("CreatePrDialog on the parent target", () => {
     expect(
       await screen.findByText("Fetching upstream branches…"),
     ).toBeInTheDocument();
-    await expectGenerateHeld(user, client, [
-      "repo",
-      REPO,
-      "compare",
-      "",
-      "refs/heads/main",
-      "ahead",
-    ]);
+    await expectGenerateHeld(
+      user,
+      client,
+      repoKeys.branchAhead(REPO, "", "refs/heads/main"),
+    );
     expect(createButton()).toBeDisabled();
     await tryEverySubmit(user);
     expect(forgePrCreate).not.toHaveBeenCalled();
@@ -601,10 +605,18 @@ describe("forgeUnchosenSide", () => {
       head: "feat",
       base: "main",
       baseLoading: false,
+      readFailed: false,
       targetIsParent: false,
       parentBase: "",
       ...over,
     });
+
+  it("never asks for Base while the parent's branches couldn't be read", () => {
+    expect(
+      side({ base: "", targetIsParent: true, readFailed: true }),
+    ).toBeNull();
+    expect(side({ head: "", base: "", readFailed: true })).toBe("head");
+  });
 
   it("asks for Merge first, loading or not", () => {
     expect(side({ head: "", base: "" })).toBe("head");
@@ -634,9 +646,33 @@ describe("forgeUnchosenSide", () => {
   });
 });
 
+describe("defaultPrPair", () => {
+  const pair = (over: Partial<Parameters<typeof defaultPrPair>[0]>) =>
+    defaultPrPair({
+      handedHead: undefined,
+      handedBase: undefined,
+      current: "main",
+      defaultBranch: "main",
+      parentTarget: false,
+      ...over,
+    });
+
+  it("keeps the current branch as Merge when only a base is handed in", () => {
+    expect(pair({ handedBase: "release" })).toEqual({
+      head: "main",
+      base: "release",
+    });
+  });
+
+  it("leaves Merge unchosen on the default branch with nothing handed in (M1)", () => {
+    expect(pair({})).toEqual({ head: "", base: "main" });
+  });
+});
+
 describe("forgeStatusArm", () => {
   const arm = (over: Partial<Parameters<typeof forgeStatusArm>[0]>) =>
     forgeStatusArm({
+      parentReadFailed: false,
       baseLoading: false,
       fetchError: false,
       unchosen: null,
@@ -654,6 +690,15 @@ describe("forgeStatusArm", () => {
 
   it("keeps the unchosen line over an empty side", () => {
     expect(arm({ unchosen: "base", sideEmpty: true })).toBe("unchosen");
+  });
+
+  it("ranks a failed parent read first, a refetch's pending included", () => {
+    expect(
+      arm({ parentReadFailed: true, baseLoading: true, unchosen: "head" }),
+    ).toBe("parentReadFailed");
+    expect(arm({ parentReadFailed: true, sideEmpty: true })).toBe(
+      "parentReadFailed",
+    );
   });
 
   it("ranks the upstream lines first", () => {
@@ -736,6 +781,263 @@ describe("CreatePrDialog unchosen reason carrier", () => {
   });
 });
 
+describe("CreatePrDialog unchosen paths across a target change", () => {
+  it("gives the unchosen reason, not the draft's, when Fork leaves Base unchosen mid-generate", async () => {
+    forkWithUpstream();
+    setRepo({
+      current: "feat",
+      defaultBranch: null,
+      branches: ["aaa-old", "feat"],
+    });
+    const user = userEvent.setup();
+    await openDialog();
+    await waitFor(() =>
+      expect(aheadBases().at(-1)).toBe("refs/remotes/upstream/main"),
+    );
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await user.click(generateButton());
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalled());
+    // A running draft swaps Generate for its Cancel.
+    expect(screen.queryByRole("button", { name: "Generate" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Fork" }));
+    await waitFor(() =>
+      expect(baseField()).toHaveTextContent(BRANCH_PLACEHOLDER),
+    );
+    // A running draft swaps Generate for its Cancel.
+    expect(screen.queryByRole("button", { name: "Generate" })).toBeNull();
+    expectHeld(UNCHOSEN_COPY.base);
+  });
+
+  it("keeps Merge unchosen and takes the parent's base when Add upstream lands", async () => {
+    vi.mocked(loadSettings).mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      recentRepos: [
+        { path: REPO, name: "repo", isFork: true, forkParent: "octo/project" },
+      ],
+    } as typeof DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      { name: "release", remote: "upstream", lastCommitDate: "" },
+    ] as RemoteBranch[]);
+    vi.mocked(gitRemoteDefaultBranch).mockResolvedValue("release");
+    vi.mocked(gitRemoteAdd).mockImplementation(async () => {
+      vi.mocked(gitRemotes).mockResolvedValue(["origin", "upstream"]);
+    });
+    setRepo({ current: "main", defaultBranch: "main" });
+    const user = userEvent.setup();
+    await openDialog();
+    expect(mergeField()).toHaveTextContent(BRANCH_PLACEHOLDER);
+    expect(baseField()).toHaveTextContent("main");
+    await user.click(
+      await screen.findByRole("button", { name: "Add upstream remote" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Parent" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+    await waitFor(() => expect(baseField()).toHaveTextContent("release"));
+    expect(mergeField()).toHaveTextContent(BRANCH_PLACEHOLDER);
+    expect(screen.getByText(UNCHOSEN_COPY.head)).toBeInTheDocument();
+    expect(gitBranchAhead).not.toHaveBeenCalled();
+    expectHeld(UNCHOSEN_COPY.head);
+  });
+});
+
+describe("CreatePrDialog when the parent's branches can't be read", () => {
+  const READ_LINE = /^Couldn't read upstream branches: /;
+  const retryButton = () => screen.getByRole("button", { name: "Retry" });
+
+  /** The parent read rejects while `failing.now`; a test may swap in its own
+   *  pending answer through `failing.next`. */
+  function failParentRead() {
+    const failing: {
+      now: boolean;
+      next: Promise<RemoteBranch[]> | null;
+    } = { now: true, next: null };
+    vi.mocked(gitRemoteBranches).mockImplementation(async () => {
+      if (failing.next) return failing.next;
+      if (failing.now) throw new Error("refs boom");
+      return [
+        { name: "main", remote: "upstream", lastCommitDate: "" },
+      ] as RemoteBranch[];
+    });
+    forkWithUpstream();
+    setRepo({ current: "feat", defaultBranch: "main" });
+    return failing;
+  }
+
+  it("says so with Retry, holds Create on that line once, and asks for no Base", async () => {
+    const failing = failParentRead();
+    let reject!: (e: unknown) => void;
+    failing.next = new Promise((_, r) => {
+      reject = r;
+    });
+    await openDialog();
+    const loading = await screen.findByText(PARENT_FETCHING_COPY);
+    const loadingRegion = loading.closest('[role="status"]');
+    expect(loadingRegion).not.toBeNull();
+    failing.next = null;
+    await act(async () => reject(new Error("refs boom")));
+    const line = await screen.findByText(READ_LINE);
+    // Mounted before the failure reached it, so only its text changed.
+    expect(line.closest('[role="status"]')).toBe(loadingRegion);
+    const sentence = line.textContent ?? "";
+    expect(retryButton()).toBeInTheDocument();
+    expect(baseField()).not.toHaveTextContent(BRANCH_PLACEHOLDER);
+    expect(baseField()).toHaveAttribute("data-disabled");
+    expect(screen.queryByText(UNCHOSEN_COPY.base)).toBeNull();
+    expectHeld(sentence);
+    expect(screen.getAllByText(sentence)).toHaveLength(1);
+    expect(describedIds()).toEqual([line.id]);
+    // The sentence alone is the live region; Retry stays out of it.
+    const region = line.closest('[role="status"]');
+    expect(region).not.toBeNull();
+    expect(region?.textContent).toBe(sentence);
+    expect(generateButton()).toBeDisabled();
+  });
+
+  /** A parent read that stays in flight until the test answers it. */
+  function holdParentRead(failing: ReturnType<typeof failParentRead>) {
+    let resolve!: (rows: RemoteBranch[]) => void;
+    failing.now = false;
+    failing.next = new Promise((r) => {
+      resolve = r;
+    });
+    return () =>
+      act(async () => {
+        failing.next = null;
+        resolve([
+          { name: "main", remote: "upstream", lastCommitDate: "" },
+        ] as RemoteBranch[]);
+      });
+  }
+
+  it("leaves focus on Fork when a Retry lands after the target moved", async () => {
+    const failing = failParentRead();
+    const user = userEvent.setup();
+    await openDialog();
+    await screen.findByText(READ_LINE);
+    const answer = holdParentRead(failing);
+    await user.click(retryButton());
+    expect(await screen.findByText(PARENT_FETCHING_COPY)).toBeInTheDocument();
+    const fork = screen.getByRole("button", { name: "Fork" });
+    await user.click(fork);
+    await answer();
+    await settle();
+    expect(document.activeElement).toBe(fork);
+  });
+
+  it("leaves focus alone when the parent target goes away under a focused Retry", async () => {
+    failParentRead();
+    const { client } = await openDialog();
+    await screen.findByText(READ_LINE);
+    retryButton().focus();
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    await act(async () => {
+      await client.invalidateQueries({
+        queryKey: remotesOptions(REPO).queryKey,
+      });
+    });
+    await settle();
+    // The gate is off: no target picker, so no failed line and no Retry.
+    expect(screen.queryByRole("button", { name: "Fork" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(document.activeElement).not.toBe(titleInput());
+  });
+
+  it("leaves focus in Description when a Retry lands after the user moved there", async () => {
+    const failing = failParentRead();
+    const user = userEvent.setup();
+    await openDialog();
+    await screen.findByText(READ_LINE);
+    const answer = holdParentRead(failing);
+    await user.click(retryButton());
+    expect(await screen.findByText(PARENT_FETCHING_COPY)).toBeInTheDocument();
+    const description = screen.getByRole("textbox", { name: "Description" });
+    await user.click(description);
+    await answer();
+    await settle();
+    await waitFor(() => expect(baseField()).toHaveTextContent("main"));
+    expect(document.activeElement).toBe(description);
+  });
+
+  it("holds the line and Retry through a refetch Retry didn't start, then lands on Title", async () => {
+    const failing = failParentRead();
+    const { client } = await openDialog();
+    await screen.findByText(READ_LINE);
+    retryButton().focus();
+    const answer = holdParentRead(failing);
+    // What a local write's settle does to the repo's reads.
+    await act(async () => {
+      void client.invalidateQueries({ queryKey: ["repo", REPO] });
+    });
+    expect(await screen.findByText(PARENT_FETCHING_COPY)).toBeInTheDocument();
+    expect(retryButton()).toHaveAttribute("aria-disabled", "true");
+    expect(document.activeElement).toBe(retryButton());
+    await answer();
+    await settle();
+    await waitFor(() => expect(baseField()).toHaveTextContent("main"));
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(document.activeElement).toBe(titleInput());
+  });
+
+  it("fills Base on a Retry that succeeds and lands on an empty Title", async () => {
+    const failing = failParentRead();
+    const user = userEvent.setup();
+    await openDialog();
+    await screen.findByText(READ_LINE);
+    failing.now = false;
+    await user.click(retryButton());
+    await settle();
+    await waitFor(() => expect(baseField()).toHaveTextContent("main"));
+    expect(screen.queryByText(READ_LINE)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(document.activeElement).toBe(titleInput());
+  });
+
+  it("lands on a typed Title after a Retry that succeeds", async () => {
+    const failing = failParentRead();
+    const user = userEvent.setup();
+    await openDialog();
+    await screen.findByText(READ_LINE);
+    await user.type(titleInput(), "A title");
+    failing.now = false;
+    await user.click(retryButton());
+    await settle();
+    await waitFor(() => expect(baseField()).toHaveTextContent("main"));
+    expect(document.activeElement).toBe(titleInput());
+    expect(titleInput()).toHaveValue("A title");
+  });
+
+  it("keeps focus on a held Retry while it runs and after it fails again", async () => {
+    const failing = failParentRead();
+    const user = userEvent.setup();
+    await openDialog();
+    await screen.findByText(READ_LINE);
+    let reject!: (e: unknown) => void;
+    failing.next = new Promise((_, r) => {
+      reject = r;
+    });
+    await user.click(retryButton());
+    expect(await screen.findByText(PARENT_FETCHING_COPY)).toBeInTheDocument();
+    expect(retryButton()).toHaveAttribute("aria-disabled", "true");
+    expect(document.activeElement).toBe(retryButton());
+    expectHeld(PARENT_FETCHING_COPY);
+    expect(screen.getAllByText(PARENT_FETCHING_COPY)).toHaveLength(1);
+    failing.next = null;
+    await act(async () => reject(new Error("refs boom again")));
+    expect(await screen.findByText(READ_LINE)).toHaveTextContent(
+      "refs boom again",
+    );
+    await waitFor(() =>
+      expect(retryButton()).not.toHaveAttribute("aria-disabled"),
+    );
+    expect(document.activeElement).toBe(retryButton());
+  });
+});
+
 describe("CreatePrDialog Generate title", () => {
   const PLAIN = "Generate the title and description with AI";
 
@@ -744,10 +1046,9 @@ describe("CreatePrDialog Generate title", () => {
     const { client } = await openDialog();
     // A cached count for the half-empty pair: nothing to merge can't hold it.
     act(() => {
-      client.setQueryData(
-        ["repo", REPO, "compare", "refs/heads/main", "", "ahead"],
-        [COMMIT],
-      );
+      client.setQueryData(repoKeys.branchAhead(REPO, "refs/heads/main", ""), [
+        COMMIT,
+      ]);
     });
     await settle();
     expect(generateButton()).toHaveAttribute("title", PLAIN);

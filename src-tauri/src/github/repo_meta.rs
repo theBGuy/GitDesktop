@@ -494,7 +494,11 @@ pub(crate) mod tests {
     /// The first map in `body`: after `anchor`, with the row's noun in its own statement.
     /// A rebinding map is the `let result = result.map_err(` statement at the run's own
     /// indentation, after the last counted eviction and directly before the statement
-    /// holding `result?`. Returns where the text the next map is read from starts.
+    /// holding `result?`. Returns where the text the next map is read from starts. A
+    /// non-rebinding map is rejected as discarded when the text after the previous `;`, `{`
+    /// or `}` opens with `let _ =` and its statement (to the first `;` after the map) does
+    /// not end in `?`. Not seen: a statement with a brace ahead of the map (a `json!({..})`
+    /// argument), and the spellings `_ = ...`, `.ok()` and `drop(...)`.
     fn hedge_at(body: &str, anchor: &str, token: &str, rebinds: bool) -> Option<usize> {
         let map = body.find("timed_out_write(")?;
         let statement_end = map + body[map..].find(';')? + 1;
@@ -504,7 +508,25 @@ pub(crate) mod tests {
             return None;
         }
         if !rebinds {
-            return Some(statement_end);
+            // The statement starts after the previous `;`, `{` or `}` outside a string (a
+            // `|e| {` closure's brace is inside it), and a `let _ =` there discards the map.
+            let mut in_string = false;
+            let start = body[..map]
+                .char_indices()
+                .rev()
+                .find(|&(i, c)| {
+                    if c == '"' && !body[..i].ends_with('\\') {
+                        in_string = !in_string;
+                    }
+                    let closure = c == '{' && body[..i].trim_end().ends_with('|');
+                    !in_string && matches!(c, ';' | '{' | '}') && !closure
+                })
+                .map_or(0, |(i, _)| i + 1);
+            // A `?` closing the statement propagates the mapped error, so only its absence
+            // makes `let _ =` swallow it.
+            let propagates = body[..statement_end - 1].trim_end().ends_with('?');
+            let discarded = body[start..map].trim_start().starts_with("let _ =") && !propagates;
+            return (!discarded).then_some(statement_end);
         }
         let indent = |at: usize| {
             let start = body[..at].rfind('\n').map_or(0, |n| n + 1);
@@ -1140,6 +1162,7 @@ pub(crate) mod tests {
                 true,
             ),
         ];
+        let mut propagating = 0;
         for &(source, name, anchor, token, count, evicts) in rows {
             // A two-map row's later write: (text of its own run, whether its map rebinds).
             let later: &[(&str, bool)] = match name {
@@ -1159,6 +1182,52 @@ pub(crate) mod tests {
             assert!(!holds(&deleted), "{name}: a deleted map must flip");
             let ahead = deleted.replacen(anchor, &format!("{fake}{anchor}"), 1);
             assert!(!holds(&ahead), "{name}: a map ahead of the write must flip");
+            // Each non-rebinding map's statement prefixed with `let _ =` discards it and must
+            // flip. Its first line: the one after a line ending `;`, `}` or a non-closure `{`.
+            let at_maps: Vec<usize> = body
+                .match_indices("timed_out_write(")
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                at_maps.len(),
+                maps.len(),
+                "{name}: one timed_out_write per map"
+            );
+            for (&at, &(_, rebinds)) in at_maps.iter().zip(&maps) {
+                if rebinds {
+                    continue;
+                }
+                let line_start = |end: usize| body[..end].rfind('\n').map_or(0, |n| n + 1);
+                let mut start = line_start(at);
+                while start > 0 {
+                    let prev = body[..start - 1].trim_end();
+                    let ends = |s: &str| prev.ends_with(s);
+                    if ends(";") || ends("}") || (ends("{") && !ends("| {")) {
+                        break;
+                    }
+                    start = line_start(start - 1);
+                }
+                let lead = start + body[start..].len() - body[start..].trim_start().len();
+                // Kept `?` propagates the error (correct code, must hold); without it the
+                // error is swallowed and must flip.
+                let semi = at + body[at..].find(';').unwrap();
+                let kept = format!("{}let _ = {}", &body[..lead], &body[lead..]);
+                let swallowed = match body[..semi].trim_end().strip_suffix('?') {
+                    Some(before) => {
+                        assert!(holds(&kept), "{name}: a propagating `let _ =` must hold");
+                        propagating += 1;
+                        let q = before.len();
+                        format!(
+                            "{}let _ = {}{}",
+                            &body[..lead],
+                            &body[lead..q],
+                            &body[q + 1..]
+                        )
+                    }
+                    None => kept,
+                };
+                assert!(!holds(&swallowed), "{name}: a discarded map must flip");
+            }
             if count > 1 {
                 let last = body.rfind("timed_out_write(").unwrap();
                 let second = format!("{}mapped({}", &body[..last], &body[last + 16..]);
@@ -1227,6 +1296,10 @@ pub(crate) mod tests {
                 assert!(!holds(&arm), "{name}: a map on one arm must flip");
             }
         }
+        assert!(
+            propagating > 0,
+            "no row ran the propagating `let _ =` control"
+        );
     }
 
     #[test]

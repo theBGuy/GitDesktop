@@ -4021,7 +4021,8 @@ async fn glab_write_fields(
 }
 
 /// `run_glab` for a write whose timeout may still have landed: its Err says so for
-/// `write`. Reads, and the writes the roster pin lists as bare, don't go through it.
+/// `write`. Not the only hedged path: `glab_write_fields` hedges JSON-body writes, and some
+/// writes map `timed_out_write` at their own run.
 async fn glab_write(repo_path: &str, args: &[&str], write: LandedWrite) -> AppResult<GlabOutput> {
     run_glab(Some(repo_path), args, GLAB_NETWORK_TIMEOUT)
         .await
@@ -5261,25 +5262,37 @@ mod attach_tests {
 
     /// Each parenthesised review wrap embeds `paren_parts`' split of the step's error, bound
     /// between the error's binding and the wrap, so a multi-line cause closes the
-    /// parenthesis on line one. The roster is every `({first}){rest}` wrap in the function.
+    /// parenthesis on line one. The roster is every `({first}){rest}` wrap in `review_submit`
+    /// and in `verdict_step_error`, which takes the verdict step's error as its parameter.
     #[test]
     fn review_wraps_split_the_error_they_embed() {
         use crate::github::repo_meta::tests::wiring_body;
         const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
-        let body = wiring_body(include_str!("gitlab.rs"), "review_submit");
-        let wraps = [
-            "review comments as drafts before the failure",
-            "The review's draft notes couldn't be published",
-            "The review was posted, but the {action} step failed",
-            "while publishing the review's draft notes",
+        let rosters: [(&str, &[&str]); 2] = [
+            (
+                "review_submit",
+                &[
+                    "review comments as drafts before the failure",
+                    "The review's draft notes couldn't be published",
+                    "while publishing the review's draft notes",
+                ],
+            ),
+            (
+                "verdict_step_error",
+                &["The review was posted, but the {action} step failed"],
+            ),
         ];
         let split = |body: &str, wrap: &str| {
             body.find(wrap).is_some_and(|at| {
                 let before = &body[..at];
-                let start = [before.rfind("if let Err(e)"), before.rfind("map_err(|e|")]
-                    .into_iter()
-                    .flatten()
-                    .max();
+                let start = [
+                    before.rfind("if let Err(e)"),
+                    before.rfind("map_err(|e|"),
+                    before.rfind("(e: AppError"),
+                ]
+                .into_iter()
+                .flatten()
+                .max();
                 let tail = &body[at..];
                 let end = tail.find("))").unwrap_or(tail.len());
                 start.is_some_and(|s| {
@@ -5288,20 +5301,159 @@ mod attach_tests {
                 }) && tail[..end].contains("({first}){rest}")
             })
         };
-        for wrap in wraps {
-            assert!(split(&body, wrap), "{wrap}\n{body}");
-            let call = body[..body.find(wrap).unwrap()].rfind(SPLIT).unwrap();
-            let unsplit = format!(
-                "{}let (first, rest) = (e.to_string(), String::new());{}",
-                &body[..call],
-                &body[call + SPLIT.len()..]
+        for (name, wraps) in rosters {
+            let body = wiring_body(include_str!("gitlab.rs"), name);
+            for wrap in wraps {
+                assert!(split(&body, wrap), "{wrap}\n{body}");
+                let call = body[..body.find(wrap).unwrap()].rfind(SPLIT).unwrap();
+                let unsplit = format!(
+                    "{}let (first, rest) = (e.to_string(), String::new());{}",
+                    &body[..call],
+                    &body[call + SPLIT.len()..]
+                );
+                assert!(!split(&unsplit, wrap), "{wrap}: an unsplit error must flip");
+            }
+            assert_eq!(
+                body.matches("({first}){rest}").count(),
+                wraps.len(),
+                "{name}: an unlisted parenthesised wrap"
             );
-            assert!(!split(&unsplit, wrap), "{wrap}: an unsplit error must flip");
         }
+    }
+
+    /// Each caller hands the step's bound error to its wrap fn itself (read whitespace-free):
+    /// the comment's binding straight into its call, and the verdict's past no `return`, `?`
+    /// or `let e =` / `let mut e =` rebind into its own.
+    #[test]
+    fn review_callers_hand_the_error_to_their_wrap() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("gitlab.rs");
+        let flat = |name: &str| wiring_body(source, name).replace(char::is_whitespace, "");
+        let comment = "ifletErr(e)=comment_mr(repo_path,number,body,false).await{\
+                       returnErr(change_request_comment_error(e));}";
+        let changes = flat("request_changes_mr");
+        assert!(changes.contains(comment), "{changes}");
+        // No statement in the span may rebind `e` (a shadowing `let e =` / `let mut e =`).
+        let rebinds = |span: &str| {
+            ["{", ";", "}"].iter().any(|b| {
+                span.contains(&format!("{b}lete=")) || span.contains(&format!("{b}letmute="))
+            })
+        };
+        let reaches = |body: &str| {
+            let from = body.find("ifletErr(e)=verdict_result{");
+            let to = body.find("returnErr(verdict_step_error(e,action,&landed));}");
+            from.zip(to).is_some_and(|(f, t)| {
+                f < t && {
+                    let span = &body[f..t];
+                    !span.contains("return") && !span.contains('?') && !rebinds(span)
+                }
+            })
+        };
+        let submit = flat("review_submit");
+        assert!(reaches(&submit), "{submit}");
+        // Controls: the bound error wrapped before the hand-off, and an early return.
+        let wrapped = "AppError::Glab(e.to_string())";
+        let mutant = changes.replacen(
+            "change_request_comment_error(e)",
+            &format!("change_request_comment_error({wrapped})"),
+            1,
+        );
+        assert!(mutant != changes && !mutant.contains(comment), "{mutant}");
+        let mutant = submit.replacen(
+            "verdict_step_error(e,",
+            &format!("verdict_step_error({wrapped},"),
+            1,
+        );
+        assert!(mutant != submit && !reaches(&mutant), "{mutant}");
+        let early = submit.replacen(
+            "ifletErr(e)=verdict_result{",
+            "ifletErr(e)=verdict_result{returnErr(e);",
+            1,
+        );
+        assert!(
+            early != submit && !reaches(&early),
+            "an early verdict return must flip"
+        );
+        for rebind in ["lete=AppError::Glab(e.to_string());", "letmute=e;"] {
+            let shadowed = submit.replacen(
+                "ifletErr(e)=verdict_result{",
+                &format!("ifletErr(e)=verdict_result{{{rebind}"),
+                1,
+            );
+            assert!(
+                shadowed != submit && !reaches(&shadowed),
+                "a rebind of the verdict error must flip: {rebind}"
+            );
+        }
+    }
+
+    /// A timed-out verdict step or change-request comment gets its own may-or-may-not
+    /// sentence, the timed-out write's cause in its parentheses (none when it carried
+    /// none) and its hedge never repeated; any other failure keeps the old sentence.
+    #[test]
+    fn timed_out_review_steps_say_they_may_have_landed() {
+        let timed_out = || crate::forge::write_timed_out("GitLab", LandedWrite::Changed, 150);
+        let hedge = timed_out().to_string();
+        let hedge = hedge.split('\n').next().unwrap().to_string();
+        let landed =
+            "the 3 review note(s) were already posted successfully — do NOT resubmit them; ";
+        let verdict = |e: AppError, action: &str, landed: &str| {
+            let out = verdict_step_error(e, action, landed);
+            assert!(matches!(out, AppError::Glab(_)), "{out:?}");
+            out.to_string()
+        };
+        let staged = verdict(timed_out(), "approve", landed);
         assert_eq!(
-            body.matches("({first}){rest}").count(),
-            wraps.len(),
-            "an unlisted parenthesised wrap"
+            staged,
+            "The review was posted, but GitLab didn't answer in time on the approve step, so it \
+             may or may not have gone through: the 3 review note(s) were already posted \
+             successfully — do NOT resubmit them; check the merge request on GitLab before \
+             running the approve action again. (GitLab CLI timed out after 150s.)"
+        );
+        // A verdict-only review posted nothing, so its sentence starts at the forge.
+        assert_eq!(
+            verdict(timed_out(), "approve", ""),
+            "GitLab didn't answer in time on the approve step, so it may or may not have gone \
+             through: check the merge request on GitLab before running the approve action \
+             again. (GitLab CLI timed out after 150s.)"
+        );
+        assert_eq!(
+            verdict(AppError::WriteTimedOut(hedge.clone()), "request changes", ""),
+            "GitLab didn't answer in time on the request changes step, so it may or may not \
+             have gone through: check the merge request on GitLab before running the request \
+             changes action again."
+        );
+        assert!(!staged.contains(&hedge), "{staged}");
+        assert_eq!(
+            verdict(AppError::Glab("GitLab API error (500): boom".into()), "approve", landed),
+            "The review was posted, but the approve step failed: the 3 review note(s) were \
+             already posted successfully — do NOT resubmit them; only re-run the approve action \
+             on GitLab. (GitLab API error (500): boom)"
+        );
+        assert!(verdict(AppError::Timeout(150), "approve", "").contains(" step failed: "));
+
+        let comment = |e: AppError| {
+            let out = change_request_comment_error(e);
+            assert!(matches!(out, AppError::Glab(_)), "{out:?}");
+            out.to_string()
+        };
+        let posted = comment(timed_out());
+        assert_eq!(
+            posted,
+            "Changes were requested, but GitLab didn't answer in time on the comment, so it may \
+             or may not have been posted. Check the merge request on GitLab before posting it \
+             again. (GitLab CLI timed out after 150s.)"
+        );
+        assert!(!posted.contains(&hedge), "{posted}");
+        assert_eq!(
+            comment(AppError::WriteTimedOut(hedge)),
+            "Changes were requested, but GitLab didn't answer in time on the comment, so it may \
+             or may not have been posted. Check the merge request on GitLab before posting it \
+             again."
+        );
+        assert_eq!(
+            comment(AppError::Glab("GitLab API error (500): boom".into())),
+            "Changes were requested, but posting the comment failed: GitLab API error (500): boom"
         );
     }
 
@@ -5902,7 +6054,10 @@ mod attach_tests {
     /// and a runner or helper call (`merge_mr_args` builds argv and runs nothing, so it
     /// stays out). Out of its sight: a write with no method literal (the rows
     /// `set_mr_draft`, `upload_release_asset`, `request_changes_mr` and the call-site row
-    /// `set_pr_reviewers` are pinned by name only) and a write outside gitlab.rs.
+    /// `set_pr_reviewers` are pinned by name only) and a write outside gitlab.rs. The
+    /// computed set holds only writes whose method token is a literal in their own function,
+    /// so a porcelain subcommand, a GraphQL mutation or arguments built elsewhere are
+    /// invisible to it.
     #[test]
     fn every_gitlab_write_route_hedges_or_is_listed() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -6014,7 +6169,8 @@ mod attach_tests {
             ("set_pr_reviewers", &[changed], 1, 0),
         ];
         // Bare on purpose: an upload is not the write, a review's draft notes and publish
-        // step are the review's own wraps, and the reviewer helper hedges at its caller.
+        // step are the review's own wraps, and the reviewer helper is hedged only at
+        // `set_pr_reviewers`' call (`request_changes_mr`'s add and two restores stay bare).
         let bare_rows: &[Row] = &[
             ("glab_upload", &[], 0, 1),
             ("review_submit", &[], 0, 3),
@@ -6029,12 +6185,25 @@ mod attach_tests {
             58,
             "the hedged write runs"
         );
+        // The reviewer write's map sits in the call's own statement, never on the read-back.
+        let same_statement = |body: &str| {
+            body.find("set_mr_reviewer_ids(").is_some_and(|call| {
+                body[call..]
+                    .find("timed_out_write(")
+                    .is_some_and(|map| !body[call..call + map].contains(';'))
+            })
+        };
         let set_pr = wiring_body(source, "set_pr_reviewers");
-        assert!(precedes(
-            &set_pr,
-            "set_mr_reviewer_ids(",
-            "timed_out_write("
-        ));
+        assert!(same_statement(&set_pr), "{set_pr}");
+        let map =
+            ".map_err(|e| crate::forge::timed_out_write(e, \"GitLab\", LandedWrite::Changed))";
+        let unmapped = set_pr.replacen(map, "", 1);
+        assert_ne!(unmapped, set_pr);
+        let read_back = "mr_reviewers(repo_path, &enc, number)\n        .await";
+        let moved = unmapped.replacen(read_back, &format!("{read_back}{map}"), 1);
+        assert_ne!(moved, unmapped);
+        assert!(!same_statement(&moved), "a map on the read-back must flip");
+        assert!(precedes(&moved, "set_mr_reviewer_ids(", "timed_out_write("));
         let request = wiring_body(source, "request_changes_mr");
         assert_eq!(calls(&request, "set_mr_reviewer_ids("), 3, "{request}");
 
@@ -6342,7 +6511,8 @@ mod attach_tests {
         refuse_moved_origin(&repo, b).await.unwrap();
     }
 
-    /// A failed re-read (no `origin`) is git's own error, never the refusal and never Ok.
+    /// A failed re-read (no `origin`) says nothing was pushed under kind `glab`, never the
+    /// refusal, never a `git` kind and never Ok.
     #[tokio::test]
     async fn the_origin_check_returns_a_failed_read_as_its_own_error() {
         let dir = tempfile::Builder::new()
@@ -6352,7 +6522,11 @@ mod attach_tests {
         let repo = dir.path().to_string_lossy().into_owned();
         origin_git(&repo, &["init", "-q", "-b", "main"]).await;
         let failed = refuse_moved_origin(&repo, "https://gitlab.example/g/a.git").await;
-        assert!(matches!(&failed, Err(AppError::Git { .. })), "{failed:?}");
+        let lead = "Couldn't read the origin remote, so nothing was pushed: ";
+        assert!(
+            matches!(&failed, Err(AppError::Glab(m)) if m.starts_with(lead) && m.len() > lead.len()),
+            "{failed:?}"
+        );
     }
 }
 
@@ -6995,12 +7169,29 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
     // already stood, so a note failure must say so rather than read as a no-op.
     if !body.trim().is_empty() {
         if let Err(e) = comment_mr(repo_path, number, body, false).await {
-            return Err(AppError::Glab(format!(
-                "Changes were requested, but posting the comment failed: {e}"
-            )));
+            return Err(change_request_comment_error(e));
         }
     }
     Ok(())
+}
+
+/// `request_changes_mr`'s error for a comment that failed after the change request stood. A
+/// timed-out comment may have been posted, so it is never told it failed; the parentheses
+/// hold its cause, never its hedge a second time.
+fn change_request_comment_error(e: AppError) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Glab(format!(
+            "Changes were requested, but GitLab didn't answer in time on the comment, so it \
+             may or may not have been posted. Check the merge request on GitLab before posting \
+             it again.{cause}"
+        ));
+    }
+    AppError::Glab(format!(
+        "Changes were requested, but posting the comment failed: {e}"
+    ))
 }
 
 // ── Merge requests (merge) ────────────────────────────────────────────────────
@@ -8979,7 +9170,7 @@ pub async fn review_submit(
     }
 
     // Publish all drafts at once — only when something was staged (see `staged_any`).
-    // A failure here leaves the drafts staged (invisible).
+    // A failure here leaves the drafts staged (invisible); a timeout may have published them.
     if staged_any {
         let publish_endpoint = format!("{draft_endpoint}/bulk_publish");
         run_glab(
@@ -9030,11 +9221,7 @@ pub async fn review_submit(
         } else {
             String::new()
         };
-        let (first, rest) = paren_parts(&e);
-        return Err(AppError::Glab(format!(
-            "The review was posted, but the {action} step failed: {landed}only re-run the \
-             {action} action on GitLab. ({first}){rest}"
-        )));
+        return Err(verdict_step_error(e, action, &landed));
     }
 
     Ok(ReviewSubmitOut {
@@ -9042,6 +9229,33 @@ pub async fn review_submit(
         total,
         verdict_applied: verdict != "comment",
     })
+}
+
+/// `review_submit`'s error for a verdict step that failed after the review posted, with
+/// `landed` naming what posted. A timed-out step may have applied the verdict, so it is
+/// never told to re-run; the parentheses hold its cause, never its hedge a second time.
+/// With nothing landed (a verdict-only review) the timed-out sentence claims no post.
+fn verdict_step_error(e: AppError, action: &str, landed: &str) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        let posted = if landed.is_empty() {
+            ""
+        } else {
+            "The review was posted, but "
+        };
+        return AppError::Glab(format!(
+            "{posted}GitLab didn't answer in time on the {action} step, so \
+             it may or may not have gone through: {landed}check the merge request on GitLab \
+             before running the {action} action again.{cause}"
+        ));
+    }
+    let (first, rest) = paren_parts(&e);
+    AppError::Glab(format!(
+        "The review was posted, but the {action} step failed: {landed}only re-run the \
+         {action} action on GitLab. ({first}){rest}"
+    ))
 }
 
 /// The award endpoint for a subject: the issue/MR body (`note_id` None) or one
@@ -9973,9 +10187,10 @@ pub async fn create_mr(
     }
     let staged = glab_attach_checks(body, attachments, false).await?;
 
-    // Every read the create needs runs before the push, so a miss pushes nothing. This one
-    // `origin` read fixes the project path and the push credentials; each glab call and the
-    // push still resolve `origin` themselves.
+    // Every read the create needs runs before the push, so a miss pushes nothing; only the
+    // uploads re-check their staged files after it. This one `origin` read fixes the project
+    // path the glab endpoints use and the push credentials; glab's host routing and the push
+    // still resolve `origin` on their own.
     let origin =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
     // Same http gate as `publish_repo`: inert entries aren't worth a hard `GlabNotFound`.
@@ -10043,8 +10258,10 @@ pub async fn create_mr(
 }
 
 /// `create_mr`'s Err after the push (an upload or the POST), led by the push fact so a
-/// retry needn't re-push; a timeout keeps its may-have-landed sentence and a missing glab
-/// its own kind. The frontend keys on the lead (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
+/// retry needn't re-push. Only the POST passes a timeout (its may-have-landed sentence) or a
+/// missing glab through: `glab_upload` makes every run error an `upload_refusal`, so an
+/// upload's error always takes the lead. The frontend keys on the lead
+/// (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
 fn mr_post_error(e: AppError) -> AppError {
     if matches!(e, AppError::WriteTimedOut(_) | AppError::GlabNotFound) {
         return e;
@@ -10067,15 +10284,22 @@ fn origin_unchanged(captured: &str, fresh: &str) -> bool {
 
 /// Refuses the create when an uncached read of `origin` differs from `captured` (the
 /// remote-URL cache could answer with the capture itself), dropping the cached URL so a
-/// retry reads the new one. A failed read is its own error. It narrows the window to the
-/// push's lock wait and git's own read of `origin`, and cannot close it.
+/// retry reads the new one. A failed or timed-out read reports "nothing was pushed" under
+/// kind `glab`, so it never reads as a failed push. It narrows the window to the push's lock
+/// wait and git's own read of `origin`, and cannot close it.
 async fn refuse_moved_origin(repo_path: &str, captured: &str) -> AppResult<()> {
     let out = crate::git::runner::run_git(
         Some(repo_path),
         &["remote", "get-url", "origin"],
         crate::git::runner::DEFAULT_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        let detail = crate::forge::error_detail(e);
+        AppError::Glab(format!(
+            "Couldn't read the origin remote, so nothing was pushed: {detail}"
+        ))
+    })?;
     if origin_unchanged(captured, &out.stdout_lossy()) {
         return Ok(());
     }

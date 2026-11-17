@@ -648,6 +648,21 @@ pub(crate) fn paren_parts(e: &AppError) -> (String, String) {
     }
 }
 
+/// A timed-out write's technical cause (the first non-empty line after its hedge line,
+/// trimmed: the CLI or transport text, never a paragraph appended after it), for a wrap
+/// that says the hedge in its own words; None for any other error or for one with nothing
+/// after its hedge.
+pub(crate) fn timed_out_cause(e: &AppError) -> Option<&str> {
+    match e {
+        AppError::WriteTimedOut(message) => message
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .find(|line| !line.is_empty()),
+        _ => None,
+    }
+}
+
 /// Drive a set of futures CONCURRENTLY and collect their results in input order — a
 /// tiny local `join_all` so we don't pull in the `futures` crate. All futures share
 /// this task (no spawn), so they may borrow non-`'static` data; each poll advances
@@ -7149,6 +7164,36 @@ mod tests {
                 format!("retrying. ({line1})\n{line2}")
             );
         }
+    }
+
+    /// Only a timed-out write has a cause, and only the first non-empty line after its hedge.
+    #[test]
+    fn timed_out_cause_is_the_first_non_empty_line_after_the_hedge() {
+        let cli = write_timed_out("GitLab", LandedWrite::Changed, 150);
+        assert_eq!(
+            timed_out_cause(&cli),
+            Some("GitLab CLI timed out after 150s.")
+        );
+        // A recovery paragraph appended after the cause line stays out of it.
+        let paragraphs =
+            AppError::WriteTimedOut(format!("{cli}\n\nRun the upload again.\nThen check."));
+        assert_eq!(
+            timed_out_cause(&paragraphs),
+            Some("GitLab CLI timed out after 150s.")
+        );
+        assert_eq!(
+            timed_out_cause(&AppError::WriteTimedOut("hedge\n\n  cause  \n".into())),
+            Some("cause")
+        );
+        for one_line in ["hedge only", "hedge only\n  ", "hedge only\n\n \n"] {
+            assert_eq!(
+                timed_out_cause(&AppError::WriteTimedOut(one_line.into())),
+                None
+            );
+        }
+        let other = AppError::Glab("didn't answer in time.\nrequest timed out".into());
+        assert_eq!(timed_out_cause(&other), None);
+        assert_eq!(timed_out_cause(&AppError::Timeout(150)), None);
     }
 
     /// Empty and JSON replies are values; any other non-empty reply is the hedge.

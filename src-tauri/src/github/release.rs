@@ -663,18 +663,31 @@ pub async fn gh_release_sync_updater_notes(
     .await
     .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed));
     if let Err(e) = upload {
-        return Err(match save_updater_recovery_copy(path).await {
-            Some(saved) => AppError::Gh(format!(
-                "{e}\n\nThe patched {UPDATER_MANIFEST} was saved to {saved} — upload \
+        let recovery = match save_updater_recovery_copy(path).await {
+            Some(saved) => format!(
+                "The patched {UPDATER_MANIFEST} was saved to {saved} — upload \
                  that file to the release to restore the manifest."
-            )),
-            None => AppError::Gh(format!(
-                "{e}\n\nThe patched {UPDATER_MANIFEST} could not be saved locally, so \
+            ),
+            None => format!(
+                "The patched {UPDATER_MANIFEST} could not be saved locally, so \
                  the release may now have no updater manifest."
-            )),
-        });
+            ),
+        };
+        return Err(upload_failure(e, &recovery));
     }
     Ok(())
+}
+
+/// A failed manifest upload with its recovery paragraph appended. A timed-out upload
+/// stays `WriteTimedOut`, so the frontend still reads it as a write that may have landed;
+/// any other failure is `Gh`.
+fn upload_failure(e: AppError, recovery: &str) -> AppError {
+    match e {
+        AppError::WriteTimedOut(message) => {
+            AppError::WriteTimedOut(format!("{message}\n\n{recovery}"))
+        }
+        other => AppError::Gh(format!("{other}\n\n{recovery}")),
+    }
 }
 
 /// Downloads one asset (by exact name, used as the glob pattern) into `dir`.
@@ -1004,5 +1017,34 @@ mod tests {
         assert!(
             patch_updater_notes(r#"{"version":"1.0.0","platforms":[]}"#, "x").is_err()
         );
+    }
+
+    /// A timed-out upload keeps kind `timeout` (its hedge, then its CLI line) under the
+    /// recovery paragraph; any other failure is `Gh` with the same paragraph.
+    #[test]
+    fn a_failed_manifest_upload_keeps_a_timeout_kind() {
+        let recovery = "The patched latest.json was saved to C:/x/latest.json.";
+        let timed_out = crate::forge::timed_out_write(
+            AppError::Timeout(150),
+            "GitHub",
+            crate::forge::LandedWrite::Changed,
+        );
+        let hedge = timed_out.to_string();
+        let out = upload_failure(timed_out, recovery);
+        assert!(
+            matches!(&out, AppError::WriteTimedOut(m) if *m == format!("{hedge}\n\n{recovery}")),
+            "{out:?}"
+        );
+        assert!(
+            hedge.contains("\nGitHub CLI timed out after 150s."),
+            "{hedge}"
+        );
+        let failed = upload_failure(AppError::Gh("HTTP 422".into()), recovery);
+        assert!(
+            matches!(&failed, AppError::Gh(m) if *m == format!("HTTP 422\n\n{recovery}")),
+            "{failed:?}"
+        );
+        let bare = upload_failure(AppError::Timeout(150), recovery);
+        assert!(matches!(bare, AppError::Gh(_)), "{bare:?}");
     }
 }

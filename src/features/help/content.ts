@@ -2095,9 +2095,12 @@ or **Request changes**. All three always show: one that isn't usable yet stays o
 disabled, and names what it's waiting on — *available once GitDesktop connects to GitLab*
 (or Bitbucket) — so you can see the option exists and what makes it work.
 **Request changes** requires a summary. Submit posts all your pending drafts as one batch
-review (it works with no drafts too, for a plain verdict + summary). **Submit review…** and
-**Discard pending review** (the app's own review flow, not the unfinished GitHub review
-below) are also available from the command palette ({{kbd:command-palette}}).
+review (it works with no drafts too, for a plain verdict + summary). To keep a retry from
+posting your comments twice, a submit that fails after posting some of its comments or
+summary (or that may have) makes the next **Submit review** ask before sending again, as
+long as the dialog stays open. **Submit review…** and **Discard pending review** (the
+app's own review flow, not the unfinished GitHub review below) are also available from
+the command palette ({{kbd:command-palette}}).
 
 An unfinished review of yours **on GitHub** (started on github.com or by another tool,
 never submitted) is different: the pull request shows a notice at the top, *You have an
