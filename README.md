@@ -559,7 +559,9 @@ in one click.
   pending-review count, then **Submit** with a verdict (Comment / Approve /
   Request changes — all three always shown, one that isn't wired up yet
   disabled and saying what it's waiting on), inserting a
-  **provider-correct suggestion** pre-filled with the selected code.
+  **provider-correct suggestion** pre-filled with the selected code. If a
+  submit fails after part of the review posted (or may have), the next
+  **Submit review** from the same dialog asks before sending it again.
 - **An unfinished GitHub review** (one you started on github.com or with
   another tool and never submitted) says so up front: a notice at the top of
   the pull request offers **Finish on GitHub**, which opens the page where the

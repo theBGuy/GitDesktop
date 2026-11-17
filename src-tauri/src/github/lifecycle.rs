@@ -61,6 +61,9 @@ pub async fn gh_repo_set_archived(repo_path: String, archived: bool) -> AppResul
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -89,6 +92,9 @@ pub async fn gh_repo_rename(repo_path: String, new_name: String) -> AppResult<()
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -119,6 +125,9 @@ pub async fn gh_repo_set_visibility(repo_path: String, visibility: String) -> Ap
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -164,6 +173,9 @@ pub async fn gh_repo_transfer(
             invalidate_repo_meta_after(&destination, &result);
         }
     }
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -182,6 +194,9 @@ pub async fn gh_repo_delete(repo_path: String) -> AppResult<()> {
     )
     .await;
     invalidate_all_repo_meta_after(&result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }

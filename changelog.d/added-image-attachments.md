@@ -14,8 +14,9 @@
   GitHub, an edit whose image fails keeps its dialog open with the image
   still attached, so pressing **Save** again adds it. On GitLab an upload
   is all or nothing: if an image isn't accepted, nothing is posted or saved.
-  Images need GitHub CLI 2.99 or newer on GitHub.com or GitHub Enterprise
-  Cloud with write access to the repository, or GitLab CLI 1.91 or newer;
-  Bitbucket has no image attachments. With some GitHub CLI sign-in
-  types, attaching needs GitHub CLI 2.103.2 or newer, and the app says so
-  when you post.
+  A new merge request's branch is already pushed by then, and the error
+  says so. Images need GitHub CLI 2.99 or newer on GitHub.com or GitHub
+  Enterprise Cloud with write access to the repository, or GitLab CLI 1.91
+  or newer; Bitbucket has no image attachments. With some GitHub CLI
+  sign-in types, attaching needs GitHub CLI 2.103.2 or newer, and the app
+  says so when you post.

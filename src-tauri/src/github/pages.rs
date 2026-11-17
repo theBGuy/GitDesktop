@@ -120,6 +120,9 @@ pub async fn gh_pages_enable(
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -168,7 +171,8 @@ pub async fn gh_pages_update(
         &Value::Object(body).to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -182,6 +186,9 @@ pub async fn gh_pages_disable(repo_path: String) -> AppResult<()> {
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { type RefObject, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL_X_HIDDEN } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
+import { reviewMayHavePosted } from "@/lib/error-summary";
 import type { ReviewVerdict } from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
@@ -27,12 +28,15 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
+import type { PrNoun } from "@/lib/pulls/pr-state";
 import {
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
+import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 
 /**
@@ -76,6 +80,15 @@ function VerdictOption({
   );
 }
 
+/** Cancels the prompt `asked` holds, only while it is still the open one: once
+ *  answered, the store's live request belongs to whoever asked next. */
+function dropAsked(asked: RefObject<ConfirmRequest | null>) {
+  const request = asked.current;
+  asked.current = null;
+  if (request !== null && useConfirm.getState().request === request)
+    request.resolve(false, false);
+}
+
 /**
  * The submit-a-review dialog: a verdict radio (Comment always; Approve / Request
  * changes disabled-with-reason until the provider allows them), an optional summary
@@ -92,6 +105,7 @@ export function SubmitReviewDialog({
   onOpenChange,
   caps,
   remoteLabel,
+  prNoun,
   lens,
 }: {
   repoPath: string;
@@ -100,6 +114,8 @@ export function SubmitReviewDialog({
   onOpenChange: (o: boolean) => void;
   caps: { canApprove: boolean; canRequestChanges: boolean };
   remoteLabel: string;
+  /** What this forge calls the item under review. */
+  prNoun: PrNoun;
   /** The origin|upstream lens the parent PR view resolved. */
   lens: RemoteLens;
 }) {
@@ -118,12 +134,22 @@ export function SubmitReviewDialog({
   // callbacks once the observer loses its listeners (hence `mutateAsync` in the
   // cleanup). Either loss would let a failed or PARTIAL post read as success.
   const mounted = useRef(true);
+  // The prompt this dialog opened. It is repo-scoped, so it would outlive a
+  // same-repo PR switch (which re-keys this dialog) or a parent-side close.
+  const asked = useRef<ConfirmRequest | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      dropAsked(asked);
     };
   }, []);
+  // A parent-side close skips `handleOpenChange`, so it ends the memory here too.
+  useEffect(() => {
+    if (open) return;
+    dropAsked(asked);
+    mayHavePosted.current = false;
+  }, [open]);
 
   const draftList = drafts.data ?? [];
   const count = draftList.length;
@@ -173,6 +199,18 @@ export function SubmitReviewDialog({
   // (forge/model.rs `for_provider`), so a false cap on them means disconnected,
   // and GitHub never reaches the disabled arm (`canWrite ||` at the call site).
   const unavailable = `available once GitDesktop connects to ${remoteLabel}`;
+  // Set by a failure that may have posted part of this review, so the next
+  // Submit asks first: a second post can duplicate its comments.
+  const mayHavePosted = useRef(false);
+  // submit() re-reads these after its prompt, when the press's render is stale.
+  const live = useLatestRef({
+    open,
+    summaryMissing,
+    submitHeld,
+    draftList,
+    summary,
+    effectiveVerdict,
+  });
 
   // Reset transient state whenever the dialog closes (for ANY reason — Cancel,
   // Esc, backdrop, or a successful submit), so a reopen never shows a stale
@@ -183,26 +221,53 @@ export function SubmitReviewDialog({
       setVerdict("comment");
       setSummary("");
       setError(null);
+      mayHavePosted.current = false;
     }
     onOpenChange(next);
   }
 
   async function submit() {
     if (summaryMissing || submitHeld || refuseWhileOffline()) return;
+    let state = { draftList, summary, effectiveVerdict };
+    if (mayHavePosted.current) {
+      const answer = useConfirm.getState().ask({
+        title: "Submit this review again?",
+        body: `The last attempt may have posted some or all of this review on ${remoteLabel}. Submitting again can post the same comments twice. Check the ${prNoun} first.`,
+        confirmLabel: "Submit again",
+        holdOffline: true,
+      });
+      // `ask` sets the request synchronously, so this is the one just opened.
+      const mine = useConfirm.getState().request;
+      asked.current = mine;
+      const ok = await answer;
+      if (asked.current === mine) asked.current = null;
+      const now = live.current;
+      if (
+        !ok ||
+        !mounted.current ||
+        !now.open ||
+        now.summaryMissing ||
+        now.submitHeld ||
+        refuseWhileOffline()
+      )
+        return;
+      state = now;
+    }
     setError(null);
-    const comments: DraftCommentIn[] = draftList.map((d) => ({
+    const comments: DraftCommentIn[] = state.draftList.map((d) => ({
       path: d.path,
       line: d.line,
       side: d.side,
       ...(d.startLine ? { startLine: d.startLine } : {}),
       body: d.body,
     }));
+    const sentSummary = state.summary.trim() || undefined;
     let result: Awaited<ReturnType<typeof submitReview.mutateAsync>>;
     try {
       result = await submitReview.mutateAsync({
         number,
-        verdict: effectiveVerdict,
-        summary: summary.trim() || undefined,
+        verdict: state.effectiveVerdict,
+        summary: sentSummary,
         comments,
       });
     } catch (e) {
@@ -210,6 +275,12 @@ export function SubmitReviewDialog({
       // the message verbatim (on GitLab/Bitbucket it can disclose partial posting,
       // which the user needs to see in full). Unmounted mid-submit, that surface is
       // gone, so the failure rides a toast rather than vanishing.
+      // Set outside the guard: a tab hide also clears `mounted` while the dialog
+      // stays open. A verdict alone has nothing a second post could duplicate.
+      // Limit: a "Posted 0 of N" or "Saved 0 of N" failure with no summary asks.
+      mayHavePosted.current =
+        (sentSummary !== undefined || comments.length > 0) &&
+        reviewMayHavePosted(e);
       if (mounted.current) {
         setError(errorMessage(e));
       } else {

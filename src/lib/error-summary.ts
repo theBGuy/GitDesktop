@@ -787,15 +787,23 @@ function branchPushedFailure(
 }
 
 /** The compound review wraps that put a step's error after a partial-state line
- *  (`request_changes_pr` + `review_submit` in forge/bitbucket.rs,
- *  `request_changes_mr` + `review_submit` in forge/gitlab.rs; tied to those
- *  `format!` literals by scripts/attached-failure-leads.test.mjs). Each `lead`
- *  matches line one up to where the error starts; a lead ending in `(` sets the
- *  error in parentheses, which the network rewrite drops with the error. */
-const PARTIAL_STATE_WRAPS: readonly {
+ *  (GitLab's `review_submit`, `publish_step_error`, `verdict_step_error` and
+ *  `change_request_comment_error`; Bitbucket's `change_request_comment_error`,
+ *  `review_summary_error`, `review_comment_error` and `verdict_step_error`;
+ *  pinned to those `format!` literals by scripts/attached-failure-leads.test.mjs).
+ *  `lead` matches line one up to the error; one ending in `(` sets it in
+ *  parentheses. */
+type PartialStateWrap = {
   kind: AppError["kind"];
   lead: RegExp;
-}[] = [
+  /** The step failed before anything reached the forge, unless its embedded
+   *  error is an unread reply or, under kind `glab`, a bare timeout. */
+  nothingPosted?: boolean;
+  /** A timed-out step's own sentence. It says the step may have gone through, so
+   *  the network rewrite drops its cause and adds no "couldn't reach" sentence. */
+  timedOut?: boolean;
+};
+const PARTIAL_STATE_WRAPS: readonly PartialStateWrap[] = [
   {
     kind: "bitbucket",
     lead: /^Changes were requested, but posting the comment failed: /,
@@ -803,6 +811,7 @@ const PARTIAL_STATE_WRAPS: readonly {
   {
     kind: "bitbucket",
     lead: /^The review summary couldn't be posted, so the review was not submitted: /,
+    nothingPosted: true,
   },
   {
     kind: "bitbucket",
@@ -813,12 +822,33 @@ const PARTIAL_STATE_WRAPS: readonly {
     lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on Bitbucket\. \(/,
   },
   {
+    kind: "bitbucket",
+    lead: /^Changes were requested, but Bitbucket didn't answer in time on the comment, so it may or may not have been posted\. Check the pull request on Bitbucket before posting it again\.(?: \(|$)/,
+    timedOut: true,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^Bitbucket didn't answer in time on the review summary, so it may or may not have been posted\. No review comment and no verdict was sent\. Check the pull request on Bitbucket before retrying\.(?: \(|$)/,
+    timedOut: true,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^Posted \d+ of \d+ review comments, then Bitbucket didn't answer in time on the next one, so it may or may not have been posted\. Nothing after it was sent\. Check the pull request on Bitbucket before retrying\.(?: \(|$)/,
+    timedOut: true,
+  },
+  {
+    kind: "bitbucket",
+    lead: /^(?:The review was posted, but )?Bitbucket didn't answer in time on the (?:approve|request changes) step, so it may or may not have gone through: .*?check the pull request on Bitbucket before running the (?:approve|request changes) action again\.(?: \(|$)/,
+    timedOut: true,
+  },
+  {
     kind: "glab",
     lead: /^Changes were requested, but posting the comment failed: /,
   },
   {
     kind: "glab",
     lead: /^The review summary couldn't be saved as a draft, so the review was not submitted: /,
+    nothingPosted: true,
   },
   {
     kind: "glab",
@@ -830,26 +860,54 @@ const PARTIAL_STATE_WRAPS: readonly {
   },
   {
     kind: "glab",
+    lead: /^GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted\. Check the merge request on GitLab before retrying\.(?: \(|$)/,
+    timedOut: true,
+  },
+  {
+    kind: "glab",
     lead: /^The review was posted, but the (?:approve|request changes) step failed: .*? on GitLab\. \(/,
+  },
+  {
+    kind: "glab",
+    lead: /^(?:The review was posted, but )?GitLab didn't answer in time on the (?:approve|request changes) step, so it may or may not have gone through: .*?check the merge request on GitLab before running the (?:approve|request changes) action again\.(?: \(|$)/,
+    timedOut: true,
+  },
+  {
+    kind: "glab",
+    lead: /^Changes were requested, but GitLab didn't answer in time on the comment, so it may or may not have been posted\. Check the merge request on GitLab before posting it again\.(?: \(|$)/,
+    timedOut: true,
   },
 ];
 
 /** Line one of a compound review failure, or null for any other message. What
  *  already posted decides the retry, so the line outranks the network rewrite,
- *  which instead replaces only the embedded error. */
+ *  which instead replaces only the embedded error (a timed-out step's row drops
+ *  it and keeps the step's own sentence). */
 function partialStateWrap(
   kind: AppError["kind"],
   message: string,
   network: string | null,
 ): string | null {
   const headline = firstMeaningfulLine(message);
+  const match = partialStateMatch(kind, headline);
+  if (match === null) return null;
+  if (network === null) return headline;
+  const lead = match.lead[0];
+  if (match.wrap.timedOut === true) return lead.replace(/ \($/, "");
+  const kept = lead.endsWith("(") ? lead.slice(0, -1) : lead;
+  return `${kept}${network}`;
+}
+
+/** The first `PARTIAL_STATE_WRAPS` row of `kind` whose lead matches `headline`,
+ *  with that match, or null. */
+function partialStateMatch(
+  kind: AppError["kind"],
+  headline: string,
+): { wrap: PartialStateWrap; lead: RegExpExecArray } | null {
   for (const wrap of PARTIAL_STATE_WRAPS) {
     if (wrap.kind !== kind) continue;
     const lead = wrap.lead.exec(headline);
-    if (lead === null) continue;
-    if (network === null) return headline;
-    const kept = lead[0].endsWith("(") ? lead[0].slice(0, -1) : lead[0];
-    return `${kept}${network}`;
+    if (lead !== null) return { wrap, lead };
   }
   return null;
 }
@@ -892,12 +950,39 @@ export function mayHaveLanded(error: unknown): boolean {
       !leads.some((lead) => message.startsWith(lead))
     );
   }
-  const host = UNREAD_REPLY_HOSTS[error.kind];
-  if (host === undefined) return false;
   const sentence = message.startsWith(UNREAD_REPLY_PUSHED)
     ? message.slice(UNREAD_REPLY_PUSHED.length)
     : message;
-  return sentence.startsWith(`${host}${UNREAD_REPLY_LEAD}`);
+  return isUnreadReply(error.kind, sentence);
+}
+
+/** Whether `text` opens with `kind`'s host's unread-reply sentence. */
+function isUnreadReply(kind: AppError["kind"], text: string): boolean {
+  const host = UNREAD_REPLY_HOSTS[kind];
+  return host !== undefined && text.startsWith(`${host}${UNREAD_REPLY_LEAD}`);
+}
+
+/** Whether a failed review submit may have posted part of the review, so a second
+ *  submit could post it twice: a write that `mayHaveLanded`, a compound review
+ *  failure whose `PARTIAL_STATE_WRAPS` row isn't `nothingPosted`, or one whose
+ *  row is but embeds an unread reply (the forge accepted that step) or, under
+ *  kind `glab`, a bare timeout (GitLab's unhedged draft POST may have saved the
+ *  draft, which the next publish posts). */
+export function reviewMayHavePosted(error: unknown): boolean {
+  if (mayHaveLanded(error)) return true;
+  if (!isAppError(error)) return false;
+  const headline = firstMeaningfulLine(error.message ?? "");
+  const match = partialStateMatch(error.kind, headline);
+  if (match === null) return false;
+  if (match.wrap.nothingPosted !== true) return true;
+  const embedded = headline.slice(match.lead.index + match.lead[0].length);
+  const timeoutLead = DISPLAY_LEADS.timeout?.[0];
+  return (
+    isUnreadReply(error.kind, embedded) ||
+    (error.kind === "glab" &&
+      timeoutLead !== undefined &&
+      embedded.startsWith(timeoutLead))
+  );
 }
 
 /** Whether a failed edit still saved its title and base: the one reader of the

@@ -23,6 +23,10 @@ import {
   type CreatePrHost,
   type CreatePrPreset,
 } from "@/features/pulls/CreatePrDialog";
+import {
+  COUNT_FAILED_COPY,
+  COUNTING_COPY,
+} from "@/features/pulls/pr-branch-defaults";
 import { TabPanel } from "@/features/repository/TabPanel";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import { attachmentStoreSizes } from "@/lib/attachments/store";
@@ -38,6 +42,7 @@ import {
   gitBranchAhead,
   gitBranchDiff,
   gitBranches,
+  gitDefaultBranch,
   gitFetchRemote,
   gitRemoteAdd,
   gitRemoteBranches,
@@ -206,6 +211,8 @@ function renderDialog(props: {
   host?: CreatePrHost;
   /** Hosts the dialog in a repository tab, which `hide`/`show` toggle. */
   tab?: boolean;
+  /** Mounts the dialog closed; `reopen` opens it. */
+  closed?: boolean;
   onOpenChange?: (open: boolean) => void;
 }) {
   const client = new QueryClient({
@@ -235,7 +242,7 @@ function renderDialog(props: {
       </QueryClientProvider>
     );
   };
-  const view = render(ui(true));
+  const view = render(ui(!props.closed));
   const setActive = (next: boolean) => {
     active = next;
     view.rerender(ui(isOpen));
@@ -269,6 +276,8 @@ beforeEach(() => {
   usePrCreateStore.setState({ byRepo: {} });
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(gitBranches).mockResolvedValue(LOCALS);
+  // Unknown unless a case resolves it.
+  vi.mocked(gitDefaultBranch).mockReturnValue(new Promise(() => undefined));
   vi.mocked(gitRemoteBranches).mockResolvedValue(REMOTE_BRANCHES);
   vi.mocked(gitBranchAhead).mockResolvedValue([COMMIT]);
   vi.mocked(gitBranchDiff).mockReturnValue(new Promise(() => undefined));
@@ -312,6 +321,236 @@ describe("CreatePrDialog without a preset", () => {
     await waitFor(() =>
       expect(aheadBases()).toContain("refs/remotes/upstream/main"),
     );
+  });
+
+  const ORIGIN_MAIN = {
+    name: "main",
+    remote: "origin",
+    lastCommitDate: "",
+  } as RemoteBranch;
+  const settle = () => act(() => new Promise((r) => setTimeout(r, 50)));
+  const createPrButton = () =>
+    screen.getByRole("button", { name: "Create pull request" });
+  const generateButton = () => screen.getByRole("button", { name: "Generate" });
+  const diffArgs = () => vi.mocked(gitBranchDiff).mock.calls[0].slice(0, 3);
+
+  it("counts and diffs origin's copy of the base when it has one", async () => {
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      ...REMOTE_BRANCHES,
+      ORIGIN_MAIN,
+    ]);
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    expect(gitBranchAhead).toHaveBeenCalledWith(
+      REPO,
+      "refs/remotes/origin/main",
+      "refs/heads/feat",
+    );
+    expect(aheadBases()).not.toContain("refs/heads/main");
+    await user.click(generateButton());
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalledTimes(1));
+    expect(diffArgs()).toEqual([REPO, "refs/remotes/origin/main", "feat"]);
+  });
+
+  it("creates on the bare base while counting origin's copy", async () => {
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      ...REMOTE_BRANCHES,
+      ORIGIN_MAIN,
+    ]);
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Title"), "A title");
+    await user.click(createPrButton());
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    const [repo, base, head] = forgePrCreate.mock.calls[0] as unknown[];
+    expect([repo, base, head]).toEqual([REPO, "main", "feat"]);
+  });
+
+  it("keeps a head equal to its base the same branch when origin has it", async () => {
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      ...REMOTE_BRANCHES,
+      { ...ORIGIN_MAIN, name: "feat" },
+    ]);
+    renderDialog({ defaultBase: "feat" });
+    expect(
+      await screen.findByText("Pick two different branches."),
+    ).toBeInTheDocument();
+    await settle();
+    expect(screen.queryByText(/commits? to merge\./)).toBeNull();
+    expect(gitBranchAhead).not.toHaveBeenCalled();
+  });
+
+  it("counts nothing and says so until the remote-branch read answers", async () => {
+    vi.mocked(gitRemoteBranches).mockReturnValue(new Promise(() => undefined));
+    renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText(COUNTING_COPY)).toBeInTheDocument();
+    await waitFor(() => expect(gitRemoteBranches).toHaveBeenCalled());
+    await settle();
+    expect(aheadBases()).not.toContain("refs/heads/main");
+    expect(screen.getByText(COUNTING_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(/0 commits to merge/)).toBeNull();
+    expect(createPrButton()).toBeDisabled();
+    expect(createPrButton()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("counts the local base when the remote-branch read fails", async () => {
+    vi.mocked(gitRemoteBranches).mockRejectedValue(new Error("refs boom"));
+    renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    expect(aheadBases()).toEqual(["refs/heads/main"]);
+  });
+
+  it("reads no remote branches while closed", async () => {
+    renderDialog({ defaultBase: "main", closed: true });
+    await settle();
+    expect(gitRemoteBranches).not.toHaveBeenCalled();
+  });
+
+  it("counts the parent's ref on the parent target when origin has the base", async () => {
+    forkWithUpstream();
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      ...REMOTE_BRANCHES,
+      ORIGIN_MAIN,
+    ]);
+    renderDialog({ defaultBase: "main" });
+    await waitFor(() =>
+      expect(aheadBases()).toContain("refs/remotes/upstream/main"),
+    );
+    await settle();
+    expect(aheadBases()).not.toContain("refs/remotes/origin/main");
+  });
+
+  it("diffs the parent's ref on the parent target", async () => {
+    forkWithUpstream();
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "dev" });
+    await waitFor(() =>
+      expect(aheadBases()).toContain("refs/remotes/upstream/main"),
+    );
+    await user.click(generateButton());
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalledTimes(1));
+    expect(diffArgs()).toEqual([REPO, "refs/remotes/upstream/main", "feat"]);
+  });
+
+  it("diffs a parent base no local branch carries as the parent's ref", async () => {
+    forkWithUpstream();
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "dev" });
+    await waitFor(() =>
+      expect(aheadBases()).toContain("refs/remotes/upstream/main"),
+    );
+    await user.click(baseField());
+    await user.click(await screen.findByRole("option", { name: "release" }));
+    await waitFor(() =>
+      expect(aheadBases().at(-1)).toBe("refs/remotes/upstream/release"),
+    );
+    await user.click(generateButton());
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalledTimes(1));
+    expect(diffArgs()).toEqual([REPO, "refs/remotes/upstream/release", "feat"]);
+  });
+
+  it("creates on the parent with the bare base", async () => {
+    forkWithUpstream();
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "dev" });
+    await waitFor(() =>
+      expect(aheadBases().at(-1)).toBe("refs/remotes/upstream/main"),
+    );
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Title"), "A title");
+    await user.click(createPrButton());
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    const call = forgePrCreate.mock.calls[0] as unknown[];
+    expect([call[1], call[2], call[9]]).toEqual(["main", "feat", "upstream"]);
+  });
+
+  it("says it is counting while the count has no answer", async () => {
+    vi.mocked(gitBranchAhead).mockReturnValue(new Promise(() => undefined));
+    renderDialog({ defaultBase: "main" });
+    await waitFor(() => expect(gitBranchAhead).toHaveBeenCalled());
+    await settle();
+    expect(screen.getByText(COUNTING_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(/0 commits to merge/)).toBeNull();
+    // Held plainly, as before the count answers today: no reason sentence.
+    expect(createPrButton()).toBeDisabled();
+    expect(createPrButton()).not.toHaveAttribute("aria-describedby");
+    expect(createPrButton()).not.toHaveAccessibleDescription(COUNTING_COPY);
+  });
+
+  it("reads 0 only from a count that answered zero", async () => {
+    vi.mocked(gitBranchAhead).mockResolvedValue([]);
+    renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("0 commits to merge.")).toBeInTheDocument();
+    expect(screen.queryByText(COUNTING_COPY)).toBeNull();
+  });
+
+  it("says a failed count failed, never 0", async () => {
+    vi.mocked(gitBranchAhead).mockRejectedValue(new Error("ref gone"));
+    renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText(COUNT_FAILED_COPY)).toBeInTheDocument();
+    expect(screen.queryByText(/0 commits to merge/)).toBeNull();
+    // Held as before: plainly, with no reason sentence.
+    expect(createPrButton()).toBeDisabled();
+    expect(createPrButton()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("keeps a loaded count when its refresh fails", async () => {
+    const dialog = renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    vi.mocked(gitBranchAhead).mockRejectedValue(new Error("ref gone"));
+    const isAhead = (q: { queryKey: readonly unknown[] }) =>
+      q.queryKey.at(-1) === "ahead";
+    await act(() =>
+      dialog.client
+        .refetchQueries({ predicate: isAhead })
+        .catch(() => undefined),
+    );
+    await waitFor(() =>
+      expect(
+        dialog.client
+          .getQueryCache()
+          .findAll({ predicate: isAhead })
+          .map((q) => q.state.status),
+      ).toContain("error"),
+    );
+    await settle();
+    expect(screen.getByText("1 commit to merge.")).toBeInTheDocument();
+    expect(screen.queryByText(COUNT_FAILED_COPY)).toBeNull();
+  });
+
+  it("keeps origin's ref when a refresh of the remote-branch list fails", async () => {
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      ...REMOTE_BRANCHES,
+      ORIGIN_MAIN,
+    ]);
+    const dialog = renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    vi.mocked(gitRemoteBranches).mockRejectedValue(new Error("refs boom"));
+    await act(() =>
+      dialog.client
+        .refetchQueries({ queryKey: ["repo", REPO, "remote-branches"] })
+        .catch(() => undefined),
+    );
+    await waitFor(() =>
+      expect(
+        dialog.client.getQueryState(["repo", REPO, "remote-branches"])?.status,
+      ).toBe("error"),
+    );
+    await settle();
+    expect(aheadBases()).not.toContain("refs/heads/main");
+    expect(screen.getByText("1 commit to merge.")).toBeInTheDocument();
+  });
+
+  it("never says it is counting for the same branch", async () => {
+    vi.mocked(gitRemoteBranches).mockReturnValue(new Promise(() => undefined));
+    renderDialog({ defaultBase: "feat" });
+    expect(
+      await screen.findByText("Pick two different branches."),
+    ).toBeInTheDocument();
+    await settle();
+    expect(screen.queryByText(COUNTING_COPY)).toBeNull();
   });
 });
 
@@ -470,6 +709,7 @@ describe("CreatePrDialog preset under a lens-gate flip", () => {
 
   it("drops the parent ref once the gate turns off", async () => {
     forkWithUpstream();
+    vi.mocked(gitDefaultBranch).mockResolvedValue("main");
     const user = userEvent.setup();
     const dialog = renderDialog({
       preset: { target: "upstream", base: "release", baseRef: UPSTREAM_REF },
@@ -484,6 +724,28 @@ describe("CreatePrDialog preset under a lens-gate flip", () => {
     await user.click(screen.getByRole("button", { name: "Generate" }));
     await waitFor(() => expect(gitBranchDiff).toHaveBeenCalledTimes(1));
     expect(vi.mocked(gitBranchDiff).mock.calls[0][1]).not.toBe(UPSTREAM_REF);
+  });
+
+  it("leaves Base unchosen once the gate turns off with no default known", async () => {
+    forkWithUpstream();
+    const dialog = renderDialog({
+      preset: { target: "upstream", base: "release", baseRef: UPSTREAM_REF },
+    });
+    await waitFor(() => expect(aheadBases()).toContain(UPSTREAM_REF));
+    const reads = aheadBases().length;
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    await act(() =>
+      dialog.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    expect(
+      // The status line; Generate's reason node repeats the sentence.
+      await screen.findByText("Choose the branch to merge into.", {
+        selector: "p",
+      }),
+    ).toBeInTheDocument();
+    expect(baseField()).toHaveTextContent("Choose a branch");
+    // No guess: nothing counts against a local branch nobody picked.
+    expect(aheadBases().slice(reads)).not.toContain("refs/heads/main");
   });
 });
 

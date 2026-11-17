@@ -1180,6 +1180,9 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     let source = format!("{owner}/{name}");
     let result = run_gh(None, &fork_args(&source), GH_NETWORK_TIMEOUT).await;
     invalidate_repo_meta_after(&source, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Created("fork"))
+    });
     result?;
     // The fork owner is the signed-in user.
     let login = gh_viewer_login_fresh().await?;
@@ -1300,6 +1303,9 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     let method = if star { "PUT" } else { "DELETE" };
     let result = run_gh(None, &["api", "--method", method, &endpoint], GH_NETWORK_TIMEOUT).await;
     invalidate_repo_meta_after(&format!("{owner}/{name}"), &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }

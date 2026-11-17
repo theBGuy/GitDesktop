@@ -149,6 +149,9 @@ pub async fn gh_collaborator_add(
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     let out = result?;
     // 201 returns the invitation object; 204 (immediate grant) returns nothing.
     Ok(!out.stdout_lossy().trim().is_empty())
@@ -171,6 +174,9 @@ pub async fn gh_collaborator_remove(repo_path: String, username: String) -> AppR
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -239,7 +245,8 @@ pub async fn gh_invitation_update(
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -257,6 +264,7 @@ pub async fn gh_invitation_cancel(repo_path: String, id: String) -> AppResult<()
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }

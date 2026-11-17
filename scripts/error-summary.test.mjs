@@ -26,6 +26,7 @@ const {
   isTransportError,
   otherChangesSaved,
   presentError,
+  reviewMayHavePosted,
   RUST_TRANSPORT_PHRASES,
 } = await import("@/lib/error-summary");
 
@@ -1581,6 +1582,103 @@ test("a partial-post review failure with a transport tail keeps its disclosure",
   );
   assert.equal(p.long, true);
   assert.equal(p.fullText, message);
+});
+
+// Each compound review wrap's Rust text (forge/bitbucket.rs, forge/gitlab.rs)
+// over a timed-out or plain cause: every wrap past the first post may have posted.
+const BB_CAUSE =
+  "Bitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/x): request timed out";
+const GL_CAUSE = "GitLab CLI timed out after 150s.";
+const LANDED_BB =
+  "the 3 review comment(s) were already posted successfully — do NOT resubmit them; ";
+const LANDED_GL =
+  "the 3 review note(s) were already posted successfully — do NOT resubmit them; ";
+// publish_step_error's sentence for a timed-out publish (forge/gitlab.rs).
+const GL_PUBLISH_TIMED_OUT = `GitLab didn't answer in time while publishing the review's draft notes, so the review may or may not have been submitted. Check the merge request on GitLab before retrying. (${GL_CAUSE})`;
+const POSTED_ROWS = [
+  ["bitbucket", "Changes were requested, but posting the comment failed: Bitbucket API error (500): boom"],
+  ["bitbucket", "Posted 2 of 5 review comments before the failure; the review was not submitted. Check the pull request on Bitbucket before retrying. (Bitbucket API error (500): boom)"],
+  ["bitbucket", `The review was posted, but the approve step failed: ${LANDED_BB}only re-run the approve action on Bitbucket. (Bitbucket API error (500): boom)`],
+  ["bitbucket", `Changes were requested, but Bitbucket didn't answer in time on the comment, so it may or may not have been posted. Check the pull request on Bitbucket before posting it again. (${BB_CAUSE})`],
+  ["bitbucket", `Bitbucket didn't answer in time on the review summary, so it may or may not have been posted. No review comment and no verdict was sent. Check the pull request on Bitbucket before retrying. (${BB_CAUSE})`],
+  ["bitbucket", `Posted 2 of 5 review comments, then Bitbucket didn't answer in time on the next one, so it may or may not have been posted. Nothing after it was sent. Check the pull request on Bitbucket before retrying. (${BB_CAUSE})`],
+  ["bitbucket", "Bitbucket didn't answer in time on the request changes step, so it may or may not have gone through: check the pull request on Bitbucket before running the request changes action again."],
+  ["glab", "Changes were requested, but posting the comment failed: GitLab API error (500): boom"],
+  ["glab", "Saved 2 of 5 review comments as drafts before the failure; the review was not submitted. Check the merge request on GitLab before retrying. (GitLab API error (500): boom)"],
+  ["glab", "The review's draft notes couldn't be published, so the review was not submitted. Check the merge request on GitLab before retrying. (GitLab API error (500): boom)"],
+  ["glab", GL_PUBLISH_TIMED_OUT],
+  ["glab", `The review was posted, but the approve step failed: ${LANDED_GL}only re-run the approve action on GitLab. (GitLab API error (500): boom)`],
+  ["glab", `The review was posted, but GitLab didn't answer in time on the approve step, so it may or may not have gone through: ${LANDED_GL}check the merge request on GitLab before running the approve action again. (${GL_CAUSE})`],
+  ["glab", "Changes were requested, but GitLab didn't answer in time on the comment, so it may or may not have been posted. Check the merge request on GitLab before posting it again."],
+];
+const NOTHING_POSTED_ROWS = [
+  ["bitbucket", "The review summary couldn't be posted, so the review was not submitted: Bitbucket API error (500): boom"],
+  ["glab", "The review summary couldn't be saved as a draft, so the review was not submitted: GitLab API error (500): boom"],
+];
+
+test("a review failure may have posted unless it failed before the first post", () => {
+  for (const [kind, message] of POSTED_ROWS)
+    assert.equal(reviewMayHavePosted(appError(kind, message)), true, message);
+  for (const [kind, message] of NOTHING_POSTED_ROWS)
+    assert.equal(reviewMayHavePosted(appError(kind, message)), false, message);
+  // A landed hedge (kind timeout) may have posted; a bare timeout, a plain
+  // refusal, a row's text under another kind and a non-AppError never did.
+  const hedge =
+    "Bitbucket didn't answer in time, so your change may still have gone through. Check before trying again.";
+  assert.equal(reviewMayHavePosted(appError("timeout", `${hedge}\n${BB_CAUSE}`)), true);
+  assert.equal(reviewMayHavePosted(appError("timeout", "git operation timed out after 30s")), false);
+  assert.equal(reviewMayHavePosted(appError("gh", "HTTP 422: Validation Failed")), false);
+  assert.equal(reviewMayHavePosted(appError("gh", POSTED_ROWS[0][1])), false);
+  assert.equal(reviewMayHavePosted(new Error(POSTED_ROWS[0][1])), false);
+  assert.equal(reviewMayHavePosted(undefined), false);
+});
+
+test("GitLab's timed-out publish keeps its own sentence, the CLI line in parentheses", () => {
+  const p = presentError(appError("glab", GL_PUBLISH_TIMED_OUT));
+  assert.equal(p.summary, GL_PUBLISH_TIMED_OUT);
+  assert.ok(!p.summary.includes("Couldn't reach"), p.summary);
+  assert.equal(reviewMayHavePosted(appError("glab", GL_PUBLISH_TIMED_OUT)), true);
+  // With no CLI line to read back the sentence ends at "retrying.", which only a
+  // lead ending `(?: \(|$)` still matches.
+  const bare = GL_PUBLISH_TIMED_OUT.slice(0, -` (${GL_CAUSE})`.length);
+  assert.ok(bare.endsWith("before retrying."), bare);
+  assert.equal(presentError(appError("glab", bare)).summary, bare);
+  assert.equal(reviewMayHavePosted(appError("glab", bare)), true);
+});
+
+test("a failed summary step may have posted when its own error is an unread reply", () => {
+  const lead = "The review summary couldn't be posted, so the review was not submitted: ";
+  // created_reply_unreadable's sentence for bb_post_json's "review summary" noun.
+  const unread =
+    "Bitbucket accepted the request but its reply couldn't be read, so the review summary may already exist. Check before creating it again.";
+  assert.equal(reviewMayHavePosted(appError("bitbucket", `${lead}${unread}`)), true);
+  assert.equal(
+    reviewMayHavePosted(appError("bitbucket", `${lead}Bitbucket API error (403): forbidden`)),
+    false,
+  );
+  // Another host's sentence under this kind is not this forge's unread reply.
+  const gitlab = unread.replace("Bitbucket", "GitLab");
+  assert.equal(reviewMayHavePosted(appError("bitbucket", `${lead}${gitlab}`)), false);
+});
+
+test("GitLab's failed summary draft may have saved when its POST timed out", () => {
+  const lead =
+    "The review summary couldn't be saved as a draft, so the review was not submitted: ";
+  // run_glab_ex's bare timeout, unhedged: the draft may have been saved.
+  assert.equal(
+    reviewMayHavePosted(appError("glab", `${lead}git operation timed out after 150s`)),
+    true,
+  );
+  assert.equal(
+    reviewMayHavePosted(appError("glab", `${lead}GitLab API error (403): forbidden`)),
+    false,
+  );
+  // Only GitLab's row: a Bitbucket summary that timed out before it was sent (a
+  // connect timeout) embeds its transport line, never a bare timeout, and posted
+  // nothing; a sent one takes its own timed-out row.
+  const bbLead = "The review summary couldn't be posted, so the review was not submitted: ";
+  for (const e of [BB_CAUSE, "git operation timed out after 30s"])
+    assert.equal(reviewMayHavePosted(appError("bitbucket", `${bbLead}${e}`)), false, e);
 });
 
 test("a lead with nothing after it falls back to the kind label", () => {

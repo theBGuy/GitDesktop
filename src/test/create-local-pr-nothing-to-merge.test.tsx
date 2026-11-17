@@ -280,7 +280,7 @@ describe("Create local PR: nothing to merge", () => {
     const user = userEvent.setup();
     renderDialog({ base: "" });
     const title = await fillTitle(user);
-    const reason = "Choose a base branch to merge into.";
+    const reason = "Choose the branch to merge into.";
     expect(
       await screen.findByText(reason, { selector: "p" }),
     ).toBeInTheDocument();

@@ -5699,6 +5699,9 @@ export const CHECKS = [
       // Same class: the blame gutter's scroll-close listener for its open
       // hovercard — add/remove pair, idempotent to re-subscribe.
       "src/features/history/BlameDialog.tsx",
+      // Close-side teardown only: answers its own prompt and clears a ref when
+      // `open` is false; a repeat is a no-op and nothing runs while open.
+      "src/features/pulls/SubmitReviewDialog.tsx",
     ],
     message:
       "an open-transition reset must ride useSeedOnOpen (src/lib/use-seed-on-open.ts) — a hidden <Activity> tab re-mounts its effects on show, so a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires and wipes the user's draft; a data-arrival or otherwise idempotent seed needs an allowlist entry with rationale",

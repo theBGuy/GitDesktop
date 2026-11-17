@@ -4140,12 +4140,29 @@ pub async fn request_changes_pr(repo_path: &str, number: u64, body: &str) -> App
     http::bb_post_empty(&creds, &path).await?;
     if !body.trim().is_empty() {
         if let Err(e) = comment_pr(repo_path, number, body).await {
-            return Err(AppError::Bitbucket(format!(
-                "Changes were requested, but posting the comment failed: {e}"
-            )));
+            return Err(change_request_comment_error(e));
         }
     }
     Ok(())
+}
+
+/// `request_changes_pr`'s error for a comment that failed after the change request stood. A
+/// timed-out comment may have been posted, so it is never told it failed; the parentheses
+/// hold its cause, never its hedge a second time.
+fn change_request_comment_error(e: AppError) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Bitbucket(format!(
+            "Changes were requested, but Bitbucket didn't answer in time on the comment, so it \
+             may or may not have been posted. Check the pull request on Bitbucket before \
+             posting it again.{cause}"
+        ));
+    }
+    AppError::Bitbucket(format!(
+        "Changes were requested, but posting the comment failed: {e}"
+    ))
 }
 
 /// Submit a review on a PR — SEQUENTIAL. Bitbucket has NO invisible-draft flow that
@@ -4172,11 +4189,7 @@ pub async fn review_submit(
         let payload = serde_json::json!({ "content": { "raw": s } });
         http::bb_post_json::<serde_json::Value>(&creds, &endpoint, &payload, "review summary")
             .await
-            .map_err(|e| {
-                AppError::Bitbucket(format!(
-                    "The review summary couldn't be posted, so the review was not submitted: {e}"
-                ))
-            })?;
+            .map_err(review_summary_error)?;
     }
 
     // Each comment → a LIVE anchored comment. Stop at the first failure and disclose.
@@ -4193,13 +4206,7 @@ pub async fn review_submit(
             http::bb_post_json::<serde_json::Value>(&creds, &endpoint, &payload, "review comment")
                 .await
         {
-            let (first, rest) = paren_parts(&e);
-            return Err(AppError::Bitbucket(format!(
-                "Posted {} of {} review comments before the failure; the review was not \
-                 submitted. Check the pull request on Bitbucket before \
-                 retrying. ({first}){rest}",
-                i, total
-            )));
+            return Err(review_comment_error(e, i, total));
         }
     }
 
@@ -4227,11 +4234,7 @@ pub async fn review_submit(
         } else {
             String::new()
         };
-        let (first, rest) = paren_parts(&e);
-        return Err(AppError::Bitbucket(format!(
-            "The review was posted, but the {action} step failed: {landed}only re-run the \
-             {action} action on Bitbucket. ({first}){rest}"
-        )));
+        return Err(verdict_step_error(e, action, &landed));
     }
 
     Ok(ReviewSubmitOut {
@@ -4239,6 +4242,76 @@ pub async fn review_submit(
         total,
         verdict_applied: verdict != "comment",
     })
+}
+
+/// `review_submit`'s error for a summary that failed before anything posted. A timed-out
+/// summary may have been posted, so it is never told it failed; the parentheses hold its
+/// cause, never its hedge a second time.
+fn review_summary_error(e: AppError) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Bitbucket(format!(
+            "Bitbucket didn't answer in time on the review summary, so it may or may not have \
+             been posted. No review comment and no verdict was sent. Check the pull request on \
+             Bitbucket before retrying.{cause}"
+        ));
+    }
+    AppError::Bitbucket(format!(
+        "The review summary couldn't be posted, so the review was not submitted: {e}"
+    ))
+}
+
+/// `review_submit`'s error for the review comment after the `i` of `total` that posted. A
+/// timed-out comment may have been posted, so it is never told it failed; the parentheses
+/// hold its cause, never its hedge a second time.
+fn review_comment_error(e: AppError, i: usize, total: u32) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Bitbucket(format!(
+            "Posted {} of {} review comments, then Bitbucket didn't answer in time on the next \
+             one, so it may or may not have been posted. Nothing after it was sent. Check \
+             the pull request on Bitbucket before retrying.{cause}",
+            i, total
+        ));
+    }
+    let (first, rest) = paren_parts(&e);
+    AppError::Bitbucket(format!(
+        "Posted {} of {} review comments before the failure; the review was not \
+         submitted. Check the pull request on Bitbucket before \
+         retrying. ({first}){rest}",
+        i, total
+    ))
+}
+
+/// `review_submit`'s error for a verdict step that failed after the review posted, with
+/// `landed` naming what posted. A timed-out step may have applied the verdict, so it is
+/// never told to re-run; the parentheses hold its cause, never its hedge a second time.
+/// With nothing landed (a verdict-only review) the timed-out sentence claims no post.
+fn verdict_step_error(e: AppError, action: &str, landed: &str) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        let posted = if landed.is_empty() {
+            ""
+        } else {
+            "The review was posted, but "
+        };
+        return AppError::Bitbucket(format!(
+            "{posted}Bitbucket didn't answer in time on the {action} step, so it \
+             may or may not have gone through: {landed}check the pull request on \
+             Bitbucket before running the {action} action again.{cause}"
+        ));
+    }
+    let (first, rest) = paren_parts(&e);
+    AppError::Bitbucket(format!(
+        "The review was posted, but the {action} step failed: {landed}only re-run the \
+         {action} action on Bitbucket. ({first}){rest}"
+    ))
 }
 
 /// Revoke the viewer's requested-changes state
@@ -9830,23 +9903,29 @@ definitions:
         );
     }
 
-    /// Each compound wrap embeds the step's error, a landed hedge included, with no early
-    /// return ahead of it: the wrap carries the partial-state line (what already posted, do
-    /// not resubmit) that a retry needs. The roster is every `{e}` wrap in the two functions; the
-    /// parenthesised two embed it through `paren_parts`.
+    /// Each compound wrap embeds the step's error, an unread-reply hedge included (a timed-out
+    /// one is caught by the guard ahead of the wrap), with no `?` and no return ahead of it
+    /// but a sentence inside that guard's block: the wrap carries the partial-state line (what
+    /// already posted, do not resubmit) that a retry needs. The roster is every `{e}` wrap in
+    /// the four wrap fns, each taking the step's error as its parameter, and their two callers
+    /// hand each step's error straight to its fn; the parenthesised two embed it through
+    /// `paren_parts`.
     #[test]
     fn compound_wraps_embed_every_error() {
         use crate::github::repo_meta::tests::wiring_body;
         let source = include_str!("bitbucket.rs");
         let roster = [
             (
-                "request_changes_pr",
+                "change_request_comment_error",
                 "Changes were requested, but posting the comment failed",
             ),
-            ("review_submit", "The review summary couldn't be posted"),
-            ("review_submit", "review comments before the failure"),
             (
-                "review_submit",
+                "review_summary_error",
+                "The review summary couldn't be posted",
+            ),
+            ("review_comment_error", "review comments before the failure"),
+            (
+                "verdict_step_error",
                 "The review was posted, but the {action} step failed",
             ),
         ];
@@ -9864,26 +9943,40 @@ definitions:
         const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
         let start_of = |body: &str, at: usize| {
             let before = &body[..at];
-            [before.rfind("if let Err(e)"), before.rfind("map_err(|e|")]
-                .into_iter()
-                .flatten()
-                .max()
+            [
+                before.rfind("if let Err(e)"),
+                before.rfind("map_err(|e|"),
+                before.rfind("(e: AppError"),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
         };
-        // From the error's binding to the wrap: no `?`, and the only `return` is the wrap's.
+        // From the error's binding to the wrap: no `?`, and every `return` is this wrap's or a
+        // bare sentence still inside the timed-out arm's block (brace depth from its guard's
+        // `{` never back to zero; braces in its strings balance).
+        const GUARD: &str = "if matches!(e, AppError::WriteTimedOut(_)) {";
+        let in_guard = |before: &str| {
+            before.rfind(GUARD).is_some_and(|g| {
+                let mut depth = 1i32;
+                before[g + GUARD.len()..].chars().all(|c| {
+                    depth += i32::from(c == '{') - i32::from(c == '}');
+                    depth > 0
+                })
+            })
+        };
         let embeds = |body: &str, wrap: &str| {
             body.find(wrap).is_some_and(|at| {
                 let Some(s) = start_of(body, at) else {
                     return false;
                 };
                 let seg = &body[s..at];
-                let direct = match seg.rfind("return") {
-                    None => true,
-                    Some(r) => {
-                        !seg[..r].contains("return")
-                            && seg[r..].starts_with("return Err(AppError::Bitbucket(format!(")
-                            && !seg[r..].contains(';')
-                    }
-                };
+                let direct = seg.match_indices("return").all(|(r, _)| {
+                    let rest = &seg[r..];
+                    (rest.starts_with("return AppError::Bitbucket(format!(") && in_guard(&seg[..r]))
+                        || (rest.starts_with("return Err(AppError::Bitbucket(format!(")
+                            && !rest.contains(';'))
+                });
                 let tail = &body[at..];
                 let end = tail.find("))").unwrap_or(tail.len());
                 let token = token_of(wrap);
@@ -9899,6 +9992,17 @@ definitions:
             let open = s + body[s..].find('{').unwrap() + 1;
             let early = format!("{} return Err(e);{}", &body[..open], &body[open..]);
             assert!(!embeds(&early, wrap), "{name}: an early return must flip");
+            // A conditional bare return that drops `e`, ahead of the guard and after its block.
+            let bare =
+                "if e.to_string().is_empty() { return AppError::Bitbucket(format!(\"x\")); } ";
+            let ctor = body[..at].rfind("AppError::Bitbucket(format!(").unwrap();
+            for cut in [open, ctor] {
+                let mutant = format!("{}{bare}{}", &body[..cut], &body[cut..]);
+                assert!(
+                    !embeds(&mutant, wrap),
+                    "{name}: a dropping return must flip"
+                );
+            }
             let token = token_of(wrap);
             let tail_end = at + body[at..].find("))").unwrap();
             let dropped = format!("{}{}", &body[..at], body[at..].replacen(token, "", 1));
@@ -9919,11 +10023,72 @@ definitions:
                 );
             }
         }
-        for name in ["request_changes_pr", "review_submit"] {
+        let callers = ["request_changes_pr", "review_submit"];
+        for name in callers.into_iter().chain(roster.map(|(n, _)| n)) {
             let body = wiring_body(source, name);
             let wraps = body.matches("{e}").count() + body.matches("({first}){rest}").count();
             let listed = roster.iter().filter(|(n, _)| *n == name).count();
             assert_eq!(wraps, listed, "{name}: an unlisted {{e}} wrap");
+        }
+        // Each caller hands the step's error to its wrap fn with nothing in between (read
+        // whitespace-free), and a verdict error reaches its fn past no `return`, `?` or rebind.
+        let flat = |name: &str| wiring_body(source, name).replace(char::is_whitespace, "");
+        let handoffs = [
+            (
+                "request_changes_pr",
+                "ifletErr(e)=comment_pr(repo_path,number,body).await{\
+                 returnErr(change_request_comment_error(e));}",
+            ),
+            (
+                "review_submit",
+                "\"reviewsummary\").await.map_err(review_summary_error)?;",
+            ),
+            (
+                "review_submit",
+                "ifletErr(e)=http::bb_post_json::<serde_json::Value>(&creds,&endpoint,&payload,\
+                 \"reviewcomment\").await{returnErr(review_comment_error(e,i,total));}",
+            ),
+        ];
+        for (name, handoff) in handoffs {
+            assert!(flat(name).contains(handoff), "{name}: {handoff}");
+        }
+        // No statement in the span may rebind `e` (a shadowing `let e =` / `let mut e =`).
+        let rebinds = |span: &str| {
+            ["{", ";", "}"].iter().any(|b| {
+                span.contains(&format!("{b}lete=")) || span.contains(&format!("{b}letmute="))
+            })
+        };
+        let verdict_reaches = |body: &str| {
+            let from = body.find("ifletErr(e)=verdict_result{");
+            let to = body.find("returnErr(verdict_step_error(e,action,&landed));}");
+            from.zip(to).is_some_and(|(f, t)| {
+                f < t && {
+                    let span = &body[f..t];
+                    !span.contains("return") && !span.contains('?') && !rebinds(span)
+                }
+            })
+        };
+        let submit = flat("review_submit");
+        assert!(verdict_reaches(&submit), "{submit}");
+        let early = submit.replacen(
+            "ifletErr(e)=verdict_result{",
+            "ifletErr(e)=verdict_result{returnErr(e);",
+            1,
+        );
+        assert!(
+            !verdict_reaches(&early),
+            "an early verdict return must flip"
+        );
+        for rebind in ["lete=AppError::Bitbucket(e.to_string());", "letmute=e;"] {
+            let shadowed = submit.replacen(
+                "ifletErr(e)=verdict_result{",
+                &format!("ifletErr(e)=verdict_result{{{rebind}"),
+                1,
+            );
+            assert!(
+                shadowed != submit && !verdict_reaches(&shadowed),
+                "a rebind of the verdict error must flip: {rebind}"
+            );
         }
         let publish = wiring_body(source, "publish_repo");
         assert!(
@@ -9932,6 +10097,109 @@ definitions:
         );
         assert!(publish
             .contains(".map_err(|e| crate::forge::timed_out_write(e, \"Bitbucket\", landed))?;"));
+    }
+
+    /// A timed-out review step gets its own may-or-may-not sentence under kind `bitbucket`,
+    /// the request's transport line in its parentheses (none when it carried none) and its
+    /// hedge never repeated; any other failure keeps the old sentence.
+    #[test]
+    fn timed_out_review_steps_say_they_may_have_landed() {
+        const CAUSE: &str = "Bitbucket request failed: error sending request for url \
+                             (https://api.bitbucket.org/2.0/x): request timed out";
+        let timed_out =
+            || crate::forge::request_timed_out("Bitbucket", LandedWrite::Changed, CAUSE);
+        let hedge = timed_out().to_string();
+        let hedge = hedge.split('\n').next().unwrap().to_string();
+        let one_line = || AppError::WriteTimedOut(hedge.clone());
+        let plain = || AppError::Bitbucket("Bitbucket API error (500): boom".into());
+        let text = |out: AppError| {
+            assert!(matches!(out, AppError::Bitbucket(_)), "{out:?}");
+            let text = out.to_string();
+            assert!(!text.contains(&hedge) && !text.contains('\n'), "{text}");
+            text
+        };
+        let tail = format!(" ({CAUSE})");
+
+        let comment =
+            "Changes were requested, but Bitbucket didn't answer in time on the comment, \
+                       so it may or may not have been posted. Check the pull request on Bitbucket \
+                       before posting it again.";
+        assert_eq!(
+            text(change_request_comment_error(timed_out())),
+            format!("{comment}{tail}")
+        );
+        assert_eq!(text(change_request_comment_error(one_line())), comment);
+        assert_eq!(
+            text(change_request_comment_error(plain())),
+            "Changes were requested, but posting the comment failed: Bitbucket API error (500): \
+             boom"
+        );
+
+        let summary = "Bitbucket didn't answer in time on the review summary, so it may or may \
+                       not have been posted. No review comment and no verdict was sent. Check \
+                       the pull request on Bitbucket before retrying.";
+        assert_eq!(
+            text(review_summary_error(timed_out())),
+            format!("{summary}{tail}")
+        );
+        assert_eq!(text(review_summary_error(one_line())), summary);
+        assert_eq!(
+            text(review_summary_error(plain())),
+            "The review summary couldn't be posted, so the review was not submitted: Bitbucket \
+             API error (500): boom"
+        );
+
+        let next = "Posted 2 of 5 review comments, then Bitbucket didn't answer in time on the \
+                    next one, so it may or may not have been posted. Nothing after it was \
+                    sent. Check the pull request on Bitbucket before retrying.";
+        assert_eq!(
+            text(review_comment_error(timed_out(), 2, 5)),
+            format!("{next}{tail}")
+        );
+        assert_eq!(text(review_comment_error(one_line(), 2, 5)), next);
+        assert_eq!(
+            text(review_comment_error(plain(), 2, 5)),
+            "Posted 2 of 5 review comments before the failure; the review was not submitted. \
+             Check the pull request on Bitbucket before retrying. (Bitbucket API error (500): \
+             boom)"
+        );
+
+        let landed =
+            "the 3 review comment(s) were already posted successfully — do NOT resubmit them; ";
+        assert_eq!(
+            text(verdict_step_error(timed_out(), "approve", landed)),
+            format!(
+                "The review was posted, but Bitbucket didn't answer in time on the approve step, \
+                 so it may or may not have gone through: {landed}check the pull request on \
+                 Bitbucket before running the approve action again.{tail}"
+            )
+        );
+        // A verdict-only review posted nothing, so its sentence starts at the forge.
+        assert_eq!(
+            text(verdict_step_error(one_line(), "request changes", "")),
+            "Bitbucket didn't answer in time on the request changes step, so it may or may not \
+             have gone through: check the pull request on Bitbucket before running the request \
+             changes action again."
+        );
+        assert_eq!(
+            text(verdict_step_error(timed_out(), "approve", "")),
+            format!(
+                "Bitbucket didn't answer in time on the approve step, so it may or may not have \
+                 gone through: check the pull request on Bitbucket before running the approve \
+                 action again.{tail}"
+            )
+        );
+        assert_eq!(
+            text(verdict_step_error(plain(), "approve", landed)),
+            format!(
+                "The review was posted, but the approve step failed: {landed}only re-run the \
+                 approve action on Bitbucket. (Bitbucket API error (500): boom)"
+            )
+        );
+        assert!(
+            text(verdict_step_error(AppError::Timeout(30), "approve", ""))
+                .contains(" step failed: ")
+        );
     }
 
     /// A pull request create's Err after the push leads with the push fact under kind

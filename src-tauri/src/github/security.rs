@@ -186,7 +186,8 @@ async fn toggle_endpoint(repo_path: &str, slug: &str, path: &str, enabled: bool)
         &["api", "--method", method, &format!("repos/{slug}/{path}")],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -241,6 +242,9 @@ async fn apply_feature(repo_path: &str, slug: &str, feature: &str, enabled: bool
             )
             .await;
             invalidate_repo_meta_after(slug, &result);
+            let result = result.map_err(|e| {
+                crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+            });
             result?;
         }
         "dependabot_alerts" => {
@@ -269,7 +273,10 @@ async fn apply_feature(repo_path: &str, slug: &str, feature: &str, enabled: bool
                 &body.to_string(),
                 GH_NETWORK_TIMEOUT,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+            })?;
         }
         _ => {
             return Err(AppError::InvalidArgument(format!(

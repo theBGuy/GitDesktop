@@ -1,7 +1,13 @@
 import { SparkleIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  useEffectEvent,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -51,7 +57,16 @@ import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { LinkedIssuesField } from "./LinkedIssuesField";
+import {
+  BRANCH_PLACEHOLDER,
+  COUNT_FAILED_COPY,
+  COUNTING_COPY,
+  defaultPrPair,
+  UNCHOSEN_COPY,
+  unchosenSide,
+} from "./pr-branch-defaults";
 import { ReviewerNotesField } from "./ReviewerNotesField";
+import { useLandStrandedFocus } from "./use-land-stranded-focus";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
@@ -107,9 +122,35 @@ export function CreateLocalPrDialog({
   const draftRepoRef = useRef(repoPath);
   // The live `open` for the create's settle, whose closure holds the submit-time one.
   const openRef = useRef(open);
+  // An unchosen picker takes the open's focus: the seed focuses its trigger, or
+  // marks it for the wrapper's ref callback, which consumes the mark once. A
+  // close drops a mark the picker never took.
+  const pickerFocusPending = useRef<"head" | "base" | null>(null);
+  const pickerNodes = useRef<Record<"head" | "base", HTMLDivElement | null>>({
+    head: null,
+    base: null,
+  });
   useLayoutEffect(() => {
     openRef.current = open;
+    if (!open) pickerFocusPending.current = null;
   }, [open]);
+  const pickerTrigger = (node: HTMLDivElement | null) =>
+    node?.querySelector<HTMLElement>('[role="combobox"]') ?? null;
+  const focusPicker = (side: "head" | "base") => {
+    const trigger = pickerTrigger(pickerNodes.current[side]);
+    pickerFocusPending.current = trigger === null ? side : null;
+    trigger?.focus();
+  };
+  const attachPicker = (side: "head" | "base", node: HTMLDivElement | null) => {
+    pickerNodes.current[side] = node;
+    if (node === null || pickerFocusPending.current !== side) return;
+    pickerFocusPending.current = null;
+    pickerTrigger(node)?.focus();
+  };
+  const attachHeadPicker = (node: HTMLDivElement | null) =>
+    attachPicker("head", node);
+  const attachBasePicker = (node: HTMLDivElement | null) =>
+    attachPicker("base", node);
   // Set when this dialog's own draft failed to create while it was closed, so the
   // next open shows it again; that open consumes it.
   const failedWhileClosedRef = useRef(false);
@@ -279,7 +320,7 @@ export function CreateLocalPrDialog({
   // `gd/session/*` branches (a local PR must never target one) and archived
   // branches, matching BranchSwitcher. `keep` retains the seeded defaults and a
   // kept draft's pair even if archived, so they stay selectable.
-  const { names, items, annotations } = useBranchPickerOptions(repoPath, open, [
+  const { items, annotations } = useBranchPickerOptions(repoPath, open, [
     currentName,
     shownDefaultHead,
     shownDefaultBase,
@@ -311,15 +352,18 @@ export function CreateLocalPrDialog({
     // the dialog opens with no seeded body refs; extraction/AI seeding then
     // repopulates from the head branch + commits.
     resetLinkedIssues([]);
-    const h = defaultHead ?? currentName ?? names[0] ?? "";
-    const fallbackBase =
-      defaultBranch.data && defaultBranch.data !== h
-        ? defaultBranch.data
-        : (names.find((n) => n !== h) ?? "");
+    // The forge dialog's rule on its own-repository target: nothing guessed.
+    const seeded = defaultPrPair({
+      handedHead: defaultHead,
+      handedBase: defaultBase,
+      current: currentName,
+      defaultBranch: defaultBranch.data,
+      parentTarget: false,
+    });
     form.reset(
       {
-        head: h,
-        base: defaultBase ?? fallbackBase,
+        head: seeded.head,
+        base: seeded.base,
         title: "",
         body: "",
         // Cleared on open; ReviewerNotesField re-seeds from the head branch's
@@ -328,6 +372,8 @@ export function CreateLocalPrDialog({
       },
       { keepDefaultValues: true },
     );
+    const side = unchosenSide(seeded.head, seeded.base);
+    if (side !== null) focusPicker(side);
   });
   useSeedOnOpen(open, seedOnOpen);
 
@@ -347,9 +393,12 @@ export function CreateLocalPrDialog({
   const sameBranch = base === head;
   // Derived from the live pair's read only, never stored: the count's key carries
   // the pair, so a pair change resets `data` and the hold re-engages. A head
-  // already in its base reads as merged the moment it is created.
-  const noBase = !sameBranch && base === "";
-  const counted = !sameBranch && !noBase;
+  // already in its base reads as merged the moment it is created. An unchosen
+  // side, Merge first, outranks the same-branch check: an empty pair is no pick.
+  const unchosen = unchosenSide(head, base);
+  const noHead = unchosen === "head";
+  const noBase = unchosen === "base";
+  const counted = !sameBranch && unchosen === null;
   const nothingToMerge = counted && comparison.data?.length === 0;
   // A failed background refetch keeps the loaded count; only a read that never
   // answered for this pair counts as failed.
@@ -406,14 +455,30 @@ export function CreateLocalPrDialog({
       () => surface.noteRunSettled(false),
     );
   }
+  const isSubmitting = createHold.running;
+  // Generate's hold. A running create says why with Generate's own sentence;
+  // an unchosen side with Create's. The same branch, nothing to merge and a
+  // count still running or failed (no commits read) stay plain disables.
+  const generateHeld =
+    unchosen !== null || sameBranch || ahead.length === 0 || isSubmitting;
+  const generateReason = (() => {
+    switch (true) {
+      case isSubmitting:
+        return CREATE_PENDING_GENERATE_REASON;
+      case unchosen !== null:
+        return UNCHOSEN_COPY[unchosen];
+      default:
+        return undefined;
+    }
+  })();
   // Context-sensitive reuse of the `generate-commit-message` binding while this
   // dialog is open. `run` is undefined with AI off — no Generate surface, so
   // the chord falls through instead of being swallowed for nothing. A running
-  // create holds it like the button: the draft it would revise has been sent.
-  const isSubmitting = createHold.running;
+  // create holds it like the button: the draft it would revise has been sent
+  // (`generateHeld` covers it; the explicit conjunct is what the
+  // generate-held-while-submitting guard reads).
   const generateChord = useGenerateChord({
-    enabled:
-      !generating && !(sameBranch || ahead.length === 0) && !isSubmitting,
+    enabled: !generating && !generateHeld && !isSubmitting,
     run: aiEnabled ? runGenerate : undefined,
   });
   const generateHint = generateChord.hint;
@@ -422,15 +487,16 @@ export function CreateLocalPrDialog({
   // failed count never holds: it says so and leaves Create enabled.
   const holdReason = (() => {
     switch (true) {
-      // An empty pair is no pick at all (no branches to offer); it stays disabled.
-      case sameBranch && head !== "":
-        return "Pick two different branches.";
+      case noHead:
+        return UNCHOSEN_COPY.head;
       case noBase:
-        return "Choose a base branch to merge into.";
+        return UNCHOSEN_COPY.base;
+      case sameBranch:
+        return "Pick two different branches.";
       case nothingToMerge:
         return `Nothing to merge: ${head} is already in ${base}.`;
       case counting:
-        return "Counting commits to merge…";
+        return COUNTING_COPY;
       default:
         return null;
     }
@@ -451,6 +517,14 @@ export function CreateLocalPrDialog({
       })(),
       title: SUBMIT_HINT,
     });
+  // While the reason is the unchosen line, that line is Create's description
+  // and the footer's copy stays out, so it is announced once.
+  const unchosenAnnounced =
+    unchosen !== null && blockedReason === UNCHOSEN_COPY[unchosen];
+  // A focused control that goes natively disabled (Link issue or Create on
+  // the generate chord) hands focus to Title, never a dead stop.
+  const titleId = useId();
+  useLandStrandedFocus(titleId);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -507,7 +581,7 @@ export function CreateLocalPrDialog({
           {/* Fields scroll; header and submit footer stay pinned. */}
           <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             <div className="flex items-end gap-2">
-              <div className="min-w-0 flex-initial">
+              <div className="min-w-0 flex-initial" ref={attachHeadPicker}>
                 <form.AppField name="head">
                   {(field) => (
                     <field.SelectField
@@ -515,6 +589,7 @@ export function CreateLocalPrDialog({
                       items={items}
                       annotations={annotations}
                       sizeToContent
+                      placeholder={BRANCH_PLACEHOLDER}
                     />
                   )}
                 </form.AppField>
@@ -522,7 +597,7 @@ export function CreateLocalPrDialog({
               <span className="shrink-0 pb-2 text-xs text-muted-foreground">
                 into
               </span>
-              <div className="min-w-0 flex-initial">
+              <div className="min-w-0 flex-initial" ref={attachBasePicker}>
                 <form.AppField name="base">
                   {(field) => (
                     <field.SelectField
@@ -530,6 +605,7 @@ export function CreateLocalPrDialog({
                       items={items}
                       annotations={annotations}
                       sizeToContent
+                      placeholder={BRANCH_PLACEHOLDER}
                     />
                   )}
                 </form.AppField>
@@ -542,16 +618,19 @@ export function CreateLocalPrDialog({
               </p>
               {(() => {
                 switch (true) {
+                  case unchosen !== null:
+                    return (
+                      <p
+                        id={unchosenAnnounced ? reasonId : undefined}
+                        className="text-xs text-muted-foreground"
+                      >
+                        {UNCHOSEN_COPY[unchosen]}
+                      </p>
+                    );
                   case sameBranch:
                     return (
                       <p className="text-xs text-warning">
                         Pick two different branches.
-                      </p>
-                    );
-                  case noBase:
-                    return (
-                      <p className="text-xs text-muted-foreground">
-                        Choose a base branch to merge into.
                       </p>
                     );
                   case nothingToMerge:
@@ -566,13 +645,13 @@ export function CreateLocalPrDialog({
                   case counting:
                     return (
                       <p className="text-xs text-muted-foreground">
-                        Counting commits to merge…
+                        {COUNTING_COPY}
                       </p>
                     );
                   case countFailed:
                     return (
                       <p className="text-xs text-muted-foreground">
-                        Couldn't count the commits to merge.
+                        {COUNT_FAILED_COPY}
                       </p>
                     );
                   default:
@@ -592,6 +671,7 @@ export function CreateLocalPrDialog({
             >
               {(field) => (
                 <field.TextField
+                  id={titleId}
                   label="Title"
                   placeholder="Summarize the change"
                 />
@@ -616,25 +696,17 @@ export function CreateLocalPrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      // Nothing to merge stays a plain disable; a running create
-                      // says why.
                       <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={
-                          sameBranch || ahead.length === 0 || isSubmitting
-                        }
-                        reason={
-                          isSubmitting
-                            ? CREATE_PENDING_GENERATE_REASON
-                            : undefined
-                        }
+                        disabled={generateHeld}
+                        reason={generateReason}
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          !(sameBranch || ahead.length === 0 || isSubmitting)
+                          !generateHeld
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }
@@ -704,7 +776,7 @@ export function CreateLocalPrDialog({
                 >
                   Create local PR
                 </form.SubmitButton>
-                {blockedReason ? (
+                {blockedReason && !unchosenAnnounced ? (
                   <span id={reasonId} className="sr-only">
                     {blockedReason}
                   </span>

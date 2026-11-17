@@ -5500,6 +5500,7 @@ export function RemotePrView({
           canRequestChanges: canWrite || canRequestChanges,
         }}
         remoteLabel={remoteLabel}
+        prNoun={prNoun}
         lens={lens}
       />
 

@@ -301,7 +301,7 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
-      "Compose a review from the diff — batch drafts, submit with a verdict",
+      "Compose a review from the diff — batch drafts, submit with a verdict, and a retry from the same dialog that could post twice asks first",
   },
   {
     group: "Pull requests & review",

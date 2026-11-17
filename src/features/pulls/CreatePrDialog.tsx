@@ -33,7 +33,10 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { LABELS_PICKER_COPY } from "@/features/conversations/LabelsPopover";
-import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
+import {
+  emptyPickerCopy,
+  failedSinceLastSuccess,
+} from "@/features/conversations/remote-section-state";
 import { LabelChip } from "@/features/conversations/Thread";
 import {
   CREATE_PENDING_GENERATE_REASON,
@@ -79,6 +82,7 @@ import {
   useDefaultBranch,
   useForgeStatus,
   usePrsForBranch,
+  useRemoteBranches,
   useRemotes,
   useRepoLabels,
   useRepoStatus,
@@ -143,6 +147,20 @@ import { cn } from "@/lib/utils";
 import { AddUpstreamOfferCard, useAddUpstreamOffer } from "./AddUpstreamOffer";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import {
+  BRANCH_PLACEHOLDER,
+  COUNT_FAILED_COPY,
+  COUNTING_COPY,
+  defaultBaseFor,
+  defaultPrPair,
+  forgeStatusArm,
+  forgeUnchosenSide,
+  PARENT_FETCHING_COPY,
+  PARENT_RETRYING_REASON,
+  parentReadFailedCopy,
+  UNCHOSEN_COPY,
+  unchosenSide,
+} from "./pr-branch-defaults";
+import {
   type AiLabelProposal,
   applyAiProposal,
   deriveSelectedLabels,
@@ -154,6 +172,7 @@ import {
 } from "./pr-label-selection";
 import { ReviewerNotesField } from "./ReviewerNotesField";
 import { ReviewersPopover } from "./ReviewersPopover";
+import { useLandStrandedFocus } from "./use-land-stranded-focus";
 import { useBranchPickerOptions } from "./useBranchPickerOptions";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
@@ -243,7 +262,9 @@ export function CreatePrDialog({
   repoPath: string;
   /** Seeds the base ("into") branch; defaults to the repo's default branch. */
   defaultBase?: string;
-  /** Seeds the head ("merge") branch; defaults to the current branch. */
+  /** Seeds the head ("merge") branch; defaults to the current branch,
+   *  unchosen on a detached HEAD, and on the own repository's default branch
+   *  when no base is handed in either. */
   defaultHead?: string;
   preset?: CreatePrPreset;
   open: boolean;
@@ -468,6 +489,19 @@ export function CreatePrDialog({
     return rest;
   })();
   const baseLoading = targetIsParent && parentBranches.isPending;
+  // A refetch puts a dataless errored read back to pending (error null), and
+  // the failed state holds through it, Retry's or not. Not while its automatic
+  // retry is paused on a hidden window: that reads as loading, Retry leaves.
+  const parentReadFailed =
+    targetIsParent &&
+    parentBranches.data === undefined &&
+    failedSinceLastSuccess(parentBranches);
+  const parentReadSummary = parentBranches.error
+    ? presentError(parentBranches.error).summary
+    : "";
+  const parentReadLine = parentBranches.isFetching
+    ? PARENT_FETCHING_COPY
+    : parentReadFailedCopy(parentReadSummary);
 
   const form = useAppForm({
     defaultValues: {
@@ -858,8 +892,19 @@ export function CreatePrDialog({
   // initial focus, which defers to a focus already inside the popup. A close
   // drops a pending focus the input never took.
   const titleFocusPending = useRef(false);
+  // An unchosen picker takes the open's focus instead, by the same pending
+  // route: its wrapper's ref callback consumes the mark once, so a later
+  // re-attach (an `<Activity>` show) never pulls focus back to it.
+  const pickerFocusPending = useRef<"head" | "base" | null>(null);
+  const pickerNodes = useRef<Record<"head" | "base", HTMLDivElement | null>>({
+    head: null,
+    base: null,
+  });
   useEffect(() => {
-    if (!open) titleFocusPending.current = false;
+    if (!open) {
+      titleFocusPending.current = false;
+      pickerFocusPending.current = null;
+    }
   }, [open]);
   const focusTitleIfEmpty = () => {
     const input =
@@ -872,13 +917,44 @@ export function CreatePrDialog({
     titleFocusPending.current = false;
     node.querySelector("input")?.focus();
   };
+  const pickerTrigger = (node: HTMLDivElement | null) =>
+    node?.querySelector<HTMLElement>('[role="combobox"]') ?? null;
+  const focusPicker = (side: "head" | "base") => {
+    const trigger = pickerTrigger(pickerNodes.current[side]);
+    pickerFocusPending.current = trigger === null ? side : null;
+    trigger?.focus();
+  };
+  const attachPicker = (side: "head" | "base", node: HTMLDivElement | null) => {
+    pickerNodes.current[side] = node;
+    if (node === null || pickerFocusPending.current !== side) return;
+    pickerFocusPending.current = null;
+    pickerTrigger(node)?.focus();
+  };
+  const retryParentRead = () => {
+    if (parentBranches.isFetching) return;
+    void parentBranches.refetch();
+  };
+  const attachHeadPicker = (node: HTMLDivElement | null) =>
+    attachPicker("head", node);
+  const attachBasePicker = (node: HTMLDivElement | null) =>
+    attachPicker("base", node);
 
-  // Seed branches each time the dialog opens: head = current branch, base =
-  // the default branch (or, when you're already on it, the first other branch).
+  // Seed branches each time the dialog opens from `defaultPrPair`: a side it
+  // can't name stays unchosen and focused, except a Base the parent fills.
   // keepDefaultValues: otherwise the per-render options sync clobbers the
   // seeded values back to empty on an untouched form.
   const seedOnOpen = useEffectEvent(() => {
-    const h = defaultHead ?? currentName ?? names[0] ?? "";
+    // The target as it is now; nothing refills Merge if it turns parent later.
+    const parentTarget =
+      lensGate && (preset?.target ?? "upstream") === "upstream";
+    const seeded = defaultPrPair({
+      handedHead: defaultHead,
+      handedBase: preset?.base ?? defaultBase,
+      current: currentName,
+      defaultBranch: defaultBranch.data,
+      parentTarget,
+    });
+    const h = seeded.head;
     // What the form is holding, which is what the retire below is keyed on. On
     // a fresh mount the form holds its defaults, so this is just `h`.
     const retained = form.state.values.head || h;
@@ -954,10 +1030,6 @@ export function CreatePrDialog({
     // prior fork/parent choice doesn't leak into the next PR.
     setAppliedPreset(preset);
     setTarget(preset?.target ?? "upstream");
-    const fallbackBase =
-      defaultBranch.data && defaultBranch.data !== h
-        ? defaultBranch.data
-        : (names.find((n) => n !== h) ?? "");
     endDraftAttachments(attachDraftKey);
     form.reset(
       {
@@ -967,7 +1039,7 @@ export function CreatePrDialog({
         // (and its branches have loaded). A ComparePanel-seeded `defaultBase` is
         // a local branch, so it only applies to the fork target; a preset's base
         // is already its own target's.
-        base: preset?.base ?? defaultBase ?? fallbackBase,
+        base: seeded.base,
         title: "",
         body: "",
         // Seed each open from the setting so the draft default reflects the current
@@ -979,7 +1051,12 @@ export function CreatePrDialog({
       },
       { keepDefaultValues: true },
     );
-    focusTitleIfEmpty();
+    // On the parent target an empty Base is the reconcile's transient, filled
+    // once the parent's branches load, so only Merge takes focus there.
+    const side = unchosenSide(seeded.head, seeded.base);
+    if (side === "head" || (side === "base" && !parentTarget))
+      focusPicker(side);
+    else focusTitleIfEmpty();
   });
   useSeedOnOpen(open, seedOnOpen);
 
@@ -1068,14 +1145,11 @@ export function CreatePrDialog({
   const laneHint = lane && !isSubmitting ? laneHintFor(lane) : null;
   const shownLaneHint = useRetained(laneHint, open);
 
-  // Fork-side fallback base, mirroring the seed logic (default branch, else first
-  // non-head) — reused when reconciling back from the parent target.
-  const forkFallbackBase = useEffectEvent(() => {
-    const h = form.state.values.head;
-    return defaultBranch.data && defaultBranch.data !== h
-      ? defaultBranch.data
-      : (names.find((n) => n !== h) ?? "");
-  });
+  // Fork-side base when reconciling back from the parent target: the seed's
+  // rule, so an unknown default leaves Base unchosen.
+  const forkFallbackBase = useEffectEvent(() =>
+    defaultBaseFor(form.state.values.head, defaultBranch.data),
+  );
   // The preset's ref, exactly while its base is selected on its target.
   const activeBaseRef =
     presetBase !== null && base === presetBase.name ? presetBase.ref : null;
@@ -1118,7 +1192,8 @@ export function CreatePrDialog({
   // While the parent fetch is in flight `base` is still the fork-seeded local name
   // and the upstream ref may not exist yet → yield null so the compare query stays
   // idle rather than erroring. A selected preset base reads its own ref instead.
-  const compareBaseRef = (() => {
+  // This is the base's IDENTITY ref, the one "same branch" compares.
+  const identityBaseRef = (() => {
     if (!base || (targetIsParent && parentBranches.isPending)) return null;
     if (activeBaseRef !== null) return activeBaseRef;
     return targetIsParent
@@ -1126,13 +1201,45 @@ export function CreatePrDialog({
       : `refs/heads/${base}`;
   })();
   const compareHeadRef = head ? `refs/heads/${head}` : null;
-  const comparison = useBranchAhead(repoPath, compareBaseRef, compareHeadRef);
-  const ahead = comparison.data ?? [];
   // Full refs on both sides: a head equal to the parent's base name is still a
   // distinct ref (local branch vs. upstream's), so only identical refs are "same".
   const sameBranch =
-    compareBaseRef !== null && compareBaseRef === compareHeadRef;
+    identityBaseRef !== null && identityBaseRef === compareHeadRef;
+  // The ref the count, the commit list and the AI diff read. On the own target
+  // with no preset ref it is origin's copy of the base when the local
+  // remote-branch read lists one, since the forge opens the pull request
+  // against that; the local branch once the read answered without it or
+  // failed, and undecided (null) until then so nothing is counted against a
+  // guessed ref before the read answers.
+  const remoteBranches = useRemoteBranches(repoPath, open);
+  const countBaseRef = (() => {
+    if (identityBaseRef === null) return null;
+    if (activeBaseRef !== null || targetIsParent) return identityBaseRef;
+    if (remoteBranches.data) {
+      return remoteBranches.data.some(
+        (b) => b.remote === "origin" && b.name === base,
+      )
+        ? `refs/remotes/origin/${base}`
+        : identityBaseRef;
+    }
+    return remoteBranches.isError ? identityBaseRef : null;
+  })();
+  // Null on the same branch explicitly: the hook's own `base !== compare` gate
+  // no longer catches it once the count reads origin's ref.
+  const comparison = useBranchAhead(
+    repoPath,
+    sameBranch ? null : countBaseRef,
+    compareHeadRef,
+  );
+  const ahead = comparison.data ?? [];
   const nothingToMerge = sameBranch || ahead.length === 0;
+  // Status line only: the ref read or the count for this exact pair has no
+  // answer yet. Create stays held plainly through it by `nothingToMerge`.
+  const counting =
+    compareHeadRef !== null &&
+    identityBaseRef !== null &&
+    !sameBranch &&
+    (countBaseRef === null || comparison.isPending);
 
   // Duplicate probe: an open PR from this head against the chosen target already
   // exists. Probe with the target's lens ("upstream" composes owner:branch
@@ -1154,8 +1261,25 @@ export function CreatePrDialog({
   // Creating the PR pushes its head, which Keep local refuses; a local pull
   // request (no push) stays the way out, so the head stays pickable.
   const headKeptLocal = keptLocal.has(head);
+  // The side the user still has to choose, Merge first.
+  const unchosen = forgeUnchosenSide({
+    head,
+    base,
+    baseLoading,
+    readFailed: parentReadFailed,
+    targetIsParent,
+    parentBase,
+  });
+  // Holds Create and Generate apart from the count: an empty side has no pair,
+  // whatever the cache holds for the half-empty key.
+  const sideEmpty = head === "" || base === "";
+  // Nothing to pick from; a Base that survived the reconcile (a preset's ref)
+  // stays shown and usable.
+  const baseUnreadable = parentReadFailed && base === "";
   const submitBlocked =
     headKeptLocal ||
+    unchosen !== null ||
+    sideEmpty ||
     generating ||
     nothingToMerge ||
     baseLoading ||
@@ -1168,17 +1292,22 @@ export function CreatePrDialog({
   // Holds no reason sentence outranks: each explains itself in the dialog.
   const plainHold =
     nothingToMerge || baseLoading || creatingElsewhere || Boolean(existingPr);
-  // The running draft, the running create, an image still attaching, and
-  // offline carry a reason, ranked in that order, so a flip between them never
-  // drops focus. The attaching reason shows only while no plain disable (the
-  // lane hint, the duplicate notice, nothing-to-merge, the base-branch load) is
-  // on, so its settle never takes the reason from a still-held button.
+  // A kept-local head, an unchosen side, the running draft, the running
+  // create, an image still attaching, and offline carry a reason, ranked in
+  // that order, so a flip between them never drops focus. The attaching reason
+  // shows only while no plain disable (the lane hint, the duplicate notice,
+  // nothing-to-merge, the base-branch load) is on, so its settle never takes
+  // the reason from a still-held button.
   const offlineSubmit = useDisabledReason({
     disabled: shownSubmitBlocked,
     reason: (() => {
       switch (true) {
         case headKeptLocal:
           return keptLocalPrReason(head);
+        case baseUnreadable:
+          return parentReadLine;
+        case unchosen !== null:
+          return UNCHOSEN_COPY[unchosen];
         case generating:
           return AI_DRAFT_PENDING_REASON;
         case shownSubmitting:
@@ -1192,6 +1321,65 @@ export function CreatePrDialog({
     title: SUBMIT_HINT,
     describedBy: shownLaneHint ? creatingHintId : undefined,
   });
+  // The one line under the pickers, decided once: the render reads it, and so
+  // does which element carries Create's reason id.
+  const statusArm = forgeStatusArm({
+    parentReadFailed,
+    baseLoading,
+    fetchError: Boolean(parentFetchError),
+    unchosen,
+    sideEmpty,
+    sameBranch,
+    counting,
+    // A failed refresh over a loaded count keeps the count.
+    countFailed: comparison.isLoadingError,
+  });
+  // The unchosen line is Create's description while it is both the shown arm
+  // and the reason; the footer's copy then stays out, so it is announced once.
+  const unchosenAnnounced =
+    statusArm === "unchosen" &&
+    unchosen !== null &&
+    offlineSubmit.blockedReason === UNCHOSEN_COPY[unchosen];
+  // The same carrier for the failed parent read's line.
+  const readFailedAnnounced =
+    statusArm === "parentReadFailed" &&
+    offlineSubmit.blockedReason === parentReadLine;
+  // Generate's hold. The shared states reuse Create's sentences in Create's
+  // relative order; a running create comes first, with Generate's own
+  // sentence. Nothing to merge and an empty side the parent is about to fill
+  // stay plain disables the status line explains.
+  const generateHeld =
+    unchosen !== null || sideEmpty || nothingToMerge || shownSubmitting;
+  const generateReason = (() => {
+    switch (true) {
+      case shownSubmitting:
+        return CREATE_PENDING_GENERATE_REASON;
+      case baseUnreadable:
+        return parentReadLine;
+      case unchosen !== null:
+        return UNCHOSEN_COPY[unchosen];
+      default:
+        return undefined;
+    }
+  })();
+  // Any focused control that goes natively disabled hands focus to Title (the
+  // hook). The one body landing is a removed Retry: it leaves focus on body at
+  // this commit (Base UI moves it to the popup in a later microtask), so only
+  // on the failed line leaving, still on the parent with no create running,
+  // does Title take it; focus the user moved elsewhere stays there.
+  useLandStrandedFocus(titleId);
+  const landReadRecovered = useEffectEvent(() => {
+    if (!open || !targetIsParent || form.state.isSubmitting) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    document.getElementById(titleId)?.focus();
+  });
+  const readFailedBefore = useRef(parentReadFailed);
+  useLayoutEffect(() => {
+    const left = readFailedBefore.current && !parentReadFailed;
+    readFailedBefore.current = parentReadFailed;
+    if (left) landReadRecovered();
+  }, [parentReadFailed]);
 
   // Linked-issue chip cluster — extraction seeding, AI union, candidate ranking and
   // the chip mutations live in the shared hook. Gated on a usable tracker AND the
@@ -1317,9 +1505,13 @@ export function CreatePrDialog({
         targetAcceptsLabels: runAcceptsLabels,
         stillCurrent: () => sameLabelTarget(runTarget, labelTargetRef.current),
       },
-      // Diffs the preset's remote-tracking base while it is selected; the
-      // prompt still names the bare base.
-      { baseDiffRef: activeBaseRef ?? undefined },
+      // Diffs the remote-tracking base the count reads (a preset's, origin's
+      // copy, or the parent's); the prompt still names the bare base.
+      {
+        baseDiffRef: countBaseRef?.startsWith("refs/remotes/")
+          ? countBaseRef
+          : undefined,
+      },
     ).then(
       (final) => {
         if (final) {
@@ -1344,7 +1536,13 @@ export function CreatePrDialog({
   // create holds it like the button: the draft it would revise has been sent.
   // The held look is retained through the close fade, so this gate adds `open`.
   const generateChord = useGenerateChord({
-    enabled: open && !generating && !nothingToMerge && !isSubmitting,
+    enabled:
+      open &&
+      !generating &&
+      unchosen === null &&
+      !sideEmpty &&
+      !nothingToMerge &&
+      !isSubmitting,
     run: aiEnabled ? runGenerate : undefined,
   });
   const generateHint = generateChord.hint;
@@ -1461,7 +1659,7 @@ export function CreatePrDialog({
               )}
 
             <div className="flex items-end gap-2">
-              <div className="min-w-0 flex-initial">
+              <div className="min-w-0 flex-initial" ref={attachHeadPicker}>
                 <form.AppField name="head">
                   {(field) => (
                     <field.SelectField
@@ -1471,6 +1669,7 @@ export function CreatePrDialog({
                       // Frozen while a submit runs — see the "Create in" picker.
                       disabled={shownSubmitting}
                       sizeToContent
+                      placeholder={BRANCH_PLACEHOLDER}
                     />
                   )}
                 </form.AppField>
@@ -1478,15 +1677,20 @@ export function CreatePrDialog({
               <span className="shrink-0 pb-2 text-xs text-muted-foreground">
                 into
               </span>
-              <div className="min-w-0 flex-initial">
+              <div className="min-w-0 flex-initial" ref={attachBasePicker}>
                 <form.AppField name="base">
                   {(field) => (
                     <field.SelectField
                       label="Base"
-                      items={baseLoading ? {} : baseItems}
+                      items={baseLoading || baseUnreadable ? {} : baseItems}
                       annotations={baseAnnotations}
-                      disabled={baseLoading}
+                      disabled={baseLoading || baseUnreadable}
                       sizeToContent
+                      placeholder={
+                        baseLoading || baseUnreadable
+                          ? undefined
+                          : BRANCH_PLACEHOLDER
+                      }
                     />
                   )}
                 </form.AppField>
@@ -1505,25 +1709,103 @@ export function CreatePrDialog({
                 {head || "…"} <span className="text-muted-foreground">→</span>{" "}
                 {targetIsParent && base ? `upstream/${base}` : base || "…"}
               </p>
-              {baseLoading ? (
-                <p className="text-xs text-muted-foreground">
-                  Fetching upstream branches…
-                </p>
-              ) : parentFetchError ? (
-                // Fetch failed but local upstream refs (if any) still populate the
-                // picker — surface the error inline, keep the control usable.
-                <p className="text-xs text-warning">
-                  Couldn't fetch upstream: {parentFetchError}
-                </p>
-              ) : sameBranch ? (
-                <p className="text-xs text-warning">
-                  Pick two different branches.
-                </p>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  {ahead.length} commit{ahead.length === 1 ? "" : "s"} to merge.
-                </p>
-              )}
+              {(() => {
+                switch (statusArm) {
+                  case "parentReadFailed":
+                  case "baseLoading": {
+                    // One tree for both arms, so the status region is already
+                    // mounted when the read's failure reaches it and only its
+                    // text changes; the count lines stay out of it. A refetch
+                    // holds Retry with a reason, so focus stays on it.
+                    const failed = statusArm === "parentReadFailed";
+                    return (
+                      <div className="flex items-center gap-2">
+                        <div role="status">
+                          <p
+                            id={
+                              readFailedAnnounced
+                                ? offlineSubmit.reasonId
+                                : undefined
+                            }
+                            className={cn(
+                              "text-xs",
+                              failed && !parentBranches.isFetching
+                                ? "text-warning"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {failed ? parentReadLine : PARENT_FETCHING_COPY}
+                          </p>
+                        </div>
+                        {failed ? (
+                          <DisabledReasonButton
+                            type="button"
+                            variant="outline"
+                            size="xs"
+                            disabled={parentBranches.isFetching}
+                            reason={
+                              parentBranches.isFetching
+                                ? PARENT_RETRYING_REASON
+                                : null
+                            }
+                            onClick={retryParentRead}
+                          >
+                            Retry
+                          </DisabledReasonButton>
+                        ) : null}
+                      </div>
+                    );
+                  }
+                  case "fetchError":
+                    // Fetch failed but local upstream refs (if any) still
+                    // populate the picker: surface the error inline, keep the
+                    // control usable.
+                    return (
+                      <p className="text-xs text-warning">
+                        Couldn't fetch upstream: {parentFetchError}
+                      </p>
+                    );
+                  case "unchosen":
+                    // A prompt, not a problem: the count line's muted tone.
+                    return (
+                      <p
+                        id={
+                          unchosenAnnounced ? offlineSubmit.reasonId : undefined
+                        }
+                        className="text-xs text-muted-foreground"
+                      >
+                        {unchosen && UNCHOSEN_COPY[unchosen]}
+                      </p>
+                    );
+                  case "sameBranch":
+                    return (
+                      <p className="text-xs text-warning">
+                        Pick two different branches.
+                      </p>
+                    );
+                  case "counting":
+                    // Never "0 commits" before a count answered zero.
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        {COUNTING_COPY}
+                      </p>
+                    );
+                  case "countFailed":
+                    // Status only: `nothingToMerge` holds Create and Generate.
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        {COUNT_FAILED_COPY}
+                      </p>
+                    );
+                  default:
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        {ahead.length} commit{ahead.length === 1 ? "" : "s"} to
+                        merge.
+                      </p>
+                    );
+                }
+              })()}
               {targetIsParent && (
                 <p className="text-xs text-muted-foreground">
                   Labels and assignees can be added on{" "}
@@ -1712,23 +1994,17 @@ export function CreatePrDialog({
                         Cancel
                       </Button>
                     ) : (
-                      // Nothing to merge stays a plain disable; a running create
-                      // says why.
                       <DisabledReasonButton
                         type="button"
                         variant="outline"
                         size="xs"
-                        disabled={nothingToMerge || shownSubmitting}
-                        reason={
-                          shownSubmitting
-                            ? CREATE_PENDING_GENERATE_REASON
-                            : undefined
-                        }
+                        disabled={generateHeld}
+                        reason={generateReason}
                         onClick={runGenerate}
                         // The chord is only offered while it would do something —
                         // a disabled Generate's shortcut is dead too.
                         title={
-                          !nothingToMerge && !shownSubmitting
+                          !generateHeld
                             ? `Generate the title and description with AI${generateHint}`
                             : "Generate the title and description with AI"
                         }
@@ -1830,7 +2106,10 @@ export function CreatePrDialog({
                     >
                       {draft ? "Create draft" : `Create ${prNoun}`}
                     </form.SubmitButton>
-                    {offlineSubmit.blockedReason && !headKeptLocal ? (
+                    {offlineSubmit.blockedReason &&
+                    !headKeptLocal &&
+                    !unchosenAnnounced &&
+                    !readFailedAnnounced ? (
                       <span id={offlineSubmit.reasonId} className="sr-only">
                         {offlineSubmit.blockedReason}
                       </span>

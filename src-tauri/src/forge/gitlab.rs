@@ -3824,10 +3824,10 @@ pub async fn commit_comment_delete(repo_path: &str, sha: &str, comment_id: &str)
     let (did, nid) = parse_commit_comment_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/repository/commits/{sha}/discussions/{did}/notes/{nid}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -3879,26 +3879,29 @@ const UPLOAD_TOO_LARGE: &str = "it is larger than this project allows";
 const UPLOAD_UNREADABLE: &str = "GitLab's reply couldn't be read";
 
 /// What the upload refusal says did not happen: a comment or create is not posted, an
-/// edit is not saved.
+/// edit is not saved. `AfterPush` is a merge request whose branch is already pushed: its
+/// refusal says neither, since `mr_post_error`'s pushed lead wraps it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum UploadVerb {
     Posted,
     Saved,
+    AfterPush,
 }
 
 impl UploadVerb {
-    fn word(self) -> &'static str {
+    fn lead(self) -> &'static str {
         match self {
-            Self::Posted => "posted",
-            Self::Saved => "saved",
+            Self::Posted => "Nothing was posted. ",
+            Self::Saved => "Nothing was saved. ",
+            Self::AfterPush => "",
         }
     }
 }
 
 fn upload_refusal(verb: UploadVerb, name: &str, reason: &str) -> AppError {
     AppError::Glab(format!(
-        "Nothing was {}. GitLab didn't accept {name}: {reason}.",
-        verb.word()
+        "{}GitLab didn't accept {name}: {reason}.",
+        verb.lead()
     ))
 }
 
@@ -4015,6 +4018,15 @@ async fn glab_write_fields(
     )
     .await
     .map_err(|e| crate::forge::timed_out_write(e, "GitLab", write))
+}
+
+/// `run_glab` for a write whose timeout may still have landed: its Err says so for
+/// `write`. Not the only hedged path: `glab_write_fields` hedges JSON-body writes, and some
+/// writes map `timed_out_write` at their own run.
+async fn glab_write(repo_path: &str, args: &[&str], write: LandedWrite) -> AppResult<GlabOutput> {
+    run_glab(Some(repo_path), args, GLAB_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| crate::forge::timed_out_write(e, "GitLab", write))
 }
 
 /// A note's fields.
@@ -4548,7 +4560,7 @@ mod attach_tests {
 
     /// Each GitLab attached route reads its project once (`create_mr` reads `origin` once
     /// and derives the project from it), looks its assignees up in that project, uploads
-    /// into it, then writes.
+    /// into it, then writes; `create_mr` re-checks `origin` and pushes before it uploads.
     #[test]
     fn every_gitlab_attached_route_reads_its_project_before_uploading() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -4599,6 +4611,8 @@ mod attach_tests {
                     "clone_credential_config(",
                     "project_path_from_url(",
                     "create_assignee_ids(",
+                    "refuse_moved_origin(",
+                    "run_git_mutating_with_creds_for_branch(",
                     "upload_and_rewrite(",
                 ],
             ),
@@ -4618,25 +4632,29 @@ mod attach_tests {
     }
 
     /// `create_mr` reads the project only from its one `origin` read, and looks assignees
-    /// up only through the lookup that takes that project.
+    /// up only through the lookup that takes that project, both before the push.
     #[test]
     fn create_mr_derives_every_project_use_from_one_origin_read() {
         use crate::github::repo_meta::tests::wiring_body;
+        const PUSH: &str = "run_git_mutating_with_creds_for_branch(";
         let pinned = |body: &str| {
             body.matches("git_remote_url(").count() == 1
                 && body.matches("project_path(").count() == 0
                 && body.matches("project_path_from_url(").count() == 1
                 && body.matches("create_assignee_ids(").count() == 1
                 && !body.contains("resolve_assignee_ids")
-                && precedes(body, "git_remote_url(", "upload_and_rewrite(")
-                && precedes(body, "create_assignee_ids(", "upload_and_rewrite(")
+                && precedes(body, "git_remote_url(", PUSH)
+                && precedes(body, "create_assignee_ids(", PUSH)
         };
         let body = wiring_body(include_str!("gitlab.rs"), "create_mr");
         assert!(pinned(&body), "{body}");
         let reread = format!("{body}\nproject_path(x)");
         assert!(!pinned(&reread), "a second project read must flip");
         let late = body.replacen("git_remote_url(", "deferred(", 1) + "\ngit_remote_url(x)";
-        assert!(!pinned(&late), "an origin read after the uploads must flip");
+        assert!(!pinned(&late), "an origin read after the push must flip");
+        let lookup =
+            body.replacen("create_assignee_ids(", "deferred(", 1) + "\ncreate_assignee_ids(x)";
+        assert!(!pinned(&lookup), "a lookup after the push must flip");
         let direct = body.replace("create_assignee_ids(", "resolve_assignee_ids(");
         assert!(
             !pinned(&direct),
@@ -4690,8 +4708,11 @@ mod attach_tests {
                 "{name}: a reader ahead of the run must flip"
             );
             if name == "create_mr" {
-                let unchecked =
-                    body.replacen(".map_err(mr_post_error)?", ".map_err(mr_post_error)", 1);
+                // The POST's own map, not the upload's ahead of it.
+                let post = body.find(run).unwrap();
+                let (head, tail) = body.split_at(post);
+                let tail = tail.replacen(".map_err(mr_post_error)?", ".map_err(mr_post_error)", 1);
+                let unchecked = format!("{head}{tail}");
                 assert_ne!(unchecked, body);
                 assert!(!after_run(&unchecked), "create_mr: a dropped `?` must flip");
             }
@@ -5046,24 +5067,42 @@ mod attach_tests {
         assert!(!routed(&plain), "the control must flip");
     }
 
-    /// `create_mr` uploads before it pushes, and posts only after the push.
+    /// `create_mr` pushes before it uploads, so a failed push uploads nothing, and posts
+    /// only after the uploads. Its origin check is the last statement ahead of the push:
+    /// nothing fallible sits between them.
     #[test]
-    fn create_mr_uploads_then_pushes_then_posts() {
+    fn create_mr_pushes_then_uploads_then_posts() {
         use crate::github::repo_meta::tests::wiring_body;
+        const CHECK: &str = "refuse_moved_origin(";
+        const PUSH: &str = "run_git_mutating_with_creds_for_branch(";
+        const UPLOAD: &str = "upload_and_rewrite(";
+        const POST: &str = "glab_write_fields(";
         let flat = |body: String| body.split_whitespace().collect::<Vec<_>>().join(" ");
         let mr = flat(wiring_body(include_str!("gitlab.rs"), "create_mr"));
         let ordered = |body: &str| {
             let at = |token: &str| body.find(token);
-            let (upload, push, post) = (
-                at("upload_and_rewrite("),
-                at("run_git_mutating_with_creds_for_branch("),
-                at("glab_write_fields("),
-            );
-            matches!((upload, push, post), (Some(u), Some(p), Some(w)) if u < p && p < w)
+            let (push, upload, post) = (at(PUSH), at(UPLOAD), at(POST));
+            matches!((push, upload, post), (Some(p), Some(u), Some(w)) if p < u && u < w)
         };
         assert!(ordered(&mr), "{mr}");
-        let late = mr.replacen("upload_and_rewrite(", "deferred(", 1) + " upload_and_rewrite(";
-        assert!(!ordered(&late), "the control must flip");
+        let early = swap_first(&mr, PUSH, UPLOAD);
+        assert!(!ordered(&early), "an upload ahead of the push must flip");
+        let posted = swap_first(&mr, UPLOAD, POST);
+        assert!(!ordered(&posted), "a POST ahead of the uploads must flip");
+        // The check's own `?` is the only one between it and the push call.
+        let adjacent = |body: &str| {
+            body.find(CHECK).zip(body.find(PUSH)).is_some_and(|(c, p)| {
+                c < p && body[c..p].matches('?').count() == 1 && body[c..p].contains(".await?;")
+            })
+        };
+        assert!(adjacent(&mr), "{mr}");
+        let step = mr.replacen(PUSH, &format!("step().await?; {PUSH}"), 1);
+        assert!(
+            !adjacent(&step),
+            "a fallible step after the check must flip"
+        );
+        let after = swap_first(&mr, CHECK, PUSH);
+        assert!(!adjacent(&after), "a check after the push must flip");
     }
 
     /// A merge request POST that fails after the push leads with the push fact under kind
@@ -5092,6 +5131,11 @@ mod attach_tests {
                 AppError::Io(std::io::Error::other("x")),
                 wrap("io error: x"),
             ),
+            // An image refused after the push, from the real builder.
+            (
+                upload_refusal(UploadVerb::AfterPush, "image-1.png", UPLOAD_TOO_LARGE),
+                "The branch was pushed, but creating the merge request failed: GitLab didn't accept image-1.png: it is larger than this project allows.".to_string(),
+            ),
             // A bare timeout never came from the POST, so it is no hedge.
             (
                 AppError::Timeout(120),
@@ -5115,9 +5159,10 @@ mod attach_tests {
         assert!(matches!(missing, AppError::GlabNotFound), "{missing:?}");
     }
 
-    /// After its push, `create_mr` returns an Err only from the POST (through the push
-    /// lead) and from its reply reader (a `glab` hedge), so no `git`-kind error leaves once
-    /// the branch is pushed; the uploads and reads before the push carry no lead.
+    /// After its push, `create_mr` returns an Err only from the uploads and the POST
+    /// (each through the push lead) and from its reply reader (a `glab` hedge), so no
+    /// `git`-kind error leaves once the branch is pushed; the reads before the push carry
+    /// no lead.
     #[test]
     fn create_mr_returns_nothing_unled_after_the_push() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -5130,10 +5175,11 @@ mod attach_tests {
         };
         let led = |body: &str| {
             after_push(body).is_some_and(|s| {
-                s.matches('?').count() == 2
+                s.matches('?').count() == 3
+                    && s.contains(".await .map_err(mr_post_error)?,")
                     && s.contains(".await .map_err(mr_post_error)?;")
                     && s.contains("\"merge request\", true)?;")
-            }) && body.matches("mr_post_error").count() == 1
+            }) && body.matches("mr_post_error").count() == 2
         };
         assert!(led(&mr), "{mr}");
         let push = mr.find("run_git_mutating_with_creds_for_branch(").unwrap();
@@ -5142,6 +5188,9 @@ mod attach_tests {
         assert!(!led(&read), "a read after the push must flip");
         let bare = mr.replacen(" .map_err(mr_post_error)?;", "?;", 1);
         assert!(!led(&bare), "an unmapped POST must flip");
+        let upload = mr.replacen(" .map_err(mr_post_error)?,", "?,", 1);
+        assert_ne!(upload, mr);
+        assert!(!led(&upload), "an unmapped upload must flip");
         let early = format!("{} .map_err(mr_post_error)", &mr[..push]) + &mr[push..];
         assert!(!led(&early), "a lead before the push must flip");
     }
@@ -5213,24 +5262,38 @@ mod attach_tests {
 
     /// Each parenthesised review wrap embeds `paren_parts`' split of the step's error, bound
     /// between the error's binding and the wrap, so a multi-line cause closes the
-    /// parenthesis on line one. The roster is every `({first}){rest}` wrap in the function.
+    /// parenthesis on line one. The roster is every `({first}){rest}` wrap in `review_submit`
+    /// and in `publish_step_error` and `verdict_step_error`, which take their step's error as
+    /// their parameter.
     #[test]
     fn review_wraps_split_the_error_they_embed() {
         use crate::github::repo_meta::tests::wiring_body;
         const SPLIT: &str = "let (first, rest) = paren_parts(&e);";
-        let body = wiring_body(include_str!("gitlab.rs"), "review_submit");
-        let wraps = [
-            "review comments as drafts before the failure",
-            "The review's draft notes couldn't be published",
-            "The review was posted, but the {action} step failed",
+        let rosters: [(&str, &[&str]); 3] = [
+            (
+                "review_submit",
+                &["review comments as drafts before the failure"],
+            ),
+            (
+                "publish_step_error",
+                &["The review's draft notes couldn't be published"],
+            ),
+            (
+                "verdict_step_error",
+                &["The review was posted, but the {action} step failed"],
+            ),
         ];
         let split = |body: &str, wrap: &str| {
             body.find(wrap).is_some_and(|at| {
                 let before = &body[..at];
-                let start = [before.rfind("if let Err(e)"), before.rfind("map_err(|e|")]
-                    .into_iter()
-                    .flatten()
-                    .max();
+                let start = [
+                    before.rfind("if let Err(e)"),
+                    before.rfind("map_err(|e|"),
+                    before.rfind("(e: AppError"),
+                ]
+                .into_iter()
+                .flatten()
+                .max();
                 let tail = &body[at..];
                 let end = tail.find("))").unwrap_or(tail.len());
                 start.is_some_and(|s| {
@@ -5239,20 +5302,250 @@ mod attach_tests {
                 }) && tail[..end].contains("({first}){rest}")
             })
         };
-        for wrap in wraps {
-            assert!(split(&body, wrap), "{wrap}\n{body}");
-            let call = body[..body.find(wrap).unwrap()].rfind(SPLIT).unwrap();
-            let unsplit = format!(
-                "{}let (first, rest) = (e.to_string(), String::new());{}",
-                &body[..call],
-                &body[call + SPLIT.len()..]
+        for (name, wraps) in rosters {
+            let body = wiring_body(include_str!("gitlab.rs"), name);
+            for wrap in wraps {
+                assert!(split(&body, wrap), "{wrap}\n{body}");
+                let call = body[..body.find(wrap).unwrap()].rfind(SPLIT).unwrap();
+                let unsplit = format!(
+                    "{}let (first, rest) = (e.to_string(), String::new());{}",
+                    &body[..call],
+                    &body[call + SPLIT.len()..]
+                );
+                assert!(!split(&unsplit, wrap), "{wrap}: an unsplit error must flip");
+            }
+            assert_eq!(
+                body.matches("({first}){rest}").count(),
+                wraps.len(),
+                "{name}: an unlisted parenthesised wrap"
             );
-            assert!(!split(&unsplit, wrap), "{wrap}: an unsplit error must flip");
         }
+    }
+
+    /// Each caller hands the step's bound error to its wrap fn itself (read whitespace-free):
+    /// the comment's binding straight into its call, the publish run's error straight into
+    /// `publish_step_error`, and the verdict's past no `return`, `?` or `let e =` /
+    /// `let mut e =` rebind into its own.
+    #[test]
+    fn review_callers_hand_the_error_to_their_wrap() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("gitlab.rs");
+        let flat = |name: &str| wiring_body(source, name).replace(char::is_whitespace, "");
+        let comment = "ifletErr(e)=comment_mr(repo_path,number,body,false).await{\
+                       returnErr(change_request_comment_error(e));}";
+        let changes = flat("request_changes_mr");
+        assert!(changes.contains(comment), "{changes}");
+        // No statement in the span may rebind `e` (a shadowing `let e =` / `let mut e =`).
+        let rebinds = |span: &str| {
+            ["{", ";", "}"].iter().any(|b| {
+                span.contains(&format!("{b}lete=")) || span.contains(&format!("{b}letmute="))
+            })
+        };
+        let reaches = |body: &str| {
+            let from = body.find("ifletErr(e)=verdict_result{");
+            let to = body.find("returnErr(verdict_step_error(e,action,&landed));}");
+            from.zip(to).is_some_and(|(f, t)| {
+                f < t && {
+                    let span = &body[f..t];
+                    !span.contains("return") && !span.contains('?') && !rebinds(span)
+                }
+            })
+        };
+        let submit = flat("review_submit");
+        assert!(reaches(&submit), "{submit}");
+        let publish =
+            "&publish_endpoint],GLAB_NETWORK_TIMEOUT,).await.map_err(publish_step_error)?;";
+        assert!(submit.contains(publish), "{submit}");
+        // Controls: the publish error wrapped, replaced, or mapped before the hand-off.
+        for (from, to) in [
+            (
+                "map_err(publish_step_error)",
+                "map_err(|e|publish_step_error(AppError::Glab(e.to_string())))",
+            ),
+            (
+                "map_err(publish_step_error)",
+                "map_err(|_|publish_step_error(AppError::Timeout(150)))",
+            ),
+            (
+                ".map_err(publish_step_error)",
+                ".map_err(|e|AppError::Glab(e.to_string())).map_err(publish_step_error)",
+            ),
+        ] {
+            let mutant = submit.replacen(from, to, 1);
+            assert!(mutant != submit && !mutant.contains(publish), "{mutant}");
+        }
+        // Controls: the bound error wrapped before the hand-off, and an early return.
+        let wrapped = "AppError::Glab(e.to_string())";
+        let mutant = changes.replacen(
+            "change_request_comment_error(e)",
+            &format!("change_request_comment_error({wrapped})"),
+            1,
+        );
+        assert!(mutant != changes && !mutant.contains(comment), "{mutant}");
+        let mutant = submit.replacen(
+            "verdict_step_error(e,",
+            &format!("verdict_step_error({wrapped},"),
+            1,
+        );
+        assert!(mutant != submit && !reaches(&mutant), "{mutant}");
+        let early = submit.replacen(
+            "ifletErr(e)=verdict_result{",
+            "ifletErr(e)=verdict_result{returnErr(e);",
+            1,
+        );
+        assert!(
+            early != submit && !reaches(&early),
+            "an early verdict return must flip"
+        );
+        for rebind in ["lete=AppError::Glab(e.to_string());", "letmute=e;"] {
+            let shadowed = submit.replacen(
+                "ifletErr(e)=verdict_result{",
+                &format!("ifletErr(e)=verdict_result{{{rebind}"),
+                1,
+            );
+            assert!(
+                shadowed != submit && !reaches(&shadowed),
+                "a rebind of the verdict error must flip: {rebind}"
+            );
+        }
+    }
+
+    /// An unanswered publish gets its may-or-may-not sentence with the CLI's timeout in its
+    /// parentheses; any other failure keeps the not-submitted sentence over `paren_parts`.
+    /// The tail is checked typed (fails when the shared CLI line changes), derived from
+    /// `write_timed_out` + `timed_out_cause` (still passes then, so the change reads as that
+    /// line's), and by source shape (fails when the fn stops reading the shared line).
+    #[test]
+    fn publish_step_error_names_the_cli_timeout() {
+        let publish = |e: AppError| {
+            let out = publish_step_error(e);
+            assert!(matches!(out, AppError::Glab(_)), "{out:?}");
+            out.to_string()
+        };
+        let timed_out = publish(AppError::Timeout(150));
+        let shared = crate::forge::write_timed_out("GitLab", LandedWrite::Changed, 150);
+        let cause = crate::forge::timed_out_cause(&shared).expect("a CLI line");
         assert_eq!(
-            body.matches("({first}){rest}").count(),
-            wraps.len(),
-            "an unlisted parenthesised wrap"
+            timed_out,
+            format!(
+                "GitLab didn't answer in time while publishing the review's draft notes, so \
+                 the review may or may not have been submitted. Check the merge request on \
+                 GitLab before retrying. ({cause})"
+            )
+        );
+        assert_eq!(
+            timed_out,
+            "GitLab didn't answer in time while publishing the review's draft notes, so the \
+             review may or may not have been submitted. Check the merge request on GitLab \
+             before retrying. (GitLab CLI timed out after 150s.)"
+        );
+        assert!(
+            !timed_out.contains("git operation timed out"),
+            "{timed_out}"
+        );
+        assert!(!timed_out.contains('\n'), "{timed_out}");
+        assert_eq!(
+            publish(AppError::Glab("GitLab API error (500): boom".into())),
+            "The review's draft notes couldn't be published, so the review \
+             was not submitted. Check the merge request on GitLab before retrying. (GitLab API \
+             error (500): boom)"
+        );
+        assert_eq!(
+            publish(AppError::Glab(
+                "GitLab API error (500): boom\nsecond line".into()
+            )),
+            "The review's draft notes couldn't be published, so the review \
+             was not submitted. Check the merge request on GitLab before retrying. (GitLab API \
+             error (500): boom)\nsecond line"
+        );
+        // Source shape: the cause comes from the shared line, never a local CLI literal.
+        use crate::github::repo_meta::tests::wiring_body;
+        let shared_cause = |body: &str| {
+            body.contains(
+                "crate::forge::write_timed_out(\"GitLab\", LandedWrite::Changed, seconds)",
+            ) && body.contains("crate::forge::timed_out_cause(&timed_out)")
+                && !body.contains("CLI timed out")
+        };
+        let body = wiring_body(include_str!("gitlab.rs"), "publish_step_error");
+        assert!(shared_cause(&body), "{body}");
+        let local = body.replacen(
+            "let cause = crate::forge::timed_out_cause(&timed_out)",
+            "let cause = Some(format!(\"GitLab CLI timed out after {seconds}s.\"))",
+            1,
+        );
+        assert!(
+            local != body && !shared_cause(&local),
+            "a local CLI literal must flip"
+        );
+    }
+
+    /// A timed-out verdict step or change-request comment gets its own may-or-may-not
+    /// sentence, the timed-out write's cause in its parentheses (none when it carried
+    /// none) and its hedge never repeated; any other failure keeps the old sentence.
+    #[test]
+    fn timed_out_review_steps_say_they_may_have_landed() {
+        let timed_out = || crate::forge::write_timed_out("GitLab", LandedWrite::Changed, 150);
+        let hedge = timed_out().to_string();
+        let hedge = hedge.split('\n').next().unwrap().to_string();
+        let landed =
+            "the 3 review note(s) were already posted successfully — do NOT resubmit them; ";
+        let verdict = |e: AppError, action: &str, landed: &str| {
+            let out = verdict_step_error(e, action, landed);
+            assert!(matches!(out, AppError::Glab(_)), "{out:?}");
+            out.to_string()
+        };
+        let staged = verdict(timed_out(), "approve", landed);
+        assert_eq!(
+            staged,
+            "The review was posted, but GitLab didn't answer in time on the approve step, so it \
+             may or may not have gone through: the 3 review note(s) were already posted \
+             successfully — do NOT resubmit them; check the merge request on GitLab before \
+             running the approve action again. (GitLab CLI timed out after 150s.)"
+        );
+        // A verdict-only review posted nothing, so its sentence starts at the forge.
+        assert_eq!(
+            verdict(timed_out(), "approve", ""),
+            "GitLab didn't answer in time on the approve step, so it may or may not have gone \
+             through: check the merge request on GitLab before running the approve action \
+             again. (GitLab CLI timed out after 150s.)"
+        );
+        assert_eq!(
+            verdict(AppError::WriteTimedOut(hedge.clone()), "request changes", ""),
+            "GitLab didn't answer in time on the request changes step, so it may or may not \
+             have gone through: check the merge request on GitLab before running the request \
+             changes action again."
+        );
+        assert!(!staged.contains(&hedge), "{staged}");
+        assert_eq!(
+            verdict(AppError::Glab("GitLab API error (500): boom".into()), "approve", landed),
+            "The review was posted, but the approve step failed: the 3 review note(s) were \
+             already posted successfully — do NOT resubmit them; only re-run the approve action \
+             on GitLab. (GitLab API error (500): boom)"
+        );
+        assert!(verdict(AppError::Timeout(150), "approve", "").contains(" step failed: "));
+
+        let comment = |e: AppError| {
+            let out = change_request_comment_error(e);
+            assert!(matches!(out, AppError::Glab(_)), "{out:?}");
+            out.to_string()
+        };
+        let posted = comment(timed_out());
+        assert_eq!(
+            posted,
+            "Changes were requested, but GitLab didn't answer in time on the comment, so it may \
+             or may not have been posted. Check the merge request on GitLab before posting it \
+             again. (GitLab CLI timed out after 150s.)"
+        );
+        assert!(!posted.contains(&hedge), "{posted}");
+        assert_eq!(
+            comment(AppError::WriteTimedOut(hedge)),
+            "Changes were requested, but GitLab didn't answer in time on the comment, so it may \
+             or may not have been posted. Check the merge request on GitLab before posting it \
+             again."
+        );
+        assert_eq!(
+            comment(AppError::Glab("GitLab API error (500): boom".into())),
+            "Changes were requested, but posting the comment failed: GitLab API error (500): boom"
         );
     }
 
@@ -5594,9 +5887,10 @@ mod attach_tests {
         ));
     }
 
-    // One builder, two verbs: a comment or create says "posted", an edit says "saved".
+    // One builder, three verbs: a comment or create says "posted", an edit says "saved", and
+    // a merge request whose branch is pushed says neither (the pushed lead wraps it).
     #[test]
-    fn upload_refusals_say_posted_or_saved_by_verb() {
+    fn upload_refusals_lead_by_verb() {
         let refusal = |verb| match upload_refusal(verb, "image-1.png", UPLOAD_UNREADABLE) {
             AppError::Glab(m) => m,
             other => panic!("expected AppError::Glab, got {other:?}"),
@@ -5616,6 +5910,51 @@ mod attach_tests {
                 &out(1, "", "glab: HTTP 413\n")
             )),
             "Nothing was saved. GitLab didn't accept image-1.png: it is larger than this project allows."
+        );
+        assert_eq!(
+            refusal(UploadVerb::AfterPush),
+            "GitLab didn't accept image-1.png: GitLab's reply couldn't be read."
+        );
+        assert_eq!(
+            glab_msg(upload_outcome(
+                UploadVerb::AfterPush,
+                "image-1.png",
+                &out(1, "", "glab: HTTP 413\n")
+            )),
+            "GitLab didn't accept image-1.png: it is larger than this project allows."
+        );
+    }
+
+    /// Only `create_mr` passes the after-push verb, and it passes no other; every other
+    /// route keeps its "Nothing was …" refusal.
+    #[test]
+    fn only_the_pushed_merge_request_uploads_with_the_after_push_verb() {
+        let production = production_text(include_str!("gitlab.rs"));
+        let pinned = |production: &str| {
+            let bodies = fn_bodies(production);
+            let naming: Vec<&str> = bodies
+                .iter()
+                .filter(|(_, body)| body.contains("::AfterPush"))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let mr = bodies
+                .iter()
+                .find(|(name, _)| name == "create_mr")
+                .map_or("", |(_, body)| body.as_str());
+            naming == ["lead", "create_mr"]
+                && mr.matches("UploadVerb::AfterPush").count() == 1
+                && !mr.contains("UploadVerb::Posted")
+        };
+        assert!(pinned(&production));
+        let posted = production.replacen("UploadVerb::AfterPush", "UploadVerb::Posted", 1);
+        assert_ne!(posted, production);
+        assert!(!pinned(&posted), "create_mr passing Posted must flip");
+        let note = "staged, UploadVerb::Posted)";
+        let shared = production.replacen(note, "staged, UploadVerb::AfterPush)", 1);
+        assert_ne!(shared, production);
+        assert!(
+            !pinned(&shared),
+            "post_note_with_images passing it must flip"
         );
     }
 
@@ -5735,6 +6074,420 @@ mod attach_tests {
         );
     }
 
+    /// Calls of `token` (ending in `(`) in `body` that no identifier character precedes.
+    fn calls(body: &str, token: &str) -> usize {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        body.match_indices(token)
+            .filter(|&(at, _)| !body[..at].ends_with(ident))
+            .count()
+    }
+
+    /// Every function of `production` at any indent, as (name, body): its declaration line
+    /// through the `}` line at its own indent, `//` lines dropped. A multi-line function
+    /// with no such closing line panics, since where it ends is not known.
+    fn fn_bodies(production: &str) -> Vec<(String, String)> {
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let lines: Vec<&str> = production.lines().collect();
+        let mut found = Vec::new();
+        for (at, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let name = trimmed
+                .match_indices("fn ")
+                .filter(|&(i, _)| !trimmed[..i].ends_with(ident))
+                .find_map(|(i, _)| {
+                    let rest = &trimmed[i + 3..];
+                    let name = &rest[..rest.find(|c: char| !ident(c)).unwrap_or(rest.len())];
+                    let next = rest[name.len()..].chars().next();
+                    (!name.is_empty() && matches!(next, Some('(' | '<'))).then_some(name)
+                });
+            let Some(name) = name else {
+                continue;
+            };
+            let close = format!("{}}}", &line[..line.len() - trimmed.len()]);
+            let end = if trimmed.ends_with('}') || trimmed.ends_with(';') {
+                at
+            } else {
+                (at..lines.len())
+                    .find(|&i| lines[i] == close)
+                    .unwrap_or_else(|| panic!("no closing line for {name}"))
+            };
+            let body: Vec<&str> = lines[at..=end]
+                .iter()
+                .copied()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect();
+            found.push((name.to_string(), body.join("\n")));
+        }
+        found
+    }
+
+    /// The functions of `production` whose body holds a write-method literal and a call
+    /// of one of `runners`, sorted.
+    fn write_fns(production: &str, runners: &[&str]) -> Vec<String> {
+        let methods = ["\"POST\"", "\"PUT\"", "\"DELETE\"", "\"PATCH\""];
+        let mut names: Vec<String> = fn_bodies(production)
+            .into_iter()
+            .filter(|(_, body)| {
+                methods.iter().any(|m| body.contains(m))
+                    && runners.iter().any(|r| calls(body, r) > 0)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Every GitLab write run hedges a timeout or is listed as bare on purpose. The roster
+    /// is closed by computing every production function that holds a write-method literal
+    /// and a runner or helper call (`merge_mr_args` builds argv and runs nothing, so it
+    /// stays out). Out of its sight: a write with no method literal (the rows
+    /// `set_mr_draft`, `upload_release_asset`, `request_changes_mr` and the call-site row
+    /// `set_pr_reviewers` are pinned by name only) and a write outside gitlab.rs. The
+    /// computed set holds only writes whose method token is a literal in their own function,
+    /// so a porcelain subcommand, a GraphQL mutation or arguments built elsewhere are
+    /// invisible to it.
+    #[test]
+    fn every_gitlab_write_route_hedges_or_is_listed() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("gitlab.rs");
+        let production = production_text(source);
+
+        // Full tokens, noun included, so a row passing another kind's noun goes red.
+        let changed = "LandedWrite::Changed";
+        let posted = "LandedWrite::Posted";
+        let fork = "LandedWrite::Created(\"fork\")";
+        let pipeline = "LandedWrite::Created(\"pipeline\")";
+        let time_entry = "LandedWrite::Created(\"time entry\")";
+        let hook_created = "LandedWrite::Created(\"webhook\")";
+        let hook_saved = "LandedWrite::Saved(\"webhook\")";
+        let kinds = [
+            changed,
+            posted,
+            fork,
+            pipeline,
+            time_entry,
+            hook_created,
+            hook_saved,
+        ];
+        let runners = ["run_glab(", "run_glab_ex(", "run_glab_raw("];
+        let map = ".map_err(|e| crate::forge::timed_out_write(";
+        // A runner call is bare unless the map follows its `.await`.
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let bare_of = |body: &str, runners: &[&str]| -> usize {
+            runners
+                .iter()
+                .flat_map(|r| body.match_indices(r))
+                .filter(|&(at, _)| !body[..at].ends_with(ident))
+                .filter(|&(at, _)| {
+                    let rest = &body[at..];
+                    !rest
+                        .find(".await")
+                        .is_some_and(|w| rest[w + 6..].trim_start().starts_with(map))
+                })
+                .count()
+        };
+        let bare = |body: &str| bare_of(body, &runners);
+        let row_ok = |body: &str, passed: &[&str], hedges: usize, bare_runs: usize| {
+            calls(body, "glab_write(") + calls(body, "timed_out_write(") == hedges
+                && bare(body) == bare_runs
+                && kinds
+                    .iter()
+                    .all(|k| body.matches(k).count() == passed.iter().filter(|p| *p == k).count())
+        };
+
+        // (name, kinds it passes, hedges, bare runner calls)
+        type Row<'a> = (&'a str, &'a [&'a str], usize, usize);
+        let hedged: &[Row] = &[
+            ("commit_comment_delete", &[changed], 1, 0),
+            ("set_mr_state", &[changed], 1, 0),
+            ("set_mr_draft", &[changed], 1, 0),
+            ("delete_mr_comment", &[changed], 1, 0),
+            ("approve_pr", &[changed], 1, 0),
+            ("unapprove_pr", &[changed], 1, 0),
+            ("request_changes_mr", &[changed], 1, 0),
+            ("cancel_auto_merge_mr", &[changed], 1, 0),
+            ("set_issue_state", &[changed], 1, 0),
+            ("delete_issue_comment", &[changed], 1, 0),
+            ("lock_issue", &[changed], 1, 0),
+            ("move_issue", &[changed], 1, 1),
+            ("delete_issue", &[changed], 1, 0),
+            ("set_issue_milestone", &[changed], 1, 0),
+            ("set_issue_confidential", &[changed], 1, 0),
+            ("set_issue_due_date", &[changed], 1, 0),
+            ("resolve_thread", &[changed], 1, 0),
+            ("add_reaction", &[changed], 1, 0),
+            ("remove_reaction", &[changed], 1, 1),
+            ("edit_labels", &[changed], 1, 0),
+            ("set_target_assignees", &[changed], 1, 0),
+            ("remove_fork_relationship", &[changed], 1, 0),
+            ("repo_set_star", &[changed], 1, 0),
+            ("retry_run", &[changed], 1, 0),
+            ("cancel_run", &[changed], 1, 0),
+            ("play_job", &[changed], 1, 0),
+            ("retry_job", &[changed], 1, 0),
+            ("delete_release", &[changed, changed], 2, 0),
+            ("upload_release_asset", &[changed], 1, 0),
+            ("delete_release_asset", &[changed], 1, 1),
+            ("rename_repo", &[changed], 1, 0),
+            ("set_archived", &[changed], 1, 0),
+            ("set_visibility", &[changed], 1, 0),
+            ("transfer_repo", &[changed], 1, 0),
+            ("delete_repo", &[changed], 1, 0),
+            ("add_member", &[changed], 1, 1),
+            ("update_member", &[changed], 1, 0),
+            ("remove_member", &[changed], 1, 0),
+            ("delete_hook", &[changed], 1, 0),
+            ("test_hook", &[changed], 1, 0),
+            ("hook_event_resend", &[changed], 1, 0),
+            ("delete_variable", &[changed], 1, 0),
+            ("create_protected_branch", &[changed], 1, 0),
+            ("update_protected_branch", &[changed], 1, 0),
+            ("delete_protected_branch", &[changed], 1, 0),
+            ("write_time", &[time_entry, changed], 1, 0),
+            ("link_issue", &[changed], 1, 0),
+            ("unlink_issue", &[changed], 1, 0),
+            ("thread_create", &[posted], 1, 0),
+            ("run_pipeline", &[pipeline], 1, 0),
+            ("create_hook", &[hook_created], 1, 0),
+            ("update_hook", &[hook_saved], 1, 0),
+            ("set_variable", &[changed], 1, 0),
+            ("merge_mr_inner", &[changed], 1, 1),
+            ("fork_repo", &[fork], 1, 0),
+            ("star_repo", &[changed], 1, 0),
+            ("set_pr_reviewers", &[changed], 1, 0),
+        ];
+        // Bare on purpose: an upload is not the write, a review's draft notes and publish
+        // step are the review's own wraps, and the reviewer helper is hedged only at
+        // `set_pr_reviewers`' call (`request_changes_mr`'s add and two restores stay bare).
+        let bare_rows: &[Row] = &[
+            ("glab_upload", &[], 0, 1),
+            ("review_submit", &[], 0, 3),
+            ("set_mr_reviewer_ids", &[], 0, 1),
+        ];
+        for &(name, passed, hedges, bare_runs) in hedged.iter().chain(bare_rows) {
+            let body = wiring_body(source, name);
+            assert!(row_ok(&body, passed, hedges, bare_runs), "{name}: {body}");
+        }
+        assert_eq!(
+            hedged.iter().map(|row| row.2).sum::<usize>(),
+            58,
+            "the hedged write runs"
+        );
+        // The reviewer write's map sits in the call's own statement, never on the read-back.
+        let same_statement = |body: &str| {
+            body.find("set_mr_reviewer_ids(").is_some_and(|call| {
+                body[call..]
+                    .find("timed_out_write(")
+                    .is_some_and(|map| !body[call..call + map].contains(';'))
+            })
+        };
+        let set_pr = wiring_body(source, "set_pr_reviewers");
+        assert!(same_statement(&set_pr), "{set_pr}");
+        let map =
+            ".map_err(|e| crate::forge::timed_out_write(e, \"GitLab\", LandedWrite::Changed))";
+        let unmapped = set_pr.replacen(map, "", 1);
+        assert_ne!(unmapped, set_pr);
+        let read_back = "mr_reviewers(repo_path, &enc, number)\n        .await";
+        let moved = unmapped.replacen(read_back, &format!("{read_back}{map}"), 1);
+        assert_ne!(moved, unmapped);
+        assert!(!same_statement(&moved), "a map on the read-back must flip");
+        assert!(precedes(&moved, "set_mr_reviewer_ids(", "timed_out_write("));
+        let request = wiring_body(source, "request_changes_mr");
+        assert_eq!(calls(&request, "set_mr_reviewer_ids("), 3, "{request}");
+
+        // The roster is the computed set: the hedged-before rows, this test's rows with a
+        // method literal, and the bare rows.
+        let token_less = [
+            "set_mr_draft",
+            "upload_release_asset",
+            "request_changes_mr",
+            "set_pr_reviewers",
+        ];
+        let hedged_before = [
+            "post_note_with_images",
+            "comment_mr",
+            "comment_issue",
+            "edit_mr_in",
+            "edit_issue_in",
+            "create_issue_in",
+            "create_mr",
+            "commit_comment_create",
+            "commit_comment_edit",
+            "edit_mr_comment",
+            "edit_issue_comment",
+            "reply_thread",
+            "create_release",
+            "edit_release",
+            "update_repo_settings",
+        ];
+        let mut expected: Vec<String> = hedged
+            .iter()
+            .chain(bare_rows)
+            .map(|row| row.0)
+            .filter(|name| !token_less.contains(name))
+            .chain(hedged_before)
+            .map(str::to_string)
+            .collect();
+        expected.sort();
+        assert_eq!(expected.len(), 71);
+        let tokens = [
+            "run_glab(",
+            "run_glab_ex(",
+            "run_glab_raw(",
+            "run_glab_raw_for_repo(",
+            "run_glab_api_for_account(",
+            "run_glab_api_for_host(",
+            "run_glab_api_for_repo_host(",
+            "glab_write_fields(",
+            "glab_write(",
+        ];
+        assert_eq!(write_fns(&production, &tokens), expected);
+        let rogue = format!(
+            "{production}\nfn rogue() {{\n    run_glab(x, &[\"api\", \"--method\", \"POST\"]);\n}}\n"
+        );
+        assert_ne!(
+            write_fns(&rogue, &tokens),
+            expected,
+            "an unlisted write must flip"
+        );
+        let blind: Vec<&str> = tokens
+            .iter()
+            .copied()
+            .filter(|t| *t != "glab_write(")
+            .collect();
+        assert_ne!(
+            write_fns(&production, &blind),
+            expected,
+            "a token set without the helper must flip"
+        );
+
+        // The helper maps its one run once.
+        let helper = wiring_body(source, "glab_write");
+        let mapped = |body: &str| {
+            calls(body, "run_glab(") == 1
+                && calls(body, "timed_out_write(") == 1
+                && precedes(body, "run_glab(", "timed_out_write(")
+        };
+        assert!(mapped(&helper), "{helper}");
+        let unmapped = helper.replacen("timed_out_write(", "mapped(", 1);
+        assert!(!mapped(&unmapped), "a deleted helper map must flip");
+
+        // Controls on the rows.
+        let row = |name: &str| {
+            *hedged
+                .iter()
+                .chain(bare_rows)
+                .find(|row| row.0 == name)
+                .unwrap()
+        };
+        let flips = |name: &str, from: &str, to: &str| {
+            let (_, passed, hedges, bare_runs) = row(name);
+            let body = wiring_body(source, name);
+            let mutated = body.replacen(from, to, 1);
+            assert_ne!(mutated, body, "{name}: {from}");
+            !row_ok(&mutated, passed, hedges, bare_runs)
+        };
+        assert!(
+            flips("retry_run", "glab_write(", "run_glab("),
+            "a reverted write"
+        );
+        assert!(flips("fork_repo", fork, pipeline), "a swapped noun");
+        assert!(
+            flips("set_mr_reviewer_ids", "run_glab(", "glab_write("),
+            "a hedged reviewer helper"
+        );
+        let review = ["review", "submit"].join("_");
+        assert!(
+            flips(&review, "run_glab(", "glab_write("),
+            "a hedged review publish"
+        );
+        assert!(
+            flips(&review, "run_glab(", "timed_out_write(run_glab("),
+            "a mapped review publish"
+        );
+
+        // Rows with a bare run beside the hedged one: the hedge sits on the write. A read
+        // comes first and stays on `run_glab(`, the write follows on `glab_write(`.
+        let read_first = |body: &str| precedes(body, "run_glab(", "glab_write(");
+        for name in [
+            "move_issue",
+            "remove_reaction",
+            "delete_release_asset",
+            "add_member",
+        ] {
+            let body = wiring_body(source, name);
+            assert!(read_first(&body), "{name}: {body}");
+            let swapped = swap_first(&body, "run_glab(", "glab_write(");
+            assert!(row_ok(&swapped, &[changed], 1, 1), "{name}: counts hold");
+            assert!(!read_first(&swapped), "{name}: a hedged read must flip");
+        }
+        // The merge's map follows its raw run; the attribute PUT ahead of it stays bare.
+        let merge_mapped = |body: &str| {
+            bare_of(body, &["run_glab("]) == 1
+                && bare_of(body, &["run_glab_raw("]) == 0
+                && precedes(body, "run_glab_raw(", "timed_out_write(")
+        };
+        let merge = wiring_body(source, "merge_mr_inner");
+        assert!(merge_mapped(&merge), "{merge}");
+        let merge_map = concat!(
+            ".map_err(|e| crate::forge::timed_out_write(",
+            "e, \"GitLab\", LandedWrite::Changed))"
+        );
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let merge = flat(&merge);
+        assert!(merge.contains(merge_map), "{merge}");
+        let put = merge.find("run_glab(").unwrap();
+        let put_await = put + merge[put..].find(".await").unwrap() + ".await".len();
+        let put_mapped = format!("{}{merge_map}{}", &merge[..put_await], &merge[put_await..]);
+        let moved = put_mapped.replacen(&format!(".await {merge_map}?"), ".await?", 1);
+        assert!(row_ok(&moved, &[changed], 1, 1), "the counts hold: {moved}");
+        assert!(!merge_mapped(&moved), "a map moved onto the PUT must flip");
+
+        // The add-spent-time branch is the one that passes the time-entry kind.
+        let time_kind = concat!(
+            r#"let write = if suffix == "add_spent_time" { LandedWrite::Created("time entry") }"#,
+            r#" else { LandedWrite::Changed };"#
+        );
+        let time = flat(&wiring_body(source, "write_time"));
+        assert!(time.contains(time_kind), "{time}");
+        let arms = swap_first(&time, time_entry, changed);
+        assert!(
+            row_ok(&arms, &[time_entry, changed], 1, 0),
+            "the counts hold"
+        );
+        assert!(!arms.contains(time_kind), "swapped arms must flip");
+    }
+
+    /// A change request whose own run timed out may have landed, so the viewer it added
+    /// stays a reviewer; any other failure removes them again.
+    #[test]
+    fn a_timed_out_change_request_keeps_its_reviewer() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let guard = "!matches!(e, AppError::WriteTimedOut(_))";
+        let restore = "let _ = set_mr_reviewer_ids(";
+        let guarded = |body: &str| {
+            body.split_once("if let Err(e) = mutation_result")
+                .is_some_and(|(before, rest)| {
+                    !before.contains("WriteTimedOut")
+                        && rest
+                            .find(guard)
+                            .zip(rest.find(restore))
+                            .is_some_and(|(g, r)| g < r)
+                })
+        };
+        let body = wiring_body(include_str!("gitlab.rs"), "request_changes_mr");
+        assert!(guarded(&body), "{body}");
+        let unguarded = body.replacen(&format!(" && {guard}"), "", 1);
+        assert_ne!(unguarded, body);
+        assert!(!guarded(&unguarded), "a dropped guard must flip");
+        let moved = unguarded.replacen(restore, &format!("if {guard} {{ {restore}"), 1);
+        assert!(!guarded(&moved), "a guard on the earlier restore must flip");
+    }
+
     /// An upload that timed out never ran the write, so it keeps "Nothing was posted",
     /// never the may-have-landed sentence.
     #[test]
@@ -5745,12 +6498,127 @@ mod attach_tests {
             upload_refusal(UploadVerb::Posted, "image-1.png", &reason).to_string(),
             "Nothing was posted. GitLab didn't accept image-1.png: git operation timed out after 120s."
         );
+        // After the push it is still a refusal, under the pushed lead.
+        let refused = upload_refusal(UploadVerb::AfterPush, "image-1.png", &reason);
+        let pushed = mr_post_error(refused);
+        let want = "The branch was pushed, but creating the merge request failed: GitLab didn't accept image-1.png: git operation timed out after 120s.";
+        assert!(
+            matches!(&pushed, AppError::Glab(m) if m == want),
+            "{pushed:?}"
+        );
         let refuses =
             |body: &str| body.contains("upload_refusal(") && !body.contains("timed_out_write(");
         let upload = wiring_body(include_str!("gitlab.rs"), "glab_upload");
         assert!(refuses(&upload), "{upload}");
         let hedged = upload.replacen("upload_refusal(", "timed_out_write(", 1);
         assert!(!refuses(&hedged), "the control must flip");
+    }
+
+    /// The origin check compares the raw URLs, trimmed: a project path compare would pass
+    /// a host or scheme change.
+    #[test]
+    fn the_origin_check_compares_the_raw_url() {
+        let captured = "https://gitlab.example/g/p.git";
+        for fresh in [
+            captured,
+            "https://gitlab.example/g/p.git\n",
+            " https://gitlab.example/g/p.git \r\n",
+        ] {
+            assert!(origin_unchanged(captured, fresh), "{fresh:?}");
+        }
+        for fresh in [
+            "https://gitlab.example/g/other.git",
+            "https://gitlab.other/g/p.git",
+            "git@gitlab.example:g/p.git",
+            "ssh://git@gitlab.example/g/p.git",
+            "",
+        ] {
+            assert!(!origin_unchanged(captured, fresh), "{fresh:?}");
+        }
+    }
+
+    /// The origin check re-reads `origin` with git itself, never through the remote-URL
+    /// cache, and drops the cached URL when it refuses.
+    #[test]
+    fn the_origin_check_reads_origin_uncached() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let uncached = |body: &str| {
+            calls(body, "run_git(") == 1
+                && !body.contains("git_remote_url(")
+                && precedes(body, "invalidate_remote_url_cache(", "MOVED_ORIGIN_REFUSAL")
+        };
+        let body = wiring_body(include_str!("gitlab.rs"), "refuse_moved_origin");
+        assert!(uncached(&body), "{body}");
+        let cached = body.replacen(
+            "crate::git::runner::run_git(",
+            "crate::git::remote::git_remote_url(",
+            1,
+        );
+        assert_ne!(cached, body);
+        assert!(!uncached(&cached), "a cached read must flip");
+        let kept = body.replacen("invalidate_remote_url_cache(", "kept(", 1);
+        assert!(!uncached(&kept), "a refusal that keeps the cache must flip");
+    }
+
+    /// git in a throwaway repo, on the test hang guard.
+    async fn origin_git(repo: &str, args: &[&str]) {
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::TEST_GIT_HANG_GUARD)
+            .await
+            .unwrap();
+    }
+
+    /// With `origin` repointed behind the warm remote-URL cache, the check refuses with
+    /// its sentence and drops the cached URL; an unchanged `origin` passes.
+    #[tokio::test]
+    async fn the_origin_check_refuses_a_repointed_origin() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-gitlab-origin-check-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        let (a, b) = (
+            "https://gitlab.example/g/a.git",
+            "https://gitlab.example/g/b.git",
+        );
+        origin_git(&repo, &["init", "-q", "-b", "main"]).await;
+        origin_git(&repo, &["config", "user.name", "Test"]).await;
+        origin_git(&repo, &["config", "user.email", "test@example.com"]).await;
+        origin_git(&repo, &["remote", "add", "origin", a]).await;
+        let read = || crate::git::remote::git_remote_url(repo.clone(), "origin".to_string());
+        let captured = read().await.unwrap();
+        assert_eq!(captured, a);
+        refuse_moved_origin(&repo, &captured).await.unwrap();
+        // A terminal `set-url`: the app's cache is not told.
+        origin_git(&repo, &["remote", "set-url", "origin", b]).await;
+        let refused = refuse_moved_origin(&repo, &captured).await;
+        assert!(
+            matches!(&refused, Err(AppError::Glab(m)) if m == MOVED_ORIGIN_REFUSAL),
+            "{refused:?}"
+        );
+        assert_eq!(
+            MOVED_ORIGIN_REFUSAL,
+            "The origin remote doesn't match the one this merge request was prepared for, so nothing was pushed. Try again."
+        );
+        assert_eq!(read().await.unwrap(), b, "the refusal drops the cached URL");
+        refuse_moved_origin(&repo, b).await.unwrap();
+    }
+
+    /// A failed re-read (no `origin`) says nothing was pushed under kind `glab`, never the
+    /// refusal, never a `git` kind and never Ok.
+    #[tokio::test]
+    async fn the_origin_check_returns_a_failed_read_as_its_own_error() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-gitlab-origin-check-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        origin_git(&repo, &["init", "-q", "-b", "main"]).await;
+        let failed = refuse_moved_origin(&repo, "https://gitlab.example/g/a.git").await;
+        let lead = "Couldn't read the origin remote, so nothing was pushed: ";
+        assert!(
+            matches!(&failed, Err(AppError::Glab(m)) if m.starts_with(lead) && m.len() > lead.len()),
+            "{failed:?}"
+        );
     }
 }
 
@@ -5882,10 +6750,10 @@ async fn set_mr_state(repo_path: &str, number: u64, event: &str) -> AppResult<()
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}");
     let state_arg = format!("state_event={event}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &state_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -5907,10 +6775,10 @@ pub async fn reopen_mr(repo_path: &str, number: u64) -> AppResult<()> {
 pub async fn set_mr_draft(repo_path: &str, number: u64, draft: bool) -> AppResult<()> {
     let iid = number.to_string();
     let flag = if draft { "--draft" } else { "--ready" };
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["mr", "update", &iid, flag],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -6002,10 +6870,10 @@ pub async fn delete_mr_comment(repo_path: &str, number: u64, comment_id: &str) -
     let note_id = parse_note_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}/notes/{note_id}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -6198,10 +7066,10 @@ pub async fn pr_approvals(repo_path: &str, number: u64) -> AppResult<ApprovalSta
 pub async fn approve_pr(repo_path: &str, number: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}/approve");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -6211,10 +7079,10 @@ pub async fn approve_pr(repo_path: &str, number: u64) -> AppResult<()> {
 pub async fn unapprove_pr(repo_path: &str, number: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}/unapprove");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -6336,16 +7204,17 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
         }
     }
 
-    // The mutation itself. On failure, best-effort restore the reviewer list we
-    // changed above so a failed action doesn't leave the viewer as a reviewer.
+    // The mutation itself. On a failure other than a timeout, best-effort restore the
+    // reviewer list we changed above so a failed action doesn't leave the viewer as a
+    // reviewer.
     let query = format!(
         "mutation {{ mergeRequestRequestChanges(input: {{ projectPath: \"{path}\", iid: \"{number}\" }}) {{ errors }} }}"
     );
     let query_arg = format!("query={query}");
-    let result = run_glab(
-        Some(repo_path),
+    let result = glab_write(
+        repo_path,
         &["api", "graphql", "-f", &query_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await;
     let mutation_result = result.and_then(|out| {
@@ -6381,7 +7250,8 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
         Ok(())
     });
     if let Err(e) = mutation_result {
-        if added_viewer {
+        // A timed-out request may have landed, and removing the viewer would undo it.
+        if added_viewer && !matches!(e, AppError::WriteTimedOut(_)) {
             let _ = set_mr_reviewer_ids(repo_path, &enc, number, &existing_ids).await;
         }
         return Err(e);
@@ -6391,12 +7261,29 @@ pub async fn request_changes_mr(repo_path: &str, number: u64, body: &str) -> App
     // already stood, so a note failure must say so rather than read as a no-op.
     if !body.trim().is_empty() {
         if let Err(e) = comment_mr(repo_path, number, body, false).await {
-            return Err(AppError::Glab(format!(
-                "Changes were requested, but posting the comment failed: {e}"
-            )));
+            return Err(change_request_comment_error(e));
         }
     }
     Ok(())
+}
+
+/// `request_changes_mr`'s error for a comment that failed after the change request stood. A
+/// timed-out comment may have been posted, so it is never told it failed; the parentheses
+/// hold its cause, never its hedge a second time.
+fn change_request_comment_error(e: AppError) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Glab(format!(
+            "Changes were requested, but GitLab didn't answer in time on the comment, so it \
+             may or may not have been posted. Check the merge request on GitLab before posting \
+             it again.{cause}"
+        ));
+    }
+    AppError::Glab(format!(
+        "Changes were requested, but posting the comment failed: {e}"
+    ))
 }
 
 // ── Merge requests (merge) ────────────────────────────────────────────────────
@@ -6550,7 +7437,9 @@ async fn merge_mr_inner(
     let endpoint = format!("projects/{enc}/merge_requests/{number}/merge");
     let args = merge_mr_args(&endpoint, squash, delete_branch, sha, when_pipeline_succeeds);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_glab_raw(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT).await?;
+    let out = run_glab_raw(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Changed))?;
     if out.code != 0 {
         // Raw rather than `run_glab` only so a documented refusal can be reworded;
         // everything else keeps `run_glab`'s exact fallback.
@@ -6840,10 +7729,10 @@ pub async fn cancel_auto_merge_mr(repo_path: &str, number: u64) -> AppResult<()>
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint =
         format!("projects/{enc}/merge_requests/{number}/cancel_merge_when_pipeline_succeeds");
-    let out = run_glab(
-        Some(repo_path),
+    let out = glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     if let Some(msg) = service_error_message(&out.stdout_lossy()) {
@@ -7185,10 +8074,10 @@ async fn set_issue_state(repo_path: &str, number: u64, event: &str) -> AppResult
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}");
     let state_arg = format!("state_event={event}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &state_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -7271,10 +8160,10 @@ pub async fn delete_issue_comment(repo_path: &str, number: u64, comment_id: &str
     let note_id = parse_note_id(comment_id)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/notes/{note_id}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -7287,10 +8176,10 @@ pub async fn lock_issue(repo_path: &str, number: u64, locked: bool) -> AppResult
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}");
     let lock_arg = format!("discussion_locked={locked}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &lock_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -7346,10 +8235,10 @@ pub async fn move_issue(repo_path: &str, number: u64, destination: &str) -> AppR
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/move");
     let target_arg = format!("to_project_id={}", target.id);
-    let moved = run_glab(
-        Some(repo_path),
+    let moved = glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint, "-f", &target_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await
     .map_err(|e| match e {
@@ -7408,10 +8297,10 @@ pub async fn member_projects(repo_path: &str) -> AppResult<Vec<String>> {
 pub async fn delete_issue(repo_path: &str, number: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -7457,10 +8346,10 @@ pub async fn set_issue_milestone(
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}");
     let milestone_arg = format!("milestone_id={}", milestone.unwrap_or(0));
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &milestone_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -7476,10 +8365,10 @@ pub async fn set_issue_confidential(
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}");
     let arg = format!("confidential={confidential}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -7509,10 +8398,10 @@ pub async fn set_issue_due_date(
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}");
     let arg = format!("due_date={}", due_date.unwrap_or(""));
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -8161,10 +9050,10 @@ pub async fn resolve_thread(
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/merge_requests/{number}/discussions/{discussion_id}");
     let resolved_arg = format!("resolved={resolved}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &resolved_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -8263,7 +9152,8 @@ pub async fn thread_create(
         &[],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Posted))?;
     Ok(())
 }
 
@@ -8372,7 +9262,7 @@ pub async fn review_submit(
     }
 
     // Publish all drafts at once — only when something was staged (see `staged_any`).
-    // A failure here leaves the drafts staged (invisible).
+    // A failure here leaves the drafts staged (invisible); a timeout may have published them.
     if staged_any {
         let publish_endpoint = format!("{draft_endpoint}/bulk_publish");
         run_glab(
@@ -8381,13 +9271,7 @@ pub async fn review_submit(
             GLAB_NETWORK_TIMEOUT,
         )
         .await
-        .map_err(|e| {
-            let (first, rest) = paren_parts(&e);
-            AppError::Glab(format!(
-                "The review's draft notes couldn't be published, so the review was not \
-                 submitted. Check the merge request on GitLab before retrying. ({first}){rest}"
-            ))
-        })?;
+        .map_err(publish_step_error)?;
     }
 
     // Apply the verdict. Approve / request-changes reuse the existing fns; comment
@@ -8414,11 +9298,7 @@ pub async fn review_submit(
         } else {
             String::new()
         };
-        let (first, rest) = paren_parts(&e);
-        return Err(AppError::Glab(format!(
-            "The review was posted, but the {action} step failed: {landed}only re-run the \
-             {action} action on GitLab. ({first}){rest}"
-        )));
+        return Err(verdict_step_error(e, action, &landed));
     }
 
     Ok(ReviewSubmitOut {
@@ -8426,6 +9306,57 @@ pub async fn review_submit(
         total,
         verdict_applied: verdict != "comment",
     })
+}
+
+/// `review_submit`'s error for a failed publish of the staged draft notes. An unanswered
+/// publish may have submitted the review, so it never says it was not (a blind retry would
+/// publish every note twice). The publish run is a bare `run_glab`, so its timeout is a plain
+/// `Timeout`; the parentheses hold `write_timed_out`'s CLI line read back through
+/// `timed_out_cause`, so that line has one spelling. The result stays kind `Glab`.
+fn publish_step_error(e: AppError) -> AppError {
+    if let AppError::Timeout(seconds) = e {
+        let timed_out = crate::forge::write_timed_out("GitLab", LandedWrite::Changed, seconds);
+        let cause = crate::forge::timed_out_cause(&timed_out)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return AppError::Glab(format!(
+            "GitLab didn't answer in time while publishing the review's draft notes, so the \
+             review may or may not have been submitted. Check the merge request on GitLab \
+             before retrying.{cause}"
+        ));
+    }
+    let (first, rest) = paren_parts(&e);
+    AppError::Glab(format!(
+        "The review's draft notes couldn't be published, so the review was not \
+         submitted. Check the merge request on GitLab before retrying. ({first}){rest}"
+    ))
+}
+
+/// `review_submit`'s error for a verdict step that failed after the review posted, with
+/// `landed` naming what posted. A timed-out step may have applied the verdict, so it is
+/// never told to re-run; the parentheses hold its cause, never its hedge a second time.
+/// With nothing landed (a verdict-only review) the timed-out sentence claims no post.
+fn verdict_step_error(e: AppError, action: &str, landed: &str) -> AppError {
+    if matches!(e, AppError::WriteTimedOut(_)) {
+        let cause = crate::forge::timed_out_cause(&e)
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        let posted = if landed.is_empty() {
+            ""
+        } else {
+            "The review was posted, but "
+        };
+        return AppError::Glab(format!(
+            "{posted}GitLab didn't answer in time on the {action} step, so \
+             it may or may not have gone through: {landed}check the merge request on GitLab \
+             before running the {action} action again.{cause}"
+        ));
+    }
+    let (first, rest) = paren_parts(&e);
+    AppError::Glab(format!(
+        "The review was posted, but the {action} step failed: {landed}only re-run the \
+         {action} action on GitLab. ({first}){rest}"
+    ))
 }
 
 /// The award endpoint for a subject: the issue/MR body (`note_id` None) or one
@@ -8471,10 +9402,10 @@ pub async fn add_reaction(
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = award_endpoint(&enc, target, number, note_id)?;
     let name_arg = format!("name={award}");
-    match run_glab(
-        Some(repo_path),
+    match glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint, "-f", &name_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await
     {
@@ -8521,10 +9452,10 @@ pub async fn remove_reaction(
         return Ok(());
     };
     let del = format!("{endpoint}/{}", mine.id);
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &del],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -8760,7 +9691,9 @@ pub async fn set_pr_reviewers(repo_path: &str, number: u64, desired: &[String]) 
     } else {
         resolve_assignee_ids(repo_path, desired).await?
     };
-    set_mr_reviewer_ids(repo_path, &enc, number, &ids).await?;
+    set_mr_reviewer_ids(repo_path, &enc, number, &ids)
+        .await
+        .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Changed))?;
     if desired.is_empty() {
         return Ok(());
     }
@@ -8819,7 +9752,7 @@ pub async fn edit_labels(
         args.push("-f");
         args.push(&remove_arg);
     }
-    run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    glab_write(repo_path, &args, LandedWrite::Changed).await?;
     Ok(())
 }
 
@@ -8854,10 +9787,10 @@ async fn set_target_assignees(
             .join(",")
     };
     let arg = format!("assignee_ids={value}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -8959,10 +9892,10 @@ pub async fn repo_visibility(repo_path: &str) -> AppResult<crate::forge::RepoVis
 /// closed even if the relationship is later re-established.
 pub async fn remove_fork_relationship(repo_path: &str) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &format!("projects/{enc}/fork")],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -9019,10 +9952,10 @@ pub async fn repo_set_star(repo_path: &str, starred: bool) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let action = if starred { "star" } else { "unstar" };
     let endpoint = format!("projects/{enc}/{action}");
-    match run_glab(
-        Some(repo_path),
+    match glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await
     {
@@ -9355,9 +10288,10 @@ pub async fn create_mr(
     }
     let staged = glab_attach_checks(body, attachments, false).await?;
 
-    // Every read the create needs runs before the first upload and the push, so a miss
-    // uploads and pushes nothing. This one `origin` read fixes the project path and the push
-    // credentials; each glab call and the push still resolve `origin` themselves.
+    // Every read the create needs runs before the push, so a miss pushes nothing; only the
+    // uploads re-check their staged files after it. This one `origin` read fixes the project
+    // path the glab endpoints use and the push credentials; glab's host routing and the push
+    // still resolve `origin` on their own.
     let origin =
         crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string()).await?;
     // Same http gate as `publish_repo`: inert entries aren't worth a hard `GlabNotFound`.
@@ -9374,11 +10308,6 @@ pub async fn create_mr(
     } else {
         title.to_string()
     };
-    // Uploads run before the push, so a refused image leaves no branch pushed.
-    let body = match &staged {
-        Some(s) => upload_and_rewrite(repo_path, &enc, body, s, UploadVerb::Posted).await?,
-        None => body.to_string(),
-    };
 
     // An MR needs the branch on the remote first.
     let mut push_args: Vec<&str> = Vec::new();
@@ -9388,6 +10317,7 @@ pub async fn create_mr(
     }
     let spec = crate::git::remote::publish_refspec(head);
     push_args.extend(["push", "-u", "origin", &spec]);
+    refuse_moved_origin(repo_path, &origin).await?;
     // NETWORK domain (see `publish_repo`'s push): the `-c` entries ride `push_args`,
     // so the empty `cred` slice changes neither the command nor the ambient retry.
     crate::git::remote::run_git_mutating_with_creds_for_branch(
@@ -9400,6 +10330,14 @@ pub async fn create_mr(
     )
     .await?;
 
+    // Uploads run after the push, so a failed push uploads nothing; a refused image
+    // leaves the branch pushed, and the error says so.
+    let body = match &staged {
+        Some(s) => upload_and_rewrite(repo_path, &enc, body, s, UploadVerb::AfterPush)
+            .await
+            .map_err(mr_post_error)?,
+        None => body.to_string(),
+    };
     let endpoint = format!("projects/{enc}/merge_requests");
     let fields = create_mr_fields(head, base, &full_title, &body, labels, &assignee_ids);
     let out = glab_write_fields(
@@ -9420,9 +10358,11 @@ pub async fn create_mr(
     Ok(created)
 }
 
-/// `create_mr`'s POST Err, led by the push fact so a retry needn't re-push; a timeout
-/// keeps its may-have-landed sentence and a missing glab its own kind. The frontend
-/// keys on the lead (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
+/// `create_mr`'s Err after the push (an upload or the POST), led by the push fact so a
+/// retry needn't re-push. Only the POST passes a timeout (its may-have-landed sentence) or a
+/// missing glab through: `glab_upload` makes every run error an `upload_refusal`, so an
+/// upload's error always takes the lead. The frontend keys on the lead
+/// (`BRANCH_PUSHED_FAILED_LEAD`); keep in step.
 fn mr_post_error(e: AppError) -> AppError {
     if matches!(e, AppError::WriteTimedOut(_) | AppError::GlabNotFound) {
         return e;
@@ -9431,6 +10371,41 @@ fn mr_post_error(e: AppError) -> AppError {
     AppError::Glab(format!(
         "The branch was pushed, but creating the merge request failed: {detail}"
     ))
+}
+
+/// `create_mr`'s refusal when `origin` no longer reads as the URL its project and push
+/// credentials came from.
+const MOVED_ORIGIN_REFUSAL: &str = "The origin remote doesn't match the one this merge request was prepared for, so nothing was pushed. Try again.";
+
+/// `fresh` is the same `origin` as `captured`: the raw URLs, trimmed, are equal. A project
+/// path compare would pass a host or scheme change that the push credentials depend on.
+fn origin_unchanged(captured: &str, fresh: &str) -> bool {
+    captured.trim() == fresh.trim()
+}
+
+/// Refuses the create when an uncached read of `origin` differs from `captured` (the
+/// remote-URL cache could answer with the capture itself), dropping the cached URL so a
+/// retry reads the new one. A failed or timed-out read reports "nothing was pushed" under
+/// kind `glab`, so it never reads as a failed push. It narrows the window to the push's lock
+/// wait and git's own read of `origin`, and cannot close it.
+async fn refuse_moved_origin(repo_path: &str, captured: &str) -> AppResult<()> {
+    let out = crate::git::runner::run_git(
+        Some(repo_path),
+        &["remote", "get-url", "origin"],
+        crate::git::runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| {
+        let detail = crate::forge::error_detail(e);
+        AppError::Glab(format!(
+            "Couldn't read the origin remote, so nothing was pushed: {detail}"
+        ))
+    })?;
+    if origin_unchanged(captured, &out.stdout_lossy()) {
+        return Ok(());
+    }
+    crate::git::remote::invalidate_remote_url_cache(repo_path, "origin");
+    Err(AppError::Glab(MOVED_ORIGIN_REFUSAL.into()))
 }
 
 // ── Pipelines (CI, read) ──────────────────────────────────────────────────────
@@ -10038,10 +11013,10 @@ fn failed_logs_outcome(
 pub async fn retry_run(repo_path: &str, run_id: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/pipelines/{run_id}/retry");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -10052,10 +11027,10 @@ pub async fn retry_run(repo_path: &str, run_id: u64) -> AppResult<()> {
 pub async fn cancel_run(repo_path: &str, run_id: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/pipelines/{run_id}/cancel");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -10068,10 +11043,10 @@ pub async fn cancel_run(repo_path: &str, run_id: u64) -> AppResult<()> {
 pub async fn play_job(repo_path: &str, job_id: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/jobs/{job_id}/play");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -10082,10 +11057,10 @@ pub async fn play_job(repo_path: &str, job_id: u64) -> AppResult<()> {
 pub async fn retry_job(repo_path: &str, job_id: u64) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/jobs/{job_id}/retry");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -10138,7 +11113,8 @@ pub async fn run_pipeline(
         &[],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Created("pipeline")))?;
     Ok(())
 }
 
@@ -10401,18 +11377,18 @@ pub async fn delete_release(repo_path: &str, tag: &str, cleanup_tag: bool) -> Ap
     let enc = encode_project(&project_path(repo_path).await?);
     let enc_tag = encode_query_value(tag);
     let endpoint = format!("projects/{enc}/releases/{enc_tag}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     if cleanup_tag {
         let tag_endpoint = format!("projects/{enc}/repository/tags/{enc_tag}");
-        run_glab(
-            Some(repo_path),
+        glab_write(
+            repo_path,
             &["api", "--method", "DELETE", &tag_endpoint],
-            GLAB_NETWORK_TIMEOUT,
+            LandedWrite::Changed,
         )
         .await?;
     }
@@ -10435,10 +11411,10 @@ pub async fn upload_release_asset(repo_path: &str, tag: &str, file_path: &str) -
                 .into(),
         ));
     }
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["release", "upload", tag, file_path],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -10484,10 +11460,10 @@ pub async fn delete_release_asset(repo_path: &str, tag: &str, asset_name: &str) 
         .find(|l| l.name == asset_name)
         .ok_or_else(|| AppError::Glab(format!("no release asset named {asset_name}")))?;
     let del_endpoint = format!("projects/{enc}/releases/{enc_tag}/assets/links/{}", link.id);
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &del_endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11197,12 +12173,12 @@ pub async fn rename_repo(state: &AppState, repo_path: &str, new_name: &str) -> A
     let endpoint = format!("projects/{enc}");
     let name_arg = format!("name={new_name}");
     let path_arg = format!("path={new_name}");
-    let out = run_glab(
-        Some(repo_path),
+    let out = glab_write(
+        repo_path,
         &[
             "api", "--method", "PUT", &endpoint, "-f", &name_arg, "-f", &path_arg,
         ],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     let new_path = updated_project_path(&out.stdout)
@@ -11216,10 +12192,10 @@ pub async fn set_archived(repo_path: &str, archived: bool) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let action = if archived { "archive" } else { "unarchive" };
     let endpoint = format!("projects/{enc}/{action}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11237,10 +12213,10 @@ pub async fn set_visibility(repo_path: &str, visibility: &str) -> AppResult<()> 
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}");
     let vis_arg = format!("visibility={visibility}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &vis_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11259,10 +12235,10 @@ pub async fn transfer_repo(state: &AppState, repo_path: &str, namespace: &str) -
     let enc = encode_project(&origin.path);
     let ns = encode_query_value(namespace);
     let endpoint = format!("projects/{enc}/transfer?namespace={ns}");
-    let out = run_glab(
-        Some(repo_path),
+    let out = glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     let new_path = updated_project_path(&out.stdout)
@@ -11275,10 +12251,10 @@ pub async fn transfer_repo(state: &AppState, repo_path: &str, namespace: &str) -
 pub async fn delete_repo(repo_path: &str) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11406,12 +12382,12 @@ pub async fn add_member(repo_path: &str, username: &str, access_level: u8) -> Ap
     let endpoint = format!("projects/{enc}/members");
     let user_arg = format!("user_id={}", user.id);
     let level_arg = format!("access_level={access_level}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &[
             "api", "--method", "POST", &endpoint, "-f", &user_arg, "-f", &level_arg,
         ],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11426,10 +12402,10 @@ pub async fn update_member(repo_path: &str, user_id: &str, access_level: u8) -> 
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/members/{user_id}");
     let level_arg = format!("access_level={access_level}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PUT", &endpoint, "-f", &level_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11442,10 +12418,10 @@ pub async fn remove_member(repo_path: &str, user_id: &str) -> AppResult<()> {
         .map_err(|_| AppError::InvalidArgument("invalid member id".into()))?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/members/{user_id}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11593,7 +12569,8 @@ pub async fn create_hook(repo_path: &str, input: GitLabHookInput) -> AppResult<(
         &[],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Created("webhook")))?;
     Ok(())
 }
 
@@ -11611,7 +12588,8 @@ pub async fn update_hook(repo_path: &str, hook_id: &str, input: GitLabHookInput)
         &[],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Saved("webhook")))?;
     Ok(())
 }
 
@@ -11621,10 +12599,10 @@ pub async fn delete_hook(repo_path: &str, hook_id: &str) -> AppResult<()> {
         .map_err(|_| AppError::InvalidArgument("invalid webhook id".into()))?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/hooks/{hook_id}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11645,10 +12623,10 @@ pub async fn test_hook(repo_path: &str, hook_id: &str, trigger: &str) -> AppResu
     }
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/hooks/{hook_id}/test/{trigger}");
-    match run_glab(
-        Some(repo_path),
+    match glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await
     {
@@ -11752,10 +12730,10 @@ pub async fn hook_event_resend(repo_path: &str, hook_id: &str, event_id: &str) -
         .map_err(|_| AppError::InvalidArgument("invalid delivery id".into()))?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/hooks/{hook_id}/events/{event_id}/resend");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "POST", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -11911,6 +12889,7 @@ pub async fn set_variable(
         GLAB_NETWORK_TIMEOUT,
     )
     .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Changed))
     .map_err(|e| match e {
         // GitLab's curt 400 on an unmaskable value — spell out what it wants.
         AppError::Glab(msg) if masked && is_mask_rejection(&msg) => AppError::Glab(
@@ -11925,10 +12904,10 @@ pub async fn delete_variable(repo_path: &str, key: &str, scope: &str) -> AppResu
     validate_variable_key(key)?;
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/variables/{key}{}", scope_filter(scope));
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -12071,13 +13050,13 @@ pub async fn create_protected_branch(
     let push_arg = format!("push_access_level={push_access_level}");
     let merge_arg = format!("merge_access_level={merge_access_level}");
     let force_arg = format!("allow_force_push={allow_force_push}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &[
             "api", "--method", "POST", &endpoint, "-f", &name_arg, "-f", &push_arg, "-f",
             &merge_arg, "-f", &force_arg,
         ],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -12099,10 +13078,10 @@ pub async fn update_protected_branch(
         encode_query_value(name)
     );
     let force_arg = format!("allow_force_push={allow_force_push}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "PATCH", &endpoint, "-f", &force_arg],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -12115,10 +13094,10 @@ pub async fn delete_protected_branch(repo_path: &str, name: &str) -> AppResult<(
         "projects/{enc}/protected_branches/{}",
         encode_query_value(name)
     );
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -12252,7 +13231,12 @@ async fn write_time(
         args.push("-f");
         args.push(&duration_arg);
     }
-    let out = run_glab(Some(repo_path), &args, GLAB_NETWORK_TIMEOUT).await?;
+    let write = if suffix == "add_spent_time" {
+        LandedWrite::Created("time entry")
+    } else {
+        LandedWrite::Changed
+    };
+    let out = glab_write(repo_path, &args, write).await?;
     if suffix == "add_spent_time" {
         return added_time_stats(&out.stdout_lossy());
     }
@@ -12429,8 +13413,8 @@ pub async fn link_issue(repo_path: &str, number: u64, target_number: u64) -> App
     let endpoint = format!("projects/{enc}/issues/{number}/links");
     let target_project_arg = format!("target_project_id={path}");
     let target_issue_arg = format!("target_issue_iid={target_number}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &[
             "api",
             "--method",
@@ -12441,7 +13425,7 @@ pub async fn link_issue(repo_path: &str, number: u64, target_number: u64) -> App
             "-f",
             &target_issue_arg,
         ],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -12451,10 +13435,10 @@ pub async fn link_issue(repo_path: &str, number: u64, target_number: u64) -> App
 pub async fn unlink_issue(repo_path: &str, number: u64, link_id: &str) -> AppResult<()> {
     let enc = encode_project(&project_path(repo_path).await?);
     let endpoint = format!("projects/{enc}/issues/{number}/links/{link_id}");
-    run_glab(
-        Some(repo_path),
+    glab_write(
+        repo_path,
         &["api", "--method", "DELETE", &endpoint],
-        GLAB_NETWORK_TIMEOUT,
+        LandedWrite::Changed,
     )
     .await?;
     Ok(())
@@ -12616,7 +13600,13 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     let endpoint = format!("projects/{enc}/fork");
     // A conflict (already forked) exits non-zero with a 409 — surface a clear message
     // instead of an opaque glab error or a fabricated success.
-    let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let out = run_glab_raw(
+        None,
+        &["api", "--method", "POST", &endpoint],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Created("fork")))?;
     if out.code != 0 {
         return Err(fork_failure(out.code, &out.stderr));
     }
@@ -12694,7 +13684,13 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     let enc = encode_project(&format!("{owner}/{name}"));
     let action = if star { "star" } else { "unstar" };
     let endpoint = format!("projects/{enc}/{action}");
-    let out = run_glab_raw(None, &["api", "--method", "POST", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let out = run_glab_raw(
+        None,
+        &["api", "--method", "POST", &endpoint],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Changed))?;
     star_result(out.code, &out.stderr)
 }
 

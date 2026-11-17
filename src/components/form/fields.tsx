@@ -208,6 +208,7 @@ export function SelectControl({
   order,
   annotations,
   sizeToContent = false,
+  placeholder,
 }: {
   label?: ReactNode;
   /** value → display label; rendered in the object's key order unless `order`
@@ -233,6 +234,8 @@ export function SelectControl({
    *  width, capped at 28rem) instead of clamping to the trigger — for long
    *  values like branch names. Overlong options truncate with an ellipsis. */
   sizeToContent?: boolean;
+  /** Text the closed trigger shows while no value is selected. */
+  placeholder?: string;
 }) {
   const id = useId();
   // Opt-in rich rows: wrap the label so it can truncate and leave room for a
@@ -277,7 +280,10 @@ export function SelectControl({
         disabled={disabled}
       >
         <SelectTrigger id={id} className="w-full">
-          <SelectValue onMouseEnter={clipTitleFromText} />
+          <SelectValue
+            placeholder={placeholder}
+            onMouseEnter={clipTitleFromText}
+          />
         </SelectTrigger>
         <SelectContent
           {...(sizeToContent
@@ -337,6 +343,7 @@ export function SelectField({
   order,
   annotations,
   sizeToContent = false,
+  placeholder,
 }: Omit<ComponentProps<typeof SelectControl>, "value" | "onValueChange">) {
   const field = useFieldContext<string>();
   return (
@@ -350,6 +357,7 @@ export function SelectField({
       order={order}
       annotations={annotations}
       sizeToContent={sizeToContent}
+      placeholder={placeholder}
     />
   );
 }

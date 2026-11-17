@@ -894,6 +894,9 @@ pub async fn gh_repo_set_star(repo_path: String, starred: bool) -> AppResult<()>
     )
     .await;
     invalidate_repo_meta_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -1019,7 +1022,11 @@ pub async fn gh_pr_review(
     };
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let args = ["pr", "review", &n, flag, "--repo", &slug];
-    run_gh_text_write(&repo_path, &args, "--body-file", body.trim()).await?;
+    run_gh_text_write(&repo_path, &args, "--body-file", body.trim())
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -2917,6 +2924,9 @@ pub async fn gh_pr_merge(
             .await;
             invalidate_repo_meta_after(&slug, &result);
             invalidate_stack_memo_after(&slug, &result);
+            let result = result.map_err(|e| {
+                crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+            });
             let out = result?;
             if out.code != 0 {
                 // Raw rather than `run_gh` only so the refusal can be reworded: gh's own
@@ -3054,6 +3064,9 @@ async fn gh_pr_merge_async(
     .await;
     invalidate_repo_meta_after(slug, &result);
     invalidate_stack_memo_after(slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     let out = result?;
     // The PUT already succeeded, so the merge may be running — an unreadable
     // acknowledgement is uncertainty, not a failed merge, and must read that way.
@@ -3274,6 +3287,9 @@ pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -
     .await;
     invalidate_repo_meta_after(&slug, &result);
     invalidate_stack_memo_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -3295,7 +3311,11 @@ pub async fn gh_pr_update_branch(
     if rebase {
         args.push("--rebase");
     }
-    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -3724,6 +3744,9 @@ pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) 
     .await;
     invalidate_repo_meta_after(&slug, &result);
     invalidate_stack_memo_after(&slug, &result);
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+    });
     result?;
     Ok(())
 }
@@ -3742,7 +3765,10 @@ pub async fn edit_comment(repo_path: &str, comment_id: &str, body: &str) -> AppR
         &id_body_input(EDIT_COMMENT_MUTATION, comment_id, body),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Saved("comment"))
+    })?;
     Ok(())
 }
 
@@ -3772,7 +3798,8 @@ pub async fn delete_comment(repo_path: &str, comment_id: &str) -> AppResult<()> 
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -3790,7 +3817,10 @@ pub async fn edit_review_comment(repo_path: &str, comment_id: &str, body: &str) 
         &id_body_input(EDIT_REVIEW_COMMENT_MUTATION, comment_id, body),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Saved("comment"))
+    })?;
     Ok(())
 }
 
@@ -3810,7 +3840,8 @@ pub async fn delete_review_comment(repo_path: &str, comment_id: &str) -> AppResu
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -3850,7 +3881,8 @@ pub async fn gh_pr_minimize_comment(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -3869,7 +3901,8 @@ pub async fn gh_pr_unminimize_comment(repo_path: String, comment_id: String) -> 
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -3894,7 +3927,8 @@ pub async fn gh_pr_discard_pending_review(repo_path: String, review_id: String) 
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -4393,6 +4427,9 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
     // have rewritten them part-way.
     crate::git::remote::invalidate_remote_url_cache(&repo_path, "origin");
     crate::git::remote::invalidate_remote_url_cache(&repo_path, "upstream");
+    let result = result.map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Created("fork"))
+    });
     let out = result?;
     // gh prints progress to stderr; stdout carries the fork's URL when
     // creation succeeds (empty if the fork already existed).
@@ -4439,7 +4476,11 @@ pub(crate) async fn gh_pr_set_ready(
     if !ready {
         args.push("--undo");
     }
-    run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -6234,7 +6275,8 @@ pub async fn gh_pr_edit_labels(
         &["api", "graphql", "-f", &format!("query={query}")],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -7969,7 +8011,11 @@ pub async fn set_pr_reviewers(
         args.push("--remove-reviewer");
         args.push(&remove_csv);
     }
-    run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT)
+        .await
+        .map_err(|e| {
+            crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed)
+        })?;
     Ok(())
 }
 
@@ -8492,7 +8538,8 @@ pub async fn commit_comment_create(
         &payload.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Posted))?;
     Ok(())
 }
 
@@ -8522,7 +8569,10 @@ pub async fn commit_comment_edit(
         &payload.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Saved("comment"))
+    })?;
     Ok(())
 }
 
@@ -8546,7 +8596,8 @@ pub async fn commit_comment_delete(
         &["api", "-X", "DELETE", &endpoint],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -8630,7 +8681,8 @@ pub async fn thread_create(
         &payload.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Posted))?;
     Ok(())
 }
 
@@ -8686,7 +8738,8 @@ pub async fn review_submit(
         &payload.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     let total = comments.len() as u32;
     Ok(ReviewSubmitOut {
         posted: total,
@@ -9699,7 +9752,8 @@ pub async fn gh_pr_reply_review_thread(
         &id_body_input(REPLY_THREAD_MUTATION, &thread_id, &body),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Posted))?;
     Ok(())
 }
 
@@ -9728,7 +9782,8 @@ pub async fn gh_pr_resolve_review_thread(
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitHub", crate::forge::LandedWrite::Changed))?;
     Ok(())
 }
 
@@ -12257,8 +12312,8 @@ mod tests {
         assert!(super::REPLY_THREAD_MUTATION.contains("{addPullRequestReviewThreadReply("));
     }
 
-    /// Every GitHub GraphQL text write in this file sends one JSON body on stdin: no
-    /// `-f` field, no argv spawn, and no timeout map of its own (bare, as before).
+    /// Every GitHub GraphQL text write in this file sends one JSON body on stdin (no
+    /// `-f` field, no argv spawn) and maps its timeout to the hedge exactly once.
     #[test]
     fn every_github_graphql_text_write_sends_one_json_body() {
         use crate::github::repo_meta::tests::wiring_body;
@@ -12271,7 +12326,7 @@ mod tests {
                 && !flat.contains("\"-f\"")
                 && !flat.contains("body=")
                 && !flat.contains("run_gh(")
-                && !flat.contains("timed_out_write(")
+                && flat.matches("timed_out_write(").count() == 1
         };
         for name in [
             "edit_comment",
@@ -12324,7 +12379,7 @@ mod tests {
                 && flat.contains("\"--body-file\", body.trim())")
                 && !flat.contains("\"--body\"")
                 && !flat.contains("run_gh(")
-                && !flat.contains("timed_out_write(")
+                && flat.matches("timed_out_write(").count() == 1
         };
         let review = wiring_body(source, "gh_pr_review");
         assert!(on_stdin(&review), "{review}");
