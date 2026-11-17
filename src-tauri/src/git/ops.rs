@@ -1768,9 +1768,12 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // write lands in a branch delete's guarded window; the picks, `--skip`, `--abort`
         // and reset don't. The wait is unbounded, so the switch first re-reads the exact
         // branch ref it lands on, never a tag or git's ref search, and refuses unless it
-        // still reads `target_tip`; a read that can't run is the error.
+        // still reads `target_tip`; a read that can't run is the error. The twin check runs
+        // again first: a loose twin minted during the wait at the same tip passes the tip
+        // compare, and the picks would then write through the twin's loose ref.
         let tip = target_tip.as_str();
         let switched = match with_config_write_lock(repo_path, |_held| async move {
+            crate::git::branches::bare_move_tip(repo_path, target_branch).await?;
             let tip_now = crate::git::branches::branch_tip_sha(repo_path, target_branch).await?;
             if tip_now.as_deref() != Some(tip) {
                 return Err(AppError::Command(format!(
@@ -27489,6 +27492,73 @@ detached
                 assert_eq!(rev(&repo, &back).await, own_before, "{case}");
                 assert_eq!(rev(&repo, twin_ref).await, twin_before, "{case}");
             }
+        }
+    }
+
+    /// A loose `feat` minted at `Feat`'s tip while the cherry-pick waits on the config-write
+    /// mutex: the tip compare still passes, so where refs alias the check under the mutex
+    /// refuses with nothing picked and HEAD where it was; where they don't, the pick lands
+    /// on `Feat` and `feat` stays put.
+    #[tokio::test]
+    async fn cherry_pick_onto_refuses_a_case_twin_minted_during_the_mutex_wait() {
+        use crate::git::branches::tests::{hold_config_mutex, is_aliased, on_first_waiting};
+        use crate::git::runner::CONFIG_WRITE_LOCK_EVENTS;
+        let (dir, repo) = setup_repo("pick-onto-twin-mutex").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["branch", "Feat"]).await;
+        git(&repo, &["pack-refs", "--all"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        git(&repo, &["branch", "oracle-loose"]).await;
+        let aliased = is_aliased(&repo, "ORACLE-LOOSE").await;
+        assert_eq!(crate::git::branches::refs_can_alias(&repo).await, aliased);
+        let (head_before, sha_before) = (head_ref(&repo).await, rev(&repo, "HEAD").await);
+
+        let (holder, release) = hold_config_mutex(&repo).await;
+        let (events, waiting) = on_first_waiting();
+        let pick = tokio::spawn({
+            let (repo, c1) = (repo.clone(), c1.clone());
+            CONFIG_WRITE_LOCK_EVENTS.scope(events, async move {
+                cherry_pick_onto(&AppState::default(), &repo, &[c1], "Feat", None).await
+            })
+        });
+        waiting
+            .await
+            .expect("the cherry-pick reached the config-write mutex");
+        git(&repo, &["branch", "feat", "Feat"]).await;
+        release.send(()).unwrap();
+        holder.await.unwrap();
+        let result = tokio::time::timeout(TEST_GIT_HANG_GUARD, pick)
+            .await
+            .expect("the cherry-pick finishes once released")
+            .unwrap();
+
+        let tips = git(
+            &repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/Feat",
+                "refs/heads/feat",
+            ],
+        )
+        .await;
+        if aliased {
+            assert!(
+                matches!(&result, Err(AppError::Command(m)) if m == FEAT_TWIN_REFUSAL),
+                "{:?}",
+                result.as_ref().err()
+            );
+            assert_eq!(head_ref(&repo).await, head_before);
+            assert_eq!(rev(&repo, "HEAD").await, sha_before);
+            assert_eq!(git(&repo, &["status", "--porcelain"]).await.trim(), "");
+            assert!(tips.contains(&format!("refs/heads/Feat {base}")), "{tips}");
+            assert!(tips.contains(&format!("refs/heads/feat {base}")), "{tips}");
+        } else {
+            let out = result.unwrap_or_else(|e| panic!("{e:?}"));
+            assert_eq!(out.applied, 1);
+            assert_eq!(rev(&repo, "refs/heads/Feat~1").await, base);
+            assert_eq!(rev(&repo, "refs/heads/feat").await, base);
         }
     }
 

@@ -259,11 +259,22 @@ const HIDDEN_REASON_COPY: Record<HiddenReason, string> = {
  *  back or coalesced) must not leave the landing armed for a later flip. */
 const LANDING_TIMEOUT_MS = 2000;
 
-/** Watches for a whitespace-view line composer opening or closing anywhere:
- *  the probe is a DOM query, and a composer opening changes no React state. */
+/** Watches anywhere for what `whitespaceComposerOpen` reads: a line composer
+ *  mounting or unmounting, and the marks on composer wrappers, row wrappers and
+ *  Thread roots changing. The probe is a DOM query, and none of those changes
+ *  this component's React state. */
 function subscribeBodyMutations(onChange: () => void): () => void {
   const observer = new MutationObserver(onChange);
-  observer.observe(document.body, { childList: true, subtree: true });
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: [
+      "data-diff-line-widget",
+      "data-whitespace-row",
+      "data-thread-editing",
+    ],
+  });
   return () => observer.disconnect();
 }
 const subscribeNothing = () => () => undefined;
@@ -627,6 +638,13 @@ export function CommitComments({
     enabled &&
     comments.data !== undefined &&
     rows.some((r) => r.reason === "whitespace");
+  // On a host whose diff follows the setting (the one passing `drawnDiff`),
+  // any selected-file row with a resolved line may leave on a flip, so an edit
+  // open in one holds it. Turning the setting off leaves the `-w` read in hand
+  // judging nothing until the shown read lands; turning it on draws a `-w` read
+  // whose hunks git can align over lines no shown hunk covers, or past a
+  // truncated shown read's cut. Null is that host before its read settles.
+  const flipDropsRows = drawnDiff !== undefined && !selectedBinary;
 
   // Live while a Show whitespace button is mounted: a composer can open or
   // close under a button that stays.
@@ -971,7 +989,18 @@ export function CommitComments({
                       }
                     })();
                     return (
-                      <div key={c.id} className="space-y-1">
+                      // A row the flip may drop marks itself, so its open editor
+                      // holds the flip (`whitespaceComposerOpen`).
+                      <div
+                        key={c.id}
+                        className="space-y-1"
+                        data-whitespace-row={
+                          (flipDropsRows &&
+                            path === selectedPath &&
+                            line != null) ||
+                          undefined
+                        }
+                      >
                         {labelNode}
                         <Thread
                           thread={toThread(c)}

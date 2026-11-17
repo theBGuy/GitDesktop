@@ -1458,6 +1458,13 @@ pub(crate) async fn git_accept_submodule_conflict_side_core(
     .await
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Called as the accept it is scoped to starts waiting for the submodule's own working
+    /// tree, so a test can move the parent's stages during that wait.
+    static CHILD_WAIT_HOOK: Arc<dyn Fn() + Send + Sync>;
+}
+
 /// The accept, with the bound on its wait for the submodule's own working tree
 /// as a parameter so a test can shorten it.
 async fn accept_submodule_side_within(
@@ -1528,6 +1535,8 @@ async fn accept_submodule_side_within(
     .filter(|child| !Arc::ptr_eq(&child.lock(), &domain.lock()));
     let _submodule_guard = match &submodule_domain {
         Some(child) => {
+            #[cfg(test)]
+            let _ = CHILD_WAIT_HOOK.try_with(|hook| hook());
             Some(acquire_repo_lock(child, submodule_wait, "a conflict resolution").await?)
         }
         None => None,
@@ -1547,6 +1556,16 @@ async fn accept_submodule_side_within(
         return Ok(SubmoduleAcceptOutcome::Changed);
     }
 
+    // The stages again, after the child wait and the probes: git outside the app can move
+    // them meanwhile, and git's CLI has no index compare-and-swap, so this narrows the
+    // window to the gap between this read and the write.
+    let now = conflict_entries(repo_path, &path).await?;
+    if now.is_empty() {
+        return Err(AppError::InvalidArgument(NOT_CONFLICTED_REFUSAL.into()));
+    }
+    if live_stages(&now) != *expected {
+        return Ok(SubmoduleAcceptOutcome::Changed);
+    }
     // A path, not a pathspec: git's spelling from the gate, passed raw.
     let info = format!("{GITLINK_MODE},{sha},{path}");
     run_git_raw_index_retry(
@@ -3684,10 +3703,13 @@ mod tests {
         assert!(ours.gitlink && theirs.gitlink);
         let commit = ours.commit.as_ref().expect("ours is in the submodule");
         assert_eq!(commit.subject, "one");
-        // `%cI`: strict ISO 8601, `YYYY-MM-DDTHH:MM:SS±HH:MM`.
+        // `%cI`: strict ISO 8601, `YYYY-MM-DDTHH:MM:SS` then `±HH:MM`, or `Z` when the
+        // committer's zone is UTC (git 2.51.1; CI runners).
         let date = commit.committed_at.as_bytes();
+        let zone_ok = (date.len() == 20 && date[19] == b'Z')
+            || (date.len() == 25 && matches!(date[19], b'+' | b'-'));
         assert!(
-            date.len() == 25 && date[10] == b'T',
+            zone_ok && date[10] == b'T',
             "{}",
             commit.committed_at
         );
@@ -4361,6 +4383,98 @@ mod tests {
         );
         assert_pointer_staged(&f.host, &f.c1).await;
         assert_eq!(head_of(&f.sub).await, f.c1);
+    }
+
+    /// Stages moved by git outside the app while the accept waits on the submodule's own
+    /// working tree: the accept re-reads them before it writes and says Changed, the new
+    /// stages and the checkout left as they are.
+    #[tokio::test]
+    async fn accept_rereads_the_stages_after_waiting_on_the_submodules_own_working_tree() {
+        let f = gitlink_fixture("conflict-child-reread").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+        let accept = CHILD_WAIT_HOOK.scope(
+            hook,
+            git_accept_submodule_conflict_side_core(
+                &state, &f.host, "libs/dep", "ours", &expected, true,
+            ),
+        );
+        let (host, c0, c1, c2) = (&f.host, &f.c0, &f.c1, &f.c2);
+        let moved = async move {
+            rx.await
+                .expect("the accept waits on the submodule's working tree");
+            conflict_at(host, Some(c0), Some(c2), Some(c1)).await;
+            let stages = unmerged(host).await;
+            drop(held);
+            stages
+        };
+        let (outcome, stages) = tokio::join!(accept, moved);
+        assert_eq!(outcome.unwrap(), SubmoduleAcceptOutcome::Changed);
+        assert!(
+            stages.contains(&format!("{} 2\tlibs/dep", f.c2)),
+            "{stages}"
+        );
+        assert_eq!(unmerged(&f.host).await, stages, "the new stages stay");
+        assert_eq!(head_of(&f.sub).await, f.c2, "the checkout stays");
+    }
+
+    /// The path resolved by git outside the app while the accept waits on the submodule's
+    /// own working tree: the re-read refuses it as not conflicted, as the first read
+    /// would, and the accept stages nothing.
+    #[tokio::test]
+    async fn accept_refuses_a_path_resolved_during_the_child_wait() {
+        let f = gitlink_fixture("conflict-child-resolved").await;
+        conflict_at(&f.host, Some(&f.c0), Some(&f.c1), Some(&f.c2)).await;
+        let expected = stages_of(Some(&f.c0), Some(&f.c1), Some(&f.c2));
+        let state = AppState::default();
+        let tab = git(&f.sub, &["rev-parse", "--show-toplevel"])
+            .await
+            .trim()
+            .to_string();
+        let domain = state.working_tree_lock(&tab).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the tab takes its hold");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        });
+        let accept = CHILD_WAIT_HOOK.scope(
+            hook,
+            git_accept_submodule_conflict_side_core(
+                &state, &f.host, "libs/dep", "ours", &expected, true,
+            ),
+        );
+        let (host, c2) = (&f.host, &f.c2);
+        let resolved = async move {
+            rx.await
+                .expect("the accept waits on the submodule's working tree");
+            stage_gitlink(host, c2).await;
+            drop(held);
+        };
+        let (outcome, ()) = tokio::join!(accept, resolved);
+        assert_invalid(outcome, NOT_CONFLICTED_REFUSAL);
+        assert_pointer_staged(&f.host, &f.c2).await;
+        assert_eq!(head_of(&f.sub).await, f.c2, "the checkout stays");
     }
 
     /// `submodule.recurse=true` would carry the accept's checkout into a nested

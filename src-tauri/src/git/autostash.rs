@@ -468,6 +468,8 @@ pub(crate) async fn git_switch_autostash_core(
     let session_name = crate::git::branches::is_session_branch_name(&name);
     if let Some(remote) = &remote {
         validate_ref_name(remote)?;
+        // This arm creates `name`, so it takes the branch-name gate every creator takes.
+        crate::git::branches::validate_branch_name(&name)?;
         crate::git::branches::refuse_session_branch_name(&name)?;
     } else if session_name && !crate::git::branches::branch_exists_exact(&repo_path, &name).await? {
         // Refuse only guess-creation so existing session-named branches stay reachable.

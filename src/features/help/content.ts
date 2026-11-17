@@ -684,10 +684,12 @@ the last list up, with a line above it saying it couldn't refresh.
   only changes are whitespace says so. The line counts in file lists keep counting
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
-  flips it too. While you're writing a line comment on one of these diffs, it stays
-  locked until you finish or close the comment, so the draft isn't lost. A commit
-  comment on a line hidden this way stays in the comment list, with **Show
-  whitespace** beside it. Diffs of pull requests on a forge always show whitespace.
+  flips it too. While you're writing a line comment on one of these diffs, or
+  editing one of the open file's line comments in the list below the diff, it
+  stays locked until you finish or close the comment, so the draft isn't lost. A
+  commit comment on a line hidden this way stays in the comment list; while its
+  file is open, **Show whitespace** sits beside it. Diffs of pull requests on a
+  forge always show whitespace.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both

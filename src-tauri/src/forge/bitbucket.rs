@@ -2688,19 +2688,20 @@ pub async fn run_page(
     let per_page = limit.clamp(1, 100);
     let page_num = page.max(1);
     let statuses = bb_status_values(filters.status.as_deref());
-    if statuses.len() > 1 {
+    if let [first, second] = statuses[..] {
         let need = (per_page as usize).saturating_mul(page_num as usize);
-        let mut streams = Vec::new();
-        for status in statuses {
-            let stream = collect_status_stream(need, |stream_page| {
-                let path =
-                    pipelines_list_path(&ws, &slug, 100, stream_page, &filters, Some(status));
-                let creds = &creds;
+        let collect_stream = |status| {
+            let (creds, ws, slug, filters) = (&creds, &ws, &slug, &filters);
+            collect_status_stream(need, move |stream_page| {
+                let path = pipelines_list_path(ws, slug, 100, stream_page, filters, Some(status));
                 async move { http::bb_get_json(creds, &path, "pipelines", BbOpKind::Read).await }
             })
-            .await?;
-            streams.push(stream);
-        }
+        };
+        let (failed, error) = tokio::try_join!(
+            Box::pin(collect_stream(first)),
+            Box::pin(collect_stream(second)),
+        )?;
+        let streams = vec![failed, error];
         let (items, total_count, has_more) =
             merge_status_streams(streams, per_page as usize, page_num as usize);
         return Ok(CiRunPage {

@@ -160,7 +160,9 @@ export function Thread({
   const minimized = thread.isMinimized;
   const disabledSuffix = disabledReason ? ` — ${disabledReason}` : "";
   return (
-    <div className="group space-y-1">
+    // The open-editor mark is what the whitespace probe (whitespace-mode.ts)
+    // finds under a host whose rows a whitespace flip replaces.
+    <div className="group space-y-1" data-thread-editing={editing || undefined}>
       <p className="flex items-center gap-2 text-xs">
         <AuthorAvatar
           login={thread.author}

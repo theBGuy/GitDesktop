@@ -752,8 +752,13 @@ pub(crate) async fn git_rename_branch_core(
     old_name: String,
     new_name: String,
 ) -> AppResult<RenameBranchOutcome> {
+    // git stores and renames a branch literally named `@`, and this is its only in-app exit,
+    // so the old name passes it; `@{…}`, which git expands to another branch, is refused.
     validate_ref_name(&old_name)?;
-    validate_ref_name(&new_name)?;
+    if old_name != "@" {
+        validate_branch_name(&old_name)?;
+    }
+    validate_branch_name(&new_name)?;
     refuse_session_rename(&old_name, &new_name)?;
     // `branch -m` does NOT refuse a branch checked out elsewhere — it retargets that
     // worktree's HEAD silently, which under a running update means renaming the branch
@@ -2160,7 +2165,7 @@ pub(crate) async fn git_checkout_remote_branch_core(
     name: String,
 ) -> AppResult<()> {
     validate_ref_name(&remote)?;
-    validate_ref_name(&name)?;
+    validate_branch_name(&name)?;
     refuse_session_branch_name(&name)?;
     // A live update means a LOCAL `name` already exists and is held, so this switch
     // collides on it rather than creating anything.
@@ -2243,7 +2248,7 @@ pub(crate) async fn git_create_branch_core(
     start_point: Option<String>,
     no_track: bool,
 ) -> AppResult<()> {
-    validate_ref_name(&name)?;
+    validate_branch_name(&name)?;
     refuse_session_branch_name(&name)?;
     if let Some(start) = &start_point {
         // start_point may be a branch name or a commit hash — validate as a ref
@@ -4030,12 +4035,15 @@ fn case_twin_of<'a>(stored: &'a [String], name: &str, replaces: Option<&str>) ->
 /// ([`refs_can_alias`]), since git refuses only a twin of a LOOSE ref. Takes no lock: each
 /// caller supplies its hold, and only a call inside the config-write mutex held through
 /// the write makes check-then-create atomic. A failed listing is the `Err`; the disk is
-/// probed only when a stored name folds to `name`.
+/// probed only when a stored name folds to `name`. `name` must pass
+/// [`validate_branch_name`] first, so a route that mints through here can't compare a rev
+/// expression's literal spelling while git creates the branch it expands to.
 pub(crate) async fn refuse_new_name_twin(
     repo_path: &str,
     name: &str,
     replaces: Option<&str>,
 ) -> AppResult<()> {
+    validate_branch_name(name)?;
     let stored = stored_branch_names(repo_path).await?;
     let Some(twin) = case_twin_of(&stored, name, replaces) else {
         return Ok(());
@@ -4640,7 +4648,18 @@ pub(crate) mod tests {
         // The whole point of the stricter gate: `~`/`^` shapes RESOLVE under
         // `rev-parse --verify refs/heads/…`, so an existence probe alone passes
         // them and the caller proceeds against an ancestor commit.
-        for bad in ["feature~1", "main^", "HEAD@{1}", "main..other", "a^{commit}", "@"] {
+        // `@{-N}` is the Nth previous branch, which git expands into the name it mints.
+        let bad_names = [
+            "feature~1",
+            "main^",
+            "HEAD@{1}",
+            "main..other",
+            "a^{commit}",
+            "@",
+            "@{-1}",
+            "@{-2}",
+        ];
+        for bad in bad_names {
             assert!(validate_ref_name(bad).is_ok(), "ref gate accepts {bad:?}");
             assert!(
                 validate_branch_name(bad).is_err(),
@@ -15678,6 +15697,114 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn create_refuses_a_case_twin_of_a_loose_and_packed_branch() {
         create_beside_case_twin(TwinStorage::LooseAndPacked).await;
+    }
+
+    /// `@{-1}` names the previous branch, which git expands into the name it mints, so a
+    /// deleted `Feat` would come back beside a packed `feat` under a spelling the twin check
+    /// never compared. Create and rename refuse it as a branch name, on every disk.
+    #[tokio::test]
+    async fn create_and_rename_refuse_a_previous_branch_expression_as_the_new_name() {
+        for rename in [false, true] {
+            let (_g, base) = temp_base("previous-branch-new-name");
+            let repo = base.to_string_lossy().into_owned();
+            init_repo(&repo, "r.txt").await;
+            let home = run(&repo, &["branch", "--show-current"])
+                .await
+                .trim()
+                .to_string();
+            run(&repo, &["switch", "-c", "Feat"]).await;
+            run(&repo, &["switch", &home]).await;
+            run(&repo, &["branch", "-D", "Feat"]).await;
+            run(&repo, &["branch", "feat"]).await;
+            run(&repo, &["pack-refs", "--all"]).await;
+            let expanded = run(&repo, &["check-ref-format", "--branch", "@{-1}"]).await;
+            assert_eq!(
+                expanded.trim(),
+                "Feat",
+                "fixture sanity: git expands @{{-1}}"
+            );
+            let before = case_twin_snapshot(&repo).await;
+            let state = AppState::default();
+            let result = if rename {
+                git_rename_branch_core(&state, repo.clone(), home.clone(), "@{-1}".into())
+                    .await
+                    .map(drop)
+            } else {
+                git_create_branch_core(&state, repo.clone(), "@{-1}".into(), false, None, false)
+                    .await
+            };
+            assert!(
+                matches!(&result, Err(AppError::InvalidArgument(m))
+                    if m == "invalid branch name: @{-1}"),
+                "rename={rename}: {result:?}"
+            );
+            let listed = case_twin_listed(&repo).await;
+            assert!(
+                !listed.iter().any(|b| b == "Feat"),
+                "rename={rename}: {listed:?}"
+            );
+            assert!(
+                listed.iter().any(|b| b == "feat"),
+                "rename={rename}: {listed:?}"
+            );
+            assert!(listed.contains(&home), "rename={rename}: {listed:?}");
+            assert_eq!(case_twin_snapshot(&repo).await, before, "rename={rename}");
+        }
+    }
+
+    /// git stores a branch literally named `@` and `branch -m` moves it by that name, so
+    /// the rename takes it as its old name end to end, HEAD left on its own branch.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn rename_moves_a_branch_literally_named_at() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_g, base) = temp_base("rename-literal-at");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        let head = symbolic_head(&repo).await;
+        run(&repo, &["update-ref", "refs/heads/@", "HEAD"]).await;
+        let result =
+            git_rename_branch_core(&AppState::default(), repo.clone(), "@".into(), "at".into())
+                .await;
+        assert!(result.is_ok(), "{result:?}");
+        let listed = case_twin_listed(&repo).await;
+        assert!(listed.iter().any(|b| b == "at"), "{listed:?}");
+        assert!(!listed.iter().any(|b| b == "@"), "{listed:?}");
+        assert_eq!(symbolic_head(&repo).await, head);
+    }
+
+    /// `@{-1}` as the old name names the previous branch, which git would rename: refused
+    /// as a branch name, that branch where it was.
+    #[tokio::test]
+    async fn rename_refuses_a_previous_branch_expression_as_the_old_name() {
+        let (_g, base) = temp_base("rename-previous-old-name");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        let home = run(&repo, &["branch", "--show-current"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["switch", "-c", "prev-old"]).await;
+        run(&repo, &["switch", &home]).await;
+        let before = case_twin_snapshot(&repo).await;
+        let result = git_rename_branch_core(
+            &AppState::default(),
+            repo.clone(),
+            "@{-1}".into(),
+            "prev-new".into(),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(m))
+                if m == "invalid branch name: @{-1}"),
+            "{result:?}"
+        );
+        let listed = case_twin_listed(&repo).await;
+        assert!(listed.iter().any(|b| b == "prev-old"), "{listed:?}");
+        assert!(!listed.iter().any(|b| b == "prev-new"), "{listed:?}");
+        assert_eq!(case_twin_snapshot(&repo).await, before);
     }
 
     /// A name stored byte-exactly keeps git's own "already exists", alone and in a

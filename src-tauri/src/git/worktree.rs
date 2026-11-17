@@ -326,6 +326,11 @@ pub(crate) async fn git_worktree_add_user_core(
     }
     refuse_ambiguous_worktree_path(path, cfg!(windows))?;
     crate::git::branches::refuse_session_branch_name(branch)?;
+    if new_branch {
+        // `-b` mints the name, and git would expand rev syntax such as `@{-1}` to another
+        // branch's name, which the case-twin check never saw.
+        crate::git::branches::validate_branch_name(branch)?;
+    }
     if std::path::Path::new(repo_path).join(path).exists() {
         return Err(AppError::InvalidArgument(format!(
             "{path} already exists — choose a new folder"
@@ -3703,6 +3708,42 @@ prunable gitdir file points to non-existent location
                 assert!(listed.iter().any(|b| b == "Feat"), "{row}: {listed:?}");
             }
         }
+    }
+
+    /// `worktree add -b @{-1}` creates the previous branch's name (measured, git 2.51.1),
+    /// so a deleted `Feat` would come back beside a packed `feat`: refused as a branch
+    /// name before any worktree or ref exists.
+    #[tokio::test]
+    async fn new_branch_worktree_add_refuses_a_previous_branch_expression() {
+        let (base, repo) = setup_repo("wt-previous-branch").await;
+        let home = run(&repo, &["branch", "--show-current"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo, &["switch", "-c", "Feat"]).await;
+        run(&repo, &["switch", &home]).await;
+        run(&repo, &["branch", "-D", "Feat"]).await;
+        run(&repo, &["branch", "feat"]).await;
+        run(&repo, &["pack-refs", "--all"]).await;
+        let expanded = run(&repo, &["check-ref-format", "--branch", "@{-1}"]).await;
+        assert_eq!(expanded.trim(), "Feat", "fixture sanity");
+        let wt = base.path().join("wt-prev");
+        let wt_s = wt.to_string_lossy().into_owned();
+        let state = AppState::default();
+        let result = git_worktree_add_user_core(&state, &repo, &wt_s, "@{-1}", true, None).await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(m))
+                if m == "invalid branch name: @{-1}"),
+            "{result:?}"
+        );
+        assert!(!wt.exists(), "no worktree folder");
+        let listed = run(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        )
+        .await;
+        assert!(!listed.lines().any(|l| l == "refs/heads/Feat"), "{listed}");
+        assert!(listed.lines().any(|l| l == "refs/heads/feat"), "{listed}");
     }
 
     /// An uncontended new-branch add takes the config-write mutex only for the case-twin
