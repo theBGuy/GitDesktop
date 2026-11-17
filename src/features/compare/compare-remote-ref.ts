@@ -49,12 +49,15 @@ function notifyPickRemotes() {
 
 /** Records only a remote the KNOWN remotes list names: a split made without
  *  one, or a first-slash fallback no listed remote matched, is a guess, and a
- *  recorded guess would outrank the right split once the list catches up.
+ *  recorded guess would outrank the right split once the list catches up. The
+ *  backend's split from `listed` is a guess too (it falls back to the first
+ *  "/" for an unconfigured remote), so it only resolves, never records.
  *  Returns the pick as {@link resolvePick} now reads it. */
 export function recordPickRemote(
   repo: string,
   value: string,
   remotes: readonly string[] | undefined,
+  listed?: readonly RemoteBranch[],
 ): { remote: string; name: string; display: string } | null {
   const key = pickRemoteKey(repo, value);
   const split = parseRemoteCompareValue(value, remotes);
@@ -64,7 +67,7 @@ export function recordPickRemote(
       notifyPickRemotes();
     }
   }
-  return resolvePick(value, remotes, pickRemotes.get(key) ?? null);
+  return resolvePick(value, remotes, pickRemotes.get(key) ?? null, listed);
 }
 
 /** Test-only: module state would otherwise carry records between cases. */
@@ -94,13 +97,20 @@ export function usePickRemote(
 /** The one identity of a stored pick: its recorded remote when that still
  *  prefixes it, else the split against the current remotes list. A listed
  *  remote strictly longer than the record wins: the record came from an older
- *  list that didn't have it yet. */
+ *  list that didn't have it yet. While the list is unknown, an unrecorded pick
+ *  takes the backend's split from its row in `listed` (the first "/" only when
+ *  no row matches), as {@link remoteCompareRows} does. */
 export function resolvePick(
   value: string | null,
   remotes: readonly string[] | undefined,
   recorded: string | null,
+  listed?: readonly RemoteBranch[],
 ): { remote: string; name: string; display: string } | null {
-  const split = parseRemoteCompareValue(value, remotes);
+  const parsed = parseRemoteCompareValue(value, remotes);
+  const split =
+    parsed !== null && remotes === undefined
+      ? (listedPick(parsed.display, listed) ?? parsed)
+      : parsed;
   if (
     split === null ||
     recorded === null ||
@@ -114,6 +124,17 @@ export function resolvePick(
     name: split.display.slice(recorded.length + 1),
     display: split.display,
   };
+}
+
+/** The backend row whose `remote/name` is `display`, as a pick. */
+function listedPick(
+  display: string,
+  listed: readonly RemoteBranch[] | undefined,
+): { remote: string; name: string; display: string } | null {
+  const row = listed?.find((b) => `${b.remote}/${b.name}` === display);
+  return row === undefined
+    ? null
+    : { remote: row.remote, name: row.name, display };
 }
 
 export function remoteCompareValue(remote: string, name: string): string {

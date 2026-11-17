@@ -3,14 +3,24 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import {
   clearPickRemotesForTests,
   parseRemoteCompareValue,
+  recordPickRemote,
   remoteCompareRows,
+  resolvePick,
+  usePickRemote,
 } from "@/features/compare/compare-remote-ref";
 import { TabPanel } from "@/features/repository/TabPanel";
 import {
@@ -626,6 +636,47 @@ describe("Compare remote names holding a slash", () => {
     // The pick is still listed, so nothing calls it deleted.
     await settle();
     expect(screen.queryByText(/was deleted on/)).toBeNull();
+  });
+
+  it("resolves an unknown-list pick through its backend row, never recording it", () => {
+    const value = "refs/remotes/team/fork/main";
+    const listed = [remote("team/fork", "main")];
+    expect(resolvePick(value, undefined, null, listed)).toEqual({
+      remote: "team/fork",
+      name: "main",
+      display: "team/fork/main",
+    });
+    // A known list ignores the backend rows.
+    expect(resolvePick(value, ["origin", "team"], null, listed)).toEqual({
+      remote: "team",
+      name: "fork/main",
+      display: "team/fork/main",
+    });
+    expect(recordPickRemote(REPO, value, undefined, listed)?.remote).toBe(
+      "team/fork",
+    );
+    const { result } = renderHook(() => usePickRemote(REPO, value));
+    expect(result.current).toBeNull();
+  });
+
+  it("fetches the backend's remote for a pick made while the remotes read fails", async () => {
+    vi.mocked(gitRemotes).mockRejectedValue(new Error("remotes boom"));
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      remote("team/fork", "main"),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(gitRemotes).toHaveBeenCalled());
+    await user.click(await trigger());
+    await user.click(
+      await within(await popup()).findByRole("option", {
+        name: /^team\/fork\/main/,
+      }),
+    );
+    await waitFor(() =>
+      expect(gitFetchRemote).toHaveBeenCalledWith(REPO, "team/fork"),
+    );
+    expect(fetchedRemotes()).not.toContain("team");
   });
 
   it("offers remote rows only once the remotes list is known", async () => {
