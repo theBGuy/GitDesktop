@@ -267,10 +267,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     repoPath,
     pickerOpen || pick !== null || otherBranches.length === 0,
   );
-  // Rows wait for the remotes list: a remote whose name holds "/" splits only
-  // against it. A failed read with no data leaves the backend's first-slash
-  // split, the only one left, held through its retry polls so the rows don't
-  // blink with each one.
+  // Rows wait for the remotes list, so each row splits against the same list
+  // the stored pick is parsed with. A failed read with no data keeps the
+  // backend's split (the longest configured remote), held through its retry
+  // polls so the rows don't blink with each one.
   const remotesKnown =
     remotes.data !== undefined || failedSinceLastSuccess(remotes);
   const remoteRows = remotesKnown

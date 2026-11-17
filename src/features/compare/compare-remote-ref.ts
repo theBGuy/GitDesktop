@@ -13,7 +13,7 @@ export const ADD_UPSTREAM_VALUE = "::add-upstream::";
 
 /** Splits `remote/name` at the longest known remote followed by "/", since a
  *  remote name may itself hold "/". Unknown remotes (or none matching) fall
- *  back to the first "/", the backend's own split. */
+ *  back to the first "/", as the backend does for a remote it doesn't know. */
 function splitRemoteDisplay(
   display: string,
   remotes: readonly string[] | undefined,
@@ -149,12 +149,12 @@ function remoteRank(remote: string): number {
  * `remote/name` equals an offered local name (a local literally named
  * `origin/x` would make two identical combobox values). A remote branch merely
  * sharing a local's bare name stays offered. Ordered by remote (upstream,
- * origin, then alphabetical), each remote's rows by recency. Each row is
- * re-split against `remotes` first: the backend already splits at the longest
- * configured remote, and the re-split keeps each row congruent with
+ * origin, then alphabetical), each remote's rows by recency. The backend
+ * already splits at the longest configured remote. When `remotes` is known each
+ * row is re-split against it first, so it stays congruent with
  * `parseRemoteCompareValue` when this list and the backend's read differ (a
- * remote added or removed between them), and the HEAD filter here covers that
- * window.
+ * remote added or removed between them), and the HEAD filter covers that
+ * window; without a list the backend's split stands.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
@@ -163,7 +163,9 @@ export function remoteCompareRows(
 ): RemoteCompareRow[] {
   return (remoteBranches ?? [])
     .map((b) => ({
-      ...(splitRemoteDisplay(`${b.remote}/${b.name}`, remotes) ?? b),
+      ...(remotes === undefined
+        ? b
+        : (splitRemoteDisplay(`${b.remote}/${b.name}`, remotes) ?? b)),
       lastCommitDate: b.lastCommitDate,
     }))
     .filter((b) => b.name !== "HEAD" && !isSessionBranchName(b.name))

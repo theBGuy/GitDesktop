@@ -576,7 +576,7 @@ describe("Compare remote names holding a slash", () => {
       name: "main",
       display: "team/fork/main",
     });
-    // Unknown remotes keep the backend's first-slash split.
+    // Without a remotes list the value splits at the first slash.
     expect(parseRemoteCompareValue("refs/remotes/team/fork/main")).toEqual({
       remote: "team",
       name: "fork/main",
@@ -587,6 +587,16 @@ describe("Compare remote names holding a slash", () => {
         [remote("team", "fork/gd/session/x"), remote("team", "fork/main")],
         new Set(),
         ["team/fork"],
+      ).map((r) => r.display),
+    ).toEqual(["team/fork/main"]);
+  });
+
+  it("keeps the backend's split when the remotes list is unknown", () => {
+    expect(
+      remoteCompareRows(
+        [remote("team/fork", "gd/session/x"), remote("team/fork", "main")],
+        new Set(),
+        undefined,
       ).map((r) => r.display),
     ).toEqual(["team/fork/main"]);
   });

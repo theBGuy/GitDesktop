@@ -414,8 +414,8 @@ fn parse_upstream_track(track: &str) -> (u32, u32, bool) {
 
 /// Splits a remote-tracking ref past `refs/remotes/` at the longest configured
 /// remote followed by `/` (a remote name may itself hold `/`), else at the first
-/// `/`; `None` when either side would be empty. Mirrors Compare's
-/// `splitRemoteDisplay` so the two surfaces never disagree on a row.
+/// `/`; `None` when either side would be empty. The same rule as Compare's
+/// `splitRemoteDisplay`, so against the same remote list the two agree on every row.
 fn split_remote_tracking<'a>(rest: &'a str, remotes: &[String]) -> Option<(&'a str, &'a str)> {
     let mut slash = rest.find('/')?;
     for remote in remotes {
@@ -431,10 +431,10 @@ fn split_remote_tracking<'a>(rest: &'a str, remotes: &[String]) -> Option<(&'a s
     (!remote.is_empty() && !name.is_empty()).then_some((remote, name))
 }
 
-/// Branches that exist on a remote, for the switcher's "Remote" group. Returns
-/// every `refs/remotes/<remote>/<branch>` (skipping each remote's symbolic
-/// `HEAD`); the frontend drops the ones already checked out locally and the
-/// internal `gd/session/*` branches. The list reflects the last fetch. A failed
+/// Branches that exist on a remote, feeding every remote-branch list. Returns
+/// every `refs/remotes/<remote>/<branch>`, skipping each configured remote's
+/// symbolic `HEAD`; consumers drop what they don't offer (such as
+/// `gd/session/*`). The list reflects the last fetch. A failed
 /// remotes read fails the list: a guessed split would leak session branches.
 #[tauri::command]
 pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranch>> {
@@ -458,8 +458,8 @@ pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranc
         };
         // Full ref, stripped of exactly `refs/remotes/`: the short form turns into
         // `remotes/<remote>/<branch>` when a local ref is named `<remote>/<branch>`.
-        // The split takes the longest configured remote, so neither a branch nor a
-        // remote name holding `/` mis-splits.
+        // A `/` inside a branch name or a configured remote's name stays whole; a ref
+        // under no configured remote splits at its first `/`.
         let Some((remote, name)) = refname
             .strip_prefix("refs/remotes/")
             .and_then(|r| split_remote_tracking(r, &remotes))
@@ -467,7 +467,7 @@ pub async fn git_remote_branches(repo_path: String) -> AppResult<Vec<RemoteBranc
             continue;
         };
         // Skip the remote's symbolic HEAD (`origin/HEAD` → points at the default).
-        if name == "HEAD" || name.is_empty() {
+        if name == "HEAD" {
             continue;
         }
         branches.push(RemoteBranch {
@@ -5499,8 +5499,8 @@ pub(crate) mod tests {
     }
 
     /// The split takes the longest configured remote followed by `/`, whatever the
-    /// list's order, and falls back to the first `/` (the same table as Compare's
-    /// `splitRemoteDisplay`).
+    /// list's order, and falls back to the first `/` (the rule Compare's
+    /// `splitRemoteDisplay` applies).
     #[test]
     fn split_remote_tracking_takes_the_longest_configured_remote() {
         type Case<'a> = (&'a str, &'a [String], Option<(&'a str, &'a str)>);
