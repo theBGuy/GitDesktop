@@ -210,6 +210,13 @@ const button = (name: string) => {
   if (!footer) throw new Error("no dialog footer");
   return within(footer).getByRole("button", { name });
 };
+/** The sighted text of `el`: PathText's sr-only name copy removed. */
+function shownText(el: Element | null): string {
+  if (!el) return "";
+  const copy = el.cloneNode(true) as Element;
+  for (const sr of copy.querySelectorAll(".sr-only")) sr.remove();
+  return copy.textContent ?? "";
+}
 const expectFocusOn = (name: string) =>
   waitFor(() => {
     expect(document.activeElement).not.toBe(document.body);
@@ -223,10 +230,14 @@ describe("the not-installed state", () => {
     await within(d).findByText("Block terminal pushes too?");
     expect(within(d).getByText(J_BODY)).toBeInTheDocument();
     const items = within(d).getAllByRole("listitem");
-    expect(items.map((li) => li.textContent)).toEqual([
+    expect(items.map((li) => shownText(li))).toEqual([
       `It lives in this clone only (${HOOKS}/pre-push). Other clones don't get it.`,
       "git push --no-verify skips it.",
     ]);
+    const named = items[0].querySelectorAll(".sr-only");
+    expect(named).toHaveLength(1);
+    expect(named[0].textContent).toBe(`${HOOKS}/pre-push`);
+    expect(items[1].querySelectorAll(".sr-only")).toHaveLength(0);
     expect(button("Install hook")).toBeInTheDocument();
     await expectFocusOn("Cancel");
   });

@@ -173,27 +173,28 @@ describe("Compare picker Remote group", () => {
         true,
       ),
     );
-    // Each row's label span (the date sits in a sibling span).
-    const labels = within(list)
+    // Each Remote row's label span (the date sits in a sibling span).
+    const remoteLabels = within(
+      within(list).getByRole("group", { name: "Remote" }),
+    )
       .getAllByRole("option")
       .map((o) => o.querySelector("span")?.textContent ?? "");
-    const remoteLabels = labels.filter(
-      (l) => l.includes("/") && l !== "origin/dup",
-    );
     expect(remoteLabels).toEqual([
       "upstream/release",
       "upstream/main",
+      "origin/dup",
       "origin/feature-x",
       "origin/old",
       "alpha/topic",
       "colleague/idea",
     ]);
-    expect(labels.slice(0, 4)).toEqual([
-      "maindefault",
-      "origin/dup",
-      "feature-x",
-      "upstream/release",
-    ]);
+    const firstFour = within(list).getAllByRole("option").slice(0, 4);
+    // Each name ends at the branch or continues with its separator, so a row
+    // named feature-xyz or feature-x/ can't pass for feature-x.
+    expect(firstFour[0]).toHaveAccessibleName(/^main\s*,\s*default\s*(,|$)/);
+    expect(firstFour[1]).toHaveAccessibleName(/^origin\/dup\s*(,|$)/);
+    expect(firstFour[2]).toHaveAccessibleName(/^feature-x\s*(,|$)/);
+    expect(firstFour[3]).toHaveAccessibleName(/^upstream\/release\s*(,|$)/);
     // Session branches never show; a same-named local doesn't hide the remote.
     expect(optionTexts(list).join("|")).not.toContain("gd/session");
     expect(
@@ -202,10 +203,18 @@ describe("Compare picker Remote group", () => {
     expect(
       within(list).getAllByRole("option", { name: /^origin\/feature-x/ }),
     ).toHaveLength(1);
-    // The local literally named origin/dup wins; the remote row is dropped.
+    // A local literally named origin/dup and the remote row both list, one in
+    // each group.
     expect(
       within(list).getAllByRole("option", { name: /^origin\/dup/ }),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+    for (const group of ["Local", "Remote"])
+      expect(
+        within(within(list).getByRole("group", { name: group })).getAllByRole(
+          "option",
+          { name: /^origin\/dup/ },
+        ),
+      ).toHaveLength(1);
   });
 
   it("stores a local pick bare and never fetches", async () => {
@@ -213,7 +222,10 @@ describe("Compare picker Remote group", () => {
     renderPanel();
     const list = await openPicker(user);
     await user.click(
-      within(list).getByRole("option", { name: /^origin\/dup/ }),
+      within(within(list).getByRole("group", { name: "Local" })).getByRole(
+        "option",
+        { name: /^origin\/dup/ },
+      ),
     );
     expect(useUiStore.getState().compareBranch).toBe("origin/dup");
     expect(gitFetchRemote).not.toHaveBeenCalled();

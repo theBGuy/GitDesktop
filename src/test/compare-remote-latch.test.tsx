@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
+import repositoryViewSource from "@/features/repository/RepositoryView.tsx?raw";
 import { TabPanel } from "@/features/repository/TabPanel";
 import {
   forgeStatus,
@@ -21,7 +22,7 @@ import type {
   RemoteBranch,
   RepoStatus,
 } from "@/lib/git/types";
-import { dispatchAction } from "@/lib/hotkeys/hotkeys";
+import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import type { ActionId } from "@/lib/hotkeys/registry";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -251,12 +252,12 @@ describe("Compare create hotkeys", () => {
     await act(async () => finish());
   });
 
-  it("is refused while the pick was deleted on its remote", async () => {
+  it("is refused while the pick is no longer in the remote branches", async () => {
     useUiStore.setState({ compareBranch: "refs/remotes/upstream/gone" });
     renderPanel();
     await waitFor(async () =>
       expect(await parentButton()).toHaveAccessibleDescription(
-        "upstream/gone was deleted on upstream.",
+        "upstream/gone is no longer in your remote branches.",
       ),
     );
     await expectRefused(["create-pr"]);
@@ -289,5 +290,144 @@ describe("Compare create hotkeys", () => {
       expect(dispatchAction("create-pr")).toBe(true);
     });
     expect(dialog()).toHaveAttribute("data-open", "true");
+  });
+});
+
+// Stands in for the two app-level create registrations in
+// src/features/repository/RepositoryView.tsx, gate included: `create-pr`
+// behind `canCreatePr`, `create-local-pr` always. The pin below ties the copy
+// to that file's text.
+function AppCreateHotkeys({ canCreatePr }: { canCreatePr: boolean }) {
+  const requestCreate = useUiStore((s) => s.requestCreate);
+  useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
+  useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
+  return null;
+}
+
+describe("Compare create hotkeys stand-in (source pin)", () => {
+  // White space is the only freedom: any other change to either line means
+  // the stand-in above no longer mirrors the app. Each must be a whole live
+  // line, so a `//` line or a line inside a block comment never counts.
+  const squash = (s: string) => s.replace(/\s+/g, "");
+  const liveLines = (source: string) => {
+    const lines: string[] = [];
+    let inBlock = false;
+    for (const raw of source.split(/\r?\n/)) {
+      const text = raw.trim();
+      if (inBlock) {
+        if (text.includes("*/")) inBlock = false;
+        continue;
+      }
+      if (/^\{?\/\*/.test(text)) {
+        inBlock = !text.includes("*/");
+        continue;
+      }
+      lines.push(squash(text));
+    }
+    return lines;
+  };
+
+  it.each([
+    'useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);',
+    'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));',
+  ])("RepositoryView.tsx still registers %s", (line) => {
+    // A boolean, so a miss doesn't print the whole file.
+    expect(liveLines(repositoryViewSource).includes(squash(line))).toBe(true);
+  });
+});
+
+describe("Compare create hotkeys while Create is held (contract)", () => {
+  beforeEach(() => {
+    useUiStore.setState({
+      compareBranch: "main",
+      repoTab: "compare",
+      pendingCreate: null,
+    });
+  });
+
+  function renderWithApp(canCreatePr: boolean) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <AppCreateHotkeys canCreatePr={canCreatePr} />
+        <TabPanel active>
+          <ComparePanel repoPath={REPO} />
+        </TabPanel>
+      </QueryClientProvider>,
+    );
+  }
+
+  const localButton = () =>
+    screen.findByRole("button", { name: /^Create pull request…/ });
+
+  async function heldOnComparing() {
+    await waitFor(async () =>
+      expect(await localButton()).toHaveAccessibleDescription("Comparing…"),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+  }
+
+  const dialogOpen = () =>
+    screen.queryByTestId("pr-dialog")?.dataset.open ?? "false";
+
+  it("hands create-pr to the app entry while the forge can create one", async () => {
+    vi.mocked(gitCompareBranches).mockReturnValue(new Promise(() => undefined));
+    renderWithApp(true);
+    await heldOnComparing();
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().repoTab).toBe("pulls");
+    expect(useUiStore.getState().pendingCreate).toBe("pr");
+    expect(dialogOpen()).toBe("false");
+  });
+
+  it("hands create-local-pr to the app entry", async () => {
+    vi.mocked(gitCompareBranches).mockReturnValue(new Promise(() => undefined));
+    renderWithApp(true);
+    await heldOnComparing();
+    act(() => {
+      expect(dispatchAction("create-local-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().repoTab).toBe("pulls");
+    expect(useUiStore.getState().pendingCreate).toBe("local-pr");
+    expect(useUiStore.getState().localPrCreate).toBeNull();
+  });
+
+  it("runs nothing for create-pr when no entry is enabled", async () => {
+    vi.mocked(gitCompareBranches).mockReturnValue(new Promise(() => undefined));
+    renderWithApp(false);
+    await heldOnComparing();
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(false);
+    });
+    expect(useUiStore.getState().repoTab).toBe("compare");
+    expect(useUiStore.getState().pendingCreate).toBeNull();
+    expect(dialogOpen()).toBe("false");
+    act(() => {
+      expect(dispatchAction("create-local-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().repoTab).toBe("pulls");
+    expect(useUiStore.getState().pendingCreate).toBe("local-pr");
+  });
+
+  it("keeps both on Compare once the comparison answers", async () => {
+    renderWithApp(true);
+    await waitFor(async () =>
+      expect(await localButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    act(() => {
+      expect(dispatchAction("create-local-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().localPrCreate).not.toBeNull();
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(true);
+    });
+    expect(dialogOpen()).toBe("true");
+    expect(useUiStore.getState().repoTab).toBe("compare");
+    expect(useUiStore.getState().pendingCreate).toBeNull();
   });
 });

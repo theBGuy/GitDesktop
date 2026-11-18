@@ -371,7 +371,7 @@ describe("Compare retained remote pick over an emptied list", () => {
     useUiStore.setState({ compareBranch: "refs/remotes/origin/gone" });
     renderPanel();
     expect(
-      await statusLine("origin/gone was deleted on origin."),
+      await statusLine("origin/gone is no longer in your remote branches."),
     ).toBeInTheDocument();
     expect(await trigger()).toBeInTheDocument();
     expect(screen.queryByText("No other branches")).toBeNull();
@@ -496,7 +496,9 @@ describe("Compare closing copy", () => {
       client.refetchQueries({ queryKey: ["repo", REPO, "remote-branches"] }),
     );
     const missing = "origin/feature-x is no longer in your remote branches.";
-    expect(await statusLine(missing)).toBeInTheDocument();
+    expect(
+      await statusLine(`Couldn't fetch origin. ${missing}`),
+    ).toBeInTheDocument();
     await waitFor(() => {
       const creates = screen.getAllByRole("button", { name: /^Create/ });
       expect(creates.length).toBeGreaterThan(0);
@@ -595,7 +597,6 @@ describe("Compare remote names holding a slash", () => {
     expect(
       remoteCompareRows(
         [remote("team", "fork/gd/session/x"), remote("team", "fork/main")],
-        new Set(),
         ["team/fork"],
       ).map((r) => r.display),
     ).toEqual(["team/fork/main"]);
@@ -605,7 +606,6 @@ describe("Compare remote names holding a slash", () => {
     expect(
       remoteCompareRows(
         [remote("team/fork", "gd/session/x"), remote("team/fork", "main")],
-        new Set(),
         undefined,
       ).map((r) => r.display),
     ).toEqual(["team/fork/main"]);

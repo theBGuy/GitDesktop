@@ -5,12 +5,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { DetailRail, DetailRailRow } from "@/components/detail-rail";
+import {
+  DetailRail,
+  DetailRailFilterStatus,
+  DetailRailRow,
+} from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  FILE_FILTER_SURFACES,
+  type FileFilterSurface,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import {
   DegradedListNotice,
   useRetryFocusRescue,
@@ -50,10 +59,13 @@ export function BranchDiffView({
   repoPath,
   base,
   compare,
+  filterSurface,
 }: {
   repoPath: string;
   base: string;
   compare: string;
+  /** The host pane whose file-filter text this view shares. */
+  filterSurface: FileFilterSurface;
 }) {
   const files = useBranchDiffFiles(repoPath, base, compare);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -66,11 +78,15 @@ export function BranchDiffView({
     setLastKey(cmpKey);
     setSelectedPath(null);
   }
-  // Default to the first changed file until the user picks one.
-  const effectivePath =
-    selectedPath && files.data?.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (files.data?.[0]?.path ?? null);
+  const filter = useFileListFilter({
+    ...FILE_FILTER_SURFACES[filterSurface],
+    files: files.data ?? [],
+    settled: files.data !== undefined && !files.isPlaceholderData,
+    picked: selectedPath,
+    onPick: setSelectedPath,
+  });
+  // The user's pick, else the first match under a filter, else the first file.
+  const effectivePath = filter.openPath;
   // Diff off a deferred path so rapidly arrowing the file list only fetches +
   // renders the landed-on file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
@@ -131,6 +147,16 @@ export function BranchDiffView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // A list emptying under the same frame unmounts the whole rail, focus in it
+  // included, where the rail's own rescue can't run; land it on the host.
+  const listEmpty = files.data?.length === 0;
+  const lastListEmpty = useRef(listEmpty);
+  useLayoutEffect(() => {
+    if (lastListEmpty.current === listEmpty) return;
+    lastListEmpty.current = listEmpty;
+    if (listEmpty && document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [listEmpty]);
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
@@ -140,6 +166,8 @@ export function BranchDiffView({
       tabIndex={-1}
       className="flex h-full flex-col outline-none"
     >
+      {/* Outside the content's aria-busy wrapper, in every arm. */}
+      <DetailRailFilterStatus filter={filter.rail} />
       {content}
     </div>
   );
@@ -229,8 +257,8 @@ export function BranchDiffView({
 
   // Arrow keys walk the file list, mirroring the app's other lists.
   const onFilesKeyDown = listKeyboardNav({
-    items: files.data ?? [],
-    activeIndex: (files.data ?? []).findIndex((f) => f.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (file) => setSelectedPath(file.path),
     rowKey: (file) => file.path,
     rowAttr: "data-path",
@@ -267,6 +295,7 @@ export function BranchDiffView({
           className={cn(PLACEHOLDER_FADE, staleDim)}
           role="listbox"
           ariaLabel="Changed files"
+          filter={filter.rail}
         >
           {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long list can't leak a window scrollbar. */}
@@ -276,7 +305,7 @@ export function BranchDiffView({
               blameRev={sides?.compareRev}
               onKeyDown={onFilesKeyDown}
             >
-              {files.data.map((file) => (
+              {filter.visible.map((file) => (
                 <button
                   type="button"
                   key={file.path}

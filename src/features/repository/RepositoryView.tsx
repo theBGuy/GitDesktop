@@ -1004,6 +1004,7 @@ export function RepositoryView() {
               <CommitDetailView
                 repoPath={repoPath}
                 hash={deferredCompareCommitHash}
+                filterSurface="compare"
               />
             ) : compareBranch &&
               currentName &&
@@ -1012,6 +1013,7 @@ export function RepositoryView() {
                 repoPath={repoPath}
                 base={compareBranch}
                 compare={currentName}
+                filterSurface="compare"
               />
             ) : (
               <DiffPlaceholder

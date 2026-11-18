@@ -345,7 +345,11 @@ and table row are the reference).
   fixed. Label composites (`Saved to <PathText/>`) space via `gap-*` on the
   flex row, never a trailing space in the label — flex line boxes trim it.
   Non-flex-item text is exempt: the absolutely-positioned `sr-only` badge
-  spans keep their trailing announcement space.
+  spans keep their trailing announcement space. A path with a directory takes
+  its accessible name from a visually hidden full-path copy behind
+  `aria-hidden` visual spans, so a text query on such a path finds that copy
+  and an exact `textContent` holds the path twice; a test reads the shown text
+  with the copy removed.
 - A `SelectControl`/`SelectField` `items` Record silently reorders integer-like
   keys to the front (JS object semantics) — any picker whose option values are
   user-supplied identifiers that can be all-digits (logins, slugs) must pass
@@ -678,12 +682,23 @@ and table row are the reference).
   (only a focused press moves focus to the first revealed hunk), and
   `GitDiffView` hosts without a scroller (agent transcript inline diffs, the
   conflict view) keep it on neither a switch nor an expand.
-- A file rail's header content (a count, a filter summary) rides `DetailRail`'s
-  `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
-  caret strip — never a first-child band inside `children`: the strip is already
-  a bordered row, so a band under it stacks a second border and spends vertical
-  space the list wants. Keep that content to one short line; the strip's h-7 is
-  what pins the caret at the same height in both branches, so it must not grow.
+- A file rail's filter rides `DetailRail`'s `filter` prop
+  (`src/components/detail-rail.tsx`), built only by `useFileListFilter`
+  (`src/components/use-file-list-filter.ts`), and renders its field in the
+  caret strip. With a filter, the strip and the collapsed caret box share one
+  taller box (the diff path row's 41px) from the one `FILTER_BOX_Y` value, so
+  the caret holds its height in both branches; without one, both stay `h-7`. A
+  consumer derives its rendered rows, its `listKeyboardNav` items and its open
+  path from the hook (`visible`, `activeIndex`, `openPath`), never from the
+  full list, and renders `DetailRailFilterStatus` outside its own `aria-busy`
+  wrapper. A rail without a filter may still pass one short line (a count)
+  through `header`; never a first-child band inside `children`: the strip is
+  already a bordered row, so a band under it stacks a second border and spends
+  vertical space the list wants. When a whole rail goes away with its field
+  focused, a same-scope rail mounting in that commit takes the field over by
+  itself (the module's `fieldHandoff`, cleared by a microtask); a host that
+  swaps views of different types adds its own change-only landing for the rest
+  (`SessionChanges` in `src/features/sessions/SessionView.tsx`).
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.

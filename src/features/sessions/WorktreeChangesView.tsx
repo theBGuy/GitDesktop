@@ -1,9 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
-import { useDeferredValue, useState } from "react";
-import { DetailRail, DetailRailRow } from "@/components/detail-rail";
+import { useDeferredValue, useLayoutEffect, useRef, useState } from "react";
+import {
+  DetailRail,
+  DetailRailFilterStatus,
+  DetailRailRow,
+} from "@/components/detail-rail";
 import { PathText } from "@/components/path-text";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  FILE_FILTER_SURFACES,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
@@ -73,25 +81,45 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
   const entries = (status.data?.entries ?? []).filter(
     (e) => e.unstaged || e.staged,
   );
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const filter = useFileListFilter({
+    ...FILE_FILTER_SURFACES.session,
+    files: entries,
+    settled: status.data !== undefined,
+    picked: selectedPath,
+    onPick: setSelectedPath,
+  });
   const readFailed = statusReadFailed(status);
   // The error block unmounts when the first good read lands. Only when focus
   // was inside it then and fell to <body> does the landing above the view
   // take it.
   const { hostRef: landingRef, retryRef: errorBlockRef } =
     useRetryFocusRescue(readFailed);
-  // First in every arm so the region stays mounted across them: it announces
+  // A poll emptying the list unmounts the whole rail, focus in it included,
+  // where the rail's own rescue can't run; land it on the landing span.
+  // Change-only on the shown-to-gone edge, so a first load never takes focus.
+  const landingNode = useRef<HTMLSpanElement | null>(null);
+  const railShown = !readFailed && !status.isPending && entries.length > 0;
+  const lastRailShown = useRef(railShown);
+  useLayoutEffect(() => {
+    if (lastRailShown.current === railShown) return;
+    lastRailShown.current = railShown;
+    if (!railShown && document.activeElement === document.body)
+      landingNode.current?.focus({ preventScroll: true });
+  }, [railShown]);
+  // First in every arm so the regions stay mounted across them: each announces
   // only text that arrives after it is in the DOM.
   const statusLiveRegion = (
-    <span role="status" className="sr-only">
-      {readFailed ? STATUS_READ_FAILED_REASON : null}
-    </span>
+    <>
+      <span role="status" className="sr-only">
+        {readFailed ? STATUS_READ_FAILED_REASON : null}
+      </span>
+      <DetailRailFilterStatus filter={filter.rail} />
+    </>
   );
 
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const effectivePath =
-    selectedPath && entries.some((e) => e.path === selectedPath)
-      ? selectedPath
-      : (entries[0]?.path ?? null);
+  // The user's pick, else the first match under a filter, else the first file.
+  const effectivePath = filter.openPath;
   const deferredPath = useDeferredValue(effectivePath);
   const isUntracked = (path: string) =>
     entries.find((e) => e.path === path)?.unstaged === "untracked";
@@ -132,7 +160,14 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
     );
   }
   const landing = (
-    <span ref={landingRef} tabIndex={-1} className="outline-none" />
+    <span
+      ref={(node) => {
+        landingRef(node);
+        landingNode.current = node;
+      }}
+      tabIndex={-1}
+      className="outline-none"
+    />
   );
   const refreshStrip = (
     <StatusRefreshFailedStrip
@@ -157,8 +192,8 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
   }
 
   const onFilesKeyDown = listKeyboardNav({
-    items: entries,
-    activeIndex: entries.findIndex((e) => e.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (e) => setSelectedPath(e.path),
     rowKey: (e) => e.path,
     rowAttr: "data-path",
@@ -180,12 +215,12 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
         </header>
 
         <DetailRailRow>
-          <DetailRail ariaLabel="Changed files">
+          <DetailRail ariaLabel="Changed files" filter={filter.rail}>
             {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long file list can't leak a window scrollbar. */}
             <ScrollArea className="min-h-0 flex-1 overflow-hidden">
               <div onKeyDown={onFilesKeyDown}>
-                {entries.map((file) => (
+                {filter.visible.map((file) => (
                   <button
                     type="button"
                     key={file.path}

@@ -6,7 +6,7 @@ import {
   TreeStructureIcon,
   UsersThreeIcon,
 } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
@@ -525,30 +525,59 @@ function IsolationChip({
   );
 }
 
-function SessionChanges({ session }: { session: AgentSession }) {
+export function SessionChanges({ session }: { session: AgentSession }) {
   const hasCommits = session.kept || session.headHash !== session.base;
   // While a turn is running, reflect the worktree's uncommitted changes live so
   // you can watch the agent work before the checkpoint commit lands. (A kept
   // session has no worktree, so it always shows the committed diff.)
-  if (session.running && !session.kept) {
-    return <WorktreeChangesView repoPath={session.worktreePath} />;
-  }
-  if (!hasCommits) {
+  let arm: "worktree" | "placeholder" | "diff" = "diff";
+  if (session.running && !session.kept) arm = "worktree";
+  else if (!hasCommits) arm = "placeholder";
+  // The arms are different views in one slot, so a turn's end unmounts what
+  // held focus: land it here when it fell to <body>. Change-only, so opening
+  // the pane never takes focus; a rail's own field handoff runs first.
+  const landingNode = useRef<HTMLSpanElement>(null);
+  const lastArm = useRef(arm);
+  useLayoutEffect(() => {
+    if (lastArm.current === arm) return;
+    lastArm.current = arm;
+    if (document.activeElement === document.body)
+      landingNode.current?.focus({ preventScroll: true });
+  }, [arm]);
+  const landing = (
+    <span ref={landingNode} tabIndex={-1} className="outline-none" />
+  );
+  if (arm === "worktree") {
     return (
-      <DiffPlaceholder
-        icon={SparkleIcon}
-        message="No changes yet. Send the agent a task in Conversation."
-      />
+      <>
+        {landing}
+        <WorktreeChangesView repoPath={session.worktreePath} />
+      </>
+    );
+  }
+  if (arm === "placeholder") {
+    return (
+      <>
+        {landing}
+        <DiffPlaceholder
+          icon={SparkleIcon}
+          message="No changes yet. Send the agent a task in Conversation."
+        />
+      </>
     );
   }
   // Diff `base..branch` (not the cached headHash, which goes stale after a Keep
   // squashes the checkpoints). A kept session has no worktree, but its branch +
   // commits live in the shared object database, so read it from the main repo.
   return (
-    <BranchDiffView
-      repoPath={session.kept ? session.repoPath : session.worktreePath}
-      base={session.base}
-      compare={session.branch}
-    />
+    <>
+      {landing}
+      <BranchDiffView
+        repoPath={session.kept ? session.repoPath : session.worktreePath}
+        base={session.base}
+        compare={session.branch}
+        filterSurface="session"
+      />
+    </>
   );
 }

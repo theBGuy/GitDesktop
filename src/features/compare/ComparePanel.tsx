@@ -45,6 +45,7 @@ import {
   comparePrTarget,
 } from "@/features/compare/compare-pr-target";
 import {
+  collidesWithRemoteRefs,
   displayCompareValue,
   GONE_PICK_COPY,
   parseRemoteCompareValue,
@@ -116,11 +117,13 @@ import { isSessionBranchName, sanitizeRefName } from "@/lib/git/ref-name";
 import type { CommitSummary } from "@/lib/git/types";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
 import { useLensGate } from "@/lib/repo-lens/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
+import { compareInstantsNewestFirst } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useOnline } from "@/lib/use-online";
 import { useRetained } from "@/lib/use-retained";
@@ -147,6 +150,20 @@ const STAMP_STATE: Record<
     failed: "upstream-failed",
     offline: "upstream-offline",
     done: null,
+  },
+};
+
+/** The gone line's arm, plain or led by the pick's own failed fetch. A gone
+ *  remote names its cause, so it takes no lead. */
+const GONE_LINE_STATE: Record<
+  "plain" | "fetch-failed",
+  Record<"pruned" | "remote-gone" | "missing", CompareFetchStatusState>
+> = {
+  plain: { pruned: "pruned", "remote-gone": "remote-gone", missing: "missing" },
+  "fetch-failed": {
+    pruned: "pruned-fetch-failed",
+    "remote-gone": "remote-gone",
+    missing: "missing-fetch-failed",
   },
 };
 
@@ -217,9 +234,15 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const pickerTrigger = useRef<HTMLButtonElement>(null);
   // Read after an await, where the render's `pickerOpen` is stale.
   const pickerOpenNow = useRef(false);
+  // Each open re-reads both lists, so a remote removed outside the app leaves
+  // the rows; joining a read in flight never cancels one a pick's settle awaits.
   function changePickerOpen(next: boolean) {
+    const opening = next && !pickerOpenNow.current;
     pickerOpenNow.current = next;
     setPickerOpen(next);
+    if (!opening) return;
+    void remotes.refetch({ cancelRefetch: false });
+    void remoteRead.refetch({ cancelRefetch: false });
   }
 
   const currentName = status.data?.branch?.name ?? null;
@@ -265,6 +288,15 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     recordedRemote,
     remoteRead.data,
   );
+  // Whether the last successful list read holds the pick's full ref (no split
+  // can break it); null with no pick or no list yet. A re-read running over
+  // it, or failing over it, keeps the answer: `data` is only ever a success's.
+  const pickListed =
+    pick === null || remoteRead.data === undefined
+      ? null
+      : remoteRead.data.some(
+          (b) => remoteCompareValue(b.remote, b.name) === compareBranch,
+        );
   // A listed remote that names an unrecorded pick, or outranks a shorter
   // record, gets recorded: else the shorter split wins again once that remote
   // is removed. recordPickRemote refuses an unlisted (fallback) split.
@@ -284,17 +316,14 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const remotesKnown =
     remotes.data !== undefined || failedSinceLastSuccess(remotes);
   const remoteRows = remotesKnown
-    ? remoteCompareRows(
-        remoteRead.data,
-        new Set(otherBranches.map((b) => b.name)),
-        remotes.data,
-      )
+    ? remoteCompareRows(remoteRead.data, remotes.data)
     : [];
   const offer = useAddUpstreamOffer(repoPath);
   const fetcher = useCompareRemoteFetch(
     repoPath,
     compareBranch,
     pick?.remote ?? null,
+    pickListed === true,
   );
   const head = status.data?.branch;
   const prTarget = comparePrTarget({
@@ -324,22 +353,27 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   );
   // Fallback when the default branch isn't offered: the most recently committed
   // other branch — the same row the picker surfaces first, so the auto-pick
-  // matches the top of the list the user sees (not raw git ref order).
-  const firstOther = otherBranches.length
-    ? otherBranches.reduce((a, b) =>
-        b.lastCommitDate > a.lastCommitDate ? b : a,
+  // matches the top of the list the user sees (not raw git ref order). A tie
+  // keeps the earlier branch in git order. The automatic pick reads only the
+  // branches the picker lets the user pick (its colliding rows are disabled).
+  const pickable = otherBranches.filter((b) => !collidesWithRemoteRefs(b.name));
+  const firstOther = pickable.length
+    ? pickable.reduce((a, b) =>
+        compareInstantsNewestFirst(b.lastCommitDate, a.lastCommitDate) < 0
+          ? b
+          : a,
       ).name
     : null;
   // A remote pick never yields to the auto-default: a pruned one keeps its
   // pick and the status line says so.
   const compareValid =
     compareBranch !== null &&
-    (pick !== null || otherBranches.some((b) => b.name === compareBranch));
+    (pick !== null || pickable.some((b) => b.name === compareBranch));
   const defaultName = defaultBranch.data ?? null;
   // Only pick the default branch when it's actually offered: an archived default
   // must fall back to `firstOther`, else `compareValid` stays false forever and
   // the effect keeps firing a no-op set. Stable primitive for the effect deps.
-  const defaultOffered = otherBranches.some((b) => b.name === defaultName);
+  const defaultOffered = pickable.some((b) => b.name === defaultName);
 
   // Default the comparison to the default branch (when offered), else the first
   // other branch. An automatic correction (also after a refetch drops the target),
@@ -388,46 +422,31 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     (stamp.phase === "fetching" || stamp.phase === "comparing") &&
     stamp.pickedValue !== null;
   // Gone is read from a successful remotes read alone, so it holds while the
-  // remote-branch list is failed or refetching; pruned only from a settled
-  // successful list, matched on the full ref no split can break.
+  // remote-branch list is failed or refetching.
   const remoteGone =
     pick !== null && remotes.isSuccess && !remotes.data.includes(pick.remote);
-  // "Deleted on X" only while a successful remotes read still lists X;
-  // otherwise the cause is unknown and the line names none.
+  // "Deleted on X" is causal: only after this pick's own successful fetch of X
+  // left the ref unlisted, while a successful remotes read still lists X.
   const prunedState = ((): "remote-gone" | "pruned" | "missing" => {
     if (remoteGone) return "remote-gone";
     return pick !== null &&
       remotes.isSuccess &&
-      remotes.data.includes(pick.remote)
+      remotes.data.includes(pick.remote) &&
+      fetcher.prunedByFetch
       ? "pruned"
       : "missing";
   })();
-  const pruned =
-    pick !== null &&
-    remoteRead.isSuccess &&
-    !remoteRead.isFetching &&
-    !remoteRead.data.some(
-      (b) => remoteCompareValue(b.remote, b.name) === compareBranch,
-    );
+  const pruned = pickListed === false;
   const goneOrPruned = remoteGone || pruned;
-  // The pick's post-fetch read failed and nothing newer has answered: the
-  // cached comparison predates the fetch, so it can't decide Create. Any later
-  // success clears `isError` (a refetch in flight keeps it), whatever the clock.
-  const failedRead = fetcher.failedRead;
-  const staleAfterFetch =
-    failedRead !== null &&
-    failedRead.repoPath === repoPath &&
-    failedRead.pickedValue === compareBranch &&
-    failedRead.currentBranch === currentName &&
-    comparison.isError &&
-    comparison.dataUpdatedAt <= failedRead.over;
   // A pruned or gone pick holds even while a running fetch's line outranks its
-  // line: the ref a PR would target is gone either way.
+  // line: the ref a PR would target is gone either way. A remote pick's
+  // comparison in error never decides Create, retained data included, until a
+  // read succeeds (`isError` survives a refetch in flight).
   const createBlock = ((): CreateBlock | null => {
     if (listsBusy)
       return stamp?.phase === "comparing" ? "updating" : "fetching";
     if (goneOrPruned) return prunedState;
-    if (staleAfterFetch) return "compare-failed";
+    if (pick !== null && comparison.isError) return "compare-failed";
     if (comparison.data === undefined)
       return comparison.isError ? "compare-failed" : "comparing";
     return comparison.data.ahead.length === 0 ? "empty" : null;
@@ -475,6 +494,11 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     setPrOpen(true);
   }
 
+  // While Create is held or hidden these two are disabled, and dispatch runs
+  // the newest ENABLED entry, so the action belongs to whichever app-level
+  // entry is enabled: `create-local-pr` always, `create-pr` only while the forge
+  // can create one. Each opens the Pull requests tab's own create dialog, with
+  // none of Compare's base or preset; with no enabled entry nothing runs.
   useHotkeyAction(
     "create-pr",
     openCreatePr,
@@ -505,7 +529,16 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     (stampState === null ||
       stampState === "failed" ||
       stampState === "offline");
-  const fetchState = prunedShown ? prunedState : stampState;
+  // Over the pick's own failed fetch the gone line leads with that failure, but
+  // only when the fetch named the remote the line names.
+  const goneFetchFailed =
+    prunedShown &&
+    stampState === "failed" &&
+    pick !== null &&
+    stamp?.remote === pick.remote;
+  const fetchState = prunedShown
+    ? GONE_LINE_STATE[goneFetchFailed ? "fetch-failed" : "plain"][prunedState]
+    : stampState;
   // A parked pick's line promises the reconnect fetch, which fetches the pick's
   // remote as it resolves now; the other stamp lines name the attempt that ran.
   const statusRemote =
@@ -564,6 +597,17 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
           ? pick.remote
           : stamp.remote,
       pickedValue: stamp.pickedValue,
+      currentBranch: currentName,
+    });
+  }
+
+  // The gone line's Fetch: this pick's own fetch of its remote as it reads now.
+  function fetchPick() {
+    if (pick === null) return;
+    void fetcher.fire({
+      repo: repoPath,
+      remote: pick.remote,
+      pickedValue: compareBranch,
       currentBranch: currentName,
     });
   }
@@ -936,6 +980,8 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
             remote={statusRemote}
             name={pick?.name ?? ""}
             onRetry={retryFetch}
+            onFetch={fetchPick}
+            fetchHeldReason={online ? null : OFFLINE_WRITE_REASON}
             onPickAnother={pickAnotherBranch}
             idleFocusRef={pickerTrigger}
           />

@@ -696,6 +696,17 @@ the last list up, with a line above it saying it couldn't refresh.
   collapses it for you. You'll find that list on a commit's files, in **Compare**, on a
   pull request's **Files** and **Commits** tabs, and anywhere else a file list
   sits beside a diff.
+- **Filter the file list beside a diff** by typing in the field above it: the list
+  narrows to the paths that contain what you typed, and the count in the field shows
+  how many match ("2 of 13"). The open file's diff stays where it is while you type.
+  Press {{key:enter}} to open the first match, or {{key:down}} to move into the list.
+  {{kbd:focus-filter}} focuses the field while focus is in the file list or the diff,
+  and from anywhere on the **Compare** tab; it expands a collapsed list first.
+  {{key:escape}} or the field's clear button empties it. Your text stays as you move
+  from one commit or comparison to the next, and a collapsed list shows a funnel while
+  a filter is applied. The filter is on a commit's files, in **Compare**, on local pull
+  requests and on a pull request's **Commits** tab{{ai}}, plus an agent session's
+  changes{{/ai}}.
 
 ## Committing
 
@@ -1220,9 +1231,11 @@ straight to opening a pull request.
 Picking a remote branch fetches that remote once, with a status line across the panel
 ("Fetching origin…") while it runs. If the fetch fails, or you're offline, the panel
 compares against that remote's last fetch, says so, and offers **Retry** after a failed
-fetch. A picked branch that's no longer among your remote branches, or whose remote was
-removed, says so, with **Pick another branch**. Picking your own branch's copy on
-\`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
+fetch. A picked branch that's no longer among your remote branches says so and offers
+to fetch its remote (**Fetch origin**, for a branch on \`origin\`) beside **Pick another
+branch**; once a fetch confirms it, the line says the branch was deleted on that remote.
+A branch whose remote was removed offers **Pick another branch**. Picking your own
+branch's copy on \`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
 line explains the counts: ahead is what you haven't pushed, behind is what you haven't
 pulled.
 

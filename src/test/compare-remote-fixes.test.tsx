@@ -21,7 +21,7 @@ import {
   gitRemotes,
   gitStatus,
 } from "@/lib/git/api";
-import { repoKeys } from "@/lib/git/queries";
+import { repoKeys, tagListOptions } from "@/lib/git/queries";
 import type {
   Branch,
   CommitSummary,
@@ -501,7 +501,9 @@ describe("Compare fetch invalidation", () => {
       "refs/remotes/origin/main",
       "refs/heads/feat",
     );
-    for (const key of [ahead, rewrite, unrelated]) client.setQueryData(key, []);
+    const tags = tagListOptions(REPO).queryKey;
+    for (const key of [ahead, rewrite, unrelated, tags])
+      client.setQueryData(key, []);
     await user.click(await trigger());
     await user.click(
       await within(await popup()).findByRole("option", {
@@ -512,16 +514,18 @@ describe("Compare fetch invalidation", () => {
       expect(client.getQueryState(ahead)?.isInvalidated).toBe(true),
     );
     expect(client.getQueryState(rewrite)?.isInvalidated).toBe(true);
+    // A fetch brings tags, so the Tags list re-reads too.
+    expect(client.getQueryState(tags)?.isInvalidated).toBe(true);
     expect(client.getQueryState(unrelated)?.isInvalidated).toBe(false);
   });
 });
 
 describe("Compare pruned and gone picks", () => {
-  it("shows only the pruned line over a failed refresh", async () => {
+  it("shows only the missing line over a failed refresh", async () => {
     useUiStore.setState({ compareBranch: "refs/remotes/origin/gone" });
     const { client } = renderPanel();
     expect(
-      await statusLine("origin/gone was deleted on origin."),
+      await statusLine("origin/gone is no longer in your remote branches."),
     ).toBeInTheDocument();
     await screen.findByText("ahead work");
     vi.mocked(gitCompareBranches).mockRejectedValue(new Error("boom"));
@@ -540,7 +544,7 @@ describe("Compare pruned and gone picks", () => {
     expect(screen.getByText("ahead work")).toBeInTheDocument();
   });
 
-  it("lets the pruned line outrank a failed fetch's line, naming Create's hold", async () => {
+  it("leads the missing line with the failed fetch, naming Create's hold", async () => {
     vi.mocked(gitFetchRemote).mockRejectedValue(new Error("fetch boom"));
     vi.mocked(gitCompareBranches).mockRejectedValue(new Error("compare boom"));
     const user = userEvent.setup();
@@ -558,18 +562,20 @@ describe("Compare pruned and gone picks", () => {
     await act(() =>
       client.refetchQueries({ queryKey: ["repo", REPO, "remote-branches"] }),
     );
-    // Its "last fetch" is gone, so the line names the cause Create's hold does.
-    const pruned = "upstream/main was deleted on upstream.";
-    expect(await statusLine(pruned)).toBeInTheDocument();
+    // Its "last fetch" is gone, so the line names what Create's hold does.
+    const missing = "upstream/main is no longer in your remote branches.";
+    expect(
+      await statusLine(`Couldn't fetch upstream. ${missing}`),
+    ).toBeInTheDocument();
     expect(screen.queryByText(failedLine)).toBeNull();
     expect(
       await screen.findByRole("button", {
         name: /Create pull request in parent…/,
       }),
-    ).toHaveAccessibleDescription(pruned);
+    ).toHaveAccessibleDescription(missing);
   });
 
-  it("says why the comparison failed while a follow-up line outranks the pruned one", async () => {
+  it("says why the comparison failed while a follow-up line outranks the missing one", async () => {
     forkWithoutUpstream();
     useUiStore.setState({ compareBranch: "refs/remotes/origin/gone" });
     vi.mocked(gitCompareBranches).mockRejectedValue(new Error("compare boom"));
@@ -578,7 +584,7 @@ describe("Compare pruned and gone picks", () => {
     vi.mocked(gitFetchRemote).mockReturnValue(upstreamFetch.promise);
     const user = userEvent.setup();
     renderPanel();
-    await statusLine("origin/gone was deleted on origin.");
+    await statusLine("origin/gone is no longer in your remote branches.");
     await addUpstreamFromPicker(user);
     expect(await statusLine("Fetching upstream…")).toBeInTheDocument();
     // The follow-up line names no cause for the comparison, so its error shows.

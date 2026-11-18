@@ -2015,6 +2015,14 @@ function clip(el: HTMLElement) {
   Object.defineProperty(el, "clientWidth", { configurable: true, value: 100 });
 }
 
+/** The sighted text of `el`: PathText's sr-only name copy removed. */
+function shownText(el: Element | null): string {
+  if (!el) return "";
+  const copy = el.cloneNode(true) as Element;
+  for (const sr of copy.querySelectorAll(".sr-only")) sr.remove();
+  return copy.textContent ?? "";
+}
+
 async function openDefault(user: ReturnType<typeof userEvent.setup>) {
   await openFromMenu(user);
   await waitFor(() => expect(folder().value).toBe(DEFAULT_TARGET));
@@ -2049,18 +2057,26 @@ describe("PR worktree default folder", () => {
     await openDefault(user);
     expect(screen.getByText("Full path")).toBeInTheDocument();
     const row = fullPathRow();
-    expect(row.textContent).toBe(RESOLVED_DEFAULT);
+    expect(shownText(row)).toBe(RESOLVED_DEFAULT);
+    expect(row.querySelectorAll(".sr-only")).toHaveLength(1);
+    expect(row.querySelector(".sr-only")?.textContent ?? "").toBe(
+      RESOLVED_DEFAULT,
+    );
     expect(row.querySelector("span.flex.min-w-0")).not.toBeNull();
     expect(row.tabIndex).toBe(-1);
-    for (const [typed, shown] of [
-      ["E:/x/y", "E:/x/y"],
-      ["../review", "C:/repos/review"],
-      ["\\reviews", "C:/reviews"],
-      ["C:x", ""],
-    ]) {
+    // The last column counts the name copies: an unresolvable folder shows none.
+    const typedRows: [string, string, number][] = [
+      ["E:/x/y", "E:/x/y", 1],
+      ["../review", "C:/repos/review", 1],
+      ["\\reviews", "C:/reviews", 1],
+      ["C:x", "", 0],
+    ];
+    for (const [typed, shown, copies] of typedRows) {
       await user.clear(folder());
       await user.type(folder(), typed);
-      expect(row.textContent).toBe(shown);
+      expect(shownText(row)).toBe(shown);
+      expect(row.querySelectorAll(".sr-only")).toHaveLength(copies);
+      expect(row.querySelector(".sr-only")?.textContent ?? "").toBe(shown);
     }
     await user.clear(folder());
     expect(row.textContent).toBe("");
@@ -2091,7 +2107,11 @@ describe("PR worktree default folder", () => {
     const { user } = setup();
     await openFromMenu(user);
     await waitFor(() => expect(folder().value).toBe(LINKED_DEFAULT));
-    expect(fullPathRow().textContent).toBe(LINKED_DEFAULT);
+    expect(shownText(fullPathRow())).toBe(LINKED_DEFAULT);
+    expect(fullPathRow().querySelectorAll(".sr-only")).toHaveLength(1);
+    expect(fullPathRow().querySelector(".sr-only")?.textContent ?? "").toBe(
+      LINKED_DEFAULT,
+    );
     await user.click(checkOutButton());
     await waitFor(() =>
       expect(ghPrCheckoutWorktree).toHaveBeenCalledWith(
@@ -2176,7 +2196,11 @@ describe("PR worktree default folder", () => {
     await user.click(checkOutButton());
     const dialog = await screen.findByRole("dialog", RESET_DIALOG);
     const shown = dialog.querySelector("span.block > span.flex.min-w-0");
-    expect(shown?.textContent).toBe(RESOLVED_DEFAULT);
+    expect(shownText(shown)).toBe(RESOLVED_DEFAULT);
+    expect(shown?.querySelectorAll(".sr-only")).toHaveLength(1);
+    expect(shown?.querySelector(".sr-only")?.textContent ?? "").toBe(
+      RESOLVED_DEFAULT,
+    );
     await user.click(
       within(dialog).getByRole("button", {
         name: "Discard 1 commit and reset",
