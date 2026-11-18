@@ -1684,8 +1684,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (before the move, `LostOrUnknown` stops with the branch unmoved, and so
   does `Closed` unless the branch already holds the commit, when the finish
   carries on as landed), and closes through `oplog::settle_finish_claim`.
-  The update discard, the abandoned-entry sweep and a merge finish or abort
-  that holds no claim close through the conditional close
+  The update discard, the abandoned-entry sweep and a merge finish
+  or abort that holds no claim close through the conditional close
   (`oplog::close_unfinished` / `finish_if_unfinished`), which refuses over a
   live claim. A claim older than `FINISH_CLAIM_TTL` (120 s) blocks nobody,
   so one step that alone runs longer lets it lapse. A bare `oplog::finish`

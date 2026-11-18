@@ -7366,7 +7366,10 @@ fn classify_gl_merge_refusal(stderr: &str, arming_auto_merge: bool) -> Option<St
             "GitLab is blocking this merge — the merge request isn't in a mergeable state yet."
                 .to_string(),
         ),
-        409 => Some("The merge request changed while merging — refresh and retry.".to_string()),
+        409 => Some(
+            "This merge request got new commits after it was loaded, so nothing was merged. Check them and merge again."
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -19174,7 +19177,7 @@ mod tests {
                 false
             )
             .as_deref(),
-            Some("The merge request changed while merging — refresh and retry.")
+            Some("This merge request got new commits after it was loaded, so nothing was merged. Check them and merge again.")
         );
         // A 405 on the arming path means no auto-merge strategy was available AND the
         // head pipeline isn't passing; which strategies exist is version- and
@@ -19871,7 +19874,7 @@ mod tests {
         assert_eq!(text(reword_merge_refusal(AppError::Glab(r405.into()), true)), r405);
         assert_eq!(
             text(reword_merge_refusal(AppError::Glab("glab: HTTP 409".into()), false)),
-            "The merge request changed while merging — refresh and retry."
+            "This merge request got new commits after it was loaded, so nothing was merged. Check them and merge again."
         );
         assert_eq!(
             text(reword_merge_refusal(

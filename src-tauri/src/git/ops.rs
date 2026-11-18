@@ -5180,10 +5180,10 @@ pub(crate) async fn finish_local_pr_merge(
                         journal_repo: key.clone(),
                     }));
                 }
-                // A non-conflict, non-zero exit means something genuinely failed
-                // (e.g. "no cherry-pick in progress" when nothing was staged) — surface
-                // it on the exit code ALONE, since git can refuse with stderr empty and
-                // its whole report on stdout
+                // A non-conflict, non-zero exit means something genuinely
+                // failed (e.g. "no cherry-pick in progress" when nothing was
+                // staged) — surface it on the exit code ALONE, since git can
+                // refuse with stderr empty and its whole report on stdout
                 // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), which a
                 // stderr gate would report as "merged". Defensive, not behavior-changing:
                 // no `--continue` failure measured on 2.51.1 is stdout-only (3 shapes).

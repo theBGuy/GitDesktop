@@ -2045,21 +2045,27 @@ shows the message the merge will write. A **Commit message** row carries the def
 title, a count of the lines under it (such as **+3 lines**) and an **Edit** button.
 **Edit** opens **Title** and **Description** fields in place, filled with that default;
 the description scrolls once it passes about six lines. Once you change either field,
-**Reset to default** appears and puts the default back. A message you leave alone, or
-change back to the default, isn't sent: the forge writes its own default or commit
-template at merge time, and only a message you changed replaces it.
+**Reset to default** appears and puts the default back. On a hosted pull request, a
+message you leave alone, or change back to the default, isn't sent: the forge writes its
+own default or commit template at merge time, and only a message you changed replaces it
+(on a GitHub branch that requires a merge queue, the queue writes its own message).
 
 **GitHub** and **GitLab** show their own default. **Bitbucket** doesn't report one, so
 its row reads **Bitbucket's default message** and **Edit** starts from a draft in
-Bitbucket's format; leave the draft unchanged and Bitbucket writes its own. A **GitLab**
-squash in a project that also writes a merge commit gets two rows, **Squash commit** and
-**Merge commit**, each with its own **Edit**, and with **auto-merge** GitLab keeps your
-message until the pipeline passes and the merge lands. A merge with no single commit to
-word says so in one line and offers no editor: **Rebase and merge** keeps each commit's
-own message, a Bitbucket **Fast-forward** and an unsquashed merge in a GitLab project
-that fast-forwards write no merge commit, and a stacked GitHub pull request can land
-several pull requests at once. While the default is still loading you can merge with
-the forge's own message, and if it can't be loaded the row says so and offers **Retry**.
+Bitbucket's format; leave the draft unchanged and Bitbucket writes its own. When a
+default isn't known at all (such as a Bitbucket squash with more commits than can be
+listed, or a GitLab server that doesn't report one), the row names the forge the same
+way and **Edit** opens empty fields; leave them blank and the forge writes its own. A
+**GitLab** merge that writes both a squash commit and a merge commit gets two rows,
+**Squash commit** and **Merge commit**, each with its own **Edit**: that is a squash in
+a project that also writes a merge commit, and **Create a merge commit** in a project
+that requires squashing. With **auto-merge**, GitLab keeps your message until the
+pipeline passes and the merge lands. A merge with no single commit to word says so in
+one line and offers no editor: **Rebase and merge** keeps each commit's own message, a
+Bitbucket **Fast-forward** and an unsquashed merge in a GitLab project that
+fast-forwards write no merge commit, and a stacked GitHub pull request can land several
+pull requests at once. While the default is still loading you can merge with the forge's
+own message, and if it can't be loaded the row says so and offers **Retry**.
 
 A title longer than 72 characters gets a note under the fields and still merges. An
 emptied title holds the merge button, which says why, until you type a title or reset.
@@ -2067,6 +2073,12 @@ emptied title holds the merge button, which says why, until you type a title or 
 {{key:enter}} in the title does nothing. If a merge fails after you edited the message,
 the dialog stays open with your text. Local pull requests merge through the same
 dialog (see *Local PRs* below).
+
+An edited message is tied to the commits it was written for. If the pull request gets
+new commits before you merge, **GitHub** and **GitLab** refuse the merge and nothing is
+merged: the dialog stays open with your text and loads the new default, a field you
+changed keeps what you typed, a field you left alone follows the new default, and you
+can merge again. **Bitbucket** has no such check.
 
 ## Maintaining a pull request from a fork
 

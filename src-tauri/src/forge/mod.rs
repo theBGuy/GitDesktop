@@ -2736,7 +2736,7 @@ pub(crate) fn single_commit_message(
 /// a head guard only with a custom message; GitLab merges via `glab` — merge/squash
 /// only — with an optional head-`sha` stale-view guard. `strategy` is merge/squash/rebase; rebase
 /// is GitHub-only. An absent message leaves the forge's default, and one the merge
-/// can't use is refused before any request.
+/// can't use is refused before anything is written.
 ///
 /// `cleanup_warning` on the returned [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome)
 /// means the merge was accepted with a caveat — either the PR merged but post-merge

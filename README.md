@@ -446,20 +446,20 @@ in one click.
   title (Bitbucket doesn't report one, so its row reads **Bitbucket's
   default message**), **Edit** for the title and description, and **Reset
   to default** once you've changed it. A message you leave alone stays the
-  forge's own default or template; a GitLab squash that also writes a merge
-  commit gets a row for each commit, GitLab auto-merge keeps your message
-  until it lands, and a merge with no single commit to word (rebase,
-  fast-forward, a GitHub stack) says so. Labels and assignees on GitHub &
-  GitLab (set them when you open a PR/MR or any time after), request
-  reviewers across GitHub, GitLab & Bitbucket, see, link, and unlink a PR's
-  **GitHub Projects** in its header (open, closed, and merged alike) and
-  set each board's **Status**, **Priority**, **Iteration** and custom
-  fields right there, with **Edit projects…** and **Edit project fields…**
-  in the command palette opening either popup, flip a PR between **draft
-  and ready for review** either way on all three, and **create new PRs as
-  drafts by default** (Settings → General). Creating first checks the
-  branch for an already-open PR and offers the link instead of opening a
-  duplicate. A new PR is visible in the list it's headed for from the
+  forge's own default or template; a GitLab merge that writes both a squash
+  commit and a merge commit gets a row for each, GitLab auto-merge keeps
+  your message until it lands, and a merge with no single commit to word
+  (rebase, fast-forward, a GitHub stack) says so. Labels and assignees on
+  GitHub & GitLab (set them when you open a PR/MR or any time after),
+  request reviewers across GitHub, GitLab & Bitbucket, see, link, and
+  unlink a PR's **GitHub Projects** in its header (open, closed, and merged
+  alike) and set each board's **Status**, **Priority**, **Iteration** and
+  custom fields right there, with **Edit projects…** and **Edit project
+  fields…** in the command palette opening either popup, flip a PR between
+  **draft and ready for review** either way on all three, and **create new
+  PRs as drafts by default** (Settings → General). Creating first checks
+  the branch for an already-open PR and offers the link instead of opening
+  a duplicate. A new PR is visible in the list it's headed for from the
   moment you start creating it: a **pending entry** holds its place with
   the title, branches and draft state, picks up the number as the PR opens,
   and hands over to the real row once the list catches up. A locked
@@ -1057,10 +1057,10 @@ active forks. GitHub is unchanged.
   target branch, react with emoji (on descriptions and comments), edit labels
   and assignees, **approve / unapprove**, request changes, and **merge**
   (merge/squash, with a commit message you can edit first), including
-  **auto-merge** when the pipeline succeeds
-  (cancelable in place). Plus **create**: push-and-open, drafts,
-  duplicate-MR detection. GitLab's own merge status drives the **conflict**
-  strip, the list's **Conflicts** chip, and in-app conflict resolution.
+  **auto-merge** when the pipeline succeeds (cancelable in place). Plus
+  **create**: push-and-open, drafts, duplicate-MR detection. GitLab's own
+  merge status drives the **conflict** strip, the list's **Conflicts** chip,
+  and in-app conflict resolution.
 - **Issues**: create, comment, close/reopen with a drafted comment posted
   alongside, edit labels and assignees, set **milestone**, **due date**
   (past-due cue), **confidential**, and **linked related issues**;
@@ -1283,12 +1283,11 @@ agents read this repo through GitDesktop.
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`
     / `glab` / Bitbucket token): create/merge/update PRs (creating a PR
     pushes its head branch, so it also needs `--allow-git-write`; a merge
-    can carry its own commit message),
-    create/extend/dissolve GitHub PR stacks, request reviewers, edit labels
-    and assignees, approve or resolve review threads, rerun or dispatch CI,
-    cut releases, file or comment on issues, and on GitHub project boards
-    add cards and drafts, move, archive or restore them, set their fields,
-    edit drafts and post status updates
+    can carry its own commit message), create/extend/dissolve GitHub PR
+    stacks, request reviewers, edit labels and assignees, approve or resolve
+    review threads, rerun or dispatch CI, cut releases, file or comment on
+    issues, and on GitHub project boards add cards and drafts, move, archive
+    or restore them, set their fields, edit drafts and post status updates
   - **`--allow-git-write`**: recoverable git ops (stage, commit, branch,
     push/pull/fetch, stash, merge, rebase, revert, cherry-pick, tags)
   - **`--allow-destructive`**: the irreversible ones (discard, reset,
