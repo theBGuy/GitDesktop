@@ -10,6 +10,7 @@ import {
   useRef,
 } from "react";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -810,13 +811,19 @@ export function ConversationListPanel<
                 )
               }
             />
-            <DropdownMenuContent align="end" className="min-w-56">
+            <DropdownMenuContent align="end" className="min-w-56 max-w-80">
+              {/* A disabled row's reason rides its label, and only there: a title
+                  repeating it would be announced twice. */}
               <DropdownMenuItem
                 disabled={newMenu.ghDisabled}
-                title={newMenu.ghReason}
+                title={newMenu.ghDisabled ? undefined : newMenu.ghReason}
+                className={MENU_HELD_ROW_CLASS}
                 onClick={newMenu.onGh}
               >
                 {newMenu.ghLabel}
+                {newMenu.ghDisabled &&
+                  newMenu.ghReason &&
+                  ` — ${newMenu.ghReason}`}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={newMenu.onLocal}>
                 {newMenu.localLabel}

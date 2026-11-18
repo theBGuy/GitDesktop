@@ -111,6 +111,40 @@ export interface GitLabMrMergeState {
   pipelineStatus: string;
   /** Head pipeline web URL; "" when no pipeline. */
   pipelineUrl: string;
+  /** GitLab holds the MR in `locked` while a merge runs. Absent from an answer
+   *  that predates the field: reads as not locked. */
+  locked?: boolean;
+  /** The MR's neutral state ("OPEN", "MERGED", "CLOSED"); "" when GitLab sent
+   *  none, absent from an older answer. */
+  state?: string;
+}
+
+/** A commit message a merge writes: one-line `title`; `body` may be "". */
+export interface MergeMessage {
+  title: string;
+  body: string;
+}
+export type MergeCommitKind = "squash" | "merge";
+export type NoMergeMessageReason =
+  | "rebase"
+  | "fastForward"
+  | "stacked"
+  | "gitlabFastForward";
+export interface MergeMessageCommit {
+  kind: MergeCommitKind;
+  /** `null` = the forge's default text is unknown. */
+  message: MergeMessage | null;
+  /** `true` = the forge's own default; `false` = a locally composed draft. */
+  exact: boolean;
+}
+/** The commits a merge writes, in the forge's order (squash, then merge);
+ *  `reason` is set exactly when `commits` is empty. */
+export interface MergeMessageDefaults {
+  commits: MergeMessageCommit[];
+  reason: NoMergeMessageReason | null;
+  /** The head commit the defaults were read at, from the same forge answer;
+   *  absent or null when unknown (Bitbucket, older backends). */
+  headSha?: string | null;
 }
 
 export interface PrRef {

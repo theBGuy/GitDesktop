@@ -1282,7 +1282,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
   close or reopen and an issue close or reopen arm the same re-read with
   lens-scoped list keys, since the forge's list membership lags the row's own
-  state. Its per-repo entry holds the union of the keys owed and fires ONE
+  state. A merge also owes that re-read the lens's issue lists and issue
+  detail reads, since the forge closes the issues a merge resolves after it
+  answers. Its per-repo entry holds the union of the keys owed and fires ONE
   invalidation. Guards: `scripts/push-recheck-family.test.mjs` pins the arm
   sites (the run rechecks, keyed on the api callees; the branch-delete and the
   merge, close and reopen list re-reads, which no other write schedules), and
@@ -1294,7 +1296,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   through `patchRowState` (`src/lib/remote-state-filter.ts`) via the
   module-private twins `patchPrListState` / `patchIssueListState`: it
   rewrites the row's state only, never inserting or removing a row, and an
-  untouched page bails so it keeps its identity. One deliberate non-member:
+  untouched page bails so it keeps its identity. A merge of a native GitHub
+  stack also re-files as merged the open layers below it, the set the cached
+  PR details listed when the merge started (`cascadedStackNumbers`,
+  `src/lib/remote-state-filter.ts`). One deliberate non-member:
   GitLab's arm-auto-merge (`useGlArmAutoMerge`) patches nothing even though
   arming can merge at once, because its void outcome can't tell armed from
   merged; the whole-repo invalidation covers an immediate merge. The
@@ -1671,6 +1676,23 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (cold-start test mode is the one exception: it aliases the store file and
   has no second writer). A NEW store module with more than one process
   writing adopts `store_lock` — don't assume last-writer-wins is acceptable.
+- **A journal entry a record names is finished through a claim:** a finish
+  or merge abort of an entry whose handles left its start (a local PR's
+  paused merge or branch update) takes `oplog::claim_finish` before it
+  touches the worktree, re-asserts it with `oplog::renew_finish_claim`
+  immediately before the branch moves and before each worktree removal
+  (before the move, `LostOrUnknown` stops with the branch unmoved, and so
+  does `Closed` unless the branch already holds the commit, when the finish
+  carries on as landed), and closes through `oplog::settle_finish_claim`.
+  The update discard, the abandoned-entry sweep and a merge finish or abort
+  that holds no claim close through the conditional close
+  (`oplog::close_unfinished` / `finish_if_unfinished`), which refuses over a
+  live claim. A claim older than `FINISH_CLAIM_TTL` (120 s) blocks nobody,
+  so one step that alone runs longer lets it lapse. A bare `oplog::finish`
+  on such an entry is written in three places, all after the branch provably
+  holds the commit: the update discard's landed-under-claim done write, and
+  each finish's (merge and update) done write when its settle fails.
+  `reconcile` closes only `pending` entries and reads no claim.
 - **Test code runs git on `TEST_GIT_HANG_GUARD`** (`git/runner.rs`, test
   builds only): fixture helpers and direct calls to the plain spawn runners
   (`PLAIN_GIT_RUNNERS` in check L's script) in tests pass it, never

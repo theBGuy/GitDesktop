@@ -72,6 +72,8 @@ const REPO = "C:/repos/demo";
 const RECORD_KEY = localPrKey(REPO);
 const WT_ID = "0123456789ab";
 const WT_PATH = `C:/data/worktrees/id/gd-resolve-${WT_ID}`;
+/** Another checkout of the repository, where a paused merge's journal entry is filed. */
+const JOURNAL_REPO = "C:/repos/demo-main";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -564,6 +566,34 @@ describe("useStartLocalPrUpdate", () => {
 });
 
 describe("useMergeLocalPr", () => {
+  it("records the journal checkout on a paused merge", async () => {
+    vi.mocked(gitMergeLocalPr).mockResolvedValue({
+      status: "conflicts",
+      conflicts: ["a.txt"],
+      baseTip: "c".repeat(40),
+      worktreePath: WT_PATH,
+      worktreeId: WT_ID,
+      opId: "op-m",
+      journalRepo: JOURNAL_REPO,
+    });
+    const view = await mount(useMergeLocalPr);
+    await act(async () => {
+      await view.result.current.hook.mutateAsync({
+        id: "pr-1",
+        base: "main",
+        head: "feat",
+        message: "m",
+        strategy: "merge",
+      });
+    });
+    expect(records.get("pr-1")?.pendingMerge).toMatchObject({
+      worktreePath: WT_PATH,
+      opId: "op-m",
+      journalRepo: JOURNAL_REPO,
+    });
+    expect(gitAbortLocalPrMerge).not.toHaveBeenCalled();
+  });
+
   it("aborts its new worktree, then rethrows, when the record write rejects", async () => {
     const failure = new Error("no local PR with id pr-1");
     vi.mocked(updateLocalPr).mockRejectedValue(failure);
@@ -575,6 +605,7 @@ describe("useMergeLocalPr", () => {
       worktreePath: mergeWt,
       worktreeId: "fedcba987654",
       opId: "op-m",
+      journalRepo: JOURNAL_REPO,
     });
     vi.mocked(gitAbortLocalPrMerge).mockResolvedValue({
       removed: true,
@@ -598,7 +629,12 @@ describe("useMergeLocalPr", () => {
     });
     expect(updateLocalPr).toHaveBeenCalledTimes(1);
     expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
-    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, mergeWt, "op-m");
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(
+      REPO,
+      mergeWt,
+      "op-m",
+      JOURNAL_REPO,
+    );
     expect(thrown).toBe(failure);
   });
 
@@ -612,6 +648,7 @@ describe("useMergeLocalPr", () => {
       worktreePath: WT_PATH,
       worktreeId: WT_ID,
       opId: null,
+      journalRepo: REPO,
     });
     vi.mocked(gitAbortLocalPrMerge).mockRejectedValue(new Error("busy"));
     const view = await mount(useMergeLocalPr);
@@ -630,7 +667,12 @@ describe("useMergeLocalPr", () => {
           (e: unknown) => e,
         );
     });
-    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, WT_PATH, null);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(
+      REPO,
+      WT_PATH,
+      null,
+      REPO,
+    );
     expect(thrown).toBe(failure);
   });
 });

@@ -1,9 +1,10 @@
 // Pins the PR panel's Merged and Closed tabs: the "merged" and "unmerged"
 // predicates, the placeholder pairs a switch between the three tabs serves, and
-// the align that picks the tab a navigation lands on. A wrong answer never
-// errors: a merged PR lingers under Closed, a switch flashes the empty copy, or
-// a notification opens a PR on a tab that will never list it. The legacy
-// "open"/"closed" semantics stay pinned by remote-state-filter.test.mjs.
+// the align that picks the tab a navigation lands on, with the hold a GitLab MR
+// takes while its merge runs. A wrong answer never errors: a merged PR lingers
+// under Closed, a switch flashes the empty copy, or a notification opens a PR
+// on a tab that will never list it. The legacy "open"/"closed" semantics stay
+// pinned by remote-state-filter.test.mjs.
 //
 // The import reaches straight into `src/` under Node's type stripping (>= 23.6),
 // which resolves no bundler aliases: `remote-state-filter.ts` may import types
@@ -12,10 +13,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  cascadedStackNumbers,
   filterPlaceholderRows,
   filterRemoteRows,
   localPrAlignTab,
   localStateMatches,
+  prAlignStep,
   prAlignTab,
   remoteStateMatches,
 } from "../src/lib/remote-state-filter.ts";
@@ -159,7 +162,7 @@ test("align: a remote PR's state picks its tab exactly", () => {
     assert.equal(prAlignTab(state), "unmerged", state);
 });
 
-test("align: a remote PR always lands on a tab that lists it", () => {
+test("align: a remote PR's state names the tab whose predicate lists it", () => {
   for (const state of REMOTE_STATES)
     assert.equal(remoteStateMatches(state, prAlignTab(state)), true, state);
 });
@@ -202,4 +205,190 @@ test("align: every local status, hostile ones included, lands on a tab that list
       String(status),
     );
   }
+});
+
+/** A stack of three, bottom-first, as cached PR details carry it. */
+const member = (number, position, state) => ({ number, position, state });
+const STACK = [
+  member(11, 1, "open"),
+  member(12, 2, "OPEN"),
+  member(13, 3, "open"),
+];
+
+test("cascade: a merge takes the open layers below it, whatever the state's case", () => {
+  assert.deepEqual(cascadedStackNumbers(STACK, 3), [11, 12]);
+  assert.deepEqual(cascadedStackNumbers(STACK, 2), [11]);
+  assert.deepEqual(cascadedStackNumbers(STACK, 1), []);
+});
+
+test("cascade: a layer already merged or closed is not taken", () => {
+  const members = [
+    member(11, 1, "merged"),
+    member(12, 2, "closed"),
+    member(13, 3, "open"),
+    member(14, 4, "open"),
+  ];
+  assert.deepEqual(cascadedStackNumbers(members, 4), [13]);
+});
+
+test("cascade: an unread or empty member list takes nothing", () => {
+  assert.deepEqual(cascadedStackNumbers([], 3), []);
+  for (const members of [undefined, null, "11", 11, {}])
+    assert.deepEqual(cascadedStackNumbers(members, 3), [], String(members));
+  for (const position of [undefined, null, "3", Number.NaN, Infinity])
+    assert.deepEqual(
+      cascadedStackNumbers(STACK, position),
+      [],
+      String(position),
+    );
+});
+
+test("cascade: a malformed member is skipped, never a throw", () => {
+  const members = [
+    null,
+    "12",
+    7,
+    { number: 7, position: "1", state: "open" },
+    { number: 8, position: 1, state: null },
+    { number: 9, position: 1 },
+    { number: "10", position: 1, state: "open" },
+    { number: Number.NaN, position: 1, state: "open" },
+    member(11, 1, "open"),
+    member(12, 2, "open"),
+  ];
+  assert.deepEqual(cascadedStackNumbers(members, 3), [11, 12]);
+});
+
+const IDLE = { status: "idle" };
+const PENDING = { status: "pending" };
+const FAILED = { status: "failed" };
+const ok = (locked, state) => ({ status: "ok", locked, state });
+const settle = (tab) => ({ do: "settle", tab });
+const WAIT = { do: "wait" };
+const DISARM = { do: "disarm" };
+const PROBES = [IDLE, PENDING, FAILED, ok(true, "CLOSED"), ok(false, "MERGED")];
+
+test("align step: a provider that can't lock settles its own tab at once", () => {
+  for (const state of REMOTE_STATES)
+    for (const probe of PROBES)
+      for (const saw of [false, true])
+        assert.deepEqual(
+          prAlignStep(state, false, probe, 0, saw),
+          settle(prAlignTab(state)),
+          state,
+        );
+});
+
+test("align step: GitLab OPEN and MERGED never consult the probe", () => {
+  for (const state of ["OPEN", "MERGED"])
+    for (const probe of PROBES)
+      assert.deepEqual(
+        prAlignStep(state, true, probe, 0, true),
+        settle(prAlignTab(state)),
+        state,
+      );
+});
+
+test("align step: a would-be Closed waits on an unanswered probe", () => {
+  for (const state of ["CLOSED", "LOCKED", ""])
+    for (const probe of [IDLE, PENDING])
+      for (const pollsLeft of [0, 5])
+        assert.deepEqual(
+          prAlignStep(state, true, probe, pollsLeft, false),
+          WAIT,
+        );
+});
+
+test("align step: a failure with no locked answer falls back to the details", () => {
+  for (const pollsLeft of [0, 3])
+    assert.deepEqual(
+      prAlignStep("CLOSED", true, FAILED, pollsLeft, false),
+      settle("unmerged"),
+    );
+});
+
+test("align step: a failure after a locked answer never settles Closed", () => {
+  assert.deepEqual(prAlignStep("CLOSED", true, FAILED, 2, true), WAIT);
+  assert.deepEqual(prAlignStep("CLOSED", true, FAILED, 0, true), DISARM);
+});
+
+test("align step: locked waits on its polls, then disarms", () => {
+  for (const saw of [false, true]) {
+    assert.deepEqual(
+      prAlignStep("CLOSED", true, ok(true, "CLOSED"), 1, saw),
+      WAIT,
+    );
+    assert.deepEqual(
+      prAlignStep("CLOSED", true, ok(true, "CLOSED"), 0, saw),
+      DISARM,
+    );
+  }
+});
+
+test("align step: an unlocked answer settles from its OWN state", () => {
+  assert.deepEqual(
+    prAlignStep("CLOSED", true, ok(false, "MERGED"), 0, true),
+    settle("merged"),
+  );
+  // The merge failed and GitLab reopened the MR.
+  assert.deepEqual(
+    prAlignStep("CLOSED", true, ok(false, "OPEN"), 0, true),
+    settle("open"),
+  );
+  assert.deepEqual(
+    prAlignStep("CLOSED", true, ok(false, "CLOSED"), 5, false),
+    settle("unmerged"),
+  );
+  // An answer that predates the new fields, or carries no state, keeps the
+  // details' tab.
+  for (const state of [undefined, ""])
+    assert.deepEqual(
+      prAlignStep("CLOSED", true, ok(false, state), 5, false),
+      settle("unmerged"),
+    );
+});
+
+/** Drives the step over a sequence of answers the way the panel's ladder
+ *  does: after a locked answer, every later answer is a re-read and spends a
+ *  rung. Returns the first non-wait step and how many reads it took. */
+function runLadder(answers, budget = 5) {
+  let polls = 0;
+  let sawLocked = false;
+  for (const [i, probe] of answers.entries()) {
+    if (i > 0 && sawLocked) polls += 1;
+    if (probe.status === "ok" && probe.locked) sawLocked = true;
+    const step = prAlignStep("CLOSED", true, probe, budget - polls, sawLocked);
+    if (step.do !== "wait") return { step, reads: i + 1 };
+  }
+  return { step: WAIT, reads: answers.length };
+}
+
+test("align ladder: locked six times disarms on the fifth re-read", () => {
+  const locked = ok(true, "CLOSED");
+  assert.deepEqual(runLadder(Array(7).fill(locked)), {
+    step: DISARM,
+    reads: 6,
+  });
+});
+
+test("align ladder: locked, then failures until the budget is spent, disarms", () => {
+  const answers = [ok(true, "CLOSED"), ...Array(6).fill(FAILED)];
+  assert.deepEqual(runLadder(answers), { step: DISARM, reads: 6 });
+});
+
+test("align ladder: a failure between locked answers rides on to the merge", () => {
+  const answers = [
+    ok(true, "CLOSED"),
+    FAILED,
+    ok(true, "CLOSED"),
+    ok(false, "MERGED"),
+  ];
+  assert.deepEqual(runLadder(answers), { step: settle("merged"), reads: 4 });
+});
+
+test("align ladder: locked, then opened, lands on Open", () => {
+  assert.deepEqual(runLadder([ok(true, "CLOSED"), ok(false, "OPEN")]), {
+    step: settle("open"),
+    reads: 2,
+  });
 });

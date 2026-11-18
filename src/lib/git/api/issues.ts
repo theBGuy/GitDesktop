@@ -11,6 +11,7 @@ import type {
   IssueDetails,
   IssueDevelopment,
   IssueInfo,
+  IssueListPage,
   IssueRelation,
   IssueRelations,
   IssueType,
@@ -48,6 +49,22 @@ export const forgeIssueList = (
   filter: RemoteListFilter | null = null,
 ) =>
   invoke<IssueInfo[]>("forge_issue_list", {
+    repoPath,
+    state,
+    limit,
+    lens,
+    filter,
+  });
+
+/** `forgeIssueList` with the read's horizon flag beside the rows. */
+export const forgeIssueListPage = (
+  repoPath: string,
+  state: IssueStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
+) =>
+  invoke<IssueListPage>("forge_issue_list_page", {
     repoPath,
     state,
     limit,

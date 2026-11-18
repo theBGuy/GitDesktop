@@ -125,6 +125,8 @@ import {
 } from "@/lib/git/queries";
 import {
   type IssueInfo,
+  type IssueListPage,
+  listPageRows,
   OPEN_IN_BROWSER,
   type RemoteLens,
   savedProvider,
@@ -192,12 +194,15 @@ function cachedIssueRow(
   lens: RemoteLens,
   number: number,
 ): IssueInfo | undefined {
-  for (const [key, rows] of queryClient.getQueriesData<IssueInfo[]>({
+  for (const [key, page] of queryClient.getQueriesData<
+    IssueInfo[] | IssueListPage
+  >({
     queryKey: repoKeys.issueList(repo),
   })) {
+    const rows = listPageRows(page);
     // `useIssueList`'s key: index 3 is the lens, and a fork numbers its
     // issues independently of its parent.
-    if (key[3] !== lens || !Array.isArray(rows)) continue;
+    if (key[3] !== lens || !rows) continue;
     const row = rows.find((r) => r.number === number);
     if (row) return row;
   }

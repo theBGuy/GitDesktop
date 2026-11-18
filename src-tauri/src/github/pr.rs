@@ -17,14 +17,14 @@ use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::forge::{c_quote_label, c_quote_path, validate_compare_branch};
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
-use crate::github::pr_search::viewer_login_core;
+use crate::github::pr_search::{viewer_login_core, RawSearchAuthor};
 use crate::github::project_item_edits::{graphql_input, GRAPHQL_INPUT_ARGS};
 use crate::github::repo_meta::{
     invalidate_all_repo_meta_after, invalidate_repo_meta_after, write_was_attempted,
 };
 use crate::github::runner::{
-    gh_auth_epoch_counter, gh_output_ok, run_gh, run_gh_input, run_gh_raw, run_gh_raw_in_dir,
-    GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+    gh_auth_epoch_counter, gh_output_ok, run_gh, run_gh_input, run_gh_input_raw, run_gh_raw,
+    run_gh_raw_in_dir, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 use crate::github::{gh_failure_reason, gh_unreadable};
 use crate::state::AppState;
@@ -2864,6 +2864,11 @@ fn classify_gh_merge_refusal(stderr: &str) -> Option<String> {
                 "The branch has conflicts with its base — resolve them, then merge.".to_string(),
             );
         }
+        // GitHub's refusal of a `--match-head-commit` that no longer names the head.
+        // `Base branch was modified` is a different refusal and keeps GitHub's words.
+        if line.contains("Head branch was modified") {
+            return Some(HEAD_MOVED_REFUSAL.to_string());
+        }
         if let Some(idx) = line.find(GRAPHQL) {
             let msg = strip_graphql_path(&line[idx + GRAPHQL.len()..]);
             if !msg.is_empty() {
@@ -2874,9 +2879,64 @@ fn classify_gh_merge_refusal(stderr: &str) -> Option<String> {
     None
 }
 
+/// A stack member merges through merge-async, which can land several PRs, so a custom
+/// message is refused there rather than dropped.
+fn stacked_message_refusal(
+    stacked: bool,
+    message: Option<&crate::forge::MergeMessage>,
+) -> AppResult<()> {
+    if stacked && message.is_some() {
+        return Err(AppError::InvalidArgument(
+            "A stacked pull request merges through its stack and can land several pull requests, so it can't take a custom commit message. Merge it without one."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The body gh reads from stdin (`--body-file -`); empty without a message.
+fn gh_merge_stdin(message: Option<&crate::forge::MergeMessage>) -> String {
+    message
+        .map(|m| crate::forge::normalize_merge_body(&m.body))
+        .unwrap_or_default()
+}
+
+const HEAD_MOVED_REFUSAL: &str = "This pull request got new commits after its commit message was loaded, so nothing was merged. Check the message and merge again.";
+
+/// A full GitHub commit id. GitHub refuses a shorter `expectedHeadOid` even when it
+/// names the head, so nothing else may be sent as one.
+fn is_github_head_oid(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The whole `gh pr merge` request: argv and stdin. The title rides argv as ONE
+/// `--subject=` element (gh has no file flag for it, and the `=` form keeps a leading
+/// `-` from parsing as a flag); the body always rides stdin, a blank one included.
+/// A message binds to the head its default was read under through
+/// `--match-head-commit`; without a message the argv is exactly `base`.
+fn gh_merge_request(
+    base: &[&str],
+    message: Option<&crate::forge::MergeMessage>,
+    sha: Option<&str>,
+) -> (Vec<String>, String) {
+    let mut argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
+    if let Some(m) = message {
+        if let Some(sha) = sha.filter(|s| is_github_head_oid(s)) {
+            argv.push("--match-head-commit".to_string());
+            argv.push(sha.to_string());
+        }
+        argv.push(format!("--subject={}", m.title.trim()));
+        argv.push("--body-file".to_string());
+        argv.push("-".to_string());
+    }
+    (argv, gh_merge_stdin(message))
+}
+
 /// Merges the PR with the given strategy ("merge"/"squash"/"rebase"). With
 /// `delete_branch`, only the *remote* head branch is removed — local branch and
-/// HEAD are untouched.
+/// HEAD are untouched. Each message in `messages` already passed the shape checks;
+/// the slot is chosen here, after this function's own strategy check. `sha` guards
+/// only a merge that carries a message (see [`gh_merge_request`]).
 ///
 /// Deliberately NOT `gh pr merge --delete-branch`: that also deletes the LOCAL
 /// branch and moves HEAD to the default branch, diverging from GitLab/Bitbucket
@@ -2893,7 +2953,9 @@ pub async fn gh_pr_merge(
     number: u64,
     strategy: String,
     delete_branch: bool,
+    sha: Option<String>,
     lens: Option<String>,
+    messages: crate::forge::MergeMessages,
 ) -> AppResult<PrMergeOutcome> {
     let n = number.to_string();
     let method = match strategy.as_str() {
@@ -2906,6 +2968,7 @@ pub async fn gh_pr_merge(
             )));
         }
     };
+    let message = crate::forge::single_commit_message(&strategy, &["rebase"], messages)?;
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let outcome = async {
         // A stack member rejects BOTH `gh pr merge` and the plain REST merge endpoint;
@@ -2913,15 +2976,17 @@ pub async fn gh_pr_merge(
         // when it can't tell, the legacy path runs and GitHub's own refusal is the
         // backstop. Merging a member also merges every unmerged layer below it.
         let queued = if gh_pr_is_stacked(&repo_path, &slug, number).await {
+            stacked_message_refusal(true, message.as_ref())?;
             gh_pr_merge_async(&repo_path, &slug, number, &strategy).await?
                 == StackedMergeResult::Queued
         } else {
-            let result = run_gh_raw(
-                Some(&repo_path),
+            let (argv, stdin) = gh_merge_request(
                 &["pr", "merge", &n, method, "--repo", &slug],
-                GH_NETWORK_TIMEOUT,
-            )
-            .await;
+                message.as_ref(),
+                sha.as_deref(),
+            );
+            let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let result = run_gh_input_raw(Some(&repo_path), &argv, &stdin, GH_NETWORK_TIMEOUT).await;
             invalidate_repo_meta_after(&slug, &result);
             invalidate_stack_memo_after(&slug, &result);
             let result = result.map_err(|e| {
@@ -2975,14 +3040,55 @@ pub async fn gh_pr_merge(
 /// incomplete `stack` object): the legacy merge path then runs, and GitHub rejects
 /// a stacked merge there with its own actionable error.
 async fn gh_pr_is_stacked(repo_path: &str, slug: &str, number: u64) -> bool {
+    gh_pr_stack_probe(repo_path, slug, number)
+        .await
+        .unwrap_or(false)
+}
+
+/// The stack-membership read: `Ok(stacked)` when GitHub answered, `Err` when the
+/// read was inconclusive (the run failed, gh exited non-zero, or the body was unreadable).
+async fn gh_pr_stack_probe(repo_path: &str, slug: &str, number: u64) -> AppResult<bool> {
     let endpoint = format!("repos/{slug}/pulls/{number}");
-    let Ok(out) = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await else {
-        return false;
-    };
+    let read = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await;
+    stack_probe_outcome(read)
+}
+
+/// Only a JSON object answers: no `stack` or a null one is "not stacked", a complete one
+/// (the detail view's reading) is "stacked", and any other `stack` is inconclusive. A
+/// failed run keeps its error and a non-zero exit carries gh's stderr.
+fn stack_probe_outcome(read: AppResult<GhOutput>) -> AppResult<bool> {
+    let out = read?;
     if out.code != 0 {
-        return false;
+        let raw = out.stderr.trim();
+        return Err(AppError::Gh(if raw.is_empty() {
+            format!("gh exited with code {}", out.code)
+        } else {
+            raw.to_string()
+        }));
     }
-    pull_stack_ref(&out.stdout_lossy()).is_some()
+    let body = out.stdout_lossy();
+    let value: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        gh_unreadable(
+            "the pull request stack",
+            format!("could not parse the pull request: {e}"),
+        )
+    })?;
+    if !value.is_object() {
+        return Err(gh_unreadable(
+            "the pull request stack",
+            "could not parse the pull request: the answer was not a JSON object".into(),
+        ));
+    }
+    if value.get("stack").is_none_or(serde_json::Value::is_null) {
+        return Ok(false);
+    }
+    if pull_stack_ref(&body).is_none() {
+        return Err(gh_unreadable(
+            "the pull request stack",
+            "the stack reference was incomplete".into(),
+        ));
+    }
+    Ok(true)
 }
 
 /// A merge-async response — the `PUT` acknowledgement and every poll share it.
@@ -3119,6 +3225,148 @@ async fn gh_pr_merge_async(
             .and_then(|o| serde_json::from_str::<MergeAsyncStatus>(&o.stdout_lossy()).ok())
             .unwrap_or_default();
     }
+}
+
+/// The commit a GitHub merge with `strategy` writes and GitHub's default message for
+/// it, from the viewer-merge fields, with the head they were read under. A rebase
+/// writes no commit of its own and a stack member's merge can land several pull
+/// requests, so neither takes a message. The stack probe is the merge's, but an
+/// inconclusive one fails this read: the merge reads it as "not stacked", and an
+/// editor offered on that guess could be refused at the merge.
+pub(crate) async fn gh_pr_merge_message_defaults(
+    repo_path: &str,
+    number: u64,
+    strategy: &str,
+    lens: Option<&str>,
+) -> AppResult<crate::forge::MergeMessageDefaults> {
+    use crate::forge::{MergeCommitKind, MergeMessageCommit, MergeMessageDefaults};
+    let (kind, merge_type) = match strategy {
+        "squash" => (MergeCommitKind::Squash, "SQUASH"),
+        "merge" => (MergeCommitKind::Merge, "MERGE"),
+        "rebase" => {
+            return Ok(MergeMessageDefaults {
+                commits: Vec::new(),
+                reason: Some(crate::forge::NoMergeMessageReason::Rebase),
+                head_sha: None,
+            });
+        }
+        _ => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown merge strategy: {strategy}"
+            )));
+        }
+    };
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    if gh_pr_stack_probe(repo_path, &slug, number).await? {
+        return Ok(MergeMessageDefaults {
+            commits: Vec::new(),
+            reason: Some(crate::forge::NoMergeMessageReason::Stacked),
+            head_sha: None,
+        });
+    }
+    let (owner, name) = slug.split_once('/').unwrap_or((slug.as_str(), ""));
+    let query = format!("query={}", merge_defaults_query(merge_type));
+    let owner_arg = format!("owner={owner}");
+    let name_arg = format!("name={name}");
+    let number_arg = format!("number={number}");
+    // `-F` sends the number typed (`Int!`); `-f` would send a string GitHub refuses.
+    let out = run_gh_raw(
+        Some(repo_path),
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &query,
+            "-f",
+            &owner_arg,
+            "-f",
+            &name_arg,
+            "-F",
+            &number_arg,
+        ],
+        GH_TIMEOUT,
+    )
+    .await?;
+    let stdout = out.stdout_lossy();
+    let message = merge_message_default_outcome(out.code, &stdout, &out.stderr)?;
+    Ok(MergeMessageDefaults {
+        commits: vec![MergeMessageCommit {
+            kind,
+            message,
+            exact: true,
+        }],
+        reason: None,
+        head_sha: merge_defaults_head_from(&stdout),
+    })
+}
+
+/// The defaults query for one merge type. The head and both viewer-merge fields share
+/// one response, so the head is the one GitHub computed the default under.
+fn merge_defaults_query(merge_type: &str) -> String {
+    format!(
+        "query($owner:String!,$name:String!,$number:Int!){{ repository(owner:$owner,name:$name){{ pullRequest(number:$number){{ headRefOid viewerMergeHeadlineText(mergeType:{merge_type}) viewerMergeBodyText(mergeType:{merge_type}) }} }} }}"
+    )
+}
+
+/// The defaults response's `headRefOid` when it is a full commit id, else `None`.
+fn merge_defaults_head_from(stdout: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(stdout).ok()?;
+    value
+        .pointer("/data/repository/pullRequest/headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| is_github_head_oid(s))
+        .map(str::to_string)
+}
+
+/// Decides the default-message read: a server too old to have the viewer-merge fields
+/// answers "unknown" (`Ok(None)`), and every other failure stays an error.
+fn merge_message_default_outcome(
+    code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> AppResult<Option<crate::forge::MergeMessage>> {
+    if code != 0 {
+        if matches!(classify_gh_failure(stderr), GhFailure::Answered)
+            && stderr.contains("viewerMerge")
+            && stderr.contains("doesn't exist")
+        {
+            return Ok(None);
+        }
+        let raw = stderr.trim();
+        return Err(AppError::Gh(if raw.is_empty() {
+            format!("gh exited with code {code}")
+        } else {
+            raw.to_string()
+        }));
+    }
+    let value: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| gh_unreadable("the default commit message", e.to_string()))?;
+    let pr = value
+        .pointer("/data/repository/pullRequest")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| {
+            AppError::Gh("GitHub returned no pull request for the default commit message.".into())
+        })?;
+    let headline = pr
+        .get("viewerMergeHeadlineText")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if headline.is_empty() {
+        return Ok(None);
+    }
+    // Only a string body is known: a missing or mistyped one would read as an exact
+    // blank body, which a title-only edit would then send in place of GitHub's.
+    let Some(body) = pr
+        .get("viewerMergeBodyText")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::forge::MergeMessage {
+        title: headline.to_string(),
+        body: crate::forge::normalize_merge_body(body),
+    }))
 }
 
 /// The slice of `gh pr view` needed to delete only the remote head branch after
@@ -4537,12 +4785,14 @@ struct GhPullStackRef {
 
 /// The `stack` triple (stack number, position, size) from a REST pull payload;
 /// `None` when the PR is unstacked (the key is absent or JSON null) or the object
-/// is incomplete. The detail view and the merge path BOTH decide "is this PR
-/// stacked?" through here, so they can never disagree — a divergence would let one
-/// cascade a merge the other never disclosed. Pure — unit-tested.
+/// is incomplete or not an object (an array would deserialize positionally). The
+/// detail view and the merge path BOTH decide "is this PR stacked?" through here, so
+/// they can never disagree — a divergence would let one cascade a merge the other
+/// never disclosed. Pure — unit-tested.
 fn pull_stack_ref(body: &str) -> Option<(u64, u32, u32)> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let stack: GhPullStackRef = serde_json::from_value(value.get("stack")?.clone()).ok()?;
+    let stack = value.get("stack").filter(|s| s.is_object())?;
+    let stack: GhPullStackRef = serde_json::from_value(stack.clone()).ok()?;
     Some((stack.number?, stack.position?, stack.size?))
 }
 
@@ -5048,11 +5298,14 @@ const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,s
 
 /// PRs for the Pull Requests list. `state` is "open", "closed" (everything not
 /// open, merged included, matching GitHub's own Closed tab), "merged", or
-/// "unmerged" (closed without merging); see [`gh_pr_list_args`] for each argv.
+/// "unmerged" (closed without merging). [`pr_list_route`] picks the read: the
+/// first three take [`gh_pr_list_args`]' argv, and "unmerged" reads the
+/// `pullRequests` connection through GraphQL ([`gh_closed_pr_list`]), since the
+/// search API that `gh pr list --search` routes to omits archived pull requests.
 ///
 /// A non-empty `filter` narrows the list SERVER-side through `ISSUE_ADVANCED`
 /// search instead (see [`crate::github::pr_search`]); an absent or empty one keeps
-/// the `gh pr list` read below unchanged. Both paths get the same stack join.
+/// the unfiltered routes above. Every path gets the same stack join.
 pub async fn gh_pr_list(
     repo_path: String,
     state: String,
@@ -5065,6 +5318,12 @@ pub async fn gh_pr_list(
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     if let Some(q) = crate::github::pr_search::search_query(&slug, true, &state, filter.as_ref())? {
         return gh_pr_list_filtered(&repo_path, &slug, &state, limit, &q).await;
+    }
+    if pr_list_route(&state)? == PrListRoute::ClosedGraphql {
+        let mut prs = gh_closed_pr_list(&repo_path, &slug, limit).await?;
+        // A closed list describes merges already made, so it skips the stack probe.
+        apply_stack_join(&mut prs, Some(&std::collections::HashMap::new()));
+        return Ok(prs);
     }
     let args = gh_pr_list_args(&slug, &state, limit)?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -5094,15 +5353,22 @@ pub async fn gh_pr_list(
     Ok(prs)
 }
 
-/// The unfiltered `gh pr list` argv for one list state. Every arm emits literals and
-/// an unknown state errors. `is:unmerged` alone also matches open PRs, so the
-/// unmerged arm always pairs it with `is:closed`.
+/// The unfiltered `gh pr list` argv for the open, closed and merged states. Every
+/// arm is a `--state` literal and never `--search`, which routes gh to the search
+/// API and drops archived pull requests. gh reads `--state closed` as closed plus
+/// merged, newest created first, where the search arm it replaces set no order;
+/// every caller reads a newest-first window. "unmerged" errors here because it is
+/// read through GraphQL ([`gh_closed_pr_list`]); any other state is unknown.
 fn gh_pr_list_args(slug: &str, state: &str, limit: Option<u32>) -> AppResult<Vec<String>> {
     let scope: &[&str] = match state {
         "open" => &["--state", "open"],
-        "closed" => &["--search", "is:closed"],
+        "closed" => &["--state", "closed"],
         "merged" => &["--state", "merged"],
-        "unmerged" => &["--search", "is:closed is:unmerged"],
+        "unmerged" => {
+            return Err(AppError::InvalidArgument(format!(
+                "PR state filter {state} is not an argv arm: it is read through GraphQL"
+            )));
+        }
         _ => {
             return Err(AppError::InvalidArgument(format!(
                 "unknown PR state filter: {state}"
@@ -5122,6 +5388,228 @@ fn gh_pr_list_args(slug: &str, state: &str, limit: Option<u32>) -> AppResult<Vec
         args.push(n.clamp(1, 1000).to_string());
     }
     Ok(args)
+}
+
+/// How [`gh_pr_list`] reads one unfiltered list state.
+#[derive(Debug, PartialEq, Eq)]
+enum PrListRoute {
+    /// `gh pr list` with [`gh_pr_list_args`]' argv.
+    Argv,
+    /// [`gh_closed_pr_list`]: the `pullRequests` connection filtered to CLOSED.
+    ClosedGraphql,
+}
+
+/// The read for one unfiltered list state. "unmerged" never reaches argv: gh has no
+/// `--state` for closed-without-merging, and its search form omits archived PRs.
+fn pr_list_route(state: &str) -> AppResult<PrListRoute> {
+    match state {
+        "open" | "closed" | "merged" => Ok(PrListRoute::Argv),
+        "unmerged" => Ok(PrListRoute::ClosedGraphql),
+        _ => Err(AppError::InvalidArgument(format!(
+            "unknown PR state filter: {state}"
+        ))),
+    }
+}
+
+/// gh's `pr list` default of 30 rows and its page size of 100, under the app's 1..=1000
+/// clamp on the limit; the read stops after ten pages, which reach that ceiling only
+/// while no page repeats a row.
+const CLOSED_PR_DEFAULT_LIMIT: u32 = 30;
+const CLOSED_PR_MAX_LIMIT: u32 = 1000;
+const CLOSED_PR_PAGE_SIZE: u32 = 100;
+const CLOSED_PR_MAX_PAGES: usize = 10;
+
+/// One page of closed-without-merging PRs, newest created first. The node selection
+/// carries every [`PR_LIST_FIELDS`] member so a row matches the argv route's wire.
+/// Owner, name and cursor ride variables sent raw through `-f`, so the query text
+/// holds no quote for a Windows `.cmd` shim to split.
+fn closed_pr_list_query(first: u32) -> String {
+    format!(
+        r#"query($owner:String!, $name:String!, $after:String){{ repository(owner:$owner, name:$name){{ pullRequests(first:{first}, after:$after, states:[CLOSED], orderBy:{{field:CREATED_AT, direction:DESC}}){{ pageInfo{{ hasNextPage endCursor }} nodes{{ number url title baseRefName headRefName isDraft state author{{ login __typename }} labels(first:100){{nodes{{name}}}} createdAt isCrossRepository headRefOid }} }} }} }}"#
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPrListConnection {
+    page_info: GqlPrListPageInfo,
+    #[serde(default)]
+    nodes: Option<Vec<Option<GqlPrListNode>>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPrListPageInfo {
+    has_next_page: bool,
+    #[serde(default)]
+    end_cursor: Option<String>,
+}
+
+/// A `pullRequests` node. Non-null schema fields stay strict, so a node missing one
+/// fails the page as unreadable; `author` and `labels` are nullable in the schema.
+/// The author maps through the search route's conversion, which restores the `app/`
+/// prefix gh's export layer gives a Bot login.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPrListNode {
+    number: u64,
+    url: String,
+    title: String,
+    base_ref_name: String,
+    head_ref_name: String,
+    is_draft: bool,
+    state: String,
+    #[serde(default)]
+    author: Option<RawSearchAuthor>,
+    #[serde(default)]
+    labels: Option<GqlPrListLabels>,
+    created_at: String,
+    is_cross_repository: bool,
+    head_ref_oid: String,
+}
+
+#[derive(Deserialize)]
+struct GqlPrListLabels {
+    #[serde(default, deserialize_with = "null_to_default")]
+    nodes: Vec<Option<PrListLabel>>,
+}
+
+/// One GraphQL page as list rows plus the cursor of the next page (`None` once
+/// `hasNextPage` is false). A body without the connection or its `nodes` list, or one
+/// that promises a next page with no cursor, is unreadable; null nodes and null labels
+/// are skipped.
+fn parse_closed_pr_page(body: &str) -> AppResult<(Vec<PrInfo>, Option<String>)> {
+    let unreadable = |detail: String| gh_unreadable("pull requests", detail);
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| unreadable(format!("could not parse the closed PR list: {e}")))?;
+    let connection = value
+        .pointer("/data/repository/pullRequests")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| unreadable("the closed PR list carried no pullRequests".into()))?;
+    let page = GqlPrListConnection::deserialize(connection)
+        .map_err(|e| unreadable(format!("could not parse the closed PR list: {e}")))?;
+    let next = if page.page_info.has_next_page {
+        match page.page_info.end_cursor.filter(|c| !c.is_empty()) {
+            Some(cursor) => Some(cursor),
+            None => {
+                return Err(unreadable(
+                    "the closed PR list reported a next page without a cursor".into(),
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    let Some(nodes) = page.nodes else {
+        return Err(unreadable("the closed PR list carried no nodes".into()));
+    };
+    let prs = nodes
+        .into_iter()
+        .flatten()
+        .map(|n| PrInfo {
+            number: n.number,
+            url: n.url,
+            title: n.title,
+            base_ref_name: n.base_ref_name,
+            head_ref_name: n.head_ref_name,
+            is_draft: n.is_draft,
+            state: n.state,
+            author: n.author.map(RawSearchAuthor::into_author),
+            labels: n
+                .labels
+                .map(|l| l.nodes.into_iter().flatten().collect())
+                .unwrap_or_default(),
+            created_at: n.created_at,
+            head_sha: n.head_ref_oid,
+            stack: None,
+            stack_unknown: false,
+            cross_repository: n.is_cross_repository,
+        })
+        .collect();
+    Ok((prs, next))
+}
+
+/// The paging loop behind [`gh_closed_pr_list`], over an injected page fetch
+/// `(first, after)`. Limits follow `gh pr list` (30 by default, 1..=1000). A failed
+/// run returns the fetch's own error, never a partial list. Like gh's lister, a
+/// number seen on an earlier page is skipped and only unique rows count toward the
+/// limit, so a list that shifts between requests never repeats a row. It can still
+/// come back short of a limit near the cap: the page cap binds before the skipped
+/// rows are made up. A continuation cursor that repeats fails the read whole: the
+/// walk would re-read one page up to the cap and report a short list as complete.
+async fn closed_pr_pages_with<F, Fut>(limit: Option<u32>, fetch: F) -> AppResult<Vec<PrInfo>>
+where
+    F: Fn(u32, Option<String>) -> Fut,
+    Fut: Future<Output = AppResult<String>>,
+{
+    let limit = limit.map_or(CLOSED_PR_DEFAULT_LIMIT, |n| n.clamp(1, CLOSED_PR_MAX_LIMIT)) as usize;
+    let mut prs: Vec<PrInfo> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursors = std::collections::HashSet::new();
+    let mut after: Option<String> = None;
+    for _ in 0..CLOSED_PR_MAX_PAGES {
+        let first = (limit - prs.len()).min(CLOSED_PR_PAGE_SIZE as usize) as u32;
+        let (rows, next) = parse_closed_pr_page(&fetch(first, after.take()).await?)?;
+        prs.extend(rows.into_iter().filter(|pr| seen.insert(pr.number)));
+        match next {
+            Some(cursor) if prs.len() < limit => {
+                if !cursors.insert(cursor.clone()) {
+                    return Err(gh_unreadable(
+                        "pull requests",
+                        "the closed PR list repeated a page cursor".into(),
+                    ));
+                }
+                after = Some(cursor);
+            }
+            _ => break,
+        }
+    }
+    prs.truncate(limit);
+    Ok(prs)
+}
+
+/// The `gh api graphql` argv for one closed-list page. Owner, name and cursor go
+/// through `-f`, which sends them raw: `-F` would read a value starting with `@`
+/// from a file. The first page carries no `after` at all.
+fn closed_pr_page_args(owner: &str, name: &str, first: u32, after: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={}", closed_pr_list_query(first)),
+        "-f".to_string(),
+        format!("owner={owner}"),
+        "-f".to_string(),
+        format!("name={name}"),
+    ];
+    if let Some(cursor) = after {
+        args.extend(["-f".to_string(), format!("after={cursor}")]);
+    }
+    args
+}
+
+/// Closed-without-merging PRs from GitHub's `pullRequests` connection, which,
+/// unlike the search API, includes archived pull requests.
+async fn gh_closed_pr_list(
+    repo_path: &str,
+    slug: &str,
+    limit: Option<u32>,
+) -> AppResult<Vec<PrInfo>> {
+    let Some((owner, name)) = slug.split_once('/') else {
+        return Err(AppError::Gh(
+            "could not determine the repository owner".into(),
+        ));
+    };
+    validate_graphql_embed(owner, "repository owner")?;
+    validate_graphql_embed(name, "repository name")?;
+    closed_pr_pages_with(limit, |first, after| async move {
+        let args = closed_pr_page_args(owner, name, first, after.as_deref());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_gh(Some(repo_path), &args, GH_TIMEOUT)
+            .await
+            .map(|out| out.stdout_lossy())
+    })
+    .await
 }
 
 /// The filtered PR list: the search read, joined with stack membership exactly as
@@ -10159,7 +10647,8 @@ mod tests {
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async, escape_head_branch_path,
         external_items_from_thread_nodes, external_reviews_truncated, fallback_auth_outcome,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message, gh_api_write_result,
-        gh_pr_list_args,
+        gh_pr_list_args, closed_pr_list_query, closed_pr_pages_with, parse_closed_pr_page,
+        closed_pr_page_args, pr_list_route, PrListRoute,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_payload,
@@ -12139,13 +12628,19 @@ mod tests {
                 .map(str::to_string)
                 .collect()
         };
-        let cases: [(&str, &[&str]); 4] = [
+        let cases: [(&str, &[&str]); 3] = [
             ("open", &["--state", "open"]),
-            ("closed", &["--search", "is:closed"]),
+            ("closed", &["--state", "closed"]),
             ("merged", &["--state", "merged"]),
-            ("unmerged", &["--search", "is:closed is:unmerged"]),
         ];
         for (state, scope) in cases {
+            assert!(
+                !gh_pr_list_args("o/r", state, None)
+                    .unwrap()
+                    .iter()
+                    .any(|a| a == "--search"),
+                "{state}"
+            );
             assert_eq!(
                 gh_pr_list_args("o/r", state, None).unwrap(),
                 base(scope),
@@ -12184,6 +12679,460 @@ mod tests {
                 "{state}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn gh_pr_list_args_refuse_unmerged_as_a_graphql_state() {
+        let err = gh_pr_list_args("o/r", "unmerged", Some(10)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AppError::InvalidArgument(ref m)
+                    if m == "PR state filter unmerged is not an argv arm: it is read through GraphQL"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// The pin that keeps "unmerged" off the search-backed argv: only the closed
+    /// GraphQL read answers it.
+    #[test]
+    fn pr_list_route_answers_every_state() {
+        for state in ["open", "closed", "merged"] {
+            assert_eq!(pr_list_route(state).unwrap(), PrListRoute::Argv, "{state}");
+        }
+        assert_eq!(
+            pr_list_route("unmerged").unwrap(),
+            PrListRoute::ClosedGraphql
+        );
+        for state in ["all", "", "Unmerged", "is:closed"] {
+            let err = pr_list_route(state).unwrap_err();
+            assert!(
+                matches!(err, AppError::InvalidArgument(ref m) if m == &format!("unknown PR state filter: {state}")),
+                "{state}: {err}"
+            );
+        }
+    }
+
+    /// The `nodes{…}` selection of a closed-list query, braces balanced.
+    fn closed_pr_node_selection(query: &str) -> &str {
+        let start = query.find("nodes{").expect("nodes selection") + "nodes{".len();
+        let mut depth = 1;
+        for (i, c) in query[start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &query[start..start + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced nodes selection: {query}");
+    }
+
+    /// `PR_LIST_FIELDS` members missing from the node selection, matched as whole
+    /// tokens so `states:[CLOSED]` outside it can't stand in for `state`.
+    fn closed_pr_missing_fields(query: &str) -> Vec<&'static str> {
+        let selection = closed_pr_node_selection(query);
+        let tokens: Vec<&str> = selection
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .collect();
+        PR_LIST_FIELDS
+            .split(',')
+            .filter(|f| !tokens.contains(f))
+            .collect()
+    }
+
+    #[test]
+    fn closed_pr_list_query_selects_every_list_field() {
+        let query = closed_pr_list_query(100);
+        assert!(closed_pr_missing_fields(&query).is_empty(), "{query}");
+        assert!(query.contains("states:[CLOSED]"), "{query}");
+        assert!(
+            query.contains("orderBy:{field:CREATED_AT, direction:DESC}"),
+            "{query}"
+        );
+        assert!(query.contains("first:100, after:$after"), "{query}");
+        assert!(
+            query.starts_with("query($owner:String!, $name:String!, $after:String)"),
+            "{query}"
+        );
+        assert!(
+            query.contains("repository(owner:$owner, name:$name)"),
+            "{query}"
+        );
+        // Mutation control: dropping `state` from the selection must be caught even
+        // though `states:[CLOSED]` still sits in the query.
+        let mutated = query.replacen(" isDraft state author", " isDraft author", 1);
+        assert_ne!(mutated, query);
+        assert_eq!(closed_pr_missing_fields(&mutated), ["state"]);
+    }
+
+    fn gql_pr_node(number: u64) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "url": format!("https://github.com/o/r/pull/{number}"),
+            "title": format!("PR {number}"),
+            "baseRefName": "main",
+            "headRefName": format!("feat-{number}"),
+            "isDraft": false,
+            "state": "CLOSED",
+            "author": {"login": "octo"},
+            "labels": {"nodes": [{"name": "bug"}]},
+            "createdAt": "2026-11-01T00:00:00Z",
+            "isCrossRepository": false,
+            "headRefOid": "a".repeat(40),
+        })
+    }
+
+    fn gql_pr_page(
+        numbers: impl IntoIterator<Item = u64>,
+        has_next: bool,
+        cursor: Option<&str>,
+    ) -> String {
+        serde_json::json!({"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+            "nodes": numbers.into_iter().map(gql_pr_node).collect::<Vec<_>>(),
+        }}}})
+        .to_string()
+    }
+
+    #[test]
+    fn parse_closed_pr_page_matches_the_argv_wire() {
+        let node = serde_json::json!({
+            "number": 7,
+            "url": "https://github.com/o/r/pull/7",
+            "title": "Seven",
+            "baseRefName": "main",
+            "headRefName": "feat",
+            "isDraft": true,
+            "state": "CLOSED",
+            "author": {"login": "octo"},
+            "labels": {"nodes": [{"name": "bug"}, null, {"name": "ui"}]},
+            "createdAt": "2026-11-01T00:00:00Z",
+            "isCrossRepository": true,
+            "headRefOid": "b".repeat(40),
+        });
+        let mut ghost = node.clone();
+        ghost["number"] = serde_json::json!(8);
+        ghost["author"] = serde_json::Value::Null;
+        ghost["labels"] = serde_json::Value::Null;
+        // GraphQL spells a GitHub App's login bare; gh's JSON spells it `app/<login>`.
+        let mut bot = node.clone();
+        bot["number"] = serde_json::json!(9);
+        bot["author"] = serde_json::json!({"login": "dependabot", "__typename": "Bot"});
+        let body = serde_json::json!({"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": false, "endCursor": "c9"},
+            "nodes": [node, null, ghost, bot],
+        }}}})
+        .to_string();
+        let (prs, next) = parse_closed_pr_page(&body).unwrap();
+        assert_eq!(next, None);
+        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), [7, 8, 9]);
+        // The same rows as `gh pr list --json` would print them.
+        let argv_rows: Vec<PrInfo> = serde_json::from_value(serde_json::json!([
+            {
+                "number": 7, "url": "https://github.com/o/r/pull/7", "title": "Seven",
+                "baseRefName": "main", "headRefName": "feat", "isDraft": true,
+                "state": "CLOSED", "author": {"login": "octo"},
+                "labels": [{"name": "bug"}, {"name": "ui"}],
+                "createdAt": "2026-11-01T00:00:00Z", "isCrossRepository": true,
+                "headRefOid": "b".repeat(40),
+            },
+            {
+                "number": 8, "url": "https://github.com/o/r/pull/7", "title": "Seven",
+                "baseRefName": "main", "headRefName": "feat", "isDraft": true,
+                "state": "CLOSED", "author": null, "labels": [],
+                "createdAt": "2026-11-01T00:00:00Z", "isCrossRepository": true,
+                "headRefOid": "b".repeat(40),
+            },
+            {
+                "number": 9, "url": "https://github.com/o/r/pull/7", "title": "Seven",
+                "baseRefName": "main", "headRefName": "feat", "isDraft": true,
+                "state": "CLOSED", "author": {"login": "app/dependabot"},
+                "labels": [{"name": "bug"}, {"name": "ui"}],
+                "createdAt": "2026-11-01T00:00:00Z", "isCrossRepository": true,
+                "headRefOid": "b".repeat(40),
+            },
+        ]))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&prs).unwrap(),
+            serde_json::to_value(&argv_rows).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_closed_pr_page_reads_cursors_and_empty_connections() {
+        let (prs, next) = parse_closed_pr_page(&gql_pr_page([1, 2], true, Some("c1"))).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert_eq!(next.as_deref(), Some("c1"));
+        let (prs, next) = parse_closed_pr_page(&gql_pr_page([], false, None)).unwrap();
+        assert!(prs.is_empty());
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn parse_closed_pr_page_rejects_unreadable_bodies() {
+        let unreadable = |body: &str| {
+            let Err(err) = parse_closed_pr_page(body) else {
+                panic!("{body}: parsed");
+            };
+            assert!(
+                matches!(err, AppError::Gh(ref m) if m.starts_with("Couldn't read pull requests from GitHub.\n")),
+                "{body}: {err}"
+            );
+        };
+        unreadable("not json");
+        unreadable(
+            r#"{"errors":[{"message":"Could not resolve to a Repository"}],"data":{"repository":null}}"#,
+        );
+        unreadable(r#"{"data":{"repository":{}}}"#);
+        unreadable(r#"{"data":{"repository":{"pullRequests":{"nodes":[]}}}}"#);
+        // A positional array would deserialize as a connection; only an object is one.
+        let positional = r#"{"data":{"repository":{"pullRequests":[{"hasNextPage":false,"endCursor":null},[]]}}}"#;
+        unreadable(positional);
+        assert!(
+            matches!(parse_closed_pr_page(positional), Err(AppError::Gh(ref m)) if m.contains("the closed PR list carried no pullRequests"))
+        );
+        // The `nodes` list itself is required; an explicit `[]` is an empty page.
+        let page_info = r#""pageInfo":{"hasNextPage":false,"endCursor":null}"#;
+        unreadable(&format!(
+            r#"{{"data":{{"repository":{{"pullRequests":{{{page_info}}}}}}}}}"#
+        ));
+        unreadable(&format!(
+            r#"{{"data":{{"repository":{{"pullRequests":{{{page_info},"nodes":null}}}}}}}}"#
+        ));
+        assert!(parse_closed_pr_page(&gql_pr_page([], false, None))
+            .unwrap()
+            .0
+            .is_empty());
+        unreadable(&gql_pr_page([1], true, None));
+        unreadable(&gql_pr_page([1], true, Some("")));
+        let mut node = gql_pr_node(1);
+        node.as_object_mut().unwrap().remove("state");
+        unreadable(
+            &serde_json::json!({"data": {"repository": {"pullRequests": {
+                "pageInfo": {"hasNextPage": false, "endCursor": null},
+                "nodes": [node],
+            }}}})
+            .to_string(),
+        );
+    }
+
+    /// Drives [`closed_pr_pages_with`] over canned pages, recording each `(first, after)`.
+    async fn closed_pages(
+        limit: Option<u32>,
+        pages: Vec<crate::error::AppResult<String>>,
+    ) -> (
+        crate::error::AppResult<Vec<PrInfo>>,
+        Vec<(u32, Option<String>)>,
+    ) {
+        let pages = std::sync::Mutex::new(pages.into_iter());
+        let calls = std::sync::Mutex::new(Vec::new());
+        let result = closed_pr_pages_with(limit, |first, after| {
+            calls.lock().unwrap().push((first, after));
+            let page = pages
+                .lock()
+                .unwrap()
+                .next()
+                .expect("an unplanned page request");
+            async move { page }
+        })
+        .await;
+        (result, calls.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn closed_pr_pages_honour_the_limit() {
+        let (prs, calls) = closed_pages(
+            Some(130),
+            vec![
+                Ok(gql_pr_page(1..=100, true, Some("c1"))),
+                Ok(gql_pr_page(101..=130, true, Some("c2"))),
+            ],
+        )
+        .await;
+        assert_eq!(prs.unwrap().len(), 130);
+        assert_eq!(calls, [(100, None), (30, Some("c1".to_string()))]);
+
+        let (prs, calls) = closed_pages(
+            Some(250),
+            vec![
+                Ok(gql_pr_page(1..=100, true, Some("c1"))),
+                Ok(gql_pr_page(101..=200, true, Some("c2"))),
+                Ok(gql_pr_page(201..=250, true, Some("c3"))),
+            ],
+        )
+        .await;
+        assert_eq!(
+            prs.unwrap().iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=250).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            [100, 100, 50]
+        );
+
+        let (prs, calls) =
+            closed_pages(None, vec![Ok(gql_pr_page(1..=30, true, Some("c1")))]).await;
+        assert_eq!(prs.unwrap().len(), 30);
+        assert_eq!(calls, [(30, None)]);
+
+        let (prs, calls) =
+            closed_pages(Some(0), vec![Ok(gql_pr_page(1..=5, true, Some("c1")))]).await;
+        assert_eq!(prs.unwrap().len(), 1);
+        assert_eq!(calls, [(1, None)]);
+
+        // A page answering more rows than asked is cut back to the limit.
+        let (prs, _) = closed_pages(Some(3), vec![Ok(gql_pr_page(1..=5, false, None))]).await;
+        assert_eq!(prs.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn closed_pr_pages_stop_at_the_last_page_and_the_page_cap() {
+        let (prs, calls) =
+            closed_pages(Some(200), vec![Ok(gql_pr_page(1..=40, false, None))]).await;
+        assert_eq!(prs.unwrap().len(), 40);
+        assert_eq!(calls.len(), 1);
+
+        // Pages that come back short keep the walk going only up to ten requests.
+        let pages = (0..10)
+            .map(|i| {
+                let cursor = format!("c{i}");
+                Ok(gql_pr_page([i * 2 + 1, i * 2 + 2], true, Some(&cursor)))
+            })
+            .collect();
+        let (prs, calls) = closed_pages(Some(1000), pages).await;
+        assert_eq!(prs.unwrap().len(), 20);
+        assert_eq!(calls.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn closed_pr_pages_fail_whole_on_a_repeated_cursor() {
+        let (prs, calls) = closed_pages(
+            Some(200),
+            vec![
+                Ok(gql_pr_page(1..=2, true, Some("c1"))),
+                Ok(gql_pr_page(3..=4, true, Some("c1"))),
+            ],
+        )
+        .await;
+        assert_eq!(calls.len(), 2);
+        assert!(
+            matches!(prs, Err(AppError::Gh(ref m)) if m == "Couldn't read pull requests from GitHub.\nthe closed PR list repeated a page cursor"),
+            "{:?}",
+            prs.err().map(|e| e.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_pr_pages_fail_whole() {
+        let limited = "GraphQL: API rate limit exceeded for user ID 1.";
+        let (prs, calls) = closed_pages(
+            Some(200),
+            vec![
+                Ok(gql_pr_page(1..=100, true, Some("c1"))),
+                Err(AppError::Gh(limited.into())),
+            ],
+        )
+        .await;
+        assert_eq!(calls.len(), 2);
+        assert!(
+            matches!(prs, Err(AppError::Gh(ref m)) if m == limited),
+            "a failed run keeps the runner's error: {:?}",
+            prs.err().map(|e| e.to_string())
+        );
+
+        let (prs, calls) =
+            closed_pages(Some(200), vec![Ok(gql_pr_page(1..=100, true, None))]).await;
+        assert_eq!(calls.len(), 1);
+        assert!(
+            matches!(prs, Err(AppError::Gh(ref m)) if m.starts_with("Couldn't read pull requests from GitHub.\n")),
+            "{:?}",
+            prs.err().map(|e| e.to_string())
+        );
+    }
+
+    /// A row that shifts onto the next page keeps its first sighting, and the limit
+    /// is still filled from the pages after it.
+    #[tokio::test]
+    async fn closed_pr_pages_skip_a_repeated_number_and_read_on() {
+        let (prs, calls) = closed_pages(
+            Some(150),
+            vec![
+                Ok(gql_pr_page(1..=100, true, Some("c1"))),
+                Ok(gql_pr_page(96..=145, true, Some("c2"))),
+                Ok(gql_pr_page(146..=150, true, Some("c3"))),
+            ],
+        )
+        .await;
+        assert_eq!(
+            prs.unwrap().iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=150).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls,
+            [
+                (100, None),
+                (50, Some("c1".to_string())),
+                (5, Some("c2".to_string())),
+            ]
+        );
+    }
+
+    /// A limit above 1000 reads as 1000: a page answering more rows than that is cut
+    /// back to it.
+    #[tokio::test]
+    async fn closed_pr_pages_clamp_the_limit_to_1000() {
+        for limit in [1001, 5000, u32::MAX] {
+            let (prs, calls) =
+                closed_pages(Some(limit), vec![Ok(gql_pr_page(1..=1001, false, None))]).await;
+            assert_eq!(prs.unwrap().len(), 1000, "{limit}");
+            assert_eq!(calls, [(100, None)], "{limit}");
+        }
+    }
+
+    #[test]
+    fn closed_pr_page_args_send_the_cursor_raw_and_only_after_page_one() {
+        let query = format!("query={}", closed_pr_list_query(100));
+        let args = closed_pr_page_args("o", "r", 100, None);
+        assert_eq!(
+            args,
+            [
+                "api",
+                "graphql",
+                "-f",
+                query.as_str(),
+                "-f",
+                "owner=o",
+                "-f",
+                "name=r"
+            ]
+        );
+        // Owner and name ride raw `-f` variables, so no argv element holds a quote.
+        assert!(!args.iter().any(|a| a.contains('"')), "{args:?}");
+        assert!(!args.iter().any(|a| a == "-F"), "{args:?}");
+        let query = format!("query={}", closed_pr_list_query(30));
+        assert_eq!(
+            closed_pr_page_args("o", "r", 30, Some("@c1")),
+            [
+                "api",
+                "graphql",
+                "-f",
+                query.as_str(),
+                "-f",
+                "owner=o",
+                "-f",
+                "name=r",
+                "-f",
+                "after=@c1"
+            ]
+        );
     }
 
     /// The PR edit PATCH body carries `base` only when retargeting: the no-base form
@@ -16590,5 +17539,564 @@ pub(crate) mod hostile_input {
         let text = format!("-dash\n{}", line.repeat(200_000 / line.chars().count() + 1));
         assert!(text.chars().count() > 200_000);
         text
+    }
+}
+
+#[cfg(test)]
+mod merge_message_tests {
+    use super::*;
+    use crate::forge::{MergeMessage, MergeMessages, NoMergeMessageReason};
+
+    fn msg(title: &str, body: &str) -> MergeMessage {
+        MergeMessage {
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+
+    const BASE: [&str; 6] = ["pr", "merge", "7", "--squash", "--repo", "o/r"];
+    const BANNED: [&str; 6] = ["--body", "-b", "-t", "--subject", "--delete-branch", "-d"];
+
+    /// The elements after the unchanged base, with no banned flag anywhere.
+    fn extra(argv: &[String]) -> Vec<&str> {
+        assert_eq!(&argv[..BASE.len()], &BASE[..]);
+        for el in argv {
+            assert!(!BANNED.contains(&el.as_str()), "{el}");
+        }
+        argv[BASE.len()..].iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn gh_merge_request_puts_the_title_in_one_element_and_the_body_on_stdin() {
+        let (argv, stdin) = gh_merge_request(&BASE, None, None);
+        assert_eq!(argv, BASE.map(String::from).to_vec());
+        assert_eq!(stdin, "");
+        assert!(!argv.iter().any(|a| a == "--body-file"));
+
+        let m = msg("  feat: x ", "");
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), None);
+        assert_eq!(extra(&argv), ["--subject=feat: x", "--body-file", "-"]);
+        assert_eq!(stdin, "");
+
+        let m = msg("feat: x", "the body");
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), None);
+        assert_eq!(extra(&argv), ["--subject=feat: x", "--body-file", "-"]);
+        assert_eq!(stdin, "the body");
+
+        let m = msg("feat: x", "\r\n\r\nline 1\r\nline 2  \r\n\r\n");
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), None);
+        assert_eq!(extra(&argv), ["--subject=feat: x", "--body-file", "-"]);
+        assert_eq!(stdin, "line 1\nline 2");
+
+        let m = msg("-d --admin", "");
+        let (argv, _) = gh_merge_request(&BASE, Some(&m), None);
+        assert_eq!(extra(&argv), ["--subject=-d --admin", "--body-file", "-"]);
+    }
+
+    /// Only a merge with a message binds to a head, and only a full id is ever sent.
+    #[test]
+    fn gh_merge_request_binds_only_a_message_to_a_full_head_id() {
+        let head = "3b04ca7".repeat(5) + "3b04c";
+        assert_eq!(head.len(), 40);
+        let m = msg("feat: x", "b");
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), Some(&head));
+        assert_eq!(
+            extra(&argv),
+            [
+                "--match-head-commit",
+                head.as_str(),
+                "--subject=feat: x",
+                "--body-file",
+                "-"
+            ]
+        );
+        assert_eq!(stdin, "b");
+        let unbound = ["--subject=feat: x", "--body-file", "-"];
+        let sha256 = "a".repeat(64);
+        let not_hex = "g".repeat(40);
+        for sha in [
+            None,
+            Some("3b04ca7"),
+            Some(""),
+            Some(sha256.as_str()),
+            Some(&head[..39]),
+            Some(not_hex.as_str()),
+        ] {
+            let (argv, _) = gh_merge_request(&BASE, Some(&m), sha);
+            assert_eq!(extra(&argv), unbound, "{sha:?}");
+        }
+        // An untouched merge keeps the base argv whatever sha it is handed.
+        for sha in [None, Some(head.as_str()), Some("3b04ca7")] {
+            let (argv, stdin) = gh_merge_request(&BASE, None, sha);
+            assert_eq!(argv, BASE.map(String::from).to_vec(), "{sha:?}");
+            assert_eq!(stdin, "");
+        }
+    }
+
+    #[test]
+    fn head_moved_refusal_gets_one_sentence_and_base_moved_keeps_githubs() {
+        let moved =
+            "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)\n";
+        assert_eq!(
+            classify_gh_merge_refusal(moved).as_deref(),
+            Some("This pull request got new commits after its commit message was loaded, so nothing was merged. Check the message and merge again.")
+        );
+        assert_eq!(
+            classify_gh_merge_refusal("GraphQL: Base branch was modified\n").as_deref(),
+            Some("Base branch was modified")
+        );
+        let short = "GraphQL: Variable $input of type MergePullRequestInput! was provided invalid value for expectedHeadOid (Could not coerce value \"3b04ca7\" to GitObjectID)\n";
+        assert_ne!(
+            classify_gh_merge_refusal(short).as_deref(),
+            Some(HEAD_MOVED_REFUSAL)
+        );
+        assert_eq!(classify_gh_merge_refusal("some other failure\n"), None);
+    }
+
+    #[test]
+    fn stack_probe_outcome_keeps_an_inconclusive_read_apart() {
+        let out = |code: i32, stdout: &str, stderr: &str| -> AppResult<GhOutput> {
+            Ok(GhOutput {
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.into(),
+                code,
+            })
+        };
+        let stacked = r#"{"number":7,"stack":{"id":1,"number":7,"position":2,"size":3}}"#;
+        assert!(
+            pull_stack_ref(stacked).is_some(),
+            "fixture must read as stacked"
+        );
+        assert!(stack_probe_outcome(out(0, stacked, "")).unwrap());
+        assert!(!stack_probe_outcome(out(0, r#"{"number":7}"#, "")).unwrap());
+        assert!(!stack_probe_outcome(out(0, r#"{"number":7,"stack":null}"#, "")).unwrap());
+        let unreadable = |body: &str| match stack_probe_outcome(out(0, body, "")) {
+            Err(AppError::Gh(t)) => t.starts_with("Couldn't read the pull request stack"),
+            _ => false,
+        };
+        for body in [
+            "not json",
+            "",
+            r#"{"number":7,"stack":{"id":1,"number":7,"position":2}}"#,
+            r#"{"number":7,"stack":{}}"#,
+            r#"{"number":7,"stack":"7"}"#,
+            r#"{"number":7,"stack":[]}"#,
+            r#"{"number":7,"stack":[7,2,3]}"#,
+        ] {
+            assert!(unreadable(body), "{body}");
+        }
+        // A positional array never reads as a stack, in the detail view either.
+        assert_eq!(pull_stack_ref(r#"{"number":7,"stack":[7,2,3]}"#), None);
+        for body in ["null", "[]", "\"text\"", &format!("[{stacked}]")] {
+            assert!(
+                matches!(
+                    stack_probe_outcome(out(0, body, "")),
+                    Err(AppError::Gh(t))
+                        if t.starts_with("Couldn't read the pull request stack")
+                            && t.contains("the answer was not a JSON object")
+                ),
+                "{body}"
+            );
+        }
+        assert!(matches!(
+            stack_probe_outcome(out(1, "", "gh: Not Found (HTTP 404)")),
+            Err(AppError::Gh(t)) if t == "gh: Not Found (HTTP 404)"
+        ));
+        assert!(matches!(
+            stack_probe_outcome(out(1, stacked, "")),
+            Err(AppError::Gh(t)) if t == "gh exited with code 1"
+        ));
+        assert!(matches!(
+            stack_probe_outcome(Err(AppError::Timeout(30))),
+            Err(AppError::Timeout(30))
+        ));
+    }
+
+    /// The defaults read propagates an inconclusive probe; only the merge reads it as
+    /// "not stacked".
+    #[test]
+    fn defaults_read_fails_on_an_inconclusive_stack_probe() {
+        const PROBE: &str = "if gh_pr_stack_probe(repo_path, &slug, number).await? {";
+        let pinned = |b: &str| {
+            b.contains(PROBE) && !b.contains("gh_pr_is_stacked(") && !b.contains("unwrap_or(false)")
+        };
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_merge_message_defaults",
+        ));
+        assert!(pinned(&body), "{body}");
+        let collapsed = body.replacen(
+            PROBE,
+            "if gh_pr_stack_probe(repo_path, &slug, number).await.unwrap_or(false) {",
+            1,
+        );
+        assert_ne!(collapsed, body);
+        assert!(!pinned(&collapsed));
+        let legacy = body.replacen(
+            PROBE,
+            "if gh_pr_is_stacked(repo_path, &slug, number).await {",
+            1,
+        );
+        assert!(!pinned(&legacy));
+    }
+
+    /// The merge reads an inconclusive stack probe as "not stacked", so it takes the
+    /// legacy path and GitHub refuses a stacked merge there itself.
+    #[test]
+    fn merge_reads_an_inconclusive_stack_probe_as_not_stacked() {
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_is_stacked",
+        ));
+        assert!(
+            body.contains("gh_pr_stack_probe(repo_path, slug, number) .await .unwrap_or(false)"),
+            "{body}"
+        );
+        assert!(!body.contains("unwrap_or(true)"), "{body}");
+    }
+
+    #[test]
+    fn merge_defaults_query_asks_both_fields_for_its_own_type_and_the_head() {
+        for (want, other) in [("SQUASH", "MERGE"), ("MERGE", "SQUASH")] {
+            let q = merge_defaults_query(want);
+            assert!(
+                q.contains(&format!("viewerMergeHeadlineText(mergeType:{want})")),
+                "{q}"
+            );
+            assert!(
+                q.contains(&format!("viewerMergeBodyText(mergeType:{want})")),
+                "{q}"
+            );
+            assert!(!q.contains(&format!("mergeType:{other}")), "{q}");
+            assert!(
+                q.contains("pullRequest(number:$number){ headRefOid viewerMergeHeadlineText"),
+                "{q}"
+            );
+            assert!(!q.contains('"'), "{q}");
+        }
+    }
+
+    /// The production read asks for its own strategy's merge type and reports the head
+    /// that answer carried.
+    #[test]
+    fn defaults_read_queries_its_strategys_type_and_returns_the_parsed_head() {
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_merge_message_defaults",
+        ));
+        for wired in [
+            r#""squash" => (MergeCommitKind::Squash, "SQUASH"),"#,
+            r#""merge" => (MergeCommitKind::Merge, "MERGE"),"#,
+            r#"let query = format!("query={}", merge_defaults_query(merge_type));"#,
+            "let stdout = out.stdout_lossy();",
+            "head_sha: merge_defaults_head_from(&stdout),",
+        ] {
+            assert!(body.contains(wired), "{wired}\n{body}");
+        }
+        assert_eq!(body.matches("merge_defaults_query(").count(), 1, "{body}");
+        assert_eq!(body.matches("head_sha:").count(), 3, "{body}");
+        assert_eq!(body.matches("head_sha: None").count(), 2, "{body}");
+    }
+
+    #[test]
+    fn merge_defaults_head_from_reads_only_a_full_id() {
+        let head = "c3bcab13".repeat(5);
+        let body = |field: &str| {
+            format!(
+                r#"{{"data":{{"repository":{{"pullRequest":{{{field}"viewerMergeHeadlineText":"t","viewerMergeBodyText":"b"}}}}}}}}"#
+            )
+        };
+        assert_eq!(
+            merge_defaults_head_from(&body(&format!(r#""headRefOid":"{head}","#))),
+            Some(head.clone())
+        );
+        for field in [
+            String::new(),
+            r#""headRefOid":null,"#.to_string(),
+            r#""headRefOid":"","#.to_string(),
+            r#""headRefOid":"c3bcab1","#.to_string(),
+            format!(r#""headRefOid":"{}","#, "a".repeat(64)),
+            format!(r#""headRefOid":"{}","#, "z".repeat(40)),
+            r#""headRefOid":42,"#.to_string(),
+        ] {
+            assert_eq!(merge_defaults_head_from(&body(&field)), None, "{field}");
+        }
+        assert_eq!(merge_defaults_head_from("not json"), None);
+        assert_eq!(
+            merge_defaults_head_from(r#"{"data":{"repository":{"pullRequest":null}}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn gh_merge_stdin_normalises_the_body() {
+        assert_eq!(gh_merge_stdin(None), "");
+        assert_eq!(
+            gh_merge_stdin(Some(&msg("t", "\r\n\nb\r\nc \t\r\n"))),
+            "b\nc"
+        );
+        assert_eq!(gh_merge_stdin(Some(&msg("t", ""))), "");
+    }
+
+    #[test]
+    fn stacked_message_refusal_refuses_only_a_stacked_message() {
+        let m = msg("t", "");
+        assert!(stacked_message_refusal(false, None).is_ok());
+        assert!(stacked_message_refusal(false, Some(&m)).is_ok());
+        assert!(stacked_message_refusal(true, None).is_ok());
+        match stacked_message_refusal(true, Some(&m)) {
+            Err(AppError::InvalidArgument(text)) => assert_eq!(
+                text,
+                "A stacked pull request merges through its stack and can land several pull requests, so it can't take a custom commit message. Merge it without one."
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn github_refuses_an_unknown_strategy_before_any_slot_row() {
+        let messages = MergeMessages {
+            squash: Some(msg("t", "")),
+            merge: None,
+        };
+        match gh_pr_merge(
+            "C:/nonexistent".into(),
+            1,
+            "fast_forward".into(),
+            false,
+            None,
+            None,
+            messages,
+        )
+        .await
+        .map(|_| ())
+        {
+            Err(AppError::InvalidArgument(text)) => {
+                assert_eq!(text, "unknown merge strategy: fast_forward")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn defaults_read_answers_rebase_without_a_call_and_refuses_unknown_names() {
+        let d = gh_pr_merge_message_defaults("C:/nonexistent", 1, "rebase", None)
+            .await
+            .unwrap();
+        assert!(d.commits.is_empty());
+        assert_eq!(d.reason, Some(NoMergeMessageReason::Rebase));
+        assert!(matches!(
+            gh_pr_merge_message_defaults("C:/nonexistent", 1, "octopus", None).await,
+            Err(AppError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn merge_message_default_outcome_keeps_failures_apart_from_unknown() {
+        let ok = r#"{"data":{"repository":{"pullRequest":{"viewerMergeHeadlineText":" feat: x (#7) ","viewerMergeBodyText":"* one\n* two\n"}}}}"#;
+        assert_eq!(
+            merge_message_default_outcome(0, ok, "").unwrap(),
+            Some(msg("feat: x (#7)", "* one\n* two"))
+        );
+        let empty = r#"{"data":{"repository":{"pullRequest":{"viewerMergeHeadlineText":"  ","viewerMergeBodyText":"b"}}}}"#;
+        assert_eq!(merge_message_default_outcome(0, empty, "").unwrap(), None);
+        let null = r#"{"data":{"repository":{"pullRequest":{"viewerMergeHeadlineText":null,"viewerMergeBodyText":"b"}}}}"#;
+        assert_eq!(merge_message_default_outcome(0, null, "").unwrap(), None);
+        // A body that isn't a string is unknown, never an exact blank body.
+        for body in [
+            "",
+            r#","viewerMergeBodyText":null"#,
+            r#","viewerMergeBodyText":42"#,
+            r#","viewerMergeBodyText":["b"]"#,
+        ] {
+            let stdout = format!(
+                r#"{{"data":{{"repository":{{"pullRequest":{{"viewerMergeHeadlineText":"t"{body}}}}}}}}}"#
+            );
+            assert_eq!(
+                merge_message_default_outcome(0, &stdout, "").unwrap(),
+                None,
+                "{stdout}"
+            );
+        }
+        let blank = r#"{"data":{"repository":{"pullRequest":{"viewerMergeHeadlineText":"t","viewerMergeBodyText":""}}}}"#;
+        assert_eq!(
+            merge_message_default_outcome(0, blank, "").unwrap(),
+            Some(msg("t", ""))
+        );
+        // A rate limit that also names the missing field stays a failure.
+        let limited = "gh: Too Many Requests (HTTP 429)\ngh: Field 'viewerMergeHeadlineText' doesn't exist on type 'PullRequest'";
+        assert!(matches!(
+            merge_message_default_outcome(1, "", limited),
+            Err(AppError::Gh(_))
+        ));
+        let null_pr = r#"{"data":{"repository":{"pullRequest":null}}}"#;
+        assert!(matches!(
+            merge_message_default_outcome(0, null_pr, ""),
+            Err(AppError::Gh(t)) if t == "GitHub returned no pull request for the default commit message."
+        ));
+        assert!(matches!(
+            merge_message_default_outcome(0, "not json", ""),
+            Err(AppError::Gh(_))
+        ));
+        // The one non-zero exit that answers: a server without the viewer-merge fields.
+        let old = "gh: Field 'viewerMergeHeadlineText' doesn't exist on type 'PullRequest'";
+        assert_eq!(merge_message_default_outcome(1, "", old).unwrap(), None);
+        for stderr in [
+            "gh: Too Many Requests (HTTP 429)",
+            "error connecting to api.github.com: dial tcp: lookup api.github.com: no such host",
+            "gh: Bad credentials (HTTP 401)",
+        ] {
+            assert!(
+                matches!(
+                    merge_message_default_outcome(1, "", stderr),
+                    Err(AppError::Gh(_))
+                ),
+                "{stderr}"
+            );
+        }
+        assert!(matches!(
+            merge_message_default_outcome(1, "", ""),
+            Err(AppError::Gh(t)) if t == "gh exited with code 1"
+        ));
+    }
+
+    fn flat(body: &str) -> String {
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    const RUN: &str = "run_gh_input_raw(Some(&repo_path), &argv, &stdin, GH_NETWORK_TIMEOUT)";
+
+    /// The run is the one stdin runner, fed both halves of the built request.
+    fn run_takes_the_request(body: &str) -> bool {
+        let f = flat(body);
+        let (Some(req), Some(run)) = (
+            f.find("let (argv, stdin) = gh_merge_request("),
+            f.find("run_gh_input_raw("),
+        ) else {
+            return false;
+        };
+        !f.contains("\"--body\"")
+            && !f.contains("\"-b\"")
+            && !f.contains("\"--delete-branch\"")
+            && f.matches("run_gh_input_raw(").count() == 1
+            && !f.contains("run_gh_raw(")
+            && req < run
+            && f.contains(RUN)
+    }
+
+    const SLOT: &str =
+        "let message = crate::forge::single_commit_message(&strategy, &[\"rebase\"], messages)?;";
+
+    fn slot_after_strategy(body: &str) -> bool {
+        let f = flat(body);
+        match (
+            f.find("\"--rebase\""),
+            f.find("single_commit_message(&strategy, &[\"rebase\"], messages)?"),
+            f.find("gh_lens_slug("),
+        ) {
+            (Some(a), Some(b), Some(c)) => a < b && b < c,
+            _ => false,
+        }
+    }
+
+    const REFUSAL: &str = "stacked_message_refusal(true, message.as_ref())?;";
+
+    fn stacked_refused_before_async(body: &str) -> bool {
+        let f = flat(body);
+        match (
+            f.find("gh_pr_is_stacked("),
+            f.find(REFUSAL),
+            f.find("gh_pr_merge_async("),
+        ) {
+            (Some(a), Some(b), Some(c)) => a < b && b < c,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn gh_pr_merge_sends_the_message_through_stdin_after_its_checks() {
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("pr.rs"), "gh_pr_merge");
+        assert!(run_takes_the_request(&body), "{body}");
+        assert!(slot_after_strategy(&body), "{body}");
+        assert!(stacked_refused_before_async(&body), "{body}");
+
+        let f = flat(&body);
+        let at = f.find("run_gh_input_raw(").unwrap();
+        let leaked = format!("{}\"--body\", &body, {}", &f[..at], &f[at..]);
+        assert!(!run_takes_the_request(&leaked));
+        assert!(!run_takes_the_request(&f.replacen(
+            "run_gh_input_raw(",
+            "run_gh_raw(",
+            1
+        )));
+        assert!(!run_takes_the_request(&f.replacen(
+            "&stdin, GH_NETWORK_TIMEOUT",
+            "\"\", GH_NETWORK_TIMEOUT",
+            1
+        )));
+
+        assert!(f.contains(SLOT), "{f}");
+        let moved = f.replacen(SLOT, "", 1).replacen(
+            "let method = match",
+            &format!("{SLOT} let method = match"),
+            1,
+        );
+        assert!(!slot_after_strategy(&moved));
+
+        let moved = f.replacen(REFUSAL, "", 1);
+        let at = moved.find("gh_pr_merge_async(").unwrap() + "gh_pr_merge_async(".len();
+        let moved = format!("{}{REFUSAL} {}", &moved[..at], &moved[at..]);
+        assert!(moved.contains("gh_pr_merge_async("), "{moved}");
+        assert!(!stacked_refused_before_async(&moved));
+        assert!(!stacked_refused_before_async(&f.replacen(
+            "stacked_message_refusal(true,",
+            "stacked_message_refusal(false,",
+            1
+        )));
+
+        assert!(f.contains(REQUEST), "{f}");
+        for slot in ["message.as_ref(),", "sha.as_deref(),"] {
+            let dropped = f.replacen(REQUEST, &REQUEST.replace(slot, "None,"), 1);
+            assert_ne!(dropped, f, "{slot}");
+            assert!(!dropped.contains(REQUEST), "{slot}");
+        }
+    }
+
+    #[test]
+    fn forge_pr_merge_hands_its_sha_to_the_github_arm() {
+        const ARM: &str = "crate::github::pr::gh_pr_merge( repo_path, number, strategy, delete_branch, sha, lens, messages, )";
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("../forge/mod.rs"),
+            "forge_pr_merge",
+        ));
+        assert!(body.contains(ARM), "{body}");
+        let dropped = body.replacen(ARM, &ARM.replace(" sha,", " None,"), 1);
+        assert_ne!(dropped, body);
+        assert!(!dropped.contains(ARM));
+    }
+
+    /// The request is built from the slot the merge chose, never from nothing, and from
+    /// the sha the merge was handed.
+    const REQUEST: &str =
+        "gh_merge_request( &[\"pr\", \"merge\", &n, method, \"--repo\", &slug], message.as_ref(), sha.as_deref(), )";
+
+    #[test]
+    fn defaults_read_maps_each_strategy_to_its_own_merge_type() {
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_merge_message_defaults",
+        ));
+        let pairs = |b: &str| {
+            b.contains("\"squash\" => (MergeCommitKind::Squash, \"SQUASH\"),")
+                && b.contains("\"merge\" => (MergeCommitKind::Merge, \"MERGE\"),")
+        };
+        assert!(pairs(&body), "{body}");
+        let swapped = body
+            .replacen("\"SQUASH\"),", "\"TMP\"),", 1)
+            .replacen("\"MERGE\"),", "\"SQUASH\"),", 1)
+            .replacen("\"TMP\"),", "\"MERGE\"),", 1);
+        assert_ne!(swapped, body);
+        assert!(!pairs(&swapped));
     }
 }

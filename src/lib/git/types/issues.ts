@@ -41,6 +41,14 @@ export interface IssueInfo {
   labels: { name: string }[];
 }
 
+/** One `forge_issue_list_page` read: the rows plus whether the read stopped at
+ *  its horizon. `capped` is true only when a GitLab unfiltered walk hit its row
+ *  horizon; every other provider and read says false. */
+export interface IssueListPage {
+  rows: IssueInfo[];
+  capped: boolean;
+}
+
 export interface Milestone {
   number: number;
   title: string;

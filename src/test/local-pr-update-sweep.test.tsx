@@ -594,6 +594,7 @@ describe("the worktree sweep", () => {
         worktreePath: MERGE_PATH,
         worktreeId: "aaaaaaaaaaaa",
         opId: "op-m",
+        journalRepo: REPO,
       });
       await started;
     });

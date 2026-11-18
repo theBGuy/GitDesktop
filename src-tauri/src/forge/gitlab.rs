@@ -6143,7 +6143,7 @@ mod attach_tests {
 
     /// Every GitLab write run hedges a timeout or is listed as bare on purpose. The roster
     /// is closed by computing every production function that holds a write-method literal
-    /// and a runner or helper call (`merge_mr_args` builds argv and runs nothing, so it
+    /// and a runner or helper call (`merge_mr_fields` builds fields and runs nothing, so it
     /// stays out). Out of its sight: a write with no method literal (the rows
     /// `set_mr_draft`, `upload_release_asset`, `request_changes_mr` and the call-site row
     /// `set_pr_reviewers` are pinned by name only) and a write outside gitlab.rs. The
@@ -6425,11 +6425,11 @@ mod attach_tests {
             assert!(row_ok(&swapped, &[changed], 1, 1), "{name}: counts hold");
             assert!(!read_first(&swapped), "{name}: a hedged read must flip");
         }
-        // The merge's map follows its raw run; the attribute PUT ahead of it stays bare.
+        // The merge's map follows its stdin-body run; the attribute PUT ahead of it stays bare.
         let merge_mapped = |body: &str| {
             bare_of(body, &["run_glab("]) == 1
-                && bare_of(body, &["run_glab_raw("]) == 0
-                && precedes(body, "run_glab_raw(", "timed_out_write(")
+                && bare_of(body, &["run_glab_ex(", "run_glab_raw("]) == 0
+                && precedes(body, "run_glab_ex(", "timed_out_write(")
         };
         let merge = wiring_body(source, "merge_mr_inner");
         assert!(merge_mapped(&merge), "{merge}");
@@ -6443,7 +6443,12 @@ mod attach_tests {
         let put = merge.find("run_glab(").unwrap();
         let put_await = put + merge[put..].find(".await").unwrap() + ".await".len();
         let put_mapped = format!("{}{merge_map}{}", &merge[..put_await], &merge[put_await..]);
-        let moved = put_mapped.replacen(&format!(".await {merge_map}?"), ".await?", 1);
+        let reword = ".map_err(|e| reword_merge_refusal(e, when_pipeline_succeeds))?";
+        let moved = put_mapped.replacen(
+            &format!(".await {merge_map} {reword}"),
+            &format!(".await {reword}"),
+            1,
+        );
         assert!(row_ok(&moved, &[changed], 1, 1), "the counts hold: {moved}");
         assert!(!merge_mapped(&moved), "a map moved onto the PUT must flip");
 
@@ -7291,23 +7296,37 @@ fn change_request_comment_error(e: AppError) -> AppError {
 // A SHARED control with GitHub's `gh pr merge`. GitLab's merge endpoint controls
 // `squash` (the one genuine per-MR knob) + `should_remove_source_branch`; the
 // merge-commit-vs-fast-forward shape is the PROJECT's `merge_method` setting, not a
-// per-MR choice. So we offer only `merge` (squash=false) and `squash` (squash=true)
+// per-MR choice. So we offer only `merge` (asks squash=false) and `squash` (asks
+// squash=true; a forced project policy decides what is sent, see `merge_mr_inner`)
 // and reject `rebase` (GitLab has no per-MR rebase-merge — that's the project
 // setting plus a separate async endpoint). The optional `sha` guards against merging
 // a head the user never saw (GitLab 409s if it moved); that 409 and the 405 on an
 // unmergeable MR both exit non-zero with a message, so they surface via the toast.
+// The merge PUT always sends ONE JSON body on stdin, so a multi-line commit message
+// stays off argv (with `--input`, glab moves any `-f` field to the query string).
 
 /// Merge a merge request. `strategy` is `merge` or `squash` — `rebase` is rejected
 /// (see the section note). A non-empty `sha` must match the source branch HEAD or
-/// GitLab refuses: a stale-view safety guard.
+/// GitLab refuses: a stale-view safety guard. Each message in `messages` already
+/// passed the shape checks; which slots the merge can use is checked here.
 pub async fn merge_mr(
     repo_path: &str,
     number: u64,
     strategy: &str,
     delete_branch: bool,
     sha: Option<&str>,
+    messages: &crate::forge::MergeMessages,
 ) -> AppResult<()> {
-    merge_mr_inner(repo_path, number, strategy, delete_branch, sha, false).await
+    merge_mr_inner(
+        repo_path,
+        number,
+        strategy,
+        delete_branch,
+        sha,
+        messages,
+        false,
+    )
+    .await
 }
 
 /// The HTTP status behind a failed `glab api` call. glab writes either
@@ -7352,37 +7371,176 @@ fn classify_gl_merge_refusal(stderr: &str, arming_auto_merge: bool) -> Option<St
     }
 }
 
-/// The merge PUT's argv. `sha` is sent only when non-empty — an empty `sha=` would
-/// itself be rejected. Arming sends BOTH auto-merge params; the auto-merge section
-/// note below carries why.
-fn merge_mr_args(
-    endpoint: &str,
+/// A failed merge run in the app's own words where the refusal is documented. The
+/// runner's `Glab` error holds glab's stderr (or its exit-code fallback), which is all
+/// the classifier reads; every other error passes through.
+fn reword_merge_refusal(e: AppError, arming: bool) -> AppError {
+    match e {
+        AppError::Glab(text) => {
+            AppError::Glab(classify_gl_merge_refusal(&text, arming).unwrap_or(text))
+        }
+        other => other,
+    }
+}
+
+/// The merge PUT's JSON body fields, every value a string as `glab api -f` sends them.
+/// `sha` is sent only when non-empty — an empty `sha` would itself be rejected. Arming
+/// sends BOTH auto-merge params; the auto-merge section note below carries why. `squash`
+/// is the value the project's policy makes of the strategy's ([`gl_policy_squash`]), or
+/// the strategy's own when the settings read failed.
+fn merge_mr_fields(
     squash: bool,
     delete_branch: bool,
     sha: Option<&str>,
     when_pipeline_succeeds: bool,
-) -> Vec<String> {
-    let mut args = vec![
-        "api".to_string(),
-        "--method".to_string(),
-        "PUT".to_string(),
-        endpoint.to_string(),
-        "-f".to_string(),
-        format!("squash={squash}"),
-        "-f".to_string(),
-        format!("should_remove_source_branch={delete_branch}"),
+    messages: &crate::forge::MergeMessages,
+) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("squash", squash.to_string()),
+        ("should_remove_source_branch", delete_branch.to_string()),
     ];
     if let Some(s) = sha.filter(|s| !s.is_empty()) {
-        args.push("-f".to_string());
-        args.push(format!("sha={s}"));
+        fields.push(("sha", s.to_string()));
     }
     if when_pipeline_succeeds {
-        args.push("-f".to_string());
-        args.push("merge_when_pipeline_succeeds=true".to_string());
-        args.push("-f".to_string());
-        args.push("auto_merge=true".to_string());
+        fields.push(("merge_when_pipeline_succeeds", "true".to_string()));
+        fields.push(("auto_merge", "true".to_string()));
     }
-    args
+    if let Some(m) = &messages.squash {
+        fields.push(("squash_commit_message", crate::forge::merge_message_text(m)));
+    }
+    if let Some(m) = &messages.merge {
+        fields.push(("merge_commit_message", crate::forge::merge_message_text(m)));
+    }
+    fields
+}
+
+/// The project settings that decide which commits a merge writes. A null and an absent
+/// field both read as `""`.
+#[derive(Deserialize, Debug, PartialEq)]
+struct GlMergeShape {
+    #[serde(default, deserialize_with = "null_to_default")]
+    merge_method: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    squash_option: String,
+}
+
+/// Reads the project's merge settings. Its own function so the write roster never sees
+/// this GET inside the merge body.
+async fn project_merge_shape(repo_path: &str, enc: &str) -> AppResult<GlMergeShape> {
+    let out = run_glab(
+        Some(repo_path),
+        &["api", &format!("projects/{enc}")],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await?;
+    merge_shape_from(&out.stdout_lossy())
+}
+
+fn merge_shape_from(body: &str) -> AppResult<GlMergeShape> {
+    serde_json::from_str(body)
+        .map_err(|e| gl_unreadable("the project's merge settings", e.to_string()))
+}
+
+/// The squash a project's `squash_option` makes of a requested one: `always` and `never`
+/// decide whatever the request says (GitLab refuses a merge that contradicts `always`
+/// and ignores a squash under `never`); any other value, an unknown one included,
+/// leaves the request. The merge sends this value.
+fn gl_policy_squash(squash_option: &str, requested: bool) -> bool {
+    match squash_option {
+        "never" => false,
+        "always" => true,
+        _ => requested,
+    }
+}
+
+/// Whether GitLab squashes this merge, refusing a `squash_option` this app doesn't know;
+/// an absent option means a server without it.
+fn effective_squash(squash_option: &str, requested: bool) -> AppResult<bool> {
+    if squash_option.is_empty() || SQUASH_OPTIONS.contains(&squash_option) {
+        Ok(gl_policy_squash(squash_option, requested))
+    } else {
+        Err(AppError::Glab(format!(
+            "GitLab reported a squash setting this app doesn't know ({squash_option:?}), so it can't tell which commits the merge writes."
+        )))
+    }
+}
+
+/// The commits a merge writes, from the project's `merge_method` and the effective squash.
+fn mr_message_commits(
+    merge_method: &str,
+    squash: bool,
+) -> AppResult<Vec<crate::forge::MergeCommitKind>> {
+    use crate::forge::MergeCommitKind::{Merge, Squash};
+    match merge_method {
+        "merge" | "rebase_merge" if squash => Ok(vec![Squash, Merge]),
+        "merge" | "rebase_merge" => Ok(vec![Merge]),
+        "ff" if squash => Ok(vec![Squash]),
+        "ff" => Ok(Vec::new()),
+        "" => Err(AppError::Glab(
+            "GitLab didn't report this project's merge method, so this app can't tell which commits the merge writes."
+                .into(),
+        )),
+        other => Err(AppError::Glab(format!(
+            "GitLab reported a merge method this app doesn't know ({other:?}), so it can't tell which commits the merge writes."
+        ))),
+    }
+}
+
+/// The one commit-list derivation the defaults read and the merge-time check share, so
+/// the dialog's rows and the slots a merge accepts can't disagree.
+fn gl_merge_commits(
+    shape: &GlMergeShape,
+    requested_squash: bool,
+) -> AppResult<Vec<crate::forge::MergeCommitKind>> {
+    mr_message_commits(
+        &shape.merge_method,
+        effective_squash(&shape.squash_option, requested_squash)?,
+    )
+}
+
+/// Refuses a message for a commit the merge won't write.
+fn gl_message_slots_ok(
+    kinds: &[crate::forge::MergeCommitKind],
+    squash_option: &str,
+    messages: &crate::forge::MergeMessages,
+) -> AppResult<()> {
+    use crate::forge::MergeCommitKind::{Merge, Squash};
+    if messages.squash.is_some() && !kinds.contains(&Squash) {
+        return Err(AppError::InvalidArgument(if squash_option == "never" {
+            "This GitLab project never squashes merge requests, so there is no squash commit to take a message."
+                .into()
+        } else {
+            crate::forge::MERGE_SLOT_UNUSED.into()
+        }));
+    }
+    if messages.merge.is_some() && !kinds.contains(&Merge) {
+        return Err(AppError::InvalidArgument(
+            "This GitLab project fast-forwards its merges, so there is no merge commit to take a message."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The per-MR squash flag a strategy asks for. The merge and the defaults read share it,
+/// so both refuse the same names with the same sentence.
+fn gl_requested_squash(strategy: &str) -> AppResult<bool> {
+    match strategy {
+        "merge" => Ok(false),
+        "squash" => Ok(true),
+        other => Err(AppError::InvalidArgument(format!(
+            "GitLab merges via the project's configured method; '{other}' isn't a per-MR option"
+        ))),
+    }
+}
+
+/// A merge carrying a message whose commit list couldn't be established.
+fn merge_shape_unknown(e: AppError) -> AppError {
+    AppError::Glab(format!(
+        "Couldn't check which commits this merge writes, so nothing was merged. {}",
+        crate::forge::error_detail(e)
+    ))
 }
 
 /// The shared body behind `merge_mr` and `auto_merge_mr` — same endpoint, same
@@ -7394,28 +7552,33 @@ async fn merge_mr_inner(
     strategy: &str,
     delete_branch: bool,
     sha: Option<&str>,
+    messages: &crate::forge::MergeMessages,
     when_pipeline_succeeds: bool,
 ) -> AppResult<()> {
-    let squash = match strategy {
-        "merge" => false,
-        "squash" => true,
-        other => {
-            return Err(AppError::InvalidArgument(format!(
-                "GitLab merges via the project's configured method; '{other}' isn't a per-MR option"
-            )));
-        }
-    };
+    let squash = gl_requested_squash(strategy)?;
     let enc = encode_project(&project_path(repo_path).await?);
-    // GitLab's merge-time `squash` / `should_remove_source_branch` params can SET but
-    // not CLEAR the MR's persisted `squash` / `remove_source_branch` attributes (and
-    // which one the deferred merge consults is inconsistent) — so set the attributes
-    // first and let the chosen strategy always govern; otherwise an MR the author
-    // flagged "squash on accept", or born under the project's delete-source default,
-    // ignores the user's choice. This is a pre-mutation guard: if the attribute PUT
-    // fails we must NOT fall through to the irreversible merge. (A project with a
-    // locked squash policy may reject the PUT; that's a loud toast before any merge.
-    // Note the attribute is `remove_source_branch`, not the merge endpoint's
-    // `should_remove_source_branch`.)
+    // The project's settings decide which commits exist and which squash GitLab accepts,
+    // so they are read before any write, and a message is checked against them. A merge
+    // without a message falls back to the strategy's flag when the read fails: an
+    // untouched merge must not gain a new way to fail.
+    let read = project_merge_shape(repo_path, &enc).await;
+    let shape = if messages.squash.is_some() || messages.merge.is_some() {
+        let shape = read.map_err(merge_shape_unknown)?;
+        let kinds = gl_merge_commits(&shape, squash).map_err(merge_shape_unknown)?;
+        gl_message_slots_ok(&kinds, &shape.squash_option, messages)?;
+        Some(shape)
+    } else {
+        read.ok()
+    };
+    // From here `squash` is the value sent, in both PUTs.
+    let squash = shape.map_or(squash, |s| gl_policy_squash(&s.squash_option, squash));
+    // GitLab's merge-time `squash` / `should_remove_source_branch` params can SET but not
+    // CLEAR the MR's persisted `squash` / `remove_source_branch` attributes (and the
+    // deferred merge reads them inconsistently) — so the attributes are set first and a
+    // failed PUT merges nothing. GitLab accepts the attribute under a forced squash policy
+    // but refuses a merge whose squash contradicts a required one (422 "Branch cannot be
+    // merged"), so the sent value follows the policy. The attribute is
+    // `remove_source_branch`, not the merge endpoint's `should_remove_source_branch`.
     let mr_endpoint = format!("projects/{enc}/merge_requests/{number}");
     let attr_squash_arg = format!("squash={squash}");
     let attr_remove_arg = format!("remove_source_branch={delete_branch}");
@@ -7435,23 +7598,17 @@ async fn merge_mr_inner(
     )
     .await?;
     let endpoint = format!("projects/{enc}/merge_requests/{number}/merge");
-    let args = merge_mr_args(&endpoint, squash, delete_branch, sha, when_pipeline_succeeds);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_glab_raw(Some(repo_path), &arg_refs, GLAB_NETWORK_TIMEOUT)
-        .await
-        .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Changed))?;
-    if out.code != 0 {
-        // Raw rather than `run_glab` only so a documented refusal can be reworded;
-        // everything else keeps `run_glab`'s exact fallback.
-        let raw = out.stderr.trim();
-        return Err(AppError::Glab(
-            match classify_gl_merge_refusal(&out.stderr, when_pipeline_succeeds) {
-                Some(message) => message,
-                None if raw.is_empty() => format!("glab exited with code {}", out.code),
-                None => raw.to_string(),
-            },
-        ));
-    }
+    let fields = merge_mr_fields(squash, delete_branch, sha, when_pipeline_succeeds, messages);
+    let out = run_glab_ex(
+        Some(repo_path),
+        &json_body_args("PUT", &endpoint),
+        Some(&glab_fields_json(&fields)),
+        &[],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .map_err(|e| crate::forge::timed_out_write(e, "GitLab", LandedWrite::Changed))
+    .map_err(|e| reword_merge_refusal(e, when_pipeline_succeeds))?;
     // GitLab can also refuse in a body with a ZERO exit — the shape that makes a cancel
     // look successful, and nothing about it is specific to that endpoint. A body without
     // the error marker is success, whatever else it holds.
@@ -7491,9 +7648,10 @@ struct GlabHeadPipelineBrief {
     web_url: String,
 }
 
-/// The MR fields the auto-merge read needs, from the slim `merge_requests/{iid}`
-/// GET (not `/changes`). GitLab returns `null` for these scalars in some states,
-/// so each is null-tolerant.
+/// The MR fields the auto-merge read needs, plus the raw state the list align reads
+/// for the lock and the neutral state, from the slim `merge_requests/{iid}` GET (not
+/// `/changes`). GitLab returns `null` for these scalars in some states, so each is
+/// null-tolerant.
 #[derive(Deserialize)]
 struct GlabMrMergeState {
     #[serde(default, deserialize_with = "null_to_default")]
@@ -7502,11 +7660,15 @@ struct GlabMrMergeState {
     detailed_merge_status: String,
     #[serde(default)]
     head_pipeline: Option<GlabHeadPipelineBrief>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    state: String,
 }
 
 /// The auto-merge state the MR panel gates its affordance on: whether auto-merge
 /// is armed, GitLab's detailed merge status, and the head pipeline's status +
-/// web URL (empty strings when the MR has no pipeline).
+/// web URL (empty strings when the MR has no pipeline). `locked` and `state` come
+/// from the same read, so the list align can tell a mid-merge MR from a closed one
+/// without a second read that could straddle the unlock.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitLabMrMergeState {
@@ -7518,11 +7680,34 @@ pub struct GitLabMrMergeState {
     pub pipeline_status: String,
     /// MR.head_pipeline.web_url; "" when no pipeline.
     pub pipeline_url: String,
+    /// MR.state is "locked": GitLab holds the MR while a merge runs, and
+    /// [`map_mr_state`] files that state under CLOSED.
+    pub locked: bool,
+    /// MR.state through [`map_mr_state`]; "" when GitLab sent none.
+    pub state: String,
+}
+
+/// The public merge state of one slim MR read. Pure, so the field mapping (null
+/// fallbacks included) is pinned without a live glab.
+fn merge_state_from(mr: GlabMrMergeState) -> GitLabMrMergeState {
+    let (pipeline_status, pipeline_url) = mr
+        .head_pipeline
+        .map(|p| (p.status, p.web_url))
+        .unwrap_or_default();
+    GitLabMrMergeState {
+        auto_merge_enabled: mr.merge_when_pipeline_succeeds,
+        detailed_merge_status: mr.detailed_merge_status,
+        pipeline_status,
+        pipeline_url,
+        locked: mr.state == "locked",
+        state: map_mr_state(&mr.state),
+    }
 }
 
 /// Read the MR's auto-merge state (armed flag, detailed merge status, head
-/// pipeline summary) from the slim MR GET. `head_pipeline` is null when the MR
-/// has no pipeline → the pipeline fields map to empty strings.
+/// pipeline summary) from the slim MR GET, which also carries the MR's lock and
+/// neutral state for the list align. `head_pipeline` is null when the MR has no
+/// pipeline → the pipeline fields map to empty strings.
 pub async fn mr_merge_state(repo_path: &str, number: u64) -> AppResult<GitLabMrMergeState> {
     let enc = encode_project(&project_path(repo_path).await?);
     let out = run_glab(
@@ -7538,16 +7723,7 @@ pub async fn mr_merge_state(repo_path: &str, number: u64) -> AppResult<GitLabMrM
                 format!("could not parse GitLab merge state: {e}"),
             )
         })?;
-    let (pipeline_status, pipeline_url) = mr
-        .head_pipeline
-        .map(|p| (p.status, p.web_url))
-        .unwrap_or_default();
-    Ok(GitLabMrMergeState {
-        auto_merge_enabled: mr.merge_when_pipeline_succeeds,
-        detailed_merge_status: mr.detailed_merge_status,
-        pipeline_status,
-        pipeline_url,
-    })
+    Ok(merge_state_from(mr))
 }
 
 /// The MR fields a mergeability read needs, from the slim `merge_requests/{iid}`
@@ -7687,8 +7863,166 @@ pub async fn auto_merge_mr(
     strategy: &str,
     delete_branch: bool,
     sha: Option<&str>,
+    messages: &crate::forge::MergeMessages,
 ) -> AppResult<()> {
-    merge_mr_inner(repo_path, number, strategy, delete_branch, sha, true).await
+    merge_mr_inner(
+        repo_path,
+        number,
+        strategy,
+        delete_branch,
+        sha,
+        messages,
+        true,
+    )
+    .await
+}
+
+/// The commits a merge with `strategy` would write and GitLab's default message for
+/// each, with the head they were read under. The commit list comes from the project's
+/// settings and fails loudly, as does the defaults read; an older GitLab whose schema
+/// lacks the default fields still gets its rows, with unknown defaults.
+pub async fn mr_merge_message_defaults(
+    repo_path: &str,
+    number: u64,
+    strategy: &str,
+) -> AppResult<crate::forge::MergeMessageDefaults> {
+    use crate::forge::MergeMessageDefaults;
+    let squash = gl_requested_squash(strategy)?;
+    let path = project_path(repo_path).await?;
+    let enc = encode_project(&path);
+    let kinds = gl_merge_commits(&project_merge_shape(repo_path, &enc).await?, squash)?;
+    if kinds.is_empty() {
+        return Ok(MergeMessageDefaults {
+            commits: Vec::new(),
+            reason: Some(crate::forge::NoMergeMessageReason::GitlabFastForward),
+            head_sha: None,
+        });
+    }
+    let args = mr_defaults_args(&path, number);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = run_glab(Some(repo_path), &argv, GLAB_NETWORK_TIMEOUT)
+        .await
+        .map(|out| out.stdout_lossy());
+    let (defaults, head_sha) = mr_defaults_outcome(run)?;
+    Ok(MergeMessageDefaults {
+        commits: gl_default_commits(kinds, defaults),
+        reason: None,
+        head_sha,
+    })
+}
+
+/// The defaults read's `glab` argv. The head rides the same document as the messages,
+/// so it names the head they describe; the path and iid travel as raw `-f` variables,
+/// so the document holds no caller value.
+fn mr_defaults_args(path: &str, number: u64) -> Vec<String> {
+    let query = "query($path:ID!,$iid:String!){ project(fullPath: $path){ mergeRequest(iid: $iid){ diffHeadSha defaultMergeCommitMessage defaultSquashCommitMessage } } }";
+    vec![
+        "api".into(),
+        "graphql".into(),
+        "-f".into(),
+        format!("query={query}"),
+        "-f".into(),
+        format!("path={path}"),
+        "-f".into(),
+        format!("iid={number}"),
+    ]
+}
+
+/// GitLab's default (squash, merge) messages, each `None` when unknown.
+type GlDefaultMessages = (
+    Option<crate::forge::MergeMessage>,
+    Option<crate::forge::MergeMessage>,
+);
+
+/// Decides the defaults read. A schema refusal of a selected field (an older GitLab;
+/// glab exits 1 with `Field '<name>' doesn't exist on type '<type>'`) answers
+/// "unknown" for both messages and the head; every other failed run, and an exit-0 body
+/// that is not a JSON object with an object `data` (a service-error envelope, a null
+/// `data`), stays an error so the dialog offers Retry instead of passing a failure off
+/// as "no default". Below `data`, a null or absent member still answers "unknown".
+fn mr_defaults_outcome(run: AppResult<String>) -> AppResult<(GlDefaultMessages, Option<String>)> {
+    match run {
+        Ok(body) => {
+            let value = match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(value) => value,
+                Err(e) => {
+                    return Err(gl_unreadable(
+                        "the default commit messages",
+                        format!("could not parse the defaults query: {e}"),
+                    ));
+                }
+            };
+            if !value.get("data").is_some_and(serde_json::Value::is_object) {
+                return Err(gl_unreadable(
+                    "the default commit messages",
+                    "the defaults query carried no data".to_string(),
+                ));
+            }
+            Ok((mr_default_messages_from(&body), mr_default_head_from(&body)))
+        }
+        Err(AppError::Glab(text)) if text.contains("doesn't exist on type") => {
+            Ok(((None, None), None))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The MR's `diffHeadSha` out of the GraphQL answer when it is a full object id (40 or
+/// 64 hex); `None` otherwise, since only a full id can bind a merge to its head.
+fn mr_default_head_from(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    value
+        .pointer("/data/project/mergeRequest/diffHeadSha")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_string)
+}
+
+/// Pairs each commit the merge writes with GitLab's default message for that commit,
+/// from the (squash, merge) pair [`mr_default_messages_from`] reads.
+fn gl_default_commits(
+    kinds: Vec<crate::forge::MergeCommitKind>,
+    defaults: (
+        Option<crate::forge::MergeMessage>,
+        Option<crate::forge::MergeMessage>,
+    ),
+) -> Vec<crate::forge::MergeMessageCommit> {
+    use crate::forge::MergeCommitKind;
+    let (squash_default, merge_default) = defaults;
+    kinds
+        .into_iter()
+        .map(|kind| crate::forge::MergeMessageCommit {
+            kind,
+            message: match kind {
+                MergeCommitKind::Squash => squash_default.clone(),
+                MergeCommitKind::Merge => merge_default.clone(),
+            },
+            exact: true,
+        })
+        .collect()
+}
+
+/// The (squash, merge) default messages out of the GraphQL answer; `None` for an
+/// unreadable body or a null/missing field.
+fn mr_default_messages_from(
+    body: &str,
+) -> (
+    Option<crate::forge::MergeMessage>,
+    Option<crate::forge::MergeMessage>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return (None, None);
+    };
+    let read = |field: &str| {
+        value
+            .pointer(&format!("/data/project/mergeRequest/{field}"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::forge::split_merge_message)
+    };
+    (
+        read("defaultSquashCommitMessage"),
+        read("defaultMergeCommitMessage"),
+    )
 }
 
 /// The GitLab service-error envelope glab can return in a body WITH a zero exit
@@ -7839,12 +8173,15 @@ struct GlabIssueDetail {
 /// A `filter` with an axis that applies to issues — assigned to me, author, label —
 /// narrows the list SERVER-side through the same leg fan-out [`list_prs`] uses;
 /// anything else keeps the unfiltered read below.
-pub async fn list_issues(
+///
+/// The flag is true only when the unfiltered walk stopped at its horizon short of
+/// `limit`; the filtered read refuses truncation instead, so it reports false.
+pub async fn list_issues_page(
     repo_path: &str,
     state: &str,
     limit: Option<u32>,
     filter: Option<&RemoteListFilter>,
-) -> AppResult<Vec<IssueInfo>> {
+) -> AppResult<(Vec<IssueInfo>, bool)> {
     let enc = encode_project(&project_path(repo_path).await?);
     let gl_state = match state {
         "open" => "opened",
@@ -7865,7 +8202,7 @@ pub async fn list_issues(
             viewer.as_deref(),
             filter,
         )? {
-            return filtered_issue_page(repo_path, &plan, limit).await;
+            return Ok((filtered_issue_page(repo_path, &plan, limit).await?, false));
         }
     }
     unfiltered_issues_with(&enc, gl_state, limit, |url: String| async move {
@@ -7876,13 +8213,26 @@ pub async fn list_issues(
     .await
 }
 
+/// [`list_issues_page`] without its cap flag, for callers that read rows only.
+pub async fn list_issues(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    filter: Option<&RemoteListFilter>,
+) -> AppResult<Vec<IssueInfo>> {
+    list_issues_page(repo_path, state, limit, filter)
+        .await
+        .map(|(rows, _)| rows)
+}
+
 /// Small limits preserve the single request; larger ones retain server page order.
+/// Only the walk past 100 can report capped (see [`unfiltered_pages_with`]).
 async fn unfiltered_issues_with<F, Fut>(
     enc: &str,
     gl_state: &str,
     limit: Option<u32>,
     fetch: F,
-) -> AppResult<Vec<IssueInfo>>
+) -> AppResult<(Vec<IssueInfo>, bool)>
 where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<String>>,
@@ -7891,7 +8241,7 @@ where
         let endpoint = format!(
             "projects/{enc}/issues?state={gl_state}&per_page={FILTER_PAGE_SIZE}&order_by=created_at&sort=desc"
         );
-        let (issues, _) = unfiltered_pages_with(
+        let (issues, capped) = unfiltered_pages_with(
             &endpoint,
             n,
             "issues",
@@ -7902,14 +8252,14 @@ where
         .await?;
         let mut rows: Vec<IssueInfo> = issues.into_iter().map(from_glab_issue).collect();
         rows.truncate(n as usize);
-        return Ok(rows);
+        return Ok((rows, capped));
     }
     let per_page = limit.map_or(100, |n| n.clamp(1, 100));
     let endpoint = format!("projects/{enc}/issues?state={gl_state}&per_page={per_page}");
     let body = fetch(endpoint).await?;
     let issues: Vec<GlabIssue> = serde_json::from_str(&body)
         .map_err(|e| gl_unreadable("issues", format!("could not parse GitLab issues: {e}")))?;
-    Ok(issues.into_iter().map(from_glab_issue).collect())
+    Ok((issues.into_iter().map(from_glab_issue).collect(), false))
 }
 
 /// Full read view of one issue — core fields, labels (with colors), and comments,
@@ -16224,7 +16574,7 @@ mod tests {
         pages[1] = second.to_string();
         let responses = page_responses(ISSUE_WALK_ENDPOINT, pages);
         let requested = std::sync::Mutex::new(Vec::new());
-        let rows = unfiltered_issues_with(
+        let (rows, capped) = unfiltered_issues_with(
             "group%2Frepo",
             "closed",
             Some(200),
@@ -16235,6 +16585,7 @@ mod tests {
         assert_eq!(rows.len(), 200);
         assert_eq!(rows.iter().filter(|i| i.number == 7).count(), 1);
         assert_eq!(requested.into_inner().unwrap().len(), 3);
+        assert!(!capped);
     }
 
     #[tokio::test]
@@ -16261,7 +16612,7 @@ mod tests {
             );
             let responses = vec![(endpoint.clone(), body)];
             let requested = std::sync::Mutex::new(Vec::new());
-            let rows = unfiltered_issues_with(
+            let (rows, capped) = unfiltered_issues_with(
                 "group%2Frepo",
                 "opened",
                 limit,
@@ -16271,18 +16622,21 @@ mod tests {
             .unwrap();
             assert_eq!(rows.len(), count as usize);
             assert_eq!(requested.into_inner().unwrap(), [endpoint]);
+            assert!(!capped);
         }
     }
 
     #[tokio::test]
     async fn unfiltered_issue_pages_walk_past_100() {
-        for (count, limit, returned, pages_read) in [(260, 250, 250, 3), (900, 900, 500, 5)] {
+        for (count, limit, returned, pages_read, horizon) in
+            [(260, 250, 250, 3, false), (900, 900, 500, 5, true)]
+        {
             let responses = page_responses(
                 ISSUE_WALK_ENDPOINT,
                 closed_state_pages("closed", 1, count, 5000),
             );
             let requested = std::sync::Mutex::new(Vec::new());
-            let rows = unfiltered_issues_with(
+            let (rows, capped) = unfiltered_issues_with(
                 "group%2Frepo",
                 "closed",
                 Some(limit),
@@ -16295,6 +16649,7 @@ mod tests {
                 (1..=returned).collect::<Vec<_>>()
             );
             assert!(rows.iter().all(|i| i.state == "CLOSED"));
+            assert_eq!(capped, horizon, "limit {limit}");
             assert_eq!(
                 requested.into_inner().unwrap(),
                 responses
@@ -16303,6 +16658,53 @@ mod tests {
                     .map(|(url, _)| url.clone())
                     .collect::<Vec<_>>()
             );
+        }
+    }
+
+    /// The cap flag reports a walk that stopped at its horizon short of the limit,
+    /// and only that: a limit the horizon meets, a short page and a single request
+    /// all report false.
+    #[tokio::test]
+    async fn unfiltered_issue_pages_report_the_horizon_cap() {
+        for (count, limit, returned, capped_at) in [
+            (500, 550, 500, true),
+            (600, 550, 500, true),
+            (500, 500, 500, false),
+            (260, 400, 260, false),
+        ] {
+            let responses = page_responses(
+                ISSUE_WALK_ENDPOINT,
+                closed_state_pages("closed", 1, count, 5000),
+            );
+            let requested = std::sync::Mutex::new(Vec::new());
+            let (rows, capped) = unfiltered_issues_with(
+                "group%2Frepo",
+                "closed",
+                Some(limit),
+                list_page_fetch(&responses, &requested),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), returned, "{count}/{limit}");
+            assert_eq!(capped, capped_at, "{count}/{limit}");
+        }
+        let endpoint = "projects/group%2Frepo/issues?state=closed&per_page=100".to_string();
+        for limit in [Some(100), Some(50), None] {
+            let per_page = limit.unwrap_or(100);
+            let endpoint = endpoint.replace("per_page=100", &format!("per_page={per_page}"));
+            let rows: Vec<_> = (1..=u64::from(per_page)).map(|iid| (iid, 5000)).collect();
+            let responses = vec![(endpoint, walk_page(&rows))];
+            let requested = std::sync::Mutex::new(Vec::new());
+            let (rows, capped) = unfiltered_issues_with(
+                "group%2Frepo",
+                "closed",
+                limit,
+                list_page_fetch(&responses, &requested),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), per_page as usize);
+            assert!(!capped, "{limit:?}");
         }
     }
 
@@ -18335,28 +18737,12 @@ mod tests {
         assert_eq!(map_mr_state("merged"), "MERGED");
     }
 
-    // The auto-merge read's mapping lives inline in the async `mr_merge_state`,
-    // which can't run without a live glab; these mirror it on the internal
-    // deserialize struct so the field mapping (incl. the null → "" fallback) is
-    // covered by a pure test.
-    fn to_public_merge_state(mr: GlabMrMergeState) -> GitLabMrMergeState {
-        let (pipeline_status, pipeline_url) = mr
-            .head_pipeline
-            .map(|p| (p.status, p.web_url))
-            .unwrap_or_default();
-        GitLabMrMergeState {
-            auto_merge_enabled: mr.merge_when_pipeline_succeeds,
-            detailed_merge_status: mr.detailed_merge_status,
-            pipeline_status,
-            pipeline_url,
-        }
-    }
-
     #[test]
     fn maps_mr_merge_state_with_head_pipeline() {
         // The live shape while armed with a running pipeline.
         let json = r#"{
             "iid": 6,
+            "state": "opened",
             "merge_when_pipeline_succeeds": true,
             "detailed_merge_status": "ci_still_running",
             "head_pipeline": {
@@ -18364,28 +18750,88 @@ mod tests {
                 "web_url": "https://gitlab.com/g/r/-/pipelines/42"
             }
         }"#;
-        let s = to_public_merge_state(serde_json::from_str(json).unwrap());
+        let s = merge_state_from(serde_json::from_str(json).unwrap());
         assert!(s.auto_merge_enabled);
         assert_eq!(s.detailed_merge_status, "ci_still_running");
         assert_eq!(s.pipeline_status, "running");
         assert_eq!(s.pipeline_url, "https://gitlab.com/g/r/-/pipelines/42");
+        assert!(!s.locked);
+        assert_eq!(s.state, "OPEN");
     }
 
     #[test]
     fn mr_merge_state_tolerates_nulls_and_missing_pipeline() {
         // GitLab nulls the scalars and sends a null head_pipeline for an MR with
-        // no pipeline — all four fields fall back to false / "".
+        // no pipeline — every field falls back to false / "".
         let json = r#"{
             "iid": 6,
+            "state": null,
             "merge_when_pipeline_succeeds": null,
             "detailed_merge_status": null,
             "head_pipeline": null
         }"#;
-        let s = to_public_merge_state(serde_json::from_str(json).unwrap());
+        let s = merge_state_from(serde_json::from_str(json).unwrap());
         assert!(!s.auto_merge_enabled);
         assert_eq!(s.detailed_merge_status, "");
         assert_eq!(s.pipeline_status, "");
         assert_eq!(s.pipeline_url, "");
+        assert!(!s.locked);
+        assert_eq!(s.state, "");
+    }
+
+    /// `locked` is the raw mid-merge state alone; `state` is the neutral mapping the
+    /// list reads, so a locked MR still says CLOSED there.
+    #[test]
+    fn mr_merge_state_reports_the_lock_beside_the_neutral_state() {
+        let read = |state: serde_json::Value| {
+            merge_state_from(
+                serde_json::from_value(serde_json::json!({"iid": 6, "state": state})).unwrap(),
+            )
+        };
+        for (raw, locked, state) in [
+            ("locked", true, "CLOSED"),
+            ("merged", false, "MERGED"),
+            ("closed", false, "CLOSED"),
+            ("opened", false, "OPEN"),
+        ] {
+            let s = read(serde_json::json!(raw));
+            assert_eq!((s.locked, s.state.as_str()), (locked, state), "{raw}");
+        }
+        let s = read(serde_json::Value::Null);
+        assert_eq!((s.locked, s.state.as_str()), (false, ""));
+        let absent = merge_state_from(serde_json::from_str(r#"{"iid": 6}"#).unwrap());
+        assert_eq!((absent.locked, absent.state.as_str()), (false, ""));
+    }
+
+    #[test]
+    fn mr_merge_state_wire_keys_are_camel_case() {
+        let s = merge_state_from(
+            serde_json::from_str(
+                r#"{"state": "locked", "head_pipeline": {"status": "running", "web_url": "u"}}"#,
+            )
+            .unwrap(),
+        );
+        let wire = serde_json::to_value(&s).unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "autoMergeEnabled",
+                "detailedMergeStatus",
+                "locked",
+                "pipelineStatus",
+                "pipelineUrl",
+                "state",
+            ]
+        );
+        assert_eq!(wire["locked"], serde_json::json!(true));
+        assert_eq!(wire["state"], serde_json::json!("CLOSED"));
     }
 
     /// `has_conflicts` OUTRANKS `detailed_merge_status`: the detailed status
@@ -18755,61 +19201,43 @@ mod tests {
         }
     }
 
-    /// A plain merge sends neither auto-merge param, and `sha` rides along only when
-    /// non-empty — the stale-view guard is opt-in, an empty `sha=` would be rejected.
+    fn no_messages() -> crate::forge::MergeMessages {
+        crate::forge::MergeMessages::default()
+    }
+
+    fn gl_msg(title: &str, body: &str) -> crate::forge::MergeMessage {
+        crate::forge::MergeMessage {
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+
+    fn owned(fields: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        fields.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    /// A plain merge sends neither auto-merge field, and `sha` rides along only when
+    /// non-empty — the stale-view guard is opt-in, an empty `sha` would be rejected.
     #[test]
-    fn merge_mr_args_send_no_auto_merge_params_unless_arming() {
-        let plain = merge_mr_args("projects/9/merge_requests/7/merge", true, false, None, false);
+    fn merge_mr_fields_send_no_auto_merge_params_unless_arming() {
+        let plain = merge_mr_fields(true, false, None, false, &no_messages());
         assert_eq!(
             plain,
-            vec![
-                "api",
-                "--method",
-                "PUT",
-                "projects/9/merge_requests/7/merge",
-                "-f",
-                "squash=true",
-                "-f",
-                "should_remove_source_branch=false",
-            ]
+            owned(&[("squash", "true"), ("should_remove_source_branch", "false")])
         );
-        assert!(!plain.iter().any(|a| a.contains("auto_merge")));
-        assert!(
-            !plain
-                .iter()
-                .any(|a| a.contains("merge_when_pipeline_succeeds"))
-        );
+        assert!(!plain.iter().any(|(k, _)| k.contains("message")));
 
-        let empty_sha = merge_mr_args(
-            "projects/9/merge_requests/7/merge",
-            true,
-            false,
-            Some(""),
-            false,
-        );
+        let empty_sha = merge_mr_fields(true, false, Some(""), false, &no_messages());
         assert_eq!(empty_sha, plain);
 
-        let guarded = merge_mr_args(
-            "projects/9/merge_requests/7/merge",
-            false,
-            true,
-            Some("abc123"),
-            false,
-        );
+        let guarded = merge_mr_fields(false, true, Some("abc123"), false, &no_messages());
         assert_eq!(
             guarded,
-            vec![
-                "api",
-                "--method",
-                "PUT",
-                "projects/9/merge_requests/7/merge",
-                "-f",
-                "squash=false",
-                "-f",
-                "should_remove_source_branch=true",
-                "-f",
-                "sha=abc123",
-            ]
+            owned(&[
+                ("squash", "false"),
+                ("should_remove_source_branch", "true"),
+                ("sha", "abc123"),
+            ])
         );
     }
 
@@ -18818,41 +19246,668 @@ mod tests {
     /// the pair into a single arm. `auto_merge` alone would merge a pre-17.11 MR
     /// outright. Everything else must be byte-identical to the plain merge.
     #[test]
-    fn merge_mr_args_arm_with_both_auto_merge_params() {
-        let plain = merge_mr_args(
-            "projects/9/merge_requests/7/merge",
-            false,
-            true,
-            Some("abc123"),
-            false,
-        );
-        let arming = merge_mr_args(
-            "projects/9/merge_requests/7/merge",
-            false,
-            true,
-            Some("abc123"),
-            true,
-        );
+    fn merge_mr_fields_arm_with_both_auto_merge_params() {
+        let plain = merge_mr_fields(false, true, Some("abc123"), false, &no_messages());
+        let arming = merge_mr_fields(false, true, Some("abc123"), true, &no_messages());
         assert_eq!(arming[..plain.len()], plain[..]);
         assert_eq!(
             arming[plain.len()..],
-            [
+            owned(&[
+                ("merge_when_pipeline_succeeds", "true"),
+                ("auto_merge", "true")
+            ])[..]
+        );
+    }
+
+    #[test]
+    fn merge_mr_fields_carry_each_message_as_one_string() {
+        let messages = crate::forge::MergeMessages {
+            squash: Some(gl_msg("S", "sb")),
+            merge: Some(gl_msg("M", "")),
+        };
+        let fields = merge_mr_fields(true, false, None, false, &messages);
+        assert_eq!(
+            fields[fields.len() - 2..],
+            owned(&[
+                ("squash_commit_message", "S\n\nsb"),
+                ("merge_commit_message", "M")
+            ])[..]
+        );
+        let json: serde_json::Value = serde_json::from_str(&glab_fields_json(&fields)).unwrap();
+        assert_eq!(json["squash_commit_message"], "S\n\nsb");
+
+        for (squash, merge, key, text) in [
+            (
+                Some(gl_msg("S", "sb")),
+                None,
+                "squash_commit_message",
+                "S\n\nsb",
+            ),
+            (
+                None,
+                Some(gl_msg("M", "mb")),
+                "merge_commit_message",
+                "M\n\nmb",
+            ),
+        ] {
+            let one = crate::forge::MergeMessages { squash, merge };
+            let fields = merge_mr_fields(false, false, None, false, &one);
+            assert_eq!(fields.last(), Some(&(key, text.to_string())), "{key}");
+            let messages = fields
+                .iter()
+                .filter(|(k, _)| k.ends_with("_commit_message"));
+            assert_eq!(messages.count(), 1, "{key}");
+        }
+
+        let arming = merge_mr_fields(true, false, None, true, &messages);
+        for key in [
+            "merge_when_pipeline_succeeds",
+            "auto_merge",
+            "squash_commit_message",
+            "merge_commit_message",
+        ] {
+            assert!(arming.iter().any(|(k, _)| *k == key), "{key}");
+        }
+    }
+
+    #[test]
+    fn merge_shape_from_reads_null_and_absent_settings_as_empty() {
+        let shape = merge_shape_from(r#"{"merge_method":"merge","squash_option":null}"#).unwrap();
+        assert_eq!(shape.squash_option, "");
+        assert_eq!(
+            merge_shape_from(r#"{"merge_method":"ff"}"#)
+                .unwrap()
+                .squash_option,
+            ""
+        );
+        let shape = merge_shape_from(r#"{"squash_option":"always"}"#).unwrap();
+        assert_eq!(shape.merge_method, "");
+        match gl_merge_commits(&shape, true) {
+            Err(AppError::Glab(t)) => assert_eq!(
+                t,
+                "GitLab didn't report this project's merge method, so this app can't tell which commits the merge writes."
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(merge_shape_from("not json").is_err());
+    }
+
+    #[test]
+    fn effective_squash_lets_never_and_always_override_the_strategy() {
+        for requested in [true, false] {
+            assert!(!effective_squash("never", requested).unwrap());
+            assert!(effective_squash("always", requested).unwrap());
+            for option in ["default_on", "default_off", ""] {
+                assert_eq!(effective_squash(option, requested).unwrap(), requested);
+            }
+        }
+        assert!(matches!(
+            effective_squash("sometimes", true),
+            Err(AppError::Glab(_))
+        ));
+    }
+
+    #[test]
+    fn gl_policy_squash_sends_what_a_forced_policy_requires() {
+        for requested in [false, true] {
+            assert!(gl_policy_squash("always", requested), "always {requested}");
+            assert!(!gl_policy_squash("never", requested), "never {requested}");
+            for option in ["default_on", "default_off", "", "sometimes"] {
+                assert_eq!(
+                    gl_policy_squash(option, requested),
+                    requested,
+                    "{option} {requested}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gl_merge_commits_follow_the_project_settings() {
+        use crate::forge::MergeCommitKind::{Merge, Squash};
+        for method in ["merge", "rebase_merge", "ff"] {
+            for option in ["never", "always", "default_on", "default_off", ""] {
+                for requested in [true, false] {
+                    let shape = GlMergeShape {
+                        merge_method: method.into(),
+                        squash_option: option.into(),
+                    };
+                    let squash = match option {
+                        "never" => false,
+                        "always" => true,
+                        _ => requested,
+                    };
+                    let expected = match (method, squash) {
+                        ("ff", true) => vec![Squash],
+                        ("ff", false) => vec![],
+                        (_, true) => vec![Squash, Merge],
+                        (_, false) => vec![Merge],
+                    };
+                    assert_eq!(
+                        gl_merge_commits(&shape, requested).unwrap(),
+                        expected,
+                        "{method} {option} {requested}"
+                    );
+                }
+            }
+        }
+        // The settings outrank the strategy.
+        let shape = |m: &str, o: &str| GlMergeShape {
+            merge_method: m.into(),
+            squash_option: o.into(),
+        };
+        assert_eq!(
+            gl_merge_commits(&shape("merge", "never"), true).unwrap(),
+            [Merge]
+        );
+        assert_eq!(
+            gl_merge_commits(&shape("merge", "always"), false).unwrap(),
+            [Squash, Merge]
+        );
+        match gl_merge_commits(&shape("fast_forward_only", ""), true) {
+            Err(AppError::Glab(t)) => assert_eq!(
+                t,
+                "GitLab reported a merge method this app doesn't know (\"fast_forward_only\"), so it can't tell which commits the merge writes."
+            ),
+            other => panic!("{other:?}"),
+        }
+        match gl_merge_commits(&shape("", ""), true) {
+            Err(AppError::Glab(t)) => {
+                assert_eq!(
+                    t,
+                    "GitLab didn't report this project's merge method, so this app can't tell which commits the merge writes."
+                );
+                assert!(!t.contains('"'));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn gl_message_slots_ok_refuses_a_message_for_an_unwritten_commit() {
+        use crate::forge::MergeCommitKind::{Merge, Squash};
+        let squash = crate::forge::MergeMessages {
+            squash: Some(gl_msg("s", "")),
+            merge: None,
+        };
+        let merge = crate::forge::MergeMessages {
+            squash: None,
+            merge: Some(gl_msg("m", "")),
+        };
+        let both = crate::forge::MergeMessages {
+            squash: Some(gl_msg("s", "")),
+            merge: Some(gl_msg("m", "")),
+        };
+        let refusal = |r: AppResult<()>| match r {
+            Err(AppError::InvalidArgument(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refusal(gl_message_slots_ok(&[Merge], "never", &squash)),
+            "This GitLab project never squashes merge requests, so there is no squash commit to take a message."
+        );
+        assert_eq!(
+            refusal(gl_message_slots_ok(&[Merge], "default_off", &squash)),
+            crate::forge::MERGE_SLOT_UNUSED
+        );
+        assert_eq!(
+            refusal(gl_message_slots_ok(&[], "default_off", &squash)),
+            crate::forge::MERGE_SLOT_UNUSED
+        );
+        let ff = "This GitLab project fast-forwards its merges, so there is no merge commit to take a message.";
+        assert_eq!(refusal(gl_message_slots_ok(&[Squash], "", &merge)), ff);
+        assert_eq!(refusal(gl_message_slots_ok(&[], "", &merge)), ff);
+        assert!(gl_message_slots_ok(&[Squash, Merge], "", &both).is_ok());
+        assert!(gl_message_slots_ok(&[Squash, Merge], "", &merge).is_ok());
+        assert!(gl_message_slots_ok(&[Squash, Merge], "always", &squash).is_ok());
+        assert!(gl_message_slots_ok(&[], "", &no_messages()).is_ok());
+    }
+
+    #[test]
+    fn merge_shape_unknown_wraps_every_error_under_one_lead() {
+        let lead = "Couldn't check which commits this merge writes, so nothing was merged. ";
+        let unknown = mr_message_commits("weird", true).unwrap_err();
+        let unknown_text = unknown.to_string();
+        for e in [
+            AppError::Timeout(30),
+            AppError::GlabNotFound,
+            AppError::Glab("x".into()),
+            unknown,
+        ] {
+            let detail = e.to_string();
+            match merge_shape_unknown(e) {
+                AppError::Glab(t) => {
+                    assert!(t.starts_with(lead), "{t}");
+                    assert!(t.ends_with(&detail), "{t}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(unknown_text.contains("weird"));
+        match merge_shape_unknown(AppError::InvalidArgument("m".into())) {
+            AppError::Glab(t) => assert_eq!(t, format!("{lead}m")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The merge body: the project read and the slot check run before the first write,
+    /// the run takes a stdin JSON body, and the message text is only ever a field value.
+    fn merge_body_checks_first(body: &str) -> bool {
+        let Some(first_run) = body.find("run_glab(") else {
+            return false;
+        };
+        body.contains("json_body_args(\"PUT\", &endpoint)")
+            && body.contains("Some(&glab_fields_json(&fields))")
+            && !body.contains("merge_commit_message")
+            && !body.contains("squash_commit_message")
+            && ["project_merge_shape(", "merge_shape_unknown", "gl_message_slots_ok("]
+                .iter()
+                .all(|c| body.find(c).is_some_and(|at| at < first_run))
+    }
+
+    #[test]
+    fn merge_mr_inner_checks_messages_before_writing_and_sends_a_stdin_body() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("gitlab.rs"),
+            "merge_mr_inner",
+        );
+        assert!(merge_body_checks_first(&body), "{body}");
+        assert!(!merge_body_checks_first(&body.replacen(
+            "json_body_args(\"PUT\", &endpoint)",
+            "&[\"api\", \"--method\", \"PUT\", &endpoint]",
+            1
+        )));
+        let call = "gl_message_slots_ok(&kinds, &shape.squash_option, messages)?;";
+        assert!(body.contains(call), "{body}");
+        let moved = body.replacen(call, "", 1);
+        let at = moved.find("run_glab(").unwrap() + "run_glab(".len();
+        let moved = format!("{}{call} {}", &moved[..at], &moved[at..]);
+        assert!(moved.contains("run_glab("), "{moved}");
+        assert!(!merge_body_checks_first(&moved));
+
+        assert!(merge_body_wires_messages(&body), "{body}");
+        for (from, to) in [
+            (" || messages.merge", " && messages.merge"),
+            (
+                "gl_merge_commits(&shape, squash)",
+                "gl_merge_commits(&shape, true)",
+            ),
+            (".map_err(merge_shape_unknown)", ""),
+            (
+                "when_pipeline_succeeds, messages)",
+                "when_pipeline_succeeds, &crate::forge::MergeMessages::default())",
+            ),
+        ] {
+            let mutant = body.replacen(from, to, 1);
+            assert_ne!(mutant, body, "{from}");
+            assert!(!merge_body_wires_messages(&mutant), "{from}");
+        }
+    }
+
+    /// The message check reads both slots and the strategy's squash flag, wraps both
+    /// reads under one lead, and the PUT's fields carry the caller's messages.
+    fn merge_body_wires_messages(body: &str) -> bool {
+        body.contains("if messages.squash.is_some() || messages.merge.is_some() {")
+            && body.contains("gl_merge_commits(&shape, squash).map_err(merge_shape_unknown)?")
+            && body.matches("map_err(merge_shape_unknown)").count() == 2
+            && body.contains(
+                "merge_mr_fields(squash, delete_branch, sha, when_pipeline_succeeds, messages)",
+            )
+    }
+
+    const MERGE_SETTINGS_READ: &str = "let read = project_merge_shape(repo_path, &enc).await;";
+    const MERGE_SENT_SQUASH: &str =
+        "let squash = shape.map_or(squash, |s| gl_policy_squash(&s.squash_option, squash));";
+
+    /// Over a whitespace-flattened merge body: the settings read precedes the first write,
+    /// and `squash` is rebound to the policy's value once, ahead of the attribute PUT's
+    /// argument and the merge PUT's fields.
+    fn merge_body_sends_the_policy_squash(body: &str) -> bool {
+        let at = |needle: &str| body.find(needle);
+        let (Some(read), Some(sent), Some(put), Some(attr), Some(fields)) = (
+            at(MERGE_SETTINGS_READ),
+            at(MERGE_SENT_SQUASH),
+            at("run_glab("),
+            at("let attr_squash_arg = format!(\"squash={squash}\");"),
+            at("merge_mr_fields(squash, delete_branch,"),
+        ) else {
+            return false;
+        };
+        body.matches("let squash =").count() == 2
+            && read < sent
+            && sent < attr
+            && attr < put
+            && sent < fields
+    }
+
+    /// Only a merge carrying a message refuses on a failed settings read; one without
+    /// keeps the strategy's flag.
+    fn merge_body_falls_back_without_a_message(body: &str) -> bool {
+        body.contains("let shape = read.map_err(merge_shape_unknown)?;")
+            && body.contains("Some(shape) } else { read.ok() };")
+    }
+
+    #[test]
+    fn merge_mr_inner_sends_the_policy_squash_and_falls_back_without_a_message() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("gitlab.rs"),
+            "merge_mr_inner",
+        ));
+        assert!(merge_body_sends_the_policy_squash(&body), "{body}");
+        assert!(merge_body_falls_back_without_a_message(&body), "{body}");
+
+        // Moves `line` to just after the first `anchor`.
+        let moved_after = |line: &str, anchor: &str| {
+            let without = body.replacen(&format!("{line} "), "", 1);
+            let at = without.find(anchor).unwrap() + anchor.len();
+            format!("{} {line}{}", &without[..at], &without[at..])
+        };
+        let attr_arg = "let attr_squash_arg = format!(\"squash={squash}\");";
+        let attr_put_done = "GLAB_NETWORK_TIMEOUT, ) .await?;";
+        let mutants = [
+            (
+                "the attribute PUT sends the request",
+                body.replacen(
+                    attr_arg,
+                    "let attr_squash_arg = format!(\"squash={}\", gl_requested_squash(strategy)?);",
+                    1,
+                ),
+            ),
+            (
+                "the policy value bound after the attribute argument",
+                moved_after(MERGE_SENT_SQUASH, attr_arg),
+            ),
+            (
+                "the merge fields take the request",
+                body.replacen(
+                    "merge_mr_fields(squash, delete_branch,",
+                    "merge_mr_fields(gl_requested_squash(strategy)?, delete_branch,",
+                    1,
+                ),
+            ),
+            (
+                "the settings read after the attribute PUT",
+                moved_after(MERGE_SETTINGS_READ, attr_put_done),
+            ),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}");
+            assert!(
+                !merge_body_sends_the_policy_squash(&mutant),
+                "{what}: {mutant}"
+            );
+        }
+        let propagates = body.replacen("else { read.ok() }", "else { Some(read?) }", 1);
+        assert_ne!(propagates, body);
+        assert!(!merge_body_falls_back_without_a_message(&propagates));
+    }
+
+    #[test]
+    fn gl_requested_squash_is_the_one_strategy_check() {
+        assert!(!gl_requested_squash("merge").unwrap());
+        assert!(gl_requested_squash("squash").unwrap());
+        match gl_requested_squash("rebase") {
+            Err(AppError::InvalidArgument(t)) => assert_eq!(
+                t,
+                "GitLab merges via the project's configured method; 'rebase' isn't a per-MR option"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let source = include_str!("gitlab.rs");
+        for name in ["merge_mr_inner", "mr_merge_message_defaults"] {
+            let body = crate::github::repo_meta::tests::wiring_body(source, name);
+            assert!(
+                body.contains("let squash = gl_requested_squash(strategy)?;"),
+                "{body}"
+            );
+            assert!(!body.contains("isn't a per-MR option"), "{body}");
+        }
+    }
+
+    #[test]
+    fn gl_default_commits_pairs_each_kind_with_its_own_default() {
+        use crate::forge::MergeCommitKind::{Merge, Squash};
+        let s = Some(gl_msg("squash text", "sb"));
+        let m = Some(gl_msg("merge text", "mb"));
+        let both = gl_default_commits(vec![Squash, Merge], (s.clone(), m.clone()));
+        assert_eq!(both.len(), 2);
+        assert_eq!((both[0].kind, both[0].message.clone()), (Squash, s.clone()));
+        assert_eq!((both[1].kind, both[1].message.clone()), (Merge, m.clone()));
+        assert!(both.iter().all(|c| c.exact));
+        let merge_only = gl_default_commits(vec![Merge], (s.clone(), m.clone()));
+        assert_eq!(merge_only.len(), 1);
+        assert_eq!(merge_only[0].message, m);
+        let squash_only = gl_default_commits(vec![Squash], (s.clone(), None));
+        assert_eq!(squash_only[0].message, s);
+        assert!(gl_default_commits(Vec::new(), (s, m)).is_empty());
+        // The pair as the reader hands it to the call.
+        let body = r#"{"data":{"project":{"mergeRequest":{"defaultMergeCommitMessage":"M","defaultSquashCommitMessage":"S"}}}}"#;
+        let read = gl_default_commits(vec![Squash, Merge], mr_default_messages_from(body));
+        assert_eq!(read[0].message, Some(gl_msg("S", "")));
+        assert_eq!(read[1].message, Some(gl_msg("M", "")));
+    }
+
+    #[test]
+    fn mr_default_messages_from_reads_each_field_on_its_own() {
+        let live = r#"{"data":{"project":{"mergeRequest":{"defaultMergeCommitMessage":"Merge branch 'feature/dark-mode' into 'main'\n\nAdd dark mode toggle\n\nCloses #1\n\nSee merge request theBGuy/gitdesktop-gitlab-demo!1","defaultSquashCommitMessage":"Add dark mode toggle\n"}}}}"#;
+        let (squash, merge) = mr_default_messages_from(live);
+        assert_eq!(squash, Some(gl_msg("Add dark mode toggle", "")));
+        assert_eq!(
+            merge,
+            Some(gl_msg(
+                "Merge branch 'feature/dark-mode' into 'main'",
+                "Add dark mode toggle\n\nCloses #1\n\nSee merge request theBGuy/gitdesktop-gitlab-demo!1"
+            ))
+        );
+        let null_squash = r#"{"data":{"project":{"mergeRequest":{"defaultMergeCommitMessage":"M","defaultSquashCommitMessage":null}}}}"#;
+        let (squash, merge) = mr_default_messages_from(null_squash);
+        assert_eq!(squash, None);
+        assert_eq!(merge, Some(gl_msg("M", "")));
+        assert_eq!(
+            mr_default_messages_from(r#"{"errors":[{"message":"no"}]}"#),
+            (None, None)
+        );
+        assert_eq!(mr_default_messages_from("not json"), (None, None));
+    }
+
+    #[test]
+    fn mr_default_head_from_reads_only_a_full_object_id() {
+        let sha1 = "c3bcab13".repeat(5);
+        let sha256 = "0123456789abcdef".repeat(4);
+        let body = |head: &str| {
+            format!(
+                r#"{{"data":{{"project":{{"mergeRequest":{{"iid":"1"{head},"defaultSquashCommitMessage":"S"}}}}}}}}"#
+            )
+        };
+        let present = body(&format!(r#","diffHeadSha":"{sha1}""#));
+        assert_eq!(mr_default_head_from(&present), Some(sha1.clone()));
+        let long = body(&format!(r#","diffHeadSha":"{sha256}""#));
+        assert_eq!(mr_default_head_from(&long), Some(sha256));
+        assert_eq!(mr_default_head_from(&body(r#","diffHeadSha":null"#)), None);
+        assert_eq!(mr_default_head_from(&body("")), None);
+        for bad in [
+            "",
+            "c3bcab13",
+            "zz",
+            &format!("{sha1}0"),
+            &sha1.replace('c', "g"),
+        ] {
+            let malformed = body(&format!(r#","diffHeadSha":"{bad}""#));
+            assert_eq!(mr_default_head_from(&malformed), None, "{bad}");
+        }
+        assert_eq!(
+            mr_default_head_from(r#"{"data":{"project":{"mergeRequest":null}}}"#),
+            None
+        );
+        assert_eq!(mr_default_head_from("not json"), None);
+    }
+
+    #[test]
+    fn mr_defaults_outcome_errors_unless_the_schema_refused_a_field() {
+        let sha = "c3bcab13".repeat(5);
+        let good = format!(
+            r#"{{"data":{{"project":{{"mergeRequest":{{"iid":"1","diffHeadSha":"{sha}","defaultMergeCommitMessage":"M","defaultSquashCommitMessage":"S"}}}}}}}}"#
+        );
+        let ((squash, merge), head) = mr_defaults_outcome(Ok(good)).unwrap();
+        assert_eq!(squash, Some(gl_msg("S", "")));
+        assert_eq!(merge, Some(gl_msg("M", "")));
+        assert_eq!(head, Some(sha));
+        let missing = r#"{"data":{"project":{"mergeRequest":null}}}"#.to_string();
+        assert_eq!(
+            mr_defaults_outcome(Ok(missing)).unwrap(),
+            ((None, None), None)
+        );
+        let partial = r#"{"data":{"project":{"mergeRequest":{"diffHeadSha":null}}}}"#;
+        assert_eq!(
+            mr_defaults_outcome(Ok(partial.to_string())).unwrap(),
+            ((None, None), None)
+        );
+        let no_project = r#"{"data":{"project":null}}"#;
+        assert_eq!(
+            mr_defaults_outcome(Ok(no_project.to_string())).unwrap(),
+            ((None, None), None)
+        );
+        for body in ["not json", "", "{\"data\":"] {
+            assert!(
+                matches!(
+                    mr_defaults_outcome(Ok(body.to_string())),
+                    Err(AppError::Glab(t))
+                        if t.starts_with("Couldn't read the default commit messages from GitLab.\n")
+                ),
+                "{body}"
+            );
+        }
+        for body in [
+            r#"{"status":"error","message":"Internal server error"}"#,
+            r#"{"data":null}"#,
+            r#"{"data":[]}"#,
+            "[]",
+            "null",
+            "\"text\"",
+        ] {
+            assert!(
+                matches!(
+                    mr_defaults_outcome(Ok(body.to_string())),
+                    Err(AppError::Glab(t))
+                        if t.starts_with("Couldn't read the default commit messages from GitLab.\n")
+                            && t.contains("the defaults query carried no data")
+                ),
+                "{body}"
+            );
+        }
+        // glab 1.105.0's stderr for a field the server's schema lacks.
+        let schema =
+            "glab: Field 'defaultSquashCommitMessage' doesn't exist on type 'MergeRequest'";
+        assert_eq!(
+            mr_defaults_outcome(Err(AppError::Glab(schema.into()))).unwrap(),
+            ((None, None), None)
+        );
+        assert!(matches!(
+            mr_defaults_outcome(Err(AppError::Timeout(120))),
+            Err(AppError::Timeout(120))
+        ));
+        let refused = "glab: connection refused";
+        assert!(matches!(
+            mr_defaults_outcome(Err(AppError::Glab(refused.into()))),
+            Err(AppError::Glab(t)) if t == refused
+        ));
+    }
+
+    /// The production read sends this argv: the head and both defaults in one
+    /// document, and every caller value as a raw `-f` variable.
+    #[test]
+    fn mr_defaults_read_sends_its_values_as_raw_variables_and_selects_the_head() {
+        use crate::github::repo_meta::tests::wiring_body;
+        let args = mr_defaults_args("group/sub/proj", 42);
+        let query = args[3].strip_prefix("query=").expect("query slot");
+        assert!(!query.contains('"'), "{query}");
+        assert!(
+            query.contains("mergeRequest(iid: $iid){ diffHeadSha "),
+            "{query}"
+        );
+        assert!(query.contains("defaultMergeCommitMessage"), "{query}");
+        assert!(query.contains("defaultSquashCommitMessage"), "{query}");
+        assert!(query.contains("$iid:String!"), "{query}");
+        assert!(query.contains("query($path:ID!,"), "{query}");
+        assert!(query.contains("project(fullPath: $path)"), "{query}");
+        assert_eq!(
+            args.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "api",
+                "graphql",
                 "-f",
-                "merge_when_pipeline_succeeds=true",
+                args[3].as_str(),
                 "-f",
-                "auto_merge=true",
+                "path=group/sub/proj",
+                "-f",
+                "iid=42"
             ]
         );
-        // `-f` is glab's raw field: no leading-`@` file-read magic on any value.
-        assert!(!arming.iter().any(|a| a == "-F"));
+        let body = wiring_body(include_str!("gitlab.rs"), "mr_merge_message_defaults");
+        assert!(body.contains("mr_defaults_args(&path, number)"), "{body}");
+        assert!(body.contains("run_glab(Some(repo_path), &argv,"), "{body}");
+        // The parsed head reaches the answer; only the fast-forward arm carries none.
+        assert!(
+            body.contains("let (defaults, head_sha) = mr_defaults_outcome(run)?;"),
+            "{body}"
+        );
+        assert!(
+            body.contains("reason: None,\n        head_sha,\n"),
+            "{body}"
+        );
+        assert_eq!(body.matches("head_sha: None").count(), 1, "{body}");
+    }
+
+    #[test]
+    fn reword_merge_refusal_rewords_only_documented_glab_refusals() {
+        let text = |e: AppError| match e {
+            AppError::Glab(t) => t,
+            other => panic!("{other:?}"),
+        };
+        let blocked = "GitLab is blocking this merge — the merge request isn't in a mergeable state yet.";
+        let r405 = "glab: 405 Method Not Allowed (HTTP 405)";
+        assert_eq!(text(reword_merge_refusal(AppError::Glab(r405.into()), false)), blocked);
+        assert_eq!(text(reword_merge_refusal(AppError::Glab(r405.into()), true)), r405);
+        assert_eq!(
+            text(reword_merge_refusal(AppError::Glab("glab: HTTP 409".into()), false)),
+            "The merge request changed while merging — refresh and retry."
+        );
+        assert_eq!(
+            text(reword_merge_refusal(
+                AppError::Glab("glab exited with code 1".into()),
+                false
+            )),
+            "glab exited with code 1"
+        );
+        assert!(matches!(
+            reword_merge_refusal(AppError::Timeout(30), false),
+            AppError::Timeout(30)
+        ));
     }
 
     #[tokio::test]
     async fn auto_merge_rejects_invalid_strategy() {
         // The arm path shares merge_mr's strategy validation — "rebase" is not a
         // per-MR option and must fail before any remote call.
-        let r = auto_merge_mr("C:/nonexistent", 1, "rebase", false, None).await;
+        let r = auto_merge_mr("C:/nonexistent", 1, "rebase", false, None, &no_messages()).await;
         assert!(matches!(r, Err(AppError::InvalidArgument(_))));
+    }
+
+    /// GitLab's own unknown-strategy refusal answers ahead of every slot row and read.
+    #[tokio::test]
+    async fn merge_refuses_an_unknown_strategy_before_its_message_checks() {
+        let messages = crate::forge::MergeMessages {
+            squash: Some(gl_msg("s", "")),
+            merge: None,
+        };
+        match merge_mr("C:/nonexistent", 1, "rebase", false, None, &messages).await {
+            Err(AppError::InvalidArgument(t)) => assert_eq!(
+                t,
+                "GitLab merges via the project's configured method; 'rebase' isn't a per-MR option"
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

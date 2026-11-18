@@ -2588,10 +2588,155 @@ pub async fn forge_pr_unapprove(repo_path: String, number: u64) -> AppResult<()>
     }
 }
 
-/// Merge a merge/pull request. GitHub delegates to `gh pr merge` (it has no `sha`
-/// guard, so that arg is dropped); GitLab merges via `glab` — merge/squash only — with
-/// an optional head-`sha` stale-view guard. `strategy` is merge/squash/rebase; rebase
-/// is GitHub-only.
+/// A custom commit message for a merge: `title` is one non-empty line, `body` may be
+/// `""` (an explicitly blank body).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeMessage {
+    pub title: String,
+    pub body: String,
+}
+
+/// A commit a merge writes that can take a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeCommitKind {
+    Squash,
+    Merge,
+}
+
+/// Why a merge writes no commit that could take a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NoMergeMessageReason {
+    Rebase,
+    FastForward,
+    Stacked,
+    GitlabFastForward,
+}
+
+/// One commit the merge writes, with its default message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeMessageCommit {
+    pub kind: MergeCommitKind,
+    /// `None` when the default is unknown.
+    pub message: Option<MergeMessage>,
+    /// True for the forge's own default text, false for a locally composed draft.
+    pub exact: bool,
+}
+
+/// The commits a merge writes, in the forge's order (squash first, then merge).
+/// `reason` is `Some` exactly when `commits` is empty.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeMessageDefaults {
+    pub commits: Vec<MergeMessageCommit>,
+    pub reason: Option<NoMergeMessageReason>,
+    /// The head commit the defaults were read under, from the same forge response;
+    /// `None` when the forge gave none, so an edited message can't be bound to a head.
+    pub head_sha: Option<String>,
+}
+
+/// The two message slots of one merge request, already shape-checked; not a wire type.
+#[derive(Debug, Default)]
+pub struct MergeMessages {
+    pub squash: Option<MergeMessage>,
+    pub merge: Option<MergeMessage>,
+}
+
+/// A message in a slot the merge does not write.
+pub(crate) const MERGE_SLOT_UNUSED: &str =
+    "The message was given for a commit this merge doesn't write.";
+
+/// The message-shape checks every merge runs before its provider is detected. The
+/// title is the one piece that rides argv on GitHub, hence its length cap.
+pub(crate) fn validate_merge_message(m: &MergeMessage) -> AppResult<()> {
+    if m.title.trim().is_empty() {
+        return Err(AppError::InvalidArgument(
+            "The commit title can't be empty.".into(),
+        ));
+    }
+    if m.title.contains(['\n', '\r', '\0']) || m.body.contains('\0') {
+        return Err(AppError::InvalidArgument(
+            "The commit title must be a single line, and the message can't contain a NUL character."
+                .into(),
+        ));
+    }
+    let n = m.title.chars().count();
+    if n > 1024 {
+        return Err(AppError::InvalidArgument(format!(
+            "The commit title is too long ({n} characters; the limit is 1,024)."
+        )));
+    }
+    Ok(())
+}
+
+/// A message body as it is sent: CRLF to LF, every leading newline dropped, trailing
+/// whitespace trimmed. The dialog's `normalizeBody` mirrors this exactly.
+pub(crate) fn normalize_merge_body(body: &str) -> String {
+    body.replace("\r\n", "\n")
+        .trim_start_matches('\n')
+        .trim_end()
+        .to_string()
+}
+
+/// The one-string form GitLab and Bitbucket take: the trimmed title, then a blank line
+/// and the normalised body when it is non-empty.
+pub(crate) fn merge_message_text(m: &MergeMessage) -> String {
+    let title = m.title.trim();
+    let body = normalize_merge_body(&m.body);
+    if body.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n\n{body}")
+    }
+}
+
+/// Splits a forge's one-string message into title and body; `None` without a title.
+pub(crate) fn split_merge_message(text: &str) -> Option<MergeMessage> {
+    let text = text.replace("\r\n", "\n");
+    let (first, rest) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    let title = first.trim();
+    if title.is_empty() {
+        return None;
+    }
+    Some(MergeMessage {
+        title: title.to_string(),
+        body: normalize_merge_body(rest),
+    })
+}
+
+/// The slot check for forges that write at most one commit (GitHub, Bitbucket). Its
+/// caller has already refused every strategy name it doesn't accept; `no_commit` holds
+/// that forge's names for a merge that writes no commit of its own.
+pub(crate) fn single_commit_message(
+    strategy: &str,
+    no_commit: &[&str],
+    messages: MergeMessages,
+) -> AppResult<Option<MergeMessage>> {
+    let MergeMessages { squash, merge } = messages;
+    let unused = || AppError::InvalidArgument(MERGE_SLOT_UNUSED.into());
+    match strategy {
+        "squash" if merge.is_some() => Err(unused()),
+        "squash" => Ok(squash),
+        "merge" if squash.is_some() => Err(unused()),
+        "merge" => Ok(merge),
+        _ if squash.is_none() && merge.is_none() => Ok(None),
+        s if no_commit.contains(&s) => Err(AppError::InvalidArgument(
+            "This merge method writes no commit of its own, so it can't take a commit message."
+                .into(),
+        )),
+        // Unreachable through either caller; fails closed without naming a strategy.
+        _ => Err(unused()),
+    }
+}
+
+/// Merge a merge/pull request. GitHub delegates to `gh pr merge`, which takes `sha` as
+/// a head guard only with a custom message; GitLab merges via `glab` — merge/squash
+/// only — with an optional head-`sha` stale-view guard. `strategy` is merge/squash/rebase; rebase
+/// is GitHub-only. An absent message leaves the forge's default, and one the merge
+/// can't use is refused before any request.
 ///
 /// `cleanup_warning` on the returned [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome)
 /// means the merge was accepted with a caveat — either the PR merged but post-merge
@@ -2600,6 +2745,7 @@ pub async fn forge_pr_unapprove(repo_path: String, number: u64) -> AppResult<()>
 /// deletion into the server-side merge and have no stacked-merge queue. A merge
 /// FAILURE is still an `Err`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one flat arg per form field, IPC-shaped
 pub async fn forge_pr_merge(
     repo_path: String,
     number: u64,
@@ -2607,7 +2753,16 @@ pub async fn forge_pr_merge(
     delete_branch: bool,
     sha: Option<String>,
     lens: Option<String>,
+    squash_message: Option<MergeMessage>,
+    merge_message: Option<MergeMessage>,
 ) -> AppResult<crate::github::pr::PrMergeOutcome> {
+    for m in [&squash_message, &merge_message].into_iter().flatten() {
+        validate_merge_message(m)?;
+    }
+    let messages = MergeMessages {
+        squash: squash_message,
+        merge: merge_message,
+    };
     match detect_non_github(&repo_path).await {
         Some((Provider::GitLab, _)) => gitlab::merge_mr(
             &repo_path,
@@ -2615,14 +2770,57 @@ pub async fn forge_pr_merge(
             &strategy,
             delete_branch,
             sha.as_deref(),
+            &messages,
         )
         .await
         .map(|()| crate::github::pr::PrMergeOutcome::default()),
         // Bitbucket has no expected-hash guard, so `sha` is dropped.
-        Some((Provider::Bitbucket, _)) => bitbucket::merge_pr(&repo_path, number, &strategy, delete_branch)
+        Some((Provider::Bitbucket, _)) => {
+            bitbucket::merge_pr(&repo_path, number, &strategy, delete_branch, messages)
+                .await
+                .map(|()| crate::github::pr::PrMergeOutcome::default())
+        }
+        _ => {
+            crate::github::pr::gh_pr_merge(
+                repo_path,
+                number,
+                strategy,
+                delete_branch,
+                sha,
+                lens,
+                messages,
+            )
             .await
-            .map(|()| crate::github::pr::PrMergeOutcome::default()),
-        _ => crate::github::pr::gh_pr_merge(repo_path, number, strategy, delete_branch, lens).await,
+        }
+    }
+}
+
+/// The commits a merge with `strategy` would write and each one's default message,
+/// read for the merge dialog. An empty `commits` (with its `reason`) means the merge
+/// writes no commit that could take a message, so `forge_pr_merge` refuses one.
+#[tauri::command]
+pub async fn forge_pr_merge_message_defaults(
+    repo_path: String,
+    number: u64,
+    strategy: String,
+    lens: Option<String>,
+) -> AppResult<MergeMessageDefaults> {
+    match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            gitlab::mr_merge_message_defaults(&repo_path, number, &strategy).await
+        }
+        Some((Provider::Bitbucket, _)) => {
+            bitbucket::merge_message_defaults(&repo_path, number, &strategy).await
+        }
+        _ => {
+            crate::github::pr::gh_pr_merge_message_defaults(
+                &repo_path,
+                number,
+                &strategy,
+                lens.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -2647,6 +2845,44 @@ pub async fn forge_issue_list(
         )),
         _ => github::list_issues(&repo_path, &state, limit, lens, filter).await,
     }
+}
+
+/// One [`forge_issue_list_page`] answer: the rows plus whether a read horizon cut
+/// them, the issue twin of [`PrListPage`].
+#[derive(serde::Serialize)]
+pub struct IssueListPage {
+    pub rows: Vec<crate::github::issue::IssueInfo>,
+    /// True only when a GitLab unfiltered issue walk stopped at its row horizon short
+    /// of the requested limit; GitHub and every filtered read say false. Like
+    /// [`PrListPage::capped`], it never proves older rows exist.
+    pub capped: bool,
+}
+
+/// [`forge_issue_list`] with the cap flag the Issues panel needs to tell a
+/// horizon-limited page from a complete one. Same arguments and provider arms.
+#[tauri::command]
+pub async fn forge_issue_list_page(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
+) -> AppResult<IssueListPage> {
+    let (rows, capped) = match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            gitlab::list_issues_page(&repo_path, &state, limit, filter.as_ref()).await?
+        }
+        Some((Provider::Bitbucket, _)) => {
+            return Err(AppError::InvalidArgument(
+                "Bitbucket issues aren't supported yet.".into(),
+            ));
+        }
+        _ => (
+            github::list_issues(&repo_path, &state, limit, lens, filter).await?,
+            false,
+        ),
+    };
+    Ok(IssueListPage { rows, capped })
 }
 
 /// Full details for one issue's read view, behind the abstraction.
@@ -4352,10 +4588,26 @@ pub async fn forge_gl_mr_auto_merge(
     strategy: String,
     delete_branch: bool,
     sha: Option<String>,
+    squash_message: Option<MergeMessage>,
+    merge_message: Option<MergeMessage>,
 ) -> AppResult<()> {
+    for m in [&squash_message, &merge_message].into_iter().flatten() {
+        validate_merge_message(m)?;
+    }
+    let messages = MergeMessages {
+        squash: squash_message,
+        merge: merge_message,
+    };
     gl_only!(
         repo_path,
-        gitlab::auto_merge_mr(&repo_path, number, &strategy, delete_branch, sha.as_deref())
+        gitlab::auto_merge_mr(
+            &repo_path,
+            number,
+            &strategy,
+            delete_branch,
+            sha.as_deref(),
+            &messages
+        )
     )
 }
 
@@ -5233,6 +5485,37 @@ pub(crate) async fn forge_pr_create_with_attachments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Issues panel reads `rows` and `capped` off this page, exactly as the PR
+    /// panel reads [`PrListPage`].
+    #[test]
+    fn issue_list_page_wire_keys() {
+        let page = IssueListPage {
+            rows: vec![crate::github::issue::IssueInfo {
+                number: 3,
+                url: "u".into(),
+                title: "t".into(),
+                state: "OPEN".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
+                author: None,
+                labels: Vec::new(),
+            }],
+            capped: true,
+        };
+        let wire = serde_json::to_value(&page).unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["capped", "rows"]);
+        assert_eq!(wire["capped"], serde_json::json!(true));
+        assert_eq!(wire["rows"][0]["number"], serde_json::json!(3));
+        assert_eq!(wire["rows"][0]["createdAt"], serde_json::json!(""));
+    }
 
     /// The MCP-facing edit is the save without the clear signal, so `update_release`
     /// with empty notes keeps them; only the save is a Tauri command.
@@ -7244,5 +7527,257 @@ mod tests {
             let got = created_reply(html, provider, noun, after_push).map_err(|e| e.to_string());
             assert_eq!(got, Err(unreadable_sentence(host, noun, after_push)));
         }
+    }
+
+    fn mm(title: &str, body: &str) -> MergeMessage {
+        MergeMessage {
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+
+    fn invalid(r: AppResult<impl std::fmt::Debug>) -> String {
+        match r {
+            Err(AppError::InvalidArgument(t)) => t,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_merge_message_refuses_each_shape_with_its_sentence() {
+        let v1 = "The commit title can't be empty.";
+        let v2 = "The commit title must be a single line, and the message can't contain a NUL character.";
+        for title in ["", "   "] {
+            assert_eq!(invalid(validate_merge_message(&mm(title, "b"))), v1);
+        }
+        for m in [
+            mm("a\nb", ""),
+            mm("a\rb", ""),
+            mm("a\0b", ""),
+            mm("a", "b\0c"),
+        ] {
+            assert_eq!(invalid(validate_merge_message(&m)), v2, "{m:?}");
+        }
+        assert!(validate_merge_message(&mm(&"x".repeat(1024), "")).is_ok());
+        let long = invalid(validate_merge_message(&mm(&"é".repeat(1025), "")));
+        assert_eq!(
+            long,
+            "The commit title is too long (1025 characters; the limit is 1,024)."
+        );
+        assert!(validate_merge_message(&mm("t", "")).is_ok());
+    }
+
+    #[test]
+    fn merge_message_text_rules_round_trip() {
+        for (text, title, body) in [
+            ("t", "t", ""),
+            ("t\n\nb", "t", "b"),
+            ("t\r\n\r\nb\r\n", "t", "b"),
+            ("t\n\n\nb", "t", "b"),
+            ("t\n\nb\n\n  \n", "t", "b"),
+            (
+                "Merge branch 'feature/dark-mode' into 'main'\n\nAdd dark mode toggle\n\nCloses #1\n\nSee merge request theBGuy/gitdesktop-gitlab-demo!1",
+                "Merge branch 'feature/dark-mode' into 'main'",
+                "Add dark mode toggle\n\nCloses #1\n\nSee merge request theBGuy/gitdesktop-gitlab-demo!1",
+            ),
+        ] {
+            assert_eq!(split_merge_message(text), Some(mm(title, body)), "{text:?}");
+        }
+        assert_eq!(normalize_merge_body("\r\n\n\nb\r\nc \t\r\n"), "b\nc");
+        assert_eq!(merge_message_text(&mm("t", "")), "t");
+        assert_eq!(merge_message_text(&mm(" t ", "b")), "t\n\nb");
+        for m in [mm("t", ""), mm("t", "b"), mm("t", "b\n\nc")] {
+            assert_eq!(split_merge_message(&merge_message_text(&m)), Some(m));
+        }
+        assert_eq!(split_merge_message(""), None);
+        assert_eq!(split_merge_message("\n\nbody"), None);
+        assert_eq!(merge_message_text(&mm("t", " \n\t ")), "t");
+        // The trims use Rust's whitespace set, which the dialog mirrors: NEL (U+0085) is
+        // whitespace and trimmed, BOM (U+FEFF) is not and stays.
+        let nel = char::from(0x85u8);
+        let bom = char::from_u32(0xFEFF).unwrap();
+        let samples = [
+            (
+                format!("t{nel}\n\nb{nel}"),
+                "t".to_string(),
+                "b".to_string(),
+            ),
+            (
+                format!("t{bom}\n\nb{bom}"),
+                format!("t{bom}"),
+                format!("b{bom}"),
+            ),
+        ];
+        for (text, title, body) in samples {
+            assert_eq!(
+                split_merge_message(&text),
+                Some(mm(&title, &body)),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_commit_message_picks_each_forges_slot() {
+        let v4 = "This merge method writes no commit of its own, so it can't take a commit message.";
+        let s = || Some(mm("s", ""));
+        let m = || Some(mm("m", ""));
+        let messages = |squash: Option<MergeMessage>, merge: Option<MergeMessage>| MergeMessages {
+            squash,
+            merge,
+        };
+        for (no_commit, none_name) in [(&["rebase"][..], "rebase"), (&["fast_forward"][..], "fast_forward")] {
+            let pick = |name: &str, sq, mg| single_commit_message(name, no_commit, messages(sq, mg));
+            assert_eq!(pick("squash", None, None).unwrap(), None);
+            assert_eq!(pick("squash", s(), None).unwrap(), s());
+            assert_eq!(invalid(pick("squash", None, m())), MERGE_SLOT_UNUSED);
+            assert_eq!(invalid(pick("squash", s(), m())), MERGE_SLOT_UNUSED);
+            assert_eq!(pick("merge", None, None).unwrap(), None);
+            assert_eq!(invalid(pick("merge", s(), None)), MERGE_SLOT_UNUSED);
+            assert_eq!(pick("merge", None, m()).unwrap(), m());
+            assert_eq!(invalid(pick("merge", s(), m())), MERGE_SLOT_UNUSED);
+            assert_eq!(pick(none_name, None, None).unwrap(), None);
+            assert_eq!(invalid(pick(none_name, s(), None)), v4);
+            assert_eq!(invalid(pick(none_name, None, m())), v4);
+            assert_eq!(invalid(pick(none_name, s(), m())), v4);
+        }
+    }
+
+    /// The shape checks run ahead of every forge arm's own checks, so an empty title on a
+    /// name no forge knows answers the empty-title refusal. A provider lookup moved ahead
+    /// of them would still refuse here, so the order is pinned on the source below.
+    #[tokio::test]
+    async fn forge_pr_merge_checks_message_shape_first() {
+        let r = forge_pr_merge(
+            "C:/nonexistent".into(),
+            1,
+            "octopus".into(),
+            false,
+            None,
+            None,
+            Some(mm("", "b")),
+            None,
+        )
+        .await;
+        assert_eq!(invalid(r.map(|_| ())), "The commit title can't be empty.");
+    }
+
+    /// Validation precedes provider detection, so an invalid message spawns nothing.
+    #[test]
+    fn forge_pr_merge_validates_before_detecting_the_provider() {
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("mod.rs"), "forge_pr_merge");
+        let ordered = |b: &str| match (
+            b.find("validate_merge_message(m)?;"),
+            b.find("detect_non_github(&repo_path)"),
+        ) {
+            (Some(check), Some(detect)) => check < detect,
+            _ => false,
+        };
+        assert!(ordered(&body), "{body}");
+        let check = "    for m in [&squash_message, &merge_message]";
+        let at = body.find(check).unwrap();
+        let early = "    let found = detect_non_github(&repo_path).await;\n";
+        let moved = format!("{}{early}{}", &body[..at], &body[at..]);
+        assert!(!ordered(&moved));
+    }
+
+    /// Arming auto-merge runs the same shape checks ahead of its GitLab-only gate, whose
+    /// own refusal is the same error kind, so the sentence tells them apart.
+    #[tokio::test]
+    async fn forge_gl_mr_auto_merge_checks_message_shape_first() {
+        let r = forge_gl_mr_auto_merge(
+            "C:/nonexistent".into(),
+            1,
+            "squash".into(),
+            false,
+            None,
+            Some(mm("", "b")),
+            None,
+        )
+        .await;
+        assert_eq!(invalid(r), "The commit title can't be empty.");
+    }
+
+    /// A squash message on a merge is refused by the slot check, which only holds while
+    /// the command hands each message to its own slot.
+    #[tokio::test]
+    async fn forge_pr_merge_keeps_each_message_in_its_own_slot() {
+        let r = forge_pr_merge(
+            "C:/nonexistent".into(),
+            1,
+            "merge".into(),
+            false,
+            None,
+            None,
+            Some(mm("t", "")),
+            None,
+        )
+        .await;
+        assert_eq!(invalid(r.map(|_| ())), MERGE_SLOT_UNUSED);
+    }
+
+    #[test]
+    fn auto_merge_command_keeps_each_message_in_its_own_slot() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("mod.rs"),
+            "forge_gl_mr_auto_merge",
+        ));
+        let slots = "MergeMessages { squash: squash_message, merge: merge_message, }";
+        assert!(body.contains(slots), "{body}");
+        let swapped = body.replacen(
+            slots,
+            "MergeMessages { squash: merge_message, merge: squash_message, }",
+            1,
+        );
+        assert!(!swapped.contains(slots));
+        // The arm receives that struct itself, not an empty or partial copy.
+        let handoff = "sha.as_deref(), &messages ) )";
+        assert!(body.contains(handoff), "{body}");
+        for to in [
+            "sha.as_deref(), &MergeMessages::default() ) )",
+            "sha.as_deref(), &MergeMessages { squash: messages.squash, merge: None } ) )",
+        ] {
+            assert!(!body.replacen(handoff, to, 1).contains(handoff), "{to}");
+        }
+    }
+
+    #[test]
+    fn merge_message_defaults_wire_shape_is_camel_case() {
+        let one = MergeMessageDefaults {
+            commits: vec![MergeMessageCommit {
+                kind: MergeCommitKind::Squash,
+                message: Some(mm("t", "b")),
+                exact: true,
+            }],
+            reason: None,
+            head_sha: Some("c3bcab13".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&one).unwrap(),
+            serde_json::json!({"commits":[{"kind":"squash","message":{"title":"t","body":"b"},"exact":true}],"reason":null,"headSha":"c3bcab13"})
+        );
+        let none = MergeMessageDefaults {
+            commits: Vec::new(),
+            reason: Some(NoMergeMessageReason::GitlabFastForward),
+            head_sha: None,
+        };
+        let text = serde_json::to_string(&none).unwrap();
+        assert_eq!(
+            text,
+            r#"{"commits":[],"reason":"gitlabFastForward","headSha":null}"#
+        );
+        let one_text = serde_json::to_string(&one).unwrap();
+        let ff = serde_json::to_string(&NoMergeMessageReason::FastForward).unwrap();
+        assert_eq!(ff, r#""fastForward""#);
+        assert!(!one_text.contains("head_sha") && !text.contains("head_sha"));
+        for snake in ["gitlab_fast_forward", "fast_forward"] {
+            assert!(!text.contains(snake) && !ff.contains(snake));
+        }
+        let merge = serde_json::to_string(&MergeCommitKind::Merge).unwrap();
+        assert_eq!(merge, r#""merge""#);
+        let parsed: MergeMessage = serde_json::from_str(r#"{"title":"t","body":""}"#).unwrap();
+        assert_eq!(parsed, mm("t", ""));
     }
 }

@@ -1,7 +1,9 @@
-import { CaretRightIcon } from "@phosphor-icons/react";
+import { CaretRightIcon, LockIcon } from "@phosphor-icons/react";
 import {
+  createContext,
   type KeyboardEvent,
   type ReactNode,
+  use,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -15,7 +17,6 @@ import { hostedImagesFor } from "@/components/markdown/markdown-images";
 import { MarkdownEditor } from "@/components/markdown-editor";
 import { PathText } from "@/components/path-text";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
 import { reviewCommentsNotice } from "@/features/conversations/remote-section-state";
@@ -42,6 +43,11 @@ import { synthesizeThreadHunk } from "./suggestion-utils";
  * the same card inline against a hunk without the block wrapper.
  */
 
+/** Why the conversation won't take a thread reply (null = it will). A context,
+ *  not a prop, so the Files-tab anchors get it without the diff layers carrying
+ *  it; read only by {@link ReviewThreadCard}. */
+export const ThreadReplyHoldContext = createContext<string | null>(null);
+
 interface ThreadCallbacks {
   /** Feed a thread comment's body into the main conversation composer. */
   onQuote?: (body: string) => void;
@@ -59,6 +65,9 @@ interface ThreadCallbacks {
    *  only drops the menu entry, so a caller whose threads went stale sets this
    *  too. Threaded straight through to every card's Thread. */
   editHeld?: boolean;
+  /** Why the viewer's own comments can't be edited (null = they can): holds the
+   *  Edit row and an open editor's Save with this reason. */
+  editHeldReason?: string | null;
   /** Replies and resolves in flight per thread, from the mutation cache, so a
    *  remounted card still holds its controls. Absent = only this card's own
    *  presses hold them. */
@@ -514,6 +523,7 @@ export function ReviewThreadCard({
   onResolve,
   onEditComment,
   editHeld,
+  editHeldReason,
   onDeleteComment,
   pendingWrites,
   compact = false,
@@ -569,6 +579,9 @@ export function ReviewThreadCard({
     replyPaused,
     "Posting your reply…",
   );
+  // A held conversation keeps the reply box and its text (they're local); only
+  // the send holds.
+  const replyHeldReason = use(ThreadReplyHoldContext);
   // Mount-driven reveal: a layout effect keyed on `revealTarget` fires after the DOM
   // commit, so `rootRef` is live even for a card that mounted on this same click (its
   // resolved-group expander just opened) — no frame racing. Cleared via `onRevealed`
@@ -607,6 +620,7 @@ export function ReviewThreadCard({
   const showExcerpt = !compact && effectiveHunk !== "";
 
   async function submitReply() {
+    if (replyHeldReason !== null) return;
     if (!onReply || !replyBody.trim() || replyBusy) return;
     setReplyPending(true);
     try {
@@ -720,6 +734,7 @@ export function ReviewThreadCard({
                     : undefined
                 }
                 editHeld={editHeld}
+                editHeldReason={editHeldReason}
                 onDelete={
                   onDeleteComment && c.viewerDidAuthor
                     ? () => onDeleteComment(c.id)
@@ -767,6 +782,22 @@ export function ReviewThreadCard({
           {onReply &&
             (replying ? (
               <div className="space-y-2">
+                {/* Not a live region: the always-mounted span below announces it. */}
+                {replyHeldReason !== null && (
+                  <p className="flex items-start gap-1.5 text-muted-foreground text-xs">
+                    <LockIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+                    <span>
+                      <span className="font-medium text-foreground">
+                        {replyHeldReason}
+                      </span>
+                      {replyBody.trim() &&
+                        " Your reply is kept; Cancel discards it."}
+                    </span>
+                  </p>
+                )}
+                <span aria-live="polite" className="sr-only">
+                  {replyHeldReason ?? ""}
+                </span>
                 <MarkdownEditor
                   aria-label="Reply to review thread"
                   placeholder="Reply…"
@@ -779,7 +810,12 @@ export function ReviewThreadCard({
                       // this handler declines to submit would otherwise reach
                       // the global action.
                       e.preventDefault();
-                      if (replyBody.trim() && !replyBusy) submitReply();
+                      if (
+                        replyBody.trim() &&
+                        !replyBusy &&
+                        replyHeldReason === null
+                      )
+                        submitReply();
                     }
                   }}
                   rows={2}
@@ -794,11 +830,15 @@ export function ReviewThreadCard({
                   <DisabledReasonButton
                     variant="outline"
                     size="sm"
-                    disabled={!replyBody.trim() || replyBusy}
+                    disabled={
+                      !replyBody.trim() || replyBusy || replyHeldReason !== null
+                    }
                     reason={(() => {
                       switch (true) {
                         case replyBusy:
                           return replyBusyReason;
+                        case replyHeldReason !== null:
+                          return replyHeldReason;
                         case !replyBody.trim():
                           return "Write a reply first";
                         default:
@@ -830,14 +870,18 @@ export function ReviewThreadCard({
                 </div>
               </div>
             ) : (
-              <Button
+              // Always a DisabledReasonButton, so a hold landing under focus
+              // keeps the same focusable node.
+              <DisabledReasonButton
                 variant="ghost"
                 size="xs"
                 className="text-muted-foreground"
+                disabled={replyHeldReason !== null}
+                reason={replyHeldReason}
                 onClick={() => setReplying(true)}
               >
                 Reply…
-              </Button>
+              </DisabledReasonButton>
             ))}
         </div>
       )}
@@ -899,6 +943,7 @@ export function ReviewThreadList({
   onEditComment,
   onDeleteComment,
   editHeld,
+  editHeldReason,
   pendingWrites,
   provider = "github",
   apply,
@@ -1070,6 +1115,7 @@ export function ReviewThreadList({
                   onEditComment={onEditComment}
                   onDeleteComment={onDeleteComment}
                   editHeld={editHeld}
+                  editHeldReason={editHeldReason}
                   pendingWrites={pendingWrites}
                   provider={provider}
                   apply={apply}
@@ -1104,6 +1150,7 @@ export function ReviewThreadList({
                         onEditComment={onEditComment}
                         onDeleteComment={onDeleteComment}
                         editHeld={editHeld}
+                        editHeldReason={editHeldReason}
                         pendingWrites={pendingWrites}
                         provider={provider}
                         apply={apply}
@@ -1148,6 +1195,7 @@ export function ReviewThreadsBlock({
   onEditComment,
   onDeleteComment,
   editHeld,
+  editHeldReason,
   pendingWrites,
   provider = "github",
   apply,
@@ -1233,6 +1281,7 @@ export function ReviewThreadsBlock({
           onEditComment={onEditComment}
           onDeleteComment={onDeleteComment}
           editHeld={editHeld}
+          editHeldReason={editHeldReason}
           pendingWrites={pendingWrites}
           provider={provider}
           apply={apply}

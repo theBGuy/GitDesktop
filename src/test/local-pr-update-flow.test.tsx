@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import {
@@ -12,6 +19,7 @@ import {
   vi,
 } from "vitest";
 import { LocalPrView } from "@/features/pulls/LocalPrView";
+import { sharedBranchRulesOptions } from "@/lib/branch-rules/queries";
 import {
   loadBranchRules,
   loadSharedBranchRules,
@@ -36,8 +44,10 @@ import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
   conflictPreviewKey,
+  MERGE_LANDED_UNRECORDED_NOTE,
   MERGE_UPDATE_ABORT_FAILED_NOTE,
   MERGE_UPDATE_UNFINISHED_MESSAGE,
+  useMergeLocalPr,
   usePush,
 } from "@/lib/git/queries";
 import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
@@ -48,6 +58,7 @@ import type {
   RepoStatus,
 } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import {
   type LocalPr,
   listLocalPrs,
@@ -144,6 +155,8 @@ vi.mock("@/features/repository/ConflictResolveView", () => ({
 }));
 
 const REPO = "C:/repo";
+/** Another checkout of the repository, where a paused merge's journal entry is filed. */
+const JOURNAL_REPO = "C:/repo-main";
 const DISCARDED: LocalPrMergeAbortOutcome = { removed: true, closed: true };
 const OTHER_REPO = "C:/other";
 const WT = "C:/data/gd-resolve-0123456789ab";
@@ -308,6 +321,12 @@ const footerButtons = () => [
   screen.getByRole("button", { name: "Close" }),
   screen.getByRole("button", { name: /^Publish to/ }),
 ];
+
+/** The merge dialog's confirm, labelled with the strategy it runs. */
+async function mergeConfirm(label = "Create a merge commit") {
+  const dialog = await screen.findByRole("dialog");
+  return within(dialog).getByRole("button", { name: label });
+}
 
 const realAsk = useConfirm.getState().ask;
 
@@ -483,9 +502,10 @@ describe("LocalPrView: Merge while the base pushes", () => {
       await user.click(
         await screen.findByRole("menuitem", { name: "Create a merge commit" }),
       );
+      await user.click(await mergeConfirm());
       await waitFor(() => expect(toast.info).toHaveBeenCalledWith(message));
       expect(gitMergeLocalPr).not.toHaveBeenCalled();
-      expect(screen.getByRole("button", { name: "Merge" })).toBeVisible();
+      expect(screen.getByRole("dialog")).toHaveAttribute("data-open");
     });
 
   it("a push of the head leaves the merge free", async () => {
@@ -499,6 +519,7 @@ describe("LocalPrView: Merge while the base pushes", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Create a merge commit" }),
     );
+    await user.click(await mergeConfirm());
     await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
   });
 });
@@ -839,6 +860,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
       worktreePath: mergeWt,
       worktreeId: "fedcba987654",
       opId: "op-m",
+      journalRepo: JOURNAL_REPO,
     };
     const run = deferred<LocalPrMergeOutcome>();
     vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
@@ -850,6 +872,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Create a merge commit" }),
     );
+    await user.click(await mergeConfirm());
     await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
     // Another window records an update while the merge command runs.
     records = [makePr({ approved: true, pendingUpdate: { ...UPDATE } })];
@@ -864,7 +887,12 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     );
     expect(records[0]).toEqual(recorded);
     expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
-    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, mergeWt, "op-m");
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(
+      REPO,
+      mergeWt,
+      "op-m",
+      JOURNAL_REPO,
+    );
     expect(toastError).toHaveBeenCalledWith(
       expect.objectContaining({ message: MERGE_UPDATE_UNFINISHED_MESSAGE }),
     );
@@ -882,6 +910,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
       worktreePath: mergeWt,
       worktreeId: "fedcba987654",
       opId: "op-m",
+      journalRepo: JOURNAL_REPO,
     };
     const run = deferred<LocalPrMergeOutcome>();
     const abortErr = new Error("abort failed");
@@ -894,6 +923,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Create a merge commit" }),
     );
+    await user.click(await mergeConfirm());
     await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
     records = [makePr({ approved: true, pendingUpdate: { ...UPDATE } })];
     const recorded = records[0];
@@ -953,6 +983,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
       worktreePath: mergeWt,
       worktreeId: "fedcba987654",
       opId: "op-m",
+      journalRepo: JOURNAL_REPO,
     };
     const run = deferred<LocalPrMergeOutcome>();
     vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
@@ -964,6 +995,7 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "Create a merge commit" }),
     );
+    await user.click(await mergeConfirm());
     await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
     // The record changes in another window while the merge command runs.
     records = [change(makePr({ approved: true }))];
@@ -977,7 +1009,12 @@ describe("LocalPrView: resolving conflicts before approval", () => {
     await settle();
     expect(records[0]).toEqual(recorded);
     expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
-    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(REPO, mergeWt, "op-m");
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(
+      REPO,
+      mergeWt,
+      "op-m",
+      JOURNAL_REPO,
+    );
     expect(toast.warning).not.toHaveBeenCalled();
     expect(toastError).toHaveBeenCalledTimes(1);
   }
@@ -1378,5 +1415,647 @@ describe("LocalPrView: resolving conflicts before approval", () => {
       compareRead.resolve(behindBy(0));
     });
     await findStrip("No conflicts with main.");
+  });
+});
+
+describe("LocalPrView: the merge dialog", () => {
+  const MERGED: LocalPrMergeOutcome = {
+    status: "merged",
+    conflicts: [],
+    baseTip: "abc1234",
+    worktreePath: null,
+    worktreeId: null,
+    opId: "op-m",
+    journalRepo: REPO,
+  };
+  const PAUSED: LocalPrMergeOutcome = {
+    status: "conflicts",
+    conflicts: ["src/a.ts"],
+    baseTip: "abc1234",
+    worktreePath: "C:/data/gd-resolve-fedcba987654",
+    worktreeId: "fedcba987654",
+    opId: "op-m",
+    journalRepo: REPO,
+  };
+  const PENDING_MERGE: LocalPr["pendingMerge"] = {
+    base: "main",
+    head: "feat",
+    strategy: "merge",
+    message: "m",
+    worktreePath: WT,
+    worktreeId: "0123456789ab",
+    opId: "op-m",
+    startedAt: "2026-01-01T00:00:00Z",
+  };
+
+  /** Opens the dialog through the Merge menu's `item`, once the strip has read. */
+  async function openDialog(
+    user: ReturnType<typeof userEvent.setup>,
+    item = "Create a merge commit",
+  ) {
+    await findStrip(/will conflict/);
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(await screen.findByRole("menuitem", { name: item }));
+    return screen.findByRole("dialog");
+  }
+
+  /** Opens the dialog's one editor and replaces its title. */
+  async function editTitle(
+    user: ReturnType<typeof userEvent.setup>,
+    dialog: HTMLElement,
+    title: string,
+  ) {
+    await user.click(
+      within(dialog).getByRole("button", { name: "Edit commit message" }),
+    );
+    const input = within(dialog).getByRole("textbox", { name: "Commit title" });
+    await user.clear(input);
+    await user.type(input, title);
+  }
+
+  /** Another pull request's local merge, started in the view's own cache. */
+  function OtherMerge() {
+    const otherMerge = useMergeLocalPr(REPO, localPrKey(REPO));
+    return (
+      <button
+        type="button"
+        onClick={() =>
+          void otherMerge.mutateAsync({
+            id: "b",
+            base: "main",
+            head: "other",
+            message: "m",
+            strategy: "merge",
+          })
+        }
+      >
+        start other merge
+      </button>
+    );
+  }
+
+  it("a menu item opens the dialog, focus inside it, and merges nothing", async () => {
+    const user = userEvent.setup();
+    records = [makePr({ approved: true })];
+    renderView();
+    const dialog = await openDialog(user);
+    expect(within(dialog).getByText("Merge local pull request?")).toBeVisible();
+    await settle();
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    expect(gitMergeLocalPr).not.toHaveBeenCalled();
+  });
+
+  for (const [body, message] of [
+    ["", "PR A"],
+    ["Body text  \n", "PR A\n\nBody text  \n"],
+  ] as const)
+    it(`an untouched confirm sends the message local merges always sent (${JSON.stringify(body)})`, async () => {
+      const user = userEvent.setup();
+      vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+      records = [makePr({ approved: true, body })];
+      renderView();
+      await openDialog(user);
+      await user.click(await mergeConfirm());
+      await waitFor(() =>
+        expect(gitMergeLocalPr).toHaveBeenCalledWith(
+          REPO,
+          "main",
+          "feat",
+          message,
+          "merge",
+        ),
+      );
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+
+  for (const [item, title, body, message, strategy] of [
+    ["Create a merge commit", "  PR A  ", "", "  PR A  ", "merge"],
+    [
+      "Squash and merge",
+      "PR A",
+      "Body text  \n",
+      "PR A\n\nBody text  \n",
+      "squash",
+    ],
+  ] as const)
+    it(`an untouched ${strategy} confirm sends the pull request's own text (${JSON.stringify(title)})`, async () => {
+      const user = userEvent.setup();
+      vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+      records = [makePr({ approved: true, title, body })];
+      renderView();
+      await openDialog(user, item);
+      await user.click(await mergeConfirm(item));
+      await waitFor(() =>
+        expect(gitMergeLocalPr).toHaveBeenCalledWith(
+          REPO,
+          "main",
+          "feat",
+          message,
+          strategy,
+        ),
+      );
+      expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    });
+
+  it("an edited confirm sends the edited message", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+    records = [makePr({ approved: true, body: "Body text  \n" })];
+    renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "New title");
+    await user.click(await mergeConfirm());
+    await waitFor(() =>
+      expect(gitMergeLocalPr).toHaveBeenCalledWith(
+        REPO,
+        "main",
+        "feat",
+        "New title\n\nBody text",
+        "merge",
+      ),
+    );
+  });
+
+  it("rebase says there is no message to edit and sends today's message", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+    records = [makePr({ approved: true, body: "Body" })];
+    renderView();
+    const dialog = await openDialog(user, "Rebase and merge");
+    expect(
+      within(dialog).getByText(
+        "Rebase and merge keeps each commit's own message, so there is no merge message to edit.",
+      ),
+    ).toBeVisible();
+    expect(within(dialog).queryByRole("button", { name: /^Edit/ })).toBeNull();
+    await user.click(await mergeConfirm("Rebase and merge"));
+    await waitFor(() =>
+      expect(gitMergeLocalPr).toHaveBeenCalledWith(
+        REPO,
+        "main",
+        "feat",
+        "PR A\n\nBody",
+        "rebase",
+      ),
+    );
+  });
+
+  it("approval withdrawn while the dialog is open holds its confirm", async () => {
+    const user = userEvent.setup();
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    await view.arrive([makePr({ approved: false })]);
+    const confirm = await mergeConfirm();
+    await waitFor(() =>
+      expect(confirm).toHaveAccessibleDescription(
+        "Approve the PR before merging",
+      ),
+    );
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    expect(confirm).not.toHaveAttribute("disabled");
+    await user.click(confirm);
+    await settle();
+    expect(gitMergeLocalPr).not.toHaveBeenCalled();
+  });
+
+  it("a failed merge keeps an edited message open with its failure", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockRejectedValue({
+      kind: "git",
+      message: "merge failed",
+    });
+    records = [makePr({ approved: true })];
+    renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "Edited title");
+    await user.click(await mergeConfirm());
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("merge failed");
+    expect(alert).toHaveTextContent("Your edited message is still here.");
+    expect(
+      within(dialog).getByRole("textbox", { name: "Commit title" }),
+    ).toHaveValue("Edited title");
+    expect(dialog).toHaveAttribute("data-open");
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed merge's refusal reads without the error kind's lead", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockRejectedValue({
+      kind: "invalidArgument",
+      message:
+        "invalid argument: The commit title is too long (1,100 characters; the limit is 1,024).",
+    });
+    records = [makePr({ approved: true })];
+    renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "Edited title");
+    await user.click(await mergeConfirm());
+    const alert = await within(dialog).findByRole("alert");
+    expect(
+      within(alert).getByText(
+        "The commit title is too long (1,100 characters; the limit is 1,024).",
+      ),
+    ).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent(/invalid argument/i);
+  });
+
+  it("a failed merge with no edit closes the dialog", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockRejectedValue({
+      kind: "git",
+      message: "merge failed",
+    });
+    records = [makePr({ approved: true })];
+    renderView();
+    await openDialog(user);
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("a merge that pauses on conflicts closes the dialog", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(PAUSED);
+    // The paused merge's record write is not stored, so no takeover closes it.
+    vi.mocked(updateLocalPr).mockImplementation(async (_repo, id, mutate) =>
+      mutate(records.find((p) => p.id === id) as LocalPr),
+    );
+    records = [makePr({ approved: true })];
+    renderView();
+    await openDialog(user);
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("switching to another pull request closes the dialog and drops a kept failure", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockRejectedValue({
+      kind: "git",
+      message: "merge failed",
+    });
+    records = [
+      makePr({ approved: true }),
+      makePr({ id: "b", title: "PR B", approved: true }),
+    ];
+    const view = renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "Edited title");
+    await user.click(await mergeConfirm());
+    await within(dialog).findByRole("alert");
+    view.showPr("b");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The same strategy on purpose: a failure kept across the switch would
+    // reopen here with the first pull request's text.
+    const next = await openDialog(user);
+    expect(
+      within(next).queryByRole("textbox", { name: "Commit title" }),
+    ).toBeNull();
+    expect(within(next).queryByRole("alert")).toBeNull();
+    expect(within(next).getByText("PR B")).toBeVisible();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    view.showPr("a");
+    const back = await openDialog(user);
+    expect(
+      within(back).queryByRole("textbox", { name: "Commit title" }),
+    ).toBeNull();
+    expect(within(back).queryByRole("alert")).toBeNull();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("a merge whose record write fails closes the dialog and toasts", async () => {
+    const user = userEvent.setup();
+    const writeErr = new Error("store locked");
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+    records = [makePr({ approved: true })];
+    renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "Edited title");
+    vi.mocked(updateLocalPr).mockRejectedValue(writeErr);
+    await user.click(await mergeConfirm());
+    // The merge landed: the failure says so, and nothing claims a success.
+    await waitFor(() =>
+      expect(toastErrorWithNote).toHaveBeenCalledWith(
+        writeErr,
+        MERGE_LANDED_UNRECORDED_NOTE,
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("a landed merge's record write holds Close with its saving reason", async () => {
+    const user = userEvent.setup();
+    const write = deferred<LocalPr>();
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+    vi.mocked(updateLocalPr).mockReturnValue(write.promise);
+    records = [makePr({ approved: true })];
+    renderView();
+    await openDialog(user);
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(updateLocalPr).toHaveBeenCalledTimes(1));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(close).toHaveAttribute("aria-disabled", "true");
+    expect(close).toHaveAccessibleDescription("Saving…");
+    await act(async () =>
+      write.resolve(makePr({ approved: true, status: "merged" })),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Merged feat into main"),
+    );
+  });
+
+  it("this pull request's own merge holds Approve, and a press writes nothing", async () => {
+    const user = userEvent.setup();
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    records = [makePr({ approved: true })];
+    renderView();
+    await openDialog(user);
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const writes = vi.mocked(updateLocalPr).mock.calls.length;
+    const toggles = screen.getAllByRole("button", { name: "Approved" });
+    for (const approve of toggles) {
+      expect(approve).toHaveAttribute("aria-disabled", "true");
+      await user.click(approve);
+      approve.focus();
+      await user.keyboard("{Enter}");
+    }
+    expect(updateLocalPr).toHaveBeenCalledTimes(writes);
+    await act(async () => run.resolve(MERGED));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Merged feat into main"),
+    );
+    expect(records.find((p) => p.id === "a")?.approved).toBe(true);
+  });
+
+  it("a refused merge aborts its worktree in the repository it started in", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listLocalPrs).mockImplementation(async () => records);
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    vi.mocked(gitAbortLocalPrMerge).mockResolvedValue(DISCARDED);
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    view.client.setQueryData(localPrKey(OTHER_REPO), records);
+    view.showRepo(OTHER_REPO);
+    // Another window closes the record while the merge command runs.
+    records = [makePr({ approved: true, status: "closed" })];
+    await act(async () => run.resolve(PAUSED));
+    await waitFor(() => expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1));
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledWith(
+      REPO,
+      PAUSED.worktreePath,
+      "op-m",
+      REPO,
+    );
+  });
+
+  it("a takeover closes the dialog, and it stays closed once the takeover ends", async () => {
+    const user = userEvent.setup();
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    await view.arrive([
+      makePr({ approved: true, pendingMerge: PENDING_MERGE }),
+    ]);
+    await screen.findByText(/^Resolving conflicts/);
+    await view.arrive([makePr({ approved: true })]);
+    await findStrip(/will conflict/);
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("a record that closes closes the dialog", async () => {
+    const user = userEvent.setup();
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    await view.arrive([makePr({ approved: true, status: "closed" })]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("a record that goes missing closes the dialog, and it stays closed when it returns", async () => {
+    const user = userEvent.setup();
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    await view.arrive([]);
+    await screen.findByText("This local pull request no longer exists");
+    await view.arrive([makePr({ approved: true })]);
+    await findStrip(/will conflict/);
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("a second press while the record write runs merges once", async () => {
+    const user = userEvent.setup();
+    const write = deferred<LocalPr>();
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+    vi.mocked(updateLocalPr).mockReturnValue(write.promise);
+    records = [makePr({ approved: true })];
+    renderView();
+    const dialog = await openDialog(user);
+    await user.click(
+      within(dialog).getByRole("button", { name: "Edit commit message" }),
+    );
+    const confirm = await mergeConfirm();
+    await user.click(confirm);
+    await waitFor(() => expect(updateLocalPr).toHaveBeenCalledTimes(1));
+    await user.click(confirm);
+    await user.click(
+      within(dialog).getByRole("textbox", { name: "Commit title" }),
+    );
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    expect(confirm).not.toHaveAttribute("disabled");
+    expect(confirm).toHaveAccessibleDescription(ACT_PENDING_REASON);
+    await act(async () => write.resolve(makePr({ approved: true })));
+    // A press queued behind the first would fire once it settles.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    expect(updateLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("a second awaited press while its own merge runs merges once", async () => {
+    const user = userEvent.setup();
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    records = [makePr({ approved: true })];
+    renderView();
+    await openDialog(user);
+    const confirm = await mergeConfirm();
+    await user.click(confirm);
+    await user.click(confirm);
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    await act(async () => run.resolve(MERGED));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("two presses before the merge's cache notice lands merge once", async () => {
+    // Plain clicks, not awaited user-event presses: nothing between them lets the
+    // mutation cache's notice land, so only the click-time slot refuses the second.
+    const user = userEvent.setup();
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    records = [makePr({ approved: true })];
+    renderView();
+    await openDialog(user);
+    const confirm = await mergeConfirm();
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    await act(async () => run.resolve(MERGED));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("another checkout of the same pull request drops a kept failure and reopens at rest", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockRejectedValue({
+      kind: "git",
+      message: "merge failed",
+    });
+    // Both checkouts list the record: a sibling worktree shares its id.
+    vi.mocked(listLocalPrs).mockImplementation(async () => records);
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "Edited title");
+    await user.click(await mergeConfirm());
+    await within(dialog).findByRole("alert");
+    // Already read there, so the record never goes missing in between.
+    view.client.setQueryData(localPrKey(OTHER_REPO), records);
+    view.showRepo(OTHER_REPO);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The same strategy on purpose: a session kept across the checkouts would
+    // reopen here with the first checkout's text and failure.
+    const next = await openDialog(user);
+    expect(
+      within(next).queryByRole("textbox", { name: "Commit title" }),
+    ).toBeNull();
+    expect(within(next).queryByRole("alert")).toBeNull();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+  });
+
+  it("a landed merge records itself in the repository it started in", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listLocalPrs).mockImplementation(async () => records);
+    const run = deferred<LocalPrMergeOutcome>();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(run.promise);
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+    view.showRepo(OTHER_REPO);
+    const invalidate = vi.spyOn(view.client, "invalidateQueries");
+    await act(async () => run.resolve(MERGED));
+    await waitFor(() => expect(updateLocalPr).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(updateLocalPr).mock.calls[0].slice(0, 2)).toEqual([
+      REPO,
+      "a",
+    ]);
+    // The list re-read is the starting repository's too, not the one on screen.
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: localPrKey(REPO) }),
+    );
+    expect(invalidate).not.toHaveBeenCalledWith({
+      queryKey: localPrKey(OTHER_REPO),
+    });
+    // Once the merge settled, its one write left the merged record.
+    expect(updateLocalPr).toHaveBeenCalledTimes(1);
+    expect(records.find((p) => p.id === "a")).toMatchObject({
+      status: "merged",
+      mergedAt: expect.any(String),
+    });
+  });
+
+  it("a branch rule that forbids the method while the dialog is open holds its confirm", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(MERGED);
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    const confirm = await mergeConfirm();
+    expect(confirm).not.toHaveAttribute("aria-disabled");
+    vi.mocked(loadSharedBranchRules).mockResolvedValue({
+      ...EMPTY_BRANCH_RULES,
+      protections: [
+        {
+          id: "main",
+          pattern: "main",
+          blockDeletion: false,
+          blockForcePush: false,
+          requirePr: false,
+          allowedMergeMethods: ["squash", "rebase"],
+        },
+      ],
+    });
+    await act(() =>
+      view.client.invalidateQueries({
+        queryKey: sharedBranchRulesOptions(REPO).queryKey,
+      }),
+    );
+    await waitFor(() =>
+      expect(confirm).toHaveAccessibleDescription(
+        "A branch rule blocks this merge method.",
+      ),
+    );
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    expect(confirm).not.toHaveAttribute("disabled");
+    await user.click(confirm);
+    await settle();
+    expect(gitMergeLocalPr).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-open");
+  });
+
+  it("another pull request's local merge holds the confirm with its reason", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitMergeLocalPr).mockReturnValue(new Promise(() => undefined));
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    await openDialog(user);
+    const confirm = await mergeConfirm();
+    render(
+      <QueryClientProvider client={view.client}>
+        <OtherMerge />
+      </QueryClientProvider>,
+    );
+    act(() =>
+      fireEvent.click(
+        screen.getByRole("button", { name: "start other merge", hidden: true }),
+      ),
+    );
+    await waitFor(() =>
+      expect(confirm).toHaveAccessibleDescription("Merging other into main…"),
+    );
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    expect(confirm).not.toHaveAttribute("disabled");
+    expect(within(confirm).queryByRole("status")).toBeNull();
+    await user.click(confirm);
+    await settle();
+    expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
   });
 });

@@ -143,6 +143,7 @@ const stageFinish = (repo: string, base: string) =>
     worktreePath: "C:/repos/wt/isolated-merge",
     worktreeId: "isolated-merge",
     opId: null,
+    journalRepo: null,
   });
 
 function expectSilent() {
@@ -383,6 +384,7 @@ describe("removeWorktreeForCleanup refusals", () => {
     stageWrite(useAbortLocalPrMerge, path, {
       worktreePath: "C:/repos/wt/isolated-merge",
       opId: null,
+      journalRepo: null,
     });
     expect(
       await removeWorktreeForCleanup(qc, {

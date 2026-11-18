@@ -2,25 +2,14 @@ import { ClockIcon } from "@phosphor-icons/react";
 import { type ComponentProps, useMemo, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
-import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Spinner } from "@/components/ui/spinner";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import {
@@ -54,7 +43,6 @@ import type {
   ReviewThreadOut,
 } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { cn } from "@/lib/utils";
 import { DraftCommentCard } from "./PendingReviewBar";
@@ -495,146 +483,6 @@ function PrFileDiffSlot({
       lineAnchors={lineAnchors}
       lineWidget={widget}
     />
-  );
-}
-
-/** Merge-confirm dialog. Presentational — the parent keeps the merge mutation
- *  (so its `busy` flag stays accurate) and passes `pending` + `onConfirm`. */
-export function MergePrDialog({
-  open,
-  onClose,
-  number,
-  host,
-  prNoun,
-  headRefName,
-  baseRefName,
-  strategyLabel,
-  deleteBranch,
-  onDeleteBranchChange,
-  headIsDefault,
-  deletionBlocked,
-  pending,
-  heldReason,
-  onConfirm,
-  auto = false,
-  stackNotice,
-  confirmLabel,
-}: {
-  open: boolean;
-  onClose: () => void;
-  number: number;
-  /** Provider name ("GitHub" / "GitLab" / "Bitbucket") — where the merge happens. */
-  host: string;
-  /** "pull request" / "merge request". */
-  prNoun: string;
-  headRefName: string;
-  baseRefName: string;
-  strategyLabel: string;
-  deleteBranch: boolean;
-  onDeleteBranchChange: (v: boolean) => void;
-  /** Head is the repo's default branch — every forge refuses to delete it, so
-   *  the delete-branch option is hidden entirely. */
-  headIsDefault: boolean;
-  /** A branch rule blocks deleting the head — the option shows but is disabled. */
-  deletionBlocked: boolean;
-  pending: boolean;
-  /** Holds the confirm with this reason (offline) while the dialog stays open. */
-  heldReason?: string;
-  onConfirm: () => void;
-  /** Arms merge-when-pipeline-succeeds instead of merging now (GitLab-only) —
-   *  reframes the copy + confirm button; the delete-branch checkbox rides the arm. */
-  auto?: boolean;
-  /** Extra scope this merge takes with it, shown above the options. Absent =
-   *  nothing extra to disclose: unstacked, a host whose stacked merges don't
-   *  cascade, or nothing still open below. Present is usually a cascading stack,
-   *  but can also be a hedge — that stack membership couldn't be confirmed. */
-  stackNotice?: string;
-  /** Overrides the confirm button's label so a stacked merge can name how many
-   *  PRs it lands. Absent = the strategy label, unchanged. */
-  confirmLabel?: string;
-}) {
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) onClose();
-      }}
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="pr-8">
-            {auto ? "Auto-merge" : "Merge"} {prNoun} #{number}?
-          </DialogTitle>
-          <DialogDescription>
-            {auto ? (
-              <>
-                {strategyLabel} when the pipeline passes — merges{" "}
-                <span className="font-mono break-all">{headRefName}</span> into{" "}
-                <span className="font-mono break-all">{baseRefName}</span> on{" "}
-                {host} once the running pipeline succeeds. This cannot be easily
-                undone once it merges.
-              </>
-            ) : (
-              <>
-                {strategyLabel} — merges{" "}
-                <span className="font-mono break-all">{headRefName}</span> into{" "}
-                <span className="font-mono break-all">{baseRefName}</span> on{" "}
-                {host}. This cannot be easily undone.
-              </>
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        {/* A stacked merge lands more than the PR on screen — say so above the
-            options, never only on the confirm button. */}
-        {stackNotice && <p className="text-xs text-warning">{stackNotice}</p>}
-        {/* Deleting the head after merge is offered only when it's actually
-            possible: never for the default branch (hidden — the forge refuses),
-            and disabled with a reason when a branch rule blocks its deletion. */}
-        {!headIsDefault && (
-          <label
-            className={cn(
-              "flex items-start gap-2 text-xs text-muted-foreground",
-              deletionBlocked
-                ? "cursor-not-allowed opacity-70"
-                : "cursor-pointer",
-            )}
-          >
-            <Checkbox
-              checked={deleteBranch && !deletionBlocked}
-              disabled={deletionBlocked}
-              onCheckedChange={(checked) =>
-                onDeleteBranchChange(checked === true)
-              }
-            />
-            <span className="min-w-0">
-              Delete <span className="font-mono break-all">{headRefName}</span>{" "}
-              on the remote after merging
-              {deletionBlocked && (
-                <span className="text-warning">
-                  {" "}
-                  — protected by a branch rule
-                </span>
-              )}
-            </span>
-          </label>
-        )}
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
-          {/* The running write outranks the hold, and having its own reason keeps
-              the button aria-disabled through either flip. */}
-          <DisabledReasonButton
-            disabled={pending || heldReason !== undefined}
-            reason={pending ? ACT_PENDING_REASON : heldReason}
-            onClick={onConfirm}
-          >
-            {pending && <Spinner data-icon="inline-start" />}
-            {auto ? "Enable auto-merge" : (confirmLabel ?? strategyLabel)}
-          </DisabledReasonButton>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

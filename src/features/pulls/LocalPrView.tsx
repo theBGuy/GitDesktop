@@ -65,11 +65,8 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
-import {
-  gitBranchDiff,
-  type LocalPrMergeAbortOutcome,
-  type MergeStrategy,
-} from "@/lib/git/api";
+import { errorDetailText } from "@/lib/error-summary";
+import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
   AUTOSTASH_WRITES_FAMILY,
   conflictPreviewQueryKey,
@@ -78,6 +75,7 @@ import {
   type LocalPrUpdateDiscardVars,
   type LocalPrUpdateFinishVars,
   type LocalPrUpdateStartVars,
+  MERGE_LANDED_UNRECORDED_NOTE,
   MERGE_UPDATE_ABORT_FAILED_NOTE,
   MERGE_UPDATE_UNFINISHED_MESSAGE,
   type MergeRefusal,
@@ -86,7 +84,6 @@ import {
   refuseWhileBranchPushes,
   refuseWhilePushRuns,
   repoKeys,
-  useAbortLocalPrMerge,
   useBranchDiffFiles,
   useCompareBranches,
   useConflictPreview,
@@ -118,9 +115,20 @@ import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
+import { MergePrDialog } from "./MergePrDialog";
+import {
+  MERGE_LABEL,
+  MERGE_METHOD_RULE_REASON,
+  type MergeMessagePlan,
+  mergeMessageHold,
+  mergeMessagesToSend,
+  mergeMessageText,
+  useMergeMessageDraft,
+} from "./merge-message";
 import { localMergeStripArm } from "./merge-strip-arm";
 import {
   AWAITING_DEFAULT_BRANCH_REASON,
@@ -161,6 +169,36 @@ const MERGED_VERB: Record<MergeStrategy, string> = {
   rebase: "Rebased and merged",
   fast_forward: "Merged",
 };
+
+/** How a local merge attempt ended. `merged-unrecorded` is a merge that landed
+ *  whose record write failed; `refused` attempted nothing. */
+type LocalMergeResult =
+  | { outcome: "merged" | "merged-unrecorded" | "paused" | "refused" }
+  | { outcome: "failed"; text: string };
+
+/** The local merge dialog's plan, built from the record with no read: rebase writes
+ *  no commit of its own, the other strategies one commit worded by the PR. */
+function localMergePlanFor(
+  pr: LocalPr | undefined,
+  strategy: MergeStrategy,
+): MergeMessagePlan {
+  if (pr === undefined) return { state: "loading" };
+  if (strategy !== "merge" && strategy !== "squash")
+    return { state: "ready", defaults: { commits: [], reason: "rebase" } };
+  return {
+    state: "ready",
+    defaults: {
+      commits: [
+        {
+          kind: strategy,
+          message: { title: pr.title, body: pr.body },
+          exact: true,
+        },
+      ],
+      reason: null,
+    },
+  };
+}
 
 /** Tab labels for this view's sections. `files` is undefined until the branch-diff
  *  read lands, and the tab then shows no count rather than a wrong one. */
@@ -264,7 +302,6 @@ export function LocalPrView({
   // The list key the merge and the update writes re-read before they settle.
   const recordKey = localPrKey(repoPath);
   const merge = useMergeLocalPr(repoPath, recordKey);
-  const abortMerge = useAbortLocalPrMerge(repoPath);
   const updateBranchFrom = useUpdateBranchFrom(repoPath);
   // Read from the mutation cache, not the hooks' observers: this view unmounts on a
   // local -> remote -> local hop, and a remount's fresh observers never saw the write.
@@ -436,10 +473,31 @@ export function LocalPrView({
       });
     },
   });
+  // The merge dialog. The strategy outlives the close so its label holds through the
+  // close animation. A session is one open request: a failure is kept only for the
+  // session it belongs to, so a later settle never writes onto a newer one.
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeStrategy, setMergeStrategy] = useState<MergeStrategy>("merge");
+  const [mergeSession, setMergeSession] = useState<object | null>(null);
+  const mergeSessionRef = useLatestRef(mergeSession);
+  const [mergeFailure, setMergeFailure] = useState<{
+    session: object;
+    text: string;
+  } | null>(null);
+  // The confirm's press-to-settle slot: the merge has no duplicate guard, and the
+  // mutation-cache read that holds Merge lands a render after the press.
+  const [mergeRunFor, setMergeRunFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
+  const localMergePlan = localMergePlanFor(pr, mergeStrategy);
+  const mergeDraft = useMergeMessageDraft(localMergePlan);
   // A different PR must never inherit this one's drill-in, half-typed label, or
-  // open delete/promote/edit dialogs — a render-time state adjustment, not an
-  // effect.
+  // open delete/promote/edit/merge dialogs — a render-time state adjustment, not
+  // an effect. The merge session also belongs to its checkout: a sibling
+  // worktree shows the same record id.
   const [lastId, setLastId] = useState(id);
+  const [lastRepo, setLastRepo] = useState(repoPath);
   if (id !== lastId) {
     setLastId(id);
     setSelectedCommitHash(null);
@@ -447,6 +505,13 @@ export function LocalPrView({
     setDeletingCommentId(null);
     setPromoteOpen(false);
     edit.setOpen(false);
+  }
+  if (id !== lastId || repoPath !== lastRepo) {
+    setLastRepo(repoPath);
+    setMergeOpen(false);
+    setMergeSession(null);
+    setMergeFailure(null);
+    mergeDraft.reset();
   }
   const prGen = useGeneratePrDescription(repoPath);
   // The edit dialog's in-flight generation belongs to the PR it was started on; the
@@ -552,6 +617,15 @@ export function LocalPrView({
   const mergeTakeover = !!pr?.pendingMerge?.worktreePath;
   // Either paused merge takes the whole view over, footer and strip included.
   const takeover = mergeTakeover || updateTakeover;
+  // The takeover and missing-record returns below unmount the merge dialog, so it
+  // closes here, above both: otherwise it would come back by itself when the
+  // takeover ends or the record returns. A record no longer open closes it too.
+  if (mergeOpen && (takeover || pr?.status !== "open")) {
+    setMergeOpen(false);
+    setMergeSession(null);
+    setMergeFailure(null);
+    mergeDraft.reset();
+  }
   const headIsCurrent =
     pr !== undefined && status.data?.branch?.name === pr.head;
   const headDirty = headIsCurrent && hasTrackedChanges;
@@ -798,11 +872,19 @@ export function LocalPrView({
   );
   const ownsSlot = (slot: { repo: string; id: string } | null) =>
     slot?.repo === repoPath && slot.id === pr.id;
-  const statusHeld = updateHold !== undefined || ownsSlot(statusSavingFor);
-  const reviewPosting = updateHold !== undefined || ownsSlot(postingReviewFor);
+  // This PR's local merge holds them too: it writes the merged record before it
+  // settles, and a status or review write queued behind it would land after.
+  const mergingThis =
+    runningMerge?.head === pr.head && runningMerge.base === pr.base;
+  const statusHeld =
+    updateHold !== undefined || mergingThis || ownsSlot(statusSavingFor);
+  const reviewPosting =
+    updateHold !== undefined || mergingThis || ownsSlot(postingReviewFor);
   // The click slot covers the instant before the cache notice; the cache read keeps the
   // hold across a remount (this view unmounts on a local -> remote -> local hop).
+  // This PR's own merge holds it like the status and review writes.
   const approveHeld =
+    mergingThis ||
     ownsSlot(approveSavingFor) ||
     pendingWriteMatching(
       storeWrites,
@@ -933,24 +1015,47 @@ export function LocalPrView({
     }
   }
 
+  /** A Merge menu item: opens the dialog. Reopening the same strategy after a
+   *  failed edited merge keeps its rows and failure; any other open starts over. */
+  function openMergeDialog(strategy: MergeStrategy) {
+    if (!pr || runningMerge || preparing || activeUpdate) return;
+    const kept =
+      mergeFailure !== null &&
+      mergeFailure.session === mergeSession &&
+      mergeStrategy === strategy;
+    if (!kept) {
+      mergeDraft.reset();
+      setMergeFailure(null);
+      setMergeSession({});
+      setMergeStrategy(strategy);
+    }
+    setMergeOpen(true);
+  }
+
   // Awaited, not per-call callbacks: this view's effects tear down when the
   // selection or the repo tab changes, and react-query drops per-call callbacks
-  // once the observer has no listeners. Here that would lose a landed merge's
-  // record write (it would still read open) or a refused merge's discard.
-  async function doMerge(strategy: MergeStrategy) {
+  // once the observer has no listeners, which would lose the outcome's toast.
+  // Never throws: every exit reports its outcome, and every toast fires here.
+  async function doMerge(
+    strategy: MergeStrategy,
+    message: string,
+  ): Promise<LocalMergeResult> {
     // Any local merge in flight refuses another: they share the refs it advances.
-    if (!pr || runningMerge || preparing || activeUpdate) return;
+    if (!pr || runningMerge || preparing || activeUpdate)
+      return { outcome: "refused" };
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
-      return;
+      return { outcome: "refused" };
     }
     // The merge advances base without the network lock, so only a push of
     // base itself holds it.
     const current = status.data?.branch?.name ?? null;
     if (refuseWhileBranchPushes(queryClient, repoPath, pr.base, current))
-      return;
-    const message = pr.body.trim() ? `${pr.title}\n\n${pr.body}` : pr.title;
+      return { outcome: "refused" };
     try {
+      // The mutation writes the record, and aborts a refused merge's worktree,
+      // in the repository the merge ran in: the view can be showing another one
+      // by the time git answers.
       const outcome = await merge.mutateAsync({
         id: pr.id,
         base: pr.base,
@@ -958,21 +1063,18 @@ export function LocalPrView({
         message,
         strategy,
       });
-      if (outcome.status === "merged") {
-        // The record write is awaited ahead of its toast: a store write can
-        // reject (a concurrent MCP writer, a locked store), and a merge
-        // reported as landed while the record still reads open is the exact
-        // desync this view has no second chance to repair.
-        await update.mutateAsync({
-          id: pr.id,
-          mutate: (cur) => ({
-            ...cur,
-            status: "merged",
-            mergedAt: new Date().toISOString(),
-          }),
-        });
+      if (outcome.status === "merged" && outcome.refused === null) {
+        // The merge has landed either way, so a failed record write is never
+        // reported as a failed merge, nor as a success.
+        if (outcome.recordFailure !== null) {
+          toastErrorWithNote(
+            outcome.recordFailure.error,
+            MERGE_LANDED_UNRECORDED_NOTE,
+          );
+          return { outcome: "merged-unrecorded" };
+        }
         toast.success(`${MERGED_VERB[strategy]} ${pr.head} into ${pr.base}`);
-        return;
+        return { outcome: "merged" };
       }
       // Conflicts: the merge is paused in an isolated worktree (the user's
       // branch and working tree are untouched), and the mutation recorded it on
@@ -982,26 +1084,22 @@ export function LocalPrView({
       // the resolutions exclude each other.
       if (outcome.refused !== null) {
         const copy = MERGE_REFUSED[outcome.refused];
-        let aborted: LocalPrMergeAbortOutcome;
-        try {
-          aborted = await abortMerge.mutateAsync({
-            worktreePath: outcome.worktreePath,
-            opId: outcome.opId,
-          });
-        } catch (e) {
-          toastErrorWithNote(e, copy.abortFailed);
-          return;
+        const { discard } = outcome;
+        if ("error" in discard) {
+          toastErrorWithNote(discard.error, copy.abortFailed);
+          return { outcome: "failed", text: copy.abortFailed };
         }
         // The just-minted worktree is registered, so a removal always closes its
         // entry: only whether the worktree went decides the words.
-        toastError(
-          new Error(aborted.removed ? copy.message : copy.abortFailed),
-        );
-        return;
+        const text = discard.aborted.removed ? copy.message : copy.abortFailed;
+        toastError(new Error(text));
+        return { outcome: "failed", text };
       }
       toast.warning("Merge has conflicts — resolve them to finish");
+      return { outcome: "paused" };
     } catch (e) {
       toastError(e);
+      return { outcome: "failed", text: errorDetailText(e) };
     }
   }
 
@@ -1286,6 +1384,12 @@ export function LocalPrView({
     approveHeld ||
     preparing ||
     activeUpdate !== undefined;
+  // The menu items gate the method only at the pick; a rule that lands or changes
+  // while the dialog is open must still hold its confirm. The local menu never
+  // offers "fast_forward", which no branch rule names.
+  const methodBlocked =
+    mergeStrategy !== "fast_forward" &&
+    !isMergeMethodAllowed(rulesConfig, pr.base, mergeStrategy);
   // This same string doubles as the hover title while nothing blocks. The
   // active merge outranks `dirtyBlocks`: a merge already in flight can't be
   // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
@@ -1315,6 +1419,50 @@ export function LocalPrView({
         return `Merge ${pr.head} into ${pr.base}`;
     }
   })();
+
+  /** The merge dialog's confirm. Every hold the dialog shows is re-checked here, at
+   *  the press, and a failure is kept only for the session that started it. */
+  async function confirmLocalMerge() {
+    if (!pr || !mergeOpen) return;
+    if (ownsSlot(mergeRunFor)) return;
+    if (mergeBlocked) return;
+    if (methodBlocked) return;
+    if (mergeMessageHold(mergeDraft.rows, mergeDraft.plan) !== null) return;
+    const { squashMessage, mergeMessage } = mergeMessagesToSend(
+      mergeDraft.rows,
+      mergeDraft.plan,
+    );
+    const custom = squashMessage ?? mergeMessage;
+    const edited = custom !== undefined;
+    const session = mergeSession;
+    setMergeFailure(null);
+    // An untouched message is the one local merges have always written.
+    let text = pr.body.trim() ? `${pr.title}\n\n${pr.body}` : pr.title;
+    if (custom !== undefined) text = mergeMessageText(custom);
+    const mine = { repo: repoPath, id: pr.id };
+    setMergeRunFor(mine);
+    let result: LocalMergeResult;
+    try {
+      result = await doMerge(mergeStrategy, text);
+    } finally {
+      setMergeRunFor((cur) => (cur === mine ? null : cur));
+    }
+    const live = session !== null && session === mergeSessionRef.current;
+    switch (result.outcome) {
+      case "refused":
+        // Nothing was attempted: the user retries from where they are.
+        return;
+      case "failed":
+        if (edited) {
+          if (live) setMergeFailure({ session, text: result.text });
+          return;
+        }
+        if (live) setMergeOpen(false);
+        return;
+      default:
+        if (live) setMergeOpen(false);
+    }
+  }
 
   // Close and Publish both end the open PR, so an update preparing or unfinished
   // holds them; its Discard sits in the strip above.
@@ -1838,25 +1986,25 @@ export function LocalPrView({
                     disabled={
                       !isMergeMethodAllowed(rulesConfig, pr.base, "merge")
                     }
-                    onClick={() => void doMerge("merge")}
+                    onClick={() => openMergeDialog("merge")}
                   >
-                    Create a merge commit
+                    {MERGE_LABEL.merge}
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     disabled={
                       !isMergeMethodAllowed(rulesConfig, pr.base, "squash")
                     }
-                    onClick={() => void doMerge("squash")}
+                    onClick={() => openMergeDialog("squash")}
                   >
-                    Squash and merge
+                    {MERGE_LABEL.squash}
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     disabled={
                       !isMergeMethodAllowed(rulesConfig, pr.base, "rebase")
                     }
-                    onClick={() => void doMerge("rebase")}
+                    onClick={() => openMergeDialog("rebase")}
                   >
-                    Rebase and merge
+                    {MERGE_LABEL.rebase}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1890,6 +2038,37 @@ export function LocalPrView({
         pr={pr}
         open={promoteOpen}
         onOpenChange={setPromoteOpen}
+      />
+
+      {/* `pending` is this dialog's own run; another PR's local merge is a hold,
+          named by `mergeReason`. */}
+      <MergePrDialog
+        open={mergeOpen}
+        onClose={() => setMergeOpen(false)}
+        target={{ kind: "local" }}
+        headRefName={pr.head}
+        baseRefName={pr.base}
+        strategyLabel={MERGE_LABEL[mergeStrategy]}
+        pending={ownsSlot(mergeRunFor)}
+        heldReason={(() => {
+          switch (true) {
+            case ownsSlot(mergeRunFor):
+              return undefined;
+            case mergeBlocked:
+              return mergeReason;
+            case methodBlocked:
+              return MERGE_METHOD_RULE_REASON;
+            default:
+              return undefined;
+          }
+        })()}
+        onConfirm={() => void confirmLocalMerge()}
+        draft={mergeDraft}
+        failure={
+          mergeFailure !== null && mergeFailure.session === mergeSession
+            ? mergeFailure.text
+            : undefined
+        }
       />
 
       <EditTitleBodyDialog

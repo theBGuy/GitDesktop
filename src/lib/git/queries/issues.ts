@@ -24,6 +24,7 @@ import type {
   GitLabTimeStats,
   IssueDetails,
   IssueInfo,
+  IssueListPage,
   IssueReactions,
   IssueRelation,
   IssueType,
@@ -31,7 +32,7 @@ import type {
   RemoteLens,
   RemoteListFilter,
 } from "../types";
-import { remoteListFilterKey } from "../types";
+import { listPageRows, remoteListFilterKey } from "../types";
 import {
   invalidateRepoAfterWrite,
   keepPreviousDataForKeyAxes,
@@ -258,6 +259,55 @@ export function useIssueList(
   });
 }
 
+/** `useIssueList` read through `forge_issue_list_page`, so the page carries its
+ *  horizon flag (`IssueListPage.capped`) beside the rows. The Issues panel's
+ *  read; same options and the same reasons as `useIssueList`'s. */
+export function useIssueListPage(
+  repo: string,
+  enabled: boolean,
+  state: api.IssueStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
+) {
+  return useQuery({
+    // Indices 0-6 are `useIssueList`'s key, so every prefix and positional reader
+    // of the family covers these pages. The trailing marker keeps the two payload
+    // shapes in separate entries when a caller's arguments coincide.
+    queryKey: [
+      ...repoKeys.issueList(repo),
+      lens,
+      state,
+      limit ?? null,
+      remoteListFilterKey(filter),
+      "page",
+    ] as const,
+    queryFn: () => api.forgeIssueListPage(repo, state, limit, lens, filter),
+    enabled,
+    staleTime: 30_000,
+    retry: (failureCount, err) =>
+      !(
+        isAppError(err) &&
+        (err.kind === "issuesDisabled" || err.kind === "invalidArgument")
+      ) && shouldRetryQuery(failureCount, err),
+    // `useIssueList`'s placeholder rule over the page's rows. The kept page's
+    // `capped` rides along; the panel never reads it from a placeholder.
+    placeholderData: (prev, prevQuery) => {
+      const page = keepPreviousDataForKeyAxes(repo, [[3, lens]])(
+        prev,
+        prevQuery,
+      );
+      if (!page) return undefined;
+      const rows = filterPlaceholderRows(
+        page.rows,
+        state,
+        prevQuery?.queryKey[4],
+      );
+      return rows && (rows === page.rows ? page : { ...page, rows });
+    },
+  });
+}
+
 export const issueDetailsOptions = (
   repo: string,
   number: number,
@@ -317,12 +367,12 @@ function insertCreatedIssue(
   lens: RemoteLens,
   row: IssueInfo,
 ) {
-  const pages = queryClient.getQueriesData<IssueInfo[]>({
+  const pages = queryClient.getQueriesData<IssueInfo[] | IssueListPage>({
     // `useIssueList`'s key, axis for axis: 3 = lens, 4 = state, 5 = limit,
-    // 6 = the filter key. Lens is pinned because a fork numbers its issues
-    // independently of its parent; state because "closed" is the only other
-    // spelling and a new issue is never that; limit stays free so every page
-    // size on screen is written.
+    // 6 = the filter key (`useIssueListPage` appends its marker at 7). Lens is
+    // pinned because a fork numbers its issues independently of its parent;
+    // state because "closed" is the only other spelling and a new issue is
+    // never that; limit stays free so every page size on screen is written.
     predicate: (q) =>
       q.queryKey[0] === "repo" &&
       q.queryKey[1] === repo &&
@@ -331,7 +381,8 @@ function insertCreatedIssue(
       q.queryKey[4] === "open" &&
       q.queryKey[6] === remoteListFilterKey(null),
   });
-  for (const [key, rows] of pages) {
+  for (const [key, page] of pages) {
+    const rows = listPageRows(page);
     // A refetch can land the real row first; a second copy would collide on the
     // number-keyed React key rather than merely duplicating.
     if (!rows || rows.some((r) => r.number === row.number)) continue;
@@ -340,11 +391,14 @@ function insertCreatedIssue(
     // what the refetch returns anyway, keeping "Load more" (a `length === limit`
     // test) from blinking off while the page is momentarily one row over.
     const limit = key[5];
-    const next = [row, ...rows];
-    queryClient.setQueryData<IssueInfo[]>(
-      key,
-      typeof limit === "number" ? next.slice(0, limit) : next,
-    );
+    const prepended = [row, ...rows];
+    const next =
+      typeof limit === "number" ? prepended.slice(0, limit) : prepended;
+    // Written back in the page's own shape; a struct keeps its `capped`.
+    const written: IssueInfo[] | IssueListPage = Array.isArray(page)
+      ? next
+      : { ...(page as IssueListPage), rows: next };
+    queryClient.setQueryData(key, written);
   }
 }
 
@@ -842,6 +896,19 @@ function patchIssueListState(
     (page) => {
       const next = patchRowState(page, number, state);
       return next === page ? undefined : next;
+    },
+  );
+  // `useIssueListPage` caches `IssueListPage` structs under the same prefix,
+  // which the write above passes over whole; this one re-files their rows.
+  queryClient.setQueriesData<IssueListPage>(
+    {
+      queryKey: repoKeys.issueList(repo),
+      predicate: (q) => q.queryKey[3] === lens && q.queryKey[7] === "page",
+    },
+    (page) => {
+      if (!page) return undefined;
+      const rows = patchRowState(page.rows, number, state);
+      return !rows || rows === page.rows ? undefined : { ...page, rows };
     },
   );
 }

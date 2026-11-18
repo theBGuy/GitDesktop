@@ -1,4 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -9,18 +14,29 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { type ComponentProps, type ReactElement, useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
 import {
+  forgeGlMrMergeState,
   forgePrListPage,
+  forgePrView,
   forgeStatus,
+  gitRemotes,
   type PrStateFilter,
 } from "@/lib/git/api";
-import type { ForgeImplemented, ForgeStatus } from "@/lib/git/types";
+import { glMrMergeStateOptions, prDetailsOptions } from "@/lib/git/queries";
+import type {
+  ForgeImplemented,
+  ForgeStatus,
+  GitLabMrMergeState,
+  PrDetails,
+} from "@/lib/git/types";
+import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { type LocalPr, listLocalPrs } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
+import { useUiStore } from "@/lib/stores/ui";
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
@@ -31,6 +47,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
   forgePrListPage: vi.fn(),
+  forgePrView: vi.fn(),
+  forgeGlMrMergeState: vi.fn(),
+  // Pending unless a test answers it: an unanswered remotes read keeps today's copy.
+  gitRemotes: vi.fn(() => new Promise(() => undefined)),
 }));
 vi.mock("@/lib/pulls/local", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
@@ -377,5 +397,700 @@ describe("PullRequestsPanel (real panel)", () => {
       (await screen.findAllByText(/Loading merge requests/)).length,
     ).toBeGreaterThan(0);
     expect(screen.queryByText(/Loading pull requests/)).toBeNull();
+  });
+});
+
+const READY_GITLAB: ForgeStatus = {
+  ...READY_GITHUB,
+  provider: "gitlab",
+  host: "gitlab.com",
+};
+
+/** Settings that remember `C:/repo` as a repository on `provider`. */
+function savedAs(provider: "github" | "gitlab") {
+  return {
+    ...DEFAULT_SETTINGS,
+    recentRepos: [
+      {
+        path: "C:/repo",
+        name: "repo",
+        lastOpenedAt: "2026-01-01T00:00:00Z",
+        provider,
+      },
+    ],
+  };
+}
+
+/** A menu item name that starts with `label`: a disabled item carries its
+ *  reason after it. */
+const startsWith = (label: string) => (name: string) => name.startsWith(label);
+
+/** Opens the New menu and returns its forge item. */
+async function newMenuForgeItem(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string | ((name: string) => boolean),
+) {
+  await user.click(screen.getByRole("button", { name: "New" }));
+  return screen.findByRole("menuitem", { name });
+}
+
+describe("PullRequestsPanel on GitLab says merge request", () => {
+  afterEach(() => {
+    vi.mocked(forgeStatus).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    vi.mocked(gitRemotes).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+  });
+
+  it("names the state group and the refresh button for merge requests", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(READY_GITLAB);
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    vi.mocked(forgePrListPage).mockResolvedValue({ rows: [], capped: false });
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    renderPanel();
+    expect(
+      await screen.findByRole("group", { name: "Merge request state" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "Pull request state" }),
+    ).toBeNull();
+    const refresh = screen.getByRole("button", {
+      name: "Refresh merge requests",
+    });
+    expect(refresh).toHaveAttribute("title", "Refresh merge requests");
+  });
+
+  it("titles the All scope for merge requests while the probe is pending", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(savedAs("gitlab"));
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderPanel();
+    // The saved provider lands with the settings read, after the first paint.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "All" })).toHaveAttribute(
+        "title",
+        "Show every merge request",
+      ),
+    );
+    const item = await newMenuForgeItem(
+      user,
+      startsWith("Merge request on GitLab…"),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+  });
+
+  // A pending probe's reason names no action ("Checking this repository's
+  // host…"); a probe that couldn't reach the host is the arm that phrases it.
+  it("phrases the unreachable-probe reason for merge requests on a saved GitLab repo", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(savedAs("gitlab"));
+    vi.mocked(forgeStatus).mockRejectedValue(new Error("offline"));
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(forgeStatus).toHaveBeenCalled());
+    await act(async () => undefined);
+    const item = await newMenuForgeItem(
+      user,
+      startsWith("Merge request on GitLab…"),
+    );
+    // The row shows the reason itself, and only there: a disabled row never
+    // shows its title, and a title repeating the reason is announced twice.
+    await waitFor(() =>
+      expect(item).toHaveAccessibleName(
+        /^Merge request on GitLab… — .*open a merge request/,
+      ),
+    );
+    expect(item.textContent).not.toContain("pull request");
+    expect(item).not.toHaveAttribute("title");
+  });
+});
+
+describe("PullRequestsPanel in a repository with no remote", () => {
+  const CAN_CREATE: ForgeStatus = {
+    ...READY_GITHUB,
+    implemented: { pullRequests: true, mrCreate: true } as ForgeImplemented,
+  };
+  const NO_REMOTE_REASON =
+    "Add a GitHub, GitLab, or Bitbucket remote to open a pull request here.";
+
+  afterEach(() => {
+    vi.mocked(forgeStatus).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    vi.mocked(gitRemotes).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+  });
+
+  it("offers a neutral, disabled item that says which remote to add, and refuses the hotkey", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(savedAs("github"));
+    vi.mocked(forgeStatus).mockResolvedValue(CAN_CREATE);
+    vi.mocked(gitRemotes).mockClear().mockResolvedValue([]);
+    vi.mocked(forgePrListPage)
+      .mockClear()
+      .mockResolvedValue({ rows: [], capped: false });
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(gitRemotes).toHaveBeenCalled());
+    // The list is read only once the forge is ready, so the create gate is
+    // open on the forge's side and only the missing remote can close it.
+    await waitFor(() => expect(forgePrListPage).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(dispatchAction("create-pr")).toBe(false);
+    const item = await newMenuForgeItem(
+      user,
+      startsWith("Remote pull request…"),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).not.toHaveAttribute("title");
+    expect(item).toHaveTextContent(NO_REMOTE_REASON);
+    expect(item).toHaveAccessibleName(
+      `Remote pull request… — ${NO_REMOTE_REASON}`,
+    );
+    expect(
+      screen.queryByRole("menuitem", {
+        name: startsWith("Pull request on GitHub…"),
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses a create request handed over from elsewhere", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(savedAs("github"));
+    vi.mocked(forgeStatus).mockResolvedValue(CAN_CREATE);
+    vi.mocked(gitRemotes).mockClear().mockResolvedValue([]);
+    vi.mocked(forgePrListPage)
+      .mockClear()
+      .mockResolvedValue({ rows: [], capped: false });
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    renderPanel();
+    await waitFor(() => expect(gitRemotes).toHaveBeenCalled());
+    await waitFor(() => expect(forgePrListPage).toHaveBeenCalled());
+    await act(async () => undefined);
+    try {
+      await act(async () => {
+        useUiStore.setState({ pendingCreate: "pr" });
+      });
+      await waitFor(() =>
+        expect(useUiStore.getState().pendingCreate).toBe(null),
+      );
+      await act(async () => undefined);
+      expect(screen.queryByRole("dialog")).toBeNull();
+    } finally {
+      useUiStore.setState({ pendingCreate: null });
+    }
+  });
+
+  it("keeps today's item while the remotes read is pending", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(savedAs("github"));
+    vi.mocked(forgeStatus).mockResolvedValue(CAN_CREATE);
+    vi.mocked(forgePrListPage).mockResolvedValue({ rows: [], capped: false });
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    const user = userEvent.setup();
+    renderPanel();
+    await screen.findByRole("group", { name: "Pull request state" });
+    const item = await newMenuForgeItem(user, "Pull request on GitHub…");
+    expect(item).not.toHaveAttribute("aria-disabled", "true");
+    expect(item.getAttribute("title") ?? "").not.toContain("remote");
+  });
+});
+
+/** One answer of the merge-state read: a value, a rejection, or a promise. */
+type ProbeAnswer = Partial<GitLabMrMergeState> | Error | Promise<unknown>;
+
+function mergeState(fields: Partial<GitLabMrMergeState>): GitLabMrMergeState {
+  return {
+    autoMergeEnabled: false,
+    detailedMergeStatus: "",
+    pipelineStatus: "",
+    pipelineUrl: "",
+    ...fields,
+  };
+}
+
+const LOCKED = { locked: true, state: "CLOSED" };
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
+  const POLL_MS = 2_000;
+  /** Per-PR answer queues; the last answer repeats once a queue runs dry. */
+  let answers: Record<number, ProbeAnswer[]> = {};
+
+  /** Mounted beside the panel, as the detail view's own details read would be. */
+  function DetailsWatcher({ number }: { number: number }) {
+    useQuery(prDetailsOptions("C:/repo", number, "origin"));
+    return null;
+  }
+
+  /** Mounts the panel on PR `number`, armed unless `arm` is false; `seed`
+   *  writes the client's cache before the first render. */
+  function renderArmed(
+    number: number,
+    {
+      forge = READY_GITLAB,
+      arm = true,
+      detailsState = "CLOSED",
+      seed,
+    }: {
+      forge?: ForgeStatus;
+      arm?: boolean;
+      detailsState?: string;
+      seed?: (client: QueryClient) => void;
+    } = {},
+  ) {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(forge);
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    vi.mocked(forgePrListPage).mockResolvedValue({ rows: [], capped: false });
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    vi.mocked(forgePrView).mockImplementation(
+      async (_repo, n) => ({ number: n, state: detailsState }) as PrDetails,
+    );
+    vi.mocked(forgeGlMrMergeState).mockImplementation(async (_repo, n) => {
+      const queue = answers[n] ?? [];
+      const next = queue.length > 1 ? queue.shift() : queue[0];
+      if (next instanceof Error) throw next;
+      if (next instanceof Promise) return next as Promise<GitLabMrMergeState>;
+      return mergeState(next ?? {});
+    });
+    useUiStore.setState({
+      repoPath: "C:/repo",
+      repoTab: "pulls",
+      selectedPr: arm ? { kind: "remote", id: String(number) } : null,
+      pendingPrAlign: arm,
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    seed?.(client);
+    render(
+      <QueryClientProvider client={client}>
+        <PullRequestsPanel repoPath="C:/repo" />
+        <DetailsWatcher number={number} />
+      </QueryClientProvider>,
+    );
+    return client;
+  }
+
+  /** Waits on real time, which the faked intervals leave alone. */
+  async function until(check: () => boolean, what: string) {
+    for (let i = 0; i < 300; i++) {
+      if (check()) return;
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 5));
+      });
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+  async function ticks(n = 10) {
+    for (let i = 0; i < n; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 5));
+      });
+    }
+  }
+  async function poll() {
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS);
+    });
+  }
+  const probeCalls = (number?: number) =>
+    vi
+      .mocked(forgeGlMrMergeState)
+      .mock.calls.filter((c) => number === undefined || c[1] === number).length;
+  const listCalls = (state: PrStateFilter) =>
+    vi.mocked(forgePrListPage).mock.calls.filter((c) => c[1] === state).length;
+  const armed = () => useUiStore.getState().pendingPrAlign;
+  const pressedTab = (group = "Merge request state") =>
+    within(screen.getByRole("group", { name: group }))
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-pressed") === "true")?.textContent;
+
+  beforeEach(() => {
+    // Only the poll's interval is faked, so React Query's timeouts and the
+    // waits below run on real time.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.mocked(forgeGlMrMergeState).mockClear();
+    vi.mocked(forgePrView).mockClear();
+    vi.mocked(forgePrListPage).mockClear();
+    answers = {};
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.mocked(forgeStatus).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    vi.mocked(gitRemotes).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    useUiStore.setState({ selectedPr: null, pendingPrAlign: false });
+  });
+
+  /** Presses one of the state tabs, as the user would. */
+  async function pickTab(
+    user: ReturnType<typeof userEvent.setup>,
+    name: string,
+  ) {
+    const group = screen.getByRole("group", { name: "Merge request state" });
+    await user.click(within(group).getByRole("button", { name }));
+  }
+  const arm = (number: number) =>
+    act(async () => {
+      useUiStore
+        .getState()
+        .selectPrWithAlign({ kind: "remote", id: String(number) });
+    });
+
+  it("holds while locked, then lands on Merged and refreshes the stale reads", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    renderArmed(7, { arm: false });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    // The landing tab's page is cached and fresh before the align arms.
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await pickTab(user, "Open");
+    await ticks();
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    expect(armed()).toBe(true);
+    expect(pressedTab()).toBe("Open");
+    const detailsBefore = vi.mocked(forgePrView).mock.calls.length;
+    const openListBefore = listCalls("open");
+    const mergedListBefore = listCalls("merged");
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    expect(probeCalls(7)).toBe(2);
+    expect(pressedTab()).toBe("Merged");
+    await until(
+      () => vi.mocked(forgePrView).mock.calls.length > detailsBefore,
+      "the details re-read",
+    );
+    await until(
+      () => listCalls("merged") > mergedListBefore,
+      "the landing page's re-read",
+    );
+    await ticks();
+    expect(vi.mocked(forgePrView).mock.calls.length).toBe(detailsBefore + 1);
+    expect(listCalls("merged")).toBe(mergedListBefore + 1);
+    // The page the align left is not re-read.
+    expect(listCalls("open")).toBe(openListBefore);
+  });
+
+  it("re-reads the landing page when the user already sits on that tab", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    renderArmed(7, { arm: false });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await ticks();
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    expect(armed()).toBe(true);
+    const mergedListBefore = listCalls("merged");
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+    await until(
+      () => listCalls("merged") > mergedListBefore,
+      "the landing page's re-read",
+    );
+    await ticks();
+    expect(listCalls("merged")).toBe(mergedListBefore + 1);
+  });
+
+  it("waits out a cached open answer while the live read runs, then lands on Merged", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    renderArmed(7, {
+      // A pre-merge answer, fresh by the shared options' own staleTime.
+      seed: (client) =>
+        client.setQueryData(
+          glMrMergeStateOptions("C:/repo", 7).queryKey,
+          mergeState({ locked: false, state: "OPEN" }),
+        ),
+    });
+    await until(() => probeCalls(7) === 1, "the first live merge-state read");
+    await ticks();
+    expect(armed()).toBe(true);
+    expect(pressedTab()).toBe("Open");
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+  });
+
+  it("re-reads two seconds after a locked answer, not sooner", async () => {
+    answers[7] = [LOCKED];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_MS - 1);
+    });
+    await ticks();
+    expect(probeCalls(7)).toBe(1);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    await until(() => probeCalls(7) === 2, "the first re-read");
+    await ticks();
+    expect(probeCalls(7)).toBe(2);
+  });
+
+  it("settles nothing from a cached answer while the probe is paused offline", async () => {
+    answers[7] = [{ locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    await until(() => listCalls("open") === 1, "the Open page");
+    await until(
+      () => vi.mocked(forgePrView).mock.calls.length === 1,
+      "the details read",
+    );
+    await ticks();
+    // The align's details read is held in flight across the disconnect: a
+    // fetch already running is not paused, so the details settle while the
+    // probe pauses on its cached entry.
+    const details = deferred<PrDetails>();
+    vi.mocked(forgePrView).mockImplementation(() => details.promise);
+    // An answer older than the CLOSED details, as a detail view's poll leaves.
+    client.setQueryData(
+      glMrMergeStateOptions("C:/repo", 7).queryKey,
+      mergeState({ locked: false, state: "OPEN" }),
+    );
+    try {
+      await arm(7);
+      await until(
+        () => vi.mocked(forgePrView).mock.calls.length === 2,
+        "the align's details read",
+      );
+      await act(async () => {
+        onlineManager.setOnline(false);
+      });
+      await act(async () => {
+        details.resolve({ number: 7, state: "CLOSED" } as PrDetails);
+      });
+      await ticks(20);
+      expect(probeCalls(7)).toBe(0);
+      expect(armed()).toBe(true);
+      expect(pressedTab()).toBe("Open");
+      await act(async () => {
+        onlineManager.setOnline(true);
+      });
+      await until(() => !armed(), "the align to settle once online");
+      expect(pressedTab()).toBe("Merged");
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it("settles nothing from cached details while their read is paused offline", async () => {
+    renderArmed(7, { arm: false, detailsState: "OPEN" });
+    await until(() => listCalls("open") === 1, "the Open page");
+    await until(
+      () => vi.mocked(forgePrView).mock.calls.length === 1,
+      "the details read",
+    );
+    await ticks();
+    try {
+      await act(async () => {
+        onlineManager.setOnline(false);
+      });
+      await arm(7);
+      await ticks(20);
+      expect(vi.mocked(forgePrView).mock.calls.length).toBe(1);
+      expect(armed()).toBe(true);
+      await act(async () => {
+        onlineManager.setOnline(true);
+      });
+      await until(() => !armed(), "the align to settle once online");
+      expect(vi.mocked(forgePrView).mock.calls.length).toBe(2);
+      expect(pressedTab()).toBe("Open");
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it("refreshes nothing when the probe agrees with the details", async () => {
+    const answer = deferred<GitLabMrMergeState>();
+    answers[7] = [answer.promise];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the merge-state read");
+    await ticks();
+    const detailsBefore = vi.mocked(forgePrView).mock.calls.length;
+    const openListBefore = listCalls("open");
+    await act(async () => {
+      answer.resolve(mergeState({ locked: false, state: "CLOSED" }));
+    });
+    await until(() => !armed(), "the align to settle");
+    await ticks();
+    expect(pressedTab()).toBe("Closed");
+    expect(vi.mocked(forgePrView).mock.calls.length).toBe(detailsBefore);
+    expect(listCalls("open")).toBe(openListBefore);
+  });
+
+  it("disarms with the tab untouched after five locked re-reads", async () => {
+    answers[7] = [LOCKED];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    for (let rung = 1; rung <= 5; rung++) {
+      await ticks();
+      expect(armed()).toBe(true);
+      await poll();
+      await until(() => probeCalls(7) === 1 + rung, `re-read ${rung}`);
+    }
+    await until(() => !armed(), "the align to disarm");
+    expect(pressedTab()).toBe("Open");
+    await poll();
+    await poll();
+    await ticks();
+    expect(probeCalls(7)).toBe(6);
+  });
+
+  it("settles Closed when the probe fails before any locked answer", async () => {
+    answers[7] = [new Error("glab failed")];
+    renderArmed(7);
+    await until(() => !armed(), "the align to settle");
+    expect(probeCalls(7)).toBe(1);
+    expect(pressedTab()).toBe("Closed");
+  });
+
+  it("never settles Closed on a failure after a locked answer", async () => {
+    answers[7] = [LOCKED, new Error("glab failed")];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    for (let rung = 1; rung <= 5; rung++) {
+      await ticks();
+      expect(pressedTab()).toBe("Open");
+      expect(armed()).toBe(true);
+      await poll();
+      await until(() => probeCalls(7) === 1 + rung, `re-read ${rung}`);
+    }
+    await until(() => !armed(), "the align to disarm");
+    expect(pressedTab()).toBe("Open");
+  });
+
+  it("rides a failure between locked answers on to the merge", async () => {
+    answers[7] = [
+      LOCKED,
+      new Error("glab failed"),
+      LOCKED,
+      { locked: false, state: "MERGED" },
+    ];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    for (let rung = 1; rung <= 3; rung++) {
+      await ticks();
+      expect(pressedTab()).toBe("Open");
+      await poll();
+      await until(() => probeCalls(7) === 1 + rung, `re-read ${rung}`);
+    }
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+  });
+
+  it("issues no merge-state read on GitHub", async () => {
+    renderArmed(7, { forge: READY_GITHUB });
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab("Pull request state")).toBe("Closed");
+    await ticks();
+    expect(probeCalls()).toBe(0);
+  });
+
+  it.each([
+    ["OPEN", "Open"],
+    ["MERGED", "Merged"],
+  ])(
+    "issues no merge-state read on GitLab for %s details",
+    async (state, tab) => {
+      renderArmed(7, { detailsState: state });
+      await until(() => !armed(), "the align to settle");
+      expect(pressedTab()).toBe(tab);
+      await ticks();
+      expect(probeCalls()).toBe(0);
+    },
+  );
+
+  it("gives the same PR a full budget when it is armed again after a disarm", async () => {
+    answers[7] = [LOCKED];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    for (let rung = 1; rung <= 5; rung++) {
+      await ticks();
+      await poll();
+      await until(() => probeCalls(7) === 1 + rung, `re-read ${rung}`);
+    }
+    await until(() => !armed(), "the first align to disarm");
+    await arm(7);
+    await until(() => probeCalls(7) === 7, "the re-armed first read");
+    for (let rung = 1; rung <= 5; rung++) {
+      await ticks();
+      expect(armed()).toBe(true);
+      await poll();
+      await until(() => probeCalls(7) === 7 + rung, `re-armed re-read ${rung}`);
+    }
+    await until(() => !armed(), "the second align to disarm");
+    expect(pressedTab()).toBe("Open");
+  });
+
+  it("gives the next armed PR a full budget", async () => {
+    answers[7] = [LOCKED];
+    answers[8] = [LOCKED];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "A's first merge-state read");
+    for (let rung = 1; rung <= 3; rung++) {
+      await ticks();
+      await poll();
+      await until(() => probeCalls(7) === 1 + rung, `A's re-read ${rung}`);
+    }
+    await act(async () => {
+      useUiStore.getState().selectPrWithAlign({ kind: "remote", id: "8" });
+    });
+    await until(() => probeCalls(8) === 1, "B's first merge-state read");
+    for (let rung = 1; rung <= 5; rung++) {
+      await ticks();
+      expect(armed()).toBe(true);
+      await poll();
+      await until(() => probeCalls(8) === 1 + rung, `B's re-read ${rung}`);
+    }
+    await until(() => !armed(), "B's align to disarm");
+    expect(probeCalls(8)).toBe(6);
+    expect(probeCalls(7)).toBe(4);
+  });
+
+  it("lets a late answer for the PR the user left settle nothing", async () => {
+    const lateA = deferred<GitLabMrMergeState>();
+    const answerB = deferred<GitLabMrMergeState>();
+    answers[7] = [lateA.promise];
+    answers[8] = [answerB.promise];
+    renderArmed(7);
+    await until(() => probeCalls(7) === 1, "A's merge-state read");
+    await act(async () => {
+      useUiStore.getState().selectPrWithAlign({ kind: "remote", id: "8" });
+    });
+    await until(() => probeCalls(8) === 1, "B's merge-state read");
+    await act(async () => {
+      lateA.resolve(mergeState({ locked: false, state: "MERGED" }));
+    });
+    await ticks();
+    expect(armed()).toBe(true);
+    expect(pressedTab()).toBe("Open");
+    await act(async () => {
+      answerB.resolve(mergeState({ locked: false, state: "CLOSED" }));
+    });
+    await until(() => !armed(), "B's align to settle");
+    expect(pressedTab()).toBe("Closed");
   });
 });

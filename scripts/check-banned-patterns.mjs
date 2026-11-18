@@ -6005,6 +6005,9 @@ export const CHECKS = [
       "src/features/projects/ProjectStatusStrip.tsx",
       // Same shape again: the project and view dialogs' mod+enter submit chord.
       "src/features/projects/ProjectLifecycleDialogs.tsx",
+      // Same shape: a HARDCODED mod+enter submit chord on the merge dialog,
+      // not a user binding.
+      "src/features/pulls/MergePrDialog.tsx",
       // Its two `eventToBinding` calls (the board's handler and the
       // table/roadmap grid's) prevent only on fixed tables: the hardcoded Alt
       // chords (four reorder, four date-shift) and the grid's own cursor and

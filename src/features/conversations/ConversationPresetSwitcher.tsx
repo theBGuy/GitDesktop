@@ -1,4 +1,5 @@
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import type { PrNoun } from "@/lib/pulls/pr-state";
 import { cn } from "@/lib/utils";
 import type { ConversationFeature } from "./useCollapsedSections";
 import type { ConversationPreset } from "./useRemoteListFilter";
@@ -16,18 +17,23 @@ const SHORT_LABEL =
   "hidden @max-[316px]/gd-prhead:group-has-data-[slot=lens-switch]/scope:inline";
 
 /** The segments each panel offers, with the semantics on the `title` so the
- *  one-word labels never have to carry them alone. */
+ *  one-word labels never have to carry them alone. A title built from the
+ *  provider's noun takes it as an argument. */
 const SEGMENTS: Record<
   ConversationFeature,
   {
     value: ConversationPreset;
     label: string;
-    title: string;
+    title: string | ((prNoun: PrNoun) => string);
     shortLabel?: string;
   }[]
 > = {
   pulls: [
-    { value: "all", label: "All", title: "Show every pull request" },
+    {
+      value: "all",
+      label: "All",
+      title: (prNoun) => `Show every ${prNoun}`,
+    },
     {
       value: "mine",
       label: "Mine",
@@ -72,6 +78,7 @@ export function ConversationPresetSwitcher({
   canGroupByReview,
   disabledReason,
   probeReason,
+  prNoun = "pull request",
 }: {
   feature: ConversationFeature;
   preset: ConversationPreset | null;
@@ -95,6 +102,8 @@ export function ConversationPresetSwitcher({
    *  (null when not waiting), so a caller can't leave out the waiting arm by
    *  accident. */
   probeReason: string | null;
+  /** What the shown provider calls a pull request, for the pulls titles. */
+  prNoun?: PrNoun;
 }) {
   if (!canFilterMine && probeReason === null) return null;
 
@@ -117,7 +126,7 @@ export function ConversationPresetSwitcher({
           size="xs"
           className={cn("px-1.5", COMPACT_PAD, s.shortLabel && "relative")}
           aria-pressed={pressed === s.value}
-          title={s.title}
+          title={typeof s.title === "function" ? s.title(prNoun) : s.title}
           disabled={!!heldReason}
           reason={heldReason}
           onClick={() => onPreset(s.value)}

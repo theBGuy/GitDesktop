@@ -3433,6 +3433,36 @@ struct BbMergeTask {
     task_status: String,
 }
 
+/// The `message` a Bitbucket merge sends, refused over Bitbucket's 128 KiB cap.
+fn bb_merge_message(m: &crate::forge::MergeMessage) -> AppResult<String> {
+    let text = crate::forge::merge_message_text(m);
+    if text.len() > 131_072 {
+        return Err(AppError::InvalidArgument(format!(
+            "Bitbucket limits a commit message to 128 KiB, and this one is {} KiB.",
+            text.len().div_ceil(1024)
+        )));
+    }
+    Ok(text)
+}
+
+/// The merge POST's body; without a message it is the three-key object Bitbucket
+/// always received, so its own default message goes through.
+fn merge_payload(
+    merge_strategy: &str,
+    close_source_branch: bool,
+    message: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "type": "pullrequest",
+        "merge_strategy": merge_strategy,
+        "close_source_branch": close_source_branch,
+    });
+    if let Some(message) = message {
+        payload["message"] = serde_json::Value::from(message);
+    }
+    payload
+}
+
 /// Merge a pull request (`POST …/pullrequests/{n}/merge`). Bitbucket has no
 /// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
 /// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
@@ -3440,22 +3470,22 @@ struct BbMergeTask {
 /// status errors via [`http::http_error`] (an already-closed PR surfaces its 400), or the
 /// body read's own error when that read failed. The body is never consulted on a 200
 /// (merged) or a 202: a 202 with a non-empty `Location` is queued (the poll decides), and
-/// one without errors.
+/// one without errors. Each message in `messages` already passed the shape checks; the
+/// slot is chosen after this function's own strategy check, before credentials load.
 pub async fn merge_pr(
     repo_path: &str,
     number: u64,
     strategy: &str,
     delete_branch: bool,
+    messages: crate::forge::MergeMessages,
 ) -> AppResult<()> {
     let merge_strategy = map_merge_strategy(strategy)?;
+    let message = crate::forge::single_commit_message(strategy, &["fast_forward"], messages)?;
+    let text = message.as_ref().map(bb_merge_message).transpose()?;
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
     let path = format!("{base}/pullrequests/{number}/merge");
-    let payload = serde_json::json!({
-        "type": "pullrequest",
-        "merge_strategy": merge_strategy,
-        "close_source_branch": delete_branch,
-    });
+    let payload = merge_payload(merge_strategy, delete_branch, text.as_deref());
     let (status, location, body) =
         http::bb_send_request_split(&creds, reqwest::Method::POST, &path, Some(&payload)).await?;
     match merge_answer(status, location, body)? {
@@ -3464,6 +3494,99 @@ pub async fn merge_pr(
         // Synchronous merge — done.
         None => Ok(()),
     }
+}
+
+/// A draft of Bitbucket's default merge message, composed locally (Bitbucket's API
+/// doesn't expose it, so the reply marks it inexact). The squash draft keeps the PR
+/// title paragraph and lists the commits oldest first; `Approved-by:` trailers aren't
+/// reproduced.
+fn bb_default_merge_draft(
+    source_branch: &str,
+    number: u64,
+    pr_title: &str,
+    commits: Option<&[String]>,
+) -> crate::forge::MergeMessage {
+    let mut body = pr_title.trim().to_string();
+    if let Some(commits) = commits.filter(|c| !c.is_empty()) {
+        body.push_str("\n\n");
+        let lines: Vec<String> = commits.iter().map(|h| format!("* {h}")).collect();
+        body.push_str(&lines.join("\n"));
+    }
+    crate::forge::MergeMessage {
+        title: format!("Merged in {source_branch} (pull request #{number})"),
+        body,
+    }
+}
+
+/// The squash draft's commit list, oldest first, from the commits read. A failed read
+/// stays an error (the dialog offers Retry); a truncated one is `Ok(None)`, an unknown
+/// default, since a draft without its full list would misstate Bitbucket's message.
+fn squash_draft_commits(read: AppResult<(Vec<BbCommit>, bool)>) -> AppResult<Option<Vec<String>>> {
+    match read? {
+        (_, true) => Ok(None),
+        (commits, false) => Ok(Some(commits.iter().rev().map(commit_headline).collect())),
+    }
+}
+
+/// The commit a Bitbucket merge with `strategy` writes and a draft of its default
+/// message. Bitbucket's merge takes no head precondition, so no head is reported.
+pub async fn merge_message_defaults(
+    repo_path: &str,
+    number: u64,
+    strategy: &str,
+) -> AppResult<crate::forge::MergeMessageDefaults> {
+    use crate::forge::{MergeCommitKind, MergeMessageCommit, MergeMessageDefaults};
+    let kind = match map_merge_strategy(strategy)? {
+        "fast_forward" => {
+            return Ok(MergeMessageDefaults {
+                commits: Vec::new(),
+                reason: Some(crate::forge::NoMergeMessageReason::FastForward),
+                head_sha: None,
+            });
+        }
+        "squash" => MergeCommitKind::Squash,
+        _ => MergeCommitKind::Merge,
+    };
+    let creds = http::load_credentials().await?;
+    let (ws, slug) = workspace_slug(repo_path).await?;
+    let base = format!(
+        "repositories/{}/{}/pullrequests/{number}",
+        encode_query_value(&ws),
+        encode_query_value(&slug),
+    );
+    let pr: BbPr = http::bb_get_json(&creds, &base, "pull request", BbOpKind::Read).await?;
+    // `known` is false for a squash whose commit list is truncated; the merge-commit
+    // draft never lists commits.
+    let (commits, known) = if kind == MergeCommitKind::Squash {
+        let read = bb_paginate_with_truncation::<BbCommit>(
+            &creds,
+            format!("{base}/commits?pagelen=100"),
+            "commits",
+        )
+        .await;
+        let list = squash_draft_commits(read)?;
+        let known = list.is_some();
+        (list, known)
+    } else {
+        (None, true)
+    };
+    let source_branch = pr
+        .source
+        .as_ref()
+        .and_then(|s| s.branch.as_ref())
+        .map(|b| b.name.as_str())
+        .filter(|name| !name.is_empty() && known);
+    let message = source_branch
+        .map(|branch| bb_default_merge_draft(branch, number, &pr.title, commits.as_deref()));
+    Ok(MergeMessageDefaults {
+        commits: vec![MergeMessageCommit {
+            kind,
+            message,
+            exact: false,
+        }],
+        reason: None,
+        head_sha: None,
+    })
 }
 
 /// The merge POST's answer: 200 merged (`None`), 202 queued behind its `Location` task
@@ -8612,6 +8735,144 @@ mod tests {
         ));
     }
 
+    fn bb_msg(title: &str, body: &str) -> crate::forge::MergeMessage {
+        crate::forge::MergeMessage {
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn merge_payload_adds_only_the_message() {
+        assert_eq!(
+            merge_payload("squash", true, None),
+            serde_json::json!({"type":"pullrequest","merge_strategy":"squash","close_source_branch":true})
+        );
+        assert_eq!(
+            merge_payload("squash", true, Some("t\n\nb")),
+            serde_json::json!({"type":"pullrequest","merge_strategy":"squash","close_source_branch":true,"message":"t\n\nb"})
+        );
+    }
+
+    #[test]
+    fn bb_merge_message_refuses_over_128_kib() {
+        // "t\n\n" plus the body: 3 bytes of title and separator.
+        let at_cap = bb_msg("t", &"b".repeat(131_072 - 3));
+        assert_eq!(bb_merge_message(&at_cap).unwrap().len(), 131_072);
+        let over = bb_msg("t", &"b".repeat(131_073 - 3));
+        match bb_merge_message(&over) {
+            Err(AppError::InvalidArgument(t)) => assert_eq!(
+                t,
+                "Bitbucket limits a commit message to 128 KiB, and this one is 129 KiB."
+            ),
+            other => panic!("{other:?}"),
+        }
+        // The cap counts bytes: two-byte characters reach it at half the character count.
+        let two_byte = char::from_u32(0xE9).unwrap().to_string();
+        let at_cap = bb_msg("t", &format!("{}b", two_byte.repeat(65_534)));
+        assert_eq!(bb_merge_message(&at_cap).unwrap().len(), 131_072);
+        let over = bb_msg("t", &two_byte.repeat(65_535));
+        let chars = crate::forge::merge_message_text(&over).chars().count();
+        assert!(chars < 131_072, "{chars}");
+        match bb_merge_message(&over) {
+            Err(AppError::InvalidArgument(t)) => assert_eq!(
+                t,
+                "Bitbucket limits a commit message to 128 KiB, and this one is 129 KiB."
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn bb_default_merge_draft_composes_the_documented_layout() {
+        let merge = bb_default_merge_draft("feature/x", 7, " Add x ", None);
+        assert_eq!(
+            merge,
+            bb_msg("Merged in feature/x (pull request #7)", "Add x")
+        );
+        let commits = ["a".to_string(), "b".to_string()];
+        let squash = bb_default_merge_draft("feature/x", 7, "Add x", Some(&commits));
+        assert_eq!(squash.body, "Add x\n\n* a\n* b");
+        let none = bb_default_merge_draft("feature/x", 7, "Add x", Some(&[]));
+        assert_eq!(none.body, "Add x");
+    }
+
+    #[test]
+    fn squash_draft_commits_fails_on_error_and_is_unknown_when_truncated() {
+        let commits: Vec<BbCommit> = serde_json::from_str(
+            r#"[{"hash":"c3","message":"third\n\nbody"},{"hash":"c2","summary":{"raw":"second"}},{"hash":"c1","message":"first"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            squash_draft_commits(Ok((commits, false))).unwrap(),
+            Some(vec!["first".to_string(), "second".into(), "third".into()])
+        );
+        assert_eq!(
+            squash_draft_commits(Ok((Vec::new(), false))).unwrap(),
+            Some(Vec::new())
+        );
+        let page: Vec<BbCommit> = serde_json::from_str(r#"[{"hash":"c9","message":"x"}]"#).unwrap();
+        assert_eq!(squash_draft_commits(Ok((page, true))).unwrap(), None);
+        assert!(matches!(
+            squash_draft_commits(Err(AppError::Timeout(30))),
+            Err(AppError::Timeout(30))
+        ));
+        // A truncated squash list must reach the draft as an unknown message.
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("bitbucket.rs"),
+            "merge_message_defaults",
+        );
+        assert!(
+            body.contains("let list = squash_draft_commits(read)?;"),
+            "{body}"
+        );
+        assert!(body.contains("let known = list.is_some();"), "{body}");
+        assert!(body.contains("(list, known)"), "{body}");
+        assert!(
+            body.contains(".filter(|name| !name.is_empty() && known);"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_message_defaults_answers_fast_forward_without_a_request() {
+        let d = merge_message_defaults("C:/nonexistent", 1, "fast_forward")
+            .await
+            .unwrap();
+        assert!(d.commits.is_empty());
+        assert_eq!(
+            d.reason,
+            Some(crate::forge::NoMergeMessageReason::FastForward)
+        );
+        assert!(matches!(
+            merge_message_defaults("C:/nonexistent", 1, "rebase").await,
+            Err(AppError::InvalidArgument(_))
+        ));
+    }
+
+    /// Bitbucket's own unknown-strategy text answers ahead of the slot rows, and the
+    /// slot rows answer before credentials load.
+    #[tokio::test]
+    async fn merge_pr_refuses_strategy_then_slot_before_credentials() {
+        let with_merge = || crate::forge::MergeMessages {
+            squash: None,
+            merge: Some(bb_msg("m", "")),
+        };
+        match merge_pr("C:/nonexistent", 1, "rebase", false, with_merge()).await {
+            Err(AppError::InvalidArgument(t)) => {
+                assert_eq!(t, "unsupported Bitbucket merge strategy: rebase")
+            }
+            other => panic!("{other:?}"),
+        }
+        match merge_pr("C:/nonexistent", 1, "fast_forward", false, with_merge()).await {
+            Err(AppError::InvalidArgument(t)) => assert_eq!(
+                t,
+                "This merge method writes no commit of its own, so it can't take a commit message."
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
     fn participants(json: &str) -> Vec<BbParticipant> {
         let page: BbPrParticipants = serde_json::from_str(json).unwrap();
         page.participants
@@ -9901,6 +10162,54 @@ definitions:
             !split(&format!("{body}\nbb_send(x)")),
             "a bb_send beside the split send must flip"
         );
+
+        // The payload carries the composed message, built and capped before credentials load.
+        let message = |b: &str| {
+            let built = b.find(".map(bb_merge_message).transpose()?");
+            let creds = b.find("load_credentials(");
+            b.contains("merge_payload(merge_strategy, delete_branch, text.as_deref())")
+                && matches!((built, creds), (Some(m), Some(c)) if m < c)
+        };
+        assert!(message(&body), "{body}");
+        for mutant in [
+            body.replacen("text.as_deref())", "None)", 1),
+            body.replacen(".map(bb_merge_message).transpose()?", "", 1),
+            body.replacen("let creds = http::load_credentials().await?;", "", 1)
+                .replacen(
+                    "let merge_strategy",
+                    "let creds = http::load_credentials().await?; let merge_strategy",
+                    1,
+                ),
+        ] {
+            assert_ne!(mutant, body);
+            assert!(!message(&mutant), "{mutant}");
+        }
+    }
+
+    #[test]
+    fn merge_message_defaults_maps_each_strategy_to_its_own_commit() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("bitbucket.rs"),
+            "merge_message_defaults",
+        );
+        let kinds = |b: &str| {
+            b.contains("\"squash\" => MergeCommitKind::Squash,")
+                && b.contains("_ => MergeCommitKind::Merge,")
+                && b.contains("if kind == MergeCommitKind::Squash {")
+        };
+        assert!(kinds(&body), "{body}");
+        let swapped = body
+            .replacen(
+                "\"squash\" => MergeCommitKind::Squash,",
+                "\"squash\" => MergeCommitKind::Merge,",
+                1,
+            )
+            .replacen(
+                "_ => MergeCommitKind::Merge,",
+                "_ => MergeCommitKind::Squash,",
+                1,
+            );
+        assert!(!kinds(&swapped));
     }
 
     /// Each compound wrap embeds the step's error, an unread-reply hedge included (a timed-out

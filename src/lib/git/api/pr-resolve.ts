@@ -17,6 +17,9 @@ export interface LocalPrMergeOutcome {
   worktreeId: string | null;
   /** The oplog entry id, passed to finish/abort. */
   opId: string | null;
+  /** The checkout path that entry is filed under, passed to finish/abort: records are
+   *  shared by every checkout of the repository, the journal is keyed per checkout. */
+  journalRepo: string;
 }
 
 export const gitMergeLocalPr = (
@@ -45,6 +48,7 @@ export const gitFinishLocalPrMerge = (
   worktreePath: string,
   worktreeId: string,
   opId: string | null,
+  journalRepo: string | null,
 ) =>
   invoke<LocalPrMergeOutcome>("git_finish_local_pr_merge", {
     repoPath,
@@ -54,6 +58,7 @@ export const gitFinishLocalPrMerge = (
     worktreePath,
     worktreeId,
     opId,
+    journalRepo,
   });
 
 /** What an abort did: `removed` = nothing this repository can remove backs the
@@ -61,7 +66,9 @@ export const gitFinishLocalPrMerge = (
  *  remove, even one git still lists), false on a failed registry read or when a
  *  leaf of ours survived the removal; `closed` = the abort ended the merge, false
  *  when the entry was already closed as done while no registered worktree of ours
- *  backed it, and whenever `removed` is false (the entry is then left open). */
+ *  backed it, and whenever `removed` is false (the entry is then left open). An
+ *  abort refused while a finish or another abort holds the entry, or whose held
+ *  claim the journal could not re-assert, rejects instead, having removed nothing. */
 export interface LocalPrMergeAbortOutcome {
   removed: boolean;
   closed: boolean;
@@ -73,11 +80,13 @@ export const gitAbortLocalPrMerge = (
   repoPath: string,
   worktreePath: string,
   opId: string | null,
+  journalRepo: string | null,
 ) =>
   invoke<LocalPrMergeAbortOutcome>("git_abort_local_pr_merge", {
     repoPath,
     worktreePath,
     opId,
+    journalRepo,
   });
 
 /** Outcome of starting or finishing a local PR's branch update (its base merged INTO
@@ -140,8 +149,11 @@ export const gitFinishLocalPrUpdate = (
     journalRepo,
   });
 
-/** Throws a paused update away; succeeds once the repository resolves, so a stored
- *  record stays clearable. */
+/** Throws a paused update away. Once the repository resolves it refuses while a
+ *  finish holds the entry, or when its close could not read the journal while a
+ *  fresh read still finds the entry unfinished (a retry then clears it). A journal
+ *  unreadable from the start rules nothing out: the discard then answers
+ *  discarded without removing a registered worktree. */
 export const gitDiscardLocalPrUpdate = (
   repoPath: string,
   head: string,

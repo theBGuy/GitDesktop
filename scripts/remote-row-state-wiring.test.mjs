@@ -7,9 +7,12 @@
 //   cached list page of the repo's lens, inside its success callback, right
 //   after the call that arms the delayed list re-read (it doesn't wait for the
 //   re-read to fire; push-recheck-family.test.mjs pins that call and its gate),
-//   and no other write does; of the issue lifecycle writes only close and
-//   reopen hand the helper a state, whose write keys from the target its
-//   onMutate fixes, and nothing else in src/ calls the five forge state writes;
+//   and no other write does; a merge also re-files, after its own row and under
+//   the same gate, the stack layers it took with it, and its re-read owes the
+//   lens's issue lists and issue details; of the issue lifecycle writes only
+//   close and reopen hand the helper a state, whose write keys from the
+//   target its onMutate fixes, and nothing else in src/ calls the five forge
+//   state writes;
 // - the issue picker offers open and closed issues unfiltered by state and
 //   lists a number once, the linked-issue chips rank off the filtered open rows
 //   alone, and the stack offer keeps its open page RAW (the detector's
@@ -97,12 +100,25 @@ const helperWrite = ({ family, row }) =>
   `queryClient.setQueriesData<${row}[]>({ queryKey: repoKeys.${family}(repo), predicate: (q) => q.queryKey[3] === lens }, (page) => { const next = patchRowState(page, number, state); return next === page ? undefined : next; })`;
 
 /** The PR state writes and the state each re-files its row under; `gate` is
- *  the condition the patch must sit under, sharing the block whose FIRST
- *  statement arms the list re-read. */
+ *  the condition every patch must sit under, sharing the block whose FIRST
+ *  statement arms the list re-read. A merge also re-files the stack layers it
+ *  took with it (`cascade`, after its own row's patch) and owes the re-read the
+ *  lens's issue lists and issue details beside the PR rows (`rereadKeys`). */
 const PR_HOOKS = {
-  useMergePr: { state: "MERGED", gate: "if (!data.queued)" },
-  useClosePr: { state: "CLOSED", gate: null },
-  useReopenPr: { state: "OPEN", gate: null },
+  useMergePr: {
+    state: "MERGED",
+    gate: "if (!data.queued)",
+    patches: 2,
+    cascade:
+      'for (const n of data.cascaded) patchPrListState(queryClient, repo, args.lens, n, "MERGED");',
+    rereadKeys: [
+      "...prStateRecheckKeys(repo, args.lens)",
+      "[...repoKeys.issueList(repo), args.lens]",
+      '["repo", repo, "issue", args.lens]',
+    ],
+  },
+  useClosePr: { state: "CLOSED", gate: null, patches: 1 },
+  useReopenPr: { state: "OPEN", gate: null, patches: 1 },
 };
 const prPatch = (state) =>
   `patchPrListState(queryClient, repo, args.lens, args.number, "${state}");`;
@@ -374,8 +390,12 @@ function checkRemoteListState(raw) {
       );
   }
 
-  // Arm 2: in onSuccess, right after arming the re-read, re-file the PR's row.
-  for (const [name, { state, gate }] of Object.entries(PR_HOOKS)) {
+  // Arm 2: in onSuccess, right after arming the re-read, re-file the PR's row
+  // (and, for a merge, the stack layers it took with it).
+  for (const [
+    name,
+    { state, gate, patches: wanted, cascade, rereadKeys },
+  ] of Object.entries(PR_HOOKS)) {
     const u = unit(PR_ACTIONS, name);
     if (!u) continue;
     const { view } = u;
@@ -391,21 +411,42 @@ function checkRemoteListState(raw) {
       continue;
     }
     const body = view.code.slice(success[0], success[1] + 1);
-    if (patches.length !== 1)
+    if (patches.length !== wanted)
       problems.push(
-        `${PR_ACTIONS} ${name}: expected one patchPrListState call, found ${patches.length}`,
+        `${PR_ACTIONS} ${name}: expected ${wanted} patchPrListState call${wanted === 1 ? "" : "s"}, found ${patches.length}`,
       );
-    else if (patches[0] < success[0] || patches[0] > success[1])
-      problems.push(`${PR_ACTIONS} ${name}: the patch is not in onSuccess`);
-    if (!norm(body).includes(prPatch(state)))
+    if (patches.some((at) => at < success[0] || at > success[1]))
+      problems.push(`${PR_ACTIONS} ${name}: a patch is not in onSuccess`);
+    const own = norm(body).indexOf(prPatch(state));
+    if (own < 0)
       problems.push(
         `${PR_ACTIONS} ${name}: does not re-file its row as "${state}"`,
       );
+    if (cascade !== undefined) {
+      const at = norm(body).indexOf(cascade);
+      if (at < 0)
+        problems.push(
+          `${PR_ACTIONS} ${name}: does not re-file the stack layers it merged`,
+        );
+      else if (own >= 0 && at < own)
+        problems.push(
+          `${PR_ACTIONS} ${name}: the stack layers' patch must follow the PR's own`,
+        );
+    }
     const reread = view.code.indexOf("recheckListsLater(", success[0]);
-    if (reread < 0 || reread > success[1] || patches[0] < reread)
+    if (reread < 0 || reread > success[1] || patches.some((at) => at < reread))
       problems.push(
         `${PR_ACTIONS} ${name}: the patch must follow the call that arms the list re-read`,
       );
+    if (rereadKeys !== undefined && reread >= 0 && reread < success[1]) {
+      const open = reread + "recheckListsLater".length;
+      const owed = argsAt(view, open)?.[2] ?? "";
+      for (const key of rereadKeys)
+        if (!owed.includes(key))
+          problems.push(
+            `${PR_ACTIONS} ${name}: the list re-read does not owe ${key}`,
+          );
+    }
     if (gate !== null) {
       const adjacent = new RegExp(
         `${escapeRe(gate)}\\s*\\{\\s*recheckListsLater\\(`,
@@ -420,7 +461,7 @@ function checkRemoteListState(raw) {
         problems.push(
           `${PR_ACTIONS} ${name}: \`${gate}\` must open a block whose first statement arms the list re-read`,
         );
-      else if (patches[0] < gated[0] || patches[0] > gated[1])
+      else if (patches.some((at) => at < gated[0] || at > gated[1]))
         problems.push(
           `${PR_ACTIONS} ${name}: the patch is not guarded by \`${gate}\``,
         );
@@ -854,12 +895,17 @@ test("an axis inserted before state, or a longer key builder, fails", () => {
   );
 });
 
+/** The merge's queued gate from its own row's patch to its closing brace: the
+ *  own patch, then the stack layers' loop, then the brace. */
+const MERGE_OWN = `          ${prPatch("MERGED")}\n`;
+const MERGE_CASCADE =
+  "          for (const n of data.cascaded)\n" +
+  '            patchPrListState(queryClient, repo, args.lens, n, "MERGED");\n';
+const MERGE_TAIL = `${MERGE_OWN}${MERGE_CASCADE}        }\n`;
+
 test("a merge patch outside the queued gate, or ahead of the call arming the re-read, fails", () => {
   const outside = mutate(realSources(), PR_ACTIONS, (t) =>
-    t.replace(
-      '          patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");\n        }',
-      '        }\n        patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");',
-    ),
+    t.replace(MERGE_TAIL, `${MERGE_CASCADE}        }\n  ${MERGE_OWN}`),
   );
   assertFlags(outside, "useMergePr", "not guarded");
   const ahead = mutate(realSources(), PR_ACTIONS, (t) =>
@@ -870,12 +916,53 @@ test("a merge patch outside the queued gate, or ahead of the call arming the re-
   );
   assertFlags(ahead, "useMergePr", "first statement arms the list re-read");
   const dropped = mutate(realSources(), PR_ACTIONS, (t) =>
+    t.replace(MERGE_OWN, ""),
+  );
+  assertFlags(dropped, "useMergePr", "found 1");
+  assertFlags(dropped, "useMergePr", 'does not re-file its row as "MERGED"');
+});
+
+test("a merge that drops the stack layers' patch, or moves it outside the queued gate, fails", () => {
+  const dropped = mutate(realSources(), PR_ACTIONS, (t) =>
+    t.replace(MERGE_CASCADE, ""),
+  );
+  assertFlags(dropped, "useMergePr", "found 1");
+  assertFlags(dropped, "useMergePr", "does not re-file the stack layers");
+  const outside = mutate(realSources(), PR_ACTIONS, (t) =>
     t.replace(
-      '          patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");\n',
-      "",
+      MERGE_TAIL,
+      `${MERGE_OWN}        }\n${MERGE_CASCADE.replace(/^ {2}/gm, "")}`,
     ),
   );
-  assertFlags(dropped, "useMergePr", "found 0");
+  assertFlags(outside, "useMergePr", "not guarded");
+  const before = mutate(realSources(), PR_ACTIONS, (t) =>
+    t.replace(MERGE_TAIL, `${MERGE_CASCADE}${MERGE_OWN}        }\n`),
+  );
+  assertFlags(before, "useMergePr", "must follow the PR's own");
+});
+
+test("a merge whose list re-read stops owing the lens's issue lists or details fails", () => {
+  const keys = [
+    "            [...repoKeys.issueList(repo), args.lens],\n",
+    '            ["repo", repo, "issue", args.lens],\n',
+  ];
+  const lensless = [
+    "            [...repoKeys.issueList(repo)],\n",
+    '            ["repo", repo, "issue"],\n',
+  ];
+  for (const [i, key] of keys.entries()) {
+    const owed = PR_HOOKS.useMergePr.rereadKeys[i + 1];
+    assertFlags(
+      mutate(realSources(), PR_ACTIONS, (t) => t.replace(key, "")),
+      "useMergePr",
+      `does not owe ${owed}`,
+    );
+    assertFlags(
+      mutate(realSources(), PR_ACTIONS, (t) => t.replace(key, lensless[i])),
+      "useMergePr",
+      `does not owe ${owed}`,
+    );
+  }
 });
 
 test("a close or reopen that re-files under the wrong state, or not at all, fails", () => {

@@ -2726,12 +2726,6 @@ export const GH_EXIT_ABSENCE_ALLOWLIST = [
   },
   {
     file: "github/pr.rs",
-    fn: "gh_pr_is_stacked",
-    rationale:
-      "fail-safe by contract: false runs the legacy merge, which surfaces GitHub's own error for a stacked PR",
-  },
-  {
-    file: "github/pr.rs",
     fn: "detect_fork_pr_for_branch",
     rationale:
       "the matched exit is a local git rev-parse (no such branch); the gh lookups are fail-safe by contract, so publish proceeds",

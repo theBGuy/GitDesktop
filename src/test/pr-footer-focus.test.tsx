@@ -8,21 +8,32 @@ import { unmockedCommands } from "./setup";
 
 afterAll(() => expect(unmockedCommands).toEqual([]));
 
-function deferred() {
-  let resolve!: () => void;
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
-  const promise = new Promise<void>((res, rej) => {
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
     reject = rej;
   });
   return { promise, resolve, reject };
 }
 
-type Write = () => Promise<void> | "cancelled";
+/** One press of a footer button: `prepare` stands for the confirm and the
+ *  riding post (false = cancelled or refused), `write` for the mutation. */
+type Write = { prepare: () => Promise<boolean>; write: () => Promise<void> };
 
-/** The two docked footers of RemotePrView around the exported hook, with the
- *  view's handler shape: ownership read at entry, armed right before the write,
- *  disarmed by its catch. The test drives the PR state the read would report. */
+const writes = (write: Promise<void> | (() => Promise<void>)): Write => ({
+  prepare: async () => true,
+  write: typeof write === "function" ? write : () => write,
+});
+const cancelled: Write = {
+  prepare: async () => false,
+  write: async () => undefined,
+};
+
+/** The two docked footers of RemotePrView around the exported hook, each button
+ *  firing `footerFocus.run` as the view's doClose/doReopen do. The test drives
+ *  the PR state the read would report. */
 function Footers({
   entityKey,
   state,
@@ -43,19 +54,15 @@ function Footers({
     closeRef,
     reopenRef,
   });
-  async function run(
-    footer: HTMLDivElement | null,
-    target: "close" | "reopen",
-  ) {
-    const ownsFocus = !!footer?.contains(document.activeElement);
-    const started = write();
-    if (started === "cancelled") return;
-    if (ownsFocus) footerFocus.arm(target, entityKey);
-    try {
-      await started;
-    } catch {
-      footerFocus.disarm(entityKey);
-    }
+  function run(footer: HTMLDivElement | null, target: "close" | "reopen") {
+    void footerFocus.run({
+      footer,
+      target,
+      key: entityKey,
+      prepare: write.prepare,
+      write: write.write,
+      onWriteError: () => undefined,
+    });
   }
   return (
     <>
@@ -64,7 +71,7 @@ function Footers({
         <div ref={openFooterRef} data-testid="open-footer">
           <DisabledReasonButton
             ref={closeRef}
-            onClick={() => void run(openFooterRef.current, "reopen")}
+            onClick={() => run(openFooterRef.current, "reopen")}
           >
             Close
           </DisabledReasonButton>
@@ -74,7 +81,7 @@ function Footers({
         <div ref={reopenFooterRef} data-testid="closed-footer">
           <DisabledReasonButton
             ref={reopenRef}
-            onClick={() => void run(reopenFooterRef.current, "close")}
+            onClick={() => run(reopenFooterRef.current, "close")}
           >
             Reopen
           </DisabledReasonButton>
@@ -103,7 +110,7 @@ const button = (name: string) => screen.getByRole("button", { name });
 describe("useFooterFocusSwap", () => {
   it("a close fired from the footer lands on Reopen", async () => {
     const w = deferred();
-    const { show } = setup("OPEN", () => w.promise);
+    const { show } = setup("OPEN", writes(w.promise));
     await userEvent.click(button("Close"));
     await act(async () => w.resolve());
     show("CLOSED");
@@ -112,7 +119,7 @@ describe("useFooterFocusSwap", () => {
 
   it("a reopen fired from the footer lands on Close", async () => {
     const w = deferred();
-    const { show } = setup("CLOSED", () => w.promise);
+    const { show } = setup("CLOSED", writes(w.promise));
     await userEvent.click(button("Reopen"));
     await act(async () => w.resolve());
     show("OPEN");
@@ -121,7 +128,7 @@ describe("useFooterFocusSwap", () => {
 
   it("the swap may land before the write settles", async () => {
     const w = deferred();
-    const { show } = setup("OPEN", () => w.promise);
+    const { show } = setup("OPEN", writes(w.promise));
     await userEvent.click(button("Close"));
     show("CLOSED");
     expect(document.activeElement).toBe(button("Reopen"));
@@ -129,7 +136,7 @@ describe("useFooterFocusSwap", () => {
   });
 
   it("without the hook's landing, the swap strands focus on body (premise)", async () => {
-    const { show } = setup("OPEN", () => "cancelled");
+    const { show } = setup("OPEN", cancelled);
     await userEvent.click(button("Close"));
     expect(document.activeElement).toBe(button("Close"));
     show("CLOSED");
@@ -138,7 +145,7 @@ describe("useFooterFocusSwap", () => {
 
   it("a failed write leaves focus on its button and disarms", async () => {
     const w = deferred();
-    const { show } = setup("OPEN", () => w.promise);
+    const { show } = setup("OPEN", writes(w.promise));
     await userEvent.click(button("Close"));
     await act(async () => w.reject(new Error("boom")));
     expect(document.activeElement).toBe(button("Close"));
@@ -148,7 +155,7 @@ describe("useFooterFocusSwap", () => {
   });
 
   it("a cancelled confirm never arms", async () => {
-    const { show } = setup("OPEN", () => "cancelled");
+    const { show } = setup("OPEN", cancelled);
     await userEvent.click(button("Close"));
     show("CLOSED");
     expect(document.activeElement).toBe(document.body);
@@ -158,10 +165,13 @@ describe("useFooterFocusSwap", () => {
     let attempt = 0;
     const first = deferred();
     const second = deferred();
-    const { show } = setup("OPEN", () => {
-      attempt += 1;
-      return attempt === 1 ? first.promise : second.promise;
-    });
+    const { show } = setup(
+      "OPEN",
+      writes(() => {
+        attempt += 1;
+        return attempt === 1 ? first.promise : second.promise;
+      }),
+    );
     await userEvent.click(button("Close"));
     await act(async () => first.reject(new Error("boom")));
     await userEvent.click(button("Close"));
@@ -172,7 +182,7 @@ describe("useFooterFocusSwap", () => {
 
   it("leaving the PR mid-flight lands nothing, there or back", async () => {
     const w = deferred();
-    const { show } = setup("OPEN", () => w.promise);
+    const { show } = setup("OPEN", writes(w.promise));
     await userEvent.click(button("Close"));
     // The user moves to another PR, which shows closed.
     show("CLOSED", B);
@@ -189,10 +199,13 @@ describe("useFooterFocusSwap", () => {
     const onA = deferred();
     const onB = deferred();
     let attempt = 0;
-    const { show } = setup("OPEN", () => {
-      attempt += 1;
-      return attempt === 1 ? onA.promise : onB.promise;
-    });
+    const { show } = setup(
+      "OPEN",
+      writes(() => {
+        attempt += 1;
+        return attempt === 1 ? onA.promise : onB.promise;
+      }),
+    );
     await userEvent.click(button("Close"));
     // The user moves to B (dropping A's arm) and closes it from its footer.
     show("OPEN", B);
@@ -205,7 +218,7 @@ describe("useFooterFocusSwap", () => {
   });
 
   it("a refetch swapping the footer with nothing armed moves nothing", () => {
-    const { show } = setup("OPEN", () => "cancelled");
+    const { show } = setup("OPEN", cancelled);
     show("CLOSED");
     expect(document.activeElement).toBe(document.body);
     show("OPEN");
@@ -214,7 +227,7 @@ describe("useFooterFocusSwap", () => {
 
   it("focus the user moved elsewhere mid-flight stays there", async () => {
     const w = deferred();
-    const { show } = setup("OPEN", () => w.promise);
+    const { show } = setup("OPEN", writes(w.promise));
     await userEvent.click(button("Close"));
     act(() => button("Elsewhere").focus());
     await act(async () => w.resolve());
@@ -293,7 +306,7 @@ describe("useFooterFocusSwap", () => {
 
   it("a close fired with focus outside the footer never arms", async () => {
     const w = deferred();
-    const { show } = setup("OPEN", () => w.promise);
+    const { show } = setup("OPEN", writes(w.promise));
     act(() => button("Elsewhere").focus());
     // A pointer-free activation (a palette or hotkey route) leaves focus where
     // it was.
@@ -302,5 +315,66 @@ describe("useFooterFocusSwap", () => {
     act(() => button("Elsewhere").blur());
     show("CLOSED");
     expect(document.activeElement).toBe(document.body);
+  });
+
+  it("a footer swap while the riding post is pending lands nothing", async () => {
+    const pre = deferred<boolean>();
+    const w = deferred();
+    const { show } = setup("OPEN", {
+      prepare: () => pre.promise,
+      write: () => w.promise,
+    });
+    await userEvent.click(button("Close"));
+    show("CLOSED");
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => pre.resolve(true));
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => w.resolve());
+  });
+
+  it("a footer unmounted while prepare runs never arms for a later swap", async () => {
+    const pre = deferred<boolean>();
+    const { show } = setup("OPEN", {
+      prepare: () => pre.promise,
+      write: async () => undefined,
+    });
+    await userEvent.click(button("Close"));
+    show("CLOSED");
+    await act(async () => pre.resolve(true));
+    // Reopened and closed again elsewhere, with no footer press behind it.
+    show("OPEN");
+    show("CLOSED");
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("a prepare that bails after its awaits never arms", async () => {
+    const { show } = setup("OPEN", {
+      prepare: async () => {
+        await Promise.resolve();
+        return false;
+      },
+      write: async () => undefined,
+    });
+    await userEvent.click(button("Close"));
+    await act(async () => undefined);
+    show("CLOSED");
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("ownership is read before prepare's first await", async () => {
+    const w = deferred();
+    const { show } = setup("OPEN", {
+      // The confirm dialog takes focus out of the footer the same way.
+      prepare: async () => {
+        button("Elsewhere").focus();
+        return true;
+      },
+      write: () => w.promise,
+    });
+    await userEvent.click(button("Close"));
+    await act(async () => w.resolve());
+    act(() => button("Elsewhere").blur());
+    show("CLOSED");
+    expect(document.activeElement).toBe(button("Reopen"));
   });
 });

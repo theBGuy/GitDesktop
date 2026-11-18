@@ -42,7 +42,16 @@ export interface PendingMerge {
   worktreeId: string;
   /** The oplog entry id, passed to finish/abort (null if none was recorded). */
   opId: string | null;
+  /** The checkout path the journal entry is filed under; absent on merges paused before it existed. */
+  journalRepo?: string;
   startedAt: string;
+}
+
+/** The checkout a paused merge's journal entry is filed under, or null when the record
+ *  predates the field or holds no usable value (the stored record is untrusted JSON). */
+export function pendingMergeJournalRepo(merge: PendingMerge): string | null {
+  const raw: unknown = merge.journalRepo;
+  return typeof raw === "string" && raw !== "" ? raw : null;
 }
 
 /** A local PR whose base is being merged INTO its head to resolve conflicts, paused in
