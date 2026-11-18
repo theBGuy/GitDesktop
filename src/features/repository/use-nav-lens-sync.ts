@@ -1,11 +1,13 @@
 import { useLayoutEffect } from "react";
 import { useLensState } from "@/lib/repo-lens/queries";
+import { currentSegment } from "@/lib/stores/nav-history";
 import { useUiStore } from "@/lib/stores/ui";
 
-/** Keeps the history's lens stamp in step with the live lens of the open repository. */
+/** Keeps the current segment's lens stamp in step with the live lens of the open
+ *  repository. */
 export function useNavLensSync(repoPath: string | null): void {
   const { lens, answered } = useLensState(repoPath ?? "");
-  const stamp = useUiStore((s) => s.navHistory.lens);
+  const stamp = useUiStore((s) => currentSegment(s.navHistory)?.lens ?? null);
   const syncNavLens = useUiStore((s) => s.syncNavLens);
   // Compares the live lens with the history's stamp, never with a previous render,
   // so a flip made while this view was unmounted is caught on remount; `stamp` as a

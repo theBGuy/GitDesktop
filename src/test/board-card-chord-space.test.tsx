@@ -154,3 +154,36 @@ describe("Space on an issue card", () => {
     expect(onPeekChange).toHaveBeenCalledWith(ITEM.itemId);
   });
 });
+
+function enter(card: HTMLElement, mods: Mods = {}) {
+  const event = createEvent.keyDown(card, {
+    key: "Enter",
+    code: "Enter",
+    ...mods,
+  });
+  fireEvent(card, event);
+  return event;
+}
+
+// Preventing the keydown is what cancels a button's Enter activation click.
+describe("Enter on an issue card", () => {
+  it("lets a first Enter keydown through to open the card", () => {
+    const { card, onPeekChange } = renderCard();
+    expect(enter(card).defaultPrevented).toBe(false);
+    expect(onPeekChange).not.toHaveBeenCalled();
+  });
+
+  it("cancels a held Enter's repeats, so the card opens once", () => {
+    const { card } = renderCard();
+    enter(card);
+    expect(enter(card, { repeat: true }).defaultPrevented).toBe(true);
+    expect(enter(card, { repeat: true }).defaultPrevented).toBe(true);
+  });
+
+  it("leaves a chorded repeat to the global listener", () => {
+    const { card } = renderCard();
+    expect(enter(card, { repeat: true, altKey: true }).defaultPrevented).toBe(
+      false,
+    );
+  });
+});

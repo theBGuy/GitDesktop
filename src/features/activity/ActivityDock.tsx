@@ -443,6 +443,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         openRun({
           ...target,
           runId: t.runId,
+          carryHistory: true,
           stillValid,
           onApplied: () => markNotificationRead(n.id),
         });
@@ -451,6 +452,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       if (t.type === "agent") {
         openAgentTab({
           ...target,
+          carryHistory: true,
           stillValid,
           onApplied: () => markNotificationRead(n.id),
         });
@@ -460,6 +462,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         openRepoView({
           ...target,
           tab: isRepoTab(t.tab) ? t.tab : undefined,
+          carryHistory: true,
           stillValid,
           onApplied: () => markNotificationRead(n.id),
         });
@@ -500,6 +503,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         // selection reach the same commit; applied here it would land a render
         // early and fetch the new lens against the OLD number.
         beforeSelect: applyLens,
+        carryHistory: true,
         stillValid,
         onApplied: () => markNotificationRead(n.id),
       });

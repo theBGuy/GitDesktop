@@ -633,8 +633,8 @@ function BulkFieldControl({
  *  bulk way. Empty is NOT a clear here, unlike the seeded editors — this dialog has
  *  an explicit Clear arm, so an empty control under "Set to" is simply a value not
  *  yet written, the same commit-nothing state an unparseable entry sits in. The
- *  finite-number and date-shape checks refuse, before the wire, a value the seeded
- *  editors leave for the server to judge. */
+ *  date-shape check refuses, before the wire, a value the seeded editors leave for
+ *  the server to judge. */
 function bulkScalarDraft(
   def: ScalarDef,
   raw: string,
@@ -643,8 +643,6 @@ function bulkScalarDraft(
   const entry = scalarDraft(def, raw, badInput);
   if (entry === null || entry === INVALID_DRAFT) return INVALID_DRAFT;
   const { update } = entry;
-  if (update.kind === "number" && !Number.isFinite(update.number))
-    return INVALID_DRAFT;
   if (update.kind === "date" && !DATE_ONLY.test(update.date))
     return INVALID_DRAFT;
   return { mode: "set", update };

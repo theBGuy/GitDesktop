@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useNavLensSync } from "@/features/repository/use-nav-lens-sync";
 import type { RemoteLens } from "@/lib/git/types";
 import { useLensState } from "@/lib/repo-lens/queries";
-import { __resetNavHistoryForTests } from "@/lib/stores/nav-history";
+import {
+  __resetNavHistoryForTests,
+  currentSegment,
+} from "@/lib/stores/nav-history";
 import { useUiStore } from "@/lib/stores/ui";
 
 // The history's lens stamp follows the live lens, compared with the stamp
@@ -19,6 +22,8 @@ const OTHER = "C:/repos/beta";
 
 const st = () => useUiStore.getState();
 const hist = () => st().navHistory;
+const entries = () => currentSegment(hist())?.entries ?? [];
+const lens = () => currentSegment(hist())?.lens ?? null;
 const issue = (n: number) => ({ kind: "remote" as const, id: String(n) });
 
 let live: { lens: RemoteLens; answered: boolean };
@@ -67,28 +72,29 @@ describe("useNavLensSync", () => {
     setLens("upstream", false);
     mount();
     expect(hist()).toBe(before);
-    expect(hist().lens).toBeNull();
+    expect(lens()).toBeNull();
   });
 
   it("stamps an origin answer over a null stamp and keeps every entry", () => {
     trailIn(REPO);
-    const { entries, index } = hist();
+    const { index } = hist();
+    const kept = entries();
     setLens("origin");
     mount();
-    expect(hist().lens).toBe("origin");
-    expect(hist().entries).toBe(entries);
+    expect(lens()).toBe("origin");
+    expect(entries()).toBe(kept);
     expect(hist().index).toBe(index);
   });
 
   it("re-seeds at the current location when a cold fork answers upstream", () => {
     trailIn(REPO);
-    expect(hist().entries.length).toBeGreaterThan(1);
+    expect(entries().length).toBeGreaterThan(1);
     setLens("upstream");
     mount();
-    expect(hist().lens).toBe("upstream");
-    expect(hist().entries).toHaveLength(1);
+    expect(lens()).toBe("upstream");
+    expect(entries()).toHaveLength(1);
     expect(hist().index).toBe(0);
-    expect(hist().entries[0]).toMatchObject({
+    expect(entries()[0]).toMatchObject({
       tab: "issues",
       selection: { selectedIssue: issue(4) },
     });
@@ -98,11 +104,11 @@ describe("useNavLensSync", () => {
     trailIn(REPO);
     setLens("origin");
     const hook = mount();
-    expect(hist().entries.length).toBeGreaterThan(1);
+    expect(entries().length).toBeGreaterThan(1);
     setLens("upstream");
     act(() => hook.rerender({ repo: REPO }));
-    expect(hist().lens).toBe("upstream");
-    expect(hist().entries).toHaveLength(1);
+    expect(lens()).toBe("upstream");
+    expect(entries()).toHaveLength(1);
   });
 
   it("keeps the trail across an unmount and remount under an unchanged lens", () => {
@@ -111,7 +117,7 @@ describe("useNavLensSync", () => {
     mount().unmount();
     st().setRepoTab("tags");
     const kept = hist();
-    expect(kept.entries.length).toBeGreaterThan(1);
+    expect(currentSegment(kept)?.entries.length).toBeGreaterThan(1);
     mount();
     expect(hist()).toBe(kept);
   });
@@ -122,26 +128,61 @@ describe("useNavLensSync", () => {
     mount().unmount();
     setLens("upstream");
     mount();
-    expect(hist().lens).toBe("upstream");
-    expect(hist().entries).toHaveLength(1);
+    expect(lens()).toBe("upstream");
+    expect(entries()).toHaveLength(1);
   });
 
   it("keeps a switched-to repo's entries recorded before its lens answers origin", () => {
     trailIn(REPO);
     setLens("origin");
     const hook = mount();
-    expect(hist().lens).toBe("origin");
+    expect(lens()).toBe("origin");
     setLens("origin", false);
     act(() => trailIn(OTHER));
     act(() => hook.rerender({ repo: OTHER }));
-    expect(hist().lens).toBeNull();
-    const { entries, index } = hist();
-    expect(entries.length).toBeGreaterThan(1);
+    expect(lens()).toBeNull();
+    const { index } = hist();
+    const kept = entries();
+    expect(kept.length).toBeGreaterThan(1);
     setLens("origin");
     act(() => hook.rerender({ repo: OTHER }));
-    expect(hist().lens).toBe("origin");
-    expect(hist().entries).toBe(entries);
+    expect(lens()).toBe("origin");
+    expect(entries()).toBe(kept);
     expect(hist().index).toBe(index);
+  });
+
+  it("after a carried cross-repo landing, syncs only the landing's segment", () => {
+    trailIn(REPO);
+    setLens("origin");
+    const hook = mount();
+    const departed = hist().segments[0];
+    expect(departed.lens).toBe("origin");
+    act(() =>
+      st().openIssue({
+        repoPath: OTHER,
+        repoName: "beta",
+        number: 9,
+        carryHistory: true,
+      }),
+    );
+    setLens("origin");
+    act(() => hook.rerender({ repo: OTHER }));
+    expect(hist().segments).toHaveLength(2);
+    expect(hist().segments[0].entries).toEqual(departed.entries);
+    expect(currentSegment(hist())?.repoPath).toBe(OTHER);
+    expect(lens()).toBe("origin");
+    act(() => st().setRepoTab("tags"));
+    const trail = hist().segments[0];
+    expect(entries()).toHaveLength(2);
+    setLens("upstream");
+    act(() => hook.rerender({ repo: OTHER }));
+    expect(hist().segments).toHaveLength(2);
+    expect(hist().segments[0]).toBe(trail);
+    expect(lens()).toBe("upstream");
+    expect(entries()).toEqual([
+      { tab: "tags", selection: { selectedTag: null }, anchor: null },
+    ]);
+    expect(hist()).toMatchObject({ segment: 1, index: 0 });
   });
 
   it("a null repo prop writes nothing", () => {

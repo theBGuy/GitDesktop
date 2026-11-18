@@ -1,5 +1,4 @@
 import type { MyWorkItem, MyWorkPage } from "@/lib/git/types";
-import type { RecentRepo } from "@/lib/settings/api";
 
 /** Which slice of the inbox the tab strip is showing. */
 export type MyWorkTab = "all" | "prs" | "issues";
@@ -10,46 +9,6 @@ export const MY_WORK_LISTBOX_ID = "my-work-listbox";
  *  at the keyboard-highlighted option. The item URL is unique per item. */
 export const myWorkOptionId = (url: string) =>
   `my-work-${url.replace(/[^\w-]/g, "_")}`;
-
-/**
- * The host/owner/name test a recent must pass to look like this item's, or null
- * when the item can't supply one. Matches on `RecentRepo.repoName` — the name
- * the record's origin URL spells — so a clone in a renamed folder resolves
- * exactly. Rows the owner probe hasn't touched yet carry no `repoName` and fall
- * back to `name`, the FOLDER basename, which stays a heuristic in both
- * directions: a renamed clone never matches and opens in the browser, and a
- * folder named after a different repo of the same owner can match wrongly.
- * `owner`/`host` resolve in the background, so a recent missing either never
- * matches, as does an item whose URL had no parseable authority (empty host).
- */
-function localMatcher(item: MyWorkItem): ((r: RecentRepo) => boolean) | null {
-  const host = item.host.toLowerCase();
-  const owner = item.repoOwner.toLowerCase();
-  const name = item.repoName.toLowerCase();
-  if (!host || !owner || !name) return null;
-  return (r) =>
-    !!r.host &&
-    !!r.owner &&
-    r.host.toLowerCase() === host &&
-    r.owner.toLowerCase() === owner &&
-    (r.repoName ?? r.name).toLowerCase() === name;
-}
-
-/**
- * EVERY recent repository that looks like this item's, in recents order. The key
- * is not always identity: a GitLab item's owner is only the segment before the
- * repo name, so two different projects can both answer it and only reading each
- * checkout's origin can say which is the row's. Callers narrow this further and
- * resolve across what remains — both to open and to decide whether a row may
- * advertise a local action at all.
- */
-export function matchLocalRepos(
-  item: MyWorkItem,
-  recents: readonly RecentRepo[],
-): RecentRepo[] {
-  const matches = localMatcher(item);
-  return matches ? recents.filter(matches) : [];
-}
 
 /**
  * Newest first by `updatedAt`. Forge timestamps are untrusted, so an

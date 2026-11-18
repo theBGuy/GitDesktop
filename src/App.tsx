@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { AppAnnouncer } from "@/components/app-announcer";
 import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { Spinner } from "@/components/ui/spinner";
 import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
@@ -343,6 +344,7 @@ function App() {
       <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />
+      <AppAnnouncer />
       <ReconnectDialog />
       <UpdateChecker />
       <WhatsNew />

@@ -6,7 +6,10 @@ import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import { StackSection } from "@/features/pulls/StackSection";
 import type { PrStackMember } from "@/lib/git/types";
 import { useJiraIssues, useJiraLink } from "@/lib/jira/queries";
-import { __resetNavHistoryForTests } from "@/lib/stores/nav-history";
+import {
+  __resetNavHistoryForTests,
+  currentSegment,
+} from "@/lib/stores/nav-history";
 import { useUiStore } from "@/lib/stores/ui";
 
 // For the hop sites that mount alone: a marked select pushes a history entry
@@ -25,6 +28,7 @@ const REPO = "C:/repos/demo";
 
 const st = () => useUiStore.getState();
 const hist = () => st().navHistory;
+const entries = () => currentSegment(hist())?.entries ?? [];
 const remoteIssue = (n: number) => ({ kind: "remote" as const, id: String(n) });
 const jiraIssue = (key: string) => ({ kind: "jira" as const, id: key });
 
@@ -48,10 +52,10 @@ afterEach(() => {
 describe("the list-pick baseline", () => {
   it("replaces the current entry in place for an unmarked select", () => {
     onIssue(remoteIssue(1));
-    const before = hist().entries.length;
+    const before = entries().length;
     st().selectIssue(remoteIssue(2));
-    expect(hist().entries).toHaveLength(before);
-    expect(hist().entries[hist().index].selection).toEqual({
+    expect(entries()).toHaveLength(before);
+    expect(entries()[hist().index].selection).toEqual({
       selectedIssue: remoteIssue(2),
     });
   });
@@ -77,15 +81,15 @@ describe("a reference in a markdown body", () => {
 
   it("pushes an entry when an issue link is followed on the Issues tab", async () => {
     onIssue(remoteIssue(1));
-    const before = hist().entries.length;
+    const before = entries().length;
     const anchor = renderBody("Blocked by #42.");
     await act(async () => {
       fireEvent.click(anchor);
     });
     expect(st().selectedIssue).toEqual(remoteIssue(42));
-    expect(hist().entries).toHaveLength(before + 1);
+    expect(entries()).toHaveLength(before + 1);
     expect(hist().index).toBe(before);
-    expect(hist().entries[before - 1].selection).toEqual({
+    expect(entries()[before - 1].selection).toEqual({
       selectedIssue: remoteIssue(1),
     });
   });
@@ -103,7 +107,7 @@ describe("a Jira reference row", () => {
 
   it("pushes an entry when a referenced issue is opened", () => {
     onIssue(jiraIssue("PROJ-1"));
-    const before = hist().entries.length;
+    const before = entries().length;
     render(
       <JiraRefRow
         repoPath={REPO}
@@ -113,8 +117,8 @@ describe("a Jira reference row", () => {
     fireEvent.click(screen.getByRole("button", { name: /PROJ-2/ }));
     expect(st().selectedIssue).toEqual(jiraIssue("PROJ-2"));
     expect(st().repoTab).toBe("issues");
-    expect(hist().entries).toHaveLength(before + 1);
-    expect(hist().entries[before - 1].selection).toEqual({
+    expect(entries()).toHaveLength(before + 1);
+    expect(entries()[before - 1].selection).toEqual({
       selectedIssue: jiraIssue("PROJ-1"),
     });
   });

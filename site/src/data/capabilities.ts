@@ -463,6 +463,11 @@ export const capabilities: Capability[] = [
   {
     group: "Projects",
     label:
+      "Project cards open in the app — another repository's issue or PR in your local clone of it, or across a fork, with Open on GitHub always one row away",
+  },
+  {
+    group: "Projects",
+    label:
       "Project card actions — move, archive, restore or remove a card from its menu or many at once, and set fields across a selection in one go",
   },
   {
@@ -734,7 +739,8 @@ export const capabilities: Capability[] = [
   { group: "Keyboard & Markdown", label: "Arrow-key navigation on every list" },
   {
     group: "Keyboard & Markdown",
-    label: "Back & Forward — keys or mouse side buttons",
+    label:
+      "Back & Forward — keys or mouse side buttons, across repositories after a board card or notification",
   },
   { group: "Keyboard & Markdown", label: "Generated shortcut cheat sheet" },
   { group: "Keyboard & Markdown", label: "GitHub-Desktop-compatible defaults" },

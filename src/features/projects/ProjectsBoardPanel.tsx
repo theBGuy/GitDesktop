@@ -73,6 +73,7 @@ import {
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
+import { announceApp } from "@/lib/app-announce";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { presentError } from "@/lib/error-summary";
@@ -160,15 +161,15 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
-import { useRemoteSlug, useRepoLens } from "@/lib/repo-lens/queries";
+import { useLensState, useRemoteSlug } from "@/lib/repo-lens/queries";
+import type { RecentRepo } from "@/lib/settings/api";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import {
   type BoardAnchor,
   registerNavAnchorProvider,
 } from "@/lib/stores/nav-history";
-import { repoNameFromPath } from "@/lib/stores/notifications";
-import { type RepoTab, useUiStore } from "@/lib/stores/ui";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { AddExistingItemsDialog, NewDraftDialog } from "./BoardAddDialogs";
@@ -231,6 +232,7 @@ import {
   rowRange,
   selectionMods,
 } from "./board-selection";
+import { type CardOpenContext, openRowLabels } from "./card-destination";
 import { BoardDragRoot } from "./drag/BoardDragRoot";
 import type { BoardDragHost } from "./drag/seam-context";
 import { itemTitle } from "./item-title";
@@ -269,19 +271,11 @@ import {
   type Zoom,
 } from "./roadmap-model";
 import { cellEditHeld } from "./TableCell";
-import { useBoardReturn } from "./use-board-return";
+import { boardAnchorAnswer, useBoardReturn } from "./use-board-return";
+import { useCardOpen } from "./use-card-open";
 
-/** Where an issue or pull request on this board lands, per kind: the tab that
- *  owns it in-app, and the web path a CROSS-REPO card falls back to (GitHub's own
- *  spelling, which differs from the tab's). Drafts open their own popover on the
- *  card and a redacted item has nothing to open, so neither appears here. */
-const FORGE_KIND: Record<
-  "issue" | "pullRequest",
-  { tab: RepoTab; webPath: "issues" | "pull" }
-> = {
-  issue: { tab: "issues", webPath: "issues" },
-  pullRequest: { tab: "pulls", webPath: "pull" },
-};
+/** Settings not loaded: no recents, so no clone candidate and the browser. */
+const NO_RECENTS: readonly RecentRepo[] = [];
 
 const NO_GROUP_FIELDS_REASON =
   "This project has no single-select or iteration fields to group its board by";
@@ -653,9 +647,9 @@ const REORDER_REFUSAL_TOAST_ID = "board-reorder-refused";
  *  keyboard, where no greyed control is on screen to say why. */
 const CELL_EDIT_REFUSAL_TOAST_ID = "board-cell-edit-refused";
 /** What the keyboard route says when Enter closes a cell editor over an entry the
- *  field can't take (a half-typed number or date). */
+ *  field can't take (a half-typed number or date, or an out-of-range number). */
 const CELL_INVALID_ENTRY_NOTE =
-  "Nothing saved: that entry isn't a complete value yet";
+  "Nothing saved: that entry isn't a value this field can take";
 
 /**
  * One card per membership, LAST occurrence winning, applied where the pages flatten
@@ -850,39 +844,6 @@ function focusBodyLanding(root: HTMLElement | null) {
     root?.querySelector<HTMLElement>("[data-board-add-trigger]") ??
     root
   )?.focus();
-}
-
-/** Whether a card's issue or pull request opens IN-APP rather than in the browser.
- *  `selectIssue`/`openPr` hand over a bare number the destination resolves under
- *  the repo's ACTIVE lens, so only a card from the repo that lens points at can be
- *  opened here. An unresolved slug (`null`) takes the browser branch deliberately:
- *  that is the SAFE direction, since an in-app open on an unconfirmed match would
- *  paint the wrong repository's detail view under this number. */
-function opensInApp(
-  content: Extract<BoardItemContent, { kind: "issue" | "pullRequest" }>,
-  repoSlug: string | null,
-): boolean {
-  return (
-    repoSlug !== null &&
-    content.repoNameWithOwner.toLowerCase() === repoSlug.toLowerCase()
-  );
-}
-
-/** The Open row's words, or null where the menu carries no Open row at all: a
- *  DRAFT opens its notes from the card's own popover trigger, and a redacted item
- *  has no destination. The two labels are the two branches {@link opensInApp}
- *  picks between, so the row can't promise a tab the open won't use. */
-function openLabelFor(
-  item: BoardItem | undefined,
-  repoSlug: string | null,
-): string | null {
-  const content = item?.content;
-  if (
-    content === undefined ||
-    (content.kind !== "issue" && content.kind !== "pullRequest")
-  )
-    return null;
-  return opensInApp(content, repoSlug) ? "Open" : "Open on GitHub";
 }
 
 /** The move target a column id names under `field`: that field's own option or
@@ -1177,17 +1138,29 @@ export function ProjectsBoardPanel({
   // The fork/upstream lens picks which repo's project catalog this is, and which
   // slug counts as "this repo" when a card opens — the same lens the Issues and
   // Pulls surfaces resolve, wired once at the view level.
-  const lens = useRepoLens(repoPath);
+  const { gate: lensGate, lens } = useLensState(repoPath);
   const repoSlug = useRemoteSlug(repoPath, lens, canRead);
+  // The other fork side, which a card opens across; none without an upstream.
+  const otherLens = lens === "origin" ? "upstream" : "origin";
+  const otherSlug = useRemoteSlug(repoPath, otherLens, canRead && lensGate);
   const openReconnect = useUiStore((s) => s.openReconnect);
-  const selectIssue = useUiStore((s) => s.selectIssue);
-  const openPr = useUiStore((s) => s.openPr);
-  const repoName = useUiStore((s) => s.repoName);
-  const setRepoTab = useUiStore((s) => s.setRepoTab);
   // The selection hint's own dismissal, which is the only stored preference this
-  // panel has: everything else here is for the visit.
+  // panel writes; the recents it reads decide where a card from another repo opens.
   const settings = useSettings();
   const saveSettings = useSaveSettings();
+  const recents = settings.data?.recentRepos ?? NO_RECENTS;
+  // One object for the menu's labels and the open itself, so the row can't promise
+  // a destination the click won't use. Identity-stable: it reaches memoized cards
+  // through `openItem`.
+  const cardOpenCtx = useMemo<CardOpenContext>(
+    () => ({
+      repoSlug,
+      otherSide: lensGate ? { lens: otherLens, slug: otherSlug } : null,
+      forgeHost: host,
+      recents,
+    }),
+    [repoSlug, lensGate, otherLens, otherSlug, host, recents],
+  );
 
   const projects = useAvailableProjects(repoPath, canRead, lens);
   // Open boards first, then the closed ones as their own group: a closed board
@@ -1830,6 +1803,14 @@ export function ProjectsBoardPanel({
     clearSelection();
   }
 
+  /** Clear view as the user asks for it (its hotkey and both buttons). A user's
+   *  pick is a later request than a pending card open or Back, so it bumps the
+   *  epoch before the local set; the board return clears through `clearView`. */
+  function clearViewByUser() {
+    useUiStore.getState().noteUserInteraction();
+    clearView();
+  }
+
   /** Leaving ROWS (a table or a roadmap) for a board keeps the cursor's card, the
    *  way arriving at rows does: the board's cursor carries a slot, and the columns
    *  that slot lives in aren't drawn yet, so the card id is held until they are
@@ -1966,7 +1947,11 @@ export function ProjectsBoardPanel({
 
   // Palette-only, and live only where it can do something: a board on screen
   // with a view on it.
-  useHotkeyAction("clear-project-view", clearView, active && view !== null);
+  useHotkeyAction(
+    "clear-project-view",
+    clearViewByUser,
+    active && view !== null,
+  );
   // Palette-only for the same reason — its checkbox sits in the same popover — and
   // live wherever there is a board to toggle it on.
   useHotkeyAction(
@@ -1986,46 +1971,18 @@ export function ProjectsBoardPanel({
   // to the cursor. Set only by an open whose tab change follows at once, spent by
   // the anchor provider's read, and cleared on re-activation.
   const openerRef = useRef<string | null>(null);
-  const openItem = useCallback(
-    (item: BoardItem) => {
-      const content = item.content;
-      if (content.kind !== "issue" && content.kind !== "pullRequest") return;
-      const target = FORGE_KIND[content.kind];
-      // Everything the predicate refuses — another repo, or the same repo under
-      // the other lens — leaves the app, which is the same rule the Markdown
-      // reference links follow.
-      if (opensInApp(content, repoSlug)) {
-        const id = String(content.number);
-        if (content.kind === "issue") {
-          openerRef.current = item.itemId;
-          selectIssue({ kind: "remote", id });
-          setRepoTab(target.tab);
-          return;
-        }
-        // The PR arm takes the store's navigator, which lands the tab itself and
-        // arms the align the Pulls list needs — a board carries merged and closed
-        // cards, and those can't show on the Open tab. `opensInApp` already pinned
-        // the card to the repo the ACTIVE lens points at, so no lens write.
-        openPr({
-          kind: "remote",
-          repoPath,
-          repoName: repoName ?? repoNameFromPath(repoPath),
-          ref: id,
-          section: null,
-          // The navigator can apply in a later task, or not at all, so the
-          // opener is set inside the landing, just before the set it records.
-          beforeSelect: () => {
-            openerRef.current = item.itemId;
-          },
-        });
-        return;
-      }
-      void openUrl(
-        `https://${host}/${content.repoNameWithOwner}/${target.webPath}/${content.number}`,
-      ).catch(toastError);
-    },
-    [host, openPr, repoName, repoPath, repoSlug, selectIssue, setRepoTab],
-  );
+  // Written inside the navigator's landing where there is one, so an open that
+  // lands late, or never, leaves the ref alone until then.
+  const noteOpener = useCallback((itemId: string) => {
+    openerRef.current = itemId;
+  }, []);
+  const { openItem, openOnWeb, openingItemId } = useCardOpen({
+    repoPath,
+    ctx: cardOpenCtx,
+    noteOpener,
+    announce,
+    announceArrival: announceApp,
+  });
 
   /** The card `el` sits in, resolved from the DOM rather than from state: a bare
    *  Tab into the board moves focus without touching the cursor, and the arrows
@@ -2166,11 +2123,14 @@ export function ProjectsBoardPanel({
     if (chord === "enter" || chord === "space") {
       e.preventDefault();
       const def = tableCols[from.colIndex]?.def;
-      if (entry.kind === "group") toggleGroup(entry.bucketId);
-      else if (def !== undefined && isWritable(def))
+      // A held key toggles a header once: each repeat would flip it again.
+      if (entry.kind === "group") {
+        if (!e.repeat) toggleGroup(entry.bucketId);
+      } else if (def !== undefined && isWritable(def))
         requestCellEdit(entry.item, def.id);
       else if (chord === "space") peekRow(entry.item);
-      else activateRow(entry.item);
+      // A held Enter opens once: a repeat would retire the open it started.
+      else if (!e.repeat) activateRow(entry.item);
       return;
     }
     // Shift rides the same keys to extend rather than move alone, so the move is
@@ -3003,7 +2963,7 @@ export function ProjectsBoardPanel({
     cellEditSessionRef.current += 1;
     setEditingCell(null);
     if (run.itemId !== itemId || run.fieldId !== fieldId) return;
-    // Enter on an entry the field can't take yet closes the editor having written
+    // Enter on an entry the field can't take closes the editor having written
     // nothing, which a keyboard user can't see from the unchanged cell.
     if (entry === INVALID_DRAFT) {
       announce(CELL_INVALID_ENTRY_NOTE);
@@ -3442,6 +3402,10 @@ export function ProjectsBoardPanel({
     // A create holds offline rather than park. No await stands between this and
     // the write, so it refuses ahead of the pin below, which a refusal mustn't leave.
     if (refuseWhileOffline()) return;
+    // The submit is the user's request, and its continuation picks the new board:
+    // the epoch moves here, before the write, so a pending card open or Back
+    // retires. The continuation never bumps; it would retire a newer action.
+    useUiStore.getState().noteUserInteraction();
     const session = lifecycleSessionRef.current;
     const generation = pickGenerationRef.current;
     const repo = repoPath;
@@ -3603,6 +3567,9 @@ export function ProjectsBoardPanel({
         holdOffline: true,
       });
       if (!ok || refuseWhileOffline()) return;
+      // The confirm is the request, and its continuation picks the fallback
+      // board: the epoch moves before the write, as a create's submit does.
+      useUiStore.getState().noteUserInteraction();
       const generation = pickGenerationRef.current;
       try {
         await deleteProject.mutateAsync({ repo, lens, projectId: target.id });
@@ -3701,6 +3668,9 @@ export function ProjectsBoardPanel({
     const repo = repoPath;
     if (run?.kind === "new-view") {
       if (refuseWhileOffline()) return;
+      // Its continuation picks the new view: the epoch moves before the write,
+      // as a create's submit does. A rename picks nothing and leaves it.
+      useUiStore.getState().noteUserInteraction();
       let created: ProjectViewDef;
       try {
         created = await createView.mutateAsync({
@@ -3766,6 +3736,9 @@ export function ProjectsBoardPanel({
       const generation = pickGenerationRef.current;
       // A duplicate is a create: it holds offline rather than park.
       if (refuseWhileOffline()) return;
+      // Its continuation picks the copy: the epoch moves before the write, as a
+      // create's submit does.
+      useUiStore.getState().noteUserInteraction();
       let created: ProjectViewDef;
       try {
         created = await duplicateView.mutateAsync({
@@ -3801,6 +3774,10 @@ export function ProjectsBoardPanel({
         holdOffline: true,
       });
       if (!ok || refuseWhileOffline()) return;
+      // The confirm is the request and deletes the view on screen; the fallback to
+      // no view comes from an effect that moves neither the epoch nor the pick
+      // generation, so the epoch moves here, before the write.
+      useUiStore.getState().noteUserInteraction();
       // A board drawn under it falls back to no view once the switcher stops
       // listing it, the way any vanished view does.
       try {
@@ -5146,9 +5123,12 @@ export function ProjectsBoardPanel({
   const firstRow = tableEntries.find((entry) => entry.kind === "item");
   const firstRowItemId =
     firstRow?.kind === "item" ? firstRow.item.itemId : null;
-  const { heldAnchor } = useBoardReturn({
+  const { heldAnchor, retiredAnchor } = useBoardReturn({
     active,
     repoPath,
+    boardCursorId: cursor?.itemId ?? null,
+    tableCursorKey: tableCursor?.rowKey ?? null,
+    tableCursorCol: tableCursor?.colIndex ?? null,
     goneMessage: CARD_GONE_REASON[surface],
     root: () => rootRef.current,
     grid: () =>
@@ -5206,28 +5186,32 @@ export function ProjectsBoardPanel({
   }, [active]);
   // Where the user was on this tab, for the history entry Back returns to. First
   // match: an in-app open's card; a return armed but not yet consumed, or one in
-  // flight (the fallback board may be on screen); `undefined` while the catalog
-  // loads, so the entry keeps its anchor; otherwise the live board.
+  // flight (the fallback board may be on screen); one the departing press dropped
+  // by moving the epoch, while no pick or user move followed it; `undefined` while the
+  // catalog loads, so the entry keeps its anchor; otherwise the live board. The
+  // order lives in `boardAnchorAnswer`; the epoch and pick generation are read here,
+  // live, since both can move with no commit between.
   const readBoardAnchor = useEffectEvent((): BoardAnchor | null | undefined => {
     const opener = openerRef.current;
     openerRef.current = null;
-    if (opener === null) {
-      const armed = useUiStore.getState().boardReturn;
-      if (armed !== null) return armed.anchor;
-      if (heldAnchor !== null) return heldAnchor;
-      if (projectId === null && projects.data === undefined) return undefined;
-    }
-    if (projectId === null) return null;
+    const store = useUiStore.getState();
     const cursorItemId =
       liveCursor === null
         ? null
         : (columns[liveCursor.col]?.items[liveCursor.idx]?.itemId ?? null);
-    return {
+    return boardAnchorAnswer({
+      opener,
+      armed: store.boardReturn?.anchor ?? null,
+      held: heldAnchor,
+      retired: retiredAnchor,
+      epoch: store.interactionEpoch,
+      pickGeneration: pickGenerationRef.current,
+      catalogUnread: projectId === null && projects.data === undefined,
       projectId,
       viewId: activeViewId,
-      itemId: opener ?? cursorItemId,
+      cursorItemId,
       showArchived,
-    };
+    });
   });
   // Registered the way useHotkeyAction registers, so a hidden panel has none.
   useLayoutEffect(() => {
@@ -5450,7 +5434,7 @@ export function ProjectsBoardPanel({
                 ? []
                 : columns
             }
-            openLabel={openLabelFor(menuTarget?.item, repoSlug)}
+            openRows={openRowLabels(menuTarget?.item, cardOpenCtx)}
             heldReason={
               menuTarget === null ? undefined : moveHeldFor(menuTarget.item)
             }
@@ -5463,6 +5447,9 @@ export function ProjectsBoardPanel({
             actions={{
               open: () => {
                 if (menuTarget !== null) openItem(menuTarget.item);
+              },
+              openOnWeb: () => {
+                if (menuTarget !== null) openOnWeb(menuTarget.item);
               },
               showDetails: () => {
                 if (menuTarget !== null) setPeekItemId(menuTarget.item.itemId);
@@ -5716,7 +5703,7 @@ export function ProjectsBoardPanel({
             <p>No items match this view's filter.</p>
             <p className="font-mono break-all">{lensQuery}</p>
             <p>
-              <ClearViewButton onClear={clearView} landing />
+              <ClearViewButton onClear={clearViewByUser} landing />
             </p>
           </BoardNotice>,
         );
@@ -5745,6 +5732,7 @@ export function ProjectsBoardPanel({
               selectedIds={selectedIds}
               selectionSize={selectionSize}
               busyItemId={busyItemId}
+              openingItemId={openingItemId}
               peekItemId={peekItemId}
               onCellFocus={onTableCellFocus}
               onToggleGroup={toggleGroup}
@@ -5799,6 +5787,7 @@ export function ProjectsBoardPanel({
                 selectedIds={selectedIds}
                 selectionSize={selectionSize}
                 busyItemId={busyItemId}
+                openingItemId={openingItemId}
                 peekItemId={peekItemId}
                 items={roadmapItems}
                 sources={dateSources}
@@ -5849,6 +5838,7 @@ export function ProjectsBoardPanel({
                   selectedIds={selectedIds}
                   selectionSize={selectionSize}
                   busyItemId={busyItemId}
+                  openingItemId={openingItemId}
                   peekItemId={peekItemId}
                   tabStopIndex={tabStop?.col === i ? tabStop.idx : null}
                   focusNonce={focusNonce}
@@ -6111,7 +6101,11 @@ export function ProjectsBoardPanel({
             items={projectTitles}
             value={projectId}
             onValueChange={(v) => {
-              if (typeof v === "string") switchProject(v);
+              if (typeof v !== "string") return;
+              // The user's pick, a later request than a pending card open or
+              // Back: the epoch moves before the local set.
+              useUiStore.getState().noteUserInteraction();
+              switchProject(v);
             }}
           >
             {/* Fixed width, so the row wraps the same at any title length and
@@ -6342,6 +6336,9 @@ export function ProjectsBoardPanel({
                               // guard narrows it back to the row ids these rows
                               // carry.
                               if (typeof next !== "string") return;
+                              // The user's pick: the epoch moves first, as
+                              // the project picker's does.
+                              useUiStore.getState().noteUserInteraction();
                               pickView(next === NO_VIEW_ROW_ID ? null : next);
                             }}
                           >
@@ -6783,7 +6780,7 @@ export function ProjectsBoardPanel({
               </span>
             </span>
           )}
-          <ClearViewButton onClear={clearView} />
+          <ClearViewButton onClear={clearViewByUser} />
         </div>
       )}
       {/* How to build a selection at all, until the user says they know. Gated on

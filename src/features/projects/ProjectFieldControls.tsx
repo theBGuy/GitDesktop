@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
@@ -137,6 +137,34 @@ export function scalarText(
   return "";
 }
 
+/** The largest magnitude GitHub stores in a project number field; the MCP write
+ *  tool refuses past the same bound (`NUMBER_FIELD_MAX` in write_projects.rs). */
+const NUMBER_FIELD_MAX = 2_147_483_647;
+
+export const NUMBER_RANGE_MESSAGE =
+  "Out of range: GitHub stores numbers from -2,147,483,647 to 2,147,483,647";
+
+/** Whether GitHub would store `n`. Written as an acceptance test so NaN and
+ *  ±Infinity are refused too. */
+function numberFieldStorable(n: number): boolean {
+  return Math.abs(n) <= NUMBER_FIELD_MAX;
+}
+
+/** A number field's complete entry that GitHub won't store: the ONE predicate both
+ *  the draft rule and the control's inline message read, so they can't disagree. */
+function numberEntryOutOfRange(
+  def: ScalarDef,
+  raw: string,
+  badInput: boolean,
+): boolean {
+  return (
+    def.kind === "number" &&
+    !badInput &&
+    raw.trim() !== "" &&
+    !numberFieldStorable(Number(raw))
+  );
+}
+
 /** Turns a scalar input's raw text into a SEEDED-model draft. Empty is an UNSET
  *  rather than an empty value — an empty text field and a missing one read the same
  *  on a board. (The bulk dialog, which has an explicit Clear arm, maps that unset
@@ -162,6 +190,8 @@ export function scalarDraft(
     // user meant to clear. Text is NOT trimmed for emptiness — the space that starts
     // a word would blank the field on the keystroke that typed it.
     if (raw.trim() === "") return null;
+    // A complete entry GitHub refuses commits nothing; the control says why inline.
+    if (numberEntryOutOfRange(def, raw, badInput)) return INVALID_DRAFT;
     // Number(), not parseFloat(): a trailing "1.2.3" must read as unparseable, and
     // the whole point of keeping the raw text is that nothing here re-rounds it.
     const parsed = Number(raw);
@@ -282,6 +312,10 @@ export function ScalarInput({
   // values arrive by remount, per the contract above), and a changing prop only
   // trips Base UI's dev-mode default-drift warning.
   const [initial] = useState(defaultValue);
+  const [outOfRange, setOutOfRange] = useState(() =>
+    numberEntryOutOfRange(def, initial ?? "", false),
+  );
+  const messageId = useId();
   // The last state reported, seeded from the mounted control so a reconcile that
   // finds nothing changed reports nothing.
   const lastRef = useRef<{ raw: string; badInput: boolean } | null>(null);
@@ -291,8 +325,11 @@ export function ScalarInput({
     const last = lastRef.current;
     if (last !== null && last.raw === raw && last.badInput === badInput) return;
     lastRef.current = { raw, badInput };
+    setOutOfRange(numberEntryOutOfRange(def, raw, badInput));
     onEdit(raw, badInput);
   });
+  // A locked control can't be edited out of range, so it never carries the message.
+  const showRange = outOfRange && !lockedReason;
   // A NATIVE listener, not React's `onChange`: React gates its synthetic change on
   // the input's exposed value STRING (`updateValueIfChanged`, react-dom-client
   // :1592), so an edit that leaves that string `""` is never delivered. Both such
@@ -338,7 +375,20 @@ export function ScalarInput({
         className="h-7"
         disabled={!!lockedReason}
         defaultValue={initial}
+        aria-invalid={showRange || undefined}
+        aria-describedby={showRange ? messageId : undefined}
       />
+      {/* Number fields only, and mounted with the control so the message's
+          insertion is announced; empty, the block takes no height. */}
+      {def.kind === "number" && (
+        <span id={messageId} aria-live="polite" className="block">
+          {showRange && (
+            <span className="mt-1 block text-[11px] text-destructive">
+              {NUMBER_RANGE_MESSAGE}
+            </span>
+          )}
+        </span>
+      )}
     </span>
   );
 }

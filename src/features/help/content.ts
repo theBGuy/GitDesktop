@@ -326,8 +326,9 @@ host, and the name its remote spells, so a clone sitting in a folder you renamed
 counts as yours once GitDesktop has looked at it; one you added moments ago, before any
 of that is resolved, can still go to the browser. The **↗** on a row marks the ones
 GitDesktop already knows open in the browser; a row without it can still land there
-when its checkout can't be confirmed at open time. The inbox itself changes nothing:
-it finds the item and hands you to the place where you can act on it.
+when its checkout can't be confirmed at open time, or not within a moment (a folder on a
+drive that doesn't answer, say). The inbox itself changes nothing: it finds the item
+and hands you to the place where you can act on it.
 
 A pull request usually lands where its branch already is. When one of the repository's
 worktrees has that pull request's head branch checked out, GitDesktop opens it there
@@ -335,8 +336,8 @@ rather than in the main workspace, so you arrive in the checkout the work lives 
 Confirming the branch really belongs to that pull request takes a quick background
 check, and whatever it can't confirm opens the main workspace instead: a pull
 request from a fork, a branch that isn't checked out anywhere, a slow network. A row
-shows a small spinner while GitDesktop works out where to open it. Issues skip the
-branch check and open in the main workspace.
+shows a small spinner while GitDesktop works out where to open it, and a screen reader
+hears that it's opening. Issues skip the branch check and open in the main workspace.
 
 {{Secondaryclick}} a row for **Open on GitHub / GitLab / Bitbucket** (whichever host
 the item lives on) and **Copy link**; on a pull request from a repository you've
@@ -2965,7 +2966,8 @@ A board field's cell (text, number, date, single-select, multi-select or iterati
 edits in place: click it, or press {{key:enter}} or {{key:space}} on it, and a small
 editor opens over the cell. Type a text, number or date and press {{key:enter}} to save
 it; empty the box and {{key:enter}} clears the field, and an entry the field can't take
-yet (a half-typed number or date) saves nothing. A single-select or an iteration saves
+(a half-typed number or date, or a number beyond what GitHub stores, which the editor
+names under the box) saves nothing. A single-select or an iteration saves
 the option you pick, and **Clear** empties it; the arrow keys move the choice, and
 {{key:enter}} saves the one you're on. A multi-select saves when its editor closes.
 {{key:escape}} leaves without saving, and every way out puts you back on the cell. The
@@ -3051,19 +3053,29 @@ written and when it last changed under it — hover either for the exact time. A
 don't have access to shows as **redacted** and says so, rather than silently thinning the
 board.
 
-Open an issue or pull request from its card and it lands on its own tab. One from another
-repository, or from the other side of a fork's **Fork | Upstream** lens, opens on GitHub in
-your browser instead.
+Open an issue or pull request from its card and it lands on its own tab. A card from the
+other side of a fork's **Fork | Upstream** lens switches sides and opens there. One from
+another repository opens in the app too when a clone of it is among your repositories:
+GitDesktop switches to it and opens the item, a pull request in the worktree that has its
+branch checked out when there is one, an issue in the main workspace. A card with no
+clone among your repositories opens on GitHub in your browser, and so does one whose
+clone can't be confirmed in time (a folder on a drive that doesn't answer, say). If that
+check takes more than a moment, the card (or its row, in a table or roadmap) dims while
+it runs and a screen reader hears that it's opening. Clicking a card or pressing
+{{key:enter}} on it, and clicking a title or pressing {{key:enter}} on it in a table or
+roadmap, does what the first row of its menu says.
 
 From an item you opened here, {{kbd:go-back}} or your mouse's back button returns to the
 board on the same project and view with that card focused (its row, in a table or
-roadmap), and {{kbd:go-forward}} goes forward again. That holds after a visit to Settings
-or another screen too: the board comes back on its view as saved, so any unsaved layout,
-grouping, date fields or zoom you had picked on the board starts over, and
-**Show archived cards** is put back as you had it, so an archived card is found again. If
-the card has left the board, focus goes to the first card instead (in a table or roadmap,
-to a row that is still there), and a screen reader is told the card is gone. Focus you
-have moved yourself while the board loaded is left where it is.
+roadmap), and {{kbd:go-forward}} goes forward again. When the item opened in another
+repository or on the other side of the fork, Go back switches back to the board's
+repository and side first. That holds after a visit to Settings or another screen too:
+the board comes back on its view as saved, so any unsaved layout, grouping, date fields
+or zoom you had picked on the board starts over, and **Show archived cards** is put back
+as you had it, so an archived card is found again. If the card has left the board, focus
+goes to the first card instead (in a table or roadmap, to a row that is still there), and
+a screen reader is told the card is gone. Focus you have moved yourself while the board
+loaded is left where it is.
 
 {{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
 with the title, what the card is, and its dates — when it was opened, when it joined this
@@ -3154,9 +3166,12 @@ says so beside **View options**, whether or not you left the dialog open.
 ## Moving a card
 
 {{Secondaryclick}} a card for its menu. On Windows and Linux, {{key:shift+f10}} (or the Menu
-key) opens it on the card you're on. For an issue or pull request the menu opens with
-**Open**, which reads **Open on GitHub** where the card belongs somewhere the app can't
-follow. Below it, **Move to** lists the columns of whatever the board is grouped by: pick one
+key) opens it on the card you're on. For an issue or pull request the menu opens with a
+row that names where the item will open: **Open** for this repository, **Open in** and
+the repository's name for a clone of another one, **Open in Upstream** or **Open in
+Fork** for the other side of a fork, and **Open on GitHub** when the app has nowhere to
+open it. Under it, **Open on GitHub** is always there too, unless the first row already
+says it. Next, **Move to** lists the columns of whatever the board is grouped by: pick one
 and the card is there straight away, with the write going to GitHub behind it. The row
 matching the card's current value is ticked and can't be picked, so a move can't be sent as a
 no-op; the **No {field}** column clears the field rather than setting it, and stays pickable
@@ -4347,12 +4362,19 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - {{kbd:show-repositories}} repositories · {{kbd:show-branches}} branches ·
   {{kbd:back-to-repositories}} back to repositories · {{kbd:focus-filter}} focus the
   filter.
-- {{kbd:go-back}} back · {{kbd:go-forward}} forward through the tabs and items you visited
-  in this repository: a tab switch, a \`#123\` link, a linked pull request, a card opened
-  from a board. The mouse's back and forward buttons do the same. Moving through a list
-  adds nothing to go back through, and the trail starts again when you open another
-  repository or switch between **Fork** and **Upstream**. While a dialog is open, those
-  keys and buttons do nothing.
+- {{kbd:go-back}} back · {{kbd:go-forward}} forward through the tabs and items you
+  visited: a tab switch, a \`#123\` link, a linked pull request, a card opened from a
+  board. The mouse's back and forward buttons do the same. A board card or a
+  notification (one for a pull request, a workflow run, {{ai}}an agent session, {{/ai}}or
+  a repository's tab) that opens in another repository, or on the other side of a fork,
+  keeps the trail, so going back switches repositories (or sides) and returns to where
+  you were. Moving through a list adds nothing to go back through. The trail starts
+  again when you open another repository any other way, such as from the repository
+  switcher or **My work**, and switching between **Fork** and **Upstream** yourself
+  starts this repository's part of it again. If a repository on the trail can no longer
+  be opened, going back or forward to it says so once, drops every stop in it and
+  leaves you where you are; the next press goes on to the nearest stop left.
+  While a dialog is open, those keys and buttons do nothing.
 
 ## Doing things
 

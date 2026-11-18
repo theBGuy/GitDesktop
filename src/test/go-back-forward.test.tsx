@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
+import { toast } from "sonner";
 import {
   afterAll,
   afterEach,
@@ -10,6 +11,9 @@ import {
   vi,
 } from "vitest";
 import { GUIDE_SECTIONS } from "@/features/help/content";
+import { validateRepo } from "@/lib/git/api";
+import { remotesOptions } from "@/lib/git/queries";
+import type { RepoInfo } from "@/lib/git/types";
 import {
   useAvailableActions,
   useEffectiveBindings,
@@ -23,9 +27,13 @@ import {
   useSideButtonNavigation,
   vetoSideButtonNavigation,
 } from "@/lib/hotkeys/side-buttons";
+import { lensKey } from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
-import { __resetNavHistoryForTests } from "@/lib/stores/nav-history";
+import {
+  __resetNavHistoryForTests,
+  readNavLens,
+} from "@/lib/stores/nav-history";
 import { useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
 
@@ -36,8 +44,14 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
 }));
+// The cross-repository restore's validation seam.
+vi.mock("@/lib/git/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/api")>()),
+  validateRepo: vi.fn(),
+}));
 
 const REPO = "C:/repos/alpha";
+const OTHER = "C:/repos/beta";
 const st = () => useUiStore.getState();
 
 const showBranches = vi.fn();
@@ -471,5 +485,181 @@ describe("the help guide's shortcut tokens", () => {
     expect(used.has("go-back")).toBe(true);
     expect(used.has("go-forward")).toBe(true);
     expect([...used].filter((id) => !actionIds.has(id))).toEqual([]);
+  });
+});
+
+describe("the history's lens reader", () => {
+  it("is registered on mount over the cached lens, and removed on unmount", () => {
+    const client = new QueryClient();
+    expect(readNavLens(REPO)).toBeNull();
+    const host = render(
+      <QueryClientProvider client={client}>
+        <Host />
+      </QueryClientProvider>,
+    );
+    // Inputs still unanswered: the provisional lens is no verdict.
+    expect(readNavLens(REPO)).toBeNull();
+    client.setQueryData(["repo", REPO, "forge-status"], {
+      provider: "github",
+      authenticated: true,
+    });
+    client.setQueryData(remotesOptions(REPO).queryKey, ["origin", "upstream"]);
+    client.setQueryData(lensKey(REPO), "upstream");
+    expect(readNavLens(REPO)).toBe("upstream");
+    client.setQueryData(lensKey(REPO), "origin");
+    expect(readNavLens(REPO)).toBe("origin");
+    host.unmount();
+    expect(readNavLens(REPO)).toBeNull();
+  });
+});
+
+describe("Go back and Go forward across repositories", () => {
+  const answers = (root: string) =>
+    vi.mocked(validateRepo).mockResolvedValue({ root, name: "x" } as RepoInfo);
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  const carry = (repoPath: string, number: number) =>
+    st().openIssue({
+      repoPath,
+      repoName: repoPath === REPO ? "alpha" : "beta",
+      number,
+      carryHistory: true,
+    });
+
+  /** Alpha on History, then a carried landing in beta: Back crosses into alpha. */
+  async function hostAcross() {
+    const host = renderHost();
+    await host.findByText("alt+left");
+    act(() => {
+      st().openRepo({ root: REPO, name: "alpha" });
+      st().setRepoTab("history");
+      carry(OTHER, 2);
+    });
+    expect(st().repoPath).toBe(OTHER);
+    return host;
+  }
+
+  let error: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    vi.mocked(validateRepo).mockReset();
+    error = vi.spyOn(toast, "error").mockImplementation(() => "");
+  });
+  afterEach(() => error.mockRestore());
+
+  it("Alt+Left lands when validateRepo answers the same root, under its path normalization", async () => {
+    await hostAcross();
+    answers("c:\\Repos\\Alpha");
+    press("ArrowLeft");
+    expect(validateRepo).toHaveBeenCalledExactlyOnceWith(REPO);
+    expect(st().repoPath).toBe(OTHER);
+    await settle();
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["answers an enclosing repository", () => answers("C:/repos")],
+    [
+      "rejects",
+      () =>
+        vi
+          .mocked(validateRepo)
+          .mockRejectedValue({ kind: "git", message: "x" }),
+    ],
+  ])(
+    "when validateRepo %s, one toast and every stop there goes",
+    async (_n, arrange) => {
+      await hostAcross();
+      act(() => {
+        carry(REPO, 3);
+        carry(OTHER, 4);
+      });
+      arrange();
+      press("ArrowLeft");
+      await settle();
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        "Can't go back to alpha. Its folder is missing or is no longer a Git repository.",
+      );
+      expect(st().repoPath).toBe(OTHER);
+      expect(st().navHistory.segments.map((s) => s.repoPath)).toEqual([OTHER]);
+    },
+  );
+
+  it("Forward's toast names the direction; button 3 runs the same route", async () => {
+    await hostAcross();
+    answers(REPO);
+    click(3);
+    await settle();
+    expect(st().repoPath).toBe(REPO);
+    vi.mocked(validateRepo).mockRejectedValue({ kind: "git", message: "x" });
+    press("ArrowRight");
+    await settle();
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      "Can't go forward to beta. Its folder is missing or is no longer a Git repository.",
+    );
+    expect(st().repoPath).toBe(REPO);
+  });
+
+  it("names the folder when the segment kept no repository name", async () => {
+    await hostAcross();
+    act(() => {
+      const h = st().navHistory;
+      useUiStore.setState({
+        navHistory: {
+          ...h,
+          segments: h.segments.map((s, i) =>
+            i === 0 ? { ...s, repoName: null } : s,
+          ),
+        },
+      });
+    });
+    vi.mocked(validateRepo).mockRejectedValue({ kind: "git", message: "x" });
+    press("ArrowLeft");
+    await settle();
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      "Can't go back to alpha. Its folder is missing or is no longer a Git repository.",
+    );
+  });
+
+  it("re-applies the segment's lens through the lens cache", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    for (const [repo, l] of [
+      [REPO, "upstream"],
+      [OTHER, "origin"],
+    ] as const) {
+      client.setQueryData(["repo", repo, "forge-status"], {
+        provider: "github",
+        authenticated: true,
+      });
+      client.setQueryData(remotesOptions(repo).queryKey, [
+        "origin",
+        "upstream",
+      ]);
+      client.setQueryData(lensKey(repo), l);
+    }
+    const host = render(
+      <QueryClientProvider client={client}>
+        <Host />
+      </QueryClientProvider>,
+    );
+    await host.findByText("alt+left");
+    act(() => {
+      st().openRepo({ root: REPO, name: "alpha" });
+      carry(OTHER, 2);
+    });
+    expect(st().navHistory.segments.map((s) => s.lens)).toEqual([
+      "upstream",
+      "origin",
+    ]);
+    act(() => client.setQueryData(lensKey(REPO), "origin"));
+    answers(REPO);
+    press("ArrowLeft");
+    await settle();
+    expect(st().repoPath).toBe(REPO);
+    expect(client.getQueryData(lensKey(REPO))).toBe("upstream");
   });
 });

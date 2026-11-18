@@ -77,6 +77,8 @@ export interface BulkMenuState {
  *  the board's field definitions, and the one move mutation. */
 export interface BoardMenuActions {
   open: () => void;
+  /** The second Open row: the card's web page, whatever the first row says. */
+  openOnWeb: () => void;
   /** Open the card's details peek — the pointer route to what Space does from the
    *  keyboard. Issue/PR cards alone: a draft's popover is its own card. */
   showDetails: () => void;
@@ -190,7 +192,7 @@ const REORDER_ROWS: {
 ];
 
 /**
- * The board's card menu: an optional Open row, a flat "Move to" section listing the
+ * The board's card menu: optional Open rows, a flat "Move to" section listing the
  * current grouping's columns in board order, a "Position" section that moves the
  * card inside its own column, a read-only "Show details" peek for an issue or pull
  * request, then the rows that change what the card IS — edit a draft, convert it,
@@ -209,7 +211,7 @@ export function BoardCardMenuItems({
   noun,
   bulk,
   columns,
-  openLabel,
+  openRows,
   heldReason,
   actionHeldReason,
   editHeldReason,
@@ -228,9 +230,10 @@ export function BoardCardMenuItems({
   /** The move targets, in board order. Empty on an ungrouped board, which drops
    *  the whole section. */
   columns: BoardColumnModel[];
-  /** "Open" for an in-app destination, "Open on GitHub" for the browser, or null
-   *  where there is nothing to open (drafts own their popover on the card). */
-  openLabel: string | null;
+  /** The Open row naming where the open lands, and under it "Open on GitHub"
+   *  unless the first row already says that; null where there is nothing to open
+   *  (drafts own their popover on the card). */
+  openRows: { primary: string; secondary: string | null } | null;
   /** Why every move is held, or undefined when they're live. */
   heldReason: string | undefined;
   /** Why the whole write block below the peek is held — the draft rows as well as
@@ -266,9 +269,16 @@ export function BoardCardMenuItems({
   const isPeekable = kind === "issue" || kind === "pullRequest";
   return (
     <>
-      {openLabel !== null && (
+      {openRows !== null && (
         <>
-          <ContextMenuItem onClick={actions.open}>{openLabel}</ContextMenuItem>
+          <ContextMenuItem onClick={actions.open}>
+            {openRows.primary}
+          </ContextMenuItem>
+          {openRows.secondary !== null && (
+            <ContextMenuItem onClick={actions.openOnWeb}>
+              {openRows.secondary}
+            </ContextMenuItem>
+          )}
           {/* Unconditional: the Position section below always draws, so this
               separator never ends up with nothing under it. */}
           <ContextMenuSeparator />

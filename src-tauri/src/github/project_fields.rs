@@ -1201,6 +1201,7 @@ fn parse_item_field_values(value: &Value, field: &str) -> ItemFieldValues {
                 item_id: node.get("id")?.as_str()?.to_string(),
                 project: project_ref(project)?,
                 values: array(&node["fieldValues"]["nodes"])
+                    .filter(|v| !crate::github::project_items::is_title_value(v))
                     .map(parse_field_value)
                     .collect(),
             })
@@ -2276,6 +2277,32 @@ mod tests {
                 json!({"kind":"unknown","fieldName":expected_name})
             );
         }
+    }
+
+    #[test]
+    fn an_items_built_in_title_value_is_dropped() {
+        let response = json!({"data":{"repository":{"issue":{"projectItems":{"nodes":[
+            {"id":"item-a","project":{"id":"project-a","title":"Roadmap","number":3,"closed":false,"viewerCanUpdate":true},"fieldValues":{"nodes":[
+                {"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"notes","name":"Notes","dataType":"TEXT"},"text":"A note"},
+                {"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"title","name":"Title","dataType":"TITLE"},"text":"An item's own title"},
+                {"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"custom-title","name":"Title","dataType":"TEXT"},"text":"Custom"}
+            ]}}
+        ]}}}}});
+        let out = parse_item_field_values(&response, "issue");
+        let wire = serde_json::to_value(&out.items[0].values).expect("values serialize");
+        let ids: Vec<_> = wire
+            .as_array()
+            .expect("values")
+            .iter()
+            .map(|v| (v["kind"].clone(), v["fieldId"].clone()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (json!("text"), json!("notes")),
+                (json!("text"), json!("custom-title"))
+            ]
+        );
     }
 
     #[test]

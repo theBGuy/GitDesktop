@@ -16,6 +16,7 @@ import {
   BOARD_WRITES_KEY,
   pausedBoardWriteOn,
   projectItemsRepoKey,
+  shiftChasedRepos,
 } from "./board-writes";
 import { repoKeys } from "./core";
 import { isLocalRepoQuery } from "./local-query-filter";
@@ -132,16 +133,20 @@ export function useMutationCacheSnapshot<T>(
 export const pendingBoardWrites = new Map<string, number>();
 
 /** Whether a board write on `repo` is outstanding for a settle to wait on: inside
- *  its request ({@link pendingBoardWrites}), or PAUSED offline after its
- *  optimistic patch, before the request the count wraps ever started. A settling
- *  write is excluded from its own reading provided every board-write `onMutate`
- *  awaits only microtask-scope work — the precondition `pausedBoardWriteOn`
- *  states. */
+ *  its request ({@link pendingBoardWrites}), inside a date-shift chase on the repo
+ *  (`shiftChasedRepos`, held across the chase's rounds, where the request count
+ *  drops to zero between one answer and the next request), or PAUSED offline after
+ *  its optimistic patch, before the request the count wraps ever started. A
+ *  settling write is excluded from its own reading provided every board-write
+ *  `onMutate` awaits only microtask-scope work — the precondition
+ *  `pausedBoardWriteOn` states — and a chase releases its repo before its own
+ *  settle runs. */
 export function boardWritesOutstanding(
   queryClient: QueryClient,
   repo: string,
 ): boolean {
   if ((pendingBoardWrites.get(repo) ?? 0) > 0) return true;
+  if (shiftChasedRepos.has(repo)) return true;
   // `findAll`, never `find`: the mutation cache's `find` defaults to an EXACT key
   // match (query-core 5.102.8), which the `["board-write"]` prefix never is.
   return (
@@ -295,21 +300,24 @@ export function boardReadFailed(queryHash: string): boolean {
  * stale WITHOUT fetching (`refetchType: "none"`), because the answer a refetch
  * would bring back has not seen that sibling yet: server truth fetched mid-flight
  * puts an archived card back on the board, or a moved one in its old column, until
- * the sibling's own settle re-reads. Deferring costs nothing while the last write
- * out is one of THESE — projects.ts's `trackBoardWrite` decrements before any
- * `onSettled` runs, so it sees a clear count and performs the one real refetch.
- * The gap: when the last one out settles through `markProjectBoardsStale`,
- * `holdBoardsForVerdict` or a slotted board move's success (all projects.ts)
- * instead, nothing refetches at once. That is the point of those modes — the
- * first's own patch is already on screen, and the boards stay marked stale for the
- * next natural read; the second records its board's lenses owed, and its caller
- * arms the full re-read that judges the failed reposition; the third marks nothing
- * and starts no read beyond restarting the reads its cancel left dataless; the
- * recovery re-read follows. A write under the shield (writeThroughBoards'
- * `markStale: false`) marks only the FILTERED lenses it patches, whose membership
- * no payload can settle, and preserves every mark it found — so a mark laid here
- * still reaches its refetch. A lone write here sees zero and refetches
- * immediately, exactly as before.
+ * the sibling's own settle re-reads. A date-shift chase counts as outstanding for
+ * its whole burst, its rounds' gaps included: a read landing between two rounds
+ * replaces the dates the chase compares against, and it would write the server's
+ * older ones back. Deferring costs nothing while the last write out is one of
+ * THESE — projects.ts's `trackBoardWrite` decrements, and a chase releases its
+ * repo, before any `onSettled` runs, so it sees a clear count and performs the one
+ * real refetch. The gap: when the last one out settles through
+ * `markProjectBoardsStale`, `holdBoardsForVerdict` or a slotted board move's
+ * success (all projects.ts) instead, nothing refetches at once. That is the
+ * point of those modes — the first's own patch is already on screen, and the
+ * boards stay marked stale for the next natural read; the second records its
+ * board's lenses owed, and its caller arms the full re-read that judges the
+ * failed reposition; the third marks nothing and starts no read beyond restarting
+ * the reads its cancel left dataless; the recovery re-read follows. A write under
+ * the shield (writeThroughBoards' `markStale: false`) marks only the FILTERED
+ * lenses it patches, whose membership no payload can settle, and preserves every
+ * mark it found — so a mark laid here still reaches its refetch. A lone write here
+ * sees zero and refetches at once.
  *
  * Read PER REPO, matching the key this invalidates: a write pending in another
  * repository must not defer this one, whose stale mark that write's own settle

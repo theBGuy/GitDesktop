@@ -1,6 +1,7 @@
-// Pins the click-time open claim of the two clicks that await before calling a
-// ui-store navigator: My work's `openItem` (MyWorkScreen.tsx) and the Activity
-// dock's `navigate` (ActivityDock.tsx). Each declares
+// Pins the click-time open claim of the three clicks that await before calling a
+// ui-store navigator: My work's `openItem` (MyWorkScreen.tsx), the Activity
+// dock's `navigate` (ActivityDock.tsx) and the Projects board's `openInClone`
+// (use-card-open.ts), whose file holds no other claim. Each declares
 // `const claimed = claimRepoOpen();` once, as a top-level statement of its body,
 // ahead of its first `await`, `throw` and navigator call, and after its early
 // returns (the arms that never open a repo, which must not retire an open made
@@ -13,7 +14,7 @@
 // An older jump still held on its repo-shell warm-up checks the open claims, so
 // a click that claimed late, or never read its claim, lets an older target land
 // over a newer one, or lets a newer open be retired by an older click. A narrow
-// pin on these two functions, not a src-wide scanner; each check must go red on
+// pin on these three functions, not a src-wide scanner; each check must go red on
 // the in-memory mutants below, so a scan that can't fail on those edits fails
 // here instead.
 import assert from "node:assert/strict";
@@ -44,6 +45,15 @@ const SITES = {
     head: /\bconst navigate = \(n: AppNotification\) => \{/g,
     params: false,
     generation: "clickGen",
+  },
+  openInClone: {
+    file: "src/features/projects/use-card-open.ts",
+    head: /\basync function openInClone\s*\(/g,
+    params: true,
+    generation: "boardOpenGen",
+    // The board's browser arms and its fork hop open no repository, so the
+    // clone arm's claim is the file's only one.
+    soleClaim: true,
   },
 };
 
@@ -89,6 +99,20 @@ function claimProblems(name, text) {
   if (typeof span === "string") return [span];
   const body = masked.slice(span[0], span[1] + 1);
   const problems = [];
+  if (site.soleClaim) {
+    const inFile = [...masked.matchAll(/(?<![\w$.])claimRepoOpen\s*\(/g)];
+    if (inFile.length !== 1)
+      problems.push(
+        `${site.file} holds ${inFile.length} claimRepoOpen calls, not only ${name}'s`,
+      );
+    // The other claim routes, and an alias the count above can't see.
+    for (const m of masked.matchAll(
+      /(?<![\w$.])(reserveRepoOpen|claimRepoOpenOrder|claimWarmRepoShell)\s*\(/g,
+    ))
+      problems.push(`${site.file} takes another claim through ${m[1]}`);
+    if (/(?<![\w$.])claimRepoOpen\s+as(?![\w$])/.test(masked))
+      problems.push(`${site.file} imports claimRepoOpen under an alias`);
+  }
   const calls = [...body.matchAll(/(?<![\w$.])claimRepoOpen\s*\(/g)];
   const decl = /(?<![\w$.])const claimed = claimRepoOpen\(\);/.exec(body);
   if (calls.length !== 1 || !decl) {
@@ -214,8 +238,12 @@ const MUTANTS = {
       )(once(CLAIM, "")(s)),
     "superseded no longer reads the claim": once("!claimed() || ", ""),
     "the last superseded check before the navigators removed": once(
-      "      if (superseded()) return;\n    }\n",
+      "    }\n    if (superseded()) return;\n",
       "    }\n",
+    ),
+    "a return between the claim and the first await": once(
+      CLAIM,
+      `${CLAIM}    if (gen < 0) return;\n`,
     ),
     "an await just before openIssue without a re-check": once(
       "      openIssue({\n",
@@ -294,6 +322,94 @@ const MUTANTS = {
     "navigate renamed": once(
       "const navigate = (n: AppNotification) => {",
       "const go = (n: AppNotification) => {",
+    ),
+  },
+  openInClone: {
+    "the claim removed": once(CLAIM, ""),
+    "the claim inside a block": once(CLAIM, `    {\n  ${CLAIM}    }\n`),
+    "the claim inside a conditional": once(
+      CLAIM,
+      `    if (gen > 0) {\n  ${CLAIM}    }\n`,
+    ),
+    "the claim inside a callback": once(
+      CLAIM,
+      `    queueMicrotask(() => {\n  ${CLAIM}    });\n`,
+    ),
+    "the claim after the first await": once(CLAIM, `    await null;\n${CLAIM}`),
+    "a throw ahead of the claim": once(
+      CLAIM,
+      `    if (!item) throw new Error("no item");\n${CLAIM}`,
+    ),
+    "a navigator call ahead of the claim": once(
+      CLAIM,
+      `    openIssue({ repoPath: "", repoName: "", number: 0 });\n${CLAIM}`,
+    ),
+    "a return between the claim and the first await": once(
+      CLAIM,
+      `${CLAIM}    if (gen < 0) return;\n`,
+    ),
+    "superseded no longer reads the claim": once("!claimed() || ", ""),
+    "the superseded check after the resolve removed": once(
+      "    });\n    if (superseded()) return;\n",
+      "    });\n",
+    ),
+    "an await just before openIssue without a re-check": once(
+      "      openIssue({\n        repoPath: targetPath,\n",
+      "      await null;\n      openIssue({\n        repoPath: targetPath,\n",
+    ),
+    "the openPr arm drops stillValid": once(
+      "        beforeSelect,\n        stillValid,\n      });\n    } else {",
+      "        beforeSelect,\n      });\n    } else {",
+    ),
+    "the openIssue arm drops stillValid": once(
+      "        number: target.number,\n        carryHistory: true,\n        beforeSelect,\n        stillValid,\n",
+      "        number: target.number,\n        carryHistory: true,\n        beforeSelect,\n",
+    ),
+    "the claim read inside stillValid": once(
+      "      gen === boardOpenGen &&\n",
+      "      gen === boardOpenGen &&\n      claimed() &&\n",
+    ),
+    "superseded read inside stillValid": once(
+      "      gen === boardOpenGen &&\n",
+      "      gen === boardOpenGen &&\n      !superseded() &&\n",
+    ),
+    "stillValid without the generation": once(
+      "      gen === boardOpenGen &&\n",
+      "",
+    ),
+    "stillValid without the epoch": once(
+      "      gen === boardOpenGen &&\n      useUiStore.getState().interactionEpoch === epochAtRequest;\n",
+      "      gen === boardOpenGen;\n",
+    ),
+    "a second claim in the file, in openItem": once(
+      "    const gen = bumpBoardOpenGen();\n",
+      "    const gen = bumpBoardOpenGen();\n    claimRepoOpen();\n",
+    ),
+    "a second claim in the file, through reserveRepoOpen": once(
+      "    const gen = bumpBoardOpenGen();\n",
+      "    const gen = bumpBoardOpenGen();\n    reserveRepoOpen();\n",
+    ),
+    "a second claim in the file, through claimRepoOpenOrder": once(
+      "    const gen = bumpBoardOpenGen();\n",
+      "    const gen = bumpBoardOpenGen();\n    claimRepoOpenOrder();\n",
+    ),
+    "a second claim in the file, through claimWarmRepoShell": once(
+      "    const gen = bumpBoardOpenGen();\n",
+      '    const gen = bumpBoardOpenGen();\n    void claimWarmRepoShell("");\n',
+    ),
+    "a second claim in the file, through an aliased import": (s) =>
+      once(
+        "    const gen = bumpBoardOpenGen();\n",
+        "    const gen = bumpBoardOpenGen();\n    claimOpen();\n",
+      )(
+        once(
+          "import { claimRepoOpen } from",
+          "import { claimRepoOpen, claimRepoOpen as claimOpen } from",
+        )(s),
+      ),
+    "openInClone renamed": once(
+      "async function openInClone(",
+      "async function openClone(",
     ),
   },
 };

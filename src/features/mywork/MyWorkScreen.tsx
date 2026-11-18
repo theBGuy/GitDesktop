@@ -44,19 +44,26 @@ import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { composedErrorPresentation, presentError } from "@/lib/error-summary";
 import { rateLimitSummary } from "@/lib/forge-backoff";
-import { forgePrHeadRef, repoOriginPath, validateRepo } from "@/lib/git/api";
-import { normPath } from "@/lib/git/path";
 import { useForgeMyWork, useMyWorkSources } from "@/lib/git/queries";
 import {
   type ForgeProvider,
   type MyWorkItem,
-  type PrHeadRef,
   providerLabel,
-  type RepoInfo,
-  type RepoOrigin,
 } from "@/lib/git/types";
-import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  hasOpenableMatch,
+  type LocalLandingTarget,
+  openableMatches,
+  openingStatus,
+  PENDING_AFFORDANCE_MS,
+  urlAuthority,
+} from "@/lib/local-landing/match";
+import {
+  type LocalLanding,
+  resolveLocalLanding,
+} from "@/lib/local-landing/resolve";
+import { useMenuKeyFollowUpCanceller } from "@/lib/menu-key-follow-up";
 import { applyRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useSettings } from "@/lib/settings/queries";
@@ -70,7 +77,6 @@ import {
   filterMyWork,
   MY_WORK_LISTBOX_ID,
   type MyWorkTab,
-  matchLocalRepos,
   mergeMyWorkPages,
   myWorkOptionId,
 } from "./mywork-utils";
@@ -141,24 +147,6 @@ const EMPTY_SCOPE: Record<ForgeProvider, string> = {
     "This searches every project you're involved in, not just local ones.",
   bitbucket: "This searches the Bitbucket repositories you've opened here.",
 };
-
-/** Every provider id, as an exhaustive Record so widening `ForgeProvider` fails
- *  the build here rather than quietly narrowing the check below. */
-const FORGE_PROVIDERS: Record<ForgeProvider, true> = {
-  github: true,
-  gitlab: true,
-  bitbucket: true,
-};
-
-/** `RecentRepo.provider` is a stored string, so an id this build doesn't know
- *  fails over to the item's own provider rather than reaching the backend as a
- *  tag it can't deserialize — a rejection the open's deadline would swallow into
- *  a silent main-workspace landing. */
-function asForgeProvider(value: string | undefined): ForgeProvider | null {
-  return value !== undefined && Object.hasOwn(FORGE_PROVIDERS, value)
-    ? (value as ForgeProvider)
-    : null;
-}
 
 /** "A" / "A and B" — the configured set is at most three. */
 const joinLabels = (labels: string[]) =>
@@ -245,18 +233,6 @@ const NO_LEGS: MyWorkLeg[] = [];
 const NO_ERRORS: LegError[] = [];
 const NO_ITEMS: MyWorkItem[] = [];
 
-/** Total budget for resolving where to open a PR, spanning EVERY awaited leg of
- *  the resolution — the worktree list, the head-ref read, and the validate of
- *  whatever checkout they point at. Opening must stay a keypress-fast action,
- *  and any one leg can block for seconds (git's prune, a stalled network mount).
- *  Legs that consume the whole budget leave nothing for the ones after them,
- *  which fall back to the main checkout — the safe direction. */
-const WORKTREE_RESOLVE_BUDGET_MS = 1500;
-
-/** Grace period before a resolving open lights its row, so a resolution that
- *  answers quickly never flashes a spinner. */
-const PENDING_AFFORDANCE_MS = 300;
-
 /** How long the skeleton holds after the FIRST forge answers, waiting for the
  *  rest. Owner-ratified trade: one clean paint beats fastest-first rows — a
  *  handful of rows landing and then reshuffling as a slower leg arrives reads
@@ -271,233 +247,19 @@ const FIRST_PAINT_GRACE_MS = 3500;
  *  app by itself. Read only from handlers and continuations, never in render. */
 let openGen = 0;
 
-/** Resolves `work` against what's left of `deadline`, answering `fallback` on
- *  both rejection and expiry — the caller treats slow and broken alike. */
-function withDeadline<T>(
-  work: Promise<T>,
-  deadline: number,
-  fallback: T,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    work.catch(() => fallback),
-    new Promise<T>((resolve) => {
-      timer = setTimeout(
-        () => resolve(fallback),
-        Math.max(0, deadline - Date.now()),
-      );
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
-
-/**
- * A checkout's navigation target, or null when it can't be validated in time.
- * `root` rather than the caller's path: git prints worktree paths with forward
- * slashes while validate_repo answers the canonical spelling, and every
- * repo-identity consumer (query keys, per-repo stores, the session lists'
- * `s.repoPath === repoPath` filters) compares that form as a plain string — two
- * spellings of one checkout would read as two different repos.
- */
-async function resolveTarget(
-  path: string,
-  deadline: number,
-): Promise<{ path: string; name: string } | null> {
-  // A spent budget would race git against a zero-length timeout and discard the
-  // result — don't spawn the process at all.
-  if (Date.now() >= deadline) return null;
-  const info = await withDeadline<RepoInfo | null>(
-    validateRepo(path),
-    deadline,
-    null,
-  );
-  return info ? { path: info.root, name: info.name } : null;
-}
-
-/**
- * Whether a matched checkout's STORED classification can support opening this
- * row. Repo detection answers from glab's SAVED hosts, while the inbox
- * enumerates account hosts as well — a token authenticates glab with no saved
- * host at all — so a self-managed host known only by token classifies its clones
- * as GitHub while its rows arrive as GitLab, and landing there would resolve the
- * wrong integration.
- *
- * This is the cheap half of a two-stage gate, and it only drops KNOWN
- * disagreement: it runs at render time with no IPC, so an unclassified checkout
- * (the same token-only host, which the backfill can never tag) has to pass here.
- * `originMatches` settles those against the backend's own live verdict.
- */
-function providerAgrees(recent: RecentRepo, item: MyWorkItem): boolean {
-  const stored = asForgeProvider(recent.provider);
-  return stored === null || stored === item.provider;
-}
-
-/**
- * The checkouts an open may land on: key-matched AND classified compatibly.
- * `openItem` resolves from this list and the row affordances read it, so a row
- * can never advertise a local action the open refuses over a provider — that
- * disagreement is knowable at render time, from fields already in memory.
- * The ORIGIN proof is deliberately not part of it: it costs a git read per
- * candidate, so it stays an open-time check whose browser fallback remains the
- * recorded optimistic-display trade.
- */
-function openableMatches(
-  item: MyWorkItem,
-  recents: readonly RecentRepo[],
-): RecentRepo[] {
-  return matchLocalRepos(item, recents).filter((r) => providerAgrees(r, item));
-}
-
-/**
- * `openableMatches` reduced to its yes/no, for the display sites — which ask
- * once per row per render and only ever read the answer, so this stops at the
- * first hit rather than materializing the filtered list. It reads the same
- * `matchLocalRepos` + `providerAgrees` pair, with no second copy of either rule,
- * so a row's affordance can't come to disagree with the open's candidate set.
- */
-function hasOpenableMatch(
-  item: MyWorkItem,
-  recents: readonly RecentRepo[],
-): boolean {
-  return matchLocalRepos(item, recents).some((r) => providerAgrees(r, item));
-}
-
-/** The item's own authority: `URL.host` is the hostname plus any port the scheme
- *  doesn't default (`:443` drops on https, `:8443` stays), lowercased as it
- *  parses — the spelling the origin side answers with. Null when it won't parse. */
-function itemAuthority(item: MyWorkItem): string | null {
-  try {
-    return new URL(item.url).host.toLowerCase();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Whether `repoPath`'s origin really is this item's repository AND would resolve
- * this item's integration, read inside the caller's deadline.
- *
- * EVERY axis must match. Equal namespaces on two hosts are different projects;
- * equal hostnames on two ports are different instances; and the match key's host
- * is a stored value that goes stale the moment a remote is re-pointed — only the
- * origin's own answer settles any of it. Host and authority are deliberately
- * BOTH compared even though authority subsumes host in practice: should the two
- * derivations ever drift apart, requiring both turns that drift into a browser
- * open rather than a wrong one.
- *
- * `provider` is the axis identity alone cannot supply: a checkout on a host only
- * a glab TOKEN knows is the right repository, yet detection can't recognise it
- * and its landing would resolve GitHub's resilient default. Every row reaches
- * here, so this reads "the checkout must route to the forge this row came from"
- * — the live verdict `providerAgrees` can't see.
- *
- * Every unknown — a slow or failed read, a checkout with no origin, an
- * unparseable row URL, any field empty — answers false: an identity that can't
- * be proven must not become a navigation into somebody else's project.
- */
-async function originMatches(
-  item: MyWorkItem,
-  repoPath: string,
-  deadline: number,
-): Promise<boolean> {
-  const origin = await withDeadline<RepoOrigin | null>(
-    repoOriginPath(repoPath),
-    deadline,
-    null,
-  );
-  const authority = itemAuthority(item);
-  if (
-    origin === null ||
-    authority === null ||
-    origin.host === "" ||
-    origin.authority === "" ||
-    origin.path === "" ||
-    origin.provider === ""
-  ) {
-    return false;
-  }
-  return (
-    origin.path.toLowerCase() === item.repoFullName.toLowerCase() &&
-    origin.host.toLowerCase() === item.host.toLowerCase() &&
-    origin.authority.toLowerCase() === authority &&
-    origin.provider === item.provider
-  );
-}
-
-/**
- * The first candidate whose origin really is this item's repository, else null.
- * Both clones of an ambiguous key can be in recents, so a single failed proof
- * says nothing about the rest. Sequential and bounded: candidates number a
- * handful at most, and an expiry mid-loop simply stops proving — the caller
- * treats that like any other unproven match.
- */
-async function provenCandidate(
-  item: MyWorkItem,
-  candidates: readonly RecentRepo[],
-  deadline: number,
-): Promise<RecentRepo | null> {
-  for (const candidate of candidates) {
-    // A spent budget would race git against a zero-length timeout and discard
-    // the result — stop rather than spawn one per remaining candidate.
-    if (Date.now() >= deadline) return null;
-    if (await originMatches(item, candidate.path, deadline)) return candidate;
-  }
-  return null;
-}
-
-/**
- * The repo's main worktree when `repoPath` is itself a linked one, else null.
- * A worktree opened through the folder picker lands in recents like any other
- * checkout, so a matched row can't be assumed to be the main workspace.
- */
-function mainWorktreeOf(
-  worktrees: UserWorktree[],
-  repoPath: string,
-): string | null {
-  const main = worktrees.find((w) => w.isMain);
-  // normPath for comparison only — git spells worktree paths with forward
-  // slashes where validate_repo hands back Windows separators.
-  if (!main || normPath(main.path) === normPath(repoPath)) return null;
-  return main.path;
-}
-
-/**
- * The worktree whose checked-out branch is provably this PR's head, else null.
- * Every unknown — a slow or failed head-ref read, an unproven head, no branch
- * match — is a null, and the caller's deadline bounds the read. Candidates are
- * not filtered against `repoPath`: a head branch checked out in the matched
- * checkout itself is still the proven answer, and returning it is what keeps
- * the main-workspace preference from pulling the user off their own branch.
- */
-async function branchWorktreeOf(
-  item: MyWorkItem,
-  worktrees: UserWorktree[],
-  repoPath: string,
-  provider: ForgeProvider,
-  deadline: number,
-): Promise<string | null> {
-  const candidates = worktrees.filter((w) => w.branch !== "");
-  if (candidates.length === 0) return null;
-  // A spent budget would race the forge CLI against a zero-length timeout and
-  // discard the result — don't spawn the process at all.
-  if (Date.now() >= deadline) return null;
-  const head = await withDeadline<PrHeadRef | null>(
-    forgePrHeadRef(provider, repoPath, item.number),
-    deadline,
-    null,
-  );
-  // A fork PR's head branch lives in a different repository, where that branch
-  // name routinely also exists locally — only a head slug matching this item's
-  // repo proves a local branch IS the PR's, so an empty or foreign slug falls
-  // back to whatever the caller had chosen.
-  if (
-    !head ||
-    head.headRefName === "" ||
-    head.headRepoFullName.toLowerCase() !== item.repoFullName.toLowerCase()
-  ) {
-    return null;
-  }
-  // Exact compare: git branch names are case-sensitive.
-  return candidates.find((w) => w.branch === head.headRefName)?.path ?? null;
+/** What the shared resolver needs to know about a row. The authority comes from
+ *  the row's URL, the only place a My Work item carries its port. */
+function landingTarget(item: MyWorkItem): LocalLandingTarget {
+  return {
+    provider: item.provider,
+    host: item.host,
+    authority: urlAuthority(item.url),
+    repoOwner: item.repoOwner,
+    repoName: item.repoName,
+    repoFullName: item.repoFullName,
+    number: item.number,
+    isPullRequest: item.isPullRequest,
+  };
 }
 
 /** Inset from the row's leading edge for a keyboard-opened menu's anchor, so the
@@ -546,8 +308,12 @@ export function MyWorkScreen() {
   // The active row is tracked by URL (unique per item) rather than by index, so
   // a filter change can't silently retarget the selection to a different item.
   const [activeUrl, setActiveUrl] = useState<string | null>(null);
-  // The row whose open is still resolving where to land, or null.
-  const [pendingOpenUrl, setPendingOpenUrl] = useState<string | null>(null);
+  // The row whose open is still resolving where to land, with the sentence its
+  // wait speaks (fixed at the open's start), or null.
+  const [pendingOpen, setPendingOpen] = useState<{
+    url: string;
+    status: string;
+  } | null>(null);
   // Latches the first paint: set when every configured leg has answered, or when
   // the grace window closes, whichever comes first. Never unset — a leg that
   // becomes configured later (a sign-in mid-session) and every refetch arrive
@@ -721,12 +487,15 @@ export function MyWorkScreen() {
     // view change), so a continuation from a previous mount stays superseded;
     // the view is read live because the screen can be gone entirely.
     const gen = ++openGen;
+    // A newer open clears an older one's wait at once, browser-only opens
+    // included; the older wait is never announced as done.
+    setPendingOpen(null);
     // The same set the row's affordances render from, so a local-looking row is
     // never one this refuses over a provider. Both open arms below start here,
     // so PRs and issues are gated alike.
     const candidates = openableMatches(item, recents);
     if (candidates.length === 0) {
-      openUrl(item.url);
+      openUrl(item.url).catch(toastError);
       return;
     }
     // Claimed here, before the first await but after the browser-only arm, so a
@@ -737,153 +506,56 @@ export function MyWorkScreen() {
     const claimed = claimRepoOpen();
     const superseded = () =>
       gen !== openGen || !claimed() || useUiStore.getState().view !== "mywork";
-    // EVERY row is proven below, whatever its provider: the key's host and owner
-    // are STORED values, so a re-pointed origin leaves any provider's key naming
-    // a checkout that is no longer this project. GitLab carries a second reason —
-    // it persists only the segment BEFORE the repo name, so `team-a/sub/repo` and
-    // `team-b/sub/repo` answer the same key and the candidates can be DIFFERENT
-    // projects. Elsewhere the key is identity, so several candidates are clones of
-    // the one right repository and the proof only has to find a live one.
-    let match = candidates[0];
-    // Recents rows outlive deleted and moved clones, so prove the path is still
-    // a repo before navigating; the browser fallback keeps the row a working
-    // link while the toast names the stale path (repair lives in the repo list).
+    // Fixed at the open's start, so a refetch that drops or retitles the row
+    // can't blank or change the sentence mid-wait.
+    const status = openingStatus(item);
+    // Armed before the first await: the resolve's first folder check can take its
+    // whole budget, and a freeze the row doesn't acknowledge reads as a dropped
+    // keypress. Held locally as well as on the ref: the ref is what an unmount can
+    // reach, but only this generation may clear its own timer out of it.
+    const timer = setTimeout(() => {
+      if (!superseded()) setPendingOpen({ url: item.url, status });
+    }, PENDING_AFFORDANCE_MS);
+    pendingTimerRef.current = timer;
+    // Ownership is claimed at ARM time, not fire time: a successor open must
+    // own the affordance from its first instant, or the superseded open's
+    // cleanup darkens a row the successor is still resolving.
+    pendingGenRef.current = gen;
+    let landing: LocalLanding;
     try {
-      await validateRepo(match.path);
-    } catch (e) {
-      if (superseded()) return;
-      // A stale FIRST candidate is not the end of a multi-candidate row: the
-      // proof rejects a dead path anyway, so only a row with nowhere else to
-      // look reports it and gives up here.
-      if (candidates.length === 1) {
-        openUrl(item.url);
-        // Only a real notARepo earns the stale-path sentence — a missing CLI or
-        // an IPC failure would be misdescribed by it, so it takes the generic
-        // toast.
-        if (isAppError(e) && e.kind === "notARepo") {
-          toast.error(`${match.path} is no longer a git repository.`);
-        } else {
-          toastError(e);
-        }
-        return;
+      landing = await resolveLocalLanding(landingTarget(item), candidates, {
+        preferWorktree: opts?.preferWorktree ?? true,
+        superseded,
+      });
+    } finally {
+      clearTimeout(timer);
+      if (pendingTimerRef.current === timer) pendingTimerRef.current = null;
+      // Only the generation that owns the affordance may darken it.
+      if (pendingGenRef.current === gen) {
+        pendingGenRef.current = 0;
+        setPendingOpen(null);
       }
     }
     if (superseded()) return;
-    // Where a local landing goes, in one rule: a matched row that is itself a
-    // linked worktree prefers its repo's main workspace, and a PROVEN PR head
-    // branch outranks that toward the worktree holding it. Every unknown stays
-    // on match.path, silently — nothing broke for the user.
-    let targetPath = match.path;
-    let targetName = match.name;
-    {
-      // Armed before the first await, not before the network leg: listing
-      // worktrees runs a prune that can block for seconds, and a freeze the row
-      // doesn't acknowledge reads as a dropped keypress. Held locally as well as
-      // on the ref — the ref is what an unmount can reach, but only this
-      // generation may clear its own timer out of it.
-      const timer = setTimeout(() => {
-        if (superseded()) return;
-        setPendingOpenUrl(item.url);
-      }, PENDING_AFFORDANCE_MS);
-      pendingTimerRef.current = timer;
-      // Ownership is claimed at ARM time, not fire time: a successor open must
-      // own the affordance from its first instant, or the superseded open's
-      // cleanup darkens a row the successor is still resolving.
-      pendingGenRef.current = gen;
-      // One budget for the whole resolution, however many legs it takes.
-      const deadline = Date.now() + WORKTREE_RESOLVE_BUDGET_MS;
-      try {
-        // Settle which candidate is really this row's first in the budget —
-        // ahead of the optional worktree legs, which may spend the rest of it.
-        // None proven opens the browser: the row stays a working link, and no
-        // open lands in a checkout that isn't this project's.
-        const proven = await provenCandidate(item, candidates, deadline);
-        if (superseded()) return;
-        if (!proven) {
-          openUrl(item.url);
-          return;
-        }
-        // Everything below resolves against the PROVEN checkout, not the key's
-        // first match.
-        match = proven;
-        targetPath = proven.path;
-        targetName = proven.name;
-        // Listed once and shared: both preferences read the same snapshot, and
-        // this is the leg that can block.
-        const worktrees = await withDeadline(
-          listUserWorktrees(match.path),
-          deadline,
-          [],
-        );
-        if (superseded()) return;
-        // The fallback is resolved AND validated first, before the optional
-        // network leg can spend the budget on it: the semantics promise the main
-        // workspace whenever the branch is unconfirmed, so that promise must not
-        // depend on how slow the head-ref read turns out to be. Costs one local
-        // git call even when the branch goes on to win.
-        // Null when the matched row already IS the main workspace, so the
-        // ordinary main-clone open never re-validates or re-spells its path.
-        const mainPath = mainWorktreeOf(worktrees, match.path);
-        // Where the open lands if the branch is never looked up. Proving a head
-        // can only matter when some branch-bearing checkout sits somewhere ELSE
-        // than that: a single-checkout clone has nowhere to be redirected to, and
-        // the common open must stay keypress-instant rather than wait on a forge
-        // call whose every outcome is the path it already has.
-        const fallbackPath = mainPath ?? match.path;
-        const lookupCanMove = worktrees.some(
-          (w) => w.branch !== "" && normPath(w.path) !== normPath(fallbackPath),
-        );
-        let landing: { path: string; name: string } | null = null;
-        if (mainPath) {
-          // git skips its prune while another process holds the worktree-admin
-          // lock, so a checkout deleted out-of-band can still be listed.
-          landing = await resolveTarget(mainPath, deadline);
-          if (superseded()) return;
-        }
-        if (
-          lookupCanMove &&
-          item.isPullRequest &&
-          (opts?.preferWorktree ?? true)
-        ) {
-          // `providerAgrees` already dropped every candidate whose stored provider
-          // contradicts the row, so a CLASSIFIED checkout necessarily agrees here.
-          // The fallback covers the unclassified ones: a recent the owner probe
-          // hasn't touched, or one carrying an id this build doesn't know.
-          const branch = await branchWorktreeOf(
-            item,
-            worktrees,
-            match.path,
-            asForgeProvider(match.provider) ?? item.provider,
-            deadline,
-          );
-          if (superseded()) return;
-          if (branch && normPath(branch) === normPath(match.path)) {
-            // The proven head is the matched checkout itself — stay on the
-            // user's own branch rather than moving them to the main workspace.
-            landing = null;
-          } else if (branch) {
-            const branchTarget = await resolveTarget(branch, deadline);
-            if (superseded()) return;
-            // A branch that won't validate keeps the main-workspace fallback
-            // rather than dropping back to the matched worktree.
-            if (branchTarget) landing = branchTarget;
-          }
-        }
-        if (landing) {
-          targetPath = landing.path;
-          targetName = landing.name;
-        }
-      } finally {
-        clearTimeout(timer);
-        if (pendingTimerRef.current === timer) pendingTimerRef.current = null;
-        // Only the generation that owns the affordance may darken it.
-        if (pendingGenRef.current === gen) {
-          pendingGenRef.current = 0;
-          setPendingOpenUrl(null);
+    if (landing.kind === "superseded") return;
+    if (landing.kind === "browser") {
+      // No proven clone keeps the row a working link. A stale recents folder
+      // also names its path; repair lives in the repo list.
+      openUrl(item.url).catch(toastError);
+      if (landing.reason === "stale") {
+        // Only a real notARepo earns the stale-path sentence — a missing CLI or
+        // an IPC failure would be misdescribed by it, so it takes the generic
+        // toast.
+        if (isAppError(landing.error) && landing.error.kind === "notARepo") {
+          toast.error(`${landing.path} is no longer a git repository.`);
+        } else {
+          toastError(landing.error);
         }
       }
-      if (superseded()) return;
+      return;
     }
+    const targetPath = landing.path;
+    const targetName = landing.name;
     // Land under the origin lens (the match keyed on the ORIGIN slug): a fork
     // sitting on "upstream" resolves this number against the parent repo. Keyed on
     // the path actually navigated to, since a worktree carries its own lens. The
@@ -925,6 +597,8 @@ export function MyWorkScreen() {
     }
   }
 
+  const armMenuKeyFollowUp = useMenuKeyFollowUpCanceller();
+
   // Arrow keys from the filter input move the selection through the visible
   // rows and Enter opens it, so a keyboard user goes type → arrows → Enter
   // without ever leaving the input. Shift+Enter is the keyboard route to the
@@ -939,6 +613,7 @@ export function MyWorkScreen() {
       const item = interactive[activeIndex];
       if (!item) return;
       e.preventDefault();
+      if (e.repeat) return;
       void openItem(item, { preferWorktree: !e.shiftKey });
       return;
     }
@@ -955,6 +630,7 @@ export function MyWorkScreen() {
       if (item) {
         e.preventDefault();
         openRowContextMenu(item.url);
+        if (e.key === "ContextMenu") armMenuKeyFollowUp();
       }
       return;
     }
@@ -1045,7 +721,7 @@ export function MyWorkScreen() {
         visible={visible}
         activeIndex={activeIndex}
         recents={recents}
-        pendingOpenUrl={pendingOpenUrl}
+        pendingOpenUrl={pendingOpen?.url ?? null}
         onRetry={refresh}
         onSelect={setActiveUrl}
         onOpen={(item, opts) => void openItem(item, opts)}
@@ -1058,6 +734,11 @@ export function MyWorkScreen() {
         bodyOffline={offline}
         sourcesFailed={!fatal && sources.isError}
       />
+      {/* A slow open's spoken wait, mounted empty for the same reason. Nothing
+          visible: the row's spinner is the sighted cue, and focus stays put. */}
+      <div role="status" className="sr-only">
+        {pendingOpen?.status}
+      </div>
     </div>
   );
 }
@@ -1314,7 +995,9 @@ function MyWorkList({
                     Open in main workspace
                   </ContextMenuItem>
                 )}
-              <ContextMenuItem onClick={() => openUrl(menuItem.url)}>
+              <ContextMenuItem
+                onClick={() => openUrl(menuItem.url).catch(toastError)}
+              >
                 {`Open on ${providerLabel(menuItem.provider)}`}
               </ContextMenuItem>
               <ContextMenuItem

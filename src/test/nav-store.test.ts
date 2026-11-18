@@ -1,19 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RemoteLens } from "@/lib/git/types";
 import {
   __resetNavHistoryForTests,
   type BoardAnchor,
   canGoBack,
   canGoForward,
+  currentSegment,
   NAV_HISTORY_CAP,
   NAV_SELECTION_FIELDS,
   type NavEntry,
+  type NavSegment,
   readNavAnchor,
   registerNavAnchorProvider,
+  registerNavLensReader,
   restoreStep,
   sameLocation,
   selectionOf,
 } from "@/lib/stores/nav-history";
-import { type RepoTab, type UiState, useUiStore } from "@/lib/stores/ui";
+import {
+  type RepoTab,
+  registerRepoShellWarmup,
+  type UiState,
+  useUiStore,
+} from "@/lib/stores/ui";
 
 // The store wiring: the recorder's subscribe, goBack/goForward, the three
 // non-bumping writers and the navigator hop marks, driven through useUiStore.
@@ -24,8 +33,12 @@ const OTHER = "C:/repos/beta";
 
 const st = () => useUiStore.getState();
 const hist = () => st().navHistory;
-const tabs = () => hist().entries.map((e) => e.tab);
-const current = (): NavEntry => hist().entries[hist().index];
+/** The current segment's entries and stamp; `segmentTabs` reads every segment. */
+const entries = (): readonly NavEntry[] =>
+  currentSegment(hist())?.entries ?? [];
+const lens = () => currentSegment(hist())?.lens ?? null;
+const tabs = () => entries().map((e) => e.tab);
+const current = (): NavEntry => entries()[hist().index];
 
 const issue = (n: number) => ({ kind: "remote" as const, id: String(n) });
 const pr = (n: number) => ({ kind: "remote" as const, id: String(n) });
@@ -55,30 +68,46 @@ function countNotifications() {
   };
 }
 
-/** The history invariants (no two adjacent equal locations, no non-current entry on a
- *  hidden tab, the cap with `index` on an entry) and "canGo* true exactly when a press
- *  changes location", checked after
- *  every store change until the returned function runs. */
+/** The history invariants (per segment: no two adjacent equal locations, no non-current
+ *  entry on a hidden tab, never empty; across segments: the cap, no two equal neighbours,
+ *  `segment` and `index` on an entry) and "canGo* true exactly when a press changes
+ *  location", a repository or lens change counting as one, checked after every store
+ *  change until the returned function runs. */
 function watchInvariants(): () => string[] {
   const problems: string[] = [];
   const unsubscribe = useUiStore.subscribe((s) => {
-    const { entries, index } = s.navHistory;
+    const { segments, segment, index } = s.navHistory;
     if (s.view !== "repo") return;
-    if (entries.length > NAV_HISTORY_CAP) problems.push("over the cap");
-    if (entries.length > 0 && (index < 0 || index >= entries.length))
-      problems.push(`index ${index} names no entry`);
-    entries.forEach((e, i) => {
-      if (i > 0 && sameLocation(entries[i - 1], e))
-        problems.push(`entries ${i - 1} and ${i} are one location`);
-      if (i !== index && s.navHiddenTabs.includes(e.tab))
-        problems.push(`entry ${i} is on hidden tab ${e.tab}`);
+    const total = segments.reduce((n, seg) => n + seg.entries.length, 0);
+    if (total > NAV_HISTORY_CAP) problems.push("over the cap");
+    const seg: NavSegment | undefined = segments[segment];
+    if (segments.length > 0 && (seg === undefined || !seg.entries[index]))
+      problems.push(`segment ${segment} index ${index} names no entry`);
+    segments.forEach((x, n) => {
+      if (x.entries.length === 0) problems.push(`segment ${n} is empty`);
+      const prev = segments[n - 1];
+      if (prev && prev.repoPath === x.repoPath && prev.lens === x.lens)
+        problems.push(`segments ${n - 1} and ${n} are one place`);
+      x.entries.forEach((e, i) => {
+        if (i > 0 && sameLocation(x.entries[i - 1], e))
+          problems.push(`entries ${n}:${i - 1} and ${n}:${i} are one location`);
+        if ((n !== segment || i !== index) && s.navHiddenTabs.includes(e.tab))
+          problems.push(`entry ${n}:${i} is on hidden tab ${e.tab}`);
+      });
     });
+    if (seg === undefined) return;
     const here = { tab: s.repoTab, selection: selectionOf(s.repoTab, s) };
-    const back = entries[index - 1];
-    const fwd = entries[index + 1];
-    if (canGoBack(s) !== (back !== undefined && !sameLocation(back, here)))
+    const back = seg.entries[index - 1];
+    const fwd = seg.entries[index + 1];
+    const backMoves =
+      back !== undefined ? !sameLocation(back, here) : segment > 0;
+    const fwdMoves =
+      fwd !== undefined
+        ? !sameLocation(fwd, here)
+        : segment < segments.length - 1;
+    if (canGoBack(s) !== backMoves)
       problems.push("canGoBack disagrees with the trail");
-    if (canGoForward(s) !== (fwd !== undefined && !sameLocation(fwd, here)))
+    if (canGoForward(s) !== fwdMoves)
       problems.push("canGoForward disagrees with the trail");
   });
   return () => {
@@ -100,11 +129,18 @@ describe("repo switch and close", () => {
   it("opening a repo leaves one entry at the landing, index 0, stamp null", () => {
     enterRepo();
     expect(hist()).toEqual({
-      entries: [
-        { tab: "changes", selection: { selectedFile: null }, anchor: null },
+      segments: [
+        {
+          repoPath: REPO,
+          repoName: "alpha",
+          lens: null,
+          entries: [
+            { tab: "changes", selection: { selectedFile: null }, anchor: null },
+          ],
+        },
       ],
+      segment: 0,
       index: 0,
-      lens: null,
     });
   });
 
@@ -127,7 +163,8 @@ describe("repo switch and close", () => {
     });
     st().closeRepo();
     expect(st().view).toBe("welcome");
-    expect(hist().entries).toEqual([]);
+    expect(hist().segments).toEqual([]);
+    expect(hist().segment).toBe(-1);
     expect(hist().index).toBe(-1);
     expect(st().boardReturn).toBeNull();
   });
@@ -174,9 +211,11 @@ describe("repo switch and close", () => {
       st().setRepoTab("history");
       land();
       expect(st().repoPath).toBe(OTHER);
+      expect(hist().segments).toHaveLength(1);
+      expect(currentSegment(hist())?.repoPath).toBe(OTHER);
       expect(tabs()).toEqual([tab]);
       expect(hist().index).toBe(0);
-      expect(hist().lens).toBeNull();
+      expect(lens()).toBeNull();
     },
   );
 });
@@ -396,7 +435,7 @@ describe("marked selections", () => {
     onIssues();
     st().markLinkHop();
     st().selectIssue(issue(2));
-    expect(hist().entries.map((e) => e.selection)).toEqual([
+    expect(entries().map((e) => e.selection)).toEqual([
       { selectedFile: null },
       { selectedIssue: issue(1) },
       { selectedIssue: issue(2) },
@@ -471,14 +510,14 @@ describe("goBack / goForward", () => {
     expect(st().selectedIssue).toEqual(issue(2));
     expect(tabs()).toEqual(["changes", "issues", "issues", "pulls"]);
     expect(hist().index).toBe(2);
-    expect(hist().entries[3].selection).toEqual({ selectedPr: pr(4) });
+    expect(entries()[3].selection).toEqual({ selectedPr: pr(4) });
     st().goBack();
     expect(st().selectedIssue).toEqual(issue(1));
     st().goForward();
     st().goForward();
     expect(st().repoTab).toBe("pulls");
     expect(st().selectedPr).toEqual(pr(4));
-    expect(hist().entries).toHaveLength(4);
+    expect(entries()).toHaveLength(4);
     expect(hist().index).toBe(3);
   });
 
@@ -618,7 +657,7 @@ describe("cap and field map", () => {
     enterRepo();
     for (let i = 0; i < NAV_HISTORY_CAP + 10; i++)
       st().setRepoTab(i % 2 === 0 ? "issues" : "tags");
-    expect(hist().entries).toHaveLength(NAV_HISTORY_CAP);
+    expect(entries()).toHaveLength(NAV_HISTORY_CAP);
     expect(hist().index).toBe(NAV_HISTORY_CAP - 1);
     expect(current().tab).toBe(st().repoTab);
   });
@@ -640,7 +679,7 @@ describe("board anchors", () => {
     );
     st().setRepoTab("projects");
     st().setRepoTab("issues");
-    expect(hist().entries[1].anchor).toEqual(anchor("A"));
+    expect(entries()[1].anchor).toEqual(anchor("A"));
     unregisterA();
     st().goBack();
     expect(st().repoTab).toBe("projects");
@@ -653,10 +692,10 @@ describe("board anchors", () => {
     );
     st().goForward();
     expect(st().boardReturn).toBeNull();
-    expect(hist().entries[1].anchor).toEqual(anchor("B"));
+    expect(entries()[1].anchor).toEqual(anchor("B"));
     unregisterB();
     st().goBack();
-    expect(hist().entries[1].anchor).toEqual(anchor("B"));
+    expect(entries()[1].anchor).toEqual(anchor("B"));
     expect(st().boardReturn?.anchor).toEqual(anchor("B"));
     st().clearBoardReturn();
     expect(st().boardReturn).toBeNull();
@@ -688,7 +727,7 @@ describe("board anchors", () => {
     registerNavAnchorProvider("projects", () => null);
     st().setRepoTab("projects");
     st().setRepoTab("issues");
-    expect(hist().entries[1].anchor).toBeNull();
+    expect(entries()[1].anchor).toBeNull();
     st().goBack();
     expect(st().boardReturn).toBeNull();
   });
@@ -700,7 +739,7 @@ describe("in-store hop marks", () => {
     st().setRepoTab("history");
     st().selectCommit("a");
     st().openCommit("b");
-    expect(hist().entries.map((e) => e.selection)).toEqual([
+    expect(entries().map((e) => e.selection)).toEqual([
       { selectedFile: null },
       { selectedCommitHash: "a" },
       { selectedCommitHash: "b" },
@@ -793,11 +832,18 @@ describe("in-store hop marks", () => {
     expect(tabs()).toEqual(["changes", "issues", "pulls"]);
     st().syncNavLens(REPO, "upstream");
     expect(hist()).toEqual({
-      entries: [
-        { tab: "pulls", selection: { selectedPr: pr(2) }, anchor: null },
+      segments: [
+        {
+          repoPath: REPO,
+          repoName: "alpha",
+          lens: "upstream",
+          entries: [
+            { tab: "pulls", selection: { selectedPr: pr(2) }, anchor: null },
+          ],
+        },
       ],
+      segment: 0,
       index: 0,
-      lens: "upstream",
     });
   });
 });
@@ -820,9 +866,9 @@ describe("syncNavLens", () => {
     st().syncNavLens(REPO, "origin");
     notes.stop();
     expect(notes.count).toBe(1);
-    expect(hist().entries).toBe(before.entries);
+    expect(entries()).toBe(currentSegment(before)?.entries);
     expect(hist().index).toBe(2);
-    expect(hist().lens).toBe("origin");
+    expect(lens()).toBe("origin");
     expect(st().boardReturn).not.toBeNull();
     expect(st().interactionEpoch).toBe(epoch);
   });
@@ -832,11 +878,18 @@ describe("syncNavLens", () => {
     const epoch = st().interactionEpoch;
     st().syncNavLens(REPO, "upstream");
     expect(hist()).toEqual({
-      entries: [
-        { tab: "tags", selection: { selectedTag: null }, anchor: null },
+      segments: [
+        {
+          repoPath: REPO,
+          repoName: "alpha",
+          lens: "upstream",
+          entries: [
+            { tab: "tags", selection: { selectedTag: null }, anchor: null },
+          ],
+        },
       ],
+      segment: 0,
       index: 0,
-      lens: "upstream",
     });
     expect(st().boardReturn).toBeNull();
     expect(st().interactionEpoch).toBe(epoch);
@@ -847,7 +900,7 @@ describe("syncNavLens", () => {
     st().syncNavLens(REPO, "origin");
     st().syncNavLens(REPO, "upstream");
     expect(tabs()).toEqual(["tags"]);
-    expect(hist().lens).toBe("upstream");
+    expect(lens()).toBe("upstream");
     expect(st().boardReturn).toBeNull();
   });
 
@@ -868,7 +921,7 @@ describe("syncNavLens", () => {
     several();
     st().syncNavLens(REPO, "upstream");
     enterRepo(OTHER);
-    expect(hist().lens).toBeNull();
+    expect(lens()).toBeNull();
   });
 });
 
@@ -884,7 +937,7 @@ describe("invariants over a scripted session", () => {
     st().markLinkHop();
     st().selectIssue(issue(2));
     st().selectIssue(issue(1));
-    expect(hist().entries).toHaveLength(1);
+    expect(entries()).toHaveLength(1);
     expect(canGoBack(st())).toBe(false);
     expect(stop()).toEqual([]);
   });
@@ -896,7 +949,7 @@ describe("invariants over a scripted session", () => {
     st().selectIssue(issue(2));
     st().goBack();
     st().selectIssue(issue(2));
-    expect(hist().entries).toHaveLength(1);
+    expect(entries()).toHaveLength(1);
     expect(canGoForward(st())).toBe(false);
     expect(stop()).toEqual([]);
   });
@@ -910,7 +963,7 @@ describe("invariants over a scripted session", () => {
     st().selectIssue(issue(1));
     st().goBack();
     st().selectIssue(issue(1));
-    expect(hist().entries).toHaveLength(1);
+    expect(entries()).toHaveLength(1);
     expect(stop()).toEqual([]);
   });
 
@@ -940,7 +993,7 @@ describe("invariants over a scripted session", () => {
     st().goBack();
     st().goBack();
     st().goForward();
-    expect(hist().entries.length).toBeLessThanOrEqual(NAV_HISTORY_CAP);
+    expect(entries().length).toBeLessThanOrEqual(NAV_HISTORY_CAP);
     expect(stop()).toEqual([]);
   });
 });
@@ -971,7 +1024,7 @@ describe("hidden tabs", () => {
     expect(notes.count).toBe(1);
     expect(st().interactionEpoch).toBe(epoch);
     expect(tabs()).toEqual(["changes", "projects", "issues"]);
-    expect(hist().entries[1].anchor).toEqual(anchor("B"));
+    expect(entries()[1].anchor).toEqual(anchor("B"));
     expect(hist().index).toBe(2);
     const before = st();
     st().setNavHiddenTabs(["agent"]);
@@ -1012,5 +1065,997 @@ describe("hidden tabs", () => {
     const before = hist();
     st().setNavHiddenTabs([]);
     expect(hist()).toBe(before);
+  });
+});
+
+/** The lens the registered reader reports per repository; unlisted = cannot tell. */
+let lensOf: Record<string, RemoteLens | null> = {};
+function readLenses(initial: Record<string, RemoteLens | null> = {}) {
+  lensOf = { ...initial };
+  registerNavLensReader((repoPath) => lensOf[repoPath] ?? null);
+}
+
+/** A Projects provider shaped like the panel's: it answers the opener card once as
+ *  `itemId`, then the cursor's (none). */
+function boardProvider() {
+  const board = { opener: null as string | null };
+  const read = vi.fn((): BoardAnchor => {
+    const itemId = board.opener;
+    board.opener = null;
+    return { projectId: "P", viewId: "v1", itemId, showArchived: false };
+  });
+  registerNavAnchorProvider("projects", read);
+  return { board, read };
+}
+
+const segmentTabs = () =>
+  hist().segments.map((s) => [s.repoPath, s.lens, s.entries.map((e) => e.tab)]);
+
+describe("carried hops", () => {
+  it.each([
+    [
+      "openPr",
+      () =>
+        st().openPr({
+          kind: "remote",
+          repoPath: OTHER,
+          repoName: "beta",
+          ref: "7",
+          section: null,
+          carryHistory: true,
+        }),
+      "pulls",
+    ],
+    [
+      "openIssue",
+      () =>
+        st().openIssue({
+          repoPath: OTHER,
+          repoName: "beta",
+          number: 7,
+          carryHistory: true,
+        }),
+      "issues",
+    ],
+    [
+      "openRun",
+      () =>
+        st().openRun({
+          repoPath: OTHER,
+          repoName: "beta",
+          runId: 7,
+          carryHistory: true,
+        }),
+      "actions",
+    ],
+    [
+      "openAgentTab",
+      () =>
+        st().openAgentTab({
+          repoPath: OTHER,
+          repoName: "beta",
+          carryHistory: true,
+        }),
+      "agent",
+    ],
+    [
+      "openRepoView",
+      () =>
+        st().openRepoView({
+          repoPath: OTHER,
+          repoName: "beta",
+          tab: "tags",
+          carryHistory: true,
+        }),
+      "tags",
+    ],
+  ] as const)(
+    "a flagged cross-repo %s keeps the history as a second segment",
+    (_n, land, tab) => {
+      const check = watchInvariants();
+      enterRepo();
+      st().setRepoTab("issues");
+      st().setRepoTab("history");
+      useUiStore.setState({
+        boardReturn: { anchor: anchor("p"), epoch: st().interactionEpoch },
+      });
+      land();
+      expect(st().repoPath).toBe(OTHER);
+      expect(segmentTabs()).toEqual([
+        [REPO, null, ["changes", "issues", "history"]],
+        [OTHER, null, [tab]],
+      ]);
+      expect(hist().segments[1].repoName).toBe("beta");
+      expect(hist()).toMatchObject({ segment: 1, index: 0 });
+      expect(canGoBack(st())).toBe(true);
+      expect(canGoForward(st())).toBe(false);
+      expect(st().boardReturn).toBeNull();
+      // Back crosses the boundary: the departing repository, tab and trail return.
+      const epoch = st().interactionEpoch;
+      st().goBack();
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoName: "alpha",
+        repoTab: "history",
+        interactionEpoch: epoch + 1,
+        boardReturn: null,
+      });
+      expect(hist()).toMatchObject({ segment: 0, index: 2 });
+      expect(canGoForward(st())).toBe(true);
+      expect(check()).toEqual([]);
+    },
+  );
+
+  it("cuts the departing segment after its current entry", () => {
+    enterRepo();
+    st().setRepoTab("issues");
+    st().setRepoTab("history");
+    st().goBack();
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues"]],
+      [OTHER, null, ["issues"]],
+    ]);
+  });
+
+  it("records the departing selection as it was before beforeSelect cleared it", () => {
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+      beforeSelect: () => st().clearRemoteSelections(),
+    });
+    expect(hist().segments[0].entries.at(-1)).toEqual({
+      tab: "pulls",
+      selection: { selectedPr: pr(1) },
+      anchor: null,
+    });
+  });
+
+  it.each([
+    [
+      "pulls",
+      "selectedPr",
+      () =>
+        st().openPr({
+          kind: "remote",
+          repoPath: REPO,
+          repoName: "alpha",
+          ref: "12",
+          section: null,
+        }),
+      pr(12),
+    ],
+    [
+      "issues",
+      "selectedIssue",
+      () => st().openIssue({ repoPath: REPO, repoName: "alpha", number: 12 }),
+      issue(12),
+    ],
+  ] as const)(
+    "a carried hop whose beforeSelect clears the selection keeps the bare %s list behind it",
+    (tab, key, jump, item) => {
+      const check = watchInvariants();
+      enterRepo();
+      st().setRepoTab(tab);
+      jump();
+      expect(entries().map((e) => e.selection)).toEqual([
+        { selectedFile: null },
+        { [key]: null },
+        { [key]: item },
+      ]);
+      st().openPr({
+        kind: "remote",
+        repoPath: OTHER,
+        repoName: "beta",
+        ref: "3",
+        section: null,
+        carryHistory: true,
+        beforeSelect: () => st().clearRemoteSelections(),
+      });
+      expect(segmentTabs()).toEqual([
+        [REPO, null, ["changes", tab, tab]],
+        [OTHER, null, ["pulls"]],
+      ]);
+      st().goBack();
+      expect(st()).toMatchObject({ repoPath: REPO, repoTab: tab, [key]: item });
+      st().goBack();
+      expect(st()).toMatchObject({ repoPath: REPO, repoTab: tab, [key]: null });
+      expect(hist()).toMatchObject({ segment: 0, index: 1 });
+      expect(check()).toEqual([]);
+    },
+  );
+
+  it("a flagged same-repo landing whose beforeSelect flips the lens starts a segment", () => {
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    st().syncNavLens(REPO, "origin");
+    st().setRepoTab("issues");
+    st().selectIssue(issue(1));
+    st().openPr({
+      kind: "remote",
+      repoPath: REPO,
+      repoName: "alpha",
+      ref: "2",
+      section: null,
+      carryHistory: true,
+      beforeSelect: () => {
+        lensOf[REPO] = "upstream";
+        st().clearRemoteSelections();
+      },
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["changes", "issues"]],
+      [REPO, "upstream", ["pulls"]],
+    ]);
+    expect(hist().segments[0].entries[1].selection).toEqual({
+      selectedIssue: issue(1),
+    });
+    expect(hist()).toMatchObject({ segment: 1, index: 0 });
+    // The lens sync then finds the new segment already in step.
+    const before = hist();
+    st().syncNavLens(REPO, "upstream");
+    expect(hist()).toBe(before);
+  });
+
+  it("with no lens reader a flagged lens flip starts no segment", () => {
+    enterRepo();
+    st().setRepoTab("issues");
+    st().openPr({
+      kind: "remote",
+      repoPath: REPO,
+      repoName: "alpha",
+      ref: "2",
+      section: null,
+      carryHistory: true,
+      beforeSelect: () => st().clearRemoteSelections(),
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues", "pulls"]],
+    ]);
+  });
+
+  it("a flagged landing that changes neither repository nor lens records as unflagged", () => {
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    st().setRepoTab("issues");
+    st().selectIssue(issue(1));
+    st().openIssue({
+      repoPath: REPO,
+      repoName: "alpha",
+      number: 2,
+      carryHistory: true,
+    });
+    st().openAgentTab({
+      repoPath: REPO,
+      repoName: "alpha",
+      carryHistory: true,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues", "issues", "agent"]],
+    ]);
+    expect(hist().index).toBe(3);
+  });
+
+  it("a landing Settings held keeps its flag when resumed", () => {
+    enterRepo();
+    st().setRepoTab("issues");
+    st().openSettings();
+    const held: { resume?: () => void } = {};
+    st().setSettingsLeaveGuard((resume) => {
+      held.resume = resume;
+    });
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+    });
+    expect(st().view).toBe("settings");
+    st().setSettingsLeaveGuard(null);
+    held.resume?.();
+    expect(st().repoPath).toBe(OTHER);
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues"]],
+      [OTHER, null, ["issues"]],
+    ]);
+  });
+
+  it("an outer landing records its own departure, not a nested navigator's", () => {
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(7));
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 3,
+      carryHistory: true,
+      beforeSelect: () => {
+        lensOf[REPO] = "upstream";
+        st().clearRemoteSelections();
+        st().openPr({
+          kind: "remote",
+          repoPath: REPO,
+          repoName: "alpha",
+          ref: "9",
+          section: null,
+        });
+      },
+    });
+    // The trail as shown before beforeSelect: its clear and the nested landing never
+    // painted, so neither leaves a stop of its own.
+    const [departed] = hist().segments;
+    expect(departed.lens).toBe("origin");
+    expect(departed.entries.map((e) => e.selection)).toEqual([
+      { selectedFile: null },
+      { selectedPr: pr(7) },
+    ]);
+    expect(currentSegment(hist())?.repoPath).toBe(OTHER);
+  });
+
+  it("the null-stamp window: a fork hop away from a live upstream starts a segment", () => {
+    readLenses({ [REPO]: "upstream" });
+    enterRepo();
+    st().setRepoTab("issues");
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    expect(lens()).toBeNull();
+    st().openPr({
+      kind: "remote",
+      repoPath: REPO,
+      repoName: "alpha",
+      ref: "2",
+      section: null,
+      carryHistory: true,
+      beforeSelect: () => {
+        lensOf[REPO] = "origin";
+        st().clearRemoteSelections();
+      },
+    });
+    expect(hist()).toEqual({
+      segments: [
+        {
+          repoPath: REPO,
+          repoName: "alpha",
+          lens: "upstream",
+          entries: [
+            { tab: "pulls", selection: { selectedPr: pr(1) }, anchor: null },
+          ],
+        },
+        {
+          repoPath: REPO,
+          repoName: "alpha",
+          lens: "origin",
+          entries: [
+            { tab: "pulls", selection: { selectedPr: pr(2) }, anchor: null },
+          ],
+        },
+      ],
+      segment: 1,
+      index: 0,
+    });
+    // Back re-applies the departing lens and lands on the departing stop, with no
+    // validation: the repository is the open one.
+    const validate = vi.fn(async () => true);
+    const applyLens = vi.fn((repoPath: string, l: RemoteLens) => {
+      lensOf[repoPath] = l;
+      st().clearRemoteSelections();
+    });
+    st().goBack({ validate, applyLens });
+    expect(validate).not.toHaveBeenCalled();
+    expect(applyLens).toHaveBeenCalledExactlyOnceWith(REPO, "upstream");
+    expect(st()).toMatchObject({ repoTab: "pulls", selectedPr: pr(1) });
+    expect(hist()).toMatchObject({ segment: 0, index: 0 });
+  });
+});
+
+const GAMMA = "C:/repos/gamma";
+
+/** A carried issue landing in `repoPath`, named after its folder. */
+const carriedIssue = (
+  repoPath: string,
+  number: number,
+  beforeSelect?: () => void,
+) =>
+  st().openIssue({
+    repoPath,
+    repoName: repoPath.split("/").pop() ?? repoPath,
+    number,
+    carryHistory: true,
+    beforeSelect,
+  });
+
+/** A `validate` whose answers are given by hand, every pending call at once. */
+function deferredValidate() {
+  const pending: ((ok: boolean) => void)[] = [];
+  const validate = vi.fn(
+    (_target: unknown) =>
+      new Promise<boolean>((resolve) => {
+        pending.push(resolve);
+      }),
+  );
+  const answer = (ok: boolean) => {
+    for (const resolve of pending.splice(0)) resolve(ok);
+  };
+  return { validate, answer };
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe("cross-segment restore", () => {
+  it("Back and Forward land the other repository's stop, the board return on Projects", () => {
+    const check = watchInvariants();
+    enterRepo();
+    const { board, read } = boardProvider();
+    st().setRepoTab("projects");
+    carriedIssue(OTHER, 2, () => {
+      board.opener = "card-9";
+    });
+    const landed = { tab: st().repoTab, issue: st().selectedIssue };
+    const applyLens = vi.fn();
+    read.mockClear();
+    const epoch = st().interactionEpoch;
+    st().goBack({ applyLens });
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoName: "alpha",
+      repoTab: "projects",
+      interactionEpoch: epoch + 1,
+      boardReturn: {
+        anchor: { projectId: "P", itemId: "card-9" },
+        epoch: epoch + 1,
+      },
+    });
+    expect(read).not.toHaveBeenCalled();
+    st().goForward({ applyLens });
+    expect(st()).toMatchObject({
+      repoPath: OTHER,
+      repoName: "beta",
+      repoTab: landed.tab,
+      selectedIssue: landed.issue,
+      boardReturn: null,
+    });
+    // The departing Projects stop read its anchor once, at the landing.
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(hist()).toMatchObject({ segment: 1, index: 0 });
+    expect(check()).toEqual([]);
+  });
+
+  it("applies the target's lens inside the landing, ahead of the set that restores its selection", () => {
+    readLenses({ [REPO]: "upstream", [OTHER]: "origin" });
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    carriedIssue(OTHER, 2, () => st().clearRemoteSelections());
+    expect(hist().segments.map((s) => s.lens)).toEqual(["upstream", "origin"]);
+    const calls: unknown[] = [];
+    const applyLens = vi.fn((repoPath: string, l: RemoteLens) => {
+      calls.push([repoPath, l, st().repoPath]);
+      lensOf[repoPath] = l;
+      st().clearRemoteSelections();
+    });
+    const epoch = st().interactionEpoch;
+    st().goBack({ applyLens });
+    expect(calls).toEqual([[REPO, "upstream", OTHER]]);
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "pulls",
+      selectedPr: pr(1),
+      interactionEpoch: epoch + 1,
+    });
+    st().goForward({ applyLens });
+    expect(calls.at(-1)).toEqual([OTHER, "origin", REPO]);
+    expect(st()).toMatchObject({ repoPath: OTHER, selectedIssue: issue(2) });
+    // The departing stop was recorded before the lens apply cleared its selection.
+    st().goBack({ applyLens });
+    expect(st()).toMatchObject({ repoPath: REPO, selectedPr: pr(1) });
+  });
+
+  it("stamps the board return with the press's own epoch, both true at the set", async () => {
+    enterRepo();
+    const { board, read } = boardProvider();
+    st().setRepoTab("projects");
+    carriedIssue(OTHER, 2, () => {
+      board.opener = "card-9";
+    });
+    const { validate, answer } = deferredValidate();
+    const seen: unknown[] = [];
+    const stop = useUiStore.subscribe((s, prev) => {
+      if (s.boardReturn && s.boardReturn !== prev.boardReturn)
+        seen.push([s.interactionEpoch, s.boardReturn.epoch, s.repoPath]);
+    });
+    st().goBack({ validate });
+    const pressed = st().interactionEpoch;
+    expect(validate).toHaveBeenCalledExactlyOnceWith({
+      repoPath: REPO,
+      repoName: "alpha",
+      lens: null,
+    });
+    expect(st().repoPath).toBe(OTHER);
+    answer(true);
+    await flush();
+    stop();
+    expect(seen).toEqual([[pressed, pressed, REPO]]);
+    expect(st().interactionEpoch).toBe(pressed);
+    // Forward from Projects reads the departing anchor at the landing, not the press.
+    read.mockClear();
+    st().goForward({ validate });
+    expect(read).not.toHaveBeenCalled();
+    answer(true);
+    await flush();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(st().repoPath).toBe(OTHER);
+  });
+
+  it("a dead target loses every stop of its repository, behind and ahead, in one non-bumping set", async () => {
+    const check = watchInvariants();
+    readLenses({ [OTHER]: "origin" });
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    carriedIssue(REPO, 2);
+    lensOf[OTHER] = "upstream";
+    carriedIssue(OTHER, 3);
+    carriedIssue(REPO, 4);
+    st().goBack();
+    st().goBack();
+    expect(hist().segments.map((s) => [s.repoPath, s.lens])).toEqual([
+      [REPO, null],
+      [OTHER, "origin"],
+      [REPO, null],
+      [OTHER, "upstream"],
+      [REPO, null],
+    ]);
+    expect(hist().segment).toBe(2);
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    st().goBack({ validate, onDead });
+    const pressed = st();
+    const n = countNotifications();
+    answer(false);
+    await flush();
+    n.stop();
+    expect(n.count).toBe(1);
+    expect(onDead).toHaveBeenCalledExactlyOnceWith(
+      { repoPath: OTHER, repoName: "beta", lens: "origin" },
+      -1,
+    );
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: pressed.repoTab,
+      selectedIssue: pressed.selectedIssue,
+      boardReturn: pressed.boardReturn,
+      interactionEpoch: pressed.interactionEpoch,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues", "issues"]],
+    ]);
+    expect(hist()).toMatchObject({ segment: 0, index: 1 });
+    expect(current().selection).toEqual({ selectedIssue: issue(2) });
+    // The next Back is a plain step inside the merged segment.
+    validate.mockClear();
+    st().goBack({ validate, onDead });
+    expect(validate).not.toHaveBeenCalled();
+    expect(st().repoTab).toBe("changes");
+    expect(onDead).toHaveBeenCalledTimes(1);
+    expect(check()).toEqual([]);
+  });
+
+  it("a dead target on Forward removes its repository's stops behind as well", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    carriedIssue(REPO, 2);
+    carriedIssue(OTHER, 3);
+    st().goBack();
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    st().goForward({ validate, onDead });
+    answer(false);
+    await flush();
+    expect(onDead).toHaveBeenCalledExactlyOnceWith(
+      { repoPath: OTHER, repoName: "beta", lens: null },
+      1,
+    );
+    expect(segmentTabs()).toEqual([[REPO, null, ["changes", "issues"]]]);
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "issues" });
+    expect(canGoForward(st())).toBe(false);
+  });
+
+  it("a press retired while it validates lands nothing, removes nothing and calls nothing", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    const applyLens = vi.fn();
+    st().goBack({ validate, onDead, applyLens });
+    st().setRepoTab("history");
+    const after = st();
+    answer(false);
+    await flush();
+    expect(onDead).not.toHaveBeenCalled();
+    expect(st()).toBe(after);
+    // A plain step back to the boundary, then a crossing a tab change retires.
+    st().goBack();
+    st().goBack({ validate, onDead, applyLens });
+    st().setRepoTab("tags");
+    answer(true);
+    await flush();
+    expect(st()).toMatchObject({ repoPath: OTHER, repoTab: "tags" });
+    // Retired even when the step it named is back in place by the settle: an
+    // overlay opened and closed, or a selection rewritten in place.
+    st().goBack();
+    st().goBack({ validate });
+    st().openMyWork();
+    st().closeMyWork();
+    answer(true);
+    await flush();
+    expect(st().repoPath).toBe(OTHER);
+    st().goBack({ validate });
+    st().selectIssue(issue(9));
+    answer(true);
+    await flush();
+    expect(st()).toMatchObject({ repoPath: OTHER, selectedIssue: issue(9) });
+  });
+
+  it("a second Back while one validates supersedes it: one step", async () => {
+    enterRepo();
+    st().setRepoTab("issues");
+    st().setRepoTab("history");
+    carriedIssue(OTHER, 1);
+    // One resolver per request, so the older press's answer can come first.
+    const answers: ((ok: boolean) => void)[] = [];
+    const validate = vi.fn(
+      (_target: unknown) =>
+        new Promise<boolean>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+    const onDead = vi.fn();
+    st().goBack({ validate, onDead });
+    st().goBack({ validate, onDead });
+    expect(validate).toHaveBeenCalledTimes(2);
+    const [older, newer] = answers;
+    const pressed = st();
+    // The retired press's dead answer drops no repository and reports nothing.
+    older(false);
+    await flush();
+    expect(onDead).not.toHaveBeenCalled();
+    expect(st()).toBe(pressed);
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues", "history"]],
+      [OTHER, null, ["issues"]],
+    ]);
+    const n = countNotifications();
+    newer(true);
+    await flush();
+    n.stop();
+    expect(n.count).toBe(1);
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+    expect(hist()).toMatchObject({ segment: 0, index: 2 });
+    expect(onDead).not.toHaveBeenCalled();
+  });
+
+  it("a prune while it validates that removes the target lands nothing", async () => {
+    enterRepo();
+    st().openAgentTab({
+      repoPath: OTHER,
+      repoName: "beta",
+      carryHistory: true,
+    });
+    carriedIssue(REPO, 2);
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes"]],
+      [OTHER, null, ["agent"]],
+      [REPO, null, ["issues"]],
+    ]);
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    st().goBack({ validate, onDead });
+    st().setNavHiddenTabs(["agent"]);
+    expect(segmentTabs()).toEqual([[REPO, null, ["changes", "issues"]]]);
+    answer(false);
+    await flush();
+    expect(onDead).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "issues" });
+    expect(hist()).toMatchObject({ segment: 0, index: 1 });
+  });
+
+  it("validates each other repository in its turn", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    carriedIssue(GAMMA, 2);
+    const { validate, answer } = deferredValidate();
+    st().goBack({ validate });
+    answer(true);
+    await flush();
+    expect(st().repoPath).toBe(OTHER);
+    st().goBack({ validate });
+    expect(validate).toHaveBeenLastCalledWith({
+      repoPath: REPO,
+      repoName: "alpha",
+      lens: null,
+    });
+    answer(true);
+    await flush();
+    expect(st().repoPath).toBe(REPO);
+    expect(validate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("carried hops read the board's anchor once, at the landing set", () => {
+  it("a cross-repo hop from Projects stores the opener set in beforeSelect", () => {
+    enterRepo();
+    const { board, read } = boardProvider();
+    st().setRepoTab("projects");
+    read.mockClear();
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+      beforeSelect: () => {
+        board.opener = "card-9";
+      },
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(hist().segments[0].entries.at(-1)?.anchor?.itemId).toBe("card-9");
+    expect(hist().segments).toHaveLength(2);
+  });
+
+  it("a fork hop from Projects stores the opener and splits on the lens", () => {
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    const { board, read } = boardProvider();
+    st().setRepoTab("projects");
+    read.mockClear();
+    st().openIssue({
+      repoPath: REPO,
+      repoName: "alpha",
+      number: 5,
+      carryHistory: true,
+      beforeSelect: () => {
+        board.opener = "card-9";
+        lensOf[REPO] = "upstream";
+        st().clearRemoteSelections();
+      },
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["changes", "projects"]],
+      [REPO, "upstream", ["issues"]],
+    ]);
+    expect(hist().segments[0].entries[1].anchor?.itemId).toBe("card-9");
+  });
+
+  it("an opener set before the navigator call is still read once, at the landing", () => {
+    enterRepo();
+    const { board, read } = boardProvider();
+    st().setRepoTab("projects");
+    read.mockClear();
+    board.opener = "card-9";
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(hist().segments[0].entries.at(-1)?.anchor?.itemId).toBe("card-9");
+  });
+
+  it("a hop made under an overlay keeps the stored anchor and reads no provider", () => {
+    enterRepo();
+    const { board, read } = boardProvider();
+    st().setRepoTab("projects");
+    st().openMyWork();
+    const stored = currentSegment(hist())?.entries.at(-1)?.anchor;
+    expect(stored?.itemId).toBeNull();
+    read.mockClear();
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+      beforeSelect: () => {
+        board.opener = "card-9";
+      },
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(st().view).toBe("repo");
+    expect(hist().segments[0].entries.at(-1)?.anchor).toEqual(stored);
+    expect(hist().segments).toHaveLength(2);
+  });
+
+  it("a flagged landing that starts no segment reads as today", () => {
+    enterRepo();
+    const { read } = boardProvider();
+    st().setRepoTab("projects");
+    read.mockClear();
+    st().openIssue({
+      repoPath: REPO,
+      repoName: "alpha",
+      number: 1,
+      carryHistory: true,
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    read.mockClear();
+    st().openIssue({
+      repoPath: REPO,
+      repoName: "alpha",
+      number: 2,
+      carryHistory: true,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(hist().segments).toHaveLength(1);
+  });
+});
+
+// Registers a warm-up, which is module state with no reset: keep this describe LAST.
+describe("held carried landings", () => {
+  const gates: (() => void)[] = [];
+  const settle = async () => {
+    for (const open of gates.splice(0)) open();
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("build from the state, reader and history at the landing, not the request", async () => {
+    registerRepoShellWarmup(() => ({
+      settled: new Promise<void>((r) => gates.push(r)),
+      stillCurrent: () => true,
+    }));
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    st().openIssue({
+      repoPath: OTHER,
+      repoName: "beta",
+      number: 2,
+      carryHistory: true,
+      beforeSelect: () => st().clearRemoteSelections(),
+    });
+    expect(st().repoPath).toBe(REPO);
+    st().selectPr(pr(2));
+    lensOf[OTHER] = "upstream";
+    await settle();
+    expect(st().repoPath).toBe(OTHER);
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["changes", "pulls"]],
+      [OTHER, "upstream", ["issues"]],
+    ]);
+    expect(hist().segments[0].entries[1].selection).toEqual({
+      selectedPr: pr(2),
+    });
+    // An unflagged held landing over that history starts it over.
+    st().openRun({ repoPath: "C:/repos/gamma", repoName: "gamma", runId: 1 });
+    await settle();
+    expect(segmentTabs()).toEqual([["C:/repos/gamma", null, ["actions"]]]);
+  });
+});
+
+// Registers its own warm-up per case; after the describe above for the same reason.
+describe("held cross-repository restores", () => {
+  const gates: (() => void)[] = [];
+  let live = true;
+  const claimedAt: number[] = [];
+  const claim = vi.fn((_root: string) => {
+    claimedAt.push(st().interactionEpoch);
+    return {
+      settled: new Promise<void>((r) => gates.push(r)),
+      stillCurrent: () => live,
+    };
+  });
+  const openGates = async () => {
+    for (const open of gates.splice(0)) open();
+    await flush();
+  };
+  beforeEach(() => {
+    live = true;
+    claimedAt.length = 0;
+    claim.mockClear();
+    registerRepoShellWarmup(claim);
+  });
+
+  it("claim after the press's bump and land once both the warm-up and validation settled", async () => {
+    enterRepo();
+    st().setRepoTab("history");
+    carriedIssue(OTHER, 1);
+    await openGates();
+    expect(st().repoPath).toBe(OTHER);
+    claim.mockClear();
+    const validate = vi.fn(async () => true);
+    st().goBack({ validate });
+    expect(claim).toHaveBeenCalledExactlyOnceWith(REPO);
+    expect(claimedAt.at(-1)).toBe(st().interactionEpoch);
+    await flush();
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(st().repoPath).toBe(OTHER);
+    await openGates();
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+  });
+
+  it("a warm-up that is no longer current lands nothing and removes nothing", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    await openGates();
+    const onDead = vi.fn();
+    st().goBack({ validate: async () => false, onDead });
+    live = false;
+    const before = st();
+    await openGates();
+    expect(onDead).not.toHaveBeenCalled();
+    expect(st()).toBe(before);
+    expect(hist().segments).toHaveLength(2);
+  });
+
+  it("validation slower than the warm-up holds the landing until it answers dead", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    await openGates();
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    st().goBack({ validate, onDead });
+    const pressed = st();
+    await openGates();
+    expect(st()).toBe(pressed);
+    const n = countNotifications();
+    answer(false);
+    await flush();
+    n.stop();
+    expect(n.count).toBe(1);
+    expect(onDead).toHaveBeenCalledExactlyOnceWith(
+      { repoPath: REPO, repoName: "alpha", lens: null },
+      -1,
+    );
+    expect(segmentTabs()).toEqual([[OTHER, null, ["issues"]]]);
+    expect(st().repoPath).toBe(OTHER);
+  });
+
+  it("validation slower than the warm-up lands once it answers live", async () => {
+    enterRepo();
+    st().setRepoTab("history");
+    carriedIssue(OTHER, 1);
+    await openGates();
+    const { validate, answer } = deferredValidate();
+    st().goBack({ validate });
+    const pressed = st();
+    await openGates();
+    expect(st()).toBe(pressed);
+    answer(true);
+    await flush();
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+    expect(hist()).toMatchObject({ segment: 0, index: 1 });
+  });
+
+  it("a same-repository crossing claims no warm-up and validates nothing", () => {
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    st().openIssue({
+      repoPath: REPO,
+      repoName: "alpha",
+      number: 2,
+      carryHistory: true,
+      beforeSelect: () => {
+        lensOf[REPO] = "upstream";
+      },
+    });
+    expect(hist().segments).toHaveLength(2);
+    claim.mockClear();
+    const validate = vi.fn(async () => true);
+    st().goBack({ validate });
+    expect(claim).not.toHaveBeenCalled();
+    expect(validate).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({ repoPath: REPO, repoTab: "changes" });
+    expect(hist()).toMatchObject({ segment: 0, index: 0 });
   });
 });

@@ -50,6 +50,10 @@ const JUMP_NAVIGATORS = ["openPr", "openRun", "openAgentTab", "openRepoView"];
 /** The navigators that hold a cross-repo landing on the repo-shell warm-up. */
 const HELD_NAVIGATORS = [...JUMP_NAVIGATORS, "openIssue"];
 
+/** The creator-scope helper behind goBack and goForward that holds a restore into
+ *  another repository's segment: not a store member, so it joins no member roster. */
+const RESTORE_HELPER = "restoreNav";
+
 /** View writers that never leave Settings through the guard, each with why. */
 const EXEMPT = {
   openSettings: "lands on Settings itself",
@@ -690,7 +694,8 @@ function onAppliedProblems(text) {
  *  `if (interceptSettingsLeave(() => get().<itself>(target))) return; land();`,
  *  so a jump its caller retired yields silently: typing into a clean Settings
  *  registers the guard without an epoch bump, so only this re-check stops a held
- *  landing leaving unsaved edits unprompted. */
+ *  landing leaving unsaved edits unprompted. The one call outside the members is
+ *  RESTORE_HELPER's, pinned by `restoreHoldProblems`. */
 function heldLandingProblems(text) {
   const masked = maskNonCode(text, false);
   const obj = storeObject(masked);
@@ -698,6 +703,8 @@ function heldLandingProblems(text) {
   const members = objectMembers(masked, obj[0], obj[1]);
   const problems = [];
   const holdsBy = new Map();
+  const restore = creatorArrow(masked, obj, RESTORE_HELPER);
+  const restoreHolds = [];
   for (const ref of masked.matchAll(/(?<![\w$.])holdNavigation(?![\w$])/g)) {
     const after = masked.slice(ref.index + ref[0].length);
     if (
@@ -715,7 +722,10 @@ function heldLandingProblems(text) {
       (m) => ref.index >= m.start && ref.index < m.end,
     );
     if (!owner) {
-      problems.push("a holdNavigation call sits outside the store's members");
+      if (restore && ref.index > restore.open && ref.index < restore.close)
+        restoreHolds.push(ref.index + ref[0].length);
+      else
+        problems.push("a holdNavigation call sits outside the store's members");
       continue;
     }
     if (!HELD_NAVIGATORS.includes(owner.key)) {
@@ -792,6 +802,153 @@ function heldLandingProblems(text) {
         `${name}'s held landing doesn't refuse a retired jump, then re-run the leave guard for itself before it lands`,
       );
   }
+  problems.push(
+    ...restoreHoldProblems(text, masked, obj, restore, restoreHolds),
+  );
+  return problems;
+}
+
+/** `{open, close, params}` of the block body of the creator-scope arrow
+ *  `const <name> = (…) => {…}` in `masked`, searched between the store creator and
+ *  its returned object; null when absent or declared more than once. */
+function creatorArrow(masked, obj, name) {
+  const scope = masked.slice(obj[2], obj[0]);
+  const decls = [
+    ...scope.matchAll(
+      new RegExp(
+        `\\n {2}const ${name} = \\(([^()]*)\\)(?::[^=]*)?\\s*=>\\s*\\{`,
+        "g",
+      ),
+    ),
+  ];
+  if (decls.length !== 1) return null;
+  const open = obj[2] + decls[0].index + decls[0][0].length - 1;
+  const close = matchBrace(masked, open);
+  return close === -1 ? null : { open, close, params: decls[0][1] };
+}
+
+/** Offsets of the depth-0 commas between `open` and its matching `close`. */
+function topLevelCommas(masked, open, close) {
+  const commas = [];
+  let depth = 0;
+  for (let i = open + 1; i < close; i++) {
+    const c = masked[i];
+    if (OPEN.has(c)) depth++;
+    else if (CLOSE.has(c)) depth--;
+    else if (depth === 0 && c === ",") commas.push(i);
+  }
+  return commas;
+}
+
+/** Problems with RESTORE_HELPER's hold, `[]` when pinned: one `holdNavigation(`
+ *  call in its body, `land()` called exactly three times (same repository, no hold,
+ *  the held settle), the press's `bumpEpochNow()` ahead of its one
+ *  `claimWarmRepoShell(` (the claim reads the epoch), no `interceptSettingsLeave`,
+ *  and both the hold's block callback and its `startViewTransition(` callback
+ *  opening with `if (!restoreIsCurrent(…)) return;`, whose body compares the view
+ *  with "repo" and `interactionEpoch` with the request's epoch. That refusal stands
+ *  in for the navigators' settle-time leave-guard re-check: a restore is requested
+ *  and lands only in the repo view, and opening Settings during the hold bumps the
+ *  epoch, so a retired press must refuse before its dead arm or its landing. */
+function restoreHoldProblems(text, masked, obj, restore, holds) {
+  if (!restore) return [`the ${RESTORE_HELPER} helper was not found`];
+  if (holds.length !== 1)
+    return [`expected one holdNavigation( in ${RESTORE_HELPER}`];
+  const problems = [];
+  const body = masked.slice(restore.open, restore.close + 1);
+  if (/(?<![\w$.])interceptSettingsLeave\(/.test(body))
+    problems.push(
+      `${RESTORE_HELPER} consults the leave guard, which a restore from the repo view never needs`,
+    );
+  if ((body.match(/(?<![\w$.])land\(\)/g) ?? []).length !== 3)
+    problems.push(`${RESTORE_HELPER} doesn't call land() exactly three times`);
+  const claims = [...body.matchAll(/(?<![\w$.])claimWarmRepoShell\(/g)];
+  const bump = /(?<![\w$.])bumpEpochNow\(\)/.exec(body);
+  if (claims.length !== 1 || !bump || bump.index > claims[0].index)
+    problems.push(
+      `${RESTORE_HELPER} doesn't bump for the press ahead of its one warm-up claim`,
+    );
+  const refusal = /^\{\s*if \(!restoreIsCurrent\([^;{}]*\)\) return;/;
+  const callOpen = masked.indexOf("(", holds[0]);
+  const callClose = matchBrace(masked, callOpen);
+  const commas =
+    callClose === -1 ? [] : topLevelCommas(masked, callOpen, callClose);
+  const second =
+    commas.length === 0 ? null : masked.slice(commas[0] + 1, callClose);
+  const cb = second === null ? null : /^\s*\(\)\s*=>\s*(?=\{)/.exec(second);
+  const cbOpen = cb ? commas[0] + 1 + cb[0].length : -1;
+  const cbClose = cb ? matchBrace(masked, cbOpen) : -1;
+  if (
+    cbClose === -1 ||
+    !/^\s*,?\s*$/.test(masked.slice(cbClose + 1, callClose))
+  )
+    problems.push(
+      `${RESTORE_HELPER}'s hold doesn't settle through a block callback as its second and last argument`,
+    );
+  else if (!refusal.test(masked.slice(cbOpen, cbClose + 1)))
+    problems.push(
+      `${RESTORE_HELPER}'s held settle doesn't refuse a retired press before its dead arm and its landing`,
+    );
+  const transitions = [...body.matchAll(/(?<![\w$.])startViewTransition\(/g)];
+  const landing =
+    transitions.length === 1
+      ? /^\s*\(\)\s*=>\s*(?=\{)/.exec(
+          body.slice(transitions[0].index + transitions[0][0].length),
+        )
+      : null;
+  const landOpen = landing
+    ? transitions[0].index + transitions[0][0].length + landing[0].length
+    : -1;
+  const landClose = landing ? matchBrace(body, landOpen) : -1;
+  if (landClose === -1 || !refusal.test(body.slice(landOpen, landClose + 1)))
+    problems.push(
+      `${RESTORE_HELPER}'s one transition callback doesn't open with the restoreIsCurrent refusal`,
+    );
+  const current = creatorArrow(masked, obj, "restoreIsCurrent");
+  if (!current) {
+    problems.push("the restoreIsCurrent predicate was not found");
+    return problems;
+  }
+  const test = masked.slice(current.open, current.close + 1);
+  // Both comparisons are `!==` inside an `if (…) return false;` refusal, so an
+  // inverted test (`===`, or a refusal that returns true) fails the pin.
+  const refusals = [
+    ...test.matchAll(/(?<![\w$])if \(([^;{}]*)\)\s*return false;/g),
+  ];
+  const viewRepo = refusals.some((r) =>
+    [...r[1].matchAll(/(?<![\w$])(?:[\w$]+\.)?view\s*!==\s*"/g)].some((m) => {
+      const quote =
+        current.open + r.index + "if (".length + m.index + m[0].length - 1;
+      return text.slice(quote, quote + 6) === '"repo"';
+    }),
+  );
+  const epoch = current.params.split(",")[0].split(":")[0].trim();
+  const epochCompare = new RegExp(
+    `\\binteractionEpoch\\s*!==\\s*${epoch}\\b|\\b${epoch}\\s*!==\\s*[\\w$.]*\\binteractionEpoch\\b`,
+  );
+  if (
+    !viewRepo ||
+    epoch === "" ||
+    !refusals.some((r) => epochCompare.test(r[1]))
+  )
+    problems.push(
+      `restoreIsCurrent doesn't compare the view with "repo" and interactionEpoch with the request's epoch`,
+    );
+  // Each must refuse alone: a refusal holding either comparison joins it to
+  // anything else by `||` only, since `&&` refuses only when both moved.
+  const viewCompare = /(?<![\w$])(?:[\w$]+\.)?view\s*!==\s*"[^"]*"/g;
+  const epochCompareAll = new RegExp(
+    `(?<![\\w$])(?:[\\w$]+\\.)?interactionEpoch\\s*!==\\s*${epoch}\\b|\\b${epoch}\\s*!==\\s*[\\w$.]*\\binteractionEpoch\\b`,
+    "g",
+  );
+  const joined = refusals.some((r) => {
+    const rest = r[1].replace(viewCompare, "").replace(epochCompareAll, "");
+    return rest !== r[1] && !/^[\s()]*(?:\|\|[\s()]*)*$/.test(rest);
+  });
+  if (epoch !== "" && joined)
+    problems.push(
+      "restoreIsCurrent joins its view or epoch refusal to another test with something other than ||",
+    );
   return problems;
 }
 
@@ -1596,6 +1753,82 @@ test("a held cross-repo jump re-runs the leave guard before it lands", () => {
       "export const useUiStore =",
       "const hold = holdNavigation;\nexport const useUiStore =",
     ),
+    // The restore's hold: a retired press reaching the dead arm or the landing.
+    once(
+      "      () => {\n        if (!restoreIsCurrent(epochAtRequest, delta, dest.repoPath)) return;\n        if (!valid) {",
+      "      () => {\n        if (!valid) {",
+    ),
+    (s) =>
+      once(
+        "        land();\n      },\n    );\n  };",
+        "        land();\n        if (!restoreIsCurrent(epochAtRequest, delta, dest.repoPath)) return;\n      },\n    );\n  };",
+      )(
+        once(
+          "      () => {\n        if (!restoreIsCurrent(epochAtRequest, delta, dest.repoPath)) return;\n        if (!valid) {",
+          "      () => {\n        if (!valid) {",
+        )(s),
+      ),
+    // An extra, unconditional landing ahead of the warm-up claim.
+    once(
+      "    const warm = claimWarmRepoShell(dest.repoPath);\n",
+      "    land();\n    const warm = claimWarmRepoShell(dest.repoPath);\n",
+    ),
+    // A landing applied in a later task without re-checking the press.
+    once(
+      "        () => {\n          if (!restoreIsCurrent(epochAtRequest, delta, dest.repoPath)) return;\n          const step",
+      "        () => {\n          const step",
+    ),
+    // The claim taken ahead of the press's bump.
+    (s) =>
+      once(
+        "    const warm = claimWarmRepoShell(dest.repoPath);\n",
+        "    const warm = claimWarmRepoShell(dest.repoPath);\n    const epochAtRequest = bumpEpochNow();\n",
+      )(
+        once(
+          "      lens: target.lens,\n    };\n    const epochAtRequest = bumpEpochNow();\n",
+          "      lens: target.lens,\n    };\n",
+        )(s),
+      ),
+    // A currency test that no longer reads the view, or the request's epoch.
+    once(
+      '    if (s.view !== "repo" || s.interactionEpoch !== epoch) return false;',
+      "    if (s.interactionEpoch !== epoch) return false;",
+    ),
+    once(
+      '    if (s.view !== "repo" || s.interactionEpoch !== epoch) return false;',
+      '    if (s.view !== "repo") return false;',
+    ),
+    // An inverted view test, which refuses every press made from the repo view.
+    once(
+      '    if (s.view !== "repo" || s.interactionEpoch !== epoch) return false;',
+      '    if (s.view === "repo" || s.interactionEpoch !== epoch) return false;',
+    ),
+    // An `&&` refusal, which refuses only when the view AND the epoch moved.
+    once(
+      '    if (s.view !== "repo" || s.interactionEpoch !== epoch) return false;',
+      '    if (s.view !== "repo" && s.interactionEpoch !== epoch) return false;',
+    ),
+    // The hold moved into the goBack member, a second hold in the helper, a
+    // leave-guard consult in it, and the helper gone.
+    (s) =>
+      once(
+        "    goBack: (opts) => restoreNav(-1, opts),",
+        "    goBack: (opts) =>\n      holdNavigation(\n        { settled: Promise.resolve(), stillCurrent: () => true },\n        () => restoreNav(-1, opts),\n      ),",
+      )(
+        once(
+          "    holdNavigation(\n      {\n        settled:",
+          "    void (\n      {\n        settled:",
+        )(s),
+      ),
+    once(
+      "    holdNavigation(\n      {\n        settled:",
+      "    holdNavigation(warm ?? { settled: Promise.resolve(), stillCurrent: () => true }, land);\n    holdNavigation(\n      {\n        settled:",
+    ),
+    once(
+      '    if (s.view !== "repo") return;\n    const target = restoreTarget(s, delta);\n',
+      '    if (s.view !== "repo") return;\n    if (interceptSettingsLeave(() => restoreNav(delta, opts))) return;\n    const target = restoreTarget(s, delta);\n',
+    ),
+    once("  const restoreNav = (", "  const restoreStepNav = ("),
   );
 });
 

@@ -111,6 +111,7 @@ export function ProjectsTableView({
   selectedIds,
   selectionSize,
   busyItemId,
+  openingItemId,
   peekItemId,
   editHeld,
   editingCell,
@@ -139,6 +140,8 @@ export function ProjectsTableView({
   selectedIds: ReadonlySet<string>;
   selectionSize: number;
   busyItemId: string | null;
+  /** The row whose open has outlasted the wait threshold: busy, never disabled. */
+  openingItemId: string | null;
   peekItemId: string | null;
   /** Why no cell can be edited right now, board-wide, or undefined. */
   editHeld: string | undefined;
@@ -508,7 +511,9 @@ export function ProjectsTableView({
                   width={width}
                   selected={selected}
                   checked={selected && selectionSize >= 2}
-                  busy={item.itemId === busyItemId}
+                  busy={
+                    item.itemId === busyItemId || item.itemId === openingItemId
+                  }
                   peek={item.itemId === peekItemId}
                   tabCol={
                     tabStopRow === vi.index ? (tabStop?.colIndex ?? 0) : null

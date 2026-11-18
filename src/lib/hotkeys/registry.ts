@@ -1505,7 +1505,7 @@ export const BUILT_IN_KEYS: {
   { keys: "Esc", what: "Close dialogs, menus, and settings" },
   {
     keys: "Mouse back / forward",
-    what: "Go back or forward through the tabs and items you visited in a repository",
+    what: "Go back or forward through the tabs and items you visited, including in repositories a board card or notification opened",
   },
   {
     keys: "Ctrl+Enter",
