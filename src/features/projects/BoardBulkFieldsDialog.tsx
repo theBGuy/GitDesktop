@@ -58,8 +58,9 @@ const NOTHING_DRAFTED_REASON = "Nothing to apply yet";
 type RowDraft =
   | { mode: "set"; update: ProjectFieldValueUpdate }
   | { mode: "clear" }
-  // A row "Set to" nothing parseable yet: it contributes nothing to the payload
-  // and doesn't count as drafted.
+  // A row "Set to" nothing it can commit (empty, not parseable yet, or a number
+  // GitHub won't store): it contributes nothing to the payload and doesn't count
+  // as drafted.
   | typeof INVALID_DRAFT;
 
 /** Every drafted row, by field id. */

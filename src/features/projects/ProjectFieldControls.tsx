@@ -78,10 +78,12 @@ export type CommittedDraft = {
   update: ProjectFieldValueUpdate;
 };
 
-/** A control holding an entry the browser can't parse. Measured in Chromium: a
- *  half-typed exponent ("1e", "-") and an unfinished date segment all report
- *  `value === ""` with `validity.badInput`, which is indistinguishable from the
- *  emptied control that MEANS clear — hence a third state rather than `null`. */
+/** A control holding an entry that commits nothing: one the browser can't parse, a
+ *  date whose year is below 1000 (still being typed), or a number GitHub won't
+ *  store. Measured in Chromium: a half-typed exponent ("1e", "-") and an unfinished
+ *  date segment all report `value === ""` with `validity.badInput`, which is
+ *  indistinguishable from the emptied control that MEANS clear — hence a third
+ *  state rather than `null`. */
 export const INVALID_DRAFT = "invalid";
 
 /** One field's drafted state in the SEEDED model (the item's editor, a table cell):
