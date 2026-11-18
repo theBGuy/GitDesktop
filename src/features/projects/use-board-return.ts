@@ -60,7 +60,7 @@ interface HeldReturn {
  *  column), Show archived and the raw view id. A read arriving does not by itself
  *  move them, but the user is not their only writer: a change made by an effect or
  *  by the hook's own step ends a retired record (or keeps a drop from making one)
- *  just as a user's move does, and the provider then answers the live board. */
+ *  just as a user's move does. */
 interface Marks {
   boardCursorId: string | null;
   tableCursorKey: string | null;
@@ -183,9 +183,10 @@ function focusVerdict(
 
 /** Returns the Projects panel to a `boardReturn` anchor: consumed once while
  *  active, pinned to its epoch, repo and pick generation, and ended by every refocus
- *  or landing and every claim except one made under a refetch, held for one recheck.
- *  A return dropped for the epoch alone only answers the provider (`retiredAnchor`)
- *  and never acts again. */
+ *  or landing and every claim, except that a claim of the anchor's card made under a
+ *  refetch is held for one recheck unless focus sits on a card or cell the user
+ *  moved to. A return dropped for the epoch alone only answers the provider
+ *  (`retiredAnchor`) and never acts again. */
 export function useBoardReturn(input: BoardReturnInput): {
   heldAnchor: BoardAnchor | null;
   retiredAnchor: RetiredAnchor | null;
@@ -255,7 +256,7 @@ export function useBoardReturn(input: BoardReturnInput): {
   });
 
   // At most one action per commit; each acting step writes `held`, which commits
-  // again, and `wait` writes nothing.
+  // again, and `wait` writes only the Show archived latch below, once.
   useEffect(() => {
     if (held === null) return;
     const store = useUiStore.getState();

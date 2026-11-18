@@ -27,9 +27,9 @@
 // note and its call other than a `return` (a `throw`, or the call put under a
 // condition), what a pinned name is read from (the slug read behind the memo's
 // `repoSlug`), or a new site of another shape (a pick or a view write outside the
-// listed handlers). The
-// typecheck catches an unread `noteOpener` parameter and a narrowed chord's dead
-// compare. An equivalent rewrite turns a pin red by design: re-point the pin.
+// listed handlers). The typecheck catches an unread `noteOpener` parameter and a
+// narrowed chord's dead compare. An equivalent rewrite turns a pin red by design:
+// re-point the pin.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -654,8 +654,9 @@ const ANCHOR_ARGS = [
 
 const literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** P14: `readBoardAnchor` calls `boardAnchorAnswer(` once, with each of
- *  ANCHOR_ARGS as a whole property and no spread that could override one. */
+/** P14: `readBoardAnchor` calls `boardAnchorAnswer(` once; each of ANCHOR_ARGS
+ *  appears in the call's argument text as a complete `key: value` entry (at any
+ *  depth: the text is matched, not parsed), and that text holds no `...`. */
 function checkP14(panel) {
   const src = uncommented(panel);
   const head = /const\s+readBoardAnchor\s*=\s*useEffectEvent\(/.exec(src);
