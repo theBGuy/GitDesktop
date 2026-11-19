@@ -229,7 +229,8 @@ export function pausedBoardWriteOn(
  *  the whole burst alongside the chase's fold entry (projects.ts
  *  `useShiftItemDates`). Its own map because the fold key carries the card too,
  *  and these reads are held per lens: the focus pass, the lens's
- *  `refetchOnMount`, and `settlesOnRepoWrite` (repo-mutation-options.ts). */
+ *  `refetchOnMount`, `settlesOnRepoWrite` (repo-mutation-options.ts), and About's
+ *  Re-check invalidation (`outsideShiftChase`, projects.ts). */
 export const shiftChasedLenses = new Map<string, number>();
 
 /** Count one more live chase on the lens `hash`. */

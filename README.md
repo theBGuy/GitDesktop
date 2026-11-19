@@ -1450,9 +1450,10 @@ review via its subscription login. The full list is under
   needs it (git, or the GitHub CLI) gets a warning naming the feature and
   the version it wants, with an Update link. It also shows a live readout
   of the window's current position, size, and display (with copy-coords).
-  **Re-check** runs the check again, and on macOS and Linux it also forgets
-  which CLIs your login shell couldn't find, so GitDesktop looks for them
-  afresh.
+  **Re-check** runs the check again and has the app reload the data it had
+  cached, so a tool you just installed doesn't wait out each screen's own
+  refresh. On macOS and Linux it also forgets which CLIs your login shell
+  couldn't find, so GitDesktop looks for them afresh.
 - **Narrow windows and split-screen**: the window goes down to 640px wide
   at 100% zoom (the minimum grows with your interface zoom), so GitDesktop
   can sit beside your editor in a tiled layout. The sidebar narrows with

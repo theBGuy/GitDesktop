@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { AuthStatus } from "@/lib/ai/agent";
+import { outsideShiftChase } from "@/lib/git/queries";
 import { invoke } from "@/lib/tauri/invoke";
 
 /** One external CLI's detected status, mirroring the Rust `ToolStatus`. */
@@ -107,8 +108,10 @@ export function cliFloorWarning(
  *  reads it there, since a refetch that starts a fetch runs it synchronously. */
 let freshRequested = false;
 
-/** About's Re-check: a refetch that also clears the backend's cached
- *  login-shell misses, so tools missing at the last check are probed again.
+/** About's Re-check: a refetch that also has the backend forget its cached
+ *  CLI lookups, so tools missing at the last check are probed again, and that
+ *  invalidates every other query but a board lens a date-shift chase holds once
+ *  the fresh check settles: active ones refetch at once, the rest when shown.
  *  Only a click that starts a fetch sends the flag: with data loaded, refetch
  *  cancels an in-flight fetch and starts its own; before the first load lands
  *  it joins that fetch, which sends none. Every other load stays plain; the
@@ -124,14 +127,28 @@ export function recheckSystemHealth(health: { refetch: () => unknown }) {
 }
 
 /** OS/app diagnostics + the status of the CLIs GitDesktop shells out to, for
- *  the Settings → About screen. Detection runs concurrently in Rust. */
+ *  the Settings → About screen. Detection runs concurrently in Rust; a fresh
+ *  load also invalidates every other query (but a board lens a date-shift chase
+ *  holds) when its call settles. */
 export function useSystemHealth() {
   return useQuery({
     queryKey: ["system-health"] as const,
-    queryFn: () =>
-      freshRequested
-        ? invoke<SystemHealth>("system_health", { fresh: true })
-        : invoke<SystemHealth>("system_health"),
+    queryFn: ({ client }) => {
+      if (!freshRequested) return invoke<SystemHealth>("system_health");
+      // Deliberately app-wide: a tool the check just found changes every answer
+      // derived from it, and Re-checks are rare. It runs once the call settled
+      // (the backend dropped its cached lookups), skips this settling entry and
+      // any board lens a date-shift chase holds, and is not awaited, so the
+      // button never waits on the other refetches.
+      return invoke<SystemHealth>("system_health", { fresh: true }).finally(
+        () => {
+          void client.invalidateQueries({
+            predicate: (query) =>
+              query.queryKey[0] !== "system-health" && outsideShiftChase(query),
+          });
+        },
+      );
+    },
     staleTime: 30_000,
     // Mostly local CLI probes: react-query's default "online" mode would park
     // them offline, which is exactly when this diagnostics screen is wanted.

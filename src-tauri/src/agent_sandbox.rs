@@ -332,6 +332,33 @@ async fn candidate_at(i: usize) -> Option<(PathBuf, String)> {
     resolved
 }
 
+/// Empties every runtime slot (About > Re-check), so the next lookup resolves again. The
+/// settled-runtime memo is kept: its expiry, never a refresh, re-prefers an engine.
+pub(crate) fn forget_runtime_candidates() {
+    if let Ok(mut c) = candidate_cache().lock() {
+        c.fill(None);
+    }
+}
+
+/// Held for its whole body by every test that seeds, reads or empties `candidate_cache`
+/// or agent.rs's `resolve_cache`: a forget in one test would empty a slot another asserts
+/// on.
+#[cfg(test)]
+pub(crate) static LOOKUP_MEMO_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+/// Seeds runtime slot `i` as freshly resolved to `value`.
+#[cfg(test)]
+pub(crate) fn seed_runtime_candidate(i: usize, value: Option<(PathBuf, String)>) {
+    candidate_cache().lock().unwrap()[i] = Some((Instant::now(), value));
+}
+
+/// Whether every runtime slot is empty, read raw: an expired entry still counts as held.
+#[cfg(test)]
+pub(crate) fn runtime_candidates_empty() -> bool {
+    candidate_cache().lock().unwrap().iter().all(Option::is_none)
+}
+
 /// Resolves preference slot `i` for real: 0 is Docker on PATH, 1 is Podman on PATH,
 /// else (Windows) Podman Desktop's install dir.
 async fn resolve_slot(i: usize) -> Option<(PathBuf, String)> {
@@ -1952,6 +1979,24 @@ mod tests {
         }
         assert_eq!(settled_runtime(), None);
         forget_settled_runtime();
+    }
+
+    /// The forget empties a fresh cached miss and a fresh hit alike. Every read is of the
+    /// raw slots, so no TTL decides either side of the forget.
+    #[test]
+    fn forgetting_the_runtime_candidates_leaves_every_slot_cold() {
+        let _memos = LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        seed_runtime_candidate(0, None);
+        seed_runtime_candidate(1, Some((PathBuf::from("pm"), "podman".to_string())));
+        let seeded: Vec<Option<bool>> = candidate_cache()
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_ref().map(|(_, v)| v.is_some()))
+            .collect();
+        assert_eq!(seeded, [Some(false), Some(true)], "each slot holds its seeded value");
+        forget_runtime_candidates();
+        assert!(runtime_candidates_empty(), "a runtime slot stayed cached");
     }
 
     #[test]

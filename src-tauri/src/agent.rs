@@ -914,7 +914,7 @@ async fn probe_login_shell(name: String, body: String) -> LoginShellProbe {
 /// Forgets every remembered login-shell miss (About > Re-check), so each absent name
 /// is probed again; a probe already in flight stores nothing.
 #[cfg(not(windows))]
-pub(crate) fn clear_login_shell_misses() {
+fn clear_login_shell_misses() {
     if let Ok(mut misses) = login_shell_misses().lock() {
         misses.clear();
     }
@@ -922,7 +922,7 @@ pub(crate) fn clear_login_shell_misses() {
 
 /// Windows has no login-shell probe; the stub keeps call sites cfg-free.
 #[cfg(windows)]
-pub(crate) fn clear_login_shell_misses() {}
+fn clear_login_shell_misses() {}
 
 /// The resolver's `command -v` line with the name single-quoted, or None for a name
 /// holding a quote, a backslash or a control character: a user-configured launcher
@@ -1533,7 +1533,7 @@ type ResolveCache = [Option<(Instant, Option<PathBuf>)>; RESOLVE_SLOTS];
 /// for a CLI only that shell finds (macOS/Linux; the resolver remembers the shell's
 /// misses, never its hits). A just-installed CLI can read "not installed" until the entry
 /// expires, on the same cadence as the container runtimes' recovery; one only the login
-/// shell would find reads so until About > Re-check or a restart, then within one TTL.
+/// shell would find reads so until About > Re-check or a restart.
 fn resolve_cache() -> &'static Mutex<ResolveCache> {
     static CACHE: OnceLock<Mutex<ResolveCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
@@ -1586,6 +1586,20 @@ async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
         c[i] = Some((Instant::now(), resolved.clone()));
     }
     resolved
+}
+
+/// Forgets every cached lookup that can read "not installed" (About > Re-check): the
+/// remembered login-shell misses, then the per-kind resolutions, then the
+/// container-runtime slots. The misses go first, so a COLD lookup that starts
+/// afterwards asks a resolver that has already forgotten. A lookup already in flight
+/// may still store its answer, and one queued behind it takes that answer; either is
+/// held for at most one [`crate::agent_sandbox::CANDIDATE_TTL`].
+pub(crate) fn forget_cli_lookups() {
+    clear_login_shell_misses();
+    if let Ok(mut c) = resolve_cache().lock() {
+        c.fill(None);
+    }
+    crate::agent_sandbox::forget_runtime_candidates();
 }
 
 // --- detection -------------------------------------------------------------
@@ -4124,9 +4138,10 @@ fn has_blank_line(text: &str) -> bool {
 
 /// Kills a run's process tree from its leader: on cancel or timeout, when the exit
 /// grace runs out, and on unix at every review run's end. Unix signals the leader's
-/// process group (it leads one, see `TreeGuard::prepare` at the spawn). On Windows the
-/// run's job, closed by the caller, is what reaches the tree; only a run whose job
-/// failed to arm walks it with `taskkill /T`, unwaited, before the direct kill.
+/// process group (it leads one, see `TreeGuard::prepare` at the spawn). Windows
+/// terminates the run's job and leaves the guard armed for the caller's decision; only
+/// a run whose job failed to arm walks the tree with `taskkill /T`, unwaited. The
+/// direct kill of the leader follows on every platform.
 fn kill_process_tree(child: &mut tokio::process::Child, tree: &crate::proc_tree::TreeGuard) {
     #[cfg(not(windows))]
     let _ = tree;
@@ -4138,7 +4153,9 @@ fn kill_process_tree(child: &mut tokio::process::Child, tree: &crate::proc_tree:
 
     #[cfg(windows)]
     {
-        if !tree.is_armed() {
+        if tree.is_armed() {
+            tree.terminate();
+        } else {
             // Fallback for a run whose job failed to arm: `taskkill /T`,
             // fire-and-forget; CREATE_NO_WINDOW suppresses the console flash.
             use std::os::windows::process::CommandExt;
@@ -4153,8 +4170,8 @@ fn kill_process_tree(child: &mut tokio::process::Child, tree: &crate::proc_tree:
     #[cfg(unix)]
     crate::proc_tree::kill_process_group(pid);
 
-    // The direct kill of the leader, on every platform. On an armed Windows run it is
-    // the only kill this fn issues; the caller's job close takes the rest of the tree.
+    // The direct kill of the leader, on every platform: it covers a failed terminate
+    // and the unwaited `taskkill` fallback.
     let _ = child.start_kill();
 }
 
@@ -4459,8 +4476,9 @@ async fn stream_agent(
     #[cfg(not(unix))]
     let group_killed = false;
     // Every other run waits here, bounded. A leader still alive when the grace ends is
-    // killed with its tree: on unix `kill_process_tree` signals its group before the
-    // reap; on Windows the guard decision below closes its job.
+    // killed with its tree by `kill_process_tree`, before the reap: on unix it signals
+    // the group, on Windows it terminates the job (an unarmed guard walks the tree with
+    // `taskkill /T` instead).
     let grace_expired = !group_killed
         && tokio::time::timeout(CHILD_EXIT_GRACE, child.wait())
             .await
@@ -4471,10 +4489,10 @@ async fn stream_agent(
     }
     // The guard's one decision, with no await since the last `child.wait()`: on unix a
     // guard still armed after the reap could signal a recycled group. It precedes the
-    // `rm -f` and the stderr join: on Windows the job close is what lets a review's
-    // stderr reach EOF. `grace_expired` feeds `forced`, so on Windows a leader that
-    // outlived the grace never disarms; on unix its group was already signalled above,
-    // and once the leader is reaped its guard disarms.
+    // `rm -f` and the stderr join: on Windows closing an armed job is what lets a cleanly
+    // ended review's stderr reach EOF. `grace_expired` feeds `forced`, so on Windows a
+    // leader that outlived the grace never disarms; on unix its group was already
+    // signalled above, and once the leader is reaped its guard disarms.
     let forced = cancelled || timed_out || grace_expired;
     let reaped = child.id().is_none();
     if tree_guard_disarms(cfg!(unix), reaped, kill_tree_on_exit, forced) {
@@ -6583,6 +6601,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_serves_the_cache_but_an_override_bypasses_it() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.lock().await;
         // A planted path that no real resolution could produce (it doesn't exist), so
         // getting it back proves the cached value was served without re-resolving.
         let kind = AgentKind::Opencode;
@@ -6604,6 +6623,41 @@ mod tests {
             cache[kind.slot()] = None;
         }
         assert_eq!(found, Some(override_file));
+    }
+
+    /// About > Re-check's forget empties every resolve slot, fresh misses and hits alike.
+    /// Every read is of the raw slots, so no TTL decides either side of the forget.
+    #[test]
+    fn forgetting_the_cli_lookups_leaves_every_resolve_slot_cold() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        let seeded: Vec<Option<bool>> = {
+            let mut cache = resolve_cache().lock().unwrap();
+            for (i, slot) in cache.iter_mut().enumerate() {
+                let hit = (i % 2 == 1).then(|| PathBuf::from(format!("gd-planted-{i}")));
+                *slot = Some((Instant::now(), hit));
+            }
+            cache
+                .iter()
+                .map(|s| s.as_ref().map(|(_, v)| v.is_some()))
+                .collect()
+        };
+        let expected: Vec<Option<bool>> = (0..RESOLVE_SLOTS).map(|i| Some(i % 2 == 1)).collect();
+        assert_eq!(seeded, expected, "each slot holds its seeded miss or hit");
+        forget_cli_lookups();
+        let all_empty = resolve_cache().lock().unwrap().iter().all(Option::is_none);
+        assert!(all_empty, "a resolve slot stayed cached");
+    }
+
+    /// The same forget reaches the container-runtime slots.
+    #[test]
+    fn forgetting_the_cli_lookups_empties_the_runtime_candidates() {
+        use crate::agent_sandbox::{runtime_candidates_empty, seed_runtime_candidate};
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        seed_runtime_candidate(0, None);
+        seed_runtime_candidate(1, Some((PathBuf::from("pm"), "podman".to_string())));
+        assert!(!runtime_candidates_empty(), "the seeded slots");
+        forget_cli_lookups();
+        assert!(runtime_candidates_empty(), "a runtime slot stayed cached");
     }
 
     #[tokio::test]
@@ -9976,6 +10030,39 @@ opencode/x-preview-f-free
         remove_when_free(dir);
     }
 
+    /// A forced end's kill takes the whole tree at once, while the run still holds its
+    /// armed guard and has yet to reap the leader: the job's terminate on Windows, the
+    /// group signal on unix.
+    #[tokio::test]
+    async fn run_tree_kill_takes_the_holder_while_the_guard_is_held() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::Both, false);
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args)
+            .current_dir(dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        TreeGuard::prepare(&mut cmd);
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn the fake CLI");
+        let guard = TreeGuard::arm(&child);
+        std::fs::write(dir.path().join("armed"), "").expect("open the armed gate");
+        assert!(guard.is_armed(), "the guard armed");
+        assert!(holder_started(&holder).await, "the holder never started");
+        kill_process_tree(&mut child, &guard);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the kill while the guard was held"
+        );
+        drop(guard);
+        let _ = child.wait().await;
+        remove_when_free(dir);
+    }
+
     /// The guard's decision over all 16 inputs: unix disarms exactly when the leader
     /// was reaped; Windows only when reaped, a session and not forced; an unreaped
     /// leader never disarms.
@@ -10011,12 +10098,13 @@ opencode/x-preview-f-free
         }
     }
 
-    /// stream_agent's body as the wiring pin reads it: CRLF normalised, whole comment
-    /// lines dropped, all whitespace stripped, and a comma directly before `)` dropped
-    /// (rustfmt adds one when it breaks a call across lines).
-    fn stream_agent_body(src: &str) -> Option<String> {
+    /// The body of the first fn whose header starts at `head`, as the wiring pins read
+    /// it: CRLF normalised, whole comment lines dropped, all whitespace stripped, and a
+    /// comma directly before `)` dropped (rustfmt adds one when it breaks a call across
+    /// lines).
+    fn stripped_fn_body(src: &str, head: &str) -> Option<String> {
         let src = src.replace("\r\n", "\n");
-        let start = src.find("async fn stream_agent(")?;
+        let start = src.find(head)?;
         let open = start + src[start..].find("{\n")? + 2;
         let close = open + src[open..].find("\n}\n")?;
         let code: String = src[open..close]
@@ -10025,6 +10113,11 @@ opencode/x-preview-f-free
             .collect();
         let stripped: String = code.split_whitespace().collect();
         Some(stripped.replace(",)", ")"))
+    }
+
+    /// stream_agent's body as the wiring pin reads it.
+    fn stream_agent_body(src: &str) -> Option<String> {
+        stripped_fn_body(src, "async fn stream_agent(")
     }
 
     /// The statement of `body` that starts with `head`, through its `;`, when exactly
@@ -10229,6 +10322,52 @@ opencode/x-preview-f-free
                 "ifgrace_expired{",
             ),
             "9",
+        );
+    }
+
+    /// kill_process_tree's body as its pin reads it.
+    fn kill_process_tree_body(src: &str) -> Option<String> {
+        stripped_fn_body(src, "\nfn kill_process_tree(")
+    }
+
+    /// kill_process_tree's whole stripped body. Before updating it, re-check the three
+    /// effects: the Windows block (an armed guard terminates the job, an unarmed one spawns
+    /// `taskkill /F /T /PID`), the unix group kill under `#[cfg(unix)]`, and the leader's
+    /// direct kill as the last statement.
+    const KILL_TREE_BODY: &str = "#[cfg(not(windows))]let_=tree;letSome(pid)=child.id()else{let_=child.start_kill();return;};#[cfg(windows)]{iftree.is_armed(){tree.terminate();}else{usestd::os::windows::process::CommandExt;let_=std::process::Command::new(\"taskkill\").args([\"/F\",\"/T\",\"/PID\",&pid.to_string()]).creation_flags(0x0800_0000)//CREATE_NO_WINDOW.spawn();}}#[cfg(unix)]crate::proc_tree::kill_process_group(pid);let_=child.start_kill();";
+    const KILL_LEADER: &str = "let_=child.start_kill();";
+
+    /// An equality pin over the whole body, so it needs no mutation controls (there is no
+    /// scanner to evade); the asserts on the const's own text keep an update from dropping
+    /// an effect.
+    #[test]
+    fn run_tree_kill_wiring_is_pinned() {
+        let body = kill_process_tree_body(include_str!("agent.rs")).expect("its body");
+        assert_eq!(
+            body, KILL_TREE_BODY,
+            "kill_process_tree changed: before updating KILL_TREE_BODY, re-check that an armed \
+             Windows guard terminates the job and an unarmed one spawns `taskkill /F /T /PID`, \
+             that the unix group kill sits under `#[cfg(unix)]`, and that the leader's direct \
+             kill is the last statement"
+        );
+        for effect in [
+            "#[cfg(windows)]{iftree.is_armed(){tree.terminate();}else{",
+            "let_=std::process::Command::new(\"taskkill\").args([\"/F\",\"/T\",\"/PID\",&pid.to_string()]).creation_flags(0x0800_0000)//CREATE_NO_WINDOW.spawn();}}",
+            "#[cfg(unix)]crate::proc_tree::kill_process_group(pid);",
+        ] {
+            assert!(
+                KILL_TREE_BODY.contains(effect),
+                "the pinned body lost `{effect}`"
+            );
+        }
+        assert_eq!(
+            KILL_TREE_BODY.matches(KILL_LEADER).count(),
+            2,
+            "the early return's direct kill and the last statement's"
+        );
+        assert!(
+            KILL_TREE_BODY.ends_with(KILL_LEADER),
+            "the leader's direct kill ends the body"
         );
     }
 
@@ -11149,18 +11288,49 @@ mod login_shell_tests {
     #[cfg(not(windows))]
     #[test]
     fn the_recheck_clear_empties_the_process_wide_cache() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
         let name = "gd-test-no-such-tool-recheck";
-        let before = {
+        // Every assert runs after its guard drops: a failure while holding the
+        // process-wide mutex would poison it for the rest of the test process.
+        let (stored, before) = {
             let mut misses = super::login_shell_misses().lock().unwrap();
             let capture = misses.capture.clone();
             let ticket = misses.ticket(capture.clone());
             misses.store(name, ticket, capture, &Missing, Instant::now());
-            assert_eq!(misses.entries.get(name), Some(&MissEntry::Measured));
-            misses.generation
+            (misses.entries.get(name).copied(), misses.generation)
         };
+        assert_eq!(stored, Some(MissEntry::Measured));
         super::clear_login_shell_misses();
-        let misses = super::login_shell_misses().lock().unwrap();
-        assert_eq!(misses.entries.get(name), None, "the clear kept the miss");
-        assert!(misses.generation > before, "the clear kept the generation");
+        let (kept, after) = {
+            let misses = super::login_shell_misses().lock().unwrap();
+            (misses.entries.get(name).copied(), misses.generation)
+        };
+        assert_eq!(kept, None, "the clear kept the miss");
+        assert!(after > before, "the clear kept the generation");
+    }
+
+    /// The Re-check's one entry point still forgets the remembered misses.
+    #[cfg(not(windows))]
+    #[test]
+    fn forgetting_the_cli_lookups_clears_the_remembered_misses() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        let name = "gd-test-no-such-tool-forget";
+        // Asserts run after the guard drops, as in the test above.
+        let stored = {
+            let mut misses = super::login_shell_misses().lock().unwrap();
+            let capture = misses.capture.clone();
+            let ticket = misses.ticket(capture.clone());
+            misses.store(name, ticket, capture, &Missing, Instant::now());
+            misses.entries.get(name).copied()
+        };
+        assert_eq!(stored, Some(MissEntry::Measured));
+        super::forget_cli_lookups();
+        let kept = super::login_shell_misses()
+            .lock()
+            .unwrap()
+            .entries
+            .get(name)
+            .copied();
+        assert_eq!(kept, None, "the forget kept the miss");
     }
 }

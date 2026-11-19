@@ -63,10 +63,22 @@ impl TreeGuard {
     }
 
     /// Whether dropping this guard would kill a tree. False after a failed Windows arm.
-    // Its one production caller is agent.rs's Windows fallback; tests call it on every platform.
+    // Its one production caller is agent.rs's `kill_process_tree`, which picks the job
+    // terminate or the `taskkill` fallback by it; tests call it on every platform.
     #[cfg(any(windows, test))]
     pub(crate) fn is_armed(&self) -> bool {
         self.inner.is_some()
+    }
+
+    /// Kills every process in the tree now and keeps the guard armed, for a caller that
+    /// still owns the child and has yet to reap it. A no-op on an unarmed guard. Windows
+    /// only: on unix that caller signals the group itself (`kill_process_group`) while
+    /// the leader is unreaped.
+    #[cfg(windows)]
+    pub(crate) fn terminate(&self) {
+        if let Some(job) = &self.inner {
+            job.terminate();
+        }
     }
 
     /// Consumes the guard WITHOUT killing, so descendants the command left behind on
@@ -131,6 +143,16 @@ impl TreeJob {
             return None;
         }
         Some(job)
+    }
+
+    /// Terminates every process in the job now and leaves the handle open, so the job
+    /// stays armed: closing it later still kills whatever joined it since.
+    pub(crate) fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        // SAFETY: `self.0` is a valid job handle this type owns. The result is ignored:
+        // a failed terminate leaves the job armed, and closing it still kills the tree.
+        unsafe { TerminateJobObject(self.0, 1) };
     }
 
     /// Consumes the guard, clearing the kill-on-close limit before its handle is
@@ -871,6 +893,94 @@ mod job_tests {
         armed_job_close_kills(ALL_KEEPS[2]);
     }
 
+    fn armed_job_terminate_kills(keeps: Keeps) {
+        let dir = temp("gd-proc-tree-");
+        let holder = Holder::new(dir.path());
+        let (mut child, _hold) = spawn_parent(dir.path(), &holder, keeps);
+        let job = TreeJob::arm(child.as_raw_handle()).expect("job object armed");
+        open_gate(dir.path());
+        assert!(
+            wait_until(|| holder.started(), HANG_GUARD),
+            "{keeps:?}: the holder started"
+        );
+
+        job.terminate();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "{keeps:?}: the holder died while the job stayed open"
+        );
+        assert!(
+            wait_until(|| matches!(child.try_wait(), Ok(Some(_))), HANG_GUARD),
+            "{keeps:?}: the parent outlived the terminate while its hold file stayed"
+        );
+        drop(job);
+    }
+
+    /// Terminating an ARMED job kills the tree with its handle still open, under every
+    /// `Keeps` value.
+    #[test]
+    fn armed_job_terminate_kills_the_tree_keeping_both() {
+        armed_job_terminate_kills(ALL_KEEPS[0]);
+    }
+
+    #[test]
+    fn armed_job_terminate_kills_the_tree_keeping_stderr_only() {
+        armed_job_terminate_kills(ALL_KEEPS[1]);
+    }
+
+    #[test]
+    fn armed_job_terminate_kills_the_tree_keeping_neither() {
+        armed_job_terminate_kills(ALL_KEEPS[2]);
+    }
+
+    /// A terminated job stays armed: a process assigned to it afterwards still dies when
+    /// the handle closes.
+    #[test]
+    fn a_terminated_job_still_kills_what_joins_it_on_close() {
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let dir1 = temp("gd-proc-tree-");
+        let dir2 = temp("gd-proc-tree-");
+        let holder1 = Holder::new(dir1.path());
+        let holder2 = Holder::new(dir2.path());
+        let (mut child1, _hold1) = spawn_parent(dir1.path(), &holder1, Keeps::Both);
+        let job = TreeJob::arm(child1.as_raw_handle()).expect("job object armed");
+        open_gate(dir1.path());
+        assert!(
+            wait_until(|| holder1.started(), HANG_GUARD),
+            "the first holder started"
+        );
+        job.terminate();
+        assert!(
+            wait_until(|| !holder1.alive(), HANG_GUARD),
+            "the first holder died with the terminate"
+        );
+        assert!(
+            wait_until(|| matches!(child1.try_wait(), Ok(Some(_))), HANG_GUARD),
+            "the first parent outlived the terminate while its hold file stayed"
+        );
+
+        let (mut child2, _hold2) = spawn_parent(dir2.path(), &holder2, Keeps::Both);
+        // SAFETY: `job.0` is the live job handle `job` owns and the second argument is the
+        // live child's handle, valid while `child2` is held.
+        let assigned = unsafe { AssignProcessToJobObject(job.0, child2.as_raw_handle()) };
+        assert_ne!(assigned, 0, "a terminated job accepts a new process");
+        open_gate(dir2.path());
+        assert!(
+            wait_until(|| holder2.started(), HANG_GUARD),
+            "the second holder started"
+        );
+        drop(job);
+        assert!(
+            wait_until(|| !holder2.alive(), HANG_GUARD),
+            "the second holder died when the terminated job closed"
+        );
+        assert!(
+            wait_until(|| matches!(child2.try_wait(), Ok(Some(_))), HANG_GUARD),
+            "the second parent outlived the job's close while its hold file stayed"
+        );
+    }
+
     /// The control that proves the observable can fail: a DISARMED job closes without
     /// a kill, and Windows never cascades one on its own, so the holder outlives a
     /// direct kill of the parent (a detached `gc --auto` relies on exactly this).
@@ -994,6 +1104,51 @@ mod guard_tests {
         child.wait().await.expect("reap it");
         let guard = TreeGuard::arm(&child);
         assert!(!guard.is_armed(), "a reaped child has nothing to arm");
+    }
+
+    /// `terminate` kills the whole tree, the leader included, while the caller still holds
+    /// the guard and the leader's hold file.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_kills_the_tree_while_the_guard_is_held() {
+        let dir = temp("gd-proc-tree-");
+        let holder = Holder::new(dir.path());
+        let (mut cmd, _hold) = tokio_parent(dir.path(), &holder, Keeps::Both);
+        TreeGuard::prepare(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn the parent");
+        let guard = TreeGuard::arm(&child);
+        assert!(guard.is_armed(), "the guard armed");
+        open_gate(dir.path());
+        assert!(
+            wait_until(|| holder.started(), HANG_GUARD),
+            "the holder started"
+        );
+
+        guard.terminate();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder died with the tree"
+        );
+        assert!(
+            matches!(
+                tokio::time::timeout(HANG_GUARD, child.wait()).await,
+                Ok(Ok(_))
+            ),
+            "the leader outlived the terminate while its hold file stayed"
+        );
+        drop(guard);
+    }
+
+    /// The unarmed path's only execution: the call returns. A no-op leaves nothing to
+    /// assert after it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_on_an_unarmed_guard_does_nothing() {
+        let mut child = quick().spawn().expect("spawn a quick child");
+        child.wait().await.expect("reap it");
+        let guard = TreeGuard::arm(&child);
+        assert!(!guard.is_armed(), "a reaped child has nothing to arm");
+        guard.terminate();
     }
 
     /// The login-shell probe's shape: the child leads its own SESSION through a setsid

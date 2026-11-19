@@ -224,11 +224,12 @@ static PROBES: [Probe; 7] = [
 
 /// OS/app info + the status of every external CLI, for Settings → About. The
 /// per-tool detections (each spawns subprocesses) run concurrently. `fresh` (About's
-/// Re-check) forgets the remembered login-shell misses before any detection starts.
+/// Re-check) forgets the remembered login-shell misses and the short-lived CLI and
+/// container-runtime lookups before any detection starts.
 #[tauri::command]
 pub async fn system_health(fresh: Option<bool>) -> AppResult<SystemHealth> {
     if fresh == Some(true) {
-        crate::agent::clear_login_shell_misses();
+        crate::agent::forget_cli_lookups();
     }
     // Each detection runs as its own task to keep this command's future tiny:
     // the invoke handler CONSTRUCTS a command future on the WebView2 UI-thread
@@ -281,7 +282,7 @@ mod tests {
 
     /// Breaches of Re-check's wiring in `src` (this file's text): `system_health`'s body,
     /// found by its header at a line start, comment lines dropped and whitespace removed,
-    /// must clear the remembered misses on `fresh` before its first spawn.
+    /// must forget the CLI lookups on `fresh` before its first spawn.
     fn recheck_clear_violations(src: &str) -> Vec<String> {
         let src = src.replace("\r\n", "\n");
         let Some(start) = src.find("\npub async fn system_health(") else {
@@ -295,7 +296,7 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .flat_map(|l| l.split_whitespace())
             .collect();
-        let clear = "iffresh==Some(true){crate::agent::clear_login_shell_misses();}";
+        let clear = "iffresh==Some(true){crate::agent::forget_cli_lookups();}";
         match (body.find(clear), body.find("spawn(")) {
             (Some(c), Some(s)) if c < s => Vec::new(),
             (Some(_), Some(_)) => vec!["the clear comes after the first spawn".into()],
@@ -310,7 +311,8 @@ mod tests {
     fn the_recheck_clears_the_misses_before_the_first_spawn() {
         let src = include_str!("health.rs").replace("\r\n", "\n");
         assert_eq!(recheck_clear_violations(&src), Vec::<String>::new());
-        let arm = "    if fresh == Some(true) {\n        crate::agent::clear_login_shell_misses();\n    }\n";
+        let arm =
+            "    if fresh == Some(true) {\n        crate::agent::forget_cli_lookups();\n    }\n";
         assert!(src.contains(arm), "the clear's lines moved");
         let removed = src.replacen(arm, "", 1);
         let collect = "        .collect();\n";
