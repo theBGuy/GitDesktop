@@ -20010,6 +20010,7 @@ detached
                 fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let key = crate::git::branches::keep_local_key("feature");
                 let set = std::process::Command::new("git")
+                    .envs(crate::git::runner::TEST_GIT_ENV)
                     .current_dir(&repo)
                     .args(["config", &key, "true"])
                     .status()

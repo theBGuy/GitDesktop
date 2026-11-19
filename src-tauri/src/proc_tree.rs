@@ -275,6 +275,36 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Polls `holder.started()` on `tokio::time::sleep` steps until it holds or `ceiling`
+    /// passes. Async on purpose: a test selects the runner future against it, so the runner
+    /// keeps draining while the holder starts.
+    pub(crate) async fn started_within(holder: &Holder, ceiling: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + ceiling;
+        loop {
+            if holder.started() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Deletes the temp dir while still owning it, then drops it. On Windows the delete
+    /// fails while a process has a file or its working directory there, so a stuck
+    /// process reads as a red; elsewhere it is a plain delete.
+    pub(crate) fn remove_when_free(dir: tempfile::TempDir) {
+        let removed = wait_until(
+            || match std::fs::remove_dir_all(dir.path()) {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            },
+            HANG_GUARD,
+        );
+        assert!(removed, "{} stayed in use", dir.path().display());
+    }
+
     /// Which shell will run the launch text.
     #[derive(Clone, Copy, Debug)]
     pub(crate) enum HostShell {
@@ -1255,12 +1285,28 @@ mod guard_tests {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("spawn the wrapper");
-        // Taken out, because `wait` closes a stdin it still holds.
+        // Taken out to outlive `child`, whose drop (like its `wait`) would close it.
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = drain(child.stdout.take().expect("stdout was piped"));
         let stderr = drain(child.stderr.take().expect("stderr was piped"));
         open_gate(dir);
-        let status = child.wait().expect("reap the wrapper");
+        // Bounded, so a stalled launcher fails the test instead of hanging it.
+        let mut status = None;
+        let exited = wait_until(
+            || {
+                status = child.try_wait().expect("poll the wrapper");
+                status.is_some()
+            },
+            HANG_GUARD,
+        );
+        if !exited {
+            // Reap only a killed wrapper: one that survived the kill would hang the wait.
+            if child.kill().is_ok() {
+                let _ = child.wait();
+            }
+            panic!("{keeps:?}: the wrapper did not exit within HANG_GUARD");
+        }
+        let status = status.expect("an exited wrapper has a status");
         assert!(
             status.success(),
             "{keeps:?}: the wrapper exits 0: {status:?}"
@@ -1274,6 +1320,7 @@ mod guard_tests {
 
     #[test]
     fn keeps_both() {
+        // The spaces test the path quoting: `sh_quote` on unix, the `.cmd` body's on Windows.
         let dir = temp("gd-proc-tree- q ");
         let holder = Holder::new(dir.path());
         let run = keeps_run(dir.path(), &holder, Keeps::Both);
@@ -1436,6 +1483,7 @@ mod guard_tests {
 
     #[test]
     fn snippets_are_one_embeddable_line() {
+        // `keeps_both`'s spaced path; the check reads quote balance, never the spaces.
         let dir = temp("gd-proc-tree- q ");
         let holder = Holder::new(dir.path());
         for shell in SHELLS {

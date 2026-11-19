@@ -2472,10 +2472,10 @@ mod tree_tests {
 
     use super::glab_exchange;
     use crate::error::AppError;
-    use crate::github::runner::tree_fixture::{
-        remove_when_free, started_within, unarmed_spawns, Wrapper,
+    use crate::github::runner::tree_fixture::{unarmed_spawns, Wrapper};
+    use crate::proc_tree::test_support::{
+        remove_when_free, started_within, wait_until, Holder, Keeps, HANG_GUARD,
     };
-    use crate::proc_tree::test_support::{wait_until, Holder, Keeps, HANG_GUARD};
 
     fn tree_dir(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()

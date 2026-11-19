@@ -10831,6 +10831,7 @@ mod tests {
 
     fn publish_git(dir: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
+            .envs(crate::git::runner::TEST_GIT_ENV)
             .current_dir(dir)
             .args(args)
             .output()

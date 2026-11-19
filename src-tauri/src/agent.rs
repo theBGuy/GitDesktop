@@ -738,13 +738,15 @@ enum MissEntry {
 }
 
 /// A name's single-flight gate. Its slot holds the hit of the flight holding it (or
-/// last holding it), read only by callers that found the gate held.
+/// last holding it) with the generation that flight started in, read only by callers
+/// that found the gate held and whose own ticket is that generation.
 #[cfg(any(not(windows), test))]
-type ProbeGate = Arc<tokio::sync::Mutex<Option<PathBuf>>>;
+type ProbeGate = Arc<tokio::sync::Mutex<Option<(u64, PathBuf)>>>;
 
 /// The login shell's misses per name, valid only for the captured PATH they were
-/// measured under. A probe stores its outcome only under the generation it started
-/// in, so a capture change or a clear during a probe discards what it measured.
+/// measured under. A probe stores its miss, and shares its hit, only under the
+/// generation it started in: after a capture change or a clear during a probe, only
+/// that probe's own caller gets what it measured.
 #[cfg(any(not(windows), test))]
 #[derive(Default)]
 struct LoginShellMisses {
@@ -826,9 +828,11 @@ impl LoginShellMisses {
 
 /// [`resolve_via_login_shell`] over an injected cache, capture, clock and probe;
 /// `capture` and `now` are read at every cache access. One probe per name at a time,
-/// the cap included: callers queued on a name's gate take the flight's hit from its
-/// slot, or its miss from the cache. A name's gate is released before the next name is tried, and the
-/// std mutex is never held across an await; a poisoned one reads as cold.
+/// the cap included: a caller queued on a name's gate takes the flight's miss from
+/// the cache while it is still there, or its hit from its slot when its ticket is the
+/// flight's generation, and otherwise probes in its turn. A name's gate is released
+/// before the next name is tried, and the std mutex is never held across an await; a
+/// poisoned one reads as cold and shares no hit.
 #[cfg(any(not(windows), test))]
 async fn resolve_via_login_shell_with<Fut>(
     names: &[&str],
@@ -863,11 +867,6 @@ where
             Ok(slot) => (slot, false),
             Err(_) => (gate.lock().await, true),
         };
-        if joined {
-            if let Some(found) = slot.clone() {
-                return Some(found);
-            }
-        }
         let ticket = match cache.lock() {
             Ok(mut misses) => {
                 if misses.fresh(name, capture(), now()) {
@@ -877,13 +876,20 @@ where
             }
             Err(_) => None,
         };
+        if let (true, Some(ticket), Some((generation, found))) = (joined, ticket, slot.as_ref()) {
+            if *generation == ticket {
+                return Some(found.clone());
+            }
+        }
         *slot = None;
         let outcome = probe((*name).to_owned(), body).await;
         if let (Some(ticket), Ok(mut misses)) = (ticket, cache.lock()) {
             misses.store(name, ticket, capture(), &outcome, now());
         }
         if let LoginShellProbe::Found(found) = outcome {
-            *slot = Some(found.clone());
+            if let Some(ticket) = ticket {
+                *slot = Some((ticket, found.clone()));
+            }
             return Some(found);
         }
     }
@@ -9658,7 +9664,9 @@ opencode/x-preview-f-free
     // support) and then waits for `go`. Each test starts its run the same way
     // (`start_run`), so no Windows holder is born before its job assignment.
 
-    use crate::proc_tree::test_support::{wait_until, Holder, HostShell, Keeps, HANG_GUARD};
+    use crate::proc_tree::test_support::{
+        remove_when_free, started_within, wait_until, Holder, HostShell, Keeps, HANG_GUARD,
+    };
     use crate::proc_tree::TreeGuard;
 
     /// What the fake CLI writes to its stderr as it ends; shares no text with the
@@ -9772,19 +9780,6 @@ opencode/x-preview-f-free
         )
     }
 
-    /// Polls `holder.started()` on tokio sleeps, so the run under test keeps being
-    /// polled meanwhile; false at `HANG_GUARD`.
-    async fn holder_started(holder: &Holder) -> bool {
-        let deadline = tokio::time::Instant::now() + HANG_GUARD;
-        while !holder.started() {
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        true
-    }
-
     /// Polls `run` once, only then opens the `armed` gate, and keeps polling it until
     /// the holder has started. On Windows the spawn and the guard's arm happen in that
     /// first poll; elsewhere a wait for an executing PATH capture may come before them.
@@ -9800,27 +9795,13 @@ opencode/x-preview-f-free
         std::fs::write(dir.join("armed"), "").expect("open the armed gate");
         tokio::select! {
             r = run.as_mut() => panic!("the run ended before its holder started: {r:?}"),
-            s = holder_started(holder) => assert!(s, "the holder never started"),
+            s = started_within(holder, HANG_GUARD) => assert!(s, "the holder never started"),
         }
     }
 
     /// Lets the fake CLI end.
     fn let_go(dir: &Path) {
         std::fs::write(dir.join("go"), "").expect("let the fake CLI end");
-    }
-
-    /// Deletes the temp dir while still owning it, then drops it. On Windows the delete
-    /// fails while a process has a file or its working directory there, so a stuck
-    /// process reads as a red; elsewhere it is a plain delete.
-    fn remove_when_free(dir: tempfile::TempDir) {
-        let removed = wait_until(
-            || match std::fs::remove_dir_all(dir.path()) {
-                Ok(()) => true,
-                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-            },
-            HANG_GUARD,
-        );
-        assert!(removed, "{} stayed in use", dir.path().display());
     }
 
     /// The error message a run that streamed no result ends with.
@@ -10015,7 +9996,10 @@ opencode/x-preview-f-free
         let guard = TreeGuard::arm(&child);
         std::fs::write(dir.path().join("armed"), "").expect("open the armed gate");
         assert!(guard.is_armed(), "the guard armed");
-        assert!(holder_started(&holder).await, "the holder never started");
+        assert!(
+            started_within(&holder, HANG_GUARD).await,
+            "the holder never started"
+        );
         guard.disarm();
         child.kill().await.expect("kill and reap the fake CLI");
         assert!(
@@ -10052,7 +10036,10 @@ opencode/x-preview-f-free
         let guard = TreeGuard::arm(&child);
         std::fs::write(dir.path().join("armed"), "").expect("open the armed gate");
         assert!(guard.is_armed(), "the guard armed");
-        assert!(holder_started(&holder).await, "the holder never started");
+        assert!(
+            started_within(&holder, HANG_GUARD).await,
+            "the holder never started"
+        );
         kill_process_tree(&mut child, &guard);
         assert!(
             wait_until(|| !holder.alive(), HANG_GUARD),
@@ -10102,7 +10089,7 @@ opencode/x-preview-f-free
     /// it: CRLF normalised, whole comment lines dropped, all whitespace stripped, and a
     /// comma directly before `)` dropped (rustfmt adds one when it breaks a call across
     /// lines).
-    fn stripped_fn_body(src: &str, head: &str) -> Option<String> {
+    pub(super) fn stripped_fn_body(src: &str, head: &str) -> Option<String> {
         let src = src.replace("\r\n", "\n");
         let start = src.find(head)?;
         let open = start + src[start..].find("{\n")? + 2;
@@ -10739,24 +10726,14 @@ mod login_shell_tests {
         resolve_via_login_shell_with, LoginShellMisses, LoginShellProbe, MissEntry,
         LOGIN_SHELL_CACHE_CAP,
     };
+    use super::tests::stripped_fn_body;
     use crate::proc_tree::test_support::HANG_GUARD;
 
     /// Breaches of the probe's guard shape in `src` (this file's text). Each body is
     /// found by its header at a line start, so the indented test text never stands in
-    /// for a production fn; whole comment lines are dropped and all whitespace removed.
-    /// No test runs the wrapper, so this is its only guard.
+    /// for a production fn, and read through [`stripped_fn_body`]. No test runs the
+    /// wrapper, so this is its only guard.
     fn probe_guard_violations(src: &str) -> Vec<String> {
-        let src = src.replace("\r\n", "\n");
-        let body = |header: &str| -> Option<String> {
-            let start = src.find(header)?;
-            let open = start + src[start..].find("{\n")? + 2;
-            let close = open + src[open..].find("\n}\n")?;
-            let code: String = src[open..close]
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .collect();
-            Some(code.split_whitespace().collect())
-        };
         let mut bad = Vec::new();
         let mut core = None;
         for (name, header) in [
@@ -10764,7 +10741,7 @@ mod login_shell_tests {
             ("configure_probe_shell", "\nfn configure_probe_shell("),
             ("run_probe_shell", "\nasync fn run_probe_shell("),
         ] {
-            let Some(code) = body(header) else {
+            let Some(code) = stripped_fn_body(src, header) else {
                 bad.push(format!("no {name} at a line start"));
                 continue;
             };
@@ -11208,6 +11185,35 @@ mod login_shell_tests {
         let all = within(async move { tokio::join!(x, y, z) }).await;
         assert_eq!(all, (None, None, None));
         assert_eq!(rig.runs("a"), 1);
+    }
+
+    /// Parks X's probe, runs `bump`, then queues Y behind it: X's hit belongs to the
+    /// generation before the bump, so Y probes again and keeps its own answer.
+    async fn a_hit_from_before(bump: impl Fn(&Rig), what: &str) {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        bump(&rig);
+        let mut y = pin!(rig.call(&["a"]));
+        waits(&mut y, "Y").await;
+        assert_eq!(rig.runs("a"), 1, "{what}: Y waits on X's gate");
+        rig.answer("a", Found(path("/old/a")));
+        assert_eq!(within(&mut x).await, Some(path("/old/a")));
+        rig.unanswer("a");
+        park(&mut y, &mut started, "a").await;
+        rig.answer("a", Found(path("/new/a")));
+        assert_eq!(within(&mut y).await, Some(path("/new/a")), "{what}");
+        assert_eq!(rig.runs("a"), 2, "{what}: Y probed again");
+    }
+
+    #[tokio::test]
+    async fn a_hit_measured_before_a_clear_is_not_shared_after_it() {
+        a_hit_from_before(|rig| rig.cache.lock().unwrap().clear(), "a clear").await;
+    }
+
+    #[tokio::test]
+    async fn a_hit_measured_before_a_capture_change_is_not_shared_after_it() {
+        a_hit_from_before(|rig| rig.set_capture(Some("/c")), "a capture change").await;
     }
 
     #[tokio::test]

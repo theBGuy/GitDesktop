@@ -359,8 +359,8 @@ fn refuse_global_config_write(args: &[&str], envs: &[(&str, &str)]) {
 /// operands. `--global` or a prefix of it down to `--gl` selects the global file, and
 /// only a `get` or `list` word, or with no word a dashed read option, reads: anything
 /// else is a write, the one-key read (`config --global user.name`) included. A caller's
-/// `GIT_CONFIG_GLOBAL` pair exempts it unless it names `/dev/null`; the name ignores
-/// ASCII case on Windows.
+/// last `GIT_CONFIG_GLOBAL` pair exempts it unless it names `/dev/null`; the name
+/// ignores ASCII case on Windows.
 #[cfg(test)]
 fn writes_global_config(args: &[&str], envs: &[(&str, &str)]) -> bool {
     const VALUED: [&str; 7] = [
@@ -434,14 +434,18 @@ fn writes_global_config(args: &[&str], envs: &[(&str, &str)]) -> bool {
         Some(w) => ["get", "list"].contains(&w),
         None => read.iter().any(|t| DASHED_READS.contains(t)),
     };
-    let own_file = envs.iter().any(|(k, v)| {
-        let named = if cfg!(windows) {
-            k.eq_ignore_ascii_case("GIT_CONFIG_GLOBAL")
-        } else {
-            *k == "GIT_CONFIG_GLOBAL"
-        };
-        named && *v != "/dev/null"
-    });
+    // `Command::envs` hands the child the last pair of a name, so that pair decides.
+    let own_file = envs
+        .iter()
+        .rev()
+        .find(|(k, _)| {
+            if cfg!(windows) {
+                k.eq_ignore_ascii_case("GIT_CONFIG_GLOBAL")
+            } else {
+                *k == "GIT_CONFIG_GLOBAL"
+            }
+        })
+        .is_some_and(|(_, v)| *v != "/dev/null");
     global && !reads && !own_file
 }
 
@@ -1636,9 +1640,12 @@ mod config_tests {
         let own = [("GIT_CONFIG_GLOBAL", "own.config")];
         let lower = [("git_config_global", "own.config")];
         let null = [("GIT_CONFIG_GLOBAL", "/dev/null")];
+        let own_then_null = [own[0], null[0]];
+        let null_then_own = [null[0], own[0]];
+        let own_then_lower_null = [own[0], ("git_config_global", "/dev/null")];
         // (argv, caller env, whether it writes the global file)
         type Row<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)], bool);
-        let table: [Row; 31] = [
+        let table: [Row; 34] = [
             (&["config", "--global", "gd.fixture", "1"], &[], true),
             (
                 &["config", "--global", "init.defaultBranch", "list"],
@@ -1719,6 +1726,14 @@ mod config_tests {
                 &["config", "--global", "gd.fixture", "1"],
                 &lower,
                 !cfg!(windows),
+            ),
+            // The child sees the last pair of a name.
+            (&["config", "--global", "k", "v"], &own_then_null, true),
+            (&["config", "--global", "k", "v"], &null_then_own, false),
+            (
+                &["config", "--global", "k", "v"],
+                &own_then_lower_null,
+                cfg!(windows),
             ),
         ];
         for (args, envs, writes) in table {
@@ -1965,7 +1980,9 @@ mod config_write_lock_tests {
 #[cfg(test)]
 mod tree_kill_tests {
     use super::*;
-    use crate::proc_tree::test_support::{wait_until, Holder, HostShell, Keeps, HANG_GUARD};
+    use crate::proc_tree::test_support::{
+        remove_when_free, started_within, wait_until, Holder, HostShell, Keeps, HANG_GUARD,
+    };
     use std::path::{Path, PathBuf};
 
     const COMMIT: &[&str] = &["commit", "--allow-empty", "-m", "x"];
@@ -2065,20 +2082,6 @@ mod tree_kill_tests {
         std::fs::write(gate, "").expect("open the gate");
     }
 
-    /// Deletes the temp dir while still owning it, then drops it. On Windows the delete
-    /// fails while a process has a file or its working directory there, so a stuck
-    /// process reads as a red; elsewhere it is a plain delete.
-    fn remove_when_free(dir: tempfile::TempDir) {
-        let removed = wait_until(
-            || match std::fs::remove_dir_all(dir.path()) {
-                Ok(()) => true,
-                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-            },
-            HANG_GUARD,
-        );
-        assert!(removed, "{} stayed in use", dir.path().display());
-    }
-
     fn describe(result: &AppResult<GitOutput>) -> String {
         match result {
             Ok(out) => format!("exit {}: {}", out.code, out.stderr),
@@ -2096,6 +2099,7 @@ mod tree_kill_tests {
     /// holds the hook's first child until then.
     #[tokio::test]
     async fn a_timed_out_git_takes_its_hook_down_with_it() {
+        // The spaces test the quoting of the hook's sh paths (`sh_path`, `sh_quote`).
         let dir = tempfile::Builder::new()
             .prefix("gd-runner- q ")
             .tempdir()
@@ -2115,14 +2119,10 @@ mod tree_kill_tests {
         let mut run = Box::pin(run_git(Some(&fx.repo), COMMIT, TEST_GIT_HANG_GUARD));
         let started = async {
             open_gate(&fx.gate);
-            let deadline = tokio::time::Instant::now() + HANG_GUARD;
-            while !holder.started() {
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "the hook's holder never started"
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            assert!(
+                started_within(&holder, HANG_GUARD).await,
+                "the hook's holder never started"
+            );
         };
         tokio::select! {
             biased;
@@ -2216,7 +2216,11 @@ mod tree_kill_tests {
     }
 
     /// A reaped git disarms its guard, so a descendant it left behind on purpose
-    /// (git's detached helpers) keeps running after the call returns.
+    /// (git's detached helpers) keeps running after the call returns. On Windows, when
+    /// the armed process is the `cmd\git.exe` shim and the assignment loses the accepted
+    /// race, the holder was never in the job, so its survival says nothing about the
+    /// disarm: the unix legs and proc_tree's `disarmed_job_close_leaves_the_tree_running`
+    /// and `a_disarmed_guard_spares_the_tree` decide it.
     #[tokio::test]
     async fn a_reaped_git_leaves_a_detached_descendant_running() {
         let dir = tempfile::Builder::new()

@@ -1640,10 +1640,12 @@ async fn rate_limit_probe(gh: &std::path::Path, host: &Option<String>) -> Option
 
 #[cfg(test)]
 mod tests {
-    use super::tree_fixture::{remove_when_free, started_within, Wrapper};
+    use super::tree_fixture::Wrapper;
     use super::*;
     use crate::agent::ChildEnv;
-    use crate::proc_tree::test_support::{wait_until, Holder, Keeps, HANG_GUARD};
+    use crate::proc_tree::test_support::{
+        remove_when_free, started_within, wait_until, Holder, Keeps, HANG_GUARD,
+    };
 
     const RATE_NOW: i64 = 1_800_000_000;
 
@@ -4781,9 +4783,8 @@ mod tests {
 /// forge/glab.rs's tests.
 #[cfg(test)]
 pub(crate) mod tree_fixture {
-    use crate::proc_tree::test_support::{wait_until, Holder, HostShell, Keeps, HANG_GUARD};
+    use crate::proc_tree::test_support::{Holder, HostShell, Keeps};
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
 
     /// The wrapper's two gates, in the holder's directory beside its reserved names.
     const ARMED: &str = "tree-armed";
@@ -4903,36 +4904,6 @@ pub(crate) mod tree_fixture {
         let path = dir.join(format!("{name}-wrapper.sh"));
         std::fs::write(&path, lines.join("\n") + "\n").expect("write the wrapper");
         (PathBuf::from("sh"), vec![path.display().to_string()])
-    }
-
-    /// Polls `holder.started()` on `tokio::time::sleep` steps until it holds or `ceiling`
-    /// passes. Async on purpose: a test selects the runner future against it, so the runner
-    /// keeps draining while the holder starts.
-    pub(crate) async fn started_within(holder: &Holder, ceiling: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + ceiling;
-        loop {
-            if holder.started() {
-                return true;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    /// Deletes the temp dir while still owning it, then drops it. On Windows the delete
-    /// fails while a process has a file or its working directory there, so a stuck
-    /// process reads as a red; elsewhere it is a plain delete.
-    pub(crate) fn remove_when_free(dir: tempfile::TempDir) {
-        let removed = wait_until(
-            || match std::fs::remove_dir_all(dir.path()) {
-                Ok(()) => true,
-                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-            },
-            HANG_GUARD,
-        );
-        assert!(removed, "{} stayed in use", dir.path().display());
     }
 
     /// The armed-spawn property over one source file: (violations, sorted names of the

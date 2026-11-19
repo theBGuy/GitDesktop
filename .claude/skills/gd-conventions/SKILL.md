@@ -1608,13 +1608,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   the git runner (`run_git_spawn`), the gh and glab runners, host-mode agent
   runs, and the login-shell probes, which arm their `setsid` child and never
   call `prepare`. Unarmed on purpose: the gh/glab sign-in child in
-  forge/session.rs, agent.rs `run_capture_parts`, and the two console
-  launchers. Not armed yet: the PTY children and their `taskkill` path (pty.rs
-  `kill_tree`), mcp.rs `run_client_cli`, agent_sandbox.rs `run_build` and
-  hooks.rs `git_run_hook_manager`. Tree tests build on the fixtures in
-  `proc_tree::test_support` (`Holder`, `wait_until`, `HANG_GUARD`): they
-  observe the holder start and die and never sleep for either, and a survivor
-  is proven by `confirm_alive`, never by a bare `alive()`.
+  forge/session.rs and the two console launchers. Not armed yet:
+  the PTY children and their `taskkill` path (pty.rs `kill_tree`),
+  mcp.rs `run_client_cli`, agent_sandbox.rs `run_build`, hooks.rs
+  `git_run_hook_manager` and agent.rs `run_capture_parts` (the CLI probes,
+  the model listing and the container runtime commands). Tree tests build
+  on the fixtures in `proc_tree::test_support` (`Holder`, `wait_until`,
+  `HANG_GUARD`, `started_within`, `remove_when_free`): they observe the
+  holder start and die and never sleep for either, and a survivor is proven
+  by `confirm_alive`, never by a bare `alive()`.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
