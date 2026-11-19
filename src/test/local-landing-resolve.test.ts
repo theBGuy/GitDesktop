@@ -184,7 +184,47 @@ describe("resolveLocalLanding", () => {
       path: "C:/b",
       name: "b",
     });
-    expect(origin.mock.calls.map((c) => c[0])).toEqual(["C:/a", "C:/b"]);
+    expect(origin.mock.calls.map((c) => c[0])).toEqual(["C:/b"]);
+  });
+
+  it("R4: a stale first candidate whose origin would still prove is never read", async () => {
+    // The default origin mock proves every path, as the backend's remote-URL
+    // cache can for a folder that no longer opens.
+    validate.mockRejectedValueOnce({ kind: "notARepo", message: "gone" });
+    expect(await settle(PR, [recent("C:/a"), recent("C:/b")])).toEqual({
+      kind: "local",
+      path: "C:/b",
+      name: "b",
+    });
+    expect(origin.mock.calls.map((c) => c[0])).toEqual(["C:/b"]);
+  });
+
+  it("R4: of three candidates, a failed first is skipped and the proof goes on past an unproven second", async () => {
+    validate.mockRejectedValueOnce({ kind: "notARepo", message: "gone" });
+    origin.mockImplementation(async (p) =>
+      p === "C:/b" ? { ...PROVEN_ORIGIN, path: "acme/other" } : PROVEN_ORIGIN,
+    );
+    expect(
+      await settle(PR, [recent("C:/a"), recent("C:/b"), recent("C:/c")]),
+    ).toEqual({ kind: "local", path: "C:/c", name: "c" });
+    expect(origin.mock.calls.map((c) => c[0])).toEqual(["C:/b", "C:/c"]);
+  });
+
+  it("R4: a first check failing with another kind leaves that clone out even when it would prove", async () => {
+    validate.mockRejectedValueOnce({
+      kind: "git",
+      message: "fatal",
+      code: 128,
+      stderr: "fatal: unsafe repository",
+    });
+    origin.mockImplementation(async (p) =>
+      p === "C:/a" ? PROVEN_ORIGIN : { ...PROVEN_ORIGIN, path: "acme/other" },
+    );
+    expect(await settle(PR, [recent("C:/a"), recent("C:/b")])).toEqual({
+      kind: "browser",
+      reason: "unproven",
+    });
+    expect(origin.mock.calls.map((c) => c[0])).toEqual(["C:/b"]);
   });
 
   it("R4: two clones that both prove land on the first, with no second origin read", async () => {

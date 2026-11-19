@@ -1,8 +1,9 @@
 import { act, renderHook } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useNavLensSync } from "@/features/repository/use-nav-lens-sync";
 import type { RemoteLens } from "@/lib/git/types";
-import { useLensState } from "@/lib/repo-lens/queries";
+import { useLensState, useUpstreamRemoteGone } from "@/lib/repo-lens/queries";
 import {
   __resetNavHistoryForTests,
   currentSegment,
@@ -10,11 +11,13 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 
 // The history's lens stamp follows the live lens, compared with the stamp
-// (never a previous render) and only once the lens reads have answered.
+// (never a previous render) and only once the lens reads have answered; a
+// remote selection recorded under Upstream drops once the remote is gone.
 
 vi.mock("@/lib/repo-lens/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/repo-lens/queries")>()),
   useLensState: vi.fn(),
+  useUpstreamRemoteGone: vi.fn(),
 }));
 
 const REPO = "C:/repos/alpha";
@@ -26,10 +29,38 @@ const entries = () => currentSegment(hist())?.entries ?? [];
 const lens = () => currentSegment(hist())?.lens ?? null;
 const issue = (n: number) => ({ kind: "remote" as const, id: String(n) });
 
-let live: { lens: RemoteLens; answered: boolean };
+let live: {
+  lens: RemoteLens;
+  answered: boolean;
+  stored: RemoteLens;
+  upstreamGone: boolean;
+};
 
+/** The live lens, with the stored choice equal to it and the remote present. */
 function setLens(lens: RemoteLens, answered = true) {
-  live = { lens, answered };
+  live = { lens, answered, stored: lens, upstreamGone: false };
+}
+
+/** The reads after `git remote remove upstream`: the list answered without the
+ *  remote, the stored choice still Upstream, the gated lens on the fork. */
+function setRemoteGone(over: Partial<typeof live> = {}) {
+  live = {
+    lens: "origin",
+    answered: true,
+    stored: "upstream",
+    upstreamGone: true,
+    ...over,
+  };
+}
+
+/** Mounts over a trail whose segment a cold fork re-seeded as "upstream", then
+ *  selects remote issue 7 under that stamp. */
+function mountOnUpstream(repoPath = REPO) {
+  setLens("upstream");
+  const hook = mount(repoPath);
+  expect(lens()).toBe("upstream");
+  act(() => st().selectIssue(issue(7)));
+  return hook;
 }
 
 /** Opens `root` and records a three-entry trail ending on the Issues tab. */
@@ -56,8 +87,9 @@ beforeEach(() => {
     settled: live.answered,
     answered: live.answered,
     waiting: false,
-    storedLens: live.lens,
+    storedLens: live.stored,
   }));
+  vi.mocked(useUpstreamRemoteGone).mockImplementation(() => live.upstreamGone);
 });
 
 afterEach(() => {
@@ -194,6 +226,157 @@ describe("useNavLensSync", () => {
     setLens("upstream");
     mount(null);
     expect(syncNavLens).not.toHaveBeenCalled();
+    expect(hist()).toBe(before);
+  });
+});
+
+describe("useNavLensSync when the upstream remote is gone", () => {
+  it("drops a remote issue recorded under Upstream and re-seeds as origin", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    setRemoteGone();
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toBeNull();
+    expect(lens()).toBe("origin");
+    expect(entries()).toHaveLength(1);
+    expect(entries()[0].selection.selectedIssue ?? null).toBeNull();
+  });
+
+  it("drops a remote pull request with its pending review and align", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    act(() => {
+      st().setRepoTab("pulls");
+      st().selectPr({ kind: "remote", id: "12" });
+      useUiStore.setState({ pendingReviewId: "r1", pendingPrAlign: true });
+    });
+    setRemoteGone();
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st()).toMatchObject({
+      selectedPr: null,
+      pendingReviewId: null,
+      pendingPrAlign: false,
+    });
+    expect(lens()).toBe("origin");
+  });
+
+  it("keeps a local pull request under the same reads", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    const local = { kind: "local" as const, id: "draft-1" };
+    act(() => {
+      st().setRepoTab("pulls");
+      st().selectPr(local);
+    });
+    setRemoteGone();
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedPr).toEqual(local);
+    expect(lens()).toBe("origin");
+  });
+
+  it("keeps the issue while the list still offers the remote", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    setRemoteGone({ upstreamGone: false });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toEqual(issue(7));
+    expect(lens()).toBe("origin");
+    expect(entries()).toHaveLength(1);
+    expect(entries()[0].selection).toMatchObject({ selectedIssue: issue(7) });
+  });
+
+  it("keeps the issue when the stored lens is origin", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    setRemoteGone({ stored: "origin" });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toEqual(issue(7));
+    expect(lens()).toBe("origin");
+  });
+
+  it("keeps the issue and every entry under a null stamp", () => {
+    trailIn(REPO);
+    const { index } = hist();
+    const kept = entries();
+    setRemoteGone();
+    mount();
+    expect(st().selectedIssue).toEqual(issue(4));
+    expect(lens()).toBe("origin");
+    expect(entries()).toBe(kept);
+    expect(hist().index).toBe(index);
+  });
+
+  it("drops it before the forge status answers, and never again after", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    setRemoteGone({ answered: false });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toBeNull();
+    expect(lens()).toBe("origin");
+    act(() => st().selectIssue(issue(8)));
+    const before = hist();
+    setRemoteGone();
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toEqual(issue(8));
+    expect(hist()).toBe(before);
+  });
+
+  it("drops it when only the remotes answer changes", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    // Unanswered, so the stamp holds "upstream" across the live "origin".
+    setRemoteGone({ answered: false, upstreamGone: false });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toEqual(issue(7));
+    expect(lens()).toBe("upstream");
+    setRemoteGone({ answered: false });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toBeNull();
+    expect(lens()).toBe("origin");
+  });
+
+  it("drops it when only the stored lens changes back to Upstream", () => {
+    trailIn(REPO);
+    const hook = mountOnUpstream();
+    // The remote reads gone, but the stored choice is Fork: nothing drops.
+    setRemoteGone({ answered: false, stored: "origin" });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toEqual(issue(7));
+    expect(lens()).toBe("upstream");
+    setRemoteGone({ answered: false });
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toBeNull();
+    expect(lens()).toBe("origin");
+  });
+
+  it("clears once when Strict Mode replays the mount", () => {
+    trailIn(REPO);
+    act(() => {
+      st().syncNavLens(REPO, "upstream");
+      st().selectIssue(issue(7));
+    });
+    expect(lens()).toBe("upstream");
+    const clearRemoteSelections = vi.fn(st().clearRemoteSelections);
+    useUiStore.setState({ clearRemoteSelections });
+    setRemoteGone();
+    renderHook(({ repo }) => useNavLensSync(repo), {
+      initialProps: { repo: REPO },
+      wrapper: StrictMode,
+    });
+    expect(clearRemoteSelections).toHaveBeenCalledTimes(1);
+    expect(st().selectedIssue).toBeNull();
+    expect(lens()).toBe("origin");
+    expect(entries()).toHaveLength(1);
+    expect(entries()[0].selection.selectedIssue ?? null).toBeNull();
+  });
+
+  it("touches nothing while another repository is open", () => {
+    trailIn(OTHER);
+    const hook = mountOnUpstream(OTHER);
+    const before = hist();
+    setRemoteGone();
+    act(() => hook.rerender({ repo: REPO }));
+    expect(st().selectedIssue).toEqual(issue(7));
     expect(hist()).toBe(before);
   });
 });

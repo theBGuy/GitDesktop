@@ -98,7 +98,9 @@ export interface NavSegmentTarget {
 
 /** What a navigator that keeps the history knows at its landing. */
 export interface NavCarry {
-  /** The OPEN repository's lens before `beforeSelect` ran, by the reader; null when it could not tell. */
+  /** The OPEN repository's lens before `beforeSelect` ran, by the reader; null when it
+   *  could not tell. From under an overlay a recorded stamp outranks it on a hop to
+   *  another repository, or back under that stamp. */
   lensFrom: RemoteLens | null;
   /** The target repository's lens after `beforeSelect`; null when no reader could tell. */
   lens: RemoteLens | null;
@@ -107,13 +109,35 @@ export interface NavCarry {
   live: Pick<UiState, NavSelectionKey | "navHistory">;
 }
 
+/** A cross-repository restore's folder check. "gone": the backend answered not a
+ *  directory, not a repository, or another root. "refused": git answered and the folder
+ *  cannot be opened (its fatal exit, or a working tree it names that is not a
+ *  directory). "unknown": the check failed any other way, or ran out of time. */
+export type NavTargetCheck = "open" | "gone" | "refused" | "unknown";
+
 export interface NavRestoreOptions {
-  /** Cross-repository steps only. Whether the target can still be opened. Must never reject. */
-  validate?: (target: NavSegmentTarget) => Promise<boolean>;
-  /** Run inside the landing, before its set, when the target segment's lens is non-null. */
+  /** Cross-repository steps only. The target folder's check (see {@link NavTargetCheck}).
+   *  Must never reject. */
+  validate?: (target: NavSegmentTarget) => Promise<NavTargetCheck>;
+  /** Run inside the landing, before its set, when the target segment's lens is non-null
+   *  and `lensGone` did not answer true. */
   applyLens?: (repoPath: string, lens: RemoteLens) => void;
-  /** Called once per press, after every stop of a dead target's repository was removed. */
-  onDead?: (target: NavSegmentTarget, delta: -1 | 1) => void;
+  /** Called once per press, after every stop of the target's repository was removed,
+   *  with the answer that removed them. */
+  onDead?: (
+    target: NavSegmentTarget,
+    delta: -1 | 1,
+    reason: "gone" | "refused",
+  ) => void;
+  /** Called once per press whose check answered "unknown" while that press is still
+   *  the current one; nothing was removed and nothing landed. */
+  onUnchecked?: (target: NavSegmentTarget, delta: -1 | 1) => void;
+  /** Asked inside the landing, once, when the target segment's lens is non-null. True
+   *  only on positive evidence that the lens's remote is gone; false when it cannot
+   *  tell. A true answer skips `applyLens` and drops the restored remote item; for a
+   *  segment not already stamped "origin" it also re-seeds that segment as "origin"
+   *  and arms no board return. */
+  lensGone?: (repoPath: string, lens: RemoteLens) => boolean;
 }
 
 type NavState = Pick<
@@ -396,8 +420,8 @@ function arrivalOf(next: NavState): NavEntry {
   return { tab, selection: selectionOf(tab, next), anchor: null };
 }
 
-/** A carried hop's history, or null when the hop starts no segment and the ordinary rules
- *  apply (the lens sync then does its own work). */
+/** A carried hop's history, or null when the hop neither starts a segment nor rejoins one
+ *  and the ordinary rules apply (the lens sync then does its own work). */
 function carriedHistory(
   next: NavState & { repoPath: string },
   prev: NavState,
@@ -430,8 +454,28 @@ function carriedHistory(
   const from = keepShown ? shownFrom : here;
   const switching = next.repoPath !== prev.repoPath;
   const stamp = from.lens ?? PROVISIONAL_NAV_LENS;
-  const departure = carry.lensFrom ?? stamp;
-  if (!switching && (carry.lens === null || carry.lens === departure))
+  // Under an overlay the lens sync is unmounted, so a recorded stamp outranks the live
+  // lens: the stored stops still stand under it. That holds on leaving the repository,
+  // and on a same-repository hop that lands under the stamp after the live lens moved
+  // off it, which rejoins the segment here because the ordinary tab-change rule would
+  // rewrite the departing stop from a selection `beforeSelect` may have cleared.
+  const overlaid = prev.view !== "repo" && from.lens !== null;
+  const rejoins =
+    overlaid &&
+    !switching &&
+    carry.lens === from.lens &&
+    carry.lensFrom !== null &&
+    carry.lensFrom !== from.lens;
+  // Any other hop reads the live lens, so a same-repository one that changes no lens
+  // leaves the stamp as recorded for the repository view's guard, which reads it against
+  // the stored choice and the remotes list. A null stamp takes the live lens too.
+  const lensFrom = overlaid && (switching || rejoins) ? null : carry.lensFrom;
+  const departure = lensFrom ?? stamp;
+  if (
+    !switching &&
+    !rejoins &&
+    (carry.lens === null || carry.lens === departure)
+  )
     return null;
   const stored = from.entries[before.index];
   // Under an overlay the departing entry stays as stored: its anchor was read on leaving.
@@ -442,12 +486,12 @@ function carriedHistory(
   // Brought in step with the live lens the way syncLens would: only a stamp the live
   // lens contradicts drops the stops recorded under it.
   const kept =
-    carry.lensFrom !== null && carry.lensFrom !== stamp
+    lensFrom !== null && lensFrom !== stamp
       ? [departing]
       : [...from.entries.slice(0, before.index), departing];
   const departingSegment: NavSegment = {
     ...from,
-    lens: carry.lensFrom ?? (switching ? from.lens : stamp),
+    lens: lensFrom ?? (switching ? from.lens : stamp),
     entries: kept,
   };
   return normalize(
@@ -488,7 +532,7 @@ export function recordNavigation(
       ? anchorOnLeave(next, prev, anchorFor)
       : history;
   }
-  // C: a carried hop that changes the repository or the lens starts a segment.
+  // C: a carried hop that changes the repository or the lens starts or rejoins a segment.
   if (carry !== null) {
     const carried = carriedHistory(
       { ...next, repoPath: next.repoPath },

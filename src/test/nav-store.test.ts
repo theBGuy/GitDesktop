@@ -10,6 +10,7 @@ import {
   NAV_SELECTION_FIELDS,
   type NavEntry,
   type NavSegment,
+  type NavTargetCheck,
   readNavAnchor,
   registerNavAnchorProvider,
   registerNavLensReader,
@@ -18,6 +19,7 @@ import {
   selectionOf,
 } from "@/lib/stores/nav-history";
 import {
+  claimWarmRepoShell,
   type RepoTab,
   registerRepoShellWarmup,
   type UiState,
@@ -1446,7 +1448,7 @@ describe("carried hops", () => {
     });
     // Back re-applies the departing lens and lands on the departing stop, with no
     // validation: the repository is the open one.
-    const validate = vi.fn(async () => true);
+    const validate = vi.fn(async (): Promise<NavTargetCheck> => "open");
     const applyLens = vi.fn((repoPath: string, l: RemoteLens) => {
       lensOf[repoPath] = l;
       st().clearRemoteSelections();
@@ -1477,20 +1479,35 @@ const carriedIssue = (
 
 /** A `validate` whose answers are given by hand, every pending call at once. */
 function deferredValidate() {
-  const pending: ((ok: boolean) => void)[] = [];
+  const pending: ((answer: NavTargetCheck) => void)[] = [];
   const validate = vi.fn(
     (_target: unknown) =>
-      new Promise<boolean>((resolve) => {
+      new Promise<NavTargetCheck>((resolve) => {
         pending.push(resolve);
       }),
   );
-  const answer = (ok: boolean) => {
-    for (const resolve of pending.splice(0)) resolve(ok);
+  const answer = (check: NavTargetCheck) => {
+    for (const resolve of pending.splice(0)) resolve(check);
   };
   return { validate, answer };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+/** Alpha, beta, alpha, beta, alpha, standing on the middle alpha: beta lies both
+ *  behind (lens "origin") and ahead (lens "upstream"). */
+function fiveSegments() {
+  readLenses({ [OTHER]: "origin" });
+  enterRepo();
+  carriedIssue(OTHER, 1);
+  carriedIssue(REPO, 2);
+  lensOf[OTHER] = "upstream";
+  carriedIssue(OTHER, 3);
+  carriedIssue(REPO, 4);
+  st().goBack();
+  st().goBack();
+  expect(hist().segment).toBe(2);
+}
 
 describe("cross-segment restore", () => {
   it("Back and Forward land the other repository's stop, the board return on Projects", () => {
@@ -1583,7 +1600,7 @@ describe("cross-segment restore", () => {
       lens: null,
     });
     expect(st().repoPath).toBe(OTHER);
-    answer(true);
+    answer("open");
     await flush();
     stop();
     expect(seen).toEqual([[pressed, pressed, REPO]]);
@@ -1592,7 +1609,7 @@ describe("cross-segment restore", () => {
     read.mockClear();
     st().goForward({ validate });
     expect(read).not.toHaveBeenCalled();
-    answer(true);
+    answer("open");
     await flush();
     expect(read).toHaveBeenCalledTimes(1);
     expect(st().repoPath).toBe(OTHER);
@@ -1622,13 +1639,14 @@ describe("cross-segment restore", () => {
     st().goBack({ validate, onDead });
     const pressed = st();
     const n = countNotifications();
-    answer(false);
+    answer("gone");
     await flush();
     n.stop();
     expect(n.count).toBe(1);
     expect(onDead).toHaveBeenCalledExactlyOnceWith(
       { repoPath: OTHER, repoName: "beta", lens: "origin" },
       -1,
+      "gone",
     );
     expect(st()).toMatchObject({
       repoPath: REPO,
@@ -1660,15 +1678,108 @@ describe("cross-segment restore", () => {
     const { validate, answer } = deferredValidate();
     const onDead = vi.fn();
     st().goForward({ validate, onDead });
-    answer(false);
+    answer("gone");
     await flush();
     expect(onDead).toHaveBeenCalledExactlyOnceWith(
       { repoPath: OTHER, repoName: "beta", lens: null },
       1,
+      "gone",
     );
     expect(segmentTabs()).toEqual([[REPO, null, ["changes", "issues"]]]);
     expect(st()).toMatchObject({ repoPath: REPO, repoTab: "issues" });
     expect(canGoForward(st())).toBe(false);
+  });
+
+  it("a refused target loses every stop of its repository like a gone one, told refused", async () => {
+    const check = watchInvariants();
+    fiveSegments();
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    const onUnchecked = vi.fn();
+    st().goBack({ validate, onDead, onUnchecked });
+    const pressed = st();
+    const n = countNotifications();
+    answer("refused");
+    await flush();
+    n.stop();
+    expect(n.count).toBe(1);
+    expect(onDead).toHaveBeenCalledExactlyOnceWith(
+      { repoPath: OTHER, repoName: "beta", lens: "origin" },
+      -1,
+      "refused",
+    );
+    expect(onUnchecked).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: pressed.repoTab,
+      selectedIssue: pressed.selectedIssue,
+      interactionEpoch: pressed.interactionEpoch,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes", "issues", "issues"]],
+    ]);
+    expect(hist()).toMatchObject({ segment: 0, index: 1 });
+    expect(check()).toEqual([]);
+  });
+
+  it.each([
+    ["Back", -1, "origin", 1],
+    ["Forward", 1, "upstream", 3],
+  ] as const)(
+    "%s on an unknown check keeps every stop, sets nothing and reports once; the next press lands",
+    async (_n, delta, targetLens, landsOn) => {
+      fiveSegments();
+      const go = (opts: Parameters<UiState["goBack"]>[0]) =>
+        delta === -1 ? st().goBack(opts) : st().goForward(opts);
+      const { validate, answer } = deferredValidate();
+      const onDead = vi.fn();
+      const onUnchecked = vi.fn();
+      go({ validate, onDead, onUnchecked });
+      const pressed = st();
+      const n = countNotifications();
+      answer("unknown");
+      await flush();
+      n.stop();
+      expect(n.count).toBe(0);
+      expect(st()).toBe(pressed);
+      expect(hist().segments.map((s) => [s.repoPath, s.lens])).toEqual([
+        [REPO, null],
+        [OTHER, "origin"],
+        [REPO, null],
+        [OTHER, "upstream"],
+        [REPO, null],
+      ]);
+      expect(onDead).not.toHaveBeenCalled();
+      expect(onUnchecked).toHaveBeenCalledExactlyOnceWith(
+        { repoPath: OTHER, repoName: "beta", lens: targetLens },
+        delta,
+      );
+      // The same press again validates anew and lands on "open".
+      go({ validate, onDead, onUnchecked });
+      expect(validate).toHaveBeenCalledTimes(2);
+      answer("open");
+      await flush();
+      expect(st().repoPath).toBe(OTHER);
+      expect(hist().segment).toBe(landsOn);
+      expect(onUnchecked).toHaveBeenCalledTimes(1);
+      expect(onDead).not.toHaveBeenCalled();
+    },
+  );
+
+  it("an unknown check for a retired press reports nothing and writes nothing", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    const onUnchecked = vi.fn();
+    st().goBack({ validate, onDead, onUnchecked });
+    st().setRepoTab("history");
+    const after = st();
+    answer("unknown");
+    await flush();
+    expect(onUnchecked).not.toHaveBeenCalled();
+    expect(onDead).not.toHaveBeenCalled();
+    expect(st()).toBe(after);
   });
 
   it("a press retired while it validates lands nothing, removes nothing and calls nothing", async () => {
@@ -1680,7 +1791,7 @@ describe("cross-segment restore", () => {
     st().goBack({ validate, onDead, applyLens });
     st().setRepoTab("history");
     const after = st();
-    answer(false);
+    answer("gone");
     await flush();
     expect(onDead).not.toHaveBeenCalled();
     expect(st()).toBe(after);
@@ -1688,7 +1799,7 @@ describe("cross-segment restore", () => {
     st().goBack();
     st().goBack({ validate, onDead, applyLens });
     st().setRepoTab("tags");
-    answer(true);
+    answer("open");
     await flush();
     expect(st()).toMatchObject({ repoPath: OTHER, repoTab: "tags" });
     // Retired even when the step it named is back in place by the settle: an
@@ -1697,12 +1808,12 @@ describe("cross-segment restore", () => {
     st().goBack({ validate });
     st().openMyWork();
     st().closeMyWork();
-    answer(true);
+    answer("open");
     await flush();
     expect(st().repoPath).toBe(OTHER);
     st().goBack({ validate });
     st().selectIssue(issue(9));
-    answer(true);
+    answer("open");
     await flush();
     expect(st()).toMatchObject({ repoPath: OTHER, selectedIssue: issue(9) });
   });
@@ -1713,10 +1824,10 @@ describe("cross-segment restore", () => {
     st().setRepoTab("history");
     carriedIssue(OTHER, 1);
     // One resolver per request, so the older press's answer can come first.
-    const answers: ((ok: boolean) => void)[] = [];
+    const answers: ((answer: NavTargetCheck) => void)[] = [];
     const validate = vi.fn(
       (_target: unknown) =>
-        new Promise<boolean>((resolve) => {
+        new Promise<NavTargetCheck>((resolve) => {
           answers.push(resolve);
         }),
     );
@@ -1727,7 +1838,7 @@ describe("cross-segment restore", () => {
     const [older, newer] = answers;
     const pressed = st();
     // The retired press's dead answer drops no repository and reports nothing.
-    older(false);
+    older("gone");
     await flush();
     expect(onDead).not.toHaveBeenCalled();
     expect(st()).toBe(pressed);
@@ -1736,7 +1847,7 @@ describe("cross-segment restore", () => {
       [OTHER, null, ["issues"]],
     ]);
     const n = countNotifications();
-    newer(true);
+    newer("open");
     await flush();
     n.stop();
     expect(n.count).toBe(1);
@@ -1763,12 +1874,48 @@ describe("cross-segment restore", () => {
     st().goBack({ validate, onDead });
     st().setNavHiddenTabs(["agent"]);
     expect(segmentTabs()).toEqual([[REPO, null, ["changes", "issues"]]]);
-    answer(false);
+    answer("gone");
     await flush();
     expect(onDead).not.toHaveBeenCalled();
     expect(st()).toMatchObject({ repoPath: REPO, repoTab: "issues" });
     expect(hist()).toMatchObject({ segment: 0, index: 1 });
   });
+
+  it.each(["gone", "refused", "unknown"] as const)(
+    "a prune while it validates that leaves the step crossing into another repository acts on nothing (%s)",
+    async (check) => {
+      enterRepo();
+      st().openAgentTab({
+        repoPath: OTHER,
+        repoName: "beta",
+        carryHistory: true,
+      });
+      carriedIssue(GAMMA, 2);
+      const { validate, answer } = deferredValidate();
+      const onDead = vi.fn();
+      const onUnchecked = vi.fn();
+      const applyLens = vi.fn();
+      const lensGone = vi.fn(() => false);
+      st().goBack({ validate, onDead, onUnchecked, applyLens, lensGone });
+      expect(validate).toHaveBeenCalledTimes(1);
+      st().setNavHiddenTabs(["agent"]);
+      // The neighbours differ, so the step back now crosses into REPO while the
+      // press named OTHER: only the repository compare can refuse the answer.
+      expect(segmentTabs()).toEqual([
+        [REPO, null, ["changes"]],
+        [GAMMA, null, ["issues"]],
+      ]);
+      const held = st();
+      const n = countNotifications();
+      answer(check);
+      await flush();
+      n.stop();
+      expect(n.count).toBe(0);
+      expect(onDead).not.toHaveBeenCalled();
+      expect(onUnchecked).not.toHaveBeenCalled();
+      expect(st()).toBe(held);
+    },
+  );
 
   it("validates each other repository in its turn", async () => {
     enterRepo();
@@ -1776,7 +1923,7 @@ describe("cross-segment restore", () => {
     carriedIssue(GAMMA, 2);
     const { validate, answer } = deferredValidate();
     st().goBack({ validate });
-    answer(true);
+    answer("open");
     await flush();
     expect(st().repoPath).toBe(OTHER);
     st().goBack({ validate });
@@ -1785,10 +1932,597 @@ describe("cross-segment restore", () => {
       repoName: "alpha",
       lens: null,
     });
-    answer(true);
+    answer("open");
     await flush();
     expect(st().repoPath).toBe(REPO);
     expect(validate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a restore whose recorded lens is gone", () => {
+  /** A lens apply shaped like the hotkey layer's: it drops remote selections. */
+  const lensApply = () =>
+    vi.fn((repoPath: string, l: RemoteLens) => {
+      lensOf[repoPath] = l;
+      st().clearRemoteSelections();
+    });
+
+  /** Alpha recorded on Upstream at `stop`, then a carried landing in beta. */
+  function upstreamStop(stop: () => void) {
+    readLenses({ [REPO]: "upstream", [OTHER]: "origin" });
+    enterRepo();
+    stop();
+    carriedIssue(OTHER, 2);
+    expect(hist().segments.map((s) => s.lens)).toEqual(["upstream", "origin"]);
+  }
+
+  it("drops a remote pull request and its align, and applies no lens", () => {
+    upstreamStop(() => {
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+    });
+    const applyLens = lensApply();
+    const lensGone = vi.fn(() => true);
+    const epoch = st().interactionEpoch;
+    const check = watchInvariants();
+    st().goBack({ applyLens, lensGone });
+    const problems = check();
+    expect(lensGone).toHaveBeenCalledExactlyOnceWith(REPO, "upstream");
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoName: "alpha",
+      repoTab: "pulls",
+      selectedPr: null,
+      pendingPrAlign: false,
+      pendingReviewId: null,
+      selectedIssue: null,
+      interactionEpoch: epoch + 1,
+      boardReturn: null,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["pulls"]],
+      [OTHER, "origin", ["issues"]],
+    ]);
+    expect(current().selection).toEqual({ selectedPr: null });
+    expect(hist()).toMatchObject({ segment: 0, index: 0 });
+    expect(problems).toEqual([]);
+  });
+
+  it.each([
+    [
+      "a pull request stop",
+      () =>
+        upstreamStop(() => {
+          st().setRepoTab("pulls");
+          st().selectPr(pr(1));
+        }),
+    ],
+    [
+      "a Projects stop with an anchor",
+      () => {
+        readLenses({ [REPO]: "upstream", [OTHER]: "origin" });
+        enterRepo();
+        const { board } = boardProvider();
+        st().setRepoTab("projects");
+        carriedIssue(OTHER, 2, () => {
+          board.opener = "card-9";
+        });
+        expect(hist().segments[0].entries[0].anchor).not.toBeNull();
+      },
+    ],
+  ] as const)(
+    "publishes the landing onto %s as one state: never the gone lens's history or an armed return",
+    (_n, trail) => {
+      trail();
+      const seen: { lens: RemoteLens | null; boardReturn: unknown }[] = [];
+      const unsubscribe = useUiStore.subscribe((s) => {
+        if (s.repoPath !== REPO) return;
+        seen.push({
+          lens: currentSegment(s.navHistory)?.lens ?? null,
+          boardReturn: s.boardReturn,
+        });
+      });
+      st().goBack({ applyLens: lensApply(), lensGone: () => true });
+      unsubscribe();
+      expect(seen.length).toBeGreaterThan(0);
+      for (const state of seen)
+        expect(state).toEqual({ lens: "origin", boardReturn: null });
+    },
+  );
+
+  it("re-seeds the landed segment, keeping the trail past it", () => {
+    upstreamStop(() => {
+      // Stamped Upstream first, so the segment records more than its last stop.
+      st().syncNavLens(REPO, "upstream");
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+    });
+    expect(segmentTabs()[0]).toEqual([REPO, "upstream", ["changes", "pulls"]]);
+    st().goBack({ applyLens: lensApply(), lensGone: () => true });
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["pulls"]],
+      [OTHER, "origin", ["issues"]],
+    ]);
+    expect(canGoBack(st())).toBe(false);
+    expect(canGoForward(st())).toBe(true);
+    st().goForward();
+    expect(st()).toMatchObject({
+      repoPath: OTHER,
+      repoTab: "issues",
+      selectedIssue: issue(2),
+    });
+    expect(hist()).toMatchObject({ segment: 1, index: 0 });
+  });
+
+  it("leaves no stop minted under the gone lens for an in-segment step", () => {
+    upstreamStop(() => {
+      st().syncNavLens(REPO, "upstream");
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+      st().setRepoTab("issues");
+      st().selectIssue(issue(7));
+    });
+    expect(segmentTabs()[0]).toEqual([
+      REPO,
+      "upstream",
+      ["changes", "pulls", "issues"],
+    ]);
+    st().goBack({ applyLens: lensApply(), lensGone: () => true });
+    expect(entries()).toHaveLength(1);
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "issues",
+      selectedPr: null,
+      selectedIssue: null,
+    });
+    st().goBack();
+    expect(entries()).toHaveLength(1);
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      selectedPr: null,
+      selectedIssue: null,
+    });
+  });
+
+  it("writes the history the lens sync writes for the same landing", () => {
+    const stop = () => {
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+    };
+    upstreamStop(stop);
+    st().goBack({ applyLens: lensApply(), lensGone: () => true });
+    const landed = hist();
+    useUiStore.setState(useUiStore.getInitialState(), true);
+    __resetNavHistoryForTests();
+    upstreamStop(stop);
+    st().goBack({ applyLens: () => undefined, lensGone: () => false });
+    expect(lens()).toBe("upstream");
+    st().clearRemoteSelections();
+    st().syncNavLens(REPO, "origin");
+    expect(hist()).toEqual(landed);
+  });
+
+  it("drops a remote issue", () => {
+    upstreamStop(() => {
+      st().setRepoTab("issues");
+      st().selectIssue(issue(7));
+    });
+    const applyLens = lensApply();
+    st().goBack({ applyLens, lensGone: () => true });
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "issues",
+      selectedIssue: null,
+    });
+  });
+
+  it("keeps a local selection, which no lens minted", () => {
+    const local = { kind: "local" as const, id: "L1" };
+    upstreamStop(() => {
+      st().setRepoTab("pulls");
+      st().selectPr(local);
+    });
+    const applyLens = lensApply();
+    st().goBack({ applyLens, lensGone: () => true });
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "pulls",
+      selectedPr: local,
+      pendingPrAlign: true,
+    });
+  });
+
+  it("lands on Projects with no board return, the anchor naming the gone lens's catalog", () => {
+    readLenses({ [REPO]: "upstream", [OTHER]: "origin" });
+    enterRepo();
+    const { board } = boardProvider();
+    st().setRepoTab("projects");
+    carriedIssue(OTHER, 2, () => {
+      board.opener = "card-9";
+    });
+    expect(segmentTabs()[0]).toEqual([REPO, "upstream", ["projects"]]);
+    const applyLens = lensApply();
+    const epoch = st().interactionEpoch;
+    st().goBack({ applyLens, lensGone: () => true });
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "projects",
+      interactionEpoch: epoch + 1,
+      boardReturn: null,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["projects"]],
+      [OTHER, "origin", ["issues"]],
+    ]);
+    expect(current().anchor).toBeNull();
+  });
+
+  it("on a same-repository lens crossing keeps a live remote selection on another tab", () => {
+    readLenses({ [REPO]: "upstream" });
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    st().openPr({
+      kind: "remote",
+      repoPath: REPO,
+      repoName: "alpha",
+      ref: "2",
+      section: null,
+      carryHistory: true,
+      beforeSelect: () => {
+        lensOf[REPO] = "origin";
+      },
+    });
+    expect(hist().segments.map((s) => s.lens)).toEqual(["upstream", "origin"]);
+    st().selectIssue(issue(5));
+    const applyLens = lensApply();
+    st().goBack({ applyLens, lensGone: () => true });
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "pulls",
+      selectedPr: null,
+      selectedIssue: issue(5),
+    });
+    // The re-seeded segment now matches the Fork one after it, so the two join.
+    expect(segmentTabs()).toEqual([[REPO, "origin", ["pulls", "pulls"]]]);
+    expect(hist()).toMatchObject({ segment: 0, index: 0 });
+    expect(entries().map((e) => e.selection)).toEqual([
+      { selectedPr: null },
+      { selectedPr: pr(2) },
+    ]);
+  });
+
+  it("on a same-repository crossing forward joins the preceding Fork segment, losing none of its stops", () => {
+    readLenses({ [REPO]: "origin" });
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    st().openPr({
+      kind: "remote",
+      repoPath: REPO,
+      repoName: "alpha",
+      ref: "2",
+      section: null,
+      carryHistory: true,
+      beforeSelect: () => {
+        lensOf[REPO] = "upstream";
+      },
+    });
+    expect(hist().segments.map((s) => s.lens)).toEqual(["origin", "upstream"]);
+    st().goBack({ applyLens: lensApply() });
+    expect(hist()).toMatchObject({ segment: 0 });
+    const origin = hist().segments[0].entries;
+    const applyLens = lensApply();
+    st().goForward({ applyLens, lensGone: () => true });
+    expect(applyLens).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({
+      repoPath: REPO,
+      repoTab: "pulls",
+      selectedPr: null,
+    });
+    expect(segmentTabs()).toEqual([
+      [REPO, "origin", ["changes", "pulls", "pulls"]],
+    ]);
+    expect(entries().slice(0, origin.length)).toEqual(origin);
+    expect(entries()).toHaveLength(origin.length + 1);
+    expect(hist()).toMatchObject({ segment: 0, index: origin.length });
+    expect(current().selection).toEqual({ selectedPr: null });
+    expect(canGoBack(st())).toBe(true);
+  });
+
+  it("lands as before when the lens is not known gone", () => {
+    upstreamStop(() => {
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+    });
+    const applyLens = lensApply();
+    const lensGone = vi.fn(() => false);
+    st().goBack({ applyLens, lensGone });
+    expect(lensGone).toHaveBeenCalledExactlyOnceWith(REPO, "upstream");
+    expect(applyLens).toHaveBeenCalledExactlyOnceWith(REPO, "upstream");
+    expect(st()).toMatchObject({
+      repoTab: "pulls",
+      selectedPr: pr(1),
+      pendingPrAlign: true,
+    });
+  });
+
+  it("never asks about a segment recorded with no lens", () => {
+    readLenses({});
+    enterRepo();
+    st().setRepoTab("pulls");
+    st().selectPr(pr(1));
+    carriedIssue(OTHER, 2);
+    expect(hist().segments.map((s) => s.lens)).toEqual([null, null]);
+    const applyLens = lensApply();
+    const lensGone = vi.fn(() => true);
+    st().goBack({ applyLens, lensGone });
+    expect(lensGone).not.toHaveBeenCalled();
+    expect(st()).toMatchObject({ repoPath: REPO, selectedPr: pr(1) });
+  });
+
+  describe("a carried hop made from under an overlay", () => {
+    /** Alpha stamped `recorded` with stops on pull request #1 and issue #7, `before`
+     *  run there, then Settings opened over it and the reader turned to `live` for
+     *  alpha. Returns alpha's segment as it stood under the overlay. */
+    function stampedUnderOverlay(
+      recorded: RemoteLens,
+      live: RemoteLens,
+      before?: () => void,
+    ): NavSegment {
+      readLenses({ [REPO]: recorded, [OTHER]: "origin" });
+      enterRepo();
+      st().syncNavLens(REPO, recorded);
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+      st().setRepoTab("issues");
+      st().selectIssue(issue(7));
+      before?.();
+      st().openSettings();
+      lensOf[REPO] = live;
+      return currentSegment(hist()) as NavSegment;
+    }
+
+    it("keeps the recorded Upstream stamp and every stop, and Back drops the gone lens's issue", () => {
+      const held = stampedUnderOverlay("upstream", "origin");
+      carriedIssue(OTHER, 2);
+      expect(hist().segments[0]).toEqual(held);
+      expect(segmentTabs()).toEqual([
+        [REPO, "upstream", ["changes", "pulls", "issues"]],
+        [OTHER, "origin", ["issues"]],
+      ]);
+      expect(hist().segments[0].entries.at(-1)?.selection).toEqual({
+        selectedIssue: issue(7),
+      });
+      const applyLens = lensApply();
+      const lensGone = vi.fn(() => true);
+      st().goBack({ applyLens, lensGone });
+      expect(lensGone).toHaveBeenCalledExactlyOnceWith(REPO, "upstream");
+      expect(applyLens).not.toHaveBeenCalled();
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoTab: "issues",
+        selectedIssue: null,
+      });
+      expect(segmentTabs()).toEqual([
+        [REPO, "origin", ["issues"]],
+        [OTHER, "origin", ["issues"]],
+      ]);
+      expect(hist()).toMatchObject({ segment: 0, index: 0 });
+    });
+
+    it("keeps the recorded Upstream stamp, and Back applies it while it is not known gone", () => {
+      stampedUnderOverlay("upstream", "origin");
+      carriedIssue(OTHER, 2);
+      const applyLens = lensApply();
+      st().goBack({ applyLens, lensGone: () => false });
+      expect(applyLens).toHaveBeenCalledExactlyOnceWith(REPO, "upstream");
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoTab: "issues",
+        selectedIssue: issue(7),
+      });
+      expect(hist()).toMatchObject({ segment: 0, index: 2 });
+    });
+
+    it("keeps a recorded Fork stamp the reader turned Upstream, and Back applies Fork", () => {
+      const held = stampedUnderOverlay("origin", "upstream");
+      carriedIssue(OTHER, 2);
+      expect(hist().segments[0]).toEqual(held);
+      expect(held.lens).toBe("origin");
+      const applyLens = lensApply();
+      st().goBack({ applyLens });
+      expect(applyLens).toHaveBeenCalledExactlyOnceWith(REPO, "origin");
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoTab: "issues",
+        selectedIssue: issue(7),
+      });
+    });
+
+    it("keeps the stops up to the pointer, the stop at it as stored", () => {
+      const held = stampedUnderOverlay("upstream", "origin", () =>
+        st().goBack(),
+      );
+      expect(hist().index).toBe(1);
+      carriedIssue(OTHER, 2);
+      const [departed] = hist().segments;
+      expect(departed).toEqual({ ...held, entries: held.entries.slice(0, 2) });
+      expect(departed.entries[1]).toBe(held.entries[1]);
+      expect(departed.lens).toBe("upstream");
+    });
+
+    it.each([
+      [
+        "a tab open",
+        () =>
+          st().openRepoView({
+            repoPath: REPO,
+            repoName: "alpha",
+            tab: "tags",
+            carryHistory: true,
+          }),
+        { tab: "tags", selection: { selectedTag: null }, anchor: null },
+      ],
+      [
+        "a run open",
+        () =>
+          st().openRun({
+            repoPath: REPO,
+            repoName: "alpha",
+            runId: 4,
+            carryHistory: true,
+          }),
+        { tab: "actions", selection: { selectedRunId: 4 }, anchor: null },
+      ],
+      [
+        "an issue open",
+        () => carriedIssue(REPO, 9),
+        { tab: "issues", selection: { selectedIssue: issue(9) }, anchor: null },
+      ],
+    ] as const)(
+      "a same-repository hop (%s) records as before, under the Upstream stamp",
+      (_n, open, arrival) => {
+        const held = stampedUnderOverlay("upstream", "origin");
+        open();
+        expect(hist()).toEqual({
+          segments: [{ ...held, entries: [...held.entries, arrival] }],
+          segment: 0,
+          index: 3,
+        });
+        expect(lens()).toBe("upstream");
+      },
+    );
+
+    it("a segment with no stamp still takes the live lens", () => {
+      readLenses({ [OTHER]: "origin" });
+      enterRepo();
+      st().setRepoTab("pulls");
+      st().selectPr(pr(1));
+      st().setRepoTab("issues");
+      st().selectIssue(issue(7));
+      st().openSettings();
+      expect(lens()).toBeNull();
+      lensOf[REPO] = "upstream";
+      carriedIssue(OTHER, 2);
+      expect(segmentTabs()).toEqual([
+        [REPO, "upstream", ["issues"]],
+        [OTHER, "origin", ["issues"]],
+      ]);
+      expect(hist().segments[0].entries[0].selection).toEqual({
+        selectedIssue: issue(7),
+      });
+    });
+
+    /** A `beforeSelect` that applies `l` to alpha the way the dock's lens
+     *  re-application does: the reader turns and the remote selections clear. */
+    const reapply = (l: RemoteLens) => () => {
+      lensOf[REPO] = l;
+      st().clearRemoteSelections();
+    };
+    /** A carried open of alpha's pull request `number`, re-applying `l` first. */
+    const carriedPr = (number: number, l: RemoteLens) =>
+      st().openPr({
+        kind: "remote",
+        repoPath: REPO,
+        repoName: "alpha",
+        ref: String(number),
+        section: null,
+        carryHistory: true,
+        beforeSelect: reapply(l),
+      });
+    const prArrival = (n: number) => ({
+      tab: "pulls",
+      selection: { selectedPr: pr(n) },
+      anchor: null,
+    });
+
+    it("a same-repository hop back under the stamp after the live lens moved off it rejoins the segment", () => {
+      const held = stampedUnderOverlay("upstream", "origin");
+      carriedPr(3, "upstream");
+      expect(hist()).toEqual({
+        segments: [{ ...held, entries: [...held.entries, prArrival(3)] }],
+        segment: 0,
+        index: 3,
+      });
+      expect(hist().segments[0].entries[2]).toBe(held.entries[2]);
+      expect(held.entries[2].selection).toEqual({ selectedIssue: issue(7) });
+      const applyLens = lensApply();
+      st().goBack({ applyLens });
+      expect(applyLens).not.toHaveBeenCalled();
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoTab: "issues",
+        selectedIssue: issue(7),
+      });
+    });
+
+    it("a hop back under a Fork stamp the reader turned Upstream rejoins it too", () => {
+      const held = stampedUnderOverlay("origin", "upstream");
+      carriedPr(3, "origin");
+      expect(hist()).toEqual({
+        segments: [{ ...held, entries: [...held.entries, prArrival(3)] }],
+        segment: 0,
+        index: 3,
+      });
+      expect(lens()).toBe("origin");
+      expect(hist().segments[0].entries[2]).toBe(held.entries[2]);
+      expect(held.entries[2].selection).toEqual({ selectedIssue: issue(7) });
+      const applyLens = lensApply();
+      st().goBack({ applyLens });
+      expect(applyLens).not.toHaveBeenCalled();
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoTab: "issues",
+        selectedIssue: issue(7),
+      });
+    });
+
+    it("a rejoin keeps the stops up to the pointer, the stop at it as stored", () => {
+      const held = stampedUnderOverlay("upstream", "origin", () =>
+        st().goBack(),
+      );
+      expect(hist().index).toBe(1);
+      carriedIssue(REPO, 3, reapply("upstream"));
+      expect(hist()).toEqual({
+        segments: [
+          {
+            ...held,
+            entries: [
+              ...held.entries.slice(0, 2),
+              {
+                tab: "issues",
+                selection: { selectedIssue: issue(3) },
+                anchor: null,
+              },
+            ],
+          },
+        ],
+        segment: 0,
+        index: 2,
+      });
+      expect(hist().segments[0].entries[1]).toBe(held.entries[1]);
+      expect(held.entries[1].selection).toEqual({ selectedPr: pr(1) });
+      expect(lens()).toBe("upstream");
+    });
+
+    it("a hop that turns the lens off a stamp the live lens still holds splits as before", () => {
+      const held = stampedUnderOverlay("upstream", "upstream");
+      carriedPr(3, "origin");
+      expect(segmentTabs()).toEqual([
+        [REPO, "upstream", ["changes", "pulls", "issues"]],
+        [REPO, "origin", ["pulls"]],
+      ]);
+      expect(hist().segments[0]).toEqual(held);
+      expect(hist().segments[0].entries[2]).toBe(held.entries[2]);
+      expect(hist()).toMatchObject({ segment: 1, index: 0 });
+      expect(current()).toEqual(prArrival(3));
+    });
   });
 });
 
@@ -1900,16 +2634,17 @@ describe("carried hops read the board's anchor once, at the landing set", () => 
   });
 });
 
-// Registers a warm-up, which is module state with no reset: keep this describe LAST.
 describe("held carried landings", () => {
   const gates: (() => void)[] = [];
+  let unregister: () => void = () => undefined;
   const settle = async () => {
     for (const open of gates.splice(0)) open();
     await new Promise((r) => setTimeout(r, 0));
   };
+  afterEach(() => unregister());
 
   it("build from the state, reader and history at the landing, not the request", async () => {
-    registerRepoShellWarmup(() => ({
+    unregister = registerRepoShellWarmup(() => ({
       settled: new Promise<void>((r) => gates.push(r)),
       stillCurrent: () => true,
     }));
@@ -1943,9 +2678,9 @@ describe("held carried landings", () => {
   });
 });
 
-// Registers its own warm-up per case; after the describe above for the same reason.
 describe("held cross-repository restores", () => {
   const gates: (() => void)[] = [];
+  let unregister: () => void = () => undefined;
   let live = true;
   const claimedAt: number[] = [];
   const claim = vi.fn((_root: string) => {
@@ -1960,11 +2695,15 @@ describe("held cross-repository restores", () => {
     await flush();
   };
   beforeEach(() => {
+    // Nothing leaked from an earlier describe's registration.
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
     live = true;
+    gates.length = 0;
     claimedAt.length = 0;
     claim.mockClear();
-    registerRepoShellWarmup(claim);
+    unregister = registerRepoShellWarmup(claim);
   });
+  afterEach(() => unregister());
 
   it("claim after the press's bump and land once both the warm-up and validation settled", async () => {
     enterRepo();
@@ -1973,7 +2712,7 @@ describe("held cross-repository restores", () => {
     await openGates();
     expect(st().repoPath).toBe(OTHER);
     claim.mockClear();
-    const validate = vi.fn(async () => true);
+    const validate = vi.fn(async (): Promise<NavTargetCheck> => "open");
     st().goBack({ validate });
     expect(claim).toHaveBeenCalledExactlyOnceWith(REPO);
     expect(claimedAt.at(-1)).toBe(st().interactionEpoch);
@@ -1989,7 +2728,10 @@ describe("held cross-repository restores", () => {
     carriedIssue(OTHER, 1);
     await openGates();
     const onDead = vi.fn();
-    st().goBack({ validate: async () => false, onDead });
+    st().goBack({
+      validate: async (): Promise<NavTargetCheck> => "gone",
+      onDead,
+    });
     live = false;
     const before = st();
     await openGates();
@@ -2009,16 +2751,42 @@ describe("held cross-repository restores", () => {
     await openGates();
     expect(st()).toBe(pressed);
     const n = countNotifications();
-    answer(false);
+    answer("gone");
     await flush();
     n.stop();
     expect(n.count).toBe(1);
     expect(onDead).toHaveBeenCalledExactlyOnceWith(
       { repoPath: REPO, repoName: "alpha", lens: null },
       -1,
+      "gone",
     );
     expect(segmentTabs()).toEqual([[OTHER, null, ["issues"]]]);
     expect(st().repoPath).toBe(OTHER);
+  });
+
+  it("validation slower than the warm-up answering unknown keeps every stop and reports once", async () => {
+    enterRepo();
+    carriedIssue(OTHER, 1);
+    await openGates();
+    const { validate, answer } = deferredValidate();
+    const onDead = vi.fn();
+    const onUnchecked = vi.fn();
+    st().goBack({ validate, onDead, onUnchecked });
+    const pressed = st();
+    await openGates();
+    expect(st()).toBe(pressed);
+    answer("unknown");
+    await flush();
+    expect(st()).toBe(pressed);
+    expect(onUnchecked).toHaveBeenCalledExactlyOnceWith(
+      { repoPath: REPO, repoName: "alpha", lens: null },
+      -1,
+    );
+    expect(onDead).not.toHaveBeenCalled();
+    expect(segmentTabs()).toEqual([
+      [REPO, null, ["changes"]],
+      [OTHER, null, ["issues"]],
+    ]);
   });
 
   it("validation slower than the warm-up lands once it answers live", async () => {
@@ -2031,7 +2799,7 @@ describe("held cross-repository restores", () => {
     const pressed = st();
     await openGates();
     expect(st()).toBe(pressed);
-    answer(true);
+    answer("open");
     await flush();
     expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
     expect(hist()).toMatchObject({ segment: 0, index: 1 });
@@ -2051,11 +2819,76 @@ describe("held cross-repository restores", () => {
     });
     expect(hist().segments).toHaveLength(2);
     claim.mockClear();
-    const validate = vi.fn(async () => true);
+    const validate = vi.fn(async (): Promise<NavTargetCheck> => "open");
     st().goBack({ validate });
     expect(claim).not.toHaveBeenCalled();
     expect(validate).not.toHaveBeenCalled();
     expect(st()).toMatchObject({ repoPath: REPO, repoTab: "changes" });
     expect(hist()).toMatchObject({ segment: 0, index: 0 });
+  });
+});
+
+describe("the repo-shell warm-up registration", () => {
+  const provider = (settled: Promise<void>) =>
+    vi.fn((_root: string) => ({ settled, stillCurrent: () => true }));
+
+  it("no warm-up is registered once the suites above disposed theirs", () => {
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+  });
+
+  it("dispose clears only its own registration and never restores an earlier one", () => {
+    const a = provider(Promise.resolve());
+    const b = provider(Promise.resolve());
+    const disposeA = registerRepoShellWarmup(a);
+    const disposeB = registerRepoShellWarmup(b);
+    disposeA();
+    expect(claimWarmRepoShell(OTHER)).not.toBeNull();
+    expect(b).toHaveBeenCalledExactlyOnceWith(OTHER);
+    expect(a).not.toHaveBeenCalled();
+    disposeB();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+    disposeB();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+    expect(a).not.toHaveBeenCalled();
+  });
+
+  it("disposing the newer registration first never restores the older one", () => {
+    const a = provider(Promise.resolve());
+    const b = provider(Promise.resolve());
+    const disposeA = registerRepoShellWarmup(a);
+    const disposeB = registerRepoShellWarmup(b);
+    disposeB();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+    expect(a).not.toHaveBeenCalled();
+    disposeA();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+    expect(a).not.toHaveBeenCalled();
+    expect(b).not.toHaveBeenCalled();
+  });
+
+  it("a second dispose after a newer registration changes nothing", () => {
+    const a = provider(Promise.resolve());
+    const b = provider(Promise.resolve());
+    const disposeA = registerRepoShellWarmup(a);
+    disposeA();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+    const disposeB = registerRepoShellWarmup(b);
+    disposeA();
+    expect(claimWarmRepoShell(OTHER)).not.toBeNull();
+    expect(b).toHaveBeenCalledExactlyOnceWith(OTHER);
+    disposeB();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+  });
+
+  it("the same function registered twice is two registrations", () => {
+    const a = provider(Promise.resolve());
+    const first = registerRepoShellWarmup(a);
+    const second = registerRepoShellWarmup(a);
+    first();
+    expect(claimWarmRepoShell(OTHER)).not.toBeNull();
+    expect(a).toHaveBeenCalledExactlyOnceWith(OTHER);
+    second();
+    expect(claimWarmRepoShell(OTHER)).toBeNull();
+    expect(a).toHaveBeenCalledTimes(1);
   });
 });

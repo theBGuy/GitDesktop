@@ -12,6 +12,7 @@ import {
   type NavHistory,
   type NavRestoreOptions,
   type NavSegmentTarget,
+  type NavTargetCheck,
   pruneHiddenTabs,
   readNavAnchor,
   readNavLens,
@@ -738,9 +739,11 @@ export interface UiState {
   /** One step through {@link UiState.navHistory}. Inside the current segment: one set
    *  that bumps the epoch once. Into another segment: a navigation bumped at the press,
    *  held for another repository on its warm-up and `opts.validate`, and landed with the
-   *  segment's lens applied ahead of one set; a target that fails validation instead
-   *  loses every stop of its repository, with `opts.onDead` called once. An empty
-   *  direction, or any view but the repo, performs no set at all. */
+   *  segment's lens applied ahead of one set. A target the check answers "gone" or
+   *  "refused" instead loses every stop of its repository, with `opts.onDead` called
+   *  once; one it answers "unknown" keeps them all, sets nothing and calls
+   *  `opts.onUnchecked` once. An empty direction, or any view but the repo, performs
+   *  no set at all. */
   goBack: (opts?: NavRestoreOptions) => void;
   goForward: (opts?: NavRestoreOptions) => void;
   /** Marks the NEXT ui-store change as a link hop; call it on the line immediately
@@ -767,12 +770,19 @@ export type RepoShellWarmup = (root: string) => {
 
 // Injected rather than imported: the warm-up and the open claims live in
 // src/features/repository, and src/lib never imports from src/features.
-let repoShellWarmup: RepoShellWarmup | null = null;
+let repoShellWarmup: { warm: RepoShellWarmup } | null = null;
 
 /** Installs the warm-up every cross-repo landing holds on. Replaces any earlier
- *  one, so a module re-evaluated by HMR re-registers cleanly. */
-export function registerRepoShellWarmup(fn: RepoShellWarmup): void {
-  repoShellWarmup = fn;
+ *  one, so a module re-evaluated by HMR re-registers cleanly. Returns its
+ *  unregister, which clears only while this registration is still the current
+ *  one (each call is its own registration, even for the same `fn`) and never
+ *  restores an earlier provider (that one may have been disposed). */
+export function registerRepoShellWarmup(fn: RepoShellWarmup): () => void {
+  const registration = { warm: fn };
+  repoShellWarmup = registration;
+  return () => {
+    if (repoShellWarmup === registration) repoShellWarmup = null;
+  };
 }
 
 /** The registered warm-up for `root`, or null before registration —
@@ -780,7 +790,7 @@ export function registerRepoShellWarmup(fn: RepoShellWarmup): void {
 export function claimWarmRepoShell(
   root: string,
 ): ReturnType<RepoShellWarmup> | null {
-  return repoShellWarmup ? repoShellWarmup(root) : null;
+  return repoShellWarmup ? repoShellWarmup.warm(root) : null;
 }
 
 export const useUiStore = create<UiState>()((set, get) => {
@@ -930,10 +940,11 @@ export const useUiStore = create<UiState>()((set, get) => {
   // that segment's recorded lens applied first. Into the same repository under the
   // other lens it lands with no hold; into another repository it also claims the
   // warm-up at the press and holds on the warm-up and validation, and a press made
-  // during that hold replaces the pending one. No Settings re-check: opening Settings
-  // bumps the epoch, which retires it. The view is tested by comparison so no view key
-  // is spelled here (the leave-guard scan fails a view write outside the store's
-  // members).
+  // during that hold replaces the pending one. At the settle an "unknown" check sets
+  // nothing, and "gone" and "refused" share one non-bumping drop of the repository's
+  // stops; only "open" lands. No Settings re-check: opening Settings bumps the epoch,
+  // which retires it. The view is tested by comparison so no view key is spelled here
+  // (the leave-guard scan fails a view write outside the store's members).
   const restoreNav = (delta: -1 | 1, opts?: NavRestoreOptions) => {
     const s = get();
     if (s.view !== "repo") return;
@@ -966,21 +977,46 @@ export const useUiStore = create<UiState>()((set, get) => {
           const step = restoreStep(get(), delta, readNavAnchor);
           const crossing = step?.crossing;
           if (!step || crossing?.repoPath !== dest.repoPath) return;
+          const { lens } = crossing;
+          // A lens whose remote is known gone is not applied, and the remote item
+          // minted under it is dropped, as a lens flip drops it: its number would
+          // resolve against the other repository.
+          const lensGone =
+            lens !== null && opts?.lensGone?.(crossing.repoPath, lens) === true;
           // Inside the landing, before its set, so no commit sees the restored
           // selection under the lens it was not recorded in.
-          const { lens } = crossing;
           const applyLens = opts?.applyLens;
-          if (lens !== null && applyLens)
+          if (lens !== null && applyLens && !lensGone)
             runBeforeSelect(() => applyLens(crossing.repoPath, lens));
-          set({
+          const patch = {
             repoPath: crossing.repoPath,
             repoName: crossing.repoName,
             ...(get().repoPath !== crossing.repoPath ? CROSS_REPO_RESET : {}),
             ...step.patch,
-            navHistory: step.navHistory,
-            boardReturn: step.anchor
-              ? { anchor: step.anchor, epoch: epochAtRequest }
-              : null,
+            ...(lensGone && step.patch.selectedPr?.kind === "remote"
+              ? { selectedPr: null, pendingPrAlign: false }
+              : {}),
+            ...(lensGone && step.patch.selectedIssue?.kind === "remote"
+              ? { selectedIssue: null }
+              : {}),
+          };
+          // The landed segment's other stops hold numbers minted under the gone lens,
+          // so it is re-seeded as "origin" in this set, as the lens sync would later:
+          // an in-segment step must never restore one. Its anchor names a project of
+          // the gone lens's catalog, so no board return is armed.
+          const reseed = lensGone
+            ? syncLens(
+                { ...get(), ...patch, navHistory: step.navHistory },
+                "origin",
+              )
+            : null;
+          set({
+            ...patch,
+            navHistory: reseed ? reseed.navHistory : step.navHistory,
+            boardReturn:
+              reseed?.reseeded || !step.anchor
+                ? null
+                : { anchor: step.anchor, epoch: epochAtRequest },
           });
         },
         { animate: false },
@@ -992,9 +1028,9 @@ export const useUiStore = create<UiState>()((set, get) => {
     // The claim reads the epoch, so it follows the bump; validation runs beside the
     // warm-up, never after it.
     const warm = claimWarmRepoShell(dest.repoPath);
-    let valid = true;
-    const validating = opts?.validate?.(dest).then((ok) => {
-      valid = ok;
+    let check: NavTargetCheck = "open";
+    const validating = opts?.validate?.(dest).then((answer) => {
+      check = answer;
     });
     if (!warm && !validating) {
       land();
@@ -1007,7 +1043,13 @@ export const useUiStore = create<UiState>()((set, get) => {
       },
       () => {
         if (!restoreIsCurrent(epochAtRequest, delta, dest.repoPath)) return;
-        if (!valid) {
+        if (check === "unknown") {
+          // A check that could not tell keeps every stop, so the same press can
+          // be tried again; no set at all.
+          opts?.onUnchecked?.(dest, delta);
+          return;
+        }
+        if (check !== "open") {
           // Never bumps: the user stays put, and the next press resolves against
           // the pruned history.
           const { navHistory, navHiddenTabs } = get();
@@ -1018,7 +1060,7 @@ export const useUiStore = create<UiState>()((set, get) => {
               navHiddenTabs,
             ),
           });
-          opts?.onDead?.(dest, delta);
+          opts?.onDead?.(dest, delta, check);
           return;
         }
         land();

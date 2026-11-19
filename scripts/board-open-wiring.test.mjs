@@ -1,35 +1,66 @@
-// Pins how the Projects panel wires the card open (src/features/projects/use-card-open.ts):
-// one hook call and none of the open helpers or navigators in the panel, the wait
-// drawn as busy on all three surfaces, the opener recorded through the hook's
-// `noteOpener`, a held Enter on a table or roadmap row opening once and a held key
-// on a group header toggling once, every open route and the arrival announcer
-// reaching the hook (App mounting the announcer once), the open context the hook
-// reads, and the user's project and view picks (and the creates and the delete
-// whose continuations pick), and the view delete, moving the epoch first, and the
-// arguments the Projects anchor provider hands boardAnchorAnswer. The panel can't
-// render under jsdom, so its wiring is read from source; the open hook's behaviour
-// is pinned in src/test/board-card-open.test.tsx, the anchor answer's in
+// Pins how the Projects panel wires the card open
+// (src/features/projects/use-card-open.ts): one hook call and none of the open
+// helpers or navigators in the panel; the wait drawn as busy on all three
+// surfaces; the opener recorded through the hook's `noteOpener`; a held Enter
+// on a table or roadmap row opening once and a held key on a group header
+// toggling once; every open route and the arrival announcer reaching the hook
+// (App mounting the announcer once); App mounting the open repository's lens
+// keeper once outside every view condition, in the return that renders every
+// view able to cover an open repository; the open context the hook reads; the
+// user's project and view picks (and the creates and the delete whose
+// continuations pick) and the view delete, each moving the epoch first; the
+// Projects anchor provider registered once for the Projects tab; and the
+// arguments it hands boardAnchorAnswer. The panel can't render under jsdom, so
+// its wiring is read from source; the open hook's behaviour is pinned in
+// src/test/board-card-open.test.tsx, the anchor answer's in
 // src/test/board-return.test.tsx.
 //
 // Each check fails closed on a file it can't read or a shape it can't find, and each
 // has an in-memory mutant that must turn it red. Files are read with CRLF folded to
 // LF, so a Windows checkout and the CI's LF checkout give the same verdicts.
 //
-// CONTRACT. These are source-shape pins. Green means each pinned shape is present,
-// the stated number of times, at the named site, in the stated textual order. P2's
-// surface compares, P10, P11, P12 and P14 read code with comments stripped; the
-// other reads are of raw text, where a shape left in a comment can count (P1 fails
-// on a name in a comment by design). No panel code is run (P12 alone models the
-// two outcomes of the lens ternary it matched), so they cannot see what a pinned
-// expression computes once more is written around it (`=== openingItemId &&
-// false`), which paths reach a pinned statement from outside its own block (a
-// narrowed key test around onTableKeyDown's guarded toggle), what runs between a
-// note and its call other than a `return` (a `throw`, or the call put under a
-// condition), what a pinned name is read from (the slug read behind the memo's
-// `repoSlug`), or a new site of another shape (a pick or a view write outside the
-// listed handlers). The typecheck catches an unread `noteOpener` parameter and a
-// narrowed chord's dead compare. An equivalent rewrite turns a pin red by design:
-// re-point the pin.
+// CONTRACT. These are source-shape pins. Green means each pinned shape is
+// present, the stated number of times, at the named site, in the stated textual
+// order. P2's surface compares, P10, P11, P12, P14, P14b and P15 read code with
+// comments stripped; the other reads are of raw text, where a shape left in a
+// comment can count (P1 fails on a name in a comment by design). No panel code
+// is run (P12 alone models the two outcomes of the lens ternary it matched), so
+// they cannot see what a pinned expression computes once more is written around
+// it (`=== openingItemId && false`), which paths reach a pinned statement from
+// outside its own block (a narrowed key test around onTableKeyDown's guarded
+// toggle), what runs between a note and its call other than a `return` (a
+// `throw`, or the call put under a condition), what a pinned name is read from
+// (the slug read behind the memo's `repoSlug`), or a new site of another shape
+// (a pick or a view write outside the listed handlers). The typecheck catches
+// an unread `noteOpener` parameter and a narrowed chord's dead compare. A count
+// of a literal attribute also counts a longer attribute that ends in the pinned
+// text (`data-onOpen={openItem}`), the same accepted limit as a copy left in a
+// comment: P2's panel side, P6, P8 and P13. P11's `onValueChange` handlers and
+// its `onClear` count, and P2's surface `item=` and `busy=` reads, are matched
+// at an attribute boundary and do not, though a namespaced attribute
+// (`x:onValueChange={…}`) still passes it. Stripped code still holds string
+// literals, so a copy of a pinned shape inside a string counts as the shape:
+// P11's picks (`void "switchProject(created.id)"`), its hotkey line and its
+// refusal token, and P10's and P15's tag and import counts (P15's view tags
+// included). P15 reads the keeper's tag at brace depth zero of App's last
+// `return (…)`, counting every brace (one inside a string counts); it cannot
+// see a condition inside the keeper itself
+// (src/test/open-repo-lens-keeper.test.tsx covers what the keeper holds) or a
+// wrapper component that mounts it. It reads the covering views by their tags,
+// so it cannot see an early return that renders none of them
+// (`if (view === "help") return null;`) or one through a wrapper component.
+// P14b reads the registration's text, not whether the effect around it runs
+// (`if (!active || true) return;` ahead of it). Its `return` rule reads the
+// call's own statement, so a helper that returns the call while the effect
+// drops the helper's result (`registerBoard();`) reads as returned. P11 finds a
+// handler by its `name(` text, so a real picker spelled
+// `switchProject.call(undefined, v)` beside a noting decoy handler elsewhere
+// reads as noted. P14 reads the opener as read, spent at once and handed on by
+// name at any depth of the call's arguments; it cannot see who else writes or
+// spends `openerRef` (a bracket-spelled spend included), a `return` between the
+// spend and the call, or what `boardAnchorAnswer` does with it (the table in
+// src/test/board-return.test.tsx does). An equivalent rewrite turns a pin red
+// by design: re-point the pin.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -136,7 +167,8 @@ function comparesOwn(span, own) {
 }
 
 /** P2: the panel passes the wait to each surface once, and each surface compares
- *  its card's or row's own item id to it inside a `busy={…}` prop of that element. */
+ *  its card's or row's own item id to it inside a `busy={…}` prop of that element
+ *  (the prop itself, never `data-busy` or `aria-busy`). */
 function checkP2(panel, surfaces) {
   const errors = [];
   const total = count(panel, OPENING_PROP);
@@ -154,7 +186,7 @@ function checkP2(panel, surfaces) {
       (t) => t !== null && ownItem(t) !== null,
     );
     const busy = own.flatMap((t) =>
-      [...t.matchAll(/\bbusy=\{/g)].map((m) => ({
+      [...t.matchAll(/(?<![\w$-])busy=\{/g)].map((m) => ({
         item: ownItem(t),
         span: balanced(t, m.index + "busy=".length),
       })),
@@ -301,6 +333,64 @@ function checkP10(app) {
   return errors;
 }
 
+const KEEPER_TAG = "<OpenRepoLensKeeper />";
+const KEEPER_IMPORT =
+  'import { OpenRepoLensKeeper } from "@/features/repository/OpenRepoLensKeeper";';
+
+/** The views that can cover an open repository: their navigators keep `repoPath`
+ *  (src/lib/stores/ui.ts), so each must render where the keeper does. */
+const REPO_COVERING_VIEWS = [
+  "RepositoryView",
+  "SettingsScreen",
+  "HelpScreen",
+  "ExploreScreen",
+  "MyWorkScreen",
+];
+
+/** P15: App mounts the open repository's lens keeper once, in code, at brace depth
+ *  zero of its last `return (…)`, so no `{…}` expression (a view condition) can
+ *  gate it, and renders each of REPO_COVERING_VIEWS once, inside that same
+ *  return, so no early return shows one without the keeper; the session lens and
+ *  the selections minted under it then live as long as each other. */
+function checkP15(app) {
+  const errors = [];
+  const code = stripComments(app.split("\n")).join("\n");
+  const imports = count(code, KEEPER_IMPORT);
+  if (imports !== 1)
+    errors.push(
+      `the OpenRepoLensKeeper import appears ${imports} times, want 1`,
+    );
+  const tags = count(code, KEEPER_TAG);
+  if (tags !== 1)
+    return [...errors, `${KEEPER_TAG} appears ${tags} times, want 1`];
+  const body = functionBody(code, "App");
+  if (body === null) return [...errors, "no function App( body"];
+  const returns = [...body.matchAll(/\breturn\s*\(/g)];
+  const last = returns.at(-1);
+  const jsx =
+    last === undefined ? null : balanced(body, last.index + last[0].length - 1);
+  if (jsx === null) return [...errors, "App's last return ( doesn't balance"];
+  for (const view of REPO_COVERING_VIEWS) {
+    const tag = new RegExp(`<${view}(?![\\w$])`, "g");
+    const inApp = body.match(tag)?.length ?? 0;
+    const inReturn = jsx.match(tag)?.length ?? 0;
+    if (inApp !== 1 || inReturn !== 1)
+      errors.push(
+        `<${view} appears ${inApp} times in App and ${inReturn} in its last return, want 1 in both`,
+      );
+  }
+  const at = jsx.indexOf(KEEPER_TAG);
+  if (at === -1)
+    return [...errors, `${KEEPER_TAG} is not in App's last return`];
+  let depth = 0;
+  for (const c of jsx.slice(0, at))
+    if (c === "{") depth += 1;
+    else if (c === "}") depth -= 1;
+  if (depth !== 0)
+    errors.push(`${KEEPER_TAG} sits inside a {…} expression (depth ${depth})`);
+  return errors;
+}
+
 /** The body of `function <name>(…) {…}`, or null. */
 function functionBody(text, name) {
   const head = new RegExp(`function ${name}\\s*\\(`).exec(text);
@@ -317,10 +407,11 @@ function functionBody(text, name) {
 const callOf = (name) => new RegExp(`(?<![\\w$.])${name}\\(`);
 const NOTE = /\bnoteUserInteraction\(\)/;
 
-/** Every `onValueChange={…}` handler that calls `name(`. */
+/** Every `onValueChange={…}` handler that calls `name(`, the attribute matched at
+ *  its boundary, so a longer name ending in it (`data-onValueChange`) is not one. */
 function handlersCalling(text, name) {
   const out = [];
-  for (const m of text.matchAll(/\bonValueChange=\{/g)) {
+  for (const m of text.matchAll(/(?<![\w$-])onValueChange=\{/g)) {
     const body = balanced(text, m.index + "onValueChange=".length);
     if (body !== null && callOf(name).test(body)) out.push(body);
   }
@@ -482,7 +573,10 @@ function checkP11(panel) {
   if (buttons.length !== 2)
     errors.push(`want two <ClearViewButton tags, found ${buttons.length}`);
   for (const tag of buttons)
-    if (tag === null || count(tag, "onClear={clearViewByUser}") !== 1)
+    if (
+      tag === null ||
+      [...tag.matchAll(/(?<![\w$-])onClear=\{clearViewByUser\}/g)].length !== 1
+    )
       errors.push("a <ClearViewButton does not pass onClear={clearViewByUser}");
   for (const name of ["switchProject", "pickView", "clearView"]) {
     const body = functionBody(src, name);
@@ -643,7 +737,8 @@ function checkP13(panel) {
 
 /** What the Projects anchor provider hands `boardAnchorAnswer`, as written: the
  *  hook's two anchors, and the armed request, the epoch and the pick generation
- *  read live at the read. */
+ *  read live at the read. The opener, read and spent at the read, is checked on
+ *  its own (`checkP14`). */
 const ANCHOR_ARGS = [
   ["armed", "store.boardReturn?.anchor ?? null"],
   ["held", "heldAnchor"],
@@ -656,7 +751,11 @@ const literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** P14: `readBoardAnchor` calls `boardAnchorAnswer(` once; each of ANCHOR_ARGS
  *  appears in the call's argument text as a complete `key: value` entry (at any
- *  depth: the text is matched, not parsed), and that text holds no `...`. */
+ *  depth: the text is matched, not parsed), and that text holds no `...`. The
+ *  opener is read and spent at once above the call
+ *  (`const opener = openerRef.current; openerRef.current = null;`), with no other
+ *  `openerRef.current` in the body, and handed on as the shorthand `opener`, the
+ *  name appearing only at its read and its hand-off. */
 function checkP14(panel) {
   const src = uncommented(panel);
   const head = /const\s+readBoardAnchor\s*=\s*useEffectEvent\(/.exec(src);
@@ -678,7 +777,58 @@ function checkP14(panel) {
   for (const [prop, value] of ANCHOR_ARGS)
     if (!new RegExp(`[{,] ?${prop}: ?${literal(value)} ?[,}]`).test(flat))
       errors.push(`boardAnchorAnswer( is not handed ${prop}: ${value}`);
+  if (!/[{,] ?opener ?[,}]/.test(flat))
+    errors.push("boardAnchorAnswer( is not handed the shorthand opener");
+  const spend =
+    /const\s+opener\s*=\s*openerRef\.current\s*;\s*openerRef\.current\s*=\s*null\s*;/.exec(
+      body,
+    );
+  if (spend === null || spend.index > calls[0].index)
+    errors.push(
+      "readBoardAnchor does not read the opener and spend it at once above the call",
+    );
+  const touches = count(body, "openerRef.current");
+  if (touches !== 2)
+    errors.push(
+      `readBoardAnchor touches openerRef.current ${touches} times, want 2 (the opener's read and spend)`,
+    );
+  const named = body.match(/(?<![\w$.])opener(?![\w$])/g)?.length ?? 0;
+  if (named !== 2)
+    errors.push(
+      `readBoardAnchor names opener ${named} times, want 2 (its read and its hand-off)`,
+    );
   return errors;
+}
+
+/** P14b: the panel calls `registerNavAnchorProvider(` once (a qualified call
+ *  counts), and that call registers `readBoardAnchor` for the Projects tab, so
+ *  the reader P14 pins is the one Go back asks for the board's place. The call
+ *  is a `return` operand, so the layout effect hands React the unregister. */
+function checkP14b(panel) {
+  const src = uncommented(panel);
+  const calls =
+    src.match(/(?<![\w$])registerNavAnchorProvider\s*\(/g)?.length ?? 0;
+  if (calls !== 1)
+    return [
+      `the panel calls registerNavAnchorProvider( ${calls} times, want 1`,
+    ];
+  if (
+    !/(?<![\w$])registerNavAnchorProvider\(\s*"projects"\s*,\s*readBoardAnchor\s*\)/.test(
+      src,
+    )
+  )
+    return [
+      'the panel\'s registerNavAnchorProvider( call is not ("projects", readBoardAnchor)',
+    ];
+  if (
+    !/(?<![\w$])return[ \t]+(?:[\w$]+\s*\.\s*)*registerNavAnchorProvider\(\s*"projects"\s*,\s*readBoardAnchor\s*\)/.test(
+      src,
+    )
+  )
+    return [
+      "the panel's registerNavAnchorProvider( call is not returned, so its unregister is dropped",
+    ];
+  return [];
 }
 
 const panel = read(PANEL);
@@ -759,6 +909,38 @@ test("P2: the wait reaches each surface once and is compared inside its busy={�
       [],
       `${tag} compare in a comment`,
     );
+    // The compare re-added inside the item's own tag under a name that only ends
+    // in busy; the bare name at the same spot is the control that it would count.
+    const element = BUSY_ELEMENT[tag];
+    const itemTag = openingTags(unbusy, element).find(
+      (t) => t !== null && ownItem(t) !== null,
+    );
+    assert.ok(itemTag, `${tag}: no <${element} with an item={…} to mutate`);
+    for (const name of ["data-busy", "aria-busy", "busy"]) {
+      const attr = `${name}={${compare[1]} === openingItemId}`;
+      const renamed = {
+        ...surfaces,
+        [tag]: mutate(
+          unbusy,
+          itemTag,
+          itemTag.replace(`<${element}`, () => `<${element} ${attr}`),
+        ),
+      };
+      assert.ok(
+        openingTags(renamed[tag], element).some(
+          (t) => t !== null && ownItem(t) !== null && t.includes(attr),
+        ),
+        `${tag}: ${attr} landed outside the <${element} that takes the item`,
+      );
+      if (name === "busy")
+        assert.deepEqual(checkP2(panel, renamed), [], `${tag}: ${attr}`);
+      else
+        assert.notDeepEqual(
+          checkP2(panel, renamed),
+          [],
+          `${tag} compare under ${name}`,
+        );
+    }
   }
 });
 
@@ -868,6 +1050,68 @@ test("P10: App mounts one AppAnnouncer", () => {
   ];
   for (const m of mutants) assert.notDeepEqual(checkP10(m), []);
 });
+
+test("P15: App mounts one OpenRepoLensKeeper outside every view condition", () => {
+  assert.deepEqual(checkP15(app), []);
+  const mutants = {
+    "tag removed": mutate(app, KEEPER_TAG, ""),
+    "tag doubled": mutate(app, KEEPER_TAG, `${KEEPER_TAG}${KEEPER_TAG}`),
+    "import removed": mutate(app, KEEPER_IMPORT, ""),
+    "tag behind a view condition": mutate(
+      app,
+      KEEPER_TAG,
+      `{view === "repo" && ${KEEPER_TAG}}`,
+    ),
+    "tag and import only in comments": mutate(
+      mutate(app, KEEPER_TAG, `{/* ${KEEPER_TAG} */}`),
+      KEEPER_IMPORT,
+      `// ${KEEPER_IMPORT}`,
+    ),
+    "Settings in an early return": earlyReturn("settings", "SettingsScreen"),
+    "Help in an early return": earlyReturn("help", "HelpScreen"),
+    "a covering view doubled": mutate(
+      app,
+      "<ExploreScreen />",
+      "<ExploreScreen /><ExploreScreen />",
+    ),
+  };
+  for (const [label, m] of Object.entries(mutants)) {
+    assert.notEqual(m, app, `${label}: no change`);
+    assert.notDeepEqual(checkP15(m), [], label);
+    // The rule folds no line ending of its own: a CRLF copy gets the same verdict.
+    assert.deepEqual(checkP15(m.replace(/\n/g, "\r\n")), checkP15(m), label);
+  }
+  assert.deepEqual(checkP15(app.replace(/\n/g, "\r\n")), []);
+  // Only the depth rule sees the condition: the counts still hold.
+  assert.deepEqual(checkP15(mutants["tag behind a view condition"]), [
+    `${KEEPER_TAG} sits inside a {…} expression (depth 1)`,
+  ]);
+  for (const [label, view] of [
+    ["Settings in an early return", "SettingsScreen"],
+    ["Help in an early return", "HelpScreen"],
+  ])
+    assert.deepEqual(
+      checkP15(mutants[label]),
+      [
+        `<${view} appears 1 times in App and 0 in its last return, want 1 in both`,
+      ],
+      label,
+    );
+});
+
+/** App with `view`'s screen moved out of the last return into an early return
+ *  ahead of it. */
+function earlyReturn(view, screen) {
+  const branch = `        {view === "${view}" && <${screen} />}\n`;
+  const last = "\n  return (\n    <>\n";
+  const moved = mutate(
+    mutate(app, branch, ""),
+    last,
+    `\n  if (view === "${view}") return <${screen} />;\n${last}`,
+  );
+  assert.ok(!moved.includes(branch) && moved.includes(`return <${screen} />;`));
+  return moved;
+}
 
 /** The panel with `body` (a slice of it) rewritten by `edit`, asserting a change. */
 function within(text, body, edit) {
@@ -1029,11 +1273,52 @@ test("P11: every user start of a pick moves the epoch first; the shared pick fun
       "viewId === null ? clearView() :",
       "viewId === null ? clearViewByUser() :",
     ),
+    // The real handler picks without noting; the noting arrow lives on under a
+    // longer attribute name that ends in the pinned one.
+    "project picker's noting handler renamed": mutate(
+      panel,
+      'onValueChange={(v) => {\n              if (typeof v !== "string") return;\n',
+      'onValueChange={(v) => {\n              if (typeof v !== "string") return;\n              switchProject.call(undefined, v);\n            }}\n            data-onValueChange={(v: unknown) => {\n              if (typeof v !== "string") return;\n',
+    ),
+    "view rows' noting handler renamed": mutate(
+      panel,
+      "value={view?.id ?? NO_VIEW_ROW_ID}\n                            onValueChange={(next) => {\n",
+      'value={view?.id ?? NO_VIEW_ROW_ID}\n                            onValueChange={(next) => {\n                              if (typeof next !== "string") return;\n                              pickView.call(undefined, next === NO_VIEW_ROW_ID ? null : next);\n                            }}\n                            data-onValueChange={(next: unknown) => {\n',
+    ),
+    "first button passes clearViewByUser only under a longer name": mutate(
+      panel,
+      "onClear={clearViewByUser}",
+      "onClear={clearView} data-onClear={clearViewByUser}",
+    ),
+    "second button passes clearViewByUser only under a longer name": (() => {
+      const at = panel.lastIndexOf("onClear={clearViewByUser}");
+      return `${panel.slice(0, at)}onClear={clearView} data-onClear={clearViewByUser}${panel.slice(at + "onClear={clearViewByUser}".length)}`;
+    })(),
   };
   for (const [label, m] of Object.entries(mutants)) {
     assert.notEqual(m, panel, `${label}: no change`);
     assert.notDeepEqual(checkP11(m), [], label);
   }
+  // Only the attribute boundary sees these.
+  for (const [label, why] of [
+    [
+      "project picker's noting handler renamed",
+      "the project picker can't be found",
+    ],
+    [
+      "view rows' noting handler renamed",
+      "the view rows' handler can't be found",
+    ],
+    [
+      "first button passes clearViewByUser only under a longer name",
+      "a <ClearViewButton does not pass onClear={clearViewByUser}",
+    ],
+    [
+      "second button passes clearViewByUser only under a longer name",
+      "a <ClearViewButton does not pass onClear={clearViewByUser}",
+    ],
+  ])
+    assert.deepEqual(checkP11(mutants[label]), [why], label);
 });
 
 test("P12: the open context's other side, its slug, its gate, its fields and its dependencies", () => {
@@ -1164,9 +1449,93 @@ test("P14: the Projects anchor provider hands boardAnchorAnswer its live argumen
       "return boardAnchorAnswer(",
       "return null; // boardAnchorAnswer(",
     ),
+    "the opener read after its spend": swap(
+      "const opener = openerRef.current;\n    openerRef.current = null;",
+      "openerRef.current = null;\n    const opener = openerRef.current;",
+    ),
+    "the opener handed on as null": swap(
+      "opener,\n      armed:",
+      "opener: null,\n      armed:",
+    ),
+    "the opener's spend dropped": swap(
+      "    openerRef.current = null;\n    const store",
+      "    const store",
+    ),
+    "the opener's spend under a condition": swap(
+      "    openerRef.current = null;\n    const store",
+      "    if (active) openerRef.current = null;\n    const store",
+    ),
+    "a later opener: null key": swap(
+      "showArchived,\n    });",
+      "showArchived,\n      opener: null,\n    });",
+    ),
+    "the opener re-armed after its spend": swap(
+      "    return boardAnchorAnswer({",
+      "    openerRef.current = cursorItemId;\n    return boardAnchorAnswer({",
+    ),
   };
   for (const [label, m] of Object.entries(mutants))
     assert.notDeepEqual(checkP14(m), [], label);
+  for (const label of [
+    "the opener read after its spend",
+    "the opener handed on as null",
+    "the opener's spend dropped",
+    "the opener's spend under a condition",
+    "a later opener: null key",
+  ])
+    assert.ok(
+      checkP14(mutants[label]).some((e) => e.includes("opener")),
+      `${label}: the failure doesn't name the opener`,
+    );
+  // A re-arm leaves the read, the spend and the hand-off in place: only the
+  // count of openerRef.current sees it.
+  assert.deepEqual(
+    checkP14(mutants["the opener re-armed after its spend"]),
+    [
+      "readBoardAnchor touches openerRef.current 3 times, want 2 (the opener's read and spend)",
+    ],
+    "the opener re-armed after its spend",
+  );
+});
+
+test("P14b: the panel registers readBoardAnchor once, for the Projects tab", () => {
+  assert.deepEqual(checkP14b(panel), []);
+  const REGISTRATION = 'registerNavAnchorProvider("projects", readBoardAnchor)';
+  const line = `    return ${REGISTRATION};\n`;
+  const mutants = {
+    "another tab": mutate(
+      panel,
+      REGISTRATION,
+      'registerNavAnchorProvider("issues", readBoardAnchor)',
+    ),
+    "the registration removed": mutate(panel, line, ""),
+    "another reader": mutate(
+      panel,
+      REGISTRATION,
+      'registerNavAnchorProvider("projects", readHeldAnchor)',
+    ),
+    "a second registration": mutate(
+      panel,
+      line,
+      `    ${REGISTRATION};\n${line}`,
+    ),
+    "the return dropped": mutate(panel, line, `    ${REGISTRATION};\n`),
+    "a line break after the return": mutate(
+      panel,
+      line,
+      `    return\n      ${REGISTRATION};\n`,
+    ),
+  };
+  for (const [label, m] of Object.entries(mutants)) {
+    assert.notEqual(m, panel, `${label}: no change`);
+    assert.notDeepEqual(checkP14b(m), [], label);
+    assert.deepEqual(checkP14b(m.replace(/\n/g, "\r\n")), checkP14b(m), label);
+  }
+  for (const label of ["the return dropped", "a line break after the return"])
+    assert.deepEqual(checkP14b(mutants[label]), [
+      "the panel's registerNavAnchorProvider( call is not returned, so its unregister is dropped",
+    ]);
+  assert.deepEqual(checkP14b(panel.replace(/\n/g, "\r\n")), []);
 });
 
 test("the checks fail closed on a shape they can't find", () => {
@@ -1185,6 +1554,8 @@ test("the checks fail closed on a shape they can't find", () => {
     checkP12,
     checkP13,
     checkP14,
+    checkP14b,
+    checkP15,
   ])
     assert.notDeepEqual(check(""), []);
   assert.throws(() => read("src/features/projects/__no_such_file__.tsx"));

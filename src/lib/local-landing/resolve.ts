@@ -257,8 +257,10 @@ async function resolveLanding(
   const first = await raceDeadline(validateRepo(candidates[0].path), deadline);
   if (superseded()) return { kind: "superseded" };
   if (first.kind === "timeout") return { kind: "browser", reason: "unproven" };
-  // A stale FIRST candidate ends only a single-candidate open: the proof below
-  // rejects a dead path anyway, so several candidates keep looking.
+  // A first candidate whose folder check errored ends a single-candidate open
+  // and is left out of the proof otherwise: the backend can answer a path's
+  // origin from its remote-URL cache without touching the folder, so a proof
+  // of that path is no evidence the checkout still opens.
   if (first.kind === "error" && candidates.length === 1) {
     return {
       kind: "browser",
@@ -271,7 +273,7 @@ async function resolveLanding(
   // ahead of the optional worktree legs, which may spend the rest of it.
   const proven = await provenCandidate(
     target,
-    candidates,
+    first.kind === "error" ? candidates.slice(1) : candidates,
     deadline,
     superseded,
   );

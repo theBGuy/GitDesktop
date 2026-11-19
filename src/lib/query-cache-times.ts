@@ -2,7 +2,8 @@
  *  RepositoryView is one unkeyed instance, so every repo switch orphans the last
  *  repo's keys, and a revisit past react-query's 5-minute default lands in steps.
  *  Set per curated factory, never as a `["repo"]` prefix default. Excluded, on
- *  the default: `["repo-lens", r]` (holds session-only lens writes); the
+ *  the default: `["repo-lens", r]` (holds session-only lens writes; the open
+ *  repository's entry stays observed by `OpenRepoLensKeeper`); the
  *  notification baseline `["repo", r, "pr-poll"]`, which a stale snapshot would
  *  prime into a burst of alerts; and `["repo", r, "forge-status"]`, whose
  *  `retryOnMount: false` would keep an errored entry with no data unretried on

@@ -1,14 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { remotesOptions } from "@/lib/git/queries";
 import type { ForgeStatus, RemoteLens } from "@/lib/git/types";
 import {
+  cachedLensGone,
   cachedLensInputsComplete,
   cachedRepoLens,
   lensKey,
   useLensState,
+  useUpstreamRemoteGone,
 } from "@/lib/repo-lens/queries";
 
 // The hook's three reads refetch past their staleTime; a fetch that never
@@ -93,5 +95,43 @@ describe("cachedRepoLens", () => {
     const { result } = renderHook(() => useLensState(REPO), { wrapper });
     expect(result.current.lens).toBe(lens);
     expect(cachedRepoLens(client, REPO)).toBe(result.current.lens);
+  });
+});
+
+function withClient(client: QueryClient) {
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
+
+describe("useUpstreamRemoteGone", () => {
+  it.each([
+    ["no remotes data", undefined, false],
+    ["an empty list", [], true],
+    ["origin alone", ["origin"], true],
+    ["origin and upstream", ["origin", "upstream"], false],
+  ] as [string, string[] | undefined, boolean][])(
+    "agrees with cachedLensGone over %s",
+    (_name, remotes, gone) => {
+      const client = seeded({ remotes });
+      const { result } = renderHook(() => useUpstreamRemoteGone(REPO), {
+        wrapper: withClient(client),
+      });
+      expect(result.current).toBe(gone);
+      expect(cachedLensGone(client, REPO, "upstream")).toBe(gone);
+      expect(cachedLensGone(client, REPO, "origin")).toBe(false);
+    },
+  );
+
+  it("re-renders when the list loses the remote", async () => {
+    const client = seeded({ remotes: ["origin", "upstream"] });
+    const { result } = renderHook(() => useUpstreamRemoteGone(REPO), {
+      wrapper: withClient(client),
+    });
+    expect(result.current).toBe(false);
+    // react-query batches observer notifications onto a later tick.
+    act(() => {
+      client.setQueryData(remotesOptions(REPO).queryKey, ["origin"]);
+    });
+    await waitFor(() => expect(result.current).toBe(true));
   });
 });

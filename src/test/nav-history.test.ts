@@ -1050,25 +1050,38 @@ describe("hidden tabs", () => {
         3,
       ),
     );
-    // An equal location at the join collapses (I1), the current one surviving.
-    const joined = pruneHiddenTabs(
-      historyOf(
-        [
-          first,
-          agentOnly,
-          segOf(REPO, "origin", [entry("tags"), entry("pulls")]),
-        ],
-        2,
-        0,
-      ),
-      ["agent"],
-    );
+    // An equal location at the join collapses (I1), the current one surviving
+    // whether it is the later of the pair or the earlier; the anchor, which is
+    // no part of a location, tells which one did.
+    const early = segOf(REPO, "origin", [
+      entry("issues"),
+      entry("tags", {}, anchor("early")),
+    ]);
+    const late = segOf(REPO, "origin", [
+      entry("tags", {}, anchor("late")),
+      entry("pulls"),
+    ]);
+    const joined = pruneHiddenTabs(historyOf([early, agentOnly, late], 2, 0), [
+      "agent",
+    ]);
     expect(entriesOf(joined).map((e) => e.tab)).toEqual([
       "issues",
       "tags",
       "pulls",
     ]);
     expect(joined.index).toBe(1);
+    expect(currentEntry(joined)?.anchor?.itemId).toBe("late");
+    const joinedEarly = pruneHiddenTabs(
+      historyOf([early, agentOnly, late], 0, 1),
+      ["agent"],
+    );
+    expect(entriesOf(joinedEarly).map((e) => e.tab)).toEqual([
+      "issues",
+      "tags",
+      "pulls",
+    ]);
+    expect(joinedEarly.index).toBe(1);
+    expect(currentEntry(joinedEarly)?.anchor?.itemId).toBe("early");
     // A hidden CURRENT entry keeps its segment.
     const kept = historyOf([first, agentOnly, last], 1, 0);
     expect(pruneHiddenTabs(kept, ["agent"])).toBe(kept);
@@ -1936,9 +1949,15 @@ describe("dropRepository", () => {
   it("removes it on both sides in one call and merges what it parted", () => {
     const history = historyOf(
       [
-        A("issues", "pulls"),
+        segOf(REPO, null, [
+          entry("issues"),
+          entry("pulls", {}, anchor("early")),
+        ]),
         B(),
-        A("pulls", "history"),
+        segOf(REPO, null, [
+          entry("pulls", {}, anchor("late")),
+          entry("history"),
+        ]),
         B("upstream"),
         A("changes"),
       ],
@@ -1946,7 +1965,8 @@ describe("dropRepository", () => {
       1,
     );
     const out = dropRepository(history, BETA, []);
-    // The join's equal Pulls entries collapse (I1): the later one survives.
+    // The join's equal Pulls entries collapse (I1): neither is current, so the
+    // later one survives, told apart by its anchor.
     expect(out.segments).toHaveLength(1);
     expect(entriesOf(out).map((e) => e.tab)).toEqual([
       "issues",
@@ -1954,6 +1974,7 @@ describe("dropRepository", () => {
       "history",
       "changes",
     ]);
+    expect(entriesOf(out)[1].anchor?.itemId).toBe("late");
     expect(out.segment).toBe(0);
     expect(currentEntry(out)?.tab).toBe("history");
     expect(out.index).toBe(2);

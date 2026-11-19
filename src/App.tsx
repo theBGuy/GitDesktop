@@ -15,6 +15,7 @@ import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
 import { RepoNotificationsDialogHost } from "@/features/notifications/RepoNotificationsDialog";
+import { OpenRepoLensKeeper } from "@/features/repository/OpenRepoLensKeeper";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -345,6 +346,7 @@ function App() {
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />
       <AppAnnouncer />
+      <OpenRepoLensKeeper />
       <ReconnectDialog />
       <UpdateChecker />
       <WhatsNew />

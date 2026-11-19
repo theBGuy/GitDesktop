@@ -225,7 +225,17 @@ function mount(
   panel: Panel,
   wrapper?: (p: { children: ReactNode }) => ReactNode,
 ) {
-  const hook = renderHook(() => useBoardReturn(panel.input()), { wrapper });
+  /** Every render's retired anchor, in render order: a record the next commit
+   *  clears still shows here. */
+  const seen: ReturnType<typeof useBoardReturn>["retiredAnchor"][] = [];
+  const hook = renderHook(
+    () => {
+      const out = useBoardReturn(panel.input());
+      seen.push(out.retiredAnchor);
+      return out;
+    },
+    { wrapper },
+  );
   /** A panel commit over its current state. */
   const commit = (change?: () => void) =>
     act(() => {
@@ -233,7 +243,7 @@ function mount(
       panel.draw();
       hook.rerender();
     });
-  return { ...hook, commit };
+  return { ...hook, commit, seen };
 }
 
 /** What a goBack onto the Projects entry arms: the request at the restore's epoch. */
@@ -935,6 +945,28 @@ describe("a return retired by the epoch alone keeps its anchor for that departur
     expect(read()).toEqual(anchorOf());
   });
 
+  it("the return's own Show archived step before the press still leaves it answering", () => {
+    const { panel, hook, read } = retireOne({ archivedShown: true });
+    expect(panel.log).toEqual(["setArchived(false)"]);
+    expect(hook.result.current.retiredAnchor).toEqual({
+      anchor: anchorOf(),
+      epoch: st().interactionEpoch,
+      pickBaseline: 0,
+    });
+    expect(read()).toEqual(anchorOf());
+  });
+
+  it("the return's own view pick before the press still leaves it answering", () => {
+    const { panel, hook, read } = retireOne({ activeViewId: "V2" });
+    expect(panel.log).toEqual(['pickView("V1")']);
+    expect(hook.result.current.retiredAnchor).toEqual({
+      anchor: anchorOf(),
+      epoch: st().interactionEpoch,
+      pickBaseline: 1,
+    });
+    expect(read()).toEqual(anchorOf());
+  });
+
   it("data arriving with the marks unchanged keeps it answering and acts on nothing", () => {
     const { panel, hook, read, live } = retireOne();
     hook.commit(() => {
@@ -976,6 +1008,14 @@ describe("a return retired by the epoch alone keeps its anchor for that departur
   });
 });
 
+/** Every render from `from` on, the one carrying the change included, held no
+ *  retired anchor, and at least one ran. */
+function expectNoneSince(hook: Hook, from: number) {
+  const since = hook.seen.slice(from);
+  expect(since.length).toBeGreaterThan(0);
+  expect(since.every((anchor) => anchor === null)).toBe(true);
+}
+
 describe("a retired anchor's endings", () => {
   it("an Activity hide ends it, and the show does not revive it", () => {
     const control: { set?: (mode: "visible" | "hidden") => void } = {};
@@ -996,10 +1036,12 @@ describe("a retired anchor's endings", () => {
 
   it("the panel going inactive ends it, and active again does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       panel.state.active = false;
     });
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       panel.state.active = true;
     });
@@ -1022,11 +1064,13 @@ describe("a retired anchor's endings", () => {
 
   it("a repository change ends it, and changing back does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       useUiStore.setState({ repoPath: OTHER });
       panel.state.repoPath = OTHER;
     });
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       useUiStore.setState({ repoPath: REPO });
       panel.state.repoPath = REPO;
@@ -1065,10 +1109,12 @@ describe("a retired anchor's endings", () => {
 
   it("the board cursor moved ends it, and moving back does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       panel.state.boardCursorId = "I3";
     });
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       panel.state.boardCursorId = "I2";
     });
@@ -1078,10 +1124,12 @@ describe("a retired anchor's endings", () => {
 
   it("the table cursor moved ends it, and moving back does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       panel.state.tableCursorKey = "item:I3";
     });
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       panel.state.tableCursorKey = "item:I2";
     });
@@ -1091,10 +1139,12 @@ describe("a retired anchor's endings", () => {
 
   it("the table cursor's column moved ends it, and moving back does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       panel.state.tableCursorCol = 1;
     });
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       panel.state.tableCursorCol = 0;
     });
@@ -1104,10 +1154,12 @@ describe("a retired anchor's endings", () => {
 
   it("a Show archived toggle ends it, and toggling back does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       panel.state.archivedShown = true;
     });
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       panel.state.archivedShown = false;
     });
@@ -1117,11 +1169,13 @@ describe("a retired anchor's endings", () => {
 
   it("the raw view id changed with no pick ends it, and setting it back does not revive it", () => {
     const { panel, hook, read } = retireOne();
+    const from = hook.seen.length;
     hook.commit(() => {
       panel.state.activeViewId = null;
     });
     expect(panel.state.gen).toBe(0);
     expect(hook.result.current.retiredAnchor).toBeNull();
+    expectNoneSince(hook, from);
     hook.commit(() => {
       panel.state.activeViewId = "V1";
     });
@@ -1152,24 +1206,6 @@ describe("a retired anchor's endings", () => {
   });
 });
 
-/** Mounts the hook and keeps every render's retired anchor: a record the next
- *  commit clears still shows here. */
-function mountSeen(panel: Panel) {
-  const seen: ReturnType<typeof useBoardReturn>["retiredAnchor"][] = [];
-  const hook = renderHook(() => {
-    const out = useBoardReturn(panel.input());
-    seen.push(out.retiredAnchor);
-    return out;
-  });
-  const commit = (change?: () => void) =>
-    act(() => {
-      change?.();
-      panel.draw();
-      hook.rerender();
-    });
-  return { ...hook, commit, seen };
-}
-
 describe("a drop not for the epoch alone retires nothing", () => {
   it("the epoch and the pick generation moved in one commit", () => {
     const panel = makePanel({
@@ -1178,7 +1214,7 @@ describe("a drop not for the epoch alone retires nothing", () => {
       boardCursorId: "I2",
       tableCursorKey: "item:I2",
     });
-    const hook = mountSeen(panel);
+    const hook = mount(panel);
     arm(anchorOf());
     hook.commit();
     expect(hook.result.current.heldAnchor).toEqual(anchorOf());
@@ -1193,7 +1229,7 @@ describe("a drop not for the epoch alone retires nothing", () => {
 
   it("a consume refused for the repository", () => {
     const panel = makePanel({ boardCursorId: "I2", tableCursorKey: "item:I2" });
-    const hook = mountSeen(panel);
+    const hook = mount(panel);
     act(() => useUiStore.setState({ repoPath: OTHER }));
     arm(anchorOf(), -1);
     expect(st().boardReturn).toBeNull();
@@ -1295,10 +1331,10 @@ describe("the departure a retired return describes", () => {
     });
     unregister = registerNavAnchorProvider("projects", provider.read);
     expect(hook.result.current.heldAnchor).toEqual(original);
-    const pending: ((ok: boolean) => void)[] = [];
+    const pending: ((ok: "open") => void)[] = [];
     const validate = vi.fn(
       () =>
-        new Promise<boolean>((resolve) => {
+        new Promise<"open">((resolve) => {
           pending.push(resolve);
         }),
     );
@@ -1309,7 +1345,7 @@ describe("the departure a retired return describes", () => {
     expect(hook.result.current.heldAnchor).toBeNull();
     expect(provider.live()).toEqual({ ...original, itemId: null });
     await act(async () => {
-      for (const resolve of pending.splice(0)) resolve(true);
+      for (const resolve of pending.splice(0)) resolve("open");
       await flush();
     });
     expect(st().repoPath).toBe(OTHER);

@@ -423,15 +423,17 @@ describe("a card of another repository with a clone in recents", () => {
       isPullRequest: false,
     });
     expect(pending[0].candidates).toEqual([WIDGETS_CLONE]);
+    // The landing folder's name differs from the card's repository: the
+    // navigator takes the folder's, the arrival speaks the repository's.
     await pending[0].settle({
       kind: "local",
       path: "C:/src/widgets",
-      name: "widgets",
+      name: "widgets-main",
     });
     const arg = onlyArg(openIssue);
     expect(arg).toEqual({
       repoPath: "C:/src/widgets",
-      repoName: "widgets",
+      repoName: "widgets-main",
       number: 12,
       carryHistory: true,
       beforeSelect: expect.any(Function),
@@ -500,6 +502,9 @@ describe("a card of another repository with a clone in recents", () => {
       beforeSelect: expect.any(Function),
       stillValid: expect.any(Function),
     });
+    arg.beforeSelect?.();
+    expect(h.announceArrival).toHaveBeenCalledTimes(1);
+    expect(h.announceArrival).toHaveBeenCalledWith("Opened in widgets");
     // The held landing re-checks the click's generation and the navigator's
     // own epoch.
     expect(arg.stillValid?.(epoch())).toBe(true);

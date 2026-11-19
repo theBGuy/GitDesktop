@@ -13,7 +13,7 @@ import {
 import { GUIDE_SECTIONS } from "@/features/help/content";
 import { validateRepo } from "@/lib/git/api";
 import { remotesOptions } from "@/lib/git/queries";
-import type { RepoInfo } from "@/lib/git/types";
+import type { RemoteLens, RepoInfo } from "@/lib/git/types";
 import {
   useAvailableActions,
   useEffectiveBindings,
@@ -27,7 +27,7 @@ import {
   useSideButtonNavigation,
   vetoSideButtonNavigation,
 } from "@/lib/hotkeys/side-buttons";
-import { lensKey } from "@/lib/repo-lens/queries";
+import { cachedLensGone, lensKey } from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import {
@@ -499,15 +499,41 @@ describe("the history's lens reader", () => {
     );
     // Inputs still unanswered: the provisional lens is no verdict.
     expect(readNavLens(REPO)).toBeNull();
+    // One input at a time: the raw lens alone, then with only some of the gate's
+    // inputs, is still no verdict.
+    client.setQueryData(lensKey(REPO), "upstream");
+    expect(readNavLens(REPO)).toBeNull();
+    client.setQueryData(remotesOptions(REPO).queryKey, ["origin"]);
+    expect(readNavLens(REPO)).toBeNull();
+    // Complete, the GATED lens answers: no upstream remote, so "origin" over a
+    // raw "upstream".
     client.setQueryData(["repo", REPO, "forge-status"], {
       provider: "github",
       authenticated: true,
     });
+    expect(readNavLens(REPO)).toBe("origin");
     client.setQueryData(remotesOptions(REPO).queryKey, ["origin", "upstream"]);
-    client.setQueryData(lensKey(REPO), "upstream");
     expect(readNavLens(REPO)).toBe("upstream");
+    client.setQueryData(["repo", REPO, "forge-status"], {
+      provider: "github",
+      authenticated: false,
+    });
+    expect(readNavLens(REPO)).toBe("origin");
+    client.setQueryData(["repo", REPO, "forge-status"], {
+      provider: "github",
+      authenticated: true,
+    });
     client.setQueryData(lensKey(REPO), "origin");
     expect(readNavLens(REPO)).toBe("origin");
+    // The reverse order: the gate's inputs first, then the lens.
+    client.setQueryData(["repo", OTHER, "forge-status"], {
+      provider: "github",
+      authenticated: true,
+    });
+    client.setQueryData(remotesOptions(OTHER).queryKey, ["origin", "upstream"]);
+    expect(readNavLens(OTHER)).toBeNull();
+    client.setQueryData(lensKey(OTHER), "upstream");
+    expect(readNavLens(OTHER)).toBe("upstream");
     host.unmount();
     expect(readNavLens(REPO)).toBeNull();
   });
@@ -559,18 +585,34 @@ describe("Go back and Go forward across repositories", () => {
     expect(error).not.toHaveBeenCalled();
   });
 
+  const rejects = (e: unknown) => () =>
+    vi.mocked(validateRepo).mockRejectedValue(e);
+  const GONE = (name: string) =>
+    `Can't go back to ${name}. Its folder is missing or is no longer a Git repository.`;
+  const REFUSED = (name: string) =>
+    `Can't go back to ${name}. Git can't open its folder.`;
+  const UNCHECKED = (name: string) => `Couldn't check ${name}. Try again.`;
+
   it.each([
-    ["answers an enclosing repository", () => answers("C:/repos")],
+    ["answers an enclosing repository", answers.bind(null, "C:/repos"), GONE],
     [
-      "rejects",
-      () =>
-        vi
-          .mocked(validateRepo)
-          .mockRejectedValue({ kind: "git", message: "x" }),
+      "rejects as not a repository",
+      rejects({ kind: "notARepo", message: "x" }),
+      GONE,
+    ],
+    [
+      "rejects with git's fatal exit",
+      rejects({ kind: "git", message: "x", code: 128, stderr: "fatal: x" }),
+      REFUSED,
+    ],
+    [
+      "rejects with a missing core.worktree",
+      rejects({ kind: "command", message: "x" }),
+      REFUSED,
     ],
   ])(
     "when validateRepo %s, one toast and every stop there goes",
-    async (_n, arrange) => {
+    async (_n, arrange, copy) => {
       await hostAcross();
       act(() => {
         carry(REPO, 3);
@@ -579,48 +621,319 @@ describe("Go back and Go forward across repositories", () => {
       arrange();
       press("ArrowLeft");
       await settle();
-      expect(error).toHaveBeenCalledExactlyOnceWith(
-        "Can't go back to alpha. Its folder is missing or is no longer a Git repository.",
-      );
+      expect(error).toHaveBeenCalledExactlyOnceWith(copy("alpha"));
       expect(st().repoPath).toBe(OTHER);
       expect(st().navHistory.segments.map((s) => s.repoPath)).toEqual([OTHER]);
+      // The stops are gone, so the next press stays in beta and says nothing.
+      press("ArrowLeft");
+      await settle();
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(validateRepo).toHaveBeenCalledTimes(1);
+      expect(st().repoPath).toBe(OTHER);
     },
   );
 
-  it("Forward's toast names the direction; button 3 runs the same route", async () => {
+  it.each([
+    ["a timeout", { kind: "timeout", message: "x" }],
+    ["an io failure", { kind: "io", message: "x" }],
+    ["git missing", { kind: "gitNotFound", message: "x" }],
+    ["a killed git", { kind: "git", message: "x", code: -1, stderr: "" }],
+    ["a git failure with no exit code", { kind: "git", message: "x" }],
+    ["a plain Error", new Error("ipc")],
+    ["null", null],
+  ])(
+    "when validateRepo rejects with %s, it couldn't check: one toast, every stop kept, then a press that lands",
+    async (_n, rejection) => {
+      await hostAcross();
+      vi.mocked(validateRepo).mockRejectedValueOnce(rejection);
+      press("ArrowLeft");
+      await settle();
+      expect(error).toHaveBeenCalledExactlyOnceWith(UNCHECKED("alpha"));
+      expect(st().repoPath).toBe(OTHER);
+      expect(st().navHistory.segments.map((s) => s.repoPath)).toEqual([
+        REPO,
+        OTHER,
+      ]);
+      answers(REPO);
+      press("ArrowLeft");
+      await settle();
+      expect(validateRepo).toHaveBeenCalledTimes(2);
+      expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+      expect(error).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    [
+      "gone",
+      { kind: "notARepo", message: "x" },
+      "Its folder is missing or is no longer a Git repository.",
+    ],
+    [
+      "refused",
+      { kind: "git", message: "x", code: 128, stderr: "fatal: x" },
+      "Git can't open its folder.",
+    ],
+  ])(
+    "Forward's %s toast names the direction; button 3 runs the same route",
+    async (_n, rejection, reason) => {
+      await hostAcross();
+      answers(REPO);
+      click(3);
+      await settle();
+      expect(st().repoPath).toBe(REPO);
+      vi.mocked(validateRepo).mockRejectedValue(rejection);
+      press("ArrowRight");
+      await settle();
+      expect(error).toHaveBeenCalledExactlyOnceWith(
+        `Can't go forward to beta. ${reason}`,
+      );
+      expect(st().repoPath).toBe(REPO);
+    },
+  );
+
+  it("Forward's couldn't-check toast is the same as Back's", async () => {
     await hostAcross();
     answers(REPO);
-    click(3);
+    press("ArrowLeft");
     await settle();
     expect(st().repoPath).toBe(REPO);
-    vi.mocked(validateRepo).mockRejectedValue({ kind: "git", message: "x" });
+    vi.mocked(validateRepo).mockRejectedValue({ kind: "io", message: "x" });
     press("ArrowRight");
     await settle();
-    expect(error).toHaveBeenCalledExactlyOnceWith(
-      "Can't go forward to beta. Its folder is missing or is no longer a Git repository.",
-    );
+    expect(error).toHaveBeenCalledExactlyOnceWith(UNCHECKED("beta"));
     expect(st().repoPath).toBe(REPO);
   });
 
-  it("names the folder when the segment kept no repository name", async () => {
-    await hostAcross();
-    act(() => {
-      const h = st().navHistory;
-      useUiStore.setState({
-        navHistory: {
-          ...h,
-          segments: h.segments.map((s, i) =>
-            i === 0 ? { ...s, repoName: null } : s,
-          ),
-        },
+  it.each(
+    (
+      [
+        ["gone", { kind: "notARepo", message: "x" }, GONE],
+        ["refused", { kind: "command", message: "x" }, REFUSED],
+        ["unknown", { kind: "timeout", message: "x" }, UNCHECKED],
+      ] as const
+    ).flatMap(([answer, rejection, copy]) => [
+      [answer, "Alpha Prime", rejection, copy("Alpha Prime")] as const,
+      [answer, null, rejection, copy("alpha")] as const,
+    ]),
+  )(
+    "the %s toast names the segment's repository name %s, else its folder",
+    async (_n, repoName, rejection, expected) => {
+      await hostAcross();
+      act(() => {
+        const h = st().navHistory;
+        useUiStore.setState({
+          navHistory: {
+            ...h,
+            segments: h.segments.map((s, i) =>
+              i === 0 ? { ...s, repoName } : s,
+            ),
+          },
+        });
       });
+      vi.mocked(validateRepo).mockRejectedValue(rejection);
+      press("ArrowLeft");
+      await settle();
+      expect(error).toHaveBeenCalledExactlyOnceWith(expected);
+    },
+  );
+
+  describe("the folder check's limit", () => {
+    /** A `validateRepo` answered by hand; every case settles it before it ends, since
+     *  the hotkey layer shares an in-flight check per folder. */
+    function deferredRepo() {
+      const hands: {
+        resolve: (info: RepoInfo) => void;
+        reject: (e: unknown) => void;
+      }[] = [];
+      vi.mocked(validateRepo).mockImplementation(
+        () =>
+          new Promise<RepoInfo>((resolve, reject) => {
+            hands.push({ resolve, reject });
+          }),
+      );
+      return {
+        resolve: (root: string) => {
+          for (const h of hands) h.resolve({ root, name: "x" } as RepoInfo);
+        },
+        reject: (e: unknown) => {
+          for (const h of hands) h.reject(e);
+        },
+      };
+    }
+    // Fake timers only after `hostAcross`, whose findByText polls on real ones; no
+    // findBy*, waitFor or settle() while they are on.
+    const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    afterEach(() => {
+      vi.useRealTimers();
     });
-    vi.mocked(validateRepo).mockRejectedValue({ kind: "git", message: "x" });
-    press("ArrowLeft");
-    await settle();
-    expect(error).toHaveBeenCalledExactlyOnceWith(
-      "Can't go back to alpha. Its folder is missing or is no longer a Git repository.",
-    );
+
+    it("a check slower than 10 s says it couldn't check at the limit, and its late answer reaches nothing", async () => {
+      await hostAcross();
+      const check = deferredRepo();
+      vi.useFakeTimers();
+      try {
+        press("ArrowLeft");
+        const pressed = st();
+        await advance(9_999);
+        expect(error).not.toHaveBeenCalled();
+        await advance(1);
+        expect(error).toHaveBeenCalledExactlyOnceWith(UNCHECKED("alpha"));
+        expect(st()).toBe(pressed);
+        await act(async () => {
+          check.reject({ kind: "notARepo", message: "x" });
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(error).toHaveBeenCalledTimes(1);
+        expect(st()).toBe(pressed);
+        expect(st().navHistory.segments).toHaveLength(2);
+      } finally {
+        check.reject({ kind: "io", message: "cleanup" });
+        await advance(0);
+      }
+    });
+
+    it("a second press while the check is in flight shares it under its own limit, and a settled check is asked anew", async () => {
+      await hostAcross();
+      const check = deferredRepo();
+      vi.useFakeTimers();
+      try {
+        press("ArrowLeft");
+        await advance(10_000);
+        expect(error).toHaveBeenCalledTimes(1);
+        await advance(2_000);
+        press("ArrowLeft");
+        expect(validateRepo).toHaveBeenCalledTimes(1);
+        await advance(9_999);
+        expect(error).toHaveBeenCalledTimes(1);
+        await advance(1);
+        expect(error).toHaveBeenCalledTimes(2);
+        expect(error).toHaveBeenLastCalledWith(UNCHECKED("alpha"));
+        expect(st().repoPath).toBe(OTHER);
+        await act(async () => {
+          check.resolve(REPO);
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        answers(REPO);
+        press("ArrowLeft");
+        expect(validateRepo).toHaveBeenCalledTimes(2);
+        await advance(0);
+        expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+        expect(error).toHaveBeenCalledTimes(2);
+      } finally {
+        check.resolve(REPO);
+        await advance(0);
+      }
+    });
+
+    it("a second press inside the first press's window shares its check and replaces it", async () => {
+      await hostAcross();
+      const check = deferredRepo();
+      vi.useFakeTimers();
+      try {
+        press("ArrowLeft");
+        await advance(3_000);
+        press("ArrowLeft");
+        expect(validateRepo).toHaveBeenCalledTimes(1);
+        // The first press's limit passes: it was replaced, so it says nothing.
+        await advance(7_000);
+        expect(error).not.toHaveBeenCalled();
+        expect(st().repoPath).toBe(OTHER);
+        const epoch = st().interactionEpoch;
+        await act(async () => {
+          check.resolve(REPO);
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+        expect(st().navHistory).toMatchObject({ segment: 0 });
+        expect(st().navHistory.segments.map((s) => s.repoPath)).toEqual([
+          REPO,
+          OTHER,
+        ]);
+        expect(st().interactionEpoch).toBe(epoch);
+        await advance(10_000);
+        expect(error).not.toHaveBeenCalled();
+        expect(validateRepo).toHaveBeenCalledTimes(1);
+      } finally {
+        check.resolve(REPO);
+        await advance(0);
+      }
+    });
+
+    it("folders whose paths differ only by letter case get a check each", async () => {
+      const ALPHA_UPPER = "C:/repos/ALPHA";
+      await hostAcross();
+      act(() => carry(ALPHA_UPPER, 5));
+      answers(OTHER);
+      press("ArrowLeft");
+      await settle();
+      expect(st().repoPath).toBe(OTHER);
+      expect(st().navHistory.segments.map((s) => s.repoPath)).toEqual([
+        REPO,
+        OTHER,
+        ALPHA_UPPER,
+      ]);
+      vi.mocked(validateRepo).mockClear();
+      const check = deferredRepo();
+      vi.useFakeTimers();
+      try {
+        press("ArrowLeft");
+        press("ArrowRight");
+        expect(vi.mocked(validateRepo).mock.calls).toEqual([
+          [REPO],
+          [ALPHA_UPPER],
+        ]);
+      } finally {
+        check.resolve(REPO);
+        await advance(0);
+      }
+    });
+
+    it("a shared check that answers open inside the second press's window lands it", async () => {
+      await hostAcross();
+      const check = deferredRepo();
+      vi.useFakeTimers();
+      try {
+        press("ArrowLeft");
+        await advance(12_000);
+        expect(error).toHaveBeenCalledTimes(1);
+        press("ArrowLeft");
+        await advance(3_000);
+        await act(async () => {
+          check.resolve(REPO);
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(validateRepo).toHaveBeenCalledTimes(1);
+        expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+        await advance(10_000);
+        expect(error).toHaveBeenCalledTimes(1);
+      } finally {
+        check.resolve(REPO);
+        await advance(0);
+      }
+    });
+
+    it("a check that answers inside the limit lands and leaves no timer behind", async () => {
+      await hostAcross();
+      const check = deferredRepo();
+      vi.useFakeTimers();
+      try {
+        const timers = vi.getTimerCount();
+        press("ArrowLeft");
+        await advance(9_999);
+        expect(st().repoPath).toBe(OTHER);
+        await act(async () => {
+          check.resolve(REPO);
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(st()).toMatchObject({ repoPath: REPO, repoTab: "history" });
+        expect(vi.getTimerCount()).toBe(timers);
+        expect(error).not.toHaveBeenCalled();
+      } finally {
+        check.resolve(REPO);
+        await advance(0);
+      }
+    });
   });
 
   it("re-applies the segment's lens through the lens cache", async () => {
@@ -661,5 +974,141 @@ describe("Go back and Go forward across repositories", () => {
     await settle();
     expect(st().repoPath).toBe(REPO);
     expect(client.getQueryData(lensKey(REPO))).toBe("upstream");
+  });
+
+  describe("a stop recorded on Upstream", () => {
+    const ISSUE = { kind: "remote", id: "7" } as const;
+    const FORGE = ["repo", REPO, "forge-status"] as const;
+
+    /** Alpha's Issues stop with a remote issue, recorded under `recorded` while every
+     *  lens cache is complete and the gate is open, then a carried landing in beta.
+     *  Each case changes the caches only after the stamp was read. */
+    async function hostRecordedStop(recorded: RemoteLens) {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      client.setQueryData(FORGE, { provider: "github", authenticated: true });
+      client.setQueryData(remotesOptions(REPO).queryKey, [
+        "origin",
+        "upstream",
+      ]);
+      client.setQueryData(lensKey(REPO), recorded);
+      const host = render(
+        <QueryClientProvider client={client}>
+          <Host />
+        </QueryClientProvider>,
+      );
+      await host.findByText("alt+left");
+      act(() => {
+        st().openRepo({ root: REPO, name: "alpha" });
+        st().setRepoTab("issues");
+        st().selectIssue(ISSUE);
+        carry(OTHER, 2);
+      });
+      expect(st().navHistory.segments.map((s) => s.lens)).toEqual([
+        recorded,
+        null,
+      ]);
+      answers(REPO);
+      return client;
+    }
+
+    /** Presses Back with the lens cache seeded at `seeded`, written at a known time so
+     *  a same-value write shows in `dataUpdatedAt`. */
+    async function back(client: QueryClient, seeded: RemoteLens) {
+      act(() => client.setQueryData(lensKey(REPO), seeded, { updatedAt: 1 }));
+      press("ArrowLeft");
+      await settle();
+      expect(st()).toMatchObject({ repoPath: REPO, repoTab: "issues" });
+      expect(error).not.toHaveBeenCalled();
+    }
+
+    it("lands on Upstream with the issue while the remotes still hold upstream", async () => {
+      const client = await hostRecordedStop("upstream");
+      await back(client, "origin");
+      expect(st().selectedIssue).toEqual(ISSUE);
+      expect(client.getQueryData(lensKey(REPO))).toBe("upstream");
+    });
+
+    it.each([
+      ["with the forge status cached", (_: QueryClient) => undefined],
+      [
+        "with no forge status cached",
+        (c: QueryClient) => c.removeQueries({ queryKey: FORGE, exact: true }),
+      ],
+    ])(
+      "drops the issue and writes no lens once upstream is removed, %s",
+      async (_, change) => {
+        const client = await hostRecordedStop("upstream");
+        act(() => {
+          client.setQueryData(remotesOptions(REPO).queryKey, ["origin"]);
+          change(client);
+        });
+        await back(client, "origin");
+        expect(st().selectedIssue).toBeNull();
+        expect(client.getQueryData(lensKey(REPO))).toBe("origin");
+        expect(client.getQueryState(lensKey(REPO))?.dataUpdatedAt).toBe(1);
+      },
+    );
+
+    it.each([
+      [
+        "no remotes cache",
+        (c: QueryClient) =>
+          c.removeQueries({
+            queryKey: remotesOptions(REPO).queryKey,
+            exact: true,
+          }),
+      ],
+      [
+        "remotes holding upstream, signed out",
+        (c: QueryClient) =>
+          c.setQueryData(FORGE, { provider: "github", authenticated: false }),
+      ],
+    ])(
+      "with %s, applies the lens and restores the issue as before",
+      async (_, change) => {
+        const client = await hostRecordedStop("upstream");
+        act(() => change(client));
+        await back(client, "origin");
+        expect(st().selectedIssue).toEqual(ISSUE);
+        expect(client.getQueryData(lensKey(REPO))).toBe("upstream");
+      },
+    );
+
+    it("cachedLensGone answers from the remotes list alone", () => {
+      const forges = [
+        { provider: "github", authenticated: true },
+        { provider: "github", authenticated: false },
+        undefined,
+      ];
+      const remoteLists = [["origin", "upstream"], ["origin"], [], undefined];
+      for (const forge of forges)
+        for (const remotes of remoteLists)
+          for (const raw of ["origin", "upstream", undefined] as const)
+            for (const recorded of ["origin", "upstream"] as const) {
+              const client = new QueryClient();
+              if (forge) client.setQueryData(FORGE, forge);
+              if (remotes)
+                client.setQueryData(remotesOptions(REPO).queryKey, remotes);
+              if (raw) client.setQueryData(lensKey(REPO), raw);
+              expect(
+                cachedLensGone(client, REPO, recorded),
+                JSON.stringify({ forge, remotes, raw, recorded }),
+              ).toBe(
+                recorded === "upstream" &&
+                  remotes !== undefined &&
+                  !remotes.includes("upstream"),
+              );
+            }
+    });
+
+    it("a stop recorded on the fork applies its lens and restores the issue with upstream removed", async () => {
+      const client = await hostRecordedStop("origin");
+      act(() => client.setQueryData(remotesOptions(REPO).queryKey, ["origin"]));
+      await back(client, "upstream");
+      expect(st().selectedIssue).toEqual(ISSUE);
+      expect(client.getQueryData(lensKey(REPO))).toBe("origin");
+    });
   });
 });

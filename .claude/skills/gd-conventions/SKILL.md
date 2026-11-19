@@ -929,20 +929,35 @@ one grep away on the named symbol. Grows via Conventions-sync.
   empties it, except a navigator landing that passes `carryHistory: true`
   (the board's card opens and the Activity dock's four jumps): a change of
   repository or of the same repository's lens then starts a new segment, with
-  the departing tab's anchor read at the landing. Every writer that keeps or
-  adds entries returns through the module's one normalizer (seeding writes
-  one entry, and the stamp-only lens path returns the entries unchanged). Back
-  and Forward restore inside a segment in one set and never call a navigator;
-  a step into another segment goes through `restoreNav`'s cross-segment arm
-  (ui.ts): into the same repository under the other lens it lands at once;
-  into another repository it is a held landing that warms the repository shell
-  and validates the target folder beside it and, when the folder no longer
-  opens, drops every segment of that repository and toasts once. `restoreNav`
-  is the sixth hold site `scripts/settings-leave-guard.test.mjs` pins, under
-  its own `RESTORE_HELPER` constant outside the five held navigators. A mouse
-  side-button press a surface spends on something else (cancelling a drag)
-  calls `vetoSideButtonNavigation` from its mousedown, so the release doesn't
-  also navigate.
+  the departing tab's anchor read at the landing; from under an overlay the
+  departing stop is the stored one, its anchor read when the view left. A
+  stamped segment left from under an overlay for another repository keeps its
+  stamp and its stops up to the current one, whatever the live lens; a
+  same-repository hop that lands under that stamp after the live lens moved off
+  it rejoins the segment the same way. Every writer that keeps or adds entries
+  returns through the module's one normalizer (seeding writes one entry, and the
+  stamp-only lens path returns the entries unchanged). Back and Forward restore
+  inside a segment in one set and never call a navigator; a step into another
+  segment goes through `restoreNav`'s cross-segment arm (ui.ts): into the same
+  repository under the other lens it lands at once; into another repository it
+  is a held landing that warms the repository shell and validates the target
+  folder beside it, for at most 10 s. Two answers each drop every segment of
+  that repository and toast once: gone (the backend answers not a directory or
+  not a repository, or answers another root) and refused (git answers and the
+  folder cannot be opened: its fatal exit, or a working tree it names that is
+  not a directory). A check that fails any other way, or passes the 10 s, drops
+  nothing, lands nothing and toasts once. All three act only while their press
+  is still the current one. When the repository's cached remotes list no longer
+  holds `upstream`, a landing on a segment stamped upstream applies no lens,
+  drops the restored remote pull request or issue, re-seeds that segment as
+  origin and arms no board return. When the list loses it under a segment
+  stamped upstream while the stored choice is still Upstream, `useNavLensSync`
+  drops the remote selection and re-seeds the segment as origin, without waiting
+  for the forge status. `restoreNav` is the sixth hold site
+  `scripts/settings-leave-guard.test.mjs` pins, under its own `RESTORE_HELPER`
+  constant outside the five held navigators. A mouse side-button press a surface
+  spends on something else (cancelling a drag) calls `vetoSideButtonNavigation`
+  from its mousedown, so the release doesn't also navigate.
 - **Repo-identity keying** — per-repo state keys on the repo IDENTITY
   (`useRepoIdentity` / the shared `--git-common-dir` resolver), never a raw
   checkout path; a raw-path key diverges across worktrees of one repo.
@@ -991,7 +1006,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   own waits stay in its own `role="status"` region.
 - **View lens** — a PR/issue number or blob is valid only in the lens that
   produced it (origin vs upstream vs local match); navigation and dock entry
-  points thread the lens (`beforeSelect`), never pass a bare number across.
+  points thread the lens (`beforeSelect`), never pass a bare number across. The
+  open repository's cached lens stays observed app-wide (`OpenRepoLensKeeper`),
+  so a session-only lens lives as long as the selections minted under it; a
+  repository left behind keeps the default expiry.
 - **Force/retry threading** — a re-run or retry carries its force/trigger
   marker end-to-end; downstream code distinguishing "original vs re-run" reads
   the marker, never infers from timing.

@@ -1631,20 +1631,22 @@ is, disabled, and says what it requires instead of failing when you press it.
 
 ## Fork · Upstream lens
 
-When the repo is a **GitHub fork** — an \`origin\` you pushed to plus an \`upstream\`
-remote pointing at the parent — a **Fork | Upstream** switch appears in the list toolbar.
+When the repo is a **GitHub fork** (an \`origin\` you pushed to plus an \`upstream\`
+remote pointing at the parent), a **Fork | Upstream** switch appears in the list toolbar.
 It's **remembered per repository** and defaults to **Fork** (your \`origin\`). Flip it to
-**Upstream** and the remote pull-request list, and every PR you open from it — description,
-commits, comments, reviews, reactions, labels, assignees, and reviewers — read and write
+**Upstream** and the remote pull-request list, and every PR you open from it (description,
+commits, comments, reviews, reactions, labels, assignees, and reviewers), read and write
 the **parent** repository instead of your fork; the section header names the repository
 you're looking at. Switch back to **Fork** for your own. The switch shows only on a GitHub
 fork (never on GitLab or Bitbucket, or a repo with no upstream remote). Two palette
 commands do the same thing without the mouse: **Switch to fork view** ({{kbd:repo-lens-origin}})
 and **Switch to upstream view** ({{kbd:repo-lens-upstream}}). The same lens scopes the
-**Issues** tab (see *Issues*). Opening a PR against the parent — and this whole switch —
+**Issues** tab (see *Issues*). Opening a PR against the parent (and this whole switch)
 needs an \`upstream\` remote; if you cloned your fork without one, the **Create pull
 request** dialog offers an **Add upstream remote** button that wires it up for you, and
-the **command palette**'s **Add upstream remote** command adds the remote and fetches it.
+the **command palette**'s **Add upstream remote** command adds the remote and fetches it. If
+the \`upstream\` remote is removed outside the app while a GitHub pull request or issue is open
+under **Upstream**, that tab returns to your fork's list once the app sees the remote is gone.
 
 ## GitHub PRs
 
@@ -4368,13 +4370,18 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
   notification (one for a pull request, a workflow run, {{ai}}an agent session, {{/ai}}or
   a repository's tab) that opens in another repository, or on the other side of a fork,
   keeps the trail, so going back switches repositories (or sides) and returns to where
-  you were. Moving through a list adds nothing to go back through. The trail starts
+  you were. One exception: a GitHub pull request or issue you had open under the
+  **Upstream** lens comes back as its tab's list with nothing selected once the app
+  sees that the \`upstream\` remote has been removed, and that part of the trail
+  starts again. Moving through a list adds nothing to go back through. The trail starts
   again when you open another repository any other way, such as from the repository
   switcher or **My work**, and switching between **Fork** and **Upstream** yourself
   starts this repository's part of it again. If a repository on the trail can no longer
   be opened, going back or forward to it says so once, drops every stop in it and
-  leaves you where you are; the next press goes on to the nearest stop left.
-  While a dialog is open, those keys and buttons do nothing.
+  leaves you where you are; the next press goes on to the nearest stop left. If the
+  app can't check the folder (no answer within ten seconds, or the check itself
+  fails), it says so and keeps the trail, so you can try the same press again. While a
+  dialog is open, those keys and buttons do nothing.
 
 ## Doing things
 
