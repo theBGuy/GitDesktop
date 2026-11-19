@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   elementRanges,
+  hasSpread,
   loadCorpus,
   maskNonCode,
   ScanError,
@@ -46,20 +47,6 @@ const HOSTS = {
 
 const squash = (s) => s.replace(/\s+/g, "");
 const mask = (rel, text) => maskNonCode(text, rel.endsWith(".tsx"));
-
-/** Whether the masked opening tag [from, end) holds a `{...x}` attribute: a
- *  brace at depth 0, so an object spread inside a value doesn't count. */
-function hasSpread(masked, from, end) {
-  let depth = 0;
-  for (let i = from; i < end; i++) {
-    if (masked[i] === "}") depth--;
-    else if (masked[i] === "{") {
-      if (depth === 0 && /^\{\s*\.\.\./.test(masked.slice(i, end))) return true;
-      depth++;
-    }
-  }
-  return false;
-}
 
 /** Every mount of either view in source order, as [view, surface]: the
  *  surface is null unless the opening tag carries a double-quoted

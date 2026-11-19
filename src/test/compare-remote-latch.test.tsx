@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -444,18 +445,20 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
     });
   });
 
-  // The app entries mount after the panel, as in RepositoryView, so their
-  // registrations run after the panel's in a commit.
-  function renderWithApp() {
-    const client = new QueryClient({
+  // The app entries mount before the panel, as in RepositoryView: in a shared
+  // commit they register first, so the panel's enabled entry registers last
+  // and takes the action.
+  function renderWithApp(
+    client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
-    });
+    }),
+  ) {
     render(
       <QueryClientProvider client={client}>
+        <AppCreateHotkeys repoPath={REPO} />
         <TabPanel active>
           <ComparePanel repoPath={REPO} />
         </TabPanel>
-        <AppCreateHotkeys repoPath={REPO} />
       </QueryClientProvider>,
     );
     return client;
@@ -586,6 +589,74 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
     await act(() => client.refetchQueries({ queryKey: ["repo", REPO] }));
     await localButton();
     expect(dialogOpen()).toBe("false");
+  });
+
+  it("keeps create-pr on Compare when the forge answers after the comparison", async () => {
+    let answerForge!: (status: ForgeStatus) => void;
+    vi.mocked(forgeStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        answerForge = resolve;
+      }),
+    );
+    const client = renderWithApp();
+    // The comparison has landed (its ahead row shows) while the forge is held.
+    await aheadRow();
+    expect(client.getQueryState(forgeKey)?.status).toBe("pending");
+    // Both gates read the forge status, so they flip in this one commit.
+    await act(async () => answerForge(GITHUB));
+    // Lets react-query's batched notify timer flush that commit.
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(true);
+    });
+    expect(dialogOpen()).toBe("true");
+    expect(useUiStore.getState().repoTab).toBe("compare");
+    expect(useUiStore.getState().pendingCreate).toBeNull();
+  });
+
+  it("keeps both on Compare when both are enabled in the mount commit", async () => {
+    const warm = renderWithApp();
+    await forgeAnswered(warm);
+    await waitFor(async () =>
+      expect(await localButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    cleanup();
+    renderWithApp(warm);
+    act(() => {
+      expect(dispatchAction("create-local-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().localPrCreate).not.toBeNull();
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(true);
+    });
+    expect(dialogOpen()).toBe("true");
+    expect(useUiStore.getState().repoTab).toBe("compare");
+    expect(useUiStore.getState().pendingCreate).toBeNull();
+    // The remount's ScrollArea timer lands after the assertions.
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+  });
+
+  it("keeps create-pr on Compare across a forge readiness flip", async () => {
+    const client = renderWithApp();
+    await forgeAnswered(client);
+    await waitFor(async () =>
+      expect(await localButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    // Both gates read this one forge status, so each flip re-registers both.
+    const notReady = { ...GITHUB, implemented: { pullRequests: true } };
+    act(() => client.setQueryData(forgeKey, notReady as ForgeStatus));
+    await localButton(/^Create local PR…/);
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    act(() => client.setQueryData(forgeKey, GITHUB));
+    await localButton();
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(true);
+    });
+    expect(dialogOpen()).toBe("true");
+    expect(useUiStore.getState().repoTab).toBe("compare");
+    expect(useUiStore.getState().pendingCreate).toBeNull();
   });
 });
 

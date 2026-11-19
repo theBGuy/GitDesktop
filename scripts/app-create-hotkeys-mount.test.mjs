@@ -1,11 +1,14 @@
 // Pins where RepositoryView mounts AppCreateHotkeys, the app-level `create-pr`
 // and `create-local-pr` entries. Dispatch runs the newest enabled entry and
-// layout effects register in tree order, so the `{repoPath}` mount must sit
-// after every ComparePanel and PullRequestsPanel element (the two panels that
-// register the same actions); the `{null}` mount is the no-repository return,
-// which keeps both chords registered without a repository. A closure over
-// every .ts/.tsx under src/ (src/test/ excluded) keeps a fourth registrar from
-// joining without its own order decision.
+// layout effects register in tree order, so the `{repoPath}` mount sits before
+// every ComparePanel and PullRequestsPanel element (the two panels that
+// register the same actions): in a shared commit a panel's entry registers
+// last, and its enabled entry takes the action. It also sits outside every
+// TabPanel and Activity element, whose hidden state tears its effects down
+// and would drop both entries on other tabs. The `{null}` mount is the
+// no-repository return, which keeps both chords registered without a
+// repository. A closure over every .ts/.tsx under src/ (src/test/ excluded)
+// keeps a fourth registrar from joining without its own order decision.
 // A source scan, since nothing mounts RepositoryView in jsdom. Scans run on
 // `maskNonCode`'s output, so comments and string text never count; literals
 // are read from the raw text at the masked offsets. Every lookup that finds
@@ -18,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   elementRanges,
+  hasSpread,
   loadCorpus,
   maskNonCode,
   matchBrace,
@@ -75,20 +79,6 @@ function checkRegistrars(corpus) {
   assert.deepEqual(registrars(corpus), REGISTRARS, "the registrar set moved");
 }
 
-/** Whether the masked opening tag [from, end) holds a `{...x}` attribute: a
- *  brace at depth 0, so an object spread inside a value doesn't count. */
-function hasSpread(masked, from, end) {
-  let depth = 0;
-  for (let i = from; i < end; i++) {
-    if (masked[i] === "}") depth--;
-    else if (masked[i] === "{") {
-      if (depth === 0 && /^\{\s*\.\.\./.test(masked.slice(i, end))) return true;
-      depth++;
-    }
-  }
-  return false;
-}
-
 /** Every AppCreateHotkeys mount in source order, as { from, end, repoPath }:
  *  `repoPath` is the attribute's squashed expression, or null when the tag
  *  holds a spread or not exactly one `repoPath={…}`. */
@@ -130,7 +120,7 @@ function checkMounts(text, masked = mask(HOST, text)) {
   );
 }
 
-/** The `{repoPath}` mount starts after the end of every panel mount, and
+/** The `{repoPath}` mount ends before the start of every panel mount, and
  *  each panel has one. */
 function checkOrder(text, masked = mask(HOST, text)) {
   const live = mounts(text, masked).filter((m) => m.repoPath === "repoPath");
@@ -138,10 +128,10 @@ function checkOrder(text, masked = mask(HOST, text)) {
   for (const panel of PANELS) {
     const ranges = elementRanges(HOST, text, masked, panel);
     assert.ok(ranges.length > 0, `${HOST} mounts no <${panel}>`);
-    for (const [, end] of ranges)
+    for (const [start] of ranges)
       assert.ok(
-        live[0].from >= end,
-        `the {repoPath} ${MOUNT} mount starts before a <${panel}> ends`,
+        live[0].end <= start,
+        `the {repoPath} ${MOUNT} mount does not end before a <${panel}> starts`,
       );
   }
 }
@@ -158,6 +148,21 @@ function checkGuard(text, masked = mask(HOST, text)) {
     ),
     `the {null} ${MOUNT} mount is not the no-repository return`,
   );
+}
+
+/** No TabPanel or Activity element contains the `{repoPath}` mount, and the
+ *  host holds at least one TabPanel. */
+function checkOutsideTabs(text, masked = mask(HOST, text)) {
+  const live = mounts(text, masked).filter((m) => m.repoPath === "repoPath");
+  assert.equal(live.length, 1, `${live.length} {repoPath} mounts`);
+  const panels = elementRanges(HOST, text, masked, "TabPanel");
+  assert.ok(panels.length > 0, `${HOST} mounts no <TabPanel>`);
+  for (const name of ["TabPanel", "Activity"])
+    for (const [start, end] of elementRanges(HOST, text, masked, name))
+      assert.ok(
+        live[0].end <= start || live[0].from >= end,
+        `the {repoPath} ${MOUNT} mount sits inside a <${name}>`,
+      );
 }
 
 const hostText = () => {
@@ -181,12 +186,16 @@ test("RepositoryView imports AppCreateHotkeys and mounts it on {null} and {repoP
   checkMounts(hostText());
 });
 
-test("the {repoPath} mount comes after every ComparePanel and PullRequestsPanel", () => {
+test("the {repoPath} mount comes before every ComparePanel and PullRequestsPanel", () => {
   checkOrder(hostText());
 });
 
 test("the {null} mount is the no-repository return", () => {
   checkGuard(hostText());
+});
+
+test("the {repoPath} mount sits outside every TabPanel and Activity", () => {
+  checkOutsideTabs(hostText());
 });
 
 // In-memory controls: each mutation fails the check that pins it.
@@ -239,9 +248,26 @@ test("control: a guard mount on {repoPath} fails", () => {
   assert.throws(() => checkMounts(text), /AppCreateHotkeys mounts/);
 });
 
-test("control: the {repoPath} mount moved above the sidebar fails the order", () => {
-  const text = once(once(hostText(), LIVE, ""), "<aside", `${LIVE}\n<aside`);
-  assert.throws(() => checkOrder(text), /starts before a <ComparePanel> ends/);
+test("control: a {repoPath} mount after </main> fails the order, the live text passes", () => {
+  checkOrder(hostText());
+  const text = once(once(hostText(), LIVE, ""), "</main>", `</main>\n${LIVE}`);
+  checkMounts(text);
+  assert.throws(
+    () => checkOrder(text),
+    /does not end before a <ComparePanel> starts/,
+  );
+});
+
+test("control: a {repoPath} mount inside the first TabPanel fails, the live text passes", () => {
+  checkOutsideTabs(hostText());
+  const removed = once(hostText(), LIVE, "");
+  const masked = mask(HOST, removed);
+  const [[start]] = elementRanges(HOST, removed, masked, "TabPanel");
+  const at = tagEnd(masked, start) + 1;
+  const text = `${removed.slice(0, at)}\n${LIVE}${removed.slice(at)}`;
+  checkMounts(text);
+  checkOrder(text);
+  assert.throws(() => checkOutsideTabs(text), /mount sits inside a <TabPanel>/);
 });
 
 test("control: a changed no-repository condition fails the guard pin", () => {

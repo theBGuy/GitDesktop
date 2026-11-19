@@ -779,6 +779,9 @@ export function RepositoryView() {
       {/* Outside every TabPanel: a hidden tab's <Activity> pauses effects, and
           the log must follow HEAD for readers on whichever tab is shown. */}
       <StatusLogSync key={repoPath} repoPath={repoPath} />
+      {/* Before the tab panels: in a shared commit its entries register first,
+          so a panel's own enabled entry is the newest and takes the action. */}
+      <AppCreateHotkeys repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
         {/* The sidebar shares the window's shrink with the content pane: it
             gives up width down to a 288px floor (the narrowest that still fits
@@ -1183,9 +1186,6 @@ export function RepositoryView() {
           )}
         </main>
       </div>
-      {/* After the tab panels: its registrations then run after theirs in a
-          commit, so a panel's own enabled entry stays the newest. */}
-      <AppCreateHotkeys repoPath={repoPath} />
 
       {/* Palette "Blame file…": pick a tracked file, then blame its worktree
           contents (no rev — "blame this file as it is now"). */}

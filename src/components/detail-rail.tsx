@@ -500,11 +500,11 @@ export function DetailRail({
       ?.focus();
   const onFieldKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     // Bound chords (Go back's Alt+arrow) reach the window listener untouched.
-    // An unsettled list is another identity's placeholder: no key picks from it.
     if (!filter || hasChordModifier(e)) return;
     if (e.key === "Enter") {
       // A held Enter that activated the x, `Clear filter` or the funnel repeats
-      // into the field once they move focus here; a repeat picks nothing.
+      // into the field once they move focus here; a repeat picks nothing. An
+      // unsettled list is another identity's placeholder: no key picks from it.
       if (
         e.nativeEvent.isComposing ||
         e.repeat ||

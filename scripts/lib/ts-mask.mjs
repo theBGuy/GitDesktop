@@ -339,6 +339,20 @@ export function tagEnd(masked, start) {
   return -1;
 }
 
+/** Whether the masked opening tag [from, end) holds a `{...x}` attribute: a
+ *  brace at depth 0, so an object spread inside a value doesn't count. */
+export function hasSpread(masked, from, end) {
+  let depth = 0;
+  for (let i = from; i < end; i++) {
+    if (masked[i] === "}") depth--;
+    else if (masked[i] === "{") {
+      if (depth === 0 && /^\{\s*\.\.\./.test(masked.slice(i, end))) return true;
+      depth++;
+    }
+  }
+  return false;
+}
+
 export const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export function* sourceFiles(dir) {
