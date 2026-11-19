@@ -268,10 +268,12 @@ const RUNTIME_SLOTS: usize = 2;
 /// `agent.rs`'s per-kind CLI resolve cache, and by the settled-runtime memo, so tuning
 /// it moves all three. It buys the one-shot callers (session discard, Test panel
 /// mount, shell open) and a turn burst ONE resolution instead of one per call, which
-/// matters because resolving an ABSENT binary costs a login-shell spawn on
-/// macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a cached MISS
-/// is what holds the "not installed" copy up, so a longer TTL would keep that copy
-/// past the very tick meant to clear it once an engine is installed.
+/// matters because a binary only the login shell finds costs a spawn per resolution
+/// on macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a cached
+/// MISS is what holds the "not installed" copy up, so a longer TTL would keep that
+/// copy past the very tick meant to clear it once an engine is installed. An engine
+/// only the login shell would find is held by the resolver's own miss instead, until
+/// About > Re-check or a restart.
 pub(crate) const CANDIDATE_TTL: Duration = Duration::from_secs(15);
 
 type CandidateCache = [Option<(Instant, Option<(PathBuf, String)>)>; RUNTIME_SLOTS];
@@ -1358,13 +1360,12 @@ fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<St
     ))
 }
 
-/// A batch file's self-delete: `(goto)` ends the batch context, so the `del` runs
-/// without cmd then failing to read the deleted file (measured on Windows 10 through
-/// `cmd /c start`, whose `cmd /K` console then stays open at a prompt). It also ends the
-/// prelude's `setlocal`, so the `del` runs under cmd's registry default for delayed
-/// expansion: with that on, a `!` in %TEMP% makes the `del` miss and the script stays.
+/// A batch file's self-delete, then `exit`. `(goto)` ends the batch context, so the
+/// `del` runs without cmd then failing to read the deleted file, and no later line of
+/// the file is read: the `exit` must share this line to close the `cmd /K` console
+/// `start` runs the script under (measured on Windows 10).
 #[cfg(any(windows, test))]
-const CMD_SCRIPT_SELF_DELETE: &str = "(goto) 2>nul & del \"%~f0\"\r\n";
+const CMD_SCRIPT_SELF_DELETE: &str = "(goto) 2>nul & del \"%~f0\" & exit\r\n";
 
 /// Windows: `start` a temp `.cmd` for a fresh, fully-wired console; a direct
 /// spawn leaves stdio bound to ours, so it cannot take keyboard input.
@@ -2188,14 +2189,14 @@ mod tests {
             "echo.\r\n",
             "echo (container exited) Press any key to close...\r\n",
             "pause >nul\r\n",
-            "(goto) 2>nul & del \"%~f0\"\r\n",
+            "(goto) 2>nul & del \"%~f0\" & exit\r\n",
         );
         let script = container_shell_script(bin, &args, tip).unwrap();
         assert_eq!(script, expected);
         // The self-delete must be the last line: cmd reads the file by offset.
         assert_eq!(
             script.trim_end_matches("\r\n").rsplit("\r\n").next(),
-            Some("(goto) 2>nul & del \"%~f0\"")
+            Some("(goto) 2>nul & del \"%~f0\" & exit")
         );
     }
 

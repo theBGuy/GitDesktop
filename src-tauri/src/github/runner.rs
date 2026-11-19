@@ -35,7 +35,9 @@ impl GhOutput {
 /// failed while About showed gh installed. Cached like `git` (see
 /// `git::runner::git_bin`): the login-shell fallback isn't free, and only a
 /// *successful* resolution is cached, so a gh installed after launch is still
-/// picked up on the next call.
+/// picked up on the next call, unless only the login shell can find it: the
+/// resolver remembers that shell's miss (macOS/Linux) until the process
+/// restarts, or in the app until About > Re-check.
 static GH_BIN: OnceCell<PathBuf> = OnceCell::const_new();
 
 async fn gh_bin() -> AppResult<PathBuf> {
@@ -176,15 +178,31 @@ async fn gh_stored_login(host: &str) -> bool {
         .stderr(Stdio::null());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    cmd.kill_on_drop(true);
 
-    let Ok(Ok(status)) = tokio::time::timeout(PROBE_TIMEOUT, cmd.status()).await else {
+    let Some(status) = probe_exit(cmd, PROBE_TIMEOUT).await else {
         stored_login_cache_put_failure(host);
         return false;
     };
     let stored = status.success();
     stored_login_cache_put(host, stored);
     stored
+}
+
+/// Spawns `cmd` with its tree armed and waits for it inside `timeout`. `None` for a spawn
+/// error, a failed wait or a timeout. Leaves the stdio the caller set: the stored-login
+/// probe's stdout is the user's token and must stay null.
+async fn probe_exit(mut cmd: Command, timeout: Duration) -> Option<std::process::ExitStatus> {
+    crate::proc_tree::TreeGuard::prepare(&mut cmd);
+    cmd.kill_on_drop(true);
+    let run = async {
+        let mut child = cmd.spawn()?;
+        // Declared right after `child` so it drops first, while the leader is unreaped.
+        let guard = crate::proc_tree::TreeGuard::arm(&child);
+        let status = child.wait().await?;
+        guard.disarm();
+        Ok::<_, std::io::Error>(status)
+    };
+    tokio::time::timeout(timeout, run).await.ok()?.ok()
 }
 
 /// The host spellings to offer gh for a remote URL, most specific first: the authority,
@@ -411,20 +429,26 @@ async fn spawn_gh_resolved(
     .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    crate::proc_tree::TreeGuard::prepare(&mut cmd);
     cmd.kill_on_drop(true);
 
-    // Spawn, write and drains all sit inside the one timeout; a dropped child is killed.
+    // Spawn, exchange and reap all sit inside the one timeout. The guard is declared right
+    // after `child` so it drops first, killing the tree while the leader is unreaped; only
+    // a reaped call disarms.
     let exchange = async {
-        let child = cmd.spawn().map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AppError::GhNotFound
             } else {
                 AppError::Io(e)
             }
         })?;
-        exchange_with_stdin(child, input.map(str::as_bytes))
+        let guard = crate::proc_tree::TreeGuard::arm(&child);
+        let output = exchange_with_stdin(&mut child, input.map(str::as_bytes))
             .await
-            .map_err(AppError::Io)
+            .map_err(AppError::Io)?;
+        guard.disarm();
+        Ok::<_, AppError>(output)
     };
     let output = tokio::time::timeout(timeout, exchange)
         .await
@@ -438,21 +462,41 @@ async fn spawn_gh_resolved(
 }
 
 /// Writes `input` to the child's stdin while draining stdout and stderr, closing the
-/// pipe once the write ends so the child reads EOF. A reaped child's output is the
-/// result whatever the write returned: a CLI that exits before reading keeps its own
-/// exit code and stderr. The write error surfaces only when the wait itself failed.
-/// Takes no timeout; each caller wraps the exchange in its own.
+/// pipe once the write ends so the child reads EOF, then reaps the child. `Ok` means the
+/// child was reaped (the caller's cue to disarm its tree guard). Once it is, its output
+/// is the result at once and nothing more is awaited, so a CLI that exits before reading
+/// keeps its own exit code and stderr. A write still pending is dropped; on Windows one
+/// parked in the blocking pool keeps its pipe handle until the reader goes. A reaped
+/// leader no longer pins its group id, which is safe because the caller awaits nothing
+/// before its disarm and the disarm sends no signal. A failed drain or wait returns at
+/// once, with the write's error preferred when the write had already ended. Borrows the
+/// child and never kills it; takes no timeout, each caller wraps the exchange in its own.
 pub(crate) async fn exchange_with_stdin(
-    mut child: tokio::process::Child,
+    child: &mut tokio::process::Child,
     input: Option<&[u8]>,
 ) -> std::io::Result<std::process::Output> {
     use tokio::io::AsyncWriteExt;
+
+    /// Reads one optional pipe to its end; a missing pipe reads as empty.
+    async fn drain(
+        pipe: &mut Option<impl tokio::io::AsyncRead + Unpin>,
+    ) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let mut buf = Vec::new();
+        if let Some(pipe) = pipe {
+            pipe.read_to_end(&mut buf).await?;
+        }
+        Ok(buf)
+    }
 
     debug_assert!(
         input.is_none() || child.stdin.is_some(),
         "stdin text given for a child spawned without a piped stdin"
     );
     let stdin = child.stdin.take();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
     let write = async move {
         let (Some(mut pipe), Some(bytes)) = (stdin, input) else {
             return Ok(());
@@ -461,8 +505,27 @@ pub(crate) async fn exchange_with_stdin(
         drop(pipe);
         written
     };
-    let (written, waited) = tokio::join!(write, child.wait_with_output());
-    waited.map_err(|wait_err| written.err().unwrap_or(wait_err))
+    // The reap follows the drains, so the leader stays unreaped while the guard is armed,
+    // and it is the last thing either branch below awaits.
+    let reap = async {
+        let (stdout, stderr) = tokio::try_join!(drain(&mut stdout), drain(&mut stderr))?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+    tokio::pin!(write, reap);
+    // A reap that ends first returns at once and drops the pending write: a descendant
+    // holding the pipe unread must not keep a reaped call's guard armed, and a failed
+    // reap leaves the kill to that armed guard. Biased toward the write, so when both
+    // end in one poll a failed reap still reports the write's error.
+    tokio::select! {
+        biased;
+        written = &mut write => reap.await.map_err(|e| written.err().unwrap_or(e)),
+        reaped = &mut reap => reaped,
+    }
 }
 
 /// Runs gh, treating any non-zero exit code as an error carrying gh's stderr.
@@ -1577,8 +1640,10 @@ async fn rate_limit_probe(gh: &std::path::Path, host: &Option<String>) -> Option
 
 #[cfg(test)]
 mod tests {
+    use super::tree_fixture::{remove_when_free, started_within, Wrapper};
     use super::*;
     use crate::agent::ChildEnv;
+    use crate::proc_tree::test_support::{wait_until, Holder, Keeps, HANG_GUARD};
 
     const RATE_NOW: i64 = 1_800_000_000;
 
@@ -4133,14 +4198,14 @@ mod tests {
         } else {
             tokio::process::Command::new("true")
         };
-        let child = command
+        let mut child = command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let _ = exchange_with_stdin(child, Some(b"text")).await;
+        let _ = exchange_with_stdin(&mut child, Some(b"text")).await;
     }
 
     /// A wrapper-only gh: multi-line text fails at spawn as an argument (std refuses a
@@ -4190,5 +4255,904 @@ mod tests {
             Err(AppError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
             other => panic!("expected a spawn refusal, got {:?}", other.err()),
         }
+    }
+
+    /// The armed-spawn pin over this file. Each control mutates the real text in memory:
+    /// the first group must add the violation it names, the second must leave the verdict.
+    #[test]
+    fn every_gh_spawn_is_tree_armed() {
+        use super::tree_fixture::unarmed_spawns;
+        // The byte range of the first line of fn `name` that contains `needle`.
+        fn line_in(src: &str, name: &str, needle: &str) -> std::ops::Range<usize> {
+            let start = src.find(&format!("fn {name}(")).expect(name);
+            let end = start + src[start..].find("\n}").expect("a closing line");
+            let at = start
+                + src[start..end]
+                    .find(needle)
+                    .unwrap_or_else(|| panic!("`{needle}` in {name}"));
+            let from = src[..at].rfind('\n').map_or(0, |n| n + 1);
+            let to = src[at..].find('\n').map_or(src.len(), |n| at + n + 1);
+            from..to
+        }
+        fn swap(src: &str, name: &str, needle: &str, with: &str) -> String {
+            let line = line_in(src, name, needle);
+            format!("{}{with}{}", &src[..line.start], &src[line.end..])
+        }
+        fn rename(src: &str, name: &str, from: &str, to: &str) -> String {
+            let line = line_in(src, name, from);
+            let text = src[line.clone()].replacen(from, to, 1);
+            format!("{}{text}{}", &src[..line.start], &src[line.end..])
+        }
+        // Moves fn `name`'s `moved` line above its `anchor` line.
+        fn hoist(src: &str, name: &str, moved: &str, anchor: &str) -> String {
+            let line = src[line_in(src, name, moved)].to_string();
+            let without = swap(src, name, moved, "");
+            let at = line_in(&without, name, anchor).start;
+            format!("{}{line}{}", &without[..at], &without[at..])
+        }
+        fn above(src: &str, item: &str, text: &str) -> String {
+            let at = src.find(item).expect(item);
+            let at = src[..at].rfind('\n').map_or(0, |n| n + 1);
+            format!("{}{text}{}", &src[..at], &src[at..])
+        }
+        // Inserts `text` below fn `name`'s first line that contains `needle`.
+        fn below(src: &str, name: &str, needle: &str, text: &str) -> String {
+            let line = line_in(src, name, needle);
+            format!("{}{text}{}", &src[..line.end], &src[line.end..])
+        }
+        // Inserts `text` above fn `name`'s first line that contains `needle`.
+        fn above_line(src: &str, name: &str, needle: &str, text: &str) -> String {
+            let line = line_in(src, name, needle);
+            format!("{}{text}{}", &src[..line.start], &src[line.start..])
+        }
+
+        let src = include_str!("runner.rs").replace("\r\n", "\n");
+        let (violations, roster) = unarmed_spawns(&src);
+        assert!(violations.is_empty(), "{violations:#?}");
+        assert_eq!(
+            roster,
+            ["probe_exit", "spawn_gh_resolved"],
+            "a new correctly armed spawning fn: add its name to this roster"
+        );
+
+        let next = "async fn spawn_gh_resolved(";
+        let rogue = "fn rogue(cmd: &mut Command) {\n    let _ = cmd.spawn();\n}\n";
+        let one_line = "fn rogue(cmd: &mut Command) { let _ = cmd.spawn(); }\n";
+        let in_impl = "impl Rogue {\n    fn go(cmd: &mut Command) {\n        let _ = cmd.spawn();\n    }\n}\n";
+        let seam = "#[cfg(test)]\nstatic X: u8 = 0;\n";
+        let kill = "cmd.kill_on_drop(true);";
+        let untested = src
+            .lines()
+            .filter(|l| l.trim_end() != "#[cfg(test)]")
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut trips = vec![
+            (above(&src, next, rogue), "`rogue`"),
+            (above(&src, next, one_line), "was not read"),
+            (
+                swap(
+                    &src,
+                    "spawn_gh_resolved",
+                    kill,
+                    &format!("    cmd.output();\n    {kill}\n"),
+                ),
+                "`.output()`",
+            ),
+            (above(&src, next, in_impl), "outside"),
+            (above(&src, next, &format!("{seam}{rogue}")), "`rogue`"),
+            (untested.clone(), "no test module"),
+            (untested, "outside"),
+        ];
+        for name in ["probe_exit", "spawn_gh_resolved"] {
+            let arm = "TreeGuard::arm(";
+            trips.extend([
+                (rename(&src, name, arm, "TreeGuard::arm_tree("), name),
+                (swap(&src, name, "guard.disarm();", ""), name),
+                (swap(&src, name, kill, ""), name),
+                (swap(&src, name, "TreeGuard::prepare(&mut cmd);", ""), name),
+                (hoist(&src, name, "guard.disarm();", arm), name),
+                (hoist(&src, name, arm, ".spawn()"), name),
+                // A removed statement kept alive by a comment line still trips.
+                (
+                    swap(
+                        &src,
+                        name,
+                        "guard.disarm();",
+                        "        // guard.disarm();\n",
+                    ),
+                    name,
+                ),
+            ]);
+        }
+        for (text, mark) in &trips {
+            assert_ne!(text, &src, "the {mark} control must change the text");
+            let (found, _) = unarmed_spawns(text);
+            assert!(
+                found.iter().any(|v| v.contains(mark)),
+                "a control left no {mark} violation: {found:#?}"
+            );
+        }
+        // One control per body rule, each tripping that rule's own message.
+        for name in ["probe_exit", "spawn_gh_resolved"] {
+            let arm = "TreeGuard::arm(";
+            let (spawns, disarm, moves, awaits) = (
+                format!("`{name}` spawns"),
+                format!("`{name}`'s disarm"),
+                format!("`{name}` moves or rebinds"),
+                format!("`{name}` awaits between"),
+            );
+            let controls = [
+                (
+                    above_line(&src, name, arm, "        tokio::task::yield_now().await;\n"),
+                    &awaits,
+                ),
+                (
+                    above_line(&src, name, "guard.disarm();", "        settle().await?;\n"),
+                    &disarm,
+                ),
+                (
+                    below(&src, name, arm, "        let _ = cmd.spawn();\n"),
+                    &spawns,
+                ),
+                (
+                    below(&src, name, arm, "        let _ = TreeGuard::arm(&child);\n"),
+                    &spawns,
+                ),
+                (
+                    swap(
+                        &src,
+                        name,
+                        "guard.disarm();",
+                        "        if ok { guard.disarm(); }\n",
+                    ),
+                    &disarm,
+                ),
+                (
+                    below(&src, name, "guard.disarm();", "        guard.disarm();\n"),
+                    &disarm,
+                ),
+                (
+                    below(&src, name, arm, "        let mut child = child;\n"),
+                    &moves,
+                ),
+                (below(&src, name, arm, "        consume(child);\n"), &moves),
+            ];
+            for (text, mark) in &controls {
+                assert_ne!(text, &src, "the {mark} control must change the text");
+                let (found, _) = unarmed_spawns(text);
+                assert!(
+                    found.iter().any(|v| v.contains(mark.as_str())),
+                    "a control left no {mark} violation: {found:#?}"
+                );
+            }
+        }
+
+        let gone = rename(&src, "probe_exit", "probe_exit(", "probe_exit_gone(");
+        assert_ne!(
+            unarmed_spawns(&gone).1,
+            roster,
+            "a renamed fn must move the roster"
+        );
+
+        let reflowed = rename(
+            &src,
+            "spawn_gh_resolved",
+            "cmd.spawn()",
+            "cmd\n        .spawn()",
+        );
+        let keeps = [
+            above(&src, next, seam),
+            above(&src, kill, "    // cmd.output(); cmd.spawn();\n"),
+            below(
+                &src,
+                "spawn_gh_resolved",
+                "TreeGuard::arm(",
+                "        // let mut child = cmd.spawn()?; TreeGuard::arm(&child); guard.disarm(); f(child);\n",
+            ),
+            rename(
+                &reflowed,
+                "probe_exit",
+                kill,
+                "cmd\n        .kill_on_drop(true);",
+            ),
+        ];
+        for text in &keeps {
+            assert_ne!(text, &src, "the control must change the text");
+            assert_eq!(unarmed_spawns(text), (vec![], roster.clone()));
+        }
+    }
+
+    /// The stored-login probe's stdout is the user's token: gh_stored_login sends it to
+    /// null in its one `.stdout(` call (a later one would win) and reaches the child only
+    /// through probe_exit, which sets no stdio. Matches these literal spellings only, over
+    /// whitespace-stripped bodies.
+    #[test]
+    fn the_stored_login_probe_never_captures_stdout() {
+        const CAPTURES: [&str; 9] = [
+            "Stdio::piped",
+            "Stdio::inherit",
+            ".output(",
+            "wait_with_output",
+            "child.stdout",
+            ".stdout.take(",
+            "spawn_gh_resolved(",
+            "exchange_with_stdin(",
+            "run_gh",
+        ];
+        let body = |name: &str| -> String {
+            crate::github::repo_meta::tests::wiring_body(include_str!("runner.rs"), name)
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect()
+        };
+        let holds = |login: &str, probe: &str| {
+            login.contains(".stdout(Stdio::null())")
+                && login.matches(".stdout(").count() == 1
+                && login.contains("probe_exit(")
+                && CAPTURES
+                    .iter()
+                    .all(|c| !login.contains(c) && !probe.contains(c))
+                && [".stdout(", ".stderr(", ".stdin("]
+                    .iter()
+                    .all(|c| !probe.contains(c))
+        };
+        let (login, probe) = (body("gh_stored_login"), body("probe_exit"));
+        assert!(holds(&login, &probe), "{login}\n{probe}");
+
+        let piped = login.replace(".stdout(Stdio::null())", ".stdout(Stdio::piped())");
+        let routed = login.replace("probe_exit(", "spawn_gh_resolved(");
+        assert_ne!(piped, login);
+        assert_ne!(routed, login);
+        assert!(!holds(&piped, &probe), "a piped stdout must flip");
+        assert!(!holds(&routed, &probe), "a capturing runner must flip");
+        let set = format!("{probe}cmd.stdout(Stdio::null());");
+        assert!(!holds(&login, &set), "stdio set in probe_exit must flip");
+        let reset = format!("{login}cmd.stdout(sink);");
+        assert!(
+            !holds(&reset, &probe),
+            "a second stdout, which would win, must flip"
+        );
+        for capture in CAPTURES {
+            assert!(!holds(&format!("{login}{capture}"), &probe), "{capture}");
+            assert!(!holds(&login, &format!("{probe}{capture}")), "{capture}");
+        }
+    }
+
+    fn tree_dir(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("create temp dir")
+    }
+
+    /// The wrapper's command as gh_stored_login builds its own: null stdio, no console.
+    fn login_probe_command(wrapper: &Wrapper) -> Command {
+        let mut cmd = wrapper.command();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd
+    }
+
+    /// Dropping an armed gh call, which is all a timeout or a cancel does, kills
+    /// everything its wrapper started. The holder is a descendant of the spawned shell
+    /// and keeps both of the runner's pipes, and the stdin text is never read, so the drop
+    /// lands on an unfinished write. The test drops the call itself once the holder has
+    /// started, so no budget races startup.
+    #[tokio::test]
+    async fn an_abandoned_gh_call_kills_its_wrappers_whole_tree() {
+        let dir = tree_dir("gd-gh-tree-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "gh", &holder, Keeps::Both);
+        let (program, args) = (wrapper.program(), wrapper.args());
+        let (text, _) = big_text();
+        let mut run = Box::pin(spawn_gh_resolved(
+            program,
+            None,
+            None,
+            &args,
+            Some(&text),
+            HANG_GUARD,
+        ));
+        // The first poll spawns and arms; only then may the wrapper start the holder.
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled before its gate: {:?}", r.map(|o| o.code)),
+            () = std::future::ready(()) => {}
+        }
+        wrapper.mark_armed();
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled under its holder: {:?}", r.map(|o| o.code)),
+            ok = started_within(&holder, HANG_GUARD) => assert!(ok, "the holder never started"),
+        }
+        drop(run);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the abandoned gh call"
+        );
+        remove_when_free(dir);
+    }
+
+    /// The control for the kill test above: the same wrapper spawned the runner's way but
+    /// never armed, killed directly with its read ends dropped, leaves the holder running.
+    #[tokio::test]
+    async fn a_direct_kill_alone_leaves_the_gh_wrappers_child_running() {
+        let dir = tree_dir("gd-gh-direct-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "gh", &holder, Keeps::Both);
+        let mut cmd = wrapper.command();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        crate::proc_tree::TreeGuard::prepare(&mut cmd);
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn the wrapper");
+        wrapper.mark_armed();
+        assert!(
+            started_within(&holder, HANG_GUARD).await,
+            "the holder never started"
+        );
+        child.kill().await.expect("kill the wrapper");
+        drop(child.stdout.take());
+        drop(child.stderr.take());
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with a wrapper killed alone"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+
+    /// A reaped gh call disarms, so what it started keeps running. The holder keeps
+    /// neither of the runner's pipes, so both reach EOF and the wrapper is reaped while
+    /// the holder lives.
+    #[tokio::test]
+    async fn a_reaped_gh_call_leaves_what_it_started_running() {
+        let dir = tree_dir("gd-gh-reaped-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "gh", &holder, Keeps::Neither);
+        let (program, args) = (wrapper.program(), wrapper.args());
+        let mut run = Box::pin(spawn_gh_resolved(
+            program, None, None, &args, None, HANG_GUARD,
+        ));
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled before its gate: {:?}", r.map(|o| o.code)),
+            () = std::future::ready(()) => {}
+        }
+        wrapper.mark_armed();
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled under its holder: {:?}", r.map(|o| o.code)),
+            ok = started_within(&holder, HANG_GUARD) => assert!(ok, "the holder never started"),
+        }
+        wrapper.let_finish();
+        let out = run.await.unwrap_or_else(|e| {
+            let why = "the holder kept one of the runner's pipes (a Keeps::Neither failure)";
+            panic!("{e:?}: {why}, or the wrapper never saw its finish gate")
+        });
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert!(out.stdout.is_empty(), "stdout: {}", out.stdout_lossy());
+        assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with the reaped gh call"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+
+    /// A reaped leader's output is the result at once, while a background job keeps its
+    /// stdin open unread and more than a pipe's worth of text is still unwritten. The
+    /// guard is then dropped armed: the group still has members, so its id still names
+    /// them, and the kill takes the holder. Unix only: on Windows a helper cmd starts
+    /// directly inherits every pipe (only proc_tree's holder launcher sheds its handles),
+    /// so the drains would not end while it lives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reaped_call_does_not_wait_for_a_write_a_descendant_blocks() {
+        use crate::proc_tree::test_support::HostShell;
+        let dir = tree_dir("gd-gh-blocked-");
+        let holder = Holder::new(dir.path());
+        let leave = dir.path().join("leave").display().to_string();
+        let reading = dir.path().join("job-holds-stdin");
+        let job = reading.display().to_string();
+        assert!(!leave.contains('\''), "a quote in the gate's path: {leave}");
+        let snippet = holder.launch_snippet(HostShell::Sh, Keeps::Neither);
+        // fd 9 carries the leader's stdin past the null stdin a background job defaults to;
+        // the job marks itself started once that stdin is its own.
+        let script = format!(
+            "{snippet}\nexec 9<&0\n{{ : > '{job}'; exec sleep 3600; }} <&9 9<&- >/dev/null 2>&1 &\nexec 9<&-\ni=0; while [ ! -e '{leave}' ] && [ \"$i\" -lt 9000 ]; do sleep 0.1; i=$((i+1)); done\nexit 0\n"
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(&script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::proc_tree::TreeGuard::prepare(&mut cmd);
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn the leader");
+        let guard = crate::proc_tree::TreeGuard::arm(&child);
+        assert!(guard.is_armed(), "the guard armed");
+        assert!(
+            wait_until(|| holder.started(), HANG_GUARD),
+            "the holder never started"
+        );
+        assert!(
+            wait_until(|| reading.exists(), HANG_GUARD),
+            "the stdin-holding job never started"
+        );
+        std::fs::write(&leave, "").expect("let the leader exit");
+        let (text, _) = big_text();
+        let exchange = exchange_with_stdin(&mut child, Some(text.as_bytes()));
+        let out = tokio::time::timeout(HANG_GUARD, exchange)
+            .await
+            .expect("the reaped call waited on the write its background job blocks")
+            .expect("a reaped call is Ok");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+        drop(guard);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the armed guard's drop"
+        );
+        drop(child);
+        remove_when_free(dir);
+    }
+
+    /// The stored-login probe's twin of the gh kill test: a dropped probe kills its
+    /// wrapper's whole tree. Its stdio is null, so there is no pipe to keep.
+    #[tokio::test]
+    async fn an_abandoned_login_probe_kills_its_wrappers_whole_tree() {
+        let dir = tree_dir("gd-gh-probe-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "gh", &holder, Keeps::Both);
+        let mut run = Box::pin(probe_exit(login_probe_command(&wrapper), HANG_GUARD));
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the probe settled before its gate: {r:?}"),
+            () = std::future::ready(()) => {}
+        }
+        wrapper.mark_armed();
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the probe settled under its holder: {r:?}"),
+            ok = started_within(&holder, HANG_GUARD) => assert!(ok, "the holder never started"),
+        }
+        drop(run);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the abandoned probe"
+        );
+        remove_when_free(dir);
+    }
+
+    /// A reaped stored-login probe disarms, so what it started keeps running.
+    #[tokio::test]
+    async fn a_reaped_login_probe_leaves_what_it_started_running() {
+        let dir = tree_dir("gd-gh-probed-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "gh", &holder, Keeps::Neither);
+        let mut run = Box::pin(probe_exit(login_probe_command(&wrapper), HANG_GUARD));
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the probe settled before its gate: {r:?}"),
+            () = std::future::ready(()) => {}
+        }
+        wrapper.mark_armed();
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the probe settled under its holder: {r:?}"),
+            ok = started_within(&holder, HANG_GUARD) => assert!(ok, "the holder never started"),
+        }
+        wrapper.let_finish();
+        let status = run
+            .await
+            .expect("the probe reaps the wrapper once it passes its finish gate");
+        assert!(status.success(), "{status:?}");
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with the reaped probe"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+}
+
+/// The tree-test fixture and source pins over the gh and glab runners, shared with
+/// forge/glab.rs's tests.
+#[cfg(test)]
+pub(crate) mod tree_fixture {
+    use crate::proc_tree::test_support::{wait_until, Holder, HostShell, Keeps, HANG_GUARD};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    /// The wrapper's two gates, in the holder's directory beside its reserved names.
+    const ARMED: &str = "tree-armed";
+    const FINISH: &str = "tree-finish";
+
+    /// A stand-in gh or glab whose spawned program is a shell running a script file that
+    /// never `exec`s, so the holder it launches is a descendant of the spawned process.
+    pub(crate) struct Wrapper {
+        program: PathBuf,
+        args: Vec<String>,
+        armed: PathBuf,
+        finish: PathBuf,
+    }
+
+    impl Wrapper {
+        /// Writes the wrapper script for `name` under `dir`: Windows `<name>.cmd` (so the
+        /// spawned program is cmd.exe), unix `<name>-wrapper.sh` run as `sh <file>`. The
+        /// script waits for gate 1, runs `holder`'s launch snippet on a line of its own,
+        /// waits for gate 2 and exits 0. It writes nothing to stdout or stderr, and each
+        /// gate loop exits non-zero after about 15 minutes (a leak cap, never a wait).
+        pub(crate) fn new(dir: &Path, name: &str, holder: &Holder, keeps: Keeps) -> Self {
+            #[cfg(windows)]
+            let (program, args) =
+                cmd_script(dir, name, &holder.launch_snippet(HostShell::Cmd, keeps));
+            #[cfg(unix)]
+            let (program, args) =
+                sh_script(dir, name, &holder.launch_snippet(HostShell::Sh, keeps));
+            Self {
+                program,
+                args,
+                armed: dir.join(ARMED),
+                finish: dir.join(FINISH),
+            }
+        }
+
+        pub(crate) fn program(&self) -> &Path {
+            &self.program
+        }
+
+        pub(crate) fn args(&self) -> Vec<&str> {
+            self.args.iter().map(String::as_str).collect()
+        }
+
+        /// A Command over program and args with nothing else set.
+        pub(crate) fn command(&self) -> tokio::process::Command {
+            let mut cmd = tokio::process::Command::new(&self.program);
+            cmd.args(&self.args);
+            cmd
+        }
+
+        /// Opens gate 1. Before it the wrapper has started no child besides its foreground
+        /// gate poller. Call it only after the run under test has been polled once, so a
+        /// Windows holder is born after the Job Object assignment.
+        pub(crate) fn mark_armed(&self) {
+            std::fs::write(&self.armed, "").expect("open gate 1");
+        }
+
+        /// Opens gate 2: the wrapper exits 0. A test that never calls it has a wrapper that
+        /// blocks until it is killed (or until its leak cap).
+        pub(crate) fn let_finish(&self) {
+            std::fs::write(&self.finish, "").expect("open gate 2");
+        }
+    }
+
+    /// The batch arm. Gates are named relative to the script and quoted, so the gate
+    /// lines splice no absolute path into batch text (the holder's snippet line carries
+    /// its own); CRLF line ends, as cmd can miss a label in an LF file. Each loop steps
+    /// with a one-second ping and stops after 900 passes.
+    #[cfg(windows)]
+    fn cmd_script(dir: &Path, name: &str, snippet: &str) -> (PathBuf, Vec<String>) {
+        let step = r#""%SystemRoot%\System32\ping.exe" -n 2 127.0.0.1 >nul"#;
+        let lines = [
+            "@echo off".to_string(),
+            "set n=0".into(),
+            ":armed".into(),
+            format!("if exist \"%~dp0{ARMED}\" goto launch"),
+            "set /a n+=1".into(),
+            "if %n% geq 900 exit /b 1".into(),
+            step.into(),
+            "goto armed".into(),
+            ":launch".into(),
+            snippet.into(),
+            "set n=0".into(),
+            ":finish".into(),
+            format!("if exist \"%~dp0{FINISH}\" exit /b 0"),
+            "set /a n+=1".into(),
+            "if %n% geq 900 exit /b 1".into(),
+            step.into(),
+            "goto finish".into(),
+        ];
+        let path = dir.join(format!("{name}.cmd"));
+        std::fs::write(&path, lines.join("\r\n") + "\r\n").expect("write the wrapper");
+        (path, Vec::new())
+    }
+
+    /// The sh arm: gates as single-quoted absolute paths, each loop stepping with
+    /// `sleep 0.1` and stopping after 9000 passes.
+    #[cfg(unix)]
+    fn sh_script(dir: &Path, name: &str, snippet: &str) -> (PathBuf, Vec<String>) {
+        let shown = dir.display().to_string();
+        assert!(
+            !shown.contains('\''),
+            "a quote in the wrapper's dir: {shown}"
+        );
+        let wait = |gate: &str| {
+            let gate = format!("'{}'", dir.join(gate).display());
+            format!(
+                "i=0; while [ ! -e {gate} ] && [ \"$i\" -lt 9000 ]; do sleep 0.1; i=$((i+1)); done; [ -e {gate} ] || exit 1"
+            )
+        };
+        let lines = [
+            wait(ARMED),
+            snippet.to_string(),
+            wait(FINISH),
+            "exit 0".into(),
+        ];
+        let path = dir.join(format!("{name}-wrapper.sh"));
+        std::fs::write(&path, lines.join("\n") + "\n").expect("write the wrapper");
+        (PathBuf::from("sh"), vec![path.display().to_string()])
+    }
+
+    /// Polls `holder.started()` on `tokio::time::sleep` steps until it holds or `ceiling`
+    /// passes. Async on purpose: a test selects the runner future against it, so the runner
+    /// keeps draining while the holder starts.
+    pub(crate) async fn started_within(holder: &Holder, ceiling: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + ceiling;
+        loop {
+            if holder.started() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Deletes the temp dir while still owning it, then drops it. On Windows the delete
+    /// fails while a process has a file or its working directory there, so a stuck
+    /// process reads as a red; elsewhere it is a plain delete.
+    pub(crate) fn remove_when_free(dir: tempfile::TempDir) {
+        let removed = wait_until(
+            || match std::fs::remove_dir_all(dir.path()) {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            },
+            HANG_GUARD,
+        );
+        assert!(removed, "{} stayed in use", dir.path().display());
+    }
+
+    /// The armed-spawn property over one source file: (violations, sorted names of the
+    /// column-0 fns that spawn). Its reach is github/runner.rs and forge/glab.rs, matched
+    /// by literal spelling over whitespace-stripped production text: column-0 test
+    /// modules and whole comment lines are dropped, and a fn body runs from its column-0
+    /// `fn` line to the next column-0 `}`. A spawning fn spawns and arms once with no
+    /// `.await` between them, disarms in one statement right after its reap (see
+    /// `ends_with_reap`), and binds `child` once and only borrows it after that. Out of
+    /// its sight: the UFCS spelling `Command::spawn(&mut cmd)`, a spawn behind a helper
+    /// in another file or a macro, an aliased `TreeGuard`, and a guard bound to `_`.
+    /// `.status()` and `.output()` match by name, whatever their receiver.
+    pub(crate) fn unarmed_spawns(source: &str) -> (Vec<String>, Vec<String>) {
+        let source = source.replace("\r\n", "\n");
+        let mut violations = Vec::new();
+        let text = production_text(&source, &mut violations);
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+
+        let mut starts = Vec::new();
+        let mut offset = 0;
+        for line in text.split('\n') {
+            if let Some(name) = fn_name(line) {
+                starts.push((offset, name));
+            }
+            offset += line.len() + 1;
+        }
+        let mut roster = Vec::new();
+        let mut outside = String::new();
+        let mut cursor = 0;
+        for &(start, name) in &starts {
+            let end = text[start..].find("\n}").map_or(text.len(), |n| start + n);
+            if let Some((_, inner)) = starts.iter().find(|(s, _)| start < *s && *s < end) {
+                violations.push(format!(
+                    "fn `{name}` was not read: its body runs into fn `{inner}` (a one-line fn \
+                     has no closing line of its own)"
+                ));
+            }
+            if start > cursor {
+                outside.push_str(&text[cursor..start]);
+            }
+            cursor = cursor.max(end);
+            let body = strip(&text[start..end]);
+            if !body.contains(".spawn()") {
+                continue;
+            }
+            roster.push(name.to_string());
+            let at = |token: &str| body.find(token);
+            let armed = match (
+                at("TreeGuard::prepare("),
+                at("kill_on_drop(true)"),
+                at(".spawn()"),
+                at("TreeGuard::arm("),
+                at(".disarm()"),
+            ) {
+                (Some(p), Some(k), Some(s), Some(a), Some(d)) => p < s && k < s && s < a && a < d,
+                _ => false,
+            };
+            if !armed {
+                violations.push(format!(
+                    "fn `{name}` spawns without TreeGuard::prepare( and kill_on_drop(true), \
+                     then .spawn(), then TreeGuard::arm(, then .disarm()"
+                ));
+            }
+            let (spawns, arms) = (
+                body.matches(".spawn()").count(),
+                body.matches("TreeGuard::arm(").count(),
+            );
+            if (spawns, arms) != (1, 1) {
+                violations.push(format!(
+                    "fn `{name}` spawns {spawns} times and arms {arms} times, not once each"
+                ));
+            }
+            // A future dropped at an await between the two would leave the child unguarded.
+            if let (Some(s), Some(a)) = (at(".spawn()"), at("TreeGuard::arm(")) {
+                if s < a && body[s..a].contains(".await") {
+                    violations.push(format!("fn `{name}` awaits between its spawn and its arm"));
+                }
+            }
+            // Disarm on any exit code: one unconditional statement right after the reap.
+            let disarms: Vec<usize> = body
+                .match_indices("guard.disarm();")
+                .map(|(i, _)| i)
+                .collect();
+            if !matches!(disarms[..], [d] if ends_with_reap(&body[..d])) {
+                violations.push(format!(
+                    "fn `{name}`'s disarm is not one `guard.disarm();` right after its reap"
+                ));
+            }
+            // The guard must drop before the Child, so `child` is bound once and only
+            // borrowed after that: never rebound, moved into a call or handed on by value.
+            let binding = "letmutchild=";
+            let moved = body.find(binding).is_some_and(|at| {
+                let rest = &body[at + binding.len()..];
+                ["(child,", "(child)", ",child)", ",child,", "=child;"]
+                    .iter()
+                    .any(|m| rest.contains(m))
+            });
+            if body.matches(binding).count() != 1 || moved {
+                violations.push(format!(
+                    "fn `{name}` moves or rebinds `child` after its one `let mut child =`"
+                ));
+            }
+        }
+        outside.push_str(&text[cursor..]);
+
+        let scanned = strip(&text);
+        for token in [".output()", ".status()", "wait_with_output"] {
+            if scanned.contains(token) {
+                violations.push(format!("`{token}` hides the Child from the tree guard"));
+            }
+        }
+        if strip(&outside).contains(".spawn()") {
+            violations.push(
+                "a `.spawn()` outside every column-0 fn body (an impl method, a nested module, \
+                 an initializer)"
+                    .into(),
+            );
+        }
+        roster.sort();
+        (violations, roster)
+    }
+
+    /// Whether stripped `before` ends with a reap: `child.wait().await?;`, or an
+    /// `exchange_with_stdin(` call followed directly by `.await.map_err(AppError::Io)?;`.
+    fn ends_with_reap(before: &str) -> bool {
+        if before.ends_with("child.wait().await?;") {
+            return true;
+        }
+        let call = "exchange_with_stdin(";
+        let Some(open) = before.rfind(call).map(|at| at + call.len()) else {
+            return false;
+        };
+        let mut depth = 1;
+        let close = before[open..].char_indices().find_map(|(i, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(open + i)
+        });
+        close.is_some_and(|c| &before[c + 1..] == ".await.map_err(AppError::Io)?;")
+    }
+
+    /// `source` minus each column-0 test module and every whole comment line. A test-gated
+    /// item that is not a module stays, and the test modules after it are still removed.
+    pub(crate) fn production_text(source: &str, violations: &mut Vec<String>) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut kept = Vec::new();
+        let mut modules = 0;
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            if line.starts_with("#[cfg(test)]") || line.starts_with("#[cfg(all(test,") {
+                let mut j = i + 1;
+                while lines.get(j).is_some_and(|l| {
+                    let t = l.trim_start();
+                    t.is_empty() || t.starts_with("#[") || t.starts_with("//")
+                }) {
+                    j += 1;
+                }
+                if let Some(name) = lines.get(j).and_then(|l| module_name(l)) {
+                    modules += 1;
+                    let Some(close) = lines[j + 1..].iter().position(|l| l.starts_with('}')) else {
+                        violations.push(format!("test module `{name}` has no column-0 close"));
+                        break;
+                    };
+                    i = j + 2 + close;
+                    continue;
+                }
+            }
+            if !line.trim_start().starts_with("//") {
+                kept.push(line);
+            }
+            i += 1;
+        }
+        if modules == 0 {
+            violations.push("no test module found, so the file was misread".into());
+        }
+        kept.join("\n")
+    }
+
+    /// The name on a column-0 fn line, after optional `pub`, `pub(...)`, `const`,
+    /// `unsafe` and `async`.
+    pub(crate) fn fn_name(line: &str) -> Option<&str> {
+        let mut rest = line;
+        loop {
+            if let Some(r) = rest.strip_prefix("pub(") {
+                rest = r.split_once(") ")?.1;
+            } else if let Some(r) = ["pub ", "const ", "unsafe ", "async "]
+                .iter()
+                .find_map(|p| rest.strip_prefix(p))
+            {
+                rest = r;
+            } else {
+                break;
+            }
+        }
+        let rest = rest.strip_prefix("fn ")?;
+        let end = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if end == 0 {
+            None
+        } else {
+            Some(&rest[..end])
+        }
+    }
+
+    /// The name on a column-0 `mod <name> {` or `pub(...) mod <name> {` line.
+    fn module_name(line: &str) -> Option<&str> {
+        let rest = match line.strip_prefix("pub(") {
+            Some(r) => r.split_once(") ")?.1,
+            None => line,
+        };
+        Some(
+            rest.strip_prefix("mod ")?
+                .trim_end()
+                .strip_suffix('{')?
+                .trim_end(),
+        )
     }
 }

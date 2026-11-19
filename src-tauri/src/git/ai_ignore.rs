@@ -2335,8 +2335,7 @@ mod tests {
         use std::process::{Command, Stdio};
         let mut child = Command::new("git")
             .arg("mktree")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_ATTR_NOSYSTEM", "1")
+            .envs(crate::git::runner::TEST_GIT_ENV)
             .current_dir(repo)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

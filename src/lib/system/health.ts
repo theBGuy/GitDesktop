@@ -103,12 +103,35 @@ export function cliFloorWarning(
     : floor.warning(parsed);
 }
 
+/** Set only for the span of a Re-check's `refetch()` call; the query function
+ *  reads it there, since a refetch that starts a fetch runs it synchronously. */
+let freshRequested = false;
+
+/** About's Re-check: a refetch that also clears the backend's cached
+ *  login-shell misses, so tools missing at the last check are probed again.
+ *  Only a click that starts a fetch sends the flag: with data loaded, refetch
+ *  cancels an in-flight fetch and starts its own; before the first load lands
+ *  it joins that fetch, which sends none. Every other load stays plain; the
+ *  `finally` below is the flag's only clear, so a throwing refetch can't leave
+ *  it set. */
+export function recheckSystemHealth(health: { refetch: () => unknown }) {
+  freshRequested = true;
+  try {
+    health.refetch();
+  } finally {
+    freshRequested = false;
+  }
+}
+
 /** OS/app diagnostics + the status of the CLIs GitDesktop shells out to, for
  *  the Settings → About screen. Detection runs concurrently in Rust. */
 export function useSystemHealth() {
   return useQuery({
     queryKey: ["system-health"] as const,
-    queryFn: () => invoke<SystemHealth>("system_health"),
+    queryFn: () =>
+      freshRequested
+        ? invoke<SystemHealth>("system_health", { fresh: true })
+        : invoke<SystemHealth>("system_health"),
     staleTime: 30_000,
     // Mostly local CLI probes: react-query's default "online" mode would park
     // them offline, which is exactly when this diagnostics screen is wanted.

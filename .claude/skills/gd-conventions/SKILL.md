@@ -1594,6 +1594,25 @@ one grep away on the named symbol. Grows via Conventions-sync.
   helpers under `CMD_SCRIPT_PRELUDE` (refusals before any write; `%` escaped;
   trailing backslashes per the receiving program) — never inline
   quote-wrapping into a script body.
+- **Whole-tree kills:** a spawned child whose descendants must die with it (a
+  timeout, a cancel, a dropped future) rides `proc_tree::TreeGuard`:
+  `TreeGuard::prepare(&mut cmd)` before the spawn, `TreeGuard::arm(&child)`
+  right after it, the guard declared after the `Child` so it drops first (an
+  unreaped leader pins the unix group id), and `disarm()` only once
+  `child.wait()` returned Ok, whatever the exit code. Every abandoned path
+  stays armed, and `kill_on_drop(true)` stays as the fallback for a failed
+  arm: alone it reaches only the direct child, so Git for Windows' `git.exe`
+  shim would leave the real git and its hooks running. Adopters: the git
+  runner (`run_git_spawn`), the gh and glab runners, host-mode agent runs, and
+  the login-shell probes, which arm their `setsid` child and never call
+  `prepare`. Unarmed on purpose: the gh/glab sign-in child in forge/session.rs,
+  agent.rs `run_capture_parts`, and the two console launchers. Not armed
+  yet: the PTY children and their `taskkill` path (pty.rs `kill_tree`),
+  mcp.rs `run_client_cli`, agent_sandbox.rs `run_build` and hooks.rs
+  `git_run_hook_manager`. Tree tests build on `proc_tree::test_support`
+  (`Holder`, `wait_until`, `HANG_GUARD`): they observe the holder start
+  and die and never sleep for either, and a survivor is proven by
+  `confirm_alive`, never by a bare `alive()`.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline

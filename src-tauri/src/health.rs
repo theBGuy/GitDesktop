@@ -223,9 +223,13 @@ static PROBES: [Probe; 7] = [
 ];
 
 /// OS/app info + the status of every external CLI, for Settings → About. The
-/// per-tool detections (each spawns subprocesses) run concurrently.
+/// per-tool detections (each spawns subprocesses) run concurrently. `fresh` (About's
+/// Re-check) forgets the remembered login-shell misses before any detection starts.
 #[tauri::command]
-pub async fn system_health() -> AppResult<SystemHealth> {
+pub async fn system_health(fresh: Option<bool>) -> AppResult<SystemHealth> {
+    if fresh == Some(true) {
+        crate::agent::clear_login_shell_misses();
+    }
     // Each detection runs as its own task to keep this command's future tiny:
     // the invoke handler CONSTRUCTS a command future on the WebView2 UI-thread
     // stack before tauri's runtime polls it on a worker, and the seven detect
@@ -267,12 +271,64 @@ mod tests {
     /// future is enough to measure it; it is never polled here.
     #[test]
     fn system_health_future_stays_small() {
-        let fut = system_health();
+        let fut = system_health(None);
         let size = std::mem::size_of_val(&fut);
         assert!(
             size < 16 * 1024,
             "system_health() future is {size} bytes (debug layout); keep per-tool detections spawned so it stays under 16 KiB"
         );
+    }
+
+    /// Breaches of Re-check's wiring in `src` (this file's text): `system_health`'s body,
+    /// found by its header at a line start, comment lines dropped and whitespace removed,
+    /// must clear the remembered misses on `fresh` before its first spawn.
+    fn recheck_clear_violations(src: &str) -> Vec<String> {
+        let src = src.replace("\r\n", "\n");
+        let Some(start) = src.find("\npub async fn system_health(") else {
+            return vec!["no system_health at a line start".into()];
+        };
+        let Some(close) = src[start..].find("\n}\n") else {
+            return vec!["system_health has no closing line".into()];
+        };
+        let body: String = src[start..start + close]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .flat_map(|l| l.split_whitespace())
+            .collect();
+        let clear = "iffresh==Some(true){crate::agent::clear_login_shell_misses();}";
+        match (body.find(clear), body.find("spawn(")) {
+            (Some(c), Some(s)) if c < s => Vec::new(),
+            (Some(_), Some(_)) => vec!["the clear comes after the first spawn".into()],
+            (None, _) => vec!["no clear on fresh".into()],
+            (_, None) => vec!["no spawn".into()],
+        }
+    }
+
+    /// Each control mutates the real text in memory and must add exactly the violation
+    /// it names.
+    #[test]
+    fn the_recheck_clears_the_misses_before_the_first_spawn() {
+        let src = include_str!("health.rs").replace("\r\n", "\n");
+        assert_eq!(recheck_clear_violations(&src), Vec::<String>::new());
+        let arm = "    if fresh == Some(true) {\n        crate::agent::clear_login_shell_misses();\n    }\n";
+        assert!(src.contains(arm), "the clear's lines moved");
+        let removed = src.replacen(arm, "", 1);
+        let collect = "        .collect();\n";
+        let fn_at = removed
+            .find("\npub async fn system_health(")
+            .expect("the fn");
+        let at = fn_at + removed[fn_at..].find(collect).expect("the collect") + collect.len();
+        let moved = format!("{}{arm}{}", &removed[..at], &removed[at..]);
+        for (text, mark) in [
+            (&removed, "no clear on fresh"),
+            (&moved, "after the first spawn"),
+        ] {
+            let bad = recheck_clear_violations(text);
+            assert!(
+                bad.len() == 1 && bad[0].contains(mark),
+                "the `{mark}` control: {bad:?}"
+            );
+        }
     }
 
     #[test]
