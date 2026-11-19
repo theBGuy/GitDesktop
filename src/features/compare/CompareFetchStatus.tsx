@@ -115,13 +115,15 @@ export function CompareFetchStatus({
 }) {
   const actions =
     state === null ? NO_ACTIONS : (STATUS_ACTIONS[state] ?? NO_ACTIONS);
-  const retry = useRetryFocusRescue(actions.includes("retry"));
-  const fetch = useRetryFocusRescue(actions.includes("fetch"));
-  const pickAnother = useRetryFocusRescue(actions.includes("pick-another"));
+  const retryRescue = useRetryFocusRescue(actions.includes("retry"));
+  const fetchRescue = useRetryFocusRescue(actions.includes("fetch"));
+  const pickAnotherRescue = useRetryFocusRescue(
+    actions.includes("pick-another"),
+  );
   const box = useRef<HTMLDivElement | null>(null);
-  const retryHost = retry.hostRef;
-  const fetchHost = fetch.hostRef;
-  const pickAnotherHost = pickAnother.hostRef;
+  const retryHost = retryRescue.hostRef;
+  const fetchHost = fetchRescue.hostRef;
+  const pickAnotherHost = pickAnotherRescue.hostRef;
   const setBox = useCallback(
     (node: HTMLDivElement | null) => {
       box.current = node;
@@ -151,19 +153,19 @@ export function CompareFetchStatus({
         {state === null ? null : STATUS_COPY[state](remote, name)}
       </p>
       {actions.includes("retry") && (
-        <span ref={retry.retryRef} className="contents">
+        <span ref={retryRescue.retryRef} className="contents">
           <StatusAction onClick={onRetry}>Retry</StatusAction>
         </span>
       )}
       {actions.includes("fetch") && (
-        <span ref={fetch.retryRef} className="contents">
+        <span ref={fetchRescue.retryRef} className="contents">
           <StatusAction onClick={onFetch} heldReason={fetchHeldReason}>
             {`Fetch ${remote}`}
           </StatusAction>
         </span>
       )}
       {actions.includes("pick-another") && (
-        <span ref={pickAnother.retryRef} className="contents">
+        <span ref={pickAnotherRescue.retryRef} className="contents">
           <StatusAction onClick={onPickAnother}>
             Pick another branch
           </StatusAction>
