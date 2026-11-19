@@ -541,8 +541,8 @@ mod tests {
     }
 
     /// `a.txt` renamed to `b.txt` (plus a true add, `n.txt`) in the returned commit,
-    /// then `b.txt` renamed to `c.txt` in the index. `diff.renames` is pinned: the test
-    /// runner sets only GIT_CONFIG_NOSYSTEM.
+    /// then `b.txt` renamed to `c.txt` in the index. `diff.renames` is pinned in the
+    /// repo, so no config file outside it decides what pairs.
     async fn renamed_repo() -> (tempfile::TempDir, String, String) {
         let tmp = tempfile::Builder::new()
             .prefix("gd-mcp-rename-")

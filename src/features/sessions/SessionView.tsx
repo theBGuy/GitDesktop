@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { PlanView } from "@/features/plan/PlanView";
 import { usePlanStore } from "@/features/plan/store";
@@ -525,30 +526,73 @@ function IsolationChip({
   );
 }
 
-function SessionChanges({ session }: { session: AgentSession }) {
+export function SessionChanges({ session }: { session: AgentSession }) {
   const hasCommits = session.kept || session.headHash !== session.base;
   // While a turn is running, reflect the worktree's uncommitted changes live so
   // you can watch the agent work before the checkpoint commit lands. (A kept
   // session has no worktree, so it always shows the committed diff.)
-  if (session.running && !session.kept) {
-    return <WorktreeChangesView repoPath={session.worktreePath} />;
-  }
-  if (!hasCommits) {
+  let arm: "worktree" | "placeholder" | "diff" = "diff";
+  if (session.running && !session.kept) arm = "worktree";
+  else if (!hasCommits) arm = "placeholder";
+  // The arms are different views in one slot: the landing span takes focus only
+  // when focus sat inside the leaving arm's wrapper as that wrapper detached
+  // and is now on <body>. Keyed per arm so the wrapper detaches with its view;
+  // a rail's own field hand-over runs first.
+  const worktreeRescue = useRetryFocusRescue(arm === "worktree");
+  const placeholderRescue = useRetryFocusRescue(arm === "placeholder");
+  const diffRescue = useRetryFocusRescue(arm === "diff");
+  // A place to continue from, not a control: like the other panes' landing
+  // hosts it is named for a screen reader and draws no focus ring.
+  const landing = (
+    <span
+      ref={(node) => {
+        worktreeRescue.hostRef(node);
+        placeholderRescue.hostRef(node);
+        diffRescue.hostRef(node);
+      }}
+      role="group"
+      aria-label="Changes"
+      tabIndex={-1}
+      className="outline-none"
+    />
+  );
+  if (arm === "worktree") {
     return (
-      <DiffPlaceholder
-        icon={SparkleIcon}
-        message="No changes yet. Send the agent a task in Conversation."
-      />
+      <>
+        {landing}
+        <div key={arm} ref={worktreeRescue.retryRef} className="contents">
+          <WorktreeChangesView repoPath={session.worktreePath} />
+        </div>
+      </>
+    );
+  }
+  if (arm === "placeholder") {
+    return (
+      <>
+        {landing}
+        <div key={arm} ref={placeholderRescue.retryRef} className="contents">
+          <DiffPlaceholder
+            icon={SparkleIcon}
+            message="No changes yet. Send the agent a task in Conversation."
+          />
+        </div>
+      </>
     );
   }
   // Diff `base..branch` (not the cached headHash, which goes stale after a Keep
   // squashes the checkpoints). A kept session has no worktree, but its branch +
   // commits live in the shared object database, so read it from the main repo.
   return (
-    <BranchDiffView
-      repoPath={session.kept ? session.repoPath : session.worktreePath}
-      base={session.base}
-      compare={session.branch}
-    />
+    <>
+      {landing}
+      <div key={arm} ref={diffRescue.retryRef} className="contents">
+        <BranchDiffView
+          repoPath={session.kept ? session.repoPath : session.worktreePath}
+          base={session.base}
+          compare={session.branch}
+          filterSurface="session"
+        />
+      </div>
+    </>
   );
 }

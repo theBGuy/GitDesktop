@@ -41,7 +41,9 @@ const resolveTaskInterpreter = (key: Interpreter) =>
  * pass missed the interpreter, so we never spawn a login shell we don't need: this
  * is what stops a Finder/Dock-launched macOS app (which inherits launchd's minimal
  * PATH) from warning that an nvm/fnm-managed `node` is absent when it runs fine.
- * Resolves to the absolute path, or null when even the login shell can't find it.
+ * Resolves to the absolute path, or null when the login shell can't find it (the
+ * backend can keep answering that from memory until About > Re-check or a
+ * restart).
  */
 export function useResolvedInterpreter(key: Interpreter, enabled: boolean) {
   return useQuery({

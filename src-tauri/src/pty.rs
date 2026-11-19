@@ -753,6 +753,8 @@ fn sh_quote(s: &str) -> String {
 
 /// The cmd interpreter's script reads %~N directly, so trailing backslashes stay undoubled.
 /// Other programs, including batch shims, need MSVC doubling at the receiving executable.
+/// The script ends with `exit`: `start` runs a batch file under `cmd /K`, whose
+/// console would otherwise stay open at a prompt.
 #[cfg(any(all(windows, debug_assertions), test))]
 fn task_terminal_script(
     cwd: &str,
@@ -772,7 +774,7 @@ fn task_terminal_script(
         line.push_str(&quote_arg(a)?);
     }
     Ok(format!(
-        "{}title GitDesktop task\r\ncd /d {cwd}\r\n{line}\r\necho.\r\necho (task exited) Press any key to close...\r\npause >nul\r\n",
+        "{}title GitDesktop task\r\ncd /d {cwd}\r\n{line}\r\necho.\r\necho (task exited) Press any key to close...\r\npause >nul\r\nexit\r\n",
         crate::agent_sandbox::CMD_SCRIPT_PRELUDE
     ))
 }
@@ -1460,6 +1462,7 @@ mod tests {
             "echo.\r\n",
             "echo (task exited) Press any key to close...\r\n",
             "pause >nul\r\n",
+            "exit\r\n",
         );
         assert_eq!(task_terminal_script(cwd, bin, &argv, "node").unwrap(), expected);
     }
@@ -1509,6 +1512,7 @@ mod tests {
             "echo.\r\n",
             "echo (task exited) Press any key to close...\r\n",
             "pause >nul\r\n",
+            "exit\r\n",
         );
         assert_eq!(
             task_terminal_script("C:\\repos", bin, &argv, "cmd").unwrap(),

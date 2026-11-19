@@ -3436,6 +3436,7 @@ mod tests {
         let config = std::path::Path::new(&work).join(".git").join("config");
         let set = |values: &[&str]| {
             let _ = std::process::Command::new("git")
+                .envs(crate::git::runner::TEST_GIT_ENV)
                 .current_dir(&work)
                 .args([
                     "config",
@@ -3742,6 +3743,7 @@ mod tests {
                         if mark {
                             let key = crate::git::branches::keep_local_key("feat/x");
                             let set = std::process::Command::new("git")
+                                .envs(crate::git::runner::TEST_GIT_ENV)
                                 .current_dir(&work)
                                 .args(["config", &key, "true"])
                                 .status()
@@ -3865,6 +3867,7 @@ mod tests {
                     if mark {
                         let key = crate::git::branches::keep_local_key("feat/x");
                         let set = std::process::Command::new("git")
+                            .envs(crate::git::runner::TEST_GIT_ENV)
                             .current_dir(&work)
                             .args(["config", &key, "true"])
                             .status()

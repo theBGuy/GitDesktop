@@ -1918,7 +1918,11 @@ export function LocalPrView({
             {/* Local commits exist in the repo, so the full commit detail (with
                 its actions menu — checkout/revert/cherry-pick/amend) applies. */}
             <div className="min-h-0 flex-1">
-              <CommitDetailView repoPath={repoPath} hash={selectedCommitHash} />
+              <CommitDetailView
+                repoPath={repoPath}
+                hash={selectedCommitHash}
+                filterSurface="local-pr-commits"
+              />
             </div>
           </div>
         ) : (
@@ -1942,6 +1946,7 @@ export function LocalPrView({
             repoPath={repoPath}
             base={pr.base}
             compare={pr.head}
+            filterSurface="local-pr-files"
           />
         </div>
       )}

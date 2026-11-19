@@ -9,6 +9,7 @@ import type {
   ForgeStatus,
 } from "../types";
 import { MY_WORK_PAGES_KEY, MY_WORK_SOURCES_KEY } from "./forge-repos";
+import { outsideShiftChase } from "./projects";
 
 /** Shared by the hook and imperative reads (the checkout route's cache read and
  *  its prefetch). gh is a local spawn, so the read runs whatever
@@ -37,10 +38,13 @@ export function useSwitchAccount() {
       api.ghSwitchAccount(args.host, args.login),
     // Local gh-config write — never park it offline.
     networkMode: "always",
-    // Deliberately app-wide (no key filter): the active account changes every
-    // gh-derived answer, and switches are rare enough that the collateral refetch
-    // beats the narrow-invalidation policy used elsewhere.
-    onSettled: () => queryClient.invalidateQueries(),
+    // Deliberately app-wide (no key filter beyond a board lens a date-shift chase
+    // holds): the active account changes every gh-derived answer, and switches are
+    // rare enough that the collateral refetch beats the narrow-invalidation policy.
+    // A changed login still resets that lens: the account-change reset
+    // (account-change.ts) is its own route and does not read the hold.
+    onSettled: () =>
+      queryClient.invalidateQueries({ predicate: outsideShiftChase }),
   });
 }
 

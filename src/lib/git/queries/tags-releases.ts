@@ -75,15 +75,19 @@ export function useDeleteTagOnOrigin(repo: string) {
 
 // ── Tags & Releases ──────────────────────────────────────────────────────────
 
-export function useTagList(repo: string) {
-  return useQuery({
+/** Shared by the hook and by settles that refresh the tags list. */
+export function tagListOptions(repo: string) {
+  return {
     queryKey: ["repo", repo, "tags"] as const,
     queryFn: () => api.gitListTags(repo),
-    staleTime: 30_000,
     // Local reads must not park on react-query's default "online" mode offline;
     // the same holds for every `networkMode` in this file.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+  };
+}
+
+export function useTagList(repo: string) {
+  return useQuery({ ...tagListOptions(repo), staleTime: 30_000 });
 }
 
 /** Recent commits, for the release-target picker. */

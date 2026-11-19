@@ -10,7 +10,11 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
-import { DetailRail, DetailRailRow } from "@/components/detail-rail";
+import {
+  DetailRail,
+  DetailRailFilterStatus,
+  DetailRailRow,
+} from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
 import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
@@ -26,6 +30,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  FILE_FILTER_SURFACES,
+  type FileFilterSurface,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
 import {
   DegradedListNotice,
@@ -170,9 +179,12 @@ const selectHead = (s: RepoStatus) => ({
 export function CommitDetailView({
   repoPath,
   hash,
+  filterSurface = "history",
 }: {
   repoPath: string;
   hash: string;
+  /** The host pane whose file-filter text this view shares. */
+  filterSurface?: FileFilterSurface;
 }) {
   const details = useCommitDetails(repoPath, hash);
   const files = useCommitFiles(repoPath, hash);
@@ -186,12 +198,16 @@ export function CommitDetailView({
     setLastHash(hash);
     setSelectedPath(null);
   }
-  // Default to the first changed file until the user picks one (derived, so
-  // there's no empty-selection frame while an effect catches up).
-  const effectivePath =
-    selectedPath && files.data?.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (files.data?.[0]?.path ?? null);
+  const filter = useFileListFilter({
+    ...FILE_FILTER_SURFACES[filterSurface],
+    files: files.data ?? [],
+    settled: files.data !== undefined && !files.isPlaceholderData,
+    picked: selectedPath,
+    onPick: setSelectedPath,
+  });
+  // The user's pick, else the first match under a filter, else the first file
+  // (derived, so there's no empty-selection frame while an effect catches up).
+  const effectivePath = filter.openPath;
   // Drive the diff off a deferred path so rapidly arrowing the file list only
   // fetches + renders the file you land on, not every one passed (each fetch's
   // large IPC payload otherwise deserializes on the main thread and stalls
@@ -527,6 +543,23 @@ export function CommitDetailView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // True exactly when the early returns below fall through to the content; they
+  // keep their own pane comparisons, which the detail-pane retention scan reads.
+  const commit = details.data;
+  const fileList = files.data;
+  const contentArm =
+    pane !== "skeleton" &&
+    pane !== "offline" &&
+    pane !== "error" &&
+    !!commit &&
+    !!fileList;
+  const errorArm = pane !== "skeleton" && pane !== "offline" && !contentArm;
+  // The status counts only while its list is on screen: the skeleton and error
+  // arms render none, though the files read may have settled under them.
+  const statusFilter = {
+    ...filter.rail,
+    settled: filter.rail.settled && contentArm,
+  };
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
@@ -538,6 +571,8 @@ export function CommitDetailView({
       data-commit-detail-focus-host=""
       className="flex h-full flex-col outline-none"
     >
+      {/* Outside the content's aria-busy wrapper, in every arm. */}
+      <DetailRailFilterStatus filter={statusFilter} blank={errorArm} />
       {content}
     </div>
   );
@@ -553,7 +588,7 @@ export function CommitDetailView({
       </div>,
     );
   }
-  if (pane === "error" || !details.data || !files.data) {
+  if (pane === "error" || !contentArm) {
     const reason = details.isError
       ? details.error
       : files.isError
@@ -584,9 +619,8 @@ export function CommitDetailView({
     );
   }
 
-  const commit = details.data;
-  const totalAdded = files.data.reduce((sum, f) => sum + f.added, 0);
-  const totalDeleted = files.data.reduce((sum, f) => sum + f.deleted, 0);
+  const totalAdded = fileList.reduce((sum, f) => sum + f.added, 0);
+  const totalDeleted = fileList.reduce((sum, f) => sum + f.deleted, 0);
   // Fade the stale content so the pane never passes it off as current. The ⋯
   // actions act on the `hash` prop, so they stay solid.
   const staleDim = stale && "opacity-80";
@@ -689,7 +723,6 @@ export function CommitDetailView({
     }
   }
 
-  const fileList = files.data;
   // The comments pane's file jumps carry a FORGE-derived path (GitHub's patch),
   // but the sidebar + effectivePath guard come from LOCAL `useCommitFiles`. On a
   // rename the two can name the same file differently, so a raw setSelectedPath
@@ -704,8 +737,8 @@ export function CommitDetailView({
   // landed on. No neighbor prefetch on arrow: it fired on every pause and
   // stalled input. Mouse hover still warms a row's diff.
   const onFilesKeyDown = listKeyboardNav({
-    items: fileList,
-    activeIndex: fileList.findIndex((f) => f.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (file) => setSelectedPath(file.path),
     rowKey: (file) => file.path,
     rowAttr: "data-path",
@@ -939,12 +972,7 @@ export function CommitDetailView({
           <DetailRail
             ariaLabel="Changed files"
             className={cn(PLACEHOLDER_FADE, staleDim)}
-            header={
-              <p className="truncate text-xs text-muted-foreground">
-                {files.data.length} changed file
-                {files.data.length === 1 ? "" : "s"}
-              </p>
-            }
+            filter={filter.rail}
           >
             {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long file list can't leak a window scrollbar. */}
@@ -954,7 +982,7 @@ export function CommitDetailView({
                 blameRev={hash}
                 onKeyDown={onFilesKeyDown}
               >
-                {files.data.map((file) => (
+                {filter.visible.map((file) => (
                   <button
                     type="button"
                     key={file.path}

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { RemoteBranch } from "@/lib/git/types";
+import { compareInstantsNewestFirst } from "@/lib/time";
 
 /** The store keeps a remote pick as its FULL remote-tracking ref, so git never
  *  resolves a same-named local branch or tag instead; a local pick stays the
@@ -153,10 +154,49 @@ export function displayCompareValue(v: string): string {
     : v;
 }
 
+export const LOCAL_REF_PREFIX = "refs/heads/";
+
+/** A picker row's combobox value: the full ref of what the row names, so a
+ *  local and a remote row never share one. Never stored. */
+export function localCompareItem(name: string): string {
+  return `${LOCAL_REF_PREFIX}${name}`;
+}
+
+/** The item a stored pick selects. A prefix test, never a parse: a stored
+ *  value starting `refs/remotes/` passes through unchanged, so it can name only
+ *  a remote row, never the local `refs/heads/refs/remotes/…` row; when no
+ *  remote row carries that ref, no row is marked. */
+export function compareItemOf(stored: string): string {
+  return stored.startsWith(REMOTE_REF_PREFIX)
+    ? stored
+    : localCompareItem(stored);
+}
+
+/** What a picked item stores: a local item's bare name, any other item as is. */
+export function compareItemStored(item: string): string {
+  return item.startsWith(LOCAL_REF_PREFIX)
+    ? item.slice(LOCAL_REF_PREFIX.length)
+    : item;
+}
+
+/** What an item's row shows and the picker's filter matches: the bare name for
+ *  a local item, `remote/name` for a remote one. */
+export function compareItemLabel(item: string): string {
+  return item.startsWith(LOCAL_REF_PREFIX)
+    ? compareItemStored(item)
+    : displayCompareValue(item);
+}
+
+/** A local branch Compare can't pick: its bare name, stored as a local pick,
+ *  would read back as a remote one. Name-only, so a row never flips. */
+export function collidesWithRemoteRefs(localName: string): boolean {
+  return localName.startsWith(REMOTE_REF_PREFIX);
+}
+
 export interface RemoteCompareRow {
-  /** The combobox value: `remote/name`. */
+  /** What the row shows: `remote/name`. */
   display: string;
-  /** The stored value: `refs/remotes/remote/name`. */
+  /** The stored value and the combobox item: `refs/remotes/remote/name`. */
   ref: string;
   lastCommitDate: string;
 }
@@ -170,23 +210,22 @@ function remoteRank(remote: string): number {
 
 /**
  * The picker's Remote rows: exactly the remote-branch list (every remote) minus
- * three filters: each remote's HEAD, agent session branches, and a row whose
- * `remote/name` equals an offered local name (a local literally named
- * `origin/x` would make two identical combobox values). A remote branch merely
- * sharing a local's bare name stays offered. Ordered by remote (upstream,
- * origin, then alphabetical), each remote's rows by recency. The backend
- * already splits at the longest configured remote. When `remotes` is known each
- * row is re-split against it first, so it stays congruent with
+ * each remote's HEAD and agent session branches. A local branch sharing a row's
+ * name, even `remote/name`, never hides it: items carry their kind. Ordered by
+ * remote (upstream, origin, then alphabetical), each remote's rows by recency.
+ * The backend already splits at the longest configured remote. When `remotes`
+ * is known each row is re-split against it first, so it stays congruent with
  * `parseRemoteCompareValue` when this list and the backend's read differ (a
  * remote added or removed between them), and the HEAD filter covers that
- * window; without a list the backend's split stands.
+ * window; without a list the backend's split stands. A row is a session branch
+ * when either split names one, since a stale list can prefix the backend's name.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
-  localNames: ReadonlySet<string>,
   remotes?: readonly string[],
 ): RemoteCompareRow[] {
   return (remoteBranches ?? [])
+    .filter((b) => !isSessionBranchName(b.name))
     .map((b) => ({
       ...(remotes === undefined
         ? b
@@ -200,12 +239,11 @@ export function remoteCompareRows(
       ref: remoteCompareValue(b.remote, b.name),
       lastCommitDate: b.lastCommitDate,
     }))
-    .filter((r) => !localNames.has(r.display))
     .sort(
       (a, b) =>
         remoteRank(a.remote) - remoteRank(b.remote) ||
         a.remote.localeCompare(b.remote) ||
-        b.lastCommitDate.localeCompare(a.lastCommitDate),
+        compareInstantsNewestFirst(a.lastCommitDate, b.lastCommitDate),
     )
     .map(({ display, ref, lastCommitDate }) => ({
       display,
@@ -218,15 +256,21 @@ export function remoteCompareRows(
  *  and Create's hold reason, so the two never disagree. */
 export const UPDATING_COMPARISON_COPY = "Updating the comparison…";
 
-/** Why a remote pick can't be compared any more: the status line's words and
- *  the Create PR hold's reason, so the two never disagree. */
+/** Why a remote pick can't be compared any more: the status line's words (a
+ *  failed fetch may lead them) and the Create PR hold's reason, so the two
+ *  never disagree on the cause. */
 export const GONE_PICK_COPY: Record<
   "pruned" | "remote-gone" | "missing",
   (remote: string, name: string) => string
 > = {
+  // Only while the record of this pick's own successful fetch of `remote`
+  // leaving the ref unlisted is still live (`prunedStale` retires it, as when
+  // a render since it was written saw a successful remotes read without
+  // `remote`), and a successful remotes read lists `remote` now.
   pruned: (remote, name) => `${remote}/${name} was deleted on ${remote}.`,
   "remote-gone": (remote) => `${remote} is no longer a remote.`,
-  // The ref is gone but no successful remotes read says why.
+  // Every other unlisted pick whose remote isn't known gone: no such fetch
+  // record, the record was retired, or the remotes read hasn't succeeded.
   missing: (remote, name) =>
     `${remote}/${name} is no longer in your remote branches.`,
 };

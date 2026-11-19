@@ -95,6 +95,10 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
+    label: "Filter the file list beside a diff by path",
+  },
+  {
+    group: "Diffs & staging",
     label:
       "Flat list ⇄ compacted directory tree in the Changes panel — collapsible folders, keyboard-first",
   },

@@ -4778,9 +4778,9 @@ mod tests {
 
     const TEN: &str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
 
-    /// A repo pinned for rename tests: the test runner sets only GIT_CONFIG_NOSYSTEM,
-    /// so a global `diff.renames` would otherwise decide what pairs (quoting and diff
-    /// prefixes are pinned by the git runner itself).
+    /// A repo with `diff.renames` pinned for rename tests, so no config file outside it
+    /// decides what pairs (quoting and diff prefixes are pinned by the git runner
+    /// itself).
     async fn rename_repo(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
         let (tmp, dir, repo) = init_line_stats_repo(prefix).await;
         for (key, value) in [("diff.renames", "true"), ("commit.gpgSign", "false")] {

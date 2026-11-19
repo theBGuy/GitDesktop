@@ -5,12 +5,21 @@ import {
   useRef,
   useState,
 } from "react";
-import { DetailRail, DetailRailRow } from "@/components/detail-rail";
+import {
+  DetailRail,
+  DetailRailFilterStatus,
+  DetailRailRow,
+} from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  FILE_FILTER_SURFACES,
+  type FileFilterSurface,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import {
   DegradedListNotice,
   useRetryFocusRescue,
@@ -42,6 +51,12 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { displayCompareValue } from "./compare-remote-ref";
 
+// The detail-pane retention scan reads the pane's Retry rescue as the
+// component's only direct `useRetryFocusRescue(` call.
+function useListLeaveRescue(listShown: boolean) {
+  return useRetryFocusRescue(listShown);
+}
+
 /**
  * The net change `compare` introduces relative to `base` (the three-dot diff,
  * what a PR would show): a changed-file list plus the selected file's diff.
@@ -50,10 +65,13 @@ export function BranchDiffView({
   repoPath,
   base,
   compare,
+  filterSurface,
 }: {
   repoPath: string;
   base: string;
   compare: string;
+  /** The host pane whose file-filter text this view shares. */
+  filterSurface: FileFilterSurface;
 }) {
   const files = useBranchDiffFiles(repoPath, base, compare);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -66,11 +84,15 @@ export function BranchDiffView({
     setLastKey(cmpKey);
     setSelectedPath(null);
   }
-  // Default to the first changed file until the user picks one.
-  const effectivePath =
-    selectedPath && files.data?.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (files.data?.[0]?.path ?? null);
+  const filter = useFileListFilter({
+    ...FILE_FILTER_SURFACES[filterSurface],
+    files: files.data ?? [],
+    settled: files.data !== undefined && !files.isPlaceholderData,
+    picked: selectedPath,
+    onPick: setSelectedPath,
+  });
+  // The user's pick, else the first match under a filter, else the first file.
+  const effectivePath = filter.openPath;
   // Diff off a deferred path so rapidly arrowing the file list only fetches +
   // renders the landed-on file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
@@ -131,15 +153,31 @@ export function BranchDiffView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // A list emptying under the same frame unmounts the whole rail, where the
+  // rail's own rescue can't run: the host takes focus only when focus sat
+  // inside the list arm as that arm detached and is now on <body>.
+  const listShown = files.data !== undefined && files.data.length > 0;
+  const { hostRef: listHostRef, retryRef: listArmRef } =
+    useListLeaveRescue(listShown);
+  // True exactly when the early returns below take the error arm; they keep
+  // their own conditions, which the detail-pane retention scan reads.
+  const errorArm =
+    pane !== "skeleton" &&
+    pane !== "offline" &&
+    !(files.isPlaceholderData && files.data?.length === 0) &&
+    (pane === "error" || !files.data);
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
         hostRef(node);
+        listHostRef(node);
         focusHost.current = node;
       }}
       tabIndex={-1}
       className="flex h-full flex-col outline-none"
     >
+      {/* Outside the content's aria-busy wrapper, in every arm. */}
+      <DetailRailFilterStatus filter={filter.rail} blank={errorArm} />
       {content}
     </div>
   );
@@ -229,15 +267,20 @@ export function BranchDiffView({
 
   // Arrow keys walk the file list, mirroring the app's other lists.
   const onFilesKeyDown = listKeyboardNav({
-    items: files.data ?? [],
-    activeIndex: (files.data ?? []).findIndex((f) => f.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (file) => setSelectedPath(file.path),
     rowKey: (file) => file.path,
     rowAttr: "data-path",
   });
 
   return shell(
-    <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
+    <div
+      key="list"
+      ref={listArmRef}
+      className="flex h-full flex-col"
+      aria-busy={Boolean(staleDim)}
+    >
       <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
         {/* Branch names are unbreakable tokens — without the clamp a long pair
             sets the whole view's minimum width. */}
@@ -267,6 +310,7 @@ export function BranchDiffView({
           className={cn(PLACEHOLDER_FADE, staleDim)}
           role="listbox"
           ariaLabel="Changed files"
+          filter={filter.rail}
         >
           {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long list can't leak a window scrollbar. */}
@@ -276,7 +320,7 @@ export function BranchDiffView({
               blameRev={sides?.compareRev}
               onKeyDown={onFilesKeyDown}
             >
-              {files.data.map((file) => (
+              {filter.visible.map((file) => (
                 <button
                   type="button"
                   key={file.path}

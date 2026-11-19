@@ -107,6 +107,7 @@ import {
   useUiStore,
 } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
+import { AppCreateHotkeys } from "./AppCreateHotkeys";
 import { ChangesPanel } from "./ChangesPanel";
 import { InsightsPanel } from "./insights/InsightsPanel";
 import { OpRecoveryBanner } from "./OpRecoveryBanner";
@@ -428,7 +429,6 @@ export function RepositoryView() {
     Boolean(gh.data?.installed && gh.data?.authenticated && gh.data?.repo) &&
     gh.data?.provider === "github";
   const canCreateIssue = forgeFeatureReady(gh.data, "issueCreate");
-  const canCreatePr = forgeFeatureReady(gh.data, "mrCreate");
   const canCreateRelease = forgeFeatureReady(gh.data, "releaseCreate");
   // Jira create is a separate axis (a linked project, not the git host); gate on
   // a link AND the project's createIssues permission. These queries dedupe with
@@ -613,8 +613,6 @@ export function RepositoryView() {
     () => requestCreate("jira-issue"),
     canCreateJira,
   );
-  useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
-  useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
   useHotkeyAction(
     "create-discussion",
     () => requestCreate("discussion"),
@@ -726,7 +724,9 @@ export function RepositoryView() {
     };
   }, []);
 
-  if (!repoPath) return null;
+  // The two create entries stay registered without a repository: a live entry,
+  // even a disabled one, keeps its chord from the webview.
+  if (!repoPath) return <AppCreateHotkeys repoPath={null} />;
 
   const secondaryTabs = secondaryTabRows(aiEnabled, bindings);
   const activeSecondary = secondaryTabs.find((t) => t.tab === repoTab);
@@ -787,6 +787,9 @@ export function RepositoryView() {
       {/* Outside every TabPanel: a hidden tab's <Activity> pauses effects, and
           the log must follow HEAD for readers on whichever tab is shown. */}
       <StatusLogSync key={repoPath} repoPath={repoPath} />
+      {/* Before the tab panels: in a shared commit its entries register first,
+          so a panel's own enabled entry is the newest and takes the action. */}
+      <AppCreateHotkeys repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
         {/* The sidebar shares the window's shrink with the content pane: it
             gives up width down to a 288px floor (the narrowest that still fits
@@ -999,7 +1002,11 @@ export function RepositoryView() {
           </TabPanel>
           <TabPanel active={repoTab === "history"}>
             {deferredCommitHash ? (
-              <CommitDetailView repoPath={repoPath} hash={deferredCommitHash} />
+              <CommitDetailView
+                repoPath={repoPath}
+                hash={deferredCommitHash}
+                filterSurface="history"
+              />
             ) : (
               <DiffPlaceholder
                 icon={GitCommitIcon}
@@ -1012,6 +1019,7 @@ export function RepositoryView() {
               <CommitDetailView
                 repoPath={repoPath}
                 hash={deferredCompareCommitHash}
+                filterSurface="compare"
               />
             ) : compareBranch &&
               currentName &&
@@ -1020,6 +1028,7 @@ export function RepositoryView() {
                 repoPath={repoPath}
                 base={compareBranch}
                 compare={currentName}
+                filterSurface="compare"
               />
             ) : (
               <DiffPlaceholder

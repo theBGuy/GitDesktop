@@ -225,6 +225,12 @@ const fetchedRemotes = () =>
 
 const createButton = () =>
   screen.getByRole("button", { name: /^Create pull request/ });
+/** Neither held with a reason (`aria-disabled`) nor natively disabled: a
+ *  reasonless hold stays native, which only `toBeEnabled` reads. */
+const expectCreateReleased = () => {
+  expect(createButton()).not.toHaveAttribute("aria-disabled", "true");
+  expect(createButton()).toBeEnabled();
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -590,6 +596,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     });
     expect(createButton()).not.toHaveAccessibleDescription("Fetching origin…");
     expect(createButton()).not.toHaveAccessibleDescription(UPDATING);
+    await waitFor(expectCreateReleased);
     unsubscribe();
   });
 
@@ -598,11 +605,14 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     vi.mocked(gitFetchRemote).mockReturnValue(fetch.promise);
     const listReread = deferred<RemoteBranch[]>();
     let listReads = 0;
+    // Held only from the fetch's settle on: the picker's own re-read on open
+    // lands first, so the held read is the one the settle starts.
+    let holdReads = false;
     vi.mocked(gitRemoteBranches).mockImplementation(async () => {
       listReads += 1;
-      return listReads === 1
-        ? [remote("upstream", "main"), remote("origin", "feature-x")]
-        : listReread.promise;
+      return holdReads
+        ? listReread.promise
+        : [remote("upstream", "main"), remote("origin", "feature-x")];
     });
     const user = userEvent.setup();
     const view = renderPanelView();
@@ -617,6 +627,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     view.setActive(false);
     await settle();
     const before = listReads;
+    holdReads = true;
     await act(async () => fetch.resolve());
     await waitFor(() => expect(listReads).toBe(before + 1));
     view.setActive(true);
@@ -631,6 +642,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     await waitFor(() =>
       expect(createButton()).not.toHaveAccessibleDescription(UPDATING),
     );
+    await waitFor(expectCreateReleased);
     unsubscribe();
   });
 
@@ -1036,11 +1048,21 @@ describe("Compare remote rows for a slash remote", () => {
   it("drops the slash remote's own HEAD row", () => {
     const rows = remoteCompareRows(
       [remote("team", "fork/HEAD"), remote("team", "fork/main")],
-      new Set(),
       ["team/fork"],
     );
     expect(rows.map((r) => r.display)).toEqual(["team/fork/main"]);
   });
+
+  it.each([[["team"]], [["team/fork"]]])(
+    "drops the slash remote's session branches when the remotes list is %j",
+    (remotes) => {
+      const rows = remoteCompareRows(
+        [remote("team/fork", "gd/session/abc"), remote("team/fork", "main")],
+        remotes,
+      );
+      expect(rows.map((r) => r.display)).toEqual(["team/fork/main"]);
+    },
+  );
 });
 
 describe("Compare picker empty copy", () => {

@@ -2239,6 +2239,7 @@ mod tests {
             &["branch", "feat/x"],
         ] {
             let out = std::process::Command::new("git")
+                .envs(crate::git::runner::TEST_GIT_ENV)
                 .current_dir(&repo)
                 .args(args)
                 .output()
