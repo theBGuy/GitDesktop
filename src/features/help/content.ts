@@ -4554,7 +4554,9 @@ Sections:
   (Git, the GitHub / GitLab CLIs{{ai}}, and the Claude Code / Codex / Copilot / opencode
   agents{{/ai}}) that flags anything missing (and warns when Git or the GitHub CLI is
   older than a feature needs), with a download link either way, and the current window
-  position.
+  position. **Re-check** runs the health check again and has the app reload the data it
+  had cached; use it after installing a tool so GitDesktop looks for it afresh without
+  waiting for each screen's own refresh.
 
 ## Staying up to date
 

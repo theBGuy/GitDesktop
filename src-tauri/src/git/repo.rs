@@ -631,8 +631,7 @@ mod identity_tests {
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(&path)
             .env("GIT_CEILING_DIRECTORIES", path.parent().unwrap())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_ATTR_NOSYSTEM", "1")
+            .envs(crate::git::runner::TEST_GIT_ENV)
             .env("LC_ALL", "C")
             .output()
             .await

@@ -2587,6 +2587,7 @@ mod tests {
     ) -> String {
         write(dir, "b.txt", content);
         let status = std::process::Command::new("git")
+            .envs(crate::git::runner::TEST_GIT_ENV)
             .args(["stash", "push", "-m", message])
             .current_dir(repo)
             .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
@@ -2713,6 +2714,7 @@ mod tests {
             let ran = std::sync::Arc::clone(&ran);
             std::sync::Arc::new(move || {
                 let status = std::process::Command::new("git")
+                    .envs(crate::git::runner::TEST_GIT_ENV)
                     .args(["stash", "push", "-m", "raced push"])
                     .current_dir(&repo)
                     .status()
@@ -2759,6 +2761,7 @@ mod tests {
                 let repo = repo.clone();
                 std::sync::Arc::new(move || {
                     let status = std::process::Command::new("git")
+                        .envs(crate::git::runner::TEST_GIT_ENV)
                         .args(["stash", "drop", external])
                         .current_dir(&repo)
                         .status()

@@ -1498,6 +1498,7 @@ mod tests {
             let ran = std::sync::Arc::clone(&ran);
             std::sync::Arc::new(move || {
                 let status = std::process::Command::new("git")
+                    .envs(crate::git::runner::TEST_GIT_ENV)
                     .args(["add", "--", "file.txt"])
                     .current_dir(&repo)
                     .status()

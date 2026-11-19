@@ -82,7 +82,7 @@ tauri-plugin-updater = "2"
 winreg = "0.56"
 # Broadcasting WM_SETTINGCHANGE so a freshly-added PATH entry (the "add gitdesktop
 # to PATH" launcher) reaches new terminals without a logout (path_launcher.rs), and
-# job objects so a timed-out git takes its whole process tree with it (runner.rs).
+# job objects so an abandoned child takes its whole process tree with it (proc_tree.rs).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_JobObjects",
@@ -92,9 +92,11 @@ windows-sys = { version = "0.61", features = [
 # the other platforms keep the web API.
 tauri-plugin-clipboard-manager = "2"
 
-# Unix-only: `killpg`, so a timed-out git or a cancelled agent takes its whole process
-# group with it (runner.rs `kill_process_group`). A spawned `kill -KILL -<pgid>` is
-# misparsed by procps-ng's kill (probed on Ubuntu 22.04 and 24.04).
+# Unix-only: `killpg`, so an abandoned or cancelled child takes its whole process
+# group with it (proc_tree.rs `kill_process_group`). A spawned `kill -KILL -<pgid>` is
+# misparsed by procps-ng's kill (probed on Ubuntu 22.04 and 24.04). Also `setsid`
+# (agent.rs `configure_probe_shell`), `waitid` (`exited_unreaped`), `access`
+# (`executable_by_us`) and `geteuid` (attachments.rs `root_is_private`).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

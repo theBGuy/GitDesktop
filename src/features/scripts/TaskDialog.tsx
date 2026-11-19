@@ -623,7 +623,7 @@ export function TaskDialog({
           <p className="text-xs text-warning">
             {INTERPRETER_LABELS[interpreter] ?? interpreter} isn't installed, or
             GitDesktop can't find it — install it, or make sure it's on your
-            shell's PATH.
+            shell's PATH, then use Settings → About → Re-check.
           </p>
         )}
 

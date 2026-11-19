@@ -8,9 +8,10 @@ import { attachmentGateReason } from "./support-gate";
 /**
  * Why attaching is closed on this surface, or null when it is open. The CLI
  * versions come from the `system-health` cache entry `useSystemHealth()` reads,
- * with the same key and query function, through this observer's own `enabled`
- * and a 5-minute window: the hook itself refetches past 30 s, which would
- * re-run every CLI probe on each view mount.
+ * with the same key and a plain query function (it never asks for a fresh
+ * check), through this observer's own `enabled` and a 5-minute window: the hook
+ * itself refetches past 30 s, which would re-run every CLI probe on each view
+ * mount.
  */
 export function useAttachmentSupport({
   forge,
