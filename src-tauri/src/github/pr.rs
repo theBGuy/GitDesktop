@@ -2800,6 +2800,9 @@ pub struct PrMergeOutcome {
     /// (the MCP merge tool, the frontend) must branch on this rather than parse a
     /// message — and must not treat the PR as merged or its branch as deleted.
     pub queued: bool,
+    /// The merge went through GitHub's stack path (merge-async), which merges or queues
+    /// the layers below it too; false on every other path and forge.
+    pub stacked: bool,
 }
 
 /// Drops the trailing ` (<path>)` go-gh appends to a GraphQL error message — the
@@ -2905,38 +2908,40 @@ const HEAD_MOVED_REFUSAL: &str = "This pull request got new commits after its co
 
 /// A full GitHub commit id. GitHub refuses a shorter `expectedHeadOid` even when it
 /// names the head, so nothing else may be sent as one.
-fn is_github_head_oid(sha: &str) -> bool {
+pub(crate) fn is_github_head_oid(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The whole `gh pr merge` request: argv and stdin. The title rides argv as ONE
 /// `--subject=` element (gh has no file flag for it, and the `=` form keeps a leading
 /// `-` from parsing as a flag); the body always rides stdin, a blank one included.
-/// A message binds to the head its default was read under through
-/// `--match-head-commit`; without a message the argv is exactly `base`.
+/// A message always binds to its head through `--match-head-commit`, so one without a
+/// full head id is refused; without a message the argv is exactly `base`.
 fn gh_merge_request(
     base: &[&str],
     message: Option<&crate::forge::MergeMessage>,
     sha: Option<&str>,
-) -> (Vec<String>, String) {
+) -> AppResult<(Vec<String>, String)> {
     let mut argv: Vec<String> = base.iter().map(|s| s.to_string()).collect();
     if let Some(m) = message {
-        if let Some(sha) = sha.filter(|s| is_github_head_oid(s)) {
-            argv.push("--match-head-commit".to_string());
-            argv.push(sha.to_string());
-        }
+        let Some(sha) = sha.filter(|s| is_github_head_oid(s)) else {
+            return Err(crate::forge::unbound_message_refusal("pull request"));
+        };
+        argv.push("--match-head-commit".to_string());
+        argv.push(sha.to_string());
         argv.push(format!("--subject={}", m.title.trim()));
         argv.push("--body-file".to_string());
         argv.push("-".to_string());
     }
-    (argv, gh_merge_stdin(message))
+    Ok((argv, gh_merge_stdin(message)))
 }
 
 /// Merges the PR with the given strategy ("merge"/"squash"/"rebase"). With
 /// `delete_branch`, only the *remote* head branch is removed — local branch and
 /// HEAD are untouched. Each message in `messages` already passed the shape checks;
-/// the slot is chosen here, after this function's own strategy check. `sha` guards
-/// only a merge that carries a message (see [`gh_merge_request`]).
+/// the slot is chosen here, after this function's own strategy check. A message
+/// travels with `sha`, a full head id; without a message `sha` is not sent (see
+/// [`gh_merge_request`]).
 ///
 /// Deliberately NOT `gh pr merge --delete-branch`: that also deletes the LOCAL
 /// branch and moves HEAD to the default branch, diverging from GitLab/Bitbucket
@@ -2975,16 +2980,17 @@ pub async fn gh_pr_merge(
         // GitHub requires its asynchronous merge API there. The probe is best-effort —
         // when it can't tell, the legacy path runs and GitHub's own refusal is the
         // backstop. Merging a member also merges every unmerged layer below it.
-        let queued = if gh_pr_is_stacked(&repo_path, &slug, number).await {
+        let (queued, stacked) = if gh_pr_is_stacked(&repo_path, &slug, number).await {
             stacked_message_refusal(true, message.as_ref())?;
-            gh_pr_merge_async(&repo_path, &slug, number, &strategy).await?
-                == StackedMergeResult::Queued
+            let queued = gh_pr_merge_async(&repo_path, &slug, number, &strategy).await?
+                == StackedMergeResult::Queued;
+            (queued, true)
         } else {
             let (argv, stdin) = gh_merge_request(
                 &["pr", "merge", &n, method, "--repo", &slug],
                 message.as_ref(),
                 sha.as_deref(),
-            );
+            )?;
             let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
             let result = run_gh_input_raw(Some(&repo_path), &argv, &stdin, GH_NETWORK_TIMEOUT).await;
             invalidate_repo_meta_after(&slug, &result);
@@ -3004,7 +3010,7 @@ pub async fn gh_pr_merge(
                     None => raw.to_string(),
                 }));
             }
-            false
+            (false, false)
         };
         // Merge accepted: from here a cleanup failure is a warning on success, never an error.
         let cleanup_warning = if queued {
@@ -3026,6 +3032,7 @@ pub async fn gh_pr_merge(
         Ok(PrMergeOutcome {
             cleanup_warning,
             queued,
+            stacked,
         })
     }
     .await;
@@ -5313,17 +5320,34 @@ pub async fn gh_pr_list(
     lens: Option<String>,
     filter: Option<crate::forge::model::RemoteListFilter>,
 ) -> AppResult<Vec<PrInfo>> {
+    gh_pr_list_page(repo_path, state, limit, lens, filter)
+        .await
+        .map(|(rows, _)| rows)
+}
+
+/// [`gh_pr_list`] with whether its read stopped at a cap: true only when the unfiltered
+/// "unmerged" walk ran out of pages with a cursor still pending (see
+/// [`closed_pr_pages_with`]); every other route answers false.
+pub async fn gh_pr_list_page(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
+) -> AppResult<(Vec<PrInfo>, bool)> {
     // Resolve the lens slug so a fork lists the chosen repo's PRs (a bare
     // `gh pr list` on a fork auto-resolves to the upstream repo).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     if let Some(q) = crate::github::pr_search::search_query(&slug, true, &state, filter.as_ref())? {
-        return gh_pr_list_filtered(&repo_path, &slug, &state, limit, &q).await;
+        return gh_pr_list_filtered(&repo_path, &slug, &state, limit, &q)
+            .await
+            .map(|rows| (rows, false));
     }
     if pr_list_route(&state)? == PrListRoute::ClosedGraphql {
-        let mut prs = gh_closed_pr_list(&repo_path, &slug, limit).await?;
+        let (mut prs, capped) = gh_closed_pr_list(&repo_path, &slug, limit).await?;
         // A closed list describes merges already made, so it skips the stack probe.
         apply_stack_join(&mut prs, Some(&std::collections::HashMap::new()));
-        return Ok(prs);
+        return Ok((prs, capped));
     }
     let args = gh_pr_list_args(&slug, &state, limit)?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -5350,7 +5374,7 @@ pub async fn gh_pr_list(
     let mut prs: Vec<PrInfo> = serde_json::from_str(&out?.stdout_lossy())
         .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))?;
     apply_stack_join(&mut prs, stacks.as_ref());
-    Ok(prs)
+    Ok((prs, false))
 }
 
 /// The unfiltered `gh pr list` argv for the open, closed and merged states. Every
@@ -5537,7 +5561,12 @@ fn parse_closed_pr_page(body: &str) -> AppResult<(Vec<PrInfo>, Option<String>)> 
 /// come back short of a limit near the cap: the page cap binds before the skipped
 /// rows are made up. A continuation cursor that repeats fails the read whole: the
 /// walk would re-read one page up to the cap and report a short list as complete.
-async fn closed_pr_pages_with<F, Fut>(limit: Option<u32>, fetch: F) -> AppResult<Vec<PrInfo>>
+/// The flag is true only when the page cap ended the walk with a cursor still pending
+/// and the limit unfilled; it says the walk stopped, not that older rows exist.
+async fn closed_pr_pages_with<F, Fut>(
+    limit: Option<u32>,
+    fetch: F,
+) -> AppResult<(Vec<PrInfo>, bool)>
 where
     F: Fn(u32, Option<String>) -> Fut,
     Fut: Future<Output = AppResult<String>>,
@@ -5564,8 +5593,10 @@ where
             _ => break,
         }
     }
+    // Each page takes `after`, so it is still set only when the last page continued.
+    let capped = after.is_some();
     prs.truncate(limit);
-    Ok(prs)
+    Ok((prs, capped))
 }
 
 /// The `gh api graphql` argv for one closed-list page. Owner, name and cursor go
@@ -5589,12 +5620,13 @@ fn closed_pr_page_args(owner: &str, name: &str, first: u32, after: Option<&str>)
 }
 
 /// Closed-without-merging PRs from GitHub's `pullRequests` connection, which,
-/// unlike the search API, includes archived pull requests.
+/// unlike the search API, includes archived pull requests; the flag is
+/// [`closed_pr_pages_with`]'s page-cap stop.
 async fn gh_closed_pr_list(
     repo_path: &str,
     slug: &str,
     limit: Option<u32>,
-) -> AppResult<Vec<PrInfo>> {
+) -> AppResult<(Vec<PrInfo>, bool)> {
     let Some((owner, name)) = slug.split_once('/') else {
         return Err(AppError::Gh(
             "could not determine the repository owner".into(),
@@ -12462,6 +12494,7 @@ mod tests {
         let v = serde_json::to_value(PrMergeOutcome {
             cleanup_warning: Some("Merging #7 was queued on GitHub…".to_string()),
             queued: true,
+            stacked: true,
         })
         .unwrap();
         assert_eq!(v["queued"], true);
@@ -12472,10 +12505,32 @@ mod tests {
         let v = serde_json::to_value(PrMergeOutcome {
             cleanup_warning: Some("Merged #7, but the remote branch…".to_string()),
             queued: false,
+            stacked: false,
         })
         .unwrap();
         assert_eq!(v["queued"], false);
         assert!(v["cleanupWarning"].is_string());
+    }
+
+    /// The frontend reads these exact keys; `stacked` gates its patch of lower layers.
+    #[test]
+    fn merge_outcome_wire_keys_are_exact() {
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let plain = serde_json::to_value(PrMergeOutcome::default()).unwrap();
+        let stacked = serde_json::to_value(PrMergeOutcome {
+            stacked: true,
+            ..Default::default()
+        })
+        .unwrap();
+        for (v, want) in [(&plain, false), (&stacked, true)] {
+            assert_eq!(keys(v), ["cleanupWarning", "queued", "stacked"], "{v}");
+            assert_eq!(v["stacked"], want, "{v}");
+            assert!(v.get("cleanup_warning").is_none(), "{v}");
+        }
     }
 
     /// The list join's whole payload contract. The `open`-absent arm is the one
@@ -12929,7 +12984,7 @@ mod tests {
         limit: Option<u32>,
         pages: Vec<crate::error::AppResult<String>>,
     ) -> (
-        crate::error::AppResult<Vec<PrInfo>>,
+        crate::error::AppResult<(Vec<PrInfo>, bool)>,
         Vec<(u32, Option<String>)>,
     ) {
         let pages = std::sync::Mutex::new(pages.into_iter());
@@ -12957,7 +13012,9 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(prs.unwrap().len(), 130);
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 130);
+        assert!(!capped);
         assert_eq!(calls, [(100, None), (30, Some("c1".to_string()))]);
 
         let (prs, calls) = closed_pages(
@@ -12969,10 +13026,12 @@ mod tests {
             ],
         )
         .await;
+        let (prs, capped) = prs.unwrap();
         assert_eq!(
-            prs.unwrap().iter().map(|p| p.number).collect::<Vec<_>>(),
+            prs.iter().map(|p| p.number).collect::<Vec<_>>(),
             (1..=250).collect::<Vec<_>>()
         );
+        assert!(!capped);
         assert_eq!(
             calls.iter().map(|c| c.0).collect::<Vec<_>>(),
             [100, 100, 50]
@@ -12980,36 +13039,98 @@ mod tests {
 
         let (prs, calls) =
             closed_pages(None, vec![Ok(gql_pr_page(1..=30, true, Some("c1")))]).await;
-        assert_eq!(prs.unwrap().len(), 30);
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 30);
+        assert!(!capped);
         assert_eq!(calls, [(30, None)]);
 
         let (prs, calls) =
             closed_pages(Some(0), vec![Ok(gql_pr_page(1..=5, true, Some("c1")))]).await;
-        assert_eq!(prs.unwrap().len(), 1);
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 1);
+        assert!(!capped);
         assert_eq!(calls, [(1, None)]);
 
         // A page answering more rows than asked is cut back to the limit.
         let (prs, _) = closed_pages(Some(3), vec![Ok(gql_pr_page(1..=5, false, None))]).await;
-        assert_eq!(prs.unwrap().len(), 3);
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 3);
+        assert!(!capped);
     }
 
     #[tokio::test]
     async fn closed_pr_pages_stop_at_the_last_page_and_the_page_cap() {
         let (prs, calls) =
             closed_pages(Some(200), vec![Ok(gql_pr_page(1..=40, false, None))]).await;
-        assert_eq!(prs.unwrap().len(), 40);
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 40);
+        assert!(!capped);
         assert_eq!(calls.len(), 1);
 
-        // Pages that come back short keep the walk going only up to ten requests.
-        let pages = (0..10)
-            .map(|i| {
-                let cursor = format!("c{i}");
-                Ok(gql_pr_page([i * 2 + 1, i * 2 + 2], true, Some(&cursor)))
-            })
-            .collect();
-        let (prs, calls) = closed_pages(Some(1000), pages).await;
-        assert_eq!(prs.unwrap().len(), 20);
+        // Pages that come back short keep the walk going only up to ten requests, and a
+        // walk the cap stopped with a cursor pending says so.
+        let short_pages = |last_next: bool| -> Vec<crate::error::AppResult<String>> {
+            (0..10)
+                .map(|i| {
+                    let cursor = format!("c{i}");
+                    let next = i < 9 || last_next;
+                    Ok(gql_pr_page(
+                        [i * 2 + 1, i * 2 + 2],
+                        next,
+                        next.then_some(cursor.as_str()),
+                    ))
+                })
+                .collect()
+        };
+        let (prs, calls) = closed_pages(Some(1000), short_pages(true)).await;
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 20);
+        assert!(capped);
         assert_eq!(calls.len(), 10);
+
+        // The tenth page ends the list: complete, not capped.
+        let (prs, calls) = closed_pages(Some(1000), short_pages(false)).await;
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 20);
+        assert!(!capped);
+        assert_eq!(calls.len(), 10);
+
+        // The limit fills exactly on the tenth page with a cursor pending: not capped.
+        let (prs, calls) = closed_pages(Some(20), short_pages(true)).await;
+        let (prs, capped) = prs.unwrap();
+        assert_eq!(prs.len(), 20);
+        assert!(!capped);
+        assert_eq!(calls.len(), 10);
+    }
+
+    /// The Closed route's first return after its read hands that read's flag on.
+    fn closed_route_reports_capped(body: &str) -> bool {
+        let bind = "let (mut prs, capped) = gh_closed_pr_list(";
+        let Some(at) = body.find(bind) else {
+            return false;
+        };
+        body[at..]
+            .split("return ")
+            .nth(1)
+            .is_some_and(|ret| ret.starts_with("Ok((prs, capped));"))
+    }
+
+    /// No seam reaches `gh_pr_list_page` without spawning gh, so its Closed route is
+    /// pinned by shape.
+    #[test]
+    fn gh_pr_list_page_reports_the_closed_list_cap() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_list_page",
+        ));
+        assert!(closed_route_reports_capped(&body), "{body}");
+        let dropped = body.replacen("return Ok((prs, capped));", "return Ok((prs, false));", 1);
+        assert_ne!(dropped, body);
+        assert!(!closed_route_reports_capped(&dropped));
+        let unbound = body.replacen("let (mut prs, capped) =", "let (mut prs, _) =", 1);
+        assert_ne!(unbound, body);
+        assert!(!closed_route_reports_capped(&unbound));
     }
 
     #[tokio::test]
@@ -13071,10 +13192,12 @@ mod tests {
             ],
         )
         .await;
+        let (prs, capped) = prs.unwrap();
         assert_eq!(
-            prs.unwrap().iter().map(|p| p.number).collect::<Vec<_>>(),
+            prs.iter().map(|p| p.number).collect::<Vec<_>>(),
             (1..=150).collect::<Vec<_>>()
         );
+        assert!(!capped);
         assert_eq!(
             calls,
             [
@@ -13092,7 +13215,9 @@ mod tests {
         for limit in [1001, 5000, u32::MAX] {
             let (prs, calls) =
                 closed_pages(Some(limit), vec![Ok(gql_pr_page(1..=1001, false, None))]).await;
-            assert_eq!(prs.unwrap().len(), 1000, "{limit}");
+            let (prs, capped) = prs.unwrap();
+            assert_eq!(prs.len(), 1000, "{limit}");
+            assert!(!capped, "{limit}");
             assert_eq!(calls, [(100, None)], "{limit}");
         }
     }
@@ -17568,38 +17693,49 @@ mod merge_message_tests {
 
     #[test]
     fn gh_merge_request_puts_the_title_in_one_element_and_the_body_on_stdin() {
-        let (argv, stdin) = gh_merge_request(&BASE, None, None);
+        let (argv, stdin) = gh_merge_request(&BASE, None, None).unwrap();
         assert_eq!(argv, BASE.map(String::from).to_vec());
         assert_eq!(stdin, "");
         assert!(!argv.iter().any(|a| a == "--body-file"));
 
+        let head = "3b04ca7".repeat(5) + "3b04c";
+        let bound = |subject: &'static str| {
+            [
+                "--match-head-commit",
+                head.as_str(),
+                subject,
+                "--body-file",
+                "-",
+            ]
+        };
         let m = msg("  feat: x ", "");
-        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), None);
-        assert_eq!(extra(&argv), ["--subject=feat: x", "--body-file", "-"]);
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), Some(&head)).unwrap();
+        assert_eq!(extra(&argv), bound("--subject=feat: x"));
         assert_eq!(stdin, "");
 
         let m = msg("feat: x", "the body");
-        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), None);
-        assert_eq!(extra(&argv), ["--subject=feat: x", "--body-file", "-"]);
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), Some(&head)).unwrap();
+        assert_eq!(extra(&argv), bound("--subject=feat: x"));
         assert_eq!(stdin, "the body");
 
         let m = msg("feat: x", "\r\n\r\nline 1\r\nline 2  \r\n\r\n");
-        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), None);
-        assert_eq!(extra(&argv), ["--subject=feat: x", "--body-file", "-"]);
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), Some(&head)).unwrap();
+        assert_eq!(extra(&argv), bound("--subject=feat: x"));
         assert_eq!(stdin, "line 1\nline 2");
 
         let m = msg("-d --admin", "");
-        let (argv, _) = gh_merge_request(&BASE, Some(&m), None);
-        assert_eq!(extra(&argv), ["--subject=-d --admin", "--body-file", "-"]);
+        let (argv, _) = gh_merge_request(&BASE, Some(&m), Some(&head)).unwrap();
+        assert_eq!(extra(&argv), bound("--subject=-d --admin"));
     }
 
-    /// Only a merge with a message binds to a head, and only a full id is ever sent.
+    /// A message always binds to a full head id; one that can't is refused, never sent
+    /// unbound.
     #[test]
-    fn gh_merge_request_binds_only_a_message_to_a_full_head_id() {
+    fn gh_merge_request_refuses_a_message_without_a_full_head_id() {
         let head = "3b04ca7".repeat(5) + "3b04c";
         assert_eq!(head.len(), 40);
         let m = msg("feat: x", "b");
-        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), Some(&head));
+        let (argv, stdin) = gh_merge_request(&BASE, Some(&m), Some(&head)).unwrap();
         assert_eq!(
             extra(&argv),
             [
@@ -17611,7 +17747,6 @@ mod merge_message_tests {
             ]
         );
         assert_eq!(stdin, "b");
-        let unbound = ["--subject=feat: x", "--body-file", "-"];
         let sha256 = "a".repeat(64);
         let not_hex = "g".repeat(40);
         for sha in [
@@ -17622,12 +17757,18 @@ mod merge_message_tests {
             Some(&head[..39]),
             Some(not_hex.as_str()),
         ] {
-            let (argv, _) = gh_merge_request(&BASE, Some(&m), sha);
-            assert_eq!(extra(&argv), unbound, "{sha:?}");
+            match gh_merge_request(&BASE, Some(&m), sha) {
+                Err(AppError::InvalidArgument(t)) => assert_eq!(
+                    t,
+                    "This edited message couldn't be tied to the pull request's current commits, so nothing was merged. Reload it and merge again.",
+                    "{sha:?}"
+                ),
+                other => panic!("{sha:?}: {other:?}"),
+            }
         }
         // An untouched merge keeps the base argv whatever sha it is handed.
         for sha in [None, Some(head.as_str()), Some("3b04ca7")] {
-            let (argv, stdin) = gh_merge_request(&BASE, None, sha);
+            let (argv, stdin) = gh_merge_request(&BASE, None, sha).unwrap();
             assert_eq!(argv, BASE.map(String::from).to_vec(), "{sha:?}");
             assert_eq!(stdin, "");
         }
@@ -17941,6 +18082,23 @@ mod merge_message_tests {
         // The one non-zero exit that answers: a server without the viewer-merge fields.
         let old = "gh: Field 'viewerMergeHeadlineText' doesn't exist on type 'PullRequest'";
         assert_eq!(merge_message_default_outcome(1, "", old).unwrap(), None);
+        // The exemption needs both halves: either one alone stays a failure.
+        for half in [
+            "gh: Field 'headRefOid' doesn't exist on type 'PullRequest'",
+            "gh: Resource not accessible by integration (viewerMergeHeadlineText)",
+        ] {
+            assert!(
+                matches!(classify_gh_failure(half), GhFailure::Answered),
+                "{half}"
+            );
+            assert!(
+                matches!(
+                    merge_message_default_outcome(1, "", half),
+                    Err(AppError::Gh(ref t)) if t == half.trim()
+                ),
+                "{half}"
+            );
+        }
         for stderr in [
             "gh: Too Many Requests (HTTP 429)",
             "error connecting to api.github.com: dial tcp: lookup api.github.com: no such host",
@@ -18060,6 +18218,29 @@ mod merge_message_tests {
             let dropped = f.replacen(REQUEST, &REQUEST.replace(slot, "None,"), 1);
             assert_ne!(dropped, f, "{slot}");
             assert!(!dropped.contains(REQUEST), "{slot}");
+        }
+
+        // `stacked` is true on the stack branch and false on the plain one.
+        assert!(stacked_on_its_branch(&f), "{f}");
+        let swapped = f
+            .replacen("(queued, true)", "(queued, @@)", 1)
+            .replacen("(false, false)", "(false, true)", 1)
+            .replacen("(queued, @@)", "(queued, false)", 1);
+        assert_ne!(swapped, f);
+        assert!(!stacked_on_its_branch(&swapped));
+    }
+
+    fn stacked_on_its_branch(f: &str) -> bool {
+        match (
+            f.find("gh_pr_merge_async("),
+            f.find("(queued, true)"),
+            f.find("gh_merge_request("),
+            f.find("(false, false)"),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d)) => {
+                a < b && b < c && c < d && f.contains("queued, stacked")
+            }
+            _ => false,
         }
     }
 

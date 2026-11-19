@@ -1529,9 +1529,10 @@ pub async fn forge_pr_list(
 pub struct PrListPage {
     pub rows: Vec<crate::github::pr::PrInfo>,
     /// True only when a GitLab unfiltered list walk stopped at its row horizon and the
-    /// horizon clamped the requested limit; every other provider and read says false.
-    /// It means the walk stopped there, never that older rows were proven to exist: a
-    /// leg holding exactly its horizon's rows and nothing older still reports true.
+    /// horizon clamped the requested limit, or GitHub's unfiltered "unmerged" walk stopped
+    /// at its page cap with a cursor still pending; every other provider and read says
+    /// false. It means the walk stopped there, never that older rows were proven to
+    /// exist: a leg holding exactly its horizon's rows and nothing older still reports true.
     pub capped: bool,
 }
 
@@ -1552,10 +1553,7 @@ pub async fn forge_pr_list_page(
         Some((Provider::Bitbucket, _)) => {
             (bitbucket::list_prs(&repo_path, &state, limit).await?, false)
         }
-        _ => (
-            github::list_prs(&repo_path, &state, limit, lens, filter).await?,
-            false,
-        ),
+        _ => github::list_prs_page(&repo_path, &state, limit, lens, filter).await?,
     };
     Ok(PrListPage { rows, capped })
 }
@@ -2732,11 +2730,43 @@ pub(crate) fn single_commit_message(
     }
 }
 
-/// Merge a merge/pull request. GitHub delegates to `gh pr merge`, which takes `sha` as
-/// a head guard only with a custom message; GitLab merges via `glab` — merge/squash
-/// only — with an optional head-`sha` stale-view guard. `strategy` is merge/squash/rebase; rebase
-/// is GitHub-only. An absent message leaves the forge's default, and one the merge
-/// can't use is refused before anything is written.
+/// The refusal of a custom message that can't be tied to a head; `noun` names the
+/// forge's item ("pull request" or "merge request").
+pub(crate) fn unbound_message_refusal(noun: &str) -> AppError {
+    AppError::InvalidArgument(format!(
+        "This edited message couldn't be tied to the {noun}'s current commits, so nothing was merged. Reload it and merge again."
+    ))
+}
+
+/// A custom message on GitHub (`provider` None) needs a full 40-hex head id and on GitLab
+/// a non-blank `sha` (GitLab would refuse a blank one only after the merge's settings
+/// update went out), so it only lands on the commits it was written for. Bitbucket has no
+/// head check and is exempt; so is a merge without a message. Pure: it reads only the
+/// provider already detected from local config.
+pub(crate) fn merge_head_refusal(
+    provider: Option<Provider>,
+    messages: &MergeMessages,
+    sha: Option<&str>,
+) -> AppResult<()> {
+    if messages.squash.is_none() && messages.merge.is_none() {
+        return Ok(());
+    }
+    match provider {
+        Some(Provider::Bitbucket) => Ok(()),
+        Some(Provider::GitLab) if sha.is_some_and(|s| !s.trim().is_empty()) => Ok(()),
+        Some(Provider::GitLab) => Err(unbound_message_refusal("merge request")),
+        _ if sha.is_some_and(crate::github::pr::is_github_head_oid) => Ok(()),
+        _ => Err(unbound_message_refusal("pull request")),
+    }
+}
+
+/// Merge a merge/pull request. GitHub delegates to `gh pr merge`, which sends `sha` as a
+/// head guard only with a custom message; GitLab merges via `glab` (merge/squash only),
+/// sending `sha` whenever it is non-empty. A custom message on GitHub or GitLab needs
+/// `sha` and is refused without one (see [`merge_head_refusal`]); Bitbucket has no head
+/// check and drops it. `strategy` is merge/squash/rebase; rebase is GitHub-only. An
+/// absent message leaves the forge's default, and one the merge can't use is refused
+/// before anything is written.
 ///
 /// `cleanup_warning` on the returned [`PrMergeOutcome`](crate::github::pr::PrMergeOutcome)
 /// means the merge was accepted with a caveat — either the PR merged but post-merge
@@ -2763,8 +2793,10 @@ pub async fn forge_pr_merge(
         squash: squash_message,
         merge: merge_message,
     };
-    match detect_non_github(&repo_path).await {
-        Some((Provider::GitLab, _)) => gitlab::merge_mr(
+    let provider = detect_non_github(&repo_path).await.map(|(p, _)| p);
+    merge_head_refusal(provider, &messages, sha.as_deref())?;
+    match provider {
+        Some(Provider::GitLab) => gitlab::merge_mr(
             &repo_path,
             number,
             &strategy,
@@ -2775,7 +2807,7 @@ pub async fn forge_pr_merge(
         .await
         .map(|()| crate::github::pr::PrMergeOutcome::default()),
         // Bitbucket has no expected-hash guard, so `sha` is dropped.
-        Some((Provider::Bitbucket, _)) => {
+        Some(Provider::Bitbucket) => {
             bitbucket::merge_pr(&repo_path, number, &strategy, delete_branch, messages)
                 .await
                 .map(|()| crate::github::pr::PrMergeOutcome::default())
@@ -4598,6 +4630,9 @@ pub async fn forge_gl_mr_auto_merge(
         squash: squash_message,
         merge: merge_message,
     };
+    // Ahead of the GitLab-only gate: it reads no forge, and the frontend arms
+    // auto-merge only on GitLab.
+    merge_head_refusal(Some(Provider::GitLab), &messages, sha.as_deref())?;
     gl_only!(
         repo_path,
         gitlab::auto_merge_mr(
@@ -7708,13 +7743,210 @@ mod tests {
             1,
             "merge".into(),
             false,
-            None,
+            Some("3b04ca7".repeat(5) + "3b04c"),
             None,
             Some(mm("t", "")),
             None,
         )
         .await;
         assert_eq!(invalid(r.map(|_| ())), MERGE_SLOT_UNUSED);
+    }
+
+    const UNBOUND_PR: &str = "This edited message couldn't be tied to the pull request's current commits, so nothing was merged. Reload it and merge again.";
+    const UNBOUND_MR: &str = "This edited message couldn't be tied to the merge request's current commits, so nothing was merged. Reload it and merge again.";
+
+    #[test]
+    fn merge_head_refusal_binds_a_message_on_github_and_gitlab() {
+        let full = "3b04ca7".repeat(5) + "3b04c";
+        let sha256 = "a".repeat(64);
+        let not_hex = "g".repeat(40);
+        let shas = [
+            None,
+            Some(""),
+            Some("3b04ca7"),
+            Some(full.as_str()),
+            Some(sha256.as_str()),
+            Some(not_hex.as_str()),
+        ];
+        let slots = |squash: bool, merge: bool| MergeMessages {
+            squash: squash.then(|| mm("s", "")),
+            merge: merge.then(|| mm("m", "")),
+        };
+        for provider in [None, Some(Provider::GitLab), Some(Provider::Bitbucket)] {
+            for (squash, merge) in [(false, false), (true, false), (false, true), (true, true)] {
+                let messages = slots(squash, merge);
+                for sha in shas {
+                    let got = merge_head_refusal(provider, &messages, sha);
+                    let at = format!("{provider:?} {squash} {merge} {sha:?}");
+                    let has_message = squash || merge;
+                    let want = match provider {
+                        _ if !has_message => None,
+                        Some(Provider::Bitbucket) => None,
+                        Some(Provider::GitLab) if sha.is_some_and(|s| !s.is_empty()) => None,
+                        Some(Provider::GitLab) => Some(UNBOUND_MR),
+                        _ if sha == Some(full.as_str()) => None,
+                        _ => Some(UNBOUND_PR),
+                    };
+                    match want {
+                        None => assert!(got.is_ok(), "{at}: {got:?}"),
+                        Some(text) => assert_eq!(invalid(got), text, "{at}"),
+                    }
+                }
+            }
+        }
+        assert!(
+            merge_head_refusal(Some(Provider::GitLab), &slots(true, false), Some("3b04ca7"))
+                .is_ok()
+        );
+        assert_eq!(
+            invalid(merge_head_refusal(
+                None,
+                &slots(true, false),
+                Some("3b04ca7")
+            )),
+            UNBOUND_PR
+        );
+        // A GitLab head of whitespace binds nothing: refused with a message, and ignored
+        // without one on every provider.
+        for blank in ["   ", "\t\n"] {
+            for (squash, merge) in [(false, false), (true, false), (false, true), (true, true)] {
+                let messages = slots(squash, merge);
+                let got = merge_head_refusal(Some(Provider::GitLab), &messages, Some(blank));
+                let at = format!("{blank:?} {squash} {merge}");
+                if squash || merge {
+                    assert_eq!(invalid(got), UNBOUND_MR, "{at}");
+                } else {
+                    assert!(got.is_ok(), "{at}: {got:?}");
+                }
+            }
+            for provider in [None, Some(Provider::Bitbucket)] {
+                let got = merge_head_refusal(provider, &slots(false, false), Some(blank));
+                assert!(got.is_ok(), "{provider:?} {blank:?}: {got:?}");
+            }
+        }
+    }
+
+    /// "C:/nonexistent" detects as GitHub, so the refusal comes from the head check,
+    /// which runs before any call.
+    #[tokio::test]
+    async fn forge_pr_merge_refuses_an_unbound_message_before_any_call() {
+        for sha in [None, Some("3b04ca7".to_string())] {
+            let r = forge_pr_merge(
+                "C:/nonexistent".into(),
+                1,
+                "squash".into(),
+                false,
+                sha.clone(),
+                None,
+                Some(mm("t", "")),
+                None,
+            )
+            .await;
+            assert_eq!(invalid(r.map(|_| ())), UNBOUND_PR, "{sha:?}");
+        }
+    }
+
+    /// Without its head check the command would answer the GitLab-only gate's refusal.
+    #[tokio::test]
+    async fn forge_gl_mr_auto_merge_refuses_an_unbound_message() {
+        let r = forge_gl_mr_auto_merge(
+            "C:/nonexistent".into(),
+            1,
+            "squash".into(),
+            false,
+            None,
+            Some(mm("t", "")),
+            None,
+        )
+        .await;
+        assert_eq!(invalid(r), UNBOUND_MR);
+    }
+
+    /// The head check answers first; the rebase's own no-message refusal comes once a
+    /// head is given, still before any gh call.
+    #[tokio::test]
+    async fn forge_pr_merge_asks_for_the_head_before_the_no_message_refusal() {
+        let merge = |sha: Option<String>| {
+            forge_pr_merge(
+                "C:/nonexistent".into(),
+                1,
+                "rebase".into(),
+                false,
+                sha,
+                None,
+                None,
+                Some(mm("t", "")),
+            )
+        };
+        assert_eq!(invalid(merge(None).await.map(|_| ())), UNBOUND_PR);
+        assert_eq!(
+            invalid(merge(Some("3b04ca7".repeat(5) + "3b04c")).await.map(|_| ())),
+            "This merge method writes no commit of its own, so it can't take a commit message."
+        );
+    }
+
+    fn head_checked_before_every_arm(body: &str) -> bool {
+        let call = "merge_head_refusal(provider, &messages, sha.as_deref())?;";
+        let (Some(detect), Some(check)) = (body.find("detect_non_github("), body.find(call)) else {
+            return false;
+        };
+        detect < check
+            && ["gitlab::merge_mr(", "bitbucket::merge_pr(", "gh_pr_merge("]
+                .iter()
+                .all(|arm| body.find(arm).is_some_and(|at| check < at))
+    }
+
+    #[test]
+    fn forge_pr_merge_checks_the_head_before_every_arm() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("mod.rs"),
+            "forge_pr_merge",
+        ));
+        assert!(head_checked_before_every_arm(&body), "{body}");
+        let call = "merge_head_refusal(provider, &messages, sha.as_deref())?;";
+        let moved = format!("{} {call}", body.replacen(call, "", 1));
+        assert!(!head_checked_before_every_arm(&moved));
+        let unbound = body.replacen(call, "merge_head_refusal(provider, &messages, None)?;", 1);
+        assert_ne!(unbound, body);
+        assert!(!head_checked_before_every_arm(&unbound));
+    }
+
+    /// True when the GitHub arm reads its flag from `list_prs_page` and no GitHub list
+    /// read sits in an arm that also spells a literal `false`.
+    fn github_arm_reads_capped(body: &str) -> bool {
+        body.contains("_ => github::list_prs_page(")
+            && body.match_indices("github::list_prs").all(|(at, _)| {
+                let arm = &body[at..];
+                !arm[..arm.find("=>").unwrap_or(arm.len())].contains("false")
+            })
+    }
+
+    /// The GitHub arm takes its cap flag from the read, never a literal `false`.
+    #[test]
+    fn forge_pr_list_page_reports_github_capped() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("mod.rs"),
+            "forge_pr_list_page",
+        ));
+        let arm = "_ => github::list_prs_page(&repo_path, &state, limit, lens, filter).await?,";
+        assert!(body.contains(arm), "{body}");
+        assert!(github_arm_reads_capped(&body), "{body}");
+        let old = body.replacen(
+            arm,
+            "_ => ( github::list_prs(&repo_path, &state, limit, lens, filter).await?, false, ),",
+            1,
+        );
+        assert_ne!(old, body);
+        assert!(!github_arm_reads_capped(&old));
+        let dropped = body.replacen(
+            arm,
+            "_ => github::list_prs_page(&repo_path, &state, limit, lens, filter).await.map(|(rows, _)| (rows, false))?,",
+            1,
+        );
+        assert_ne!(dropped, body);
+        assert!(!github_arm_reads_capped(&dropped));
     }
 
     #[test]

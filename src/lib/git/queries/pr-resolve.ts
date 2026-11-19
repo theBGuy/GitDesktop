@@ -63,6 +63,10 @@ export type RecordFailure = { error: unknown } | null;
 
 export const MERGE_LANDED_UNRECORDED_NOTE =
   "The merge landed, but this pull request's record couldn't be updated.";
+/** {@link MERGE_LANDED_UNRECORDED_NOTE}'s twin for an `already-merged` start,
+ *  which wrote nothing to land. */
+export const alreadyMergedUnrecordedNote = (head: string, base: string) =>
+  `${head} is already part of ${base}, but this pull request's record couldn't be updated.`;
 export const MERGE_DISCARDED_UNRECORDED_NOTE =
   "The merge was discarded, but this pull request's record couldn't be updated.";
 
@@ -111,7 +115,9 @@ export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
             .invalidateQueries({ queryKey: recordKey })
             .catch(() => undefined);
       };
-      if (outcome.status === "merged") {
+      // A head already part of the base wrote nothing, so it lands like a merge:
+      // there is no worktree to record or abort.
+      if (outcome.status === "merged" || outcome.status === "already-merged") {
         try {
           const recordFailure: RecordFailure = await updateLocalPr(
             repo,

@@ -136,7 +136,6 @@ import { copyText } from "@/lib/clipboard";
 import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
 import {
   appErrorDetail,
-  errorDetailText,
   isPrArchivedRefusal,
   presentError,
 } from "@/lib/error-summary";
@@ -2910,9 +2909,10 @@ export function RemotePrView({
     // The dialog can sit open across a disconnect; its confirm holds on the same
     // verdict, and this refuses a press that lands before the hold repaints.
     if (refuseWhileOffline()) return;
-    // The menu's guards on the dialog's method, re-read at the press like the
-    // dialog's hold, for a rule or a lost head that lands before it repaints.
-    if (mergeGuardMissing || mergeMethodHold !== undefined) return;
+    // The dialog's holds re-read at the press, for a pull request that stopped
+    // being open, a rule or a lost head that lands before the hold repaints.
+    if (mergeNotOpen || mergeGuardMissing || mergeMethodHold !== undefined)
+      return;
     // An emptied title holds the confirm; this refuses a press or chord that
     // lands before the hold repaints. The message is read before any await.
     if (mergeMessageHold(mergeDraft.rows, mergeDraft.plan) !== null) return;
@@ -2947,7 +2947,7 @@ export function RemotePrView({
     const afterFailedMerge = (e: unknown) => {
       if (!edited) closeDialogIfStillHere();
       else if (session !== null && session === mergeSessionRef.current)
-        setMergeFailure({ session, text: errorDetailText(e) });
+        setMergeFailure({ session, text: presentError(e).summary });
     };
     if (mergeAuto) {
       // Arm merge-when-pipeline-succeeds instead of merging now (GitLab-only).
@@ -3158,9 +3158,13 @@ export function RemotePrView({
 
   // GitLab's merge sends a stale-view `sha` guard sourced from the forge-reported head.
   // Without one we can't guard, so GitLab disables Merge rather than merge unguarded on
-  // an irreversible op; reloading refetches the head. GitHub binds only an edited
-  // message to a head and merges without one when none is known, so it's exempt.
+  // an irreversible op; reloading refetches the head. GitHub sends a head only
+  // beside an edited message and refuses an edited one when none is known, so this
+  // hold is GitLab's.
   const mergeGuardMissing = provider === "gitlab" && pr != null && !pr.headSha;
+  // A pull request merged or closed elsewhere holds the open dialog's confirm,
+  // outranking the guard and method holds it makes moot.
+  const mergeNotOpen = pr != null && pr.state !== "OPEN";
   // The open dialog's method, gated as its menu item is (GitHub, merging now): a
   // setting or branch rule that lands while it is open holds its confirm.
   const mergeMethodHold = (() => {
@@ -3182,6 +3186,8 @@ export function RemotePrView({
     switch (true) {
       case offlineHold !== undefined:
         return offlineHold;
+      case mergeNotOpen:
+        return `This ${prNoun} is no longer open.`;
       case mergeGuardMissing:
         return MERGE_GUARD_MISSING_REASON;
       default:

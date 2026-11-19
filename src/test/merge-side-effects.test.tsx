@@ -35,13 +35,22 @@ let REPO = "";
 
 const clients: QueryClient[] = [];
 
+/** The only queued outcome the backend returns: queueing takes the stack path, and
+ *  every queued result carries its cleanup warning. */
+const QUEUED_OUTCOME = {
+  queued: true,
+  cleanupWarning:
+    "Merging #13 was queued on GitHub and will land when the queue completes.",
+  stacked: true,
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   repoSeq += 1;
   REPO = `C:/repos/merge-${repoSeq}`;
   vi.mocked(invoke).mockReset();
-  answerMerge({ queued: false, cleanupWarning: null });
+  answerMerge({ queued: false, cleanupWarning: null, stacked: true });
   vi.mocked(forgeIssueList).mockImplementation(async () => [issueRow(3)]);
   vi.mocked(forgeIssueView).mockImplementation(
     async (_repo, number) => ({ number }) as unknown as IssueDetails,
@@ -191,6 +200,7 @@ describe("a merge re-files the stack layers it took with it", () => {
     expect(result).toStrictEqual({
       queued: false,
       cleanupWarning: null,
+      stacked: true,
       cascaded: [11, 12],
     });
     const merged = { 11: "MERGED", 12: "MERGED", 13: "MERGED", 20: "OPEN" };
@@ -269,6 +279,9 @@ describe("a merge re-files the stack layers it took with it", () => {
     ["details of another stack", STACK_ID, { id: "99", position: 3 }],
     ["no details entry", STACK_ID, undefined],
   ] as const)("%s re-files only the merged PR", async (_, stack, seeded) => {
+    // Only a merge sent with a stack goes through the stack path.
+    if (stack === null)
+      answerMerge({ queued: false, cleanupWarning: null, stacked: false });
     const client = setup();
     if (seeded) seedDetails(client, 13, seeded, members());
     const hook = mountMerge(client).result;
@@ -284,7 +297,7 @@ describe("a merge re-files the stack layers it took with it", () => {
   });
 
   it("a queued merge re-files nothing", async () => {
-    answerMerge({ queued: true, cleanupWarning: null });
+    answerMerge(QUEUED_OUTCOME);
     const client = setup();
     seedDetails(client, 13, { id: String(STACK_ID), position: 3 }, members());
     const hook = mountMerge(client).result;
@@ -295,6 +308,27 @@ describe("a merge re-files the stack layers it took with it", () => {
       11: "OPEN",
       12: "OPEN",
       13: "OPEN",
+      20: "OPEN",
+    });
+  });
+
+  it("a stacked PR merged off the stack path re-files only itself", async () => {
+    answerMerge({ queued: false, cleanupWarning: null, stacked: false });
+    const client = setup();
+    seedDetails(client, 13, { id: String(STACK_ID), position: 3 }, members());
+    const hook = mountMerge(client).result;
+    const { result } = await merge(() => hook.current, 13, STACK_ID);
+    expect(wireCalls()).toHaveLength(1);
+    expect(result).toStrictEqual({
+      queued: false,
+      cleanupWarning: null,
+      stacked: false,
+      cascaded: [],
+    });
+    expect(statesOf(client.getQueryData(arrayPageKey("origin")))).toEqual({
+      11: "OPEN",
+      12: "OPEN",
+      13: "MERGED",
       20: "OPEN",
     });
   });
@@ -319,13 +353,16 @@ describe("a merge re-files the stack layers it took with it", () => {
     const client = setup();
     seedDetails(client, 13, { id: String(STACK_ID), position: 3 }, members());
     // A details refetch landing mid-merge already reports the layers merged.
-    answerMerge({ queued: false, cleanupWarning: null }, false, () =>
-      seedDetails(
-        client,
-        13,
-        { id: String(STACK_ID), position: 3 },
-        members(["merged", "merged", "merged"]),
-      ),
+    answerMerge(
+      { queued: false, cleanupWarning: null, stacked: true },
+      false,
+      () =>
+        seedDetails(
+          client,
+          13,
+          { id: String(STACK_ID), position: 3 },
+          members(["merged", "merged", "merged"]),
+        ),
     );
     const hook = mountMerge(client).result;
     const { result } = await merge(() => hook.current, 13, STACK_ID);
@@ -395,7 +432,7 @@ describe("a merge re-reads the lens's issues once more after a delay", () => {
     const client = setup();
     const mergeHook = await mountWithIssues(client);
     expect(listReads()).toBe(1);
-    await merge(mergeHook, 13, null);
+    const { result, error } = await merge(mergeHook, 13, null);
     expect(wireCalls()).toHaveLength(1);
     const before = {
       list: listReads(),
@@ -407,6 +444,8 @@ describe("a merge re-reads the lens's issues once more after a delay", () => {
     });
     expect(wireCalls()).toHaveLength(1);
     return {
+      result,
+      error,
       list: listReads() - before.list,
       origin: viewReads("origin") - before.origin,
       upstream: viewReads("upstream") - before.upstream,
@@ -415,19 +454,47 @@ describe("a merge re-reads the lens's issues once more after a delay", () => {
 
   it("a landed merge re-reads the issue list and the lens's issue view once", async () => {
     expect(
-      await countAcrossDelay({ queued: false, cleanupWarning: null }),
-    ).toEqual({ list: 1, origin: 1, upstream: 0 });
+      await countAcrossDelay({
+        queued: false,
+        cleanupWarning: null,
+        stacked: false,
+      }),
+    ).toEqual({
+      result: {
+        queued: false,
+        cleanupWarning: null,
+        stacked: false,
+        cascaded: [],
+      },
+      error: undefined,
+      list: 1,
+      origin: 1,
+      upstream: 0,
+    });
   });
 
   it("a queued merge owes no issue re-read", async () => {
-    expect(
-      await countAcrossDelay({ queued: true, cleanupWarning: null }),
-    ).toEqual({ list: 0, origin: 0, upstream: 0 });
+    expect(await countAcrossDelay(QUEUED_OUTCOME)).toEqual({
+      result: { ...QUEUED_OUTCOME, cascaded: [] },
+      error: undefined,
+      list: 0,
+      origin: 0,
+      upstream: 0,
+    });
   });
 
   it("a rejected merge owes no issue re-read", async () => {
-    expect(
-      await countAcrossDelay({ kind: "gh", message: "refused" }, true),
-    ).toEqual({ list: 0, origin: 0, upstream: 0 });
+    const counts = await countAcrossDelay(
+      { kind: "gh", message: "refused" },
+      true,
+    );
+    expect(counts.error).toBeDefined();
+    expect(counts).toEqual({
+      result: undefined,
+      error: counts.error,
+      list: 0,
+      origin: 0,
+      upstream: 0,
+    });
   });
 });

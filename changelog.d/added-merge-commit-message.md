@@ -11,4 +11,5 @@
   the pull request's title and description. Rebase, fast-forward and stacked
   GitHub merges have no single message to edit, and the dialog says so.
   `Ctrl`/`⌘`+`Enter` merges from a field, a merge that fails keeps what you
-  typed, and the MCP `merge_pull_request` tool takes the message too.
+  typed, and the MCP `merge_pull_request` tool takes the message too, tied on
+  GitHub and GitLab to the head commit it was written for.

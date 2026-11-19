@@ -52,7 +52,7 @@ import {
   forgeFeatureReady,
   forgeProbeReason,
   forgeProbeState,
-  glMrMergeStateOptions,
+  glMrMergeStateAlignOptions,
   keepPreviousDataForKeyAxes,
   pendingWriteMatching,
   prDetailsOptions,
@@ -140,6 +140,10 @@ const HOLD_POLL_LIMIT = 8;
  *  the tab untouched rather than polling forever. */
 const ALIGN_LOCK_POLL_MS = 2_000;
 const ALIGN_LOCK_POLLS = 5;
+let alignProbeArms = 0;
+/** Mints a probe arm no mount has used, so a remounted panel never shares a key
+ *  with an earlier mount's in-flight read. */
+const nextAlignProbeArm = () => ++alignProbeArms;
 
 /** Why the list is flat despite the grouping toggle being on. */
 const UNGROUPED_NOTE: Record<UngroupedReason, string> = {
@@ -684,16 +688,26 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       if (revealArchived && !showArchived) setShowArchived(true);
       if (selectedPr) setAlignScrollRow(`${selectedPr.kind}:${selectedPr.id}`);
       clearPendingPrAlign();
+      return target !== stateFilter;
     },
   );
   // GitLab reports an MR mid-merge as CLOSED, a tab that never lists it, so a
   // would-be Closed answer waits on the merge-state read, which says whether the
-  // MR is locked. Same observer delta as above (`staleTime: 0`); armed only once
-  // the details answered Closed, so every other align issues no extra read.
+  // MR is locked. The probe reads its own entry per arm (`staleTime: 0`), so no
+  // read requested before the arm, the view's poll or a prefetch included, can
+  // answer it; armed only once the details answered Closed, so every other align
+  // issues no extra read. The arm number is minted inside a function React
+  // calls, since the compiler may cache a zero-input call made in render.
   const alignKey =
     alignRemoteNumber === null
       ? ""
       : `${repoPath}\n${lens}\n${alignRemoteNumber}`;
+  const [probeArm, setProbeArm] = useState(() => ({
+    key: alignKey,
+    n: nextAlignProbeArm(),
+  }));
+  if (probeArm.key !== alignKey)
+    setProbeArm(() => ({ key: alignKey, n: nextAlignProbeArm() }));
   const alignProbeOn =
     alignRemoteNumber !== null &&
     isGitLab &&
@@ -710,7 +724,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     seen: { ok: 0, failed: 0 },
   });
   const alignProbe = useQuery({
-    ...glMrMergeStateOptions(repoPath, alignRemoteNumber ?? 0),
+    ...glMrMergeStateAlignOptions(repoPath, alignRemoteNumber ?? 0, probeArm.n),
     enabled: alignProbeOn,
     staleTime: 0,
     refetchInterval: alignLockPollMs,
@@ -783,20 +797,22 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         setAlignLockPollMs(false);
         clearPendingPrAlign();
         return;
-      case "settle":
+      case "settle": {
         setAlignLockPollMs(false);
         // OPEN lands on Open, MERGED on Merged, anything else on Closed.
-        settleAlign(step.tab, false);
-        // The probe outranked the details: refresh the details' stale state
-        // and the lens's lists, so the landing tab lists the row. The lists
+        const moved = settleAlign(step.tab, false);
+        // A tab move, or a probe that outranked the details, re-reads the
+        // landing list, whose cached page can predate the PR's new state; the
+        // probe case also refreshes the details' stale state. The lens's lists
         // are only marked stale, since the observer still sits on the tab
         // being left; the landing tab's own key refetches when it is on screen.
-        if (step.tab !== tab0 && alignRemoteNumber !== null) {
-          void queryClient.invalidateQueries({
-            queryKey: prDetailsOptions(repoPath, alignRemoteNumber, lens)
-              .queryKey,
-            exact: true,
-          });
+        if ((moved || step.tab !== tab0) && alignRemoteNumber !== null) {
+          if (step.tab !== tab0)
+            void queryClient.invalidateQueries({
+              queryKey: prDetailsOptions(repoPath, alignRemoteNumber, lens)
+                .queryKey,
+              exact: true,
+            });
           void queryClient.invalidateQueries({
             queryKey: [...repoKeys.prList(repoPath), lens],
             refetchType: "none",
@@ -809,6 +825,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             queryKey: [...repoKeys.prReviewState(repoPath), lens],
           });
         }
+      }
     }
   }, [
     alignKey,

@@ -154,12 +154,6 @@ export function appErrorDetail(
     : message;
 }
 
-/** A caught error's message for in-place copy (a dialog's failure line), with
- *  an AppError's `": "`-ended display lead removed as `appErrorDetail` does. */
-export function errorDetailText(e: unknown): string {
-  return isAppError(e) ? appErrorDetail(e.kind, e.message) : errorMessage(e);
-}
-
 /** Whether a failed PR comment was GitHub refusing an archived pull request.
  *  Homed here, not beside the copy in git/types/prs.ts, which stays free of
  *  runtime imports for the hook-less node suites that load it. */

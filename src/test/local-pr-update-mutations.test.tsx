@@ -21,6 +21,7 @@ import {
   gitMergeLocalPr,
   gitOpState,
   gitUpdateLocalPrHead,
+  type LocalPrMergeOutcome,
   type LocalPrUpdateOutcome,
 } from "@/lib/git/api";
 import {
@@ -566,6 +567,40 @@ describe("useStartLocalPrUpdate", () => {
 });
 
 describe("useMergeLocalPr", () => {
+  it("marks the record merged when the head was already in the base", async () => {
+    const outcome: LocalPrMergeOutcome = {
+      status: "already-merged",
+      conflicts: [],
+      baseTip: "c".repeat(40),
+      worktreePath: null,
+      worktreeId: null,
+      opId: null,
+      journalRepo: REPO,
+    };
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(outcome);
+    const view = await mount(useMergeLocalPr);
+    let result: unknown;
+    await act(async () => {
+      result = await view.result.current.hook.mutateAsync({
+        id: "pr-1",
+        base: "main",
+        head: "feat",
+        message: "m",
+        strategy: "squash",
+      });
+    });
+    expect(result).toMatchObject({
+      status: "already-merged",
+      refused: null,
+      recordFailure: null,
+    });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ repo: REPO, id: "pr-1" });
+    expect(records.get("pr-1")?.status).toBe("merged");
+    expect(records.get("pr-1")?.pendingMerge).toBeUndefined();
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(0);
+  });
+
   it("records the journal checkout on a paused merge", async () => {
     vi.mocked(gitMergeLocalPr).mockResolvedValue({
       status: "conflicts",

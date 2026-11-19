@@ -98,15 +98,20 @@ interface MergePrDialogProps {
  *  from. */
 const FIELD_ATTR = "data-merge-message-field";
 
-const NO_MESSAGE_LINE: Record<NoMergeMessageReason, string> = {
-  rebase:
+const NO_MESSAGE_LINE: Record<
+  NoMergeMessageReason,
+  (head: string, base: string) => string
+> = {
+  rebase: () =>
     "Rebase and merge keeps each commit's own message, so there is no merge message to edit.",
-  fastForward:
+  fastForward: () =>
     "A fast-forward moves the branch without writing a commit, so there is no merge message to edit.",
-  stacked:
+  stacked: () =>
     "A stacked merge can land several pull requests, and one message can't cover them all, so there is no merge message to edit.",
-  gitlabFastForward:
+  gitlabFastForward: () =>
     "This project fast-forwards its merges, so GitLab writes no merge commit and there is no merge message to edit.",
+  alreadyMerged: (head, base) =>
+    `${head} is already part of ${base}, so this merge writes no commit and there is no merge message to edit.`,
 };
 
 interface RowNames {
@@ -178,7 +183,7 @@ function rowFooter(
   const length = titleLength(row.title);
   if (length > SUMMARY_BUDGET)
     return {
-      text: `Title is ${length} characters. Git tools shorten titles past 72.`,
+      text: `Title is ${length} characters, over the ${SUMMARY_BUDGET}-character guideline.`,
       warn: true,
     };
   if (changed) {
@@ -463,7 +468,9 @@ function MergeDialogBody({
           return (
             <LabeledGroup label={ONE_ROW.caption} actions={<CaptionActions />}>
               <p className="text-xs text-muted-foreground">
-                {why !== null ? NO_MESSAGE_LINE[why] : null}
+                {why !== null
+                  ? NO_MESSAGE_LINE[why](headRefName, baseRefName)
+                  : null}
               </p>
             </LabeledGroup>
           );

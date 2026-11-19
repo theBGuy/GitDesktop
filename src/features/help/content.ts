@@ -2074,11 +2074,13 @@ emptied title holds the merge button, which says why, until you type a title or 
 the dialog stays open with your text. Local pull requests merge through the same
 dialog (see *Local PRs* below).
 
-An edited message is tied to the commits it was written for. If the pull request gets
-new commits before you merge, **GitHub** and **GitLab** refuse the merge and nothing is
-merged: the dialog stays open with your text and loads the new default, a field you
-changed keeps what you typed, a field you left alone follows the new default, and you
-can merge again. **Bitbucket** has no such check.
+On GitHub and GitLab, an edited message is tied to the commits the dialog last
+loaded. While the dialog is open it keeps up with the pull request: when it sees new
+commits it loads the new default, a field you changed keeps what you typed and a
+field you left alone follows the new default. If commits land that the dialog hasn't
+loaded yet, **GitHub** and **GitLab** refuse the merge and nothing is merged: the
+dialog stays open with your text, loads the new default, and you can merge again.
+**Bitbucket** has no such check.
 
 ## Maintaining a pull request from a fork
 
@@ -2439,7 +2441,9 @@ exists) the strip says the conflicts can't be checked. **Approve** sits beside *
 at the bottom of every tab, and a held **Merge** says what it is waiting for. Choosing a
 method from **Merge** opens the merge dialog (see *Merge commit message* above): its
 commit message starts from the pull request's title and description, **Edit** changes
-it, and **Rebase and merge** says there is no merge message to edit.
+it, and **Rebase and merge** says there is no merge message to edit. When the pull
+request's branch is already part of its base, the dialog says so, and merging marks the
+pull request merged without writing a commit.
 
 **Resolve conflicts** needs no approval. It merges the base into the PR's branch in an
 isolated worktree and opens the conflict editor (see *Syncing & conflicts*); **Finish
@@ -3998,9 +4002,10 @@ edit **project boards** (**add** this repo's issues and PRs or new drafts as car
 can set text, number, date, single-select and iteration fields, and setting **Status**
 moves a card between columns on a board grouped by Status. One caveat: **creating** a
 pull request pushes its head branch first, so it additionally needs
-\`--allow-git-write\` (below). A **merge** can carry its own commit message, a title
-and an optional description; a GitLab squash that also writes a merge commit takes a
-second pair for that commit. The same flag also unlocks the
+\`--allow-git-write\` (below). A **merge** can carry its own commit message, a title and an
+optional description. On GitHub and GitLab it is sent with the head commit it was written
+for, and the merge is refused if the pull request has moved on. A GitLab squash that also
+writes a merge commit takes a second pair for that commit. The same flag also unlocks the
 linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**,
 **assign**, and **update** (due date, priority, labels) its issues. Issue writes cover
 GitHub and GitLab (not Bitbucket); discussions and project boards are GitHub-only; PR

@@ -25,6 +25,7 @@ import {
   loadSharedBranchRules,
 } from "@/lib/branch-rules/store";
 import { EMPTY_BRANCH_RULES } from "@/lib/branch-rules/types";
+import { presentError } from "@/lib/error-summary";
 import {
   gitAbortLocalPrMerge,
   gitCompareBranches,
@@ -41,12 +42,14 @@ import {
   type LocalPrUpdateOutcome,
 } from "@/lib/git/api";
 import {
+  alreadyMergedUnrecordedNote,
   BRANCH_PUSH_ACTIVE_MESSAGE,
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
   conflictPreviewKey,
   MERGE_LANDED_UNRECORDED_NOTE,
   MERGE_UPDATE_ABORT_FAILED_NOTE,
   MERGE_UPDATE_UNFINISHED_MESSAGE,
+  repoKeys,
   useMergeLocalPr,
   usePush,
 } from "@/lib/git/queries";
@@ -1447,6 +1450,24 @@ describe("LocalPrView: the merge dialog", () => {
     opId: "op-m",
     startedAt: "2026-01-01T00:00:00Z",
   };
+  const ALREADY: LocalPrMergeOutcome = {
+    ...MERGED,
+    status: "already-merged",
+    opId: null,
+  };
+  const ALREADY_LINE =
+    "feat is already part of main, so this merge writes no commit and there is no merge message to edit.";
+  const MERGE_DIRTY =
+    "Commit or stash your changes before merging into the current branch";
+
+  // A head with a commit of its own: an empty `ahead` means the head is
+  // already part of the base, which drops the dialog's editor.
+  beforeEach(() => {
+    vi.mocked(gitCompareBranches).mockResolvedValue({
+      ahead: [commit(9)],
+      behind: behindBy(2).behind,
+    });
+  });
 
   /** Opens the dialog through the Merge menu's `item`, once the strip has read. */
   async function openDialog(
@@ -1454,6 +1475,18 @@ describe("LocalPrView: the merge dialog", () => {
     item = "Create a merge commit",
   ) {
     await findStrip(/will conflict/);
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await user.click(await screen.findByRole("menuitem", { name: item }));
+    return screen.findByRole("dialog");
+  }
+
+  /** Opens the dialog for a head its base already holds, which the backend
+   *  always previews as clean, once the strip has read that preview. */
+  async function openAlreadyMergedDialog(
+    user: ReturnType<typeof userEvent.setup>,
+    item = "Create a merge commit",
+  ) {
+    await findStrip("This branch is 2 commits behind main.");
     await user.click(screen.getByRole("button", { name: "Merge" }));
     await user.click(await screen.findByRole("menuitem", { name: item }));
     return screen.findByRole("dialog");
@@ -1661,6 +1694,22 @@ describe("LocalPrView: the merge dialog", () => {
     expect(dialog).not.toHaveTextContent(/invalid argument/i);
   });
 
+  it("a failed merge's line matches its toast's sentence", async () => {
+    const user = userEvent.setup();
+    const err = { kind: "gh", message: "proxyconnect tcp: connection refused" };
+    vi.mocked(gitMergeLocalPr).mockRejectedValue(err);
+    records = [makePr({ approved: true })];
+    renderView();
+    const dialog = await openDialog(user);
+    await editTitle(user, dialog, "Edited title");
+    await user.click(await mergeConfirm());
+    const alert = await within(dialog).findByRole("alert");
+    const summary = presentError(err).summary;
+    expect(summary).not.toBe(err.message);
+    expect(alert.querySelector("p")?.textContent).toBe(summary);
+    expect(toastError).toHaveBeenCalledWith(err);
+  });
+
   it("a failed merge with no edit closes the dialog", async () => {
     const user = userEvent.setup();
     vi.mocked(gitMergeLocalPr).mockRejectedValue({
@@ -1744,7 +1793,141 @@ describe("LocalPrView: the merge dialog", () => {
       ),
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(toastErrorWithNote).not.toHaveBeenCalledWith(
+      writeErr,
+      alreadyMergedUnrecordedNote("feat", "main"),
+    );
     expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it.each(["Create a merge commit", "Squash and merge", "Rebase and merge"])(
+    "%s: a head already in its base says so, and merging marks it merged",
+    async (label) => {
+      const user = userEvent.setup();
+      vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+      vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(2));
+      vi.mocked(gitMergeLocalPr).mockResolvedValue(ALREADY);
+      records = [makePr({ approved: true })];
+      renderView();
+      const dialog = await openAlreadyMergedDialog(user, label);
+      expect(await within(dialog).findByText(ALREADY_LINE)).toBeInTheDocument();
+      expect(
+        within(dialog).queryByRole("button", { name: /^Edit/ }),
+      ).toBeNull();
+      const confirm = await mergeConfirm(label);
+      expect(confirm).toBeEnabled();
+      expect(confirm).not.toHaveAttribute("aria-disabled", "true");
+      await user.click(confirm);
+      await waitFor(() =>
+        expect(toast.success).toHaveBeenCalledWith(
+          "feat is already part of main, so no commit was written. This pull request is marked merged.",
+        ),
+      );
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(records[0].status).toBe("merged");
+      expect(records[0].pendingMerge ?? null).toBeNull();
+      expect(gitMergeLocalPr).toHaveBeenCalledTimes(1);
+      expect(toastErrorWithNote).not.toHaveBeenCalled();
+      expect(toastError).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a comparison still loading keeps the strategy's own row", async () => {
+    const user = userEvent.setup();
+    const compare = deferred<BranchComparison>();
+    records = [makePr({ approved: true })];
+    vi.mocked(gitCompareBranches).mockReturnValue(compare.promise);
+    renderView();
+    const dialog = await openDialog(user);
+    expect(
+      within(dialog).getByRole("button", { name: "Edit commit message" }),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(ALREADY_LINE)).toBeNull();
+  });
+
+  it("a comparison whose next read fails keeps the strategy's own row", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(2));
+    records = [makePr({ approved: true })];
+    const view = renderView();
+    const dialog = await openAlreadyMergedDialog(user);
+    expect(await within(dialog).findByText(ALREADY_LINE)).toBeInTheDocument();
+    vi.mocked(gitCompareBranches).mockRejectedValue(
+      new Error("compare failed"),
+    );
+    await act(() =>
+      view.client.invalidateQueries({
+        queryKey: repoKeys.compare(REPO, "main", "feat"),
+      }),
+    );
+    expect(
+      await within(dialog).findByRole("button", {
+        name: "Edit commit message",
+      }),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(ALREADY_LINE)).toBeNull();
+  });
+
+  it("a head already in the current base merges over a dirty tree", async () => {
+    const user = userEvent.setup();
+    repoStatus = statusOn("main", true);
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(2));
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(ALREADY);
+    records = [makePr({ approved: true })];
+    renderView();
+    await waitFor(() => {
+      expect(gitStatus).toHaveBeenCalled();
+      expect(gitCompareBranches).toHaveBeenCalled();
+    });
+    await settle();
+    const merge = screen.getByRole("button", { name: "Merge" });
+    expect(merge).not.toHaveAccessibleDescription(MERGE_DIRTY);
+    expect(screen.queryAllByText(MERGE_DIRTY)).toHaveLength(0);
+    const dialog = await openAlreadyMergedDialog(user);
+    expect(await within(dialog).findByText(ALREADY_LINE)).toBeInTheDocument();
+    await user.click(await mergeConfirm());
+    await waitFor(() => expect(gitMergeLocalPr).toHaveBeenCalledTimes(1));
+  });
+
+  it("a head ahead of the current base stays held by a dirty tree", async () => {
+    repoStatus = statusOn("main", true);
+    records = [makePr({ approved: true })];
+    renderView();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Merge" }),
+      ).toHaveAccessibleDescription(MERGE_DIRTY),
+    );
+    // The reason also shows as the footer's own visible line.
+    expect(screen.getAllByText(MERGE_DIRTY).length).toBeGreaterThan(1);
+  });
+
+  it("an already-merged start whose record write fails says nothing was merged by it", async () => {
+    const user = userEvent.setup();
+    const writeErr = new Error("store locked");
+    vi.mocked(gitConflictPreview).mockResolvedValue(preview("clean"));
+    vi.mocked(gitCompareBranches).mockResolvedValue(behindBy(2));
+    vi.mocked(gitMergeLocalPr).mockResolvedValue(ALREADY);
+    records = [makePr({ approved: true })];
+    renderView();
+    await openAlreadyMergedDialog(user);
+    vi.mocked(updateLocalPr).mockRejectedValue(writeErr);
+    await user.click(await mergeConfirm());
+    await waitFor(() =>
+      expect(toastErrorWithNote).toHaveBeenCalledWith(
+        writeErr,
+        "feat is already part of main, but this pull request's record couldn't be updated.",
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(toastErrorWithNote).not.toHaveBeenCalledWith(
+      writeErr,
+      MERGE_LANDED_UNRECORDED_NOTE,
+    );
     expect(toast.success).not.toHaveBeenCalled();
     expect(toastError).not.toHaveBeenCalled();
   });

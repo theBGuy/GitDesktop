@@ -604,7 +604,8 @@ function stackLayersMergedWith(
  *  `lens`), so the view can scope its busy hold to that PR. `stack` names the
  *  native stack the merge cascades through: every member's view holds while it
  *  lands, and a landed (not queued) merge re-files the open layers below it as
- *  merged (`stackLayersMergedWith`). The forge call ignores it. */
+ *  merged (`stackLayersMergedWith`), only when the forge reports the stack path
+ *  (`stacked`). The forge call ignores it. */
 export function useMergePr(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -646,7 +647,7 @@ export function useMergePr(repo: string) {
         .gitFetch(repo)
         .then(() => invalidateRepoAfterWrite(queryClient, repo))
         .catch(() => undefined);
-      return { ...outcome, cascaded };
+      return { ...outcome, cascaded: outcome.stacked ? cascaded : [] };
     },
     {
       identity: prWriteKey("merge", repo),
@@ -823,6 +824,25 @@ export const glMrMergeStateOptions = (repo: string, number: number) =>
     queryFn: () => api.forgeGlMrMergeState(repo, number),
     staleTime: 5_000,
     retry: false,
+  });
+
+/** The list align's mid-merge probe: the same read under its own entry per arm,
+ *  so no read requested before the arm (the view's poll, a prefetch) answers it.
+ *  `gcTime: 0` drops a retired arm's entry once it is idle and unobserved. */
+export const glMrMergeStateAlignOptions = (
+  repo: string,
+  number: number,
+  arm: number,
+) =>
+  queryOptions({
+    queryKey: [
+      ...glMrMergeStateOptions(repo, number).queryKey,
+      "align",
+      arm,
+    ] as const,
+    queryFn: () => api.forgeGlMrMergeState(repo, number),
+    retry: false,
+    gcTime: 0,
   });
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide

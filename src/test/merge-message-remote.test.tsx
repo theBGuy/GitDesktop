@@ -400,7 +400,9 @@ describe("RemotePrView: the merge message", () => {
     await user.click(confirmIn(dialog));
     await waitFor(() => expect(wireCommands()).toHaveLength(1));
     await settle();
-    await act(async () => run.resolve({ queued: false, cleanupWarning: null }));
+    await act(async () =>
+      run.resolve({ queued: false, cleanupWarning: null, stacked: false }),
+    );
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith("Merged #7"),
     );
@@ -423,6 +425,7 @@ describe("RemotePrView: the merge message", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -463,6 +466,7 @@ describe("RemotePrView: the merge message", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -652,7 +656,9 @@ describe("RemotePrView: the merge message", () => {
     await user.click(confirmIn(dialog));
     await waitFor(() => expect(wireCommands()).toHaveLength(2));
     expect(within(dialog).queryByRole("alert")).toBeNull();
-    await act(async () => run.resolve({ queued: false, cleanupWarning: null }));
+    await act(async () =>
+      run.resolve({ queued: false, cleanupWarning: null, stacked: false }),
+    );
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith("Merged #7"),
     );
@@ -858,6 +864,7 @@ describe("RemotePrView: an edited merge binds to its defaults' head", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -882,6 +889,7 @@ describe("RemotePrView: an edited merge binds to its defaults' head", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -901,6 +909,7 @@ describe("RemotePrView: an edited merge binds to its defaults' head", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -937,6 +946,7 @@ describe("RemotePrView: an edited merge binds to its defaults' head", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -979,6 +989,7 @@ describe("RemotePrView: an edited merge binds to its defaults' head", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -1048,6 +1059,7 @@ describe("RemotePrView: an edited merge binds to its defaults' head", () => {
     vi.mocked(invoke).mockResolvedValueOnce({
       queued: false,
       cleanupWarning: null,
+      stacked: false,
     });
     await user.click(confirmIn(dialog));
     await waitFor(() =>
@@ -1148,5 +1160,88 @@ describe("RemotePrView: an open dialog obeys its method's restrictions", () => {
     await user.click(confirm);
     await settle();
     expect(mergeCall()).toBeUndefined();
+  });
+});
+
+/** Answers the view's details with `state` by refetching only the exact read. */
+async function answerState(client: QueryClient, state: string) {
+  vi.mocked(forgePrView).mockImplementation(async (_repo, number) => ({
+    ...pr(number),
+    state,
+  }));
+  await act(() =>
+    client.refetchQueries({ queryKey: DETAILS_KEY, exact: true }),
+  );
+}
+
+/** The merge writes the wire saw: the calls carrying a strategy. */
+const mergeWrites = () =>
+  wireCalls().filter(
+    ([, args]) =>
+      typeof args === "object" && args !== null && "strategy" in args,
+  ).length;
+
+describe("RemotePrView: a pull request no longer open holds the merge", () => {
+  it.each([
+    ["GitLab", "MERGED", "This merge request is no longer open."],
+    ["GitLab", "CLOSED", "This merge request is no longer open."],
+    ["GitHub", "MERGED", "This pull request is no longer open."],
+  ] as const)(
+    "%s, answered %s after an edited failure",
+    async (host, state, reason) => {
+      const user = userEvent.setup();
+      if (host === "GitHub") vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+      const view = mount();
+      const dialog = await openMerge(user, "Squash and merge");
+      await editTitle(user, dialog, "Edited squash");
+      // Keyed on the merge's payload: GitHub's view can reach the wire with
+      // another call first, which a once-only answer would go to.
+      vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+        if (typeof args === "object" && args !== null && "strategy" in args)
+          throw {
+            kind: host === "GitHub" ? "gh" : "glab",
+            message: "405 Method Not Allowed",
+          };
+        throw new Error(`unexpected wire call: ${cmd}`);
+      });
+      await user.click(confirmIn(dialog));
+      const alert = await within(dialog).findByRole("alert");
+      await settle();
+      expect(mergeWrites()).toBe(1);
+      const confirm = confirmIn(dialog);
+      await answerState(view.client, state);
+      await waitFor(() => expect(confirm).toHaveAccessibleDescription(reason));
+      expect(confirm).toHaveAttribute("aria-disabled", "true");
+      await user.click(confirm);
+      await settle();
+      expect(mergeWrites()).toBe(1);
+      expect(alert).toHaveTextContent("405 Method Not Allowed");
+      expect(alert).toHaveTextContent(STILL_HERE);
+      expect(
+        within(dialog).getByRole("textbox", { name: "Commit title" }),
+      ).toHaveValue("Edited squash");
+      expect(screen.getByRole("dialog")).toHaveAttribute("data-open");
+    },
+  );
+});
+
+describe("RemotePrView: an edited merge's failure line matches its toast", () => {
+  it.each([
+    ["network", "proxyconnect tcp: connection refused"],
+    ["rate limit", "HTTP 429: too many requests, connection refused"],
+  ])("%s", async (_name, message) => {
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openMerge(user, "Squash and merge");
+    await editTitle(user, dialog, "Edited squash");
+    vi.mocked(invoke).mockRejectedValueOnce({ kind: "glab", message });
+    await user.click(confirmIn(dialog));
+    const alert = await within(dialog).findByRole("alert");
+    await settle();
+    const title = vi.mocked(toast.error).mock.calls.at(-1)?.[0];
+    expect(typeof title).toBe("string");
+    expect(title).not.toBe(message);
+    expect(alert.querySelector("p")?.textContent).toBe(title);
+    expect(alert).not.toHaveTextContent(message);
   });
 });

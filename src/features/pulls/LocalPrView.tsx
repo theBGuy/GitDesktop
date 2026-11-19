@@ -65,10 +65,11 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
-import { errorDetailText } from "@/lib/error-summary";
+import { presentError } from "@/lib/error-summary";
 import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
   AUTOSTASH_WRITES_FAMILY,
+  alreadyMergedUnrecordedNote,
   conflictPreviewQueryKey,
   forgeFeatureReady,
   LOCAL_PR_WRITES_KEY,
@@ -170,19 +171,47 @@ const MERGED_VERB: Record<MergeStrategy, string> = {
   fast_forward: "Merged",
 };
 
-/** How a local merge attempt ended. `merged-unrecorded` is a merge that landed
- *  whose record write failed; `refused` attempted nothing. */
+/** A landed start's toast and its failed-record note, per status: a head already
+ *  in its base wrote no commit, so neither may claim one landed. */
+const LANDED_COPY: Record<
+  "merged" | "already-merged",
+  {
+    toast: (strategy: MergeStrategy, head: string, base: string) => string;
+    unrecorded: (head: string, base: string) => string;
+  }
+> = {
+  merged: {
+    toast: (strategy, head, base) =>
+      `${MERGED_VERB[strategy]} ${head} into ${base}`,
+    unrecorded: () => MERGE_LANDED_UNRECORDED_NOTE,
+  },
+  "already-merged": {
+    toast: (_strategy, head, base) =>
+      `${head} is already part of ${base}, so no commit was written. This pull request is marked merged.`,
+    unrecorded: alreadyMergedUnrecordedNote,
+  },
+};
+
+/** How a local merge attempt ended. `merged-unrecorded` left nothing to merge (a merge
+ *  landed, or its base held the head) but failed to record; `refused` tried nothing. */
 type LocalMergeResult =
   | { outcome: "merged" | "merged-unrecorded" | "paused" | "refused" }
   | { outcome: "failed"; text: string };
 
-/** The local merge dialog's plan, built from the record with no read: rebase writes
+/** The local merge dialog's plan, built from the record and the view's comparison:
+ *  a head already in its base writes nothing whatever the strategy, rebase writes
  *  no commit of its own, the other strategies one commit worded by the PR. */
 function localMergePlanFor(
   pr: LocalPr | undefined,
   strategy: MergeStrategy,
+  headInBase: boolean,
 ): MergeMessagePlan {
   if (pr === undefined) return { state: "loading" };
+  if (headInBase)
+    return {
+      state: "ready",
+      defaults: { commits: [], reason: "alreadyMerged" },
+    };
   if (strategy !== "merge" && strategy !== "squash")
     return { state: "ready", defaults: { commits: [], reason: "rebase" } };
   return {
@@ -490,7 +519,16 @@ export function LocalPrView({
     repo: string;
     id: string;
   } | null>(null);
-  const localMergePlan = localMergePlanFor(pr, mergeStrategy);
+  const comparison = useCompareBranches(
+    repoPath,
+    pr?.base ?? null,
+    pr?.head ?? null,
+  );
+  // Only a comparison whose last read answered says the head is in the base: a
+  // pending or failed read keeps the strategy's own row, even over an older answer.
+  const headInBase =
+    comparison.status === "success" && comparison.data.ahead.length === 0;
+  const localMergePlan = localMergePlanFor(pr, mergeStrategy, headInBase);
   const mergeDraft = useMergeMessageDraft(localMergePlan);
   // A different PR must never inherit this one's drill-in, half-typed label, or
   // open delete/promote/edit/merge dialogs — a render-time state adjustment, not
@@ -521,11 +559,6 @@ export function LocalPrView({
   // EditTitleBodyDialog; this is only the label, so a rebinding drives both.
   const generateHint = useGenerateChordHint();
 
-  const comparison = useCompareBranches(
-    repoPath,
-    pr?.base ?? null,
-    pr?.head ?? null,
-  );
   // Shared chip state machine — enabled only while the edit dialog is open (and
   // the tracker is usable). Local PRs have no lens concept, so read the forge's
   // own issues ("origin"). Body refs are peeled into chips at open (`resetWith`
@@ -553,14 +586,16 @@ export function LocalPrView({
   // The merge runs in an isolated worktree, so a dirty working tree only blocks
   // it when `base` IS the branch you're currently on (git won't check that ref
   // out into a second worktree while it has uncommitted tracked changes). When
-  // base is some other branch, the merge never touches your tree.
+  // base is some other branch, the merge never touches your tree. A head already in
+  // its base is exempt: that start writes nothing, and the backend answers it before
+  // its clean-tree gate.
   const baseIsCurrent =
     pr !== undefined && status.data?.branch?.name === pr.base;
   const hasTrackedChanges = (status.data?.entries ?? []).some(
     (e) =>
       e.staged !== null || (e.unstaged !== null && e.unstaged !== "untracked"),
   );
-  const dirtyBlocks = baseIsCurrent && hasTrackedChanges;
+  const dirtyBlocks = baseIsCurrent && hasTrackedChanges && !headInBase;
   const canMerge = pr?.status === "open" && pr.approved;
 
   // A conflict-resolving update (base merged INTO head). Its writes are read from the
@@ -1063,17 +1098,21 @@ export function LocalPrView({
         message,
         strategy,
       });
-      if (outcome.status === "merged" && outcome.refused === null) {
-        // The merge has landed either way, so a failed record write is never
+      if (
+        (outcome.status === "merged" || outcome.status === "already-merged") &&
+        outcome.refused === null
+      ) {
+        const landed = LANDED_COPY[outcome.status];
+        // Nothing is left to merge either way, so a failed record write is never
         // reported as a failed merge, nor as a success.
         if (outcome.recordFailure !== null) {
           toastErrorWithNote(
             outcome.recordFailure.error,
-            MERGE_LANDED_UNRECORDED_NOTE,
+            landed.unrecorded(pr.head, pr.base),
           );
           return { outcome: "merged-unrecorded" };
         }
-        toast.success(`${MERGED_VERB[strategy]} ${pr.head} into ${pr.base}`);
+        toast.success(landed.toast(strategy, pr.head, pr.base));
         return { outcome: "merged" };
       }
       // Conflicts: the merge is paused in an isolated worktree (the user's
@@ -1099,7 +1138,7 @@ export function LocalPrView({
       return { outcome: "paused" };
     } catch (e) {
       toastError(e);
-      return { outcome: "failed", text: errorDetailText(e) };
+      return { outcome: "failed", text: presentError(e).summary };
     }
   }
 

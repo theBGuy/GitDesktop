@@ -418,7 +418,7 @@ describe("merge dialog: editing", () => {
     fireEvent.change(titleBox(), { target: { value: "a".repeat(73) } });
     expect(
       screen.getByText(
-        "Title is 73 characters. Git tools shorten titles past 72.",
+        "Title is 73 characters, over the 72-character guideline.",
       ),
     ).toBeInTheDocument();
     expect(status()).toBe("Title is over 72 characters");
@@ -435,7 +435,7 @@ describe("merge dialog: editing", () => {
     fireEvent.change(titleBox(), { target: { value: emoji.repeat(73) } });
     expect(
       screen.getByText(
-        "Title is 73 characters. Git tools shorten titles past 72.",
+        "Title is 73 characters, over the 72-character guideline.",
       ),
     ).toBeInTheDocument();
     expect(status()).toBe("Title is over 72 characters");
@@ -635,9 +635,18 @@ describe("merge dialog: plan states", () => {
       ["fastForward", "Bitbucket", "A fast-forward moves the branch"],
       ["stacked", "GitHub", "A stacked merge can land several pull requests"],
       ["gitlabFastForward", "GitLab", "This project fast-forwards its merges"],
+      [
+        "alreadyMerged",
+        "GitHub",
+        "feat/sync is already part of main, so this merge writes no commit and there is no merge message to edit.",
+      ],
     ];
     for (const [reason, host, line] of lines) {
-      const { unmount } = setup({ host, plan: ready([], reason) });
+      const { unmount } = setup({
+        host,
+        plan: ready([], reason),
+        local: reason === "alreadyMerged",
+      });
       expect(
         screen.queryByText(new RegExp(`^${line}`)),
         reason,

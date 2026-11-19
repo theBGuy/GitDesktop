@@ -5,9 +5,11 @@ export type MergeStrategy = "merge" | "squash" | "rebase" | "fast_forward";
 
 /** Outcome of starting or finishing a local-PR merge: `merged` committed; `conflicts`
  *  paused in an isolated worktree for the user to resolve, without touching their
- *  branch or working tree (the worktree fields feed finish/abort). */
+ *  branch or working tree (the worktree fields feed finish/abort). `already-merged`
+ *  answers a start only: the head was already part of the base, so nothing was
+ *  written and no worktree was made. */
 export interface LocalPrMergeOutcome {
-  status: "merged" | "conflicts";
+  status: "merged" | "conflicts" | "already-merged";
   conflicts: string[];
   /** The base tip after a successful merge (informational). */
   baseTip: string;

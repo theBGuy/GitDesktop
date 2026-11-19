@@ -1025,11 +1025,11 @@ struct BbHtmlLinks {
 struct BbPr {
     #[serde(default)]
     id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     title: String,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     state: String,
     #[serde(default, deserialize_with = "null_to_default")]
     draft: bool,
@@ -1044,7 +1044,7 @@ struct BbPr {
     /// The reviewer list (present on the unfielded single-PR GET) — feeds the
     /// reviewers picker. Distinct from `participants`, which also includes
     /// commenters/approvers who were never asked to review.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     reviewers: Vec<BbUser>,
     /// The participant list (present on the unfielded single-PR GET). Carries each
     /// participant's approval `state`, so `view_pr` derives completed reviewers without
@@ -1052,8 +1052,8 @@ struct BbPr {
     /// never asked to review.
     #[serde(default, deserialize_with = "null_to_default")]
     participants: Vec<BbParticipant>,
-    /// ISO-8601 open time (`created_on`); "" when absent.
-    #[serde(default)]
+    /// ISO-8601 open time (`created_on`); "" when absent or null.
+    #[serde(default, deserialize_with = "null_to_default")]
     created_on: String,
 }
 
@@ -11038,6 +11038,28 @@ mod checkout_source_tests {
     }
 
     #[test]
+    fn bb_pr_reads_null_reviewers_and_strings_as_defaults() {
+        let read = |fields: &[&str]| {
+            let mut body = serde_json::json!({ "id": 7 });
+            for f in fields {
+                body[*f] = serde_json::Value::Null;
+            }
+            serde_json::from_value::<BbPr>(body).unwrap_or_else(|e| panic!("{fields:?}: {e}"))
+        };
+        assert!(read(&["reviewers"]).reviewers.is_empty());
+        assert_eq!(read(&["title"]).title, "");
+        assert_eq!(read(&["state"]).state, "");
+        assert_eq!(read(&["created_on"]).created_on, "");
+        let all = read(&["reviewers", "title", "state", "created_on"]);
+        assert_eq!(all.id, 7);
+        assert!(all.reviewers.is_empty());
+        assert_eq!(
+            (all.title, all.state, all.created_on),
+            (String::new(), String::new(), String::new())
+        );
+    }
+
+    #[test]
     fn checkout_fields_ignore_nulls_in_fields_the_checkout_never_reads() {
         let body = serde_json::json!({
             "id": 7,
@@ -11055,9 +11077,16 @@ mod checkout_source_tests {
                 "repository": { "full_name": "ws/repo" },
             },
         });
-        // The full PR shape fails on the same body: this control documents a known
-        // limitation of the details read (backlog) — delete it once BbPr tolerates nulls.
+        // The full PR shape still refuses this body for its null
+        // `destination.commit.hash`, a field the checkout never reads; without that
+        // nested commit it reads, so the top-level nulls pass.
         assert!(serde_json::from_value::<BbPr>(body.clone()).is_err());
+        let mut no_commit = body.clone();
+        no_commit["destination"]
+            .as_object_mut()
+            .unwrap()
+            .remove("commit");
+        assert!(serde_json::from_value::<BbPr>(no_commit).is_ok());
         let pr: BbCheckoutPr =
             serde_json::from_value(body).expect("nulls outside the checkout's fields deserialize");
         assert_eq!(

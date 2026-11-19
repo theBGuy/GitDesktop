@@ -114,6 +114,24 @@ pub async fn list_prs(
         .await
 }
 
+/// [`list_prs`] plus whether the read stopped at its page cap.
+pub async fn list_prs_page(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
+) -> AppResult<(Vec<crate::github::pr::PrInfo>, bool)> {
+    crate::github::pr::gh_pr_list_page(
+        repo_path.to_string(),
+        state.to_string(),
+        limit,
+        lens,
+        filter,
+    )
+    .await
+}
+
 /// The viewer's own review state across the PR list, for the review-state grouping.
 pub async fn pr_review_state(
     repo_path: &str,

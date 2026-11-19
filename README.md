@@ -1283,11 +1283,12 @@ agents read this repo through GitDesktop.
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`
     / `glab` / Bitbucket token): create/merge/update PRs (creating a PR
     pushes its head branch, so it also needs `--allow-git-write`; a merge
-    can carry its own commit message), create/extend/dissolve GitHub PR
-    stacks, request reviewers, edit labels and assignees, approve or resolve
-    review threads, rerun or dispatch CI, cut releases, file or comment on
-    issues, and on GitHub project boards add cards and drafts, move, archive
-    or restore them, set their fields, edit drafts and post status updates
+    can carry its own commit message, tied on GitHub and GitLab to the head
+    commit it was written for), create/extend/dissolve GitHub PR stacks,
+    request reviewers, edit labels and assignees, approve or resolve review
+    threads, rerun or dispatch CI, cut releases, file or comment on issues,
+    and on GitHub project boards add cards and drafts, move, archive or
+    restore them, set their fields, edit drafts and post status updates
   - **`--allow-git-write`**: recoverable git ops (stage, commit, branch,
     push/pull/fetch, stash, merge, rebase, revert, cherry-pick, tags)
   - **`--allow-destructive`**: the irreversible ones (discard, reset,

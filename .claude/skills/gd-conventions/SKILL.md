@@ -1679,20 +1679,39 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **A journal entry a record names is finished through a claim:** a finish
   or merge abort of an entry whose handles left its start (a local PR's
   paused merge or branch update) takes `oplog::claim_finish` before it
-  touches the worktree, re-asserts it with `oplog::renew_finish_claim`
-  immediately before the branch moves and before each worktree removal
-  (before the move, `LostOrUnknown` stops with the branch unmoved, and so
-  does `Closed` unless the branch already holds the commit, when the finish
-  carries on as landed), and closes through `oplog::settle_finish_claim`.
-  The update discard, the abandoned-entry sweep and a merge finish
-  or abort that holds no claim close through the conditional close
-  (`oplog::close_unfinished` / `finish_if_unfinished`), which refuses over a
-  live claim. A claim older than `FINISH_CLAIM_TTL` (120 s) blocks nobody,
-  so one step that alone runs longer lets it lapse. A bare `oplog::finish`
-  on such an entry is written in three places, all after the branch provably
-  holds the commit: the update discard's landed-under-claim done write, and
-  each finish's (merge and update) done write when its settle fails.
-  `reconcile` closes only `pending` entries and reads no claim.
+  touches the worktree and closes through `oplog::settle_finish_claim`. Each
+  path re-asserts the claim (`oplog::renew_finish_claim`) at different
+  points, and only some renewals gate anything. Both finishes renew after
+  their gates and commit and again immediately before the branch moves, and
+  both of those gate the move: `LostOrUnknown` stops with the branch unmoved,
+  and so does `Closed` unless the branch already holds the commit, when the
+  finish carries on as landed. The merge finish renews once more before it
+  removes its worktree and does not act on the answer (the base already
+  moved). The update finish settles done first and removes its worktree
+  with no renewal. The merge abort renews before its removal and that
+  renewal gates it: `LostOrUnknown` releases the claim and refuses with
+  nothing removed, and `Closed` goes on unclaimed. The update discard, the
+  abandoned-entry sweep and a merge finish or abort that holds no claim
+  close through the conditional close (`oplog::close_unfinished` /
+  `finish_if_unfinished`), which refuses over a live claim. The claim is a
+  lease (`FINISH_CLAIM_TTL`, 120 s): a liveness bound, not mutual exclusion.
+  While holders keep running, two windows or processes never both move a
+  branch for one entry, and a crashed holder blocks for at most the limit.
+  It does not cover a holder stopped for longer than the limit that then
+  resumes (process suspension), a wall-clock jump, or a journal lock that
+  could not be acquired (`store_lock` fails open). A merge finish that holds
+  a claim records the commit it is about to land (`oplog::record_landing`,
+  the entry's `landing`, never on the listing) before the base moves, and
+  only when the entry's starting tip is known and that commit builds on the
+  tip without being it. A later finish or abort reads it (`oplog::landing`)
+  and treats the merge as landed only when the base contains that commit: a
+  finish then reports merged before its gates, whatever the worktree holds,
+  and cleans up; an abort refuses and removes nothing, so Finish is always
+  the next step. A bare `oplog::finish` on such an entry is written only
+  after the branch provably holds the commit: the update discard's
+  landed-under-claim done write, and a finish's (merge or update) done write
+  when its settle fails. `reconcile` closes only `pending` entries and reads
+  no claim.
 - **Test code runs git on `TEST_GIT_HANG_GUARD`** (`git/runner.rs`, test
   builds only): fixture helpers and direct calls to the plain spawn runners
   (`PLAIN_GIT_RUNNERS` in check L's script) in tests pass it, never

@@ -783,12 +783,20 @@ pub(crate) async fn finish_if_unfinished(repo: &str, id: &str, error: Option<Str
     close_unfinished(repo, id, error).await == CloseOutcome::Closed
 }
 
-/// A claim older than this no longer blocks anyone, so a holder that crashed blocks the
-/// entry's finish, discard and abort for at most this long.
+/// The finish claim's lease. A liveness bound, not mutual exclusion: while holders keep
+/// running, two windows or processes never both move a branch for one entry, and a
+/// holder that crashed blocks the entry's finish, discard and abort for at most this
+/// long. Not covered: a holder stopped for longer than this that then resumes (process
+/// suspension), a wall-clock jump, and a journal lock that could not be acquired (the
+/// store lock fails open).
 const FINISH_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 /// The entry field holding a finish claim: `{ "token": <uuid>, "at": <iso time> }`. Not
 /// on [`OpLogEntry`], so the listing the frontend reads never carries it.
 const FINISH_CLAIM: &str = "finishClaim";
+/// The entry field holding the commit a merge finish recorded before moving its base
+/// (see [`record_landing`]); every close leaves it in place. Not on [`OpLogEntry`], so
+/// the listing the frontend reads never carries it.
+const LANDING: &str = "landing";
 
 /// What [`claim_finish`] found.
 #[derive(Debug, PartialEq)]
@@ -837,7 +845,7 @@ pub(crate) enum CloseOutcome {
 pub(crate) async fn claim_finish(repo: &str, id: &str) -> AppResult<FinishClaim> {
     let (repo, id, token) = (repo.to_string(), id.to_string(), uuid::Uuid::new_v4());
     crate::store_lock::locked_store_task(move || {
-        claim_finish_at(&repo, &id, &token.to_string(), chrono::Utc::now())
+        claim_finish_with(&repo, &id, &token.to_string(), chrono::Utc::now)
     })
     .await
 }
@@ -847,9 +855,14 @@ pub(crate) async fn claim_finish(repo: &str, id: &str) -> AppResult<FinishClaim>
 pub(crate) async fn renew_finish_claim(repo: &str, id: &str, token: &str) -> ClaimRenewal {
     let (repo, id, token) = (repo.to_string(), id.to_string(), token.to_string());
     let result = crate::store_lock::locked_store_task(move || {
-        renew_finish_claim_at(&repo, &id, &token, chrono::Utc::now())
+        renew_finish_claim_in(&store_path(&repo)?, &repo, &id, &token, chrono::Utc::now)
     })
     .await;
+    renewal_or_lost(result)
+}
+
+/// A renewal the store could not answer reads `LostOrUnknown`, logged.
+fn renewal_or_lost(result: AppResult<ClaimRenewal>) -> ClaimRenewal {
     result.unwrap_or_else(|e| {
         eprintln!("gitdesktop: opslog claim renewal failed: {e}");
         ClaimRenewal::LostOrUnknown
@@ -868,7 +881,7 @@ pub(crate) async fn settle_finish_claim(
 ) -> bool {
     let (repo, id, token) = (repo.to_string(), id.to_string(), token.to_string());
     let result = crate::store_lock::locked_store_task(move || {
-        settle_finish_claim_at(&repo, &id, &token, how, chrono::Utc::now())
+        settle_finish_claim_with(&repo, &id, &token, how, chrono::Utc::now)
     })
     .await;
     result.unwrap_or_else(|e| {
@@ -882,7 +895,7 @@ pub(crate) async fn settle_finish_claim(
 pub(crate) async fn close_unfinished(repo: &str, id: &str, error: Option<String>) -> CloseOutcome {
     let (repo, id) = (repo.to_string(), id.to_string());
     let result = crate::store_lock::locked_store_task(move || {
-        close_unfinished_entry(&repo, &id, error, chrono::Utc::now())
+        close_unfinished_with(&repo, &id, error, chrono::Utc::now)
     })
     .await;
     result.unwrap_or_else(|e| {
@@ -894,15 +907,26 @@ pub(crate) async fn close_unfinished(repo: &str, id: &str, error: Option<String>
 /// Runs `decide` over `repo`'s entry `id` (None when there is no such entry) and writes
 /// the store back when it asks to, all under ONE acquisition of both locks: decided and
 /// written separately, a close, claim or finish landing in between would be overwritten.
+/// A decision that compares or records a time reads its clock inside `decide`, so the
+/// time is never one taken before a wait for the locks.
 fn decide_on_entry<T>(
     repo: &str,
     id: &str,
     decide: impl FnOnce(Option<&mut Map<String, Value>>) -> (T, bool),
 ) -> AppResult<T> {
-    let path = store_path(repo)?;
+    decide_on_entry_in(&store_path(repo)?, repo, id, decide)
+}
+
+/// [`decide_on_entry`] over the store file at `path`.
+fn decide_on_entry_in<T>(
+    path: &Path,
+    repo: &str,
+    id: &str,
+    decide: impl FnOnce(Option<&mut Map<String, Value>>) -> (T, bool),
+) -> AppResult<T> {
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _store_lock = crate::store_lock::lock_store(&path);
-    let mut store = read_store(&path)?;
+    let _store_lock = crate::store_lock::lock_store(path);
+    let mut store = read_store(path)?;
     let key = existing_key(&store, repo);
     let entry = key
         .as_deref()
@@ -915,7 +939,7 @@ fn decide_on_entry<T>(
         .and_then(Value::as_object_mut);
     let (answer, write) = decide(entry);
     if write {
-        write_store(&path, &store)?;
+        write_store(path, &store)?;
     }
     Ok(answer)
 }
@@ -950,13 +974,25 @@ fn claim_marker(token: &str, now: chrono::DateTime<chrono::Utc>) -> Value {
 }
 
 /// Core of [`claim_finish`] at `now` under `token`.
+#[cfg(test)]
 pub(crate) fn claim_finish_at(
     repo: &str,
     id: &str,
     token: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AppResult<FinishClaim> {
+    claim_finish_with(repo, id, token, || now)
+}
+
+/// Core of [`claim_finish`] under `token`, reading `clock` once the locks are held.
+fn claim_finish_with(
+    repo: &str,
+    id: &str,
+    token: &str,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<FinishClaim> {
     decide_on_entry(repo, id, |entry| {
+        let now = clock();
         let Some(obj) = entry else {
             return (FinishClaim::Missing, false);
         };
@@ -975,15 +1011,29 @@ pub(crate) fn claim_finish_at(
     })
 }
 
-/// Core of [`renew_finish_claim`] at `now`. A claim past its limit that still carries
-/// `token` renews: nobody took it meanwhile.
+/// Core of [`renew_finish_claim`] at `now`.
+#[cfg(test)]
 pub(crate) fn renew_finish_claim_at(
     repo: &str,
     id: &str,
     token: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AppResult<ClaimRenewal> {
-    decide_on_entry(repo, id, |entry| {
+    renew_finish_claim_in(&store_path(repo)?, repo, id, token, || now)
+}
+
+/// Core of [`renew_finish_claim`] over the store file at `path`, reading `clock` once the
+/// locks are held. A claim past its limit that still carries `token` renews: nobody took
+/// it meanwhile.
+fn renew_finish_claim_in(
+    path: &Path,
+    repo: &str,
+    id: &str,
+    token: &str,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<ClaimRenewal> {
+    decide_on_entry_in(path, repo, id, |entry| {
+        let now = clock();
         let Some(obj) = entry.filter(|obj| is_unfinished_entry(obj)) else {
             return (ClaimRenewal::Closed, false);
         };
@@ -996,6 +1046,7 @@ pub(crate) fn renew_finish_claim_at(
 }
 
 /// Core of [`settle_finish_claim`] at `now`.
+#[cfg(test)]
 fn settle_finish_claim_at(
     repo: &str,
     id: &str,
@@ -1003,7 +1054,19 @@ fn settle_finish_claim_at(
     how: ClaimSettle,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AppResult<bool> {
+    settle_finish_claim_with(repo, id, token, how, || now)
+}
+
+/// Core of [`settle_finish_claim`], reading `clock` once the locks are held.
+fn settle_finish_claim_with(
+    repo: &str,
+    id: &str,
+    token: &str,
+    how: ClaimSettle,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<bool> {
     decide_on_entry(repo, id, |entry| {
+        let now = clock();
         let Some(obj) = entry.filter(|obj| claim_token(obj) == Some(token)) else {
             return (false, false);
         };
@@ -1026,14 +1089,27 @@ fn settle_finish_claim_at(
     })
 }
 
-/// Core of [`close_unfinished`] at `now`; a dead claim is removed with the close.
+/// Core of [`close_unfinished`] at `now`.
+#[cfg(test)]
 fn close_unfinished_entry(
     repo: &str,
     id: &str,
     error: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AppResult<CloseOutcome> {
+    close_unfinished_with(repo, id, error, || now)
+}
+
+/// Core of [`close_unfinished`], reading `clock` once the locks are held; a dead claim is
+/// removed with the close.
+fn close_unfinished_with(
+    repo: &str,
+    id: &str,
+    error: Option<String>,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<CloseOutcome> {
     decide_on_entry(repo, id, |entry| {
+        let now = clock();
         let Some(obj) = entry.filter(|obj| is_unfinished_entry(obj)) else {
             return (CloseOutcome::NotUnfinished, false);
         };
@@ -1049,6 +1125,34 @@ fn close_unfinished_entry(
             error.map_or(Value::Null, Value::String),
         );
         (CloseOutcome::Closed, true)
+    })
+}
+
+/// Records `sha` as the commit the finish holding `token` on `id` is about to land, while
+/// the entry is pending or paused under that token. The claim's time is left as it was.
+/// True when written; a store error is logged and reads false.
+pub(crate) async fn record_landing(repo: &str, id: &str, token: &str, sha: &str) -> bool {
+    let (repo, id) = (repo.to_string(), id.to_string());
+    let (token, sha) = (token.to_string(), sha.to_string());
+    let result =
+        crate::store_lock::locked_store_task(move || record_landing_in(&repo, &id, &token, &sha))
+            .await;
+    result.unwrap_or_else(|e| {
+        eprintln!("gitdesktop: opslog landing record failed (finish continues): {e}");
+        false
+    })
+}
+
+/// Core of [`record_landing`].
+fn record_landing_in(repo: &str, id: &str, token: &str, sha: &str) -> AppResult<bool> {
+    decide_on_entry(repo, id, |entry| {
+        let held =
+            |obj: &Map<String, Value>| is_unfinished_entry(obj) && claim_token(obj) == Some(token);
+        let Some(obj) = entry.filter(|obj| held(obj)) else {
+            return (false, false);
+        };
+        obj.insert(LANDING.to_string(), Value::String(sha.to_string()));
+        (true, true)
     })
 }
 
@@ -1148,6 +1252,26 @@ pub(crate) async fn pre_op_tip(repo: &str, id: &Option<String>) -> Option<String
         .and_then(|e| e.get("preOpTip"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// The commit [`record_landing`] recorded on `id`: `Ok(None)` for a missing entry or an
+/// absent or non-string field, and the store's read error as `Err`, so an unreadable
+/// store never answers "no landing recorded".
+pub(crate) async fn landing(repo: &str, id: &str) -> AppResult<Option<String>> {
+    let (repo, id) = (repo.to_string(), id.to_string());
+    crate::store_lock::locked_store_task(move || landing_in(&store_path(&repo)?, &repo, &id)).await
+}
+
+/// [`landing`] over the store at `path`; the same lock as [`read_repo_entries`].
+fn landing_in(path: &Path, repo: &str, id: &str) -> AppResult<Option<String>> {
+    let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let store = read_store(path)?;
+    Ok(repo_entries(&store, repo)
+        .iter()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|e| e.get(LANDING))
+        .and_then(Value::as_str)
+        .map(str::to_string))
 }
 
 /// `repo`'s entries in stored order, read off the async runtime. The read takes no FILE
@@ -2485,6 +2609,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_landing_writes_only_for_its_holder_and_outlives_every_close() {
+        let (_dir, repo) = scratch_repo_key("landing");
+        let now = claim_now();
+        let merge = |id: &str, status: &str| {
+            let mut record = pending_record(id, "2026-01-01T00:00:00.000Z");
+            record["status"] = json_str(status);
+            record
+        };
+        let mut numeric = merge("numeric", "done");
+        numeric[LANDING] = Value::from(5);
+        seed_entries(
+            &repo,
+            vec![
+                merge("done", "paused"),
+                merge("failed", "paused"),
+                merge("released", "paused"),
+                merge("closed", "paused"),
+                merge("finished", "pending"),
+                merge("reconciled", "pending"),
+                merge("foreign", "paused"),
+                with_marker(merge("done-held", "done"), claim_marker("t", now)),
+                with_marker(merge("failed-held", "failed"), claim_marker("t", now)),
+                numeric,
+            ],
+        );
+        let held = [
+            "done",
+            "failed",
+            "released",
+            "closed",
+            "finished",
+            "reconciled",
+        ];
+        let claimed_at = now - secs(10);
+        for id in held {
+            claim_finish_at(&repo, id, "t", claimed_at).unwrap();
+        }
+        claim_finish_at(&repo, "foreign", "u", claimed_at).unwrap();
+        let record = |id: &str| record_landing_in(&repo, id, "t", "c0ffee").unwrap();
+        for id in held {
+            assert!(record(id), "{id}");
+            let stored = stored_entry(&repo, id);
+            assert_eq!(stored[LANDING], "c0ffee", "{id}");
+            assert_eq!(
+                stored[FINISH_CLAIM]["at"],
+                iso(claimed_at),
+                "{id}: lease kept"
+            );
+        }
+        let listed = git_oplog_list(repo.clone()).await.unwrap();
+        let entry = listed.iter().find(|e| e.id == "released").unwrap();
+        let wire = serde_json::to_value(entry).unwrap();
+        assert!(wire.get(LANDING).is_none(), "{wire}");
+
+        let settle = |id: &str, how| settle_finish_claim_at(&repo, id, "t", how, now).unwrap();
+        assert!(settle("done", ClaimSettle::Done));
+        assert!(settle("failed", ClaimSettle::Failed("m".to_string())));
+        assert!(settle("released", ClaimSettle::Release));
+        let ttl = chrono::Duration::from_std(FINISH_CLAIM_TTL).unwrap();
+        let close = close_unfinished_entry(&repo, "closed", None, now + ttl);
+        assert_eq!(close.unwrap(), CloseOutcome::Closed);
+        finish(&repo, &Some("finished".to_string()), None).await;
+        reconcile(&repo, false, false, "feature", &quiet_ops()).unwrap();
+        let closes = [
+            ("done", "done"),
+            ("failed", "failed"),
+            ("released", "paused"),
+            ("closed", "done"),
+            ("finished", "done"),
+            ("reconciled", "done"),
+        ];
+        for (id, status) in closes {
+            let stored = stored_entry(&repo, id);
+            assert_eq!(stored["status"], status, "{id}");
+            assert_eq!(
+                landing(&repo, id).await.unwrap().as_deref(),
+                Some("c0ffee"),
+                "{id}"
+            );
+        }
+
+        let before = store_bytes(&repo);
+        for id in [
+            "foreign",
+            "released",
+            "done-held",
+            "failed-held",
+            "missing",
+            "done",
+        ] {
+            assert!(!record(id), "{id}");
+        }
+        assert_eq!(
+            store_bytes(&repo),
+            before,
+            "only an unfinished entry's holder writes"
+        );
+        for id in ["foreign", "numeric", "missing"] {
+            assert_eq!(landing(&repo, id).await.unwrap(), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn landing_answers_none_only_from_a_store_it_read() {
+        let (_dir, path) = tmp_store();
+        let repo = r"C:\oplog\landing-read";
+        let at = "2026-01-01T00:00:00.000Z";
+        let mut recorded = pending_record("recorded", at);
+        recorded[LANDING] = json_str("c0ffee");
+        let mut numeric = pending_record("numeric", at);
+        numeric[LANDING] = Value::from(5);
+        let entries = vec![recorded, numeric, pending_record("bare", at)];
+        let mut store = Map::new();
+        store.insert(repo.to_string(), Value::Array(entries));
+        write_store(&path, &store).unwrap();
+        let read = |id: &str| landing_in(&path, repo, id).unwrap();
+        assert_eq!(read("recorded").as_deref(), Some("c0ffee"));
+        assert_eq!(read("bare"), None, "field absent");
+        assert_eq!(read("numeric"), None, "field not a string");
+        assert_eq!(read("missing"), None, "entry missing");
+
+        let (_corrupt_dir, corrupt) = tmp_store();
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let unreadable = landing_in(&corrupt, repo, "recorded");
+        assert!(unreadable.is_err(), "{unreadable:?}");
+    }
+
+    #[tokio::test]
     async fn renew_finish_claim_answers_renewed_closed_or_lost() {
         let (_dir, repo) = scratch_repo_key("claim-renew");
         let now = claim_now();
@@ -2530,10 +2782,38 @@ mod tests {
         assert_eq!(renew("released", now), ClaimRenewal::LostOrUnknown);
         assert_eq!(store_bytes(&repo), before, "only a renewal writes");
 
-        std::fs::write(store_path(&repo).unwrap(), b"not json").unwrap();
-        let unreadable = renew_finish_claim(&repo, "fresh", "t").await;
-        assert_eq!(unreadable, ClaimRenewal::LostOrUnknown);
-        assert_eq!(store_bytes(&repo), b"not json");
+        let (_corrupt_dir, corrupt) = tmp_store();
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let unreadable = renew_finish_claim_in(&corrupt, &repo, "fresh", "t", || now);
+        assert_eq!(renewal_or_lost(unreadable), ClaimRenewal::LostOrUnknown);
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"not json");
+    }
+
+    /// Each claim core reads its clock only while both locks are held, so a time taken
+    /// before a wait for another holder's write is never recorded or compared.
+    #[test]
+    fn claim_cores_read_the_clock_under_the_locks() {
+        let (_dir, repo) = scratch_repo_key("claim-clock");
+        seed_entries(
+            &repo,
+            vec![pick_record("e", "2026-01-01T00:00:00.000Z", "paused")],
+        );
+        let locked_clock = || {
+            assert!(
+                oplog_lock().try_lock().is_err(),
+                "the clock ran before the journal lock was taken"
+            );
+            claim_now()
+        };
+        let claimed = claim_finish_with(&repo, "e", "t", locked_clock).unwrap();
+        assert_eq!(claimed, FinishClaim::Claimed("t".to_string()));
+        let path = store_path(&repo).unwrap();
+        let renewed = renew_finish_claim_in(&path, &repo, "e", "t", locked_clock).unwrap();
+        assert_eq!(renewed, ClaimRenewal::Renewed);
+        let settled = settle_finish_claim_with(&repo, "e", "t", ClaimSettle::Release, locked_clock);
+        assert!(settled.unwrap());
+        let closed = close_unfinished_with(&repo, "e", None, locked_clock).unwrap();
+        assert_eq!(closed, CloseOutcome::Closed);
     }
 
     #[test]

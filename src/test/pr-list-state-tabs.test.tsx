@@ -814,23 +814,25 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     expect(listCalls("merged")).toBe(mergedListBefore + 1);
   });
 
-  it("waits out a cached open answer while the live read runs, then lands on Merged", async () => {
+  it("keeps off the view's merge-state entry: its cached open answer settles nothing and keeps its own data", async () => {
     answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
-    renderArmed(7, {
-      // A pre-merge answer, fresh by the shared options' own staleTime.
-      seed: (client) =>
-        client.setQueryData(
-          glMrMergeStateOptions("C:/repo", 7).queryKey,
-          mergeState({ locked: false, state: "OPEN" }),
-        ),
+    const shared = glMrMergeStateOptions("C:/repo", 7).queryKey;
+    const cached = mergeState({ locked: false, state: "OPEN" });
+    // A pre-merge answer, fresh by the shared options' own staleTime.
+    const client = renderArmed(7, {
+      seed: (c) => c.setQueryData(shared, cached),
     });
-    await until(() => probeCalls(7) === 1, "the first live merge-state read");
+    const cachedAt = client.getQueryState(shared)?.dataUpdatedAt;
+    await until(() => probeCalls(7) === 1, "the probe's first read");
     await ticks();
     expect(armed()).toBe(true);
     expect(pressedTab()).toBe("Open");
     await poll();
     await until(() => !armed(), "the align to settle");
     expect(pressedTab()).toBe("Merged");
+    // The probe's reads land in its own entry, never the view's.
+    expect(client.getQueryData(shared)).toEqual(cached);
+    expect(client.getQueryState(shared)?.dataUpdatedAt).toBe(cachedAt);
   });
 
   it("re-reads two seconds after a locked answer, not sooner", async () => {
@@ -851,9 +853,9 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     expect(probeCalls(7)).toBe(2);
   });
 
-  it("settles nothing from a cached answer while the probe is paused offline", async () => {
+  it("settles nothing while the probe waits offline for its first answer", async () => {
     answers[7] = [{ locked: false, state: "MERGED" }];
-    const client = renderArmed(7, { arm: false });
+    renderArmed(7, { arm: false });
     await until(() => listCalls("open") === 1, "the Open page");
     await until(
       () => vi.mocked(forgePrView).mock.calls.length === 1,
@@ -862,14 +864,9 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     await ticks();
     // The align's details read is held in flight across the disconnect: a
     // fetch already running is not paused, so the details settle while the
-    // probe pauses on its cached entry.
+    // probe's first read parks with nothing to answer from.
     const details = deferred<PrDetails>();
     vi.mocked(forgePrView).mockImplementation(() => details.promise);
-    // An answer older than the CLOSED details, as a detail view's poll leaves.
-    client.setQueryData(
-      glMrMergeStateOptions("C:/repo", 7).queryKey,
-      mergeState({ locked: false, state: "OPEN" }),
-    );
     try {
       await arm(7);
       await until(
@@ -923,10 +920,17 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     }
   });
 
-  it("refreshes nothing when the probe agrees with the details", async () => {
+  it("refreshes nothing when the probe agrees with the details on the tab it sits on", async () => {
     const answer = deferred<GitLabMrMergeState>();
     answers[7] = [answer.promise];
-    renderArmed(7);
+    renderArmed(7, { arm: false });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    // The landing tab's page is cached and fresh before the align arms.
+    await pickTab(user, "Closed");
+    await until(() => listCalls("unmerged") === 1, "the Closed page");
+    await ticks();
+    await arm(7);
     await until(() => probeCalls(7) === 1, "the merge-state read");
     await ticks();
     const detailsBefore = vi.mocked(forgePrView).mock.calls.length;
@@ -938,7 +942,137 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     await ticks();
     expect(pressedTab()).toBe("Closed");
     expect(vi.mocked(forgePrView).mock.calls.length).toBe(detailsBefore);
+    expect(listCalls("unmerged")).toBe(1);
     expect(listCalls("open")).toBe(openListBefore);
+  });
+
+  it("re-reads the landing page when the details alone move the tab", async () => {
+    answers[7] = [LOCKED];
+    const client = renderArmed(7, { arm: false });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    // The landing tab's page is cached and fresh before the align arms.
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await pickTab(user, "Open");
+    await ticks();
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    expect(armed()).toBe(true);
+    const mergedListBefore = listCalls("merged");
+    vi.mocked(forgePrView).mockImplementation(
+      async (_repo, n) => ({ number: n, state: "MERGED" }) as PrDetails,
+    );
+    await act(() =>
+      client.invalidateQueries({
+        queryKey: prDetailsOptions("C:/repo", 7, "origin").queryKey,
+        exact: true,
+      }),
+    );
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+    await until(
+      () => listCalls("merged") > mergedListBefore,
+      "the landing page's re-read",
+    );
+    await ticks();
+    expect(listCalls("merged")).toBe(mergedListBefore + 1);
+  });
+
+  it("re-reads no details when their own state chose the tab it moved to", async () => {
+    renderArmed(7, { arm: false, detailsState: "MERGED" });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    // The landing tab's page is cached and fresh before the align arms.
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await pickTab(user, "Open");
+    await ticks();
+    const detailsBefore = vi.mocked(forgePrView).mock.calls.length;
+    const mergedListBefore = listCalls("merged");
+    await arm(7);
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+    await until(
+      () => listCalls("merged") > mergedListBefore,
+      "the landing page's re-read",
+    );
+    await ticks(20);
+    expect(listCalls("merged")).toBe(mergedListBefore + 1);
+    // Only the arm's own details read: the settle adds none.
+    expect(vi.mocked(forgePrView).mock.calls.length).toBe(detailsBefore + 1);
+    expect(probeCalls()).toBe(0);
+  });
+
+  it("is answered by no read requested before the arm", async () => {
+    const held = deferred<GitLabMrMergeState>();
+    answers[7] = [held.promise, LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    await until(() => listCalls("open") === 1, "the Open page");
+    await ticks();
+    // A first load of the shared entry still in flight, as a hover prefetch leaves.
+    void client.prefetchQuery(glMrMergeStateOptions("C:/repo", 7));
+    await until(() => probeCalls(7) === 1, "the prefetch");
+    await arm(7);
+    await until(() => probeCalls(7) === 2, "the probe's own read");
+    await act(async () => {
+      held.resolve(mergeState({ locked: false, state: "OPEN" }));
+    });
+    await ticks();
+    expect(armed()).toBe(true);
+    expect(pressedTab()).toBe("Open");
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+  });
+
+  it("gives a remounted panel its own read, never the earlier mount's", async () => {
+    const held = deferred<GitLabMrMergeState>();
+    answers[7] = [held.promise, LOCKED];
+    const client = renderArmed(7);
+    await until(() => probeCalls(7) === 1, "the first mount's read");
+    cleanup();
+    act(() => {
+      useUiStore.setState({
+        selectedPr: { kind: "remote", id: "7" },
+        pendingPrAlign: true,
+      });
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <PullRequestsPanel repoPath="C:/repo" />
+        <DetailsWatcher number={7} />
+      </QueryClientProvider>,
+    );
+    await until(() => probeCalls(7) === 2, "the remounted panel's own read");
+    await act(async () => {
+      held.resolve(mergeState({ locked: false, state: "OPEN" }));
+    });
+    await ticks();
+    expect(armed()).toBe(true);
+  });
+
+  it("a second arm of the same merge request in one mount issues its own read", async () => {
+    const held = deferred<GitLabMrMergeState>();
+    answers[7] = [held.promise, LOCKED];
+    // Mounted unarmed, so both arms mint their number from a render-time re-arm.
+    renderArmed(7, { arm: false });
+    await until(() => listCalls("open") === 1, "the Open page");
+    await ticks();
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first arm's read");
+    await act(async () => {
+      useUiStore.getState().clearPendingPrAlign();
+    });
+    await ticks();
+    await arm(7);
+    await until(() => probeCalls(7) === 2, "the second arm's own read");
+    await act(async () => {
+      held.resolve(mergeState({ locked: false, state: "OPEN" }));
+    });
+    await ticks();
+    expect(armed()).toBe(true);
   });
 
   it("disarms with the tab untouched after five locked re-reads", async () => {

@@ -271,6 +271,39 @@ function blockAfter(view, re, from, to) {
   return close < 0 ? null : [open, close];
 }
 
+/** The depth-0 elements of a normalized array literal, each trimmed, or null
+ *  when `text` is not one array literal: a key owed only inside a spread,
+ *  a call or a conditional is not an element of its own. */
+function arrayElements(text) {
+  const t = text.trim();
+  if (!t.startsWith("[") || !t.endsWith("]")) return null;
+  const parts = [];
+  let depth = 0;
+  let at = 1;
+  let quote = null;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (quote !== null) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) {
+      depth--;
+      if (depth === 0 && i !== t.length - 1) return null;
+    } else if (c === "," && depth === 1) {
+      parts.push(t.slice(at, i).trim());
+      at = i + 1;
+    }
+  }
+  if (depth !== 0 || quote !== null) return null;
+  const last = t.slice(at, -1).trim();
+  if (last !== "") parts.push(last);
+  return parts;
+}
+
 /** The top-level argument texts (normalized) of the call or parameter list
  *  whose `(` sits at `open`, or null when it never closes. */
 function argsAt(view, open) {
@@ -440,12 +473,17 @@ function checkRemoteListState(raw) {
       );
     if (rereadKeys !== undefined && reread >= 0 && reread < success[1]) {
       const open = reread + "recheckListsLater".length;
-      const owed = argsAt(view, open)?.[2] ?? "";
-      for (const key of rereadKeys)
-        if (!owed.includes(key))
-          problems.push(
-            `${PR_ACTIONS} ${name}: the list re-read does not owe ${key}`,
-          );
+      const owed = arrayElements(argsAt(view, open)?.[2] ?? "");
+      if (owed === null)
+        problems.push(
+          `${PR_ACTIONS} ${name}: the list re-read's keys are not an array literal`,
+        );
+      else
+        for (const key of rereadKeys)
+          if (!owed.includes(key))
+            problems.push(
+              `${PR_ACTIONS} ${name}: the list re-read does not owe ${key}`,
+            );
     }
     if (gate !== null) {
       const adjacent = new RegExp(
@@ -962,7 +1000,26 @@ test("a merge whose list re-read stops owing the lens's issue lists or details f
       "useMergePr",
       `does not owe ${owed}`,
     );
+    // Still spelled inside the list, but owed for one lens only or only
+    // through a call: neither is the key as an element of its own.
+    const bare = key.trim().replace(/,$/, "");
+    for (const wrapped of [
+      `            ...(args.lens === "origin" ? [${bare}] : []),\n`,
+      `            someFn(${bare}),\n`,
+    ])
+      assertFlags(
+        mutate(realSources(), PR_ACTIONS, (t) => t.replace(key, wrapped)),
+        "useMergePr",
+        `does not owe ${owed}`,
+      );
   }
+  const notArray = mutate(realSources(), PR_ACTIONS, (t) =>
+    t.replace(
+      `recheckListsLater(queryClient, repo, [\n            ...prStateRecheckKeys(repo, args.lens),\n`,
+      "recheckListsLater(queryClient, repo, owedKeys(repo, args.lens), [\n",
+    ),
+  );
+  assertFlags(notArray, "useMergePr", "are not an array literal");
 });
 
 test("a close or reopen that re-files under the wrong state, or not at all, fails", () => {
