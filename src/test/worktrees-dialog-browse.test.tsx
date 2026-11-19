@@ -83,6 +83,14 @@ async function setBranch(
   await user.type(input, name);
 }
 
+/** The sighted text of `el`: PathText's sr-only name copy removed. */
+function shownText(el: Element | null): string {
+  if (!el) return "";
+  const copy = el.cloneNode(true) as Element;
+  for (const sr of copy.querySelectorAll(".sr-only")) sr.remove();
+  return copy.textContent ?? "";
+}
+
 describe("WorktreesDialog folder Browse", () => {
   it("derives the in-repo path exactly as the shared helper does", async () => {
     const { user, branch, folder } = await openCreate();
@@ -162,14 +170,22 @@ describe("WorktreesDialog folder Browse", () => {
     expect(rowId).toBeTruthy();
     const row = document.getElementById(rowId as string) as HTMLElement;
     expect(screen.getByText("Full path")).toBeTruthy();
-    expect(row.textContent).toBe(
+    expect(shownText(row)).toBe(
+      "C:/repos/demo/.gitdesktop/worktrees/feat-login",
+    );
+    expect(row.querySelectorAll(".sr-only")).toHaveLength(1);
+    expect(row.querySelector(".sr-only")?.textContent ?? "").toBe(
       "C:/repos/demo/.gitdesktop/worktrees/feat-login",
     );
     expect(row.tabIndex).toBe(-1);
     await user.clear(folder);
     expect(row.textContent).toBe("");
     await user.type(folder, "../review");
-    expect(row.textContent).toBe("C:/repos/review");
+    expect(shownText(row)).toBe("C:/repos/review");
+    expect(row.querySelectorAll(".sr-only")).toHaveLength(1);
+    expect(row.querySelector(".sr-only")?.textContent ?? "").toBe(
+      "C:/repos/review",
+    );
   });
 
   it("clipped folder text and Full path show their tooltips", async () => {

@@ -23,13 +23,33 @@ import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import { normPath } from "@/lib/git/path";
 import { useBranchDivergence, useUserWorktrees } from "@/lib/git/queries";
 import type { Branch, BranchDivergence } from "@/lib/git/types";
+import { compareInstantsNewestFirst, parseableDate } from "@/lib/time";
 import {
   ADD_UPSTREAM_VALUE,
+  collidesWithRemoteRefs,
+  compareItemLabel,
+  compareItemOf,
+  compareItemStored,
   displayCompareValue,
+  LOCAL_REF_PREFIX,
+  localCompareItem,
+  REMOTE_REF_PREFIX,
   type RemoteCompareRow,
 } from "./compare-remote-ref";
 
+/** Why a local branch named like a remote ref has no pick in this picker. */
+const COLLIDING_ROW_REASON =
+  "Can't be picked: Compare reads this name as a remote branch.";
+
 const ADD_UPSTREAM_LABEL = "Add upstream remote";
+
+type TwinKind = "local" | "remote";
+
+/** The closed trigger's word after a pick whose name the other kind shares. */
+const TWIN_CUE: Record<TwinKind, string> = {
+  local: "local",
+  remote: "remote",
+};
 
 /** The Remote group's add-upstream action row, when the repo is a GitHub fork
  *  without that remote. */
@@ -56,9 +76,10 @@ export interface CompareAddUpstreamRow {
  * so the same two numbers swap labels between a row and the selected
  * comparison. The badge tooltip names the direction.
  *
- * Remote item values are the DISPLAY form `remote/name` (a full-ref value would
- * let the filter match "refs/remotes/" on every row); this boundary maps them
- * to and from the stored full ref.
+ * Item values are kind-prefixed full refs (`refs/heads/…`, `refs/remotes/…`),
+ * so a local branch named like a remote one never shares a value with its row;
+ * labels, and so the filter, read the shown name. This boundary maps items to
+ * and from the stored pick (a bare local name or a full remote ref).
  */
 export function CompareBranchCombobox({
   repoPath,
@@ -72,6 +93,7 @@ export function CompareBranchCombobox({
   open,
   onOpenChange,
   triggerRef,
+  popupRef,
   placeholder,
   remoteNotice,
   remoteSearched,
@@ -93,6 +115,8 @@ export function CompareBranchCombobox({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   triggerRef?: Ref<HTMLButtonElement>;
+  /** The popup node, for the caller's focus rescue. */
+  popupRef?: Ref<HTMLDivElement>;
   /** The trigger's text while nothing is picked. */
   placeholder: string | null;
   /** The remote read's footer line while it hasn't succeeded (loading, failed,
@@ -138,7 +162,7 @@ export function CompareBranchCombobox({
       [...branches].sort((a, b) => {
         if (a.name === defaultName) return -1;
         if (b.name === defaultName) return 1;
-        return b.lastCommitDate.localeCompare(a.lastCommitDate);
+        return compareInstantsNewestFirst(a.lastCommitDate, b.lastCommitDate);
       }),
     [branches, defaultName],
   );
@@ -147,8 +171,8 @@ export function CompareBranchCombobox({
     () => new Map(sorted.map((b) => [b.name, b] as const)),
     [sorted],
   );
-  const remoteByDisplay = useMemo(
-    () => new Map(remoteRows.map((r) => [r.display, r] as const)),
+  const remoteByRef = useMemo(
+    () => new Map(remoteRows.map((r) => [r.ref, r] as const)),
     [remoteRows],
   );
 
@@ -160,10 +184,10 @@ export function CompareBranchCombobox({
   // would bypass filtering entirely, so rows MUST come from the render
   // functions. Only non-empty groups are passed.
   const groups = useMemo(() => {
-    const local = sorted.map((b) => b.name);
+    const local = sorted.map((b) => localCompareItem(b.name));
     const remote = [
       ...(addUpstream ? [ADD_UPSTREAM_VALUE] : []),
-      ...remoteRows.map((r) => r.display),
+      ...remoteRows.map((r) => r.ref),
     ];
     return [
       ...(local.length ? [{ value: "Local", items: local }] : []),
@@ -171,25 +195,50 @@ export function CompareBranchCombobox({
     ];
   }, [sorted, remoteRows, addUpstream]);
 
+  // A pick whose shown name the other kind also has: a remote pick against the
+  // Local rows and the current branch, a local pick against the Remote rows.
+  const shownName = value === null ? null : displayCompareValue(value);
+  const twinKind = ((): TwinKind | null => {
+    if (value === null || shownName === null) return null;
+    if (value.startsWith(REMOTE_REF_PREFIX))
+      return branchByName.has(shownName) || shownName === currentName
+        ? "remote"
+        : null;
+    return remoteRows.some((r) => r.display === value) ? "local" : null;
+  })();
+
   return (
     <Combobox
       items={groups}
-      value={value === null ? null : displayCompareValue(value)}
+      value={value === null ? null : compareItemOf(value)}
       // The action row's label is what the filter matches, so typing "remote"
       // or "upstream" still finds it.
       itemToStringLabel={(item: string) =>
-        item === ADD_UPSTREAM_VALUE ? ADD_UPSTREAM_LABEL : item
+        item === ADD_UPSTREAM_VALUE
+          ? ADD_UPSTREAM_LABEL
+          : compareItemLabel(item)
       }
       // Selecting a branch fires this and closes the popup. The action row
       // cancels its own selection: the store never sees it and the popup stays
-      // open while the remote is added (the caller closes it on success).
+      // open while the remote is added (the caller closes it on success). A
+      // colliding local row is disabled; it cancels here too. The test reads
+      // the LOCAL item's name: every remote item starts with `refs/remotes/`.
       onValueChange={(picked: string | null, details) => {
         if (picked === ADD_UPSTREAM_VALUE) {
           details.cancel();
           addUpstream?.onAdd();
           return;
         }
-        if (picked) onValueChange(remoteByDisplay.get(picked)?.ref ?? picked);
+        if (!picked) return;
+        const stored = compareItemStored(picked);
+        if (
+          picked.startsWith(LOCAL_REF_PREFIX) &&
+          collidesWithRemoteRefs(stored)
+        ) {
+          details.cancel();
+          return;
+        }
+        onValueChange(stored);
       }}
       open={open}
       onOpenChange={onOpenChange}
@@ -202,39 +251,69 @@ export function CompareBranchCombobox({
         {/* Clamp the selected branch name (the vendored SelectTrigger's
             line-clamp idiom) so a long name truncates and the caret stays put in
             the narrow Compare sidebar. The display form is rendered directly: a
-            remote pick is stored as its full ref. */}
-        <span
-          className="min-w-0 flex-1 truncate text-left"
-          onMouseEnter={clipTitleFromText}
-        >
-          {value === null ? (
-            <span className="text-muted-foreground">{placeholder}</span>
-          ) : (
-            displayCompareValue(value)
-          )}
-        </span>
+            remote pick is stored as its full ref. Each name node is keyed by
+            its form and the shown name: `clipTitleFromText` sets `title` only
+            on hover, so a node reused for another name or form would keep the
+            old tooltip until the pointer re-enters. */}
+        {twinKind === null ? (
+          <span
+            key={`name:${shownName ?? ""}`}
+            className="min-w-0 flex-1 truncate text-left"
+            onMouseEnter={clipTitleFromText}
+          >
+            {shownName === null ? (
+              <span className="text-muted-foreground">{placeholder}</span>
+            ) : (
+              shownName
+            )}
+          </span>
+        ) : (
+          // A twin's two picks show the same name, so the kind is said in words
+          // after it; the comma is hidden and the bare space renders nothing
+          // between flex items. A remote twin is always marked; `local` follows
+          // the remote rows last read and never triggers a read.
+          <span
+            key="twin"
+            className="flex min-w-0 flex-1 items-baseline gap-1.5"
+          >
+            <span
+              key={shownName}
+              className="min-w-0 truncate text-left"
+              onMouseEnter={clipTitleFromText}
+            >
+              {shownName}
+            </span>
+            <span className="sr-only">,</span>{" "}
+            <span className="shrink-0 text-[10px] text-muted-foreground">
+              {TWIN_CUE[twinKind]}
+            </span>
+          </span>
+        )}
       </ComboboxTrigger>
-      <ComboboxContent>
+      <ComboboxContent ref={popupRef}>
         <ComboboxInput showTrigger={false} placeholder="Filter branches…" />
         {/* Until remote rows are known, a miss can only speak for the local
             branches; cached rows a failed refresh left were searched too. */}
         <ComboboxEmpty>
           {remoteSearched ? "No branches match" : "No local branches match"}
         </ComboboxEmpty>
-        <ComboboxList>
+        <ComboboxList aria-label="Branches to compare with">
           {(group: { value: string; items: string[] }) => (
             <ComboboxGroup key={group.value} items={group.items}>
               <ComboboxLabel>{group.value}</ComboboxLabel>
               <ComboboxCollection>
-                {(name: string) => {
-                  if (name === ADD_UPSTREAM_VALUE && addUpstream)
-                    return <AddUpstreamRow key={name} offer={addUpstream} />;
-                  const remote = remoteByDisplay.get(name);
+                {(item: string) => {
+                  if (item === ADD_UPSTREAM_VALUE && addUpstream)
+                    return <AddUpstreamRow key={item} offer={addUpstream} />;
+                  const remote = remoteByRef.get(item);
                   if (group.value === "Remote" && remote)
-                    return <RemoteRow key={name} row={remote} />;
+                    return <RemoteRow key={item} row={remote} />;
+                  // The row and its lookups read the bare name; the maps are
+                  // keyed by the branch, divergence and worktree reads' names.
+                  const name = compareItemStored(item);
                   return (
                     <BranchRow
-                      key={name}
+                      key={item}
                       name={name}
                       branch={branchByName.get(name)}
                       defaultName={defaultName}
@@ -269,6 +348,7 @@ function AddUpstreamRow({ offer }: { offer: CompareAddUpstreamRow }) {
       <span className="shrink-0">
         {offer.busy ? "Adding upstream remote…" : ADD_UPSTREAM_LABEL}
       </span>
+      <span className="sr-only">,</span>{" "}
       <span
         className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
         onMouseEnter={clipTitleFromText}
@@ -282,28 +362,80 @@ function AddUpstreamRow({ offer }: { offer: CompareAddUpstreamRow }) {
 /** A remote-tracking row: `remote/name` and its tip's date only. */
 function RemoteRow({ row }: { row: RemoteCompareRow }) {
   return (
-    <ComboboxItem value={row.display}>
+    <ComboboxItem value={row.ref}>
       <span
         className="min-w-0 flex-1 truncate"
         onMouseEnter={clipTitle(row.display)}
       >
         {row.display}
       </span>
-      {row.lastCommitDate && (
-        <span className="shrink-0 text-[11px] text-muted-foreground">
-          <RelativeTime date={row.lastCommitDate} />
-        </span>
+      {row.lastCommitDate && parseableDate(row.lastCommitDate) && (
+        <>
+          <span className="sr-only">,</span>{" "}
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            <RelativeTime date={row.lastCommitDate} />
+          </span>
+        </>
       )}
     </ComboboxItem>
   );
 }
 
-/** One local combobox row, keyed by branch name (the value Base UI's Collection
- *  hands the render function). The ItemIndicator check (rendered by the
- *  vendored `ComboboxItem`, its `pr-8` reserving the space) marks the selected
- *  row. The `branch` lookup is defensively optional — `name` always resolves in
- *  practice (both derive from the same sorted list) — so the row still renders
- *  its value even if metadata is momentarily missing. */
+/** A local row's ↑/↓ badge, preceded by its name separator; nothing when the
+ *  branches are even. The arrows describe THIS row's branch vs `currentName`
+ *  (the app-wide row-badge frame), not the tab's current-side frame. Worded as
+ *  BranchSwitcher's: `role="img"` hides the visible arrows and counts from AT,
+ *  so the label is the whole alternative and behind-only still names the base. */
+function DivergenceBadge({
+  div,
+  currentName,
+}: {
+  div: BranchDivergence;
+  currentName: string;
+}) {
+  if (div.ahead === 0 && div.behind === 0) return null;
+  const parts: string[] = [];
+  if (div.ahead > 0)
+    parts.push(
+      `${div.ahead} commit${div.ahead === 1 ? "" : "s"} ahead of ${currentName}`,
+    );
+  if (div.behind > 0)
+    parts.push(
+      `${div.behind} commit${div.behind === 1 ? "" : "s"} behind${div.ahead > 0 ? "" : ` ${currentName}`}`,
+    );
+  const label = parts.join(", ");
+  return (
+    <>
+      <span className="sr-only">,</span>{" "}
+      <span
+        role="img"
+        aria-label={label}
+        className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
+        title={label}
+      >
+        {div.ahead > 0 && (
+          <span className="flex items-center gap-0.5">
+            <ArrowUpIcon className="size-3" weight="bold" />
+            {div.ahead}
+          </span>
+        )}
+        {div.behind > 0 && (
+          <span className="flex items-center gap-0.5">
+            <ArrowDownIcon className="size-3" weight="bold" />
+            {div.behind}
+          </span>
+        )}
+      </span>
+    </>
+  );
+}
+
+/** One local combobox row, given the bare name of its `refs/heads/` item. The
+ *  ItemIndicator check (rendered by the vendored `ComboboxItem`, its `pr-8`
+ *  reserving the space) marks the selected row. The `branch` lookup is
+ *  defensively optional — `name` always resolves in practice (both derive from
+ *  the same sorted list) — so the row still renders its value even if metadata
+ *  is momentarily missing. */
 function BranchRow({
   name,
   branch,
@@ -320,56 +452,79 @@ function BranchRow({
   /** The other checkout holding this branch, when any. */
   worktree: { path: string; isMain: boolean } | undefined;
 }) {
+  if (collidesWithRemoteRefs(name)) return <CollidingBranchRow name={name} />;
   // Names the holding checkout the way every branch row does. The record's
   // `title` arm is deliberately not used: its "this row opens it" clause is true
   // in the branch dropdown, while this row selects a compare base.
   const copy = rowCheckoutCopy(worktree?.isMain);
+  const date = branch?.lastCommitDate;
+  // The option's name comes from its content (every row in this file). A part
+  // shown beside the name is led by a hidden comma and a bare space, gated with
+  // it so none dangles; a whitespace-only run between flex items renders
+  // nothing. A chip inside the name span is hidden from AT and named by one
+  // hidden copy after the span that holds its own comma and space.
   return (
-    <ComboboxItem value={name}>
+    <ComboboxItem value={localCompareItem(name)}>
       <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>
         {name}
+        {/* A separator's space inside this inline span would render, so the
+            visible chip is hidden from AT and named by the copy after the span.
+            The copy stays a row child: absolutely positioned inside this
+            clipped span, it would land past a long name's end, outside the
+            row, and widen the list's scroll range. */}
         {name === defaultName && (
-          <span className="ml-1.5 text-[10px] text-muted-foreground">
+          <span
+            aria-hidden="true"
+            className="ml-1.5 text-[10px] text-muted-foreground"
+          >
             default
           </span>
         )}
       </span>
+      {name === defaultName && <span className="sr-only">, default</span>}
       {worktree && (
-        <span
-          className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
-          title={copy.blockedTitle(worktree.path)}
-        >
-          <TreeStructureIcon className="size-3" weight="bold" />
-          {copy.noun}
-        </span>
+        <>
+          <span className="sr-only">,</span>{" "}
+          <span
+            className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
+            title={copy.blockedTitle(worktree.path)}
+          >
+            <TreeStructureIcon className="size-3" weight="bold" />
+            {copy.noun}
+          </span>
+        </>
       )}
-      {/* ↑/↓ describe THIS row's branch vs `currentName` (the app-wide row-badge
-          frame) — deliberately not the tab's current-side frame; the tooltip
-          names the direction. Hidden when the branches are even. */}
-      {div && (div.ahead > 0 || div.behind > 0) && (
-        <span
-          className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
-          title={`${div.ahead} ahead, ${div.behind} behind ${currentName}`}
-        >
-          {div.ahead > 0 && (
-            <span className="flex items-center gap-0.5">
-              <ArrowUpIcon className="size-3" weight="bold" />
-              {div.ahead}
-            </span>
-          )}
-          {div.behind > 0 && (
-            <span className="flex items-center gap-0.5">
-              <ArrowDownIcon className="size-3" weight="bold" />
-              {div.behind}
-            </span>
-          )}
-        </span>
+      {div && <DivergenceBadge div={div} currentName={currentName} />}
+      {date && parseableDate(date) && (
+        <>
+          <span className="sr-only">,</span>{" "}
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            <RelativeTime date={date} />
+          </span>
+        </>
       )}
-      {branch?.lastCommitDate && (
-        <span className="shrink-0 text-[11px] text-muted-foreground">
-          <RelativeTime date={branch.lastCommitDate} />
+    </ComboboxItem>
+  );
+}
+
+/** A local branch Compare can't pick: listed, arrow-reachable, refused by Base
+ *  UI's `disabled`. A disabled row takes no tooltip, so the full name wraps and
+ *  the reason is visible text in the row's name; only the name is dimmed, so
+ *  the reason keeps its contrast. */
+function CollidingBranchRow({ name }: { name: string }) {
+  return (
+    <ComboboxItem
+      value={localCompareItem(name)}
+      disabled
+      className="data-disabled:opacity-100"
+    >
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="break-all opacity-50">{name}</span>
+        <span className="sr-only">,</span>{" "}
+        <span className="text-[11px] text-muted-foreground">
+          {COLLIDING_ROW_REASON}
         </span>
-      )}
+      </span>
     </ComboboxItem>
   );
 }

@@ -304,17 +304,22 @@ export function ResetCommitDialog({
 
 /** The mainline choice a merge commit's revert or pick asks for: its parents, read
  *  in `repo` (the one the dialog opened in), with Parent 1 pre-selected. The pick
- *  is keyed by commit AND `op` (what the choice is for), so every new subject
- *  starts on Parent 1 without a seed. A null `hash` asks nothing and holds nothing. */
+ *  is keyed by repository, commit AND `op` (what the choice is for), so every new
+ *  subject starts on Parent 1 without a seed, a host closing it without `reset`
+ *  included. A null `hash` asks nothing and holds nothing. */
 function useMainlineChoice(repo: string, hash: string | null, op: string) {
   const parents = useCommitParents(repo, hash);
   const [picked, setPicked] = useState<{
+    repo: string;
     hash: string;
     op: string;
     mainline: number;
   } | null>(null);
   const mainline =
-    picked !== null && picked.hash === hash && picked.op === op
+    picked !== null &&
+    picked.repo === repo &&
+    picked.hash === hash &&
+    picked.op === op
       ? picked.mainline
       : 1;
   const heldReason = (() => {
@@ -334,7 +339,7 @@ function useMainlineChoice(repo: string, hash: string | null, op: string) {
     mainline,
     heldReason,
     pick: (n: number) => {
-      if (hash !== null) setPicked({ hash, op, mainline: n });
+      if (hash !== null) setPicked({ repo, hash, op, mainline: n });
     },
     reset: () => setPicked(null),
   };
