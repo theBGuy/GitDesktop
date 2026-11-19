@@ -1,2 +1,4 @@
-- The Compare and base-branch pickers, and the branch Compare picks for you,
-  order branches by when their last commit was made, across time zones.
+- The Compare picker and the **New branch** dialog's base picker put
+  branches in the right order when their last commits were made in different
+  time zones. Compare's automatic pick follows suit when it isn't your
+  default branch.

@@ -51,6 +51,12 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import { displayCompareValue } from "./compare-remote-ref";
 
+// The detail-pane retention scan reads the pane's Retry rescue as the
+// component's only direct `useRetryFocusRescue(` call.
+function useListLeaveRescue(listShown: boolean) {
+  return useRetryFocusRescue(listShown);
+}
+
 /**
  * The net change `compare` introduces relative to `base` (the three-dot diff,
  * what a PR would show): a changed-file list plus the selected file's diff.
@@ -147,27 +153,31 @@ export function BranchDiffView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
-  // A list emptying under the same frame unmounts the whole rail, focus in it
-  // included, where the rail's own rescue can't run; land it on the host.
-  const listEmpty = files.data?.length === 0;
-  const lastListEmpty = useRef(listEmpty);
-  useLayoutEffect(() => {
-    if (lastListEmpty.current === listEmpty) return;
-    lastListEmpty.current = listEmpty;
-    if (listEmpty && document.activeElement === document.body)
-      focusHost.current?.focus({ preventScroll: true });
-  }, [listEmpty]);
+  // A list emptying under the same frame unmounts the whole rail, where the
+  // rail's own rescue can't run: the host takes focus only when focus sat
+  // inside the list arm as that arm detached and is now on <body>.
+  const listShown = files.data !== undefined && files.data.length > 0;
+  const { hostRef: listHostRef, retryRef: listArmRef } =
+    useListLeaveRescue(listShown);
+  // True exactly when the early returns below take the error arm; they keep
+  // their own conditions, which the detail-pane retention scan reads.
+  const errorArm =
+    pane !== "skeleton" &&
+    pane !== "offline" &&
+    !(files.isPlaceholderData && files.data?.length === 0) &&
+    (pane === "error" || !files.data);
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
         hostRef(node);
+        listHostRef(node);
         focusHost.current = node;
       }}
       tabIndex={-1}
       className="flex h-full flex-col outline-none"
     >
       {/* Outside the content's aria-busy wrapper, in every arm. */}
-      <DetailRailFilterStatus filter={filter.rail} />
+      <DetailRailFilterStatus filter={filter.rail} blank={errorArm} />
       {content}
     </div>
   );
@@ -265,7 +275,12 @@ export function BranchDiffView({
   });
 
   return shell(
-    <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
+    <div
+      key="list"
+      ref={listArmRef}
+      className="flex h-full flex-col"
+      aria-busy={Boolean(staleDim)}
+    >
       <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
         {/* Branch names are unbreakable tokens — without the clamp a long pair
             sets the whole view's minimum width. */}

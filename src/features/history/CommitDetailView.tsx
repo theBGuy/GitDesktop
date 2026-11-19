@@ -543,6 +543,23 @@ export function CommitDetailView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // True exactly when the early returns below fall through to the content; they
+  // keep their own pane comparisons, which the detail-pane retention scan reads.
+  const commit = details.data;
+  const fileList = files.data;
+  const contentArm =
+    pane !== "skeleton" &&
+    pane !== "offline" &&
+    pane !== "error" &&
+    !!commit &&
+    !!fileList;
+  const errorArm = pane !== "skeleton" && pane !== "offline" && !contentArm;
+  // The status counts only while its list is on screen: the skeleton and error
+  // arms render none, though the files read may have settled under them.
+  const statusFilter = {
+    ...filter.rail,
+    settled: filter.rail.settled && contentArm,
+  };
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
@@ -555,7 +572,7 @@ export function CommitDetailView({
       className="flex h-full flex-col outline-none"
     >
       {/* Outside the content's aria-busy wrapper, in every arm. */}
-      <DetailRailFilterStatus filter={filter.rail} />
+      <DetailRailFilterStatus filter={statusFilter} blank={errorArm} />
       {content}
     </div>
   );
@@ -571,7 +588,7 @@ export function CommitDetailView({
       </div>,
     );
   }
-  if (pane === "error" || !details.data || !files.data) {
+  if (pane === "error" || !contentArm) {
     const reason = details.isError
       ? details.error
       : files.isError
@@ -602,9 +619,8 @@ export function CommitDetailView({
     );
   }
 
-  const commit = details.data;
-  const totalAdded = files.data.reduce((sum, f) => sum + f.added, 0);
-  const totalDeleted = files.data.reduce((sum, f) => sum + f.deleted, 0);
+  const totalAdded = fileList.reduce((sum, f) => sum + f.added, 0);
+  const totalDeleted = fileList.reduce((sum, f) => sum + f.deleted, 0);
   // Fade the stale content so the pane never passes it off as current. The ⋯
   // actions act on the `hash` prop, so they stay solid.
   const staleDim = stale && "opacity-80";
@@ -707,7 +723,6 @@ export function CommitDetailView({
     }
   }
 
-  const fileList = files.data;
   // The comments pane's file jumps carry a FORGE-derived path (GitHub's patch),
   // but the sidebar + effectivePath guard come from LOCAL `useCommitFiles`. On a
   // rename the two can name the same file differently, so a raw setSelectedPath

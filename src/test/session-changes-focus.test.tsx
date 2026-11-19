@@ -140,6 +140,9 @@ describe("SessionChanges focus landing", () => {
     ).toBeTruthy();
     expect(landing().tagName).toBe("SPAN");
     expect(document.activeElement).toBe(landing());
+    expect(document.activeElement).toBe(
+      screen.getByRole("group", { name: "Changes" }),
+    );
   });
 
   it("S02 focus outside the pane stays where the user put it", () => {
@@ -158,6 +161,27 @@ describe("SessionChanges focus landing", () => {
     update(session({ running: false, headHash: "base0" }));
     expect(screen.getByText(/No changes yet/)).toBeTruthy();
     expect(document.activeElement).toBe(landing());
+  });
+
+  it("S05 focus already on <body> stays there when a turn ends", () => {
+    const { update } = renderChanges(session({ running: true }));
+    expect(document.activeElement).toBe(document.body);
+    update(session({ running: false }));
+    expect(
+      screen.getByRole("button", { name: "Branch diff view" }),
+    ).toBeTruthy();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("S06 a turn's start lands focus that sat in the branch diff", () => {
+    const { update } = renderChanges(session({ running: false }));
+    act(() => screen.getByRole("button", { name: "Branch diff view" }).focus());
+    update(session({ running: true }));
+    expect(screen.getByRole("button", { name: "Worktree view" })).toBeTruthy();
+    expect(document.activeElement).toBe(landing());
+    expect(document.activeElement).toBe(
+      screen.getByRole("group", { name: "Changes" }),
+    );
   });
 
   it("S04 a field focused as the turn ends keeps focus and text in the new rail", async () => {

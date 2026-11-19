@@ -225,6 +225,12 @@ const fetchedRemotes = () =>
 
 const createButton = () =>
   screen.getByRole("button", { name: /^Create pull request/ });
+/** Neither held with a reason (`aria-disabled`) nor natively disabled: a
+ *  reasonless hold stays native, which only `toBeEnabled` reads. */
+const expectCreateReleased = () => {
+  expect(createButton()).not.toHaveAttribute("aria-disabled", "true");
+  expect(createButton()).toBeEnabled();
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -590,6 +596,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     });
     expect(createButton()).not.toHaveAccessibleDescription("Fetching origin…");
     expect(createButton()).not.toHaveAccessibleDescription(UPDATING);
+    await waitFor(expectCreateReleased);
     unsubscribe();
   });
 
@@ -635,6 +642,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     await waitFor(() =>
       expect(createButton()).not.toHaveAccessibleDescription(UPDATING),
     );
+    await waitFor(expectCreateReleased);
     unsubscribe();
   });
 
@@ -1044,6 +1052,17 @@ describe("Compare remote rows for a slash remote", () => {
     );
     expect(rows.map((r) => r.display)).toEqual(["team/fork/main"]);
   });
+
+  it.each([[["team"]], [["team/fork"]]])(
+    "drops the slash remote's session branches when the remotes list is %j",
+    (remotes) => {
+      const rows = remoteCompareRows(
+        [remote("team/fork", "gd/session/abc"), remote("team/fork", "main")],
+        remotes,
+      );
+      expect(rows.map((r) => r.display)).toEqual(["team/fork/main"]);
+    },
+  );
 });
 
 describe("Compare picker empty copy", () => {

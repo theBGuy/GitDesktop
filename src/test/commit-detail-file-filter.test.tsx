@@ -286,6 +286,86 @@ describe("CommitDetailView file filter", () => {
     expect(rendered()).toEqual([]);
   });
 
+  it("the status stays empty over the skeleton until the details land", async () => {
+    useFileFilterStore.setState({ texts: { history: "t" } });
+    lists[A] = ["a/x.ts", "b/y.ts", "c/z.md"];
+    let land: (d: CommitDetails) => void = () => undefined;
+    vi.mocked(gitCommitDetails).mockImplementation(
+      () =>
+        new Promise((r) => {
+          land = r;
+        }),
+    );
+    renderView(A);
+    await waitFor(() => expect(vi.mocked(gitCommitFiles)).toHaveBeenCalled());
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(status()?.textContent).toBe("");
+    await act(async () => land(details(A)));
+    await expectOpen("a/x.ts");
+    expect(status()?.textContent).toBe("Showing 2 of 3 files");
+  });
+
+  it("the status stays empty under the error when the details fail", async () => {
+    useFileFilterStore.setState({ texts: { history: "t" } });
+    lists[A] = ["a/x.ts", "b/y.ts", "c/z.md"];
+    let fail: (e: unknown) => void = () => undefined;
+    vi.mocked(gitCommitDetails).mockImplementation(
+      () =>
+        new Promise((_r, reject) => {
+          fail = reject;
+        }),
+    );
+    renderView(A);
+    await waitFor(() => expect(vi.mocked(gitCommitFiles)).toHaveBeenCalled());
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    expect(status()?.textContent).toBe("");
+    await act(async () => fail({ kind: "git", message: "boom" }));
+    await screen.findByText("Could not load this commit");
+    expect(status()?.textContent).toBe("");
+  });
+
+  it("the status empties when the next commit's files fail to load", async () => {
+    lists[A] = ["a/x.ts", "b/y.ts", "c/z.md"];
+    const failed = Promise.reject({ kind: "git", message: "boom" });
+    failed.catch(() => undefined);
+    lists[B] = failed;
+    const user = userEvent.setup();
+    const { switchTo } = renderView(A);
+    await expectOpen("a/x.ts");
+    await user.type(field(), "t");
+    expect(status()?.textContent).toBe("Showing 2 of 3 files");
+    switchTo(B);
+    await screen.findByText("Could not load this commit");
+    expect(status()?.textContent).toBe("");
+  });
+
+  it("an ordinary commit switch never passes the status through empty", async () => {
+    lists[A] = ["a/x.ts", "b/y.ts", "c/z.md"];
+    lists[B] = ["d/one.ts", "e/x.md", "f/z.md"];
+    const user = userEvent.setup();
+    const { switchTo } = renderView(A);
+    await expectOpen("a/x.ts");
+    await user.type(field(), "t");
+    const el = status() as HTMLElement;
+    expect(el.textContent).toBe("Showing 2 of 3 files");
+    const seen: string[] = [];
+    const observer = new MutationObserver(() =>
+      seen.push(el.textContent ?? ""),
+    );
+    observer.observe(el, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    switchTo(B);
+    await expectOpen("d/one.ts");
+    await waitFor(() => expect(el.textContent).toBe("Showing 1 of 3 files"));
+    observer.disconnect();
+    expect(seen).not.toContain("");
+    expect(seen.at(-1)).toBe("Showing 1 of 3 files");
+  });
+
   it("C-i: only the compare surface claims Mod+F tab-wide; surfaces keep separate text", async () => {
     lists[A] = ["src/a.ts", "src/b.md"];
     const user = userEvent.setup();

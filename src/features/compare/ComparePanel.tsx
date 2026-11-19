@@ -6,11 +6,14 @@ import {
   GitPullRequestIcon,
   TagIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type MouseEvent,
   type ReactNode,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -97,6 +100,8 @@ import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import {
   forgeFeatureReady,
+  remoteBranchesOptions,
+  remotesOptions,
   useBranches,
   useCheckoutCommit,
   useCherryPick,
@@ -211,6 +216,11 @@ const OFFER_FAILED_COPY =
 const OFFER_OFFLINE_COPY =
   "You're offline — whether an upstream remote can be added is checked once you're back online.";
 
+/** Fetch's hold reason while this pick's own fetch is parked: the reconnect
+ *  runs it, so Fetch has nothing to add. */
+const PARKED_FETCH_COPY =
+  "You're offline — the fetch runs once you're back online.";
+
 const REMOTE_LOADING_COPY = "Loading remote branches…";
 
 export function ComparePanel({ repoPath }: { repoPath: string }) {
@@ -234,15 +244,44 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const pickerTrigger = useRef<HTMLButtonElement>(null);
   // Read after an await, where the render's `pickerOpen` is stale.
   const pickerOpenNow = useRef(false);
+  const pickerOpenGen = useRef(0);
+  const queryClient = useQueryClient();
   // Each open re-reads both lists, so a remote removed outside the app leaves
-  // the rows; joining a read in flight never cancels one a pick's settle awaits.
+  // the rows. Joining a read in flight never cancels one a pick's settle awaits,
+  // but that read may predate the change, so a joined list is read once more
+  // after it settles while this opening is still open, shown and in its repo.
   function changePickerOpen(next: boolean) {
     const opening = next && !pickerOpenNow.current;
     pickerOpenNow.current = next;
     setPickerOpen(next);
     if (!opening) return;
-    void remotes.refetch({ cancelRefetch: false });
-    void remoteRead.refetch({ cancelRefetch: false });
+    const gen = ++pickerOpenGen.current;
+    const openedIn = repoPath;
+    const reread = (
+      queryKey: readonly unknown[],
+      refetch: () => Promise<unknown>,
+    ) => {
+      const joined =
+        queryClient.getQueryState(queryKey)?.fetchStatus === "fetching";
+      const read = refetch();
+      if (!joined) return;
+      // A refetch resolves on a failed read too.
+      void read.then(() => {
+        if (
+          pickerOpenNow.current &&
+          pickerOpenGen.current === gen &&
+          useUiStore.getState().repoPath === openedIn
+        ) {
+          void refetch();
+        }
+      });
+    };
+    reread(remotesOptions(repoPath).queryKey, () =>
+      remotes.refetch({ cancelRefetch: false }),
+    );
+    reread(remoteBranchesOptions(repoPath).queryKey, () =>
+      remoteRead.refetch({ cancelRefetch: false }),
+    );
   }
 
   const currentName = status.data?.branch?.name ?? null;
@@ -319,11 +358,16 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     ? remoteCompareRows(remoteRead.data, remotes.data)
     : [];
   const offer = useAddUpstreamOffer(repoPath);
+  // Gone is read from a successful remotes read alone, so it holds while the
+  // remote-branch list is failed or refetching.
+  const remoteGone =
+    pick !== null && remotes.isSuccess && !remotes.data.includes(pick.remote);
   const fetcher = useCompareRemoteFetch(
     repoPath,
     compareBranch,
     pick?.remote ?? null,
     pickListed === true,
+    remoteGone,
   );
   const head = status.data?.branch;
   const prTarget = comparePrTarget({
@@ -421,10 +465,6 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     stampShown &&
     (stamp.phase === "fetching" || stamp.phase === "comparing") &&
     stamp.pickedValue !== null;
-  // Gone is read from a successful remotes read alone, so it holds while the
-  // remote-branch list is failed or refetching.
-  const remoteGone =
-    pick !== null && remotes.isSuccess && !remotes.data.includes(pick.remote);
   // "Deleted on X" is causal: only after this pick's own successful fetch of X
   // left the ref unlisted, while a successful remotes read still lists X.
   const prunedState = ((): "remote-gone" | "pruned" | "missing" => {
@@ -472,13 +512,38 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     defaultBase: string | undefined;
     preset: CreatePrPreset | undefined;
   } | null>(null);
-  // This panel survives repo switches, so the dialog closes in the render that
-  // switches: left open, the next repo's auto-default would remount it open.
+  // The create-ref-from-commit dialogs' targets; each open resets its form.
+  const [branchHash, setBranchHash] = useState<string | null>(null);
+  const [tagHash, setTagHash] = useState<string | null>(null);
+  // Each dialog's open session: minted by every opener, dropped by its close. A
+  // create isn't held against Esc, so its settle closes only the session it was
+  // submitted from, never a dialog reopened on another commit.
+  const branchSessionRef = useRef<object | null>(null);
+  const tagSessionRef = useRef<object | null>(null);
+  // A merge commit's revert or cherry-pick, awaiting its mainline parent.
+  const [mergePick, setMergePick] = useState<
+    (MergePickTarget & { repo: string }) | null
+  >(null);
+  // The commit the one shared context menu acts on. Revert is only OFFERED for
+  // ahead commits — the side already in this branch's history.
+  const [menuTarget, setMenuTarget] = useState<{
+    hash: string;
+    onCurrentBranch: boolean;
+    isMerge: boolean;
+  } | null>(null);
+  // This panel survives repo switches, so its dialogs, picker and commit menu
+  // close in the render that switches: left open, the next repo's main arm would
+  // mount them open, and a create-ref submit would land in that repo.
   const [prRepo, setPrRepo] = useState(repoPath);
   if (prRepo !== repoPath) {
     setPrRepo(repoPath);
     setPrOpen(false);
     setPrLatch(null);
+    setBranchHash(null);
+    setTagHash(null);
+    setMergePick(null);
+    setMenuTarget(null);
+    setPickerOpen(false);
   }
   const latched = prLatch?.repo === repoPath ? prLatch : null;
   const prDialogProps = latched ?? {
@@ -494,15 +559,29 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     setPrOpen(true);
   }
 
-  // While Create is held or hidden these two are disabled, and dispatch runs
-  // the newest ENABLED entry, so the action belongs to whichever app-level
-  // entry is enabled: `create-local-pr` always, `create-pr` only while the forge
-  // can create one. Each opens the Pull requests tab's own create dialog, with
-  // none of Compare's base or preset; with no enabled entry nothing runs.
+  // With nothing to compare against locally, the empty state waits on the
+  // remote read and the add-upstream offer's inputs: only answers may say there
+  // is nothing at all. A retained remote pick keeps the main panel, so its
+  // pruned line still names why the list emptied.
+  const emptyCandidate =
+    pick === null &&
+    otherBranches.length === 0 &&
+    remoteRows.length === 0 &&
+    !offer.canOffer;
+  // Which arm renders: the early returns below read these same booleans.
+  const armLoading = status.isPending || branches.isPending;
+  const armDetached = detached || !currentName;
+  const mainArmShown = !armLoading && !armDetached && !emptyCandidate;
+
+  // While Create is held or hidden, or its main arm is swapped out, these two
+  // are disabled, and dispatch runs the newest ENABLED entry, so the action
+  // belongs to whichever app-level entry is enabled: `create-local-pr` always,
+  // `create-pr` only while the forge can create one. Each opens the Pull
+  // requests tab's own create dialog, with none of Compare's base or preset.
   useHotkeyAction(
     "create-pr",
     openCreatePr,
-    showCreate && createBlock === null,
+    showCreate && createBlock === null && mainArmShown,
   );
   useHotkeyAction(
     "create-local-pr",
@@ -511,7 +590,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         defaultHead: currentName ?? undefined,
         defaultBase: compareBranch ?? undefined,
       }),
-    showLocalPr && createBlock === null,
+    showLocalPr && createBlock === null && mainArmShown,
   );
 
   // The status line paints a stamp only in its own repo and while its pick is
@@ -639,15 +718,6 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     });
   }
 
-  // With nothing to compare against locally, the empty state waits on the
-  // remote read and the add-upstream offer's inputs: only answers may say there
-  // is nothing at all. A retained remote pick keeps the main panel, so its
-  // pruned line still names why the list emptied.
-  const emptyCandidate =
-    pick === null &&
-    otherBranches.length === 0 &&
-    remoteRows.length === 0 &&
-    !offer.canOffer;
   const remoteReadFailed = remoteRead.isError && !remoteRead.isFetching;
   // Offline, an offer failed on the forge read alone waits for the reconnect
   // that re-runs it instead of offering a Retry that can't succeed; a failed
@@ -657,11 +727,50 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const emptyRetryShown =
     remoteReadFailed || (offer.failed && !offerWaitsOnline);
   const emptyRescue = useRetryFocusRescue(emptyCandidate && emptyRetryShown);
+  // Fetch is held offline; a parked pick fetch names its own reconnect run.
+  const fetchHeldReason = (() => {
+    if (online) return null;
+    return stampState === "offline" ? PARKED_FETCH_COPY : OFFLINE_WRITE_REASON;
+  })();
+  // Focus in the main arm, or in its picker's popup, lands on the shell when
+  // the arm is swapped out.
+  const armRescue = useRetryFocusRescue(mainArmShown);
+  const popupRescue = useRetryFocusRescue(mainArmShown);
+  const popupNode = useRef<HTMLDivElement | null>(null);
+  const emptyHost = emptyRescue.hostRef;
+  const armHost = armRescue.hostRef;
+  const popupHost = popupRescue.hostRef;
+  const shellRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      emptyHost(node);
+      armHost(node);
+      popupHost(node);
+    },
+    [emptyHost, armHost, popupHost],
+  );
+  const armRetryRef = armRescue.retryRef;
+  const popupRetryRef = popupRescue.retryRef;
+  // The popup is portaled, so the arm's own node can't see focus inside it, and
+  // it also unmounts on every close, so its ownership is read here, at the
+  // arm's detach, through the hook's contract that `retryRef(node)` returns the
+  // detach-time recorder. The arm's `key` makes this a detach BEFORE its
+  // children go: unkeyed, React reuses the box for an arm that also starts with
+  // a div and detaches the ref only after the children are removed.
+  const armRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      const recordArm = armRetryRef(node);
+      return () => {
+        recordArm();
+        popupRetryRef(popupNode.current)();
+      };
+    },
+    [armRetryRef, popupRetryRef],
+  );
   // One focus host across every arm below (same element type and position), so
   // a Retry whose refetch swaps the arm never drops focus to <body>.
   const shell = (children: ReactNode) => (
     <div
-      ref={emptyRescue.hostRef}
+      ref={shellRef}
       tabIndex={-1}
       className="flex min-h-0 flex-1 flex-col outline-none"
     >
@@ -669,19 +778,29 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     </div>
   );
 
-  // The commit the one shared context menu acts on. Revert is only OFFERED for
-  // ahead commits — the side already in this branch's history.
-  const [menuTarget, setMenuTarget] = useState<{
-    hash: string;
-    onCurrentBranch: boolean;
-    isMerge: boolean;
-  } | null>(null);
-  // A merge commit's revert or cherry-pick, awaiting its mainline parent.
-  const [mergePick, setMergePick] = useState<
-    (MergePickTarget & { repo: string }) | null
-  >(null);
-  const [branchHash, setBranchHash] = useState<string | null>(null);
-  const [tagHash, setTagHash] = useState<string | null>(null);
+  // Base UI fires no close when its root unmounts, so a picker or dialog open
+  // at the swap would mount open when the arm returns (the PR dialog on a fresh
+  // form under its old preset). The ref-from-commit dialogs stay: their forms
+  // live at panel scope and keep the typed name.
+  const [armWasShown, setArmWasShown] = useState(mainArmShown);
+  if (armWasShown !== mainArmShown) {
+    setArmWasShown(mainArmShown);
+    if (!mainArmShown) {
+      setPickerOpen(false);
+      setPrOpen(false);
+      setPrLatch(null);
+      setMergePick(null);
+    }
+  }
+  // The ref follows the committed state, including that reset: a hidden tab
+  // runs no layout effects, and the reveal's replay re-syncs it. An unmount or
+  // a hide reads as closed.
+  useLayoutEffect(() => {
+    pickerOpenNow.current = pickerOpen;
+    return () => {
+      pickerOpenNow.current = false;
+    };
+  }, [pickerOpen]);
   const shownBranchHash = useRetained(branchHash);
   const shownTagHash = useRetained(tagHash);
 
@@ -703,6 +822,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         return;
       }
       const name = sanitizeRefName(value.name);
+      const session = branchSessionRef.current;
       try {
         await createBranch.mutateAsync({
           name,
@@ -710,7 +830,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
           startPoint: branchHash,
         });
         toast.success(`Created branch ${name}`);
-        setBranchHash(null);
+        if (branchSessionRef.current === session) {
+          branchSessionRef.current = null;
+          setBranchHash(null);
+        }
       } catch (e) {
         onError(e);
       }
@@ -722,10 +845,14 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     onSubmit: async ({ value }) => {
       if (!tagHash) return;
       const name = sanitizeRefName(value.name);
+      const session = tagSessionRef.current;
       try {
         await createTag.mutateAsync({ name, hash: tagHash });
         toast.success(`Created tag ${name}`);
-        setTagHash(null);
+        if (tagSessionRef.current === session) {
+          tagSessionRef.current = null;
+          setTagHash(null);
+        }
       } catch (e) {
         onError(e);
       }
@@ -825,7 +952,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     });
   }
 
-  if (status.isPending || branches.isPending)
+  if (armLoading)
     return shell(
       <div className="space-y-2 p-3">
         <Skeleton className="h-8 w-full" />
@@ -833,7 +960,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       </div>,
     );
 
-  if (detached || !currentName) {
+  if (armDetached) {
     return shell(
       <Empty className="flex-1">
         <EmptyHeader>
@@ -943,7 +1070,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   });
 
   return shell(
-    <>
+    <div key="main-arm" ref={armRef} className="contents">
       <div className="space-y-1.5 border-b p-2">
         <p className="px-1 text-xs text-muted-foreground">
           Compare <span className="font-mono">{currentName}</span> with
@@ -971,6 +1098,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
             open={pickerOpen}
             onOpenChange={changePickerOpen}
             triggerRef={pickerTrigger}
+            popupRef={popupNode}
             placeholder={noPick ? NO_PICK_COPY : null}
             remoteNotice={remoteNotice}
             remoteSearched={remotesKnown && remoteRead.data !== undefined}
@@ -981,7 +1109,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
             name={pick?.name ?? ""}
             onRetry={retryFetch}
             onFetch={fetchPick}
-            fetchHeldReason={online ? null : OFFLINE_WRITE_REASON}
+            fetchHeldReason={fetchHeldReason}
             onPickAnother={pickAnotherBranch}
             idleFocusRef={pickerTrigger}
           />
@@ -1064,7 +1192,9 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         />
       )}
 
-      <ContextMenu>
+      {/* Keyed so a repo switch remounts it closed: clearing menuTarget under
+          an open menu would leave Base UI's popup empty. */}
+      <ContextMenu key={repoPath}>
         <ContextMenuTrigger
           render={
             <div
@@ -1160,10 +1290,12 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
                 cherryPick: (hash) => doCherryPick(hash, menuTarget.isMerge),
                 createBranch: (hash) => {
                   branchForm.reset({ name: "" });
+                  branchSessionRef.current = {};
                   setBranchHash(hash);
                 },
                 createTag: (hash) => {
                   tagForm.reset({ name: "" });
+                  tagSessionRef.current = {};
                   setTagHash(hash);
                 },
               }}
@@ -1175,7 +1307,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       <CreateRefFromCommitDialog
         form={branchForm}
         open={branchHash !== null}
-        onClose={() => setBranchHash(null)}
+        onClose={() => {
+          branchSessionRef.current = null;
+          setBranchHash(null);
+        }}
         title="Create branch from commit"
         description={`Creates a branch starting at ${shownBranchHash?.slice(0, 7) ?? ""} and switches to it.`}
         fieldLabel="Branch name"
@@ -1186,7 +1321,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       <CreateRefFromCommitDialog
         form={tagForm}
         open={tagHash !== null}
-        onClose={() => setTagHash(null)}
+        onClose={() => {
+          tagSessionRef.current = null;
+          setTagHash(null);
+        }}
         title="Create tag"
         description={`Tags commit ${shownTagHash?.slice(0, 7) ?? ""}.`}
         fieldLabel="Tag name"
@@ -1200,7 +1338,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
         openedIn={mergePick?.repo ?? null}
         onClose={() => setMergePick(null)}
       />
-    </>,
+    </div>,
   );
 }
 

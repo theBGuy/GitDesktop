@@ -6,7 +6,7 @@ import {
   TreeStructureIcon,
   UsersThreeIcon,
 } from "@phosphor-icons/react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { PlanView } from "@/features/plan/PlanView";
 import { usePlanStore } from "@/features/plan/store";
@@ -533,25 +534,33 @@ export function SessionChanges({ session }: { session: AgentSession }) {
   let arm: "worktree" | "placeholder" | "diff" = "diff";
   if (session.running && !session.kept) arm = "worktree";
   else if (!hasCommits) arm = "placeholder";
-  // The arms are different views in one slot, so a turn's end unmounts what
-  // held focus: land it here when it fell to <body>. Change-only, so opening
-  // the pane never takes focus; a rail's own field handoff runs first.
-  const landingNode = useRef<HTMLSpanElement>(null);
-  const lastArm = useRef(arm);
-  useLayoutEffect(() => {
-    if (lastArm.current === arm) return;
-    lastArm.current = arm;
-    if (document.activeElement === document.body)
-      landingNode.current?.focus({ preventScroll: true });
-  }, [arm]);
+  // The arms are different views in one slot: the landing span takes focus only
+  // when focus sat inside the leaving arm's wrapper as that wrapper detached
+  // and is now on <body>. Keyed per arm so the wrapper detaches with its view;
+  // a rail's own field hand-over runs first.
+  const worktreeRescue = useRetryFocusRescue(arm === "worktree");
+  const placeholderRescue = useRetryFocusRescue(arm === "placeholder");
+  const diffRescue = useRetryFocusRescue(arm === "diff");
   const landing = (
-    <span ref={landingNode} tabIndex={-1} className="outline-none" />
+    <span
+      ref={(node) => {
+        worktreeRescue.hostRef(node);
+        placeholderRescue.hostRef(node);
+        diffRescue.hostRef(node);
+      }}
+      role="group"
+      aria-label="Changes"
+      tabIndex={-1}
+      className="outline-none"
+    />
   );
   if (arm === "worktree") {
     return (
       <>
         {landing}
-        <WorktreeChangesView repoPath={session.worktreePath} />
+        <div key={arm} ref={worktreeRescue.retryRef} className="contents">
+          <WorktreeChangesView repoPath={session.worktreePath} />
+        </div>
       </>
     );
   }
@@ -559,10 +568,12 @@ export function SessionChanges({ session }: { session: AgentSession }) {
     return (
       <>
         {landing}
-        <DiffPlaceholder
-          icon={SparkleIcon}
-          message="No changes yet. Send the agent a task in Conversation."
-        />
+        <div key={arm} ref={placeholderRescue.retryRef} className="contents">
+          <DiffPlaceholder
+            icon={SparkleIcon}
+            message="No changes yet. Send the agent a task in Conversation."
+          />
+        </div>
       </>
     );
   }
@@ -572,12 +583,14 @@ export function SessionChanges({ session }: { session: AgentSession }) {
   return (
     <>
       {landing}
-      <BranchDiffView
-        repoPath={session.kept ? session.repoPath : session.worktreePath}
-        base={session.base}
-        compare={session.branch}
-        filterSurface="session"
-      />
+      <div key={arm} ref={diffRescue.retryRef} className="contents">
+        <BranchDiffView
+          repoPath={session.kept ? session.repoPath : session.worktreePath}
+          base={session.base}
+          compare={session.branch}
+          filterSurface="session"
+        />
+      </div>
     </>
   );
 }

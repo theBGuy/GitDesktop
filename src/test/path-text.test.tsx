@@ -134,7 +134,7 @@ describe("PathText head width", () => {
     "a/b\tc.ts",
     `a/${EMOJI}.ts`,
     "日本/b.ts",
-  ])("a non-ASCII path (%j) leaves the head unstyled", (path) => {
+  ])("a path outside printable ASCII (%j) leaves the head unstyled", (path) => {
     const { container } = render(<PathText path={path} />);
     const root = outer(container);
     expect(root.children).toHaveLength(3);

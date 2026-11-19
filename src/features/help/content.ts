@@ -701,12 +701,12 @@ the last list up, with a line above it saying it couldn't refresh.
   how many match ("2 of 13"). The open file's diff stays where it is while you type.
   Press {{key:enter}} to open the first match, or {{key:down}} to move into the list.
   {{kbd:focus-filter}} focuses the field while focus is in the file list or the diff,
-  and from anywhere on the **Compare** tab; it expands a collapsed list first.
-  {{key:escape}} or the field's clear button empties it. Your text stays as you move
-  from one commit or comparison to the next, and a collapsed list shows a funnel while
-  a filter is applied. The filter is on a commit's files, in **Compare**, on local pull
-  requests and on a pull request's **Commits** tab{{ai}}, plus an agent session's
-  changes{{/ai}}.
+  and from anywhere on the **Compare** tab while it lists files; it expands a collapsed
+  list first. {{key:escape}} or the field's clear button empties it. Your text stays as
+  you move from one commit or comparison to the next, and a collapsed list shows a
+  funnel while a filter is applied. The filter is on a commit's files, in **Compare**,
+  on local pull requests and on a pull request's **Commits** tab{{ai}}, plus an agent
+  session's changes{{/ai}}.
 
 ## Committing
 
@@ -1225,16 +1225,22 @@ behind, and the full three-dot diff a PR would show. The base-branch picker is s
 (type to filter) and lists your **Local** branches, then a **Remote** group with every
 remote's branches: \`upstream\` first, then \`origin\`, then any others. It hides archived
 branches, and shows which local branches live in other worktrees plus, when one has
-diverged, how far it is ahead of and behind your current branch. From here you can jump
+diverged, how far it is ahead of and behind your current branch. A local branch named like
+a remote branch (such as \`origin/x\`) is listed as well as that remote branch, each in its
+own group, and the closed picker tells the two apart with a **local** or **remote** mark
+after the name (the **local** mark shows once that remote branch is listed). A local branch
+whose name starts with \`refs/remotes/\` is listed but can't be picked there. The picker
+re-reads your remotes and their branches each time it opens. From here you can jump
 straight to opening a pull request.
 
 Picking a remote branch fetches that remote once, with a status line across the panel
-("Fetching origin…") while it runs. If the fetch fails, or you're offline, the panel
-compares against that remote's last fetch, says so, and offers **Retry** after a failed
-fetch. A picked branch that's no longer among your remote branches says so and offers
+("Fetching origin…") while it runs. If the fetch fails, or you're offline, a branch still
+among your remote branches is compared against that remote's last fetch; the line says
+so, and offers **Retry** after a failed fetch. A picked branch that's no longer among
+your remote branches says so and offers
 to fetch its remote (**Fetch origin**, for a branch on \`origin\`) beside **Pick another
-branch**; once a fetch confirms it, the line says the branch was deleted on that remote.
-A branch whose remote was removed offers **Pick another branch**. Picking your own
+branch**; once Compare's own fetch confirms it, the line says the branch was deleted on
+that remote. A branch whose remote was removed offers **Pick another branch**. Picking your own
 branch's copy on \`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
 line explains the counts: ahead is what you haven't pushed, behind is what you haven't
 pulled.

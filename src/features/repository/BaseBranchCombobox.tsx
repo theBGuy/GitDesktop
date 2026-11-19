@@ -298,9 +298,11 @@ function BaseBranchRow({
   // in the branch dropdown, while this row picks a base branch.
   const copy = rowCheckoutCopy(meta?.worktree?.isMain);
   const date = meta?.lastCommitDate;
-  // The option's name comes from its content: each part after the first is led
-  // by a hidden comma and a bare space, gated with it so none dangles. A
-  // whitespace-only run between flex items renders nothing.
+  // The option's name comes from its content. A part shown beside the name is
+  // led by a hidden comma and a bare space, gated with it so none dangles; a
+  // whitespace-only run between flex items renders nothing. A chip inside the
+  // name span is hidden from AT and named by one hidden copy after the span
+  // that holds its own comma and space.
   return (
     <ComboboxItem value={name}>
       <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>

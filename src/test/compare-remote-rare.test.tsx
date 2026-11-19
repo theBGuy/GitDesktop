@@ -3,11 +3,20 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import { clearPickRemotesForTests } from "@/features/compare/compare-remote-ref";
+import { useCompareRemoteFetch } from "@/features/compare/use-compare-remote-fetch";
 import { TabPanel } from "@/features/repository/TabPanel";
 import {
   forgePrsForBranch,
@@ -21,6 +30,7 @@ import {
   gitRemotes,
   gitStatus,
 } from "@/lib/git/api";
+import { remoteBranchesOptions } from "@/lib/git/queries";
 import type {
   Branch,
   CommitSummary,
@@ -185,6 +195,12 @@ async function pickOption(
 
 const createButton = () =>
   screen.getByRole("button", { name: /^Create pull request/ });
+/** Neither held with a reason (`aria-disabled`) nor natively disabled: a
+ *  reasonless hold stays native, which only `toBeEnabled` reads. */
+const expectCreateReleased = () => {
+  expect(createButton()).not.toHaveAttribute("aria-disabled", "true");
+  expect(createButton()).toBeEnabled();
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -223,6 +239,7 @@ const S10 = "origin/feature-x was deleted on origin.";
 const S11 = "origin/feature-x is no longer in your remote branches.";
 const OFFLINE =
   "You're offline — this will be available once you're back online.";
+const PARKED_FETCH = "You're offline — the fetch runs once you're back online.";
 const LISTED = () => [
   remote("upstream", "main"),
   remote("origin", "feature-x"),
@@ -341,7 +358,8 @@ describe("Compare picker open re-reads (arm a)", () => {
     expect(
       within(list).getByRole("option", { name: /^origin\/feature-x/ }),
     ).toBeInTheDocument();
-    expect(within(list).queryByText(/Loading/)).toBeNull();
+    // The notice is the popup's sibling of the list, not inside it.
+    expect(screen.queryByText(/Loading remote branches/)).toBeNull();
     await act(async () => held.resolve(LISTED()));
     await settle();
   });
@@ -395,9 +413,7 @@ describe("Compare picker open re-reads (arm a)", () => {
     await act(async () => held.resolve(LISTED()));
     await waitFor(() => expect(statusText()).toBe(""));
     expect(createButton()).not.toHaveAccessibleDescription(S11);
-    await waitFor(() =>
-      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
-    );
+    await waitFor(expectCreateReleased);
   });
 
   it("keeps the missing line and Create's hold through a FAILED re-read", async () => {
@@ -425,9 +441,7 @@ describe("Compare picker open re-reads (arm a)", () => {
     await user.click(await trigger());
     await waitFor(() => expect(statusText()).toBe(""));
     expect(createButton()).not.toHaveAccessibleDescription(S11);
-    await waitFor(() =>
-      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
-    );
+    await waitFor(expectCreateReleased);
   });
 });
 
@@ -650,6 +664,29 @@ describe("Compare gone pick and its Fetch action (arm g)", () => {
     expect(fetchCount()).toBe(before);
   });
 
+  it("names the parked pick fetch as Fetch's reason, and reconnect runs it", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    await trigger();
+    act(() => onlineManager.setOnline(false));
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine(
+      "You're offline, so this compares against origin's last fetch.",
+    );
+    vi.mocked(gitRemoteBranches).mockResolvedValue(UNLISTED());
+    await refetchList(client);
+    await statusLine(S11);
+    const button = fetchButton();
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAccessibleDescription(PARKED_FETCH);
+    const before = fetchCount();
+    await act(async () => onlineManager.setOnline(true));
+    await waitFor(() => expect(fetchCount()).toBe(before + 1));
+    expect(gitFetchRemote).toHaveBeenLastCalledWith(REPO, "origin");
+    await settle();
+    expect(fetchCount()).toBe(before + 1);
+  });
+
   it("records nothing when the list read after a successful Fetch fails", async () => {
     const user = userEvent.setup();
     const client = renderPanel();
@@ -709,6 +746,59 @@ describe("Compare gone pick and its Fetch action (arm g)", () => {
     await refetchList(client);
     expect(await statusLine(S11)).toBeInTheDocument();
     expect(screen.queryByText(/was deleted on/)).toBeNull();
+  });
+
+  it("drops the record once a remotes read no longer lists its remote", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    await reachS10(user);
+    vi.mocked(gitRemotes).mockResolvedValue(["upstream"]);
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    await statusLine("origin is no longer a remote.");
+    // Re-added under the same name, while the list still lacks the ref.
+    vi.mocked(gitRemotes).mockResolvedValue(["origin", "upstream"]);
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    expect(await statusLine(S11)).toBeInTheDocument();
+    expect(screen.queryByText(/was deleted on/)).toBeNull();
+    expect(createButton()).toHaveAccessibleDescription(S11);
+  });
+
+  // Pinned at the hook: the panel never returns a pick to a remote it left (a
+  // recorded pick remote wins while it prefixes the ref, and only a longer
+  // listed remote replaces it), so this arm guards the hook's own contract.
+  it("(Identity, hook) keeps the record retired when the pick's remote goes back", async () => {
+    const VALUE = "refs/remotes/team/fork/main";
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    // Not a once-value: the fire's settle reads the list again.
+    vi.mocked(gitRemoteBranches).mockResolvedValue([]);
+    await client.fetchQuery(remoteBranchesOptions(REPO));
+    const { result, rerender } = renderHook(
+      ({ remote }: { remote: string }) =>
+        useCompareRemoteFetch(REPO, VALUE, remote, false, false),
+      { wrapper, initialProps: { remote: "team" } },
+    );
+    await act(() =>
+      result.current.fire({
+        repo: REPO,
+        remote: "team",
+        pickedValue: VALUE,
+        currentBranch: "feat",
+      }),
+    );
+    expect(result.current.prunedByFetch).toBe(true);
+    rerender({ remote: "team/fork" });
+    expect(result.current.prunedByFetch).toBe(false);
+    rerender({ remote: "team" });
+    expect(result.current.prunedByFetch).toBe(false);
   });
 
   it("(Identity, remote) drops the record when the pick resolves to another remote", async () => {

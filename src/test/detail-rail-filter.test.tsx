@@ -98,6 +98,26 @@ interface HarnessProps {
   portal?: boolean;
   /** Renders a diff control that consumes every K keydown itself. */
   consumer?: boolean;
+  /** Renders a row action in the list whose press opens a portalled dialog. */
+  rowDialog?: boolean;
+}
+
+/** A row action owning its dialog's open state, as FileRowActions does. */
+function RowDialog() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        Row action
+      </button>
+      {open
+        ? createPortal(
+            <button type="button">Dialog action</button>,
+            document.body,
+          )
+        : null}
+    </>
+  );
 }
 
 /** A consumer in miniature: owns its pick and its reset, renders the rows from
@@ -112,6 +132,7 @@ function Harness({
   panelActive = true,
   portal = false,
   consumer = false,
+  rowDialog = false,
 }: HarnessProps) {
   const [picked, setPicked] = useState<string | null>(null);
   const [pickedFor, setPickedFor] = useState(identity);
@@ -169,6 +190,7 @@ function Harness({
                   </button>
                 ))}
               </div>
+              {rowDialog ? <RowDialog /> : null}
             </DetailRail>
             <main data-open-file={filter.openPath ?? ""}>
               <p>Plain diff text, a sentence.</p>
@@ -357,11 +379,15 @@ describe("layout and copy", () => {
     const user = userEvent.setup();
     renderRail({ files: THIRTEEN });
     expect(field().closest('[role="listbox"]')).toBeNull();
+    const listBefore = screen.getByRole("listbox", { name: "Changed files" });
+    const rowsBefore = listBefore.querySelector("[data-rows]");
     await user.type(field(), "zzz");
     expect(screen.getByText("No files match the filter")).toBeTruthy();
     const list = screen.getByRole("listbox", { name: "Changed files" });
     expect(list.classList.contains("hidden")).toBe(true);
     expect(list.querySelector("[data-rows]")).not.toBeNull();
+    expect(list).toBe(listBefore);
+    expect(list.querySelector("[data-rows]")).toBe(rowsBefore);
     expect(openFile()).toBe("src/alpha.ts");
   });
 });
@@ -475,10 +501,23 @@ describe("field keys", () => {
     expect(pickSpy).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(field());
   });
+
+  it("R04b Enter while composing stays in the field over a match", async () => {
+    const user = userEvent.setup();
+    renderRail({ files: THIRTEEN });
+    watchKeys();
+    await user.type(field(), "alpha");
+    expect(rendered()).toContain("src/alpha.ts");
+    pickSpy.mockClear();
+    fireEvent.keyDown(field(), { key: "Enter", isComposing: true });
+    expect(lastPrevented("Enter")).toBe(false);
+    expect(pickSpy).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(field());
+  });
 });
 
 describe("clearing", () => {
-  it("R07 a clear by any route refocuses the field and scrolls the open row", async () => {
+  it("R07 every clear scrolls the open row into view; the x and Clear filter refocus the field", async () => {
     const user = userEvent.setup();
     const { rerenderWith } = renderRail({ files: THIRTEEN });
     expect(scrollSpy).not.toHaveBeenCalled();
@@ -506,21 +545,26 @@ describe("clearing", () => {
     await user.type(field(), "mu");
     await user.keyboard("{Escape}");
     scrolledOpenRow();
+    expect(document.activeElement).toBe(field());
 
     await user.type(field(), "q");
     await user.keyboard("{Backspace}");
     scrolledOpenRow();
+    expect(document.activeElement).toBe(field());
 
     await user.type(field(), "eta");
+    const outside = screen.getByRole("button", { name: "Outside" });
+    act(() => outside.focus());
     act(() => useUiStore.setState({ repoPath: "/repo-b" }));
     expect(field().value).toBe("");
     scrolledOpenRow();
     expect(openFile()).toBe("src/alpha.ts");
+    expect(document.activeElement).toBe(outside);
   });
 });
 
 describe("the status", () => {
-  it("R08 announces filtering, and pins a clear's text until the next filter", async () => {
+  it("R08 announces filtering, and holds a clear's text while the settled total is unchanged", async () => {
     const user = userEvent.setup();
     const { rerenderWith } = renderRail({ files: THIRTEEN });
     expect(status()?.textContent).toBe("");
@@ -676,6 +720,43 @@ describe("the focus-filter shortcut", () => {
     await waitFor(() => expect(document.activeElement).toBe(field()));
   });
 
+  it("R10c a focus move made before the expanding commit keeps focus", async () => {
+    stored = { ...DEFAULT_SETTINGS, diffFileListCollapsed: true };
+    renderRail({ files: THIRTEEN, claim: true });
+    const diffButton = screen.getByRole("button", { name: "Diff action" });
+    const outside = screen.getByRole("button", { name: "Outside" });
+    await focusOn(diffButton);
+    // A synchronous press: the settings re-render lands a timer task later.
+    act(() => {
+      dispatchAction("focus-filter");
+    });
+    expect(caret("Expand file list")).toBeTruthy();
+    act(() => outside.focus());
+    await waitFor(() => expect(caret("Collapse file list")).toBeTruthy());
+    expect(document.activeElement).toBe(outside);
+    expect(document.activeElement).not.toBe(field());
+  });
+
+  it("R10d a press from the collapsed caret ends on the field", async () => {
+    const user = userEvent.setup();
+    stored = { ...DEFAULT_SETTINGS, diffFileListCollapsed: true };
+    renderRail({ files: THIRTEEN });
+    await focusOn(caret("Expand file list"));
+    await user.keyboard(MOD_F);
+    await waitFor(() => expect(document.activeElement).toBe(field()));
+  });
+
+  it("R10e a press from the collapsed caret selects the stored text", async () => {
+    const user = userEvent.setup();
+    stored = { ...DEFAULT_SETTINGS, diffFileListCollapsed: true };
+    useFileFilterStore.getState().setText("rail", "alpha");
+    renderRail({ files: THIRTEEN });
+    await focusOn(caret("Expand file list"));
+    await user.keyboard(MOD_F);
+    await waitFor(() => expect(document.activeElement).toBe(field()));
+    expect([field().selectionStart, field().selectionEnd]).toEqual([0, 5]);
+  });
+
   it("R10 follows a rebound binding and goes inert when cleared", async () => {
     const user = userEvent.setup();
     stored = {
@@ -701,6 +782,40 @@ describe("the focus-filter shortcut", () => {
     await user.keyboard(MOD_F);
     expect(lastPrevented("f")).toBe(false);
     expect(document.activeElement).toBe(row("src/beta.ts"));
+  });
+
+  it("R10f answers a shared chord only when the filter is its first holder", async () => {
+    const user = userEvent.setup();
+    const CHORD = "{Control>}{Shift>}k{/Shift}{/Control}";
+    // command-palette comes before focus-filter in ACTIONS: it owns the chord.
+    stored = {
+      ...DEFAULT_SETTINGS,
+      hotkeys: {
+        "command-palette": "mod+shift+k",
+        "focus-filter": "mod+shift+k",
+      },
+    } as AppSettings;
+    const before = renderRail({ files: THIRTEEN });
+    watchKeys();
+    await focusOn(row("src/beta.ts"));
+    await user.keyboard(CHORD);
+    expect(lastPrevented("k")).toBe(false);
+    expect(document.activeElement).toBe(row("src/beta.ts"));
+    before.unmount();
+
+    // focus-comment comes after focus-filter: the filter owns the chord.
+    stored = {
+      ...DEFAULT_SETTINGS,
+      hotkeys: {
+        "focus-comment": "mod+shift+k",
+        "focus-filter": "mod+shift+k",
+      },
+    } as AppSettings;
+    renderRail({ files: THIRTEEN });
+    await focusOn(row("src/beta.ts"));
+    await user.keyboard(CHORD);
+    expect(lastPrevented("k")).toBe(true);
+    expect(document.activeElement).toBe(field());
   });
 
   it("R11 ignores a portalled node and focus outside the row", async () => {
@@ -1116,5 +1231,35 @@ describe("the field handoff", () => {
     await typeInA();
     swapTo({ show: "B" });
     fieldHoldsFocusAtEnd();
+  });
+});
+
+describe("a list hidden under focus", () => {
+  it("R23a a poll leaving nothing to match moves focus from a row action to the field", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith } = renderRail({ files: THIRTEEN, rowDialog: true });
+    await user.type(field(), "alpha");
+    const action = screen.getByRole("button", { name: "Row action" });
+    act(() => action.focus());
+    expect(document.activeElement).toBe(action);
+    rerenderWith({ files: F("x/none.ts"), rowDialog: true });
+    expect(screen.getByText("No files match the filter")).toBeTruthy();
+    expect(action.isConnected).toBe(true);
+    expect(document.activeElement).toBe(field());
+  });
+
+  it("R23b a row action's portalled dialog keeps focus as the list hides", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith } = renderRail({ files: THIRTEEN, rowDialog: true });
+    await user.type(field(), "alpha");
+    await user.click(screen.getByRole("button", { name: "Row action" }));
+    const dialogAction = screen.getByRole("button", { name: "Dialog action" });
+    act(() => dialogAction.focus());
+    expect(document.activeElement).toBe(dialogAction);
+    // Every prop is replaced, so the row action stays mounted only with it.
+    rerenderWith({ files: F("x/none.ts"), rowDialog: true });
+    expect(screen.getByText("No files match the filter")).toBeTruthy();
+    expect(dialogAction.isConnected).toBe(true);
+    expect(document.activeElement).toBe(dialogAction);
   });
 });

@@ -187,7 +187,7 @@ describe("PrCommitDetail file filter", () => {
     await expectOpen("src/file-15.ts");
   });
 
-  it("C-d: another commit's mount keeps the text and opens its first match; Enter notes the interaction", async () => {
+  it("C-d: another commit's mount keeps the text and opens its first match; Enter on it notes nothing", async () => {
     lists[A] = ["a/x.ts", "b/y.md"];
     lists[B] = ["c/one.md", "d/two.ts", "e/three.ts"];
     const user = userEvent.setup();
@@ -202,10 +202,41 @@ describe("PrCommitDetail file filter", () => {
     await user.click(field());
     const before = useUiStore.getState().interactionEpoch;
     await user.keyboard("{Enter}");
-    // Enter's pick goes through the component's own pick helper.
-    expect(useUiStore.getState().interactionEpoch).toBeGreaterThan(before);
+    // The first match is already the open file: the pick changes nothing.
+    expect(useUiStore.getState().interactionEpoch).toBe(before);
     expect(document.activeElement?.getAttribute("data-path")).toBe("d/two.ts");
     await expectOpen("d/two.ts");
+  });
+
+  it("C-n: the pin a keystroke makes moves no epoch; a pick that opens another file does", async () => {
+    lists[A] = ["src/a.ts", "src/b.md", "lib/c.ts"];
+    const user = userEvent.setup();
+    renderView(A);
+    await expectOpen("src/a.ts");
+    await user.click(field());
+    const before = useUiStore.getState().interactionEpoch;
+    await user.keyboard("lib");
+    expect(rendered()).toEqual(["lib/c.ts"]);
+    expect(openFile()).toBe("src/a.ts");
+    expect(useUiStore.getState().interactionEpoch).toBe(before);
+    await user.keyboard("{Enter}");
+    expect(useUiStore.getState().interactionEpoch).toBeGreaterThan(before);
+    await expectOpen("lib/c.ts");
+  });
+
+  it("C-o: a row click moves the epoch", async () => {
+    lists[A] = ["src/a.ts", "src/b.md"];
+    const user = userEvent.setup();
+    renderView(A);
+    await expectOpen("src/a.ts");
+    const before = useUiStore.getState().interactionEpoch;
+    await user.click(
+      rail().querySelector<HTMLElement>(
+        '[data-path="src/b.md"]',
+      ) as HTMLElement,
+    );
+    expect(useUiStore.getState().interactionEpoch).toBeGreaterThan(before);
+    await expectOpen("src/b.md");
   });
 
   it("C-k: an untouched list follows a new first file; a typed filter pins the open file", async () => {

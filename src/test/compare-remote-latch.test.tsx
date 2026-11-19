@@ -1,6 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ReactNode } from "react";
+import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
 import repositoryViewSource from "@/features/repository/RepositoryView.tsx?raw";
@@ -9,11 +17,13 @@ import {
   forgeStatus,
   gitBranches,
   gitCompareBranches,
+  gitCreateBranch,
   gitDefaultBranch,
   gitFetchRemote,
   gitRemoteBranches,
   gitRemotes,
   gitStatus,
+  gitTag,
 } from "@/lib/git/api";
 import type {
   Branch,
@@ -27,6 +37,7 @@ import type { ActionId } from "@/lib/hotkeys/registry";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
+import { liveLines, squash } from "./live-lines";
 
 // The dialog's own props are what these tests pin, so a stub reports them.
 vi.mock("@/features/pulls/CreatePrDialog", async (importOriginal) => ({
@@ -51,6 +62,14 @@ vi.mock("@/features/pulls/CreatePrDialog", async (importOriginal) => ({
     </div>
   ),
 }));
+vi.mock("@/features/history/HistoryDialogs", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/features/history/HistoryDialogs")
+  >()),
+  MergeParentDialog: (p: { target: { hash: string } | null }) => (
+    <div data-testid="merge-parent-dialog" data-target={p.target?.hash ?? ""} />
+  ),
+}));
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
@@ -66,6 +85,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   forgeStatus: vi.fn(),
   forgePrsForBranch: vi.fn(async () => []),
   gitFetchRemote: vi.fn(async () => undefined),
+  gitCreateBranch: vi.fn(async () => undefined),
+  gitTag: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/repo-lens/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/repo-lens/store")>()),
@@ -121,6 +142,74 @@ function renderPanel() {
 const parentButton = () =>
   screen.findByRole("button", { name: /Create pull request in parent…/ });
 const dialog = () => screen.getByTestId("pr-dialog");
+
+const headOn = (name: string, detached: boolean) =>
+  ({
+    branch: { name, detached, upstreamRemote: null, upstreamBranch: null },
+    files: [],
+  }) as unknown as RepoStatus;
+
+// Detaching HEAD swaps the main arm out; checking `feat` out again brings it
+// back. `whileOut` runs in between.
+async function swapArmOutAndBack(
+  client: QueryClient,
+  whileOut: () => void = () => undefined,
+) {
+  vi.mocked(gitStatus).mockResolvedValue(headOn("feat", true));
+  await act(() =>
+    client.refetchQueries({ queryKey: ["repo", REPO, "status"] }),
+  );
+  await screen.findByText("You're on a detached HEAD");
+  act(whileOut);
+  vi.mocked(gitStatus).mockResolvedValue(headOn("feat", false));
+  await act(() =>
+    client.refetchQueries({ queryKey: ["repo", REPO, "status"] }),
+  );
+}
+
+// Read by selector: an open modal hides the rows from role queries.
+const rowOf = (hash: string) => document.querySelector(`[data-row="${hash}"]`);
+const aheadRow = (hash = COMMIT.hash) =>
+  waitFor(() => {
+    const found = rowOf(hash);
+    if (!found) throw new Error("no ahead row");
+    return found;
+  });
+
+// Each row: the menu item, the dialog's title, its field's label, its submit
+// button, the command the submit runs and the toast that reports it.
+const CREATE_REFS: [
+  string,
+  string,
+  string,
+  string,
+  (...args: never[]) => Promise<void>,
+  string,
+][] = [
+  [
+    "Create branch from commit…",
+    "Create branch from commit",
+    "Branch name",
+    "Create branch",
+    gitCreateBranch,
+    "Created branch",
+  ],
+  [
+    "Create tag…",
+    "Create tag",
+    "Tag name",
+    "Create tag",
+    gitTag,
+    "Created tag",
+  ],
+];
+
+async function openCreateRef(item: string, title: string, hash: string) {
+  const user = userEvent.setup();
+  fireEvent.contextMenu(await aheadRow(hash));
+  await user.click(await screen.findByRole("menuitem", { name: item }));
+  expect(await screen.findByRole("dialog", { name: title })).toBeVisible();
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -186,6 +275,61 @@ describe("Compare Create PR dialog latch", () => {
     await user.click(screen.getByRole("button", { name: "Close stub" }));
     expect(dialog()).toHaveAttribute("data-open", "false");
     expect(dialog()).toHaveAttribute("data-target", "upstream");
+  });
+
+  it("closes when the main arm swaps out and stays closed when it returns", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    await user.click(await parentButton());
+    expect(dialog()).toHaveAttribute("data-open", "true");
+    vi.mocked(gitStatus).mockResolvedValue(headOn("feat", true));
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "status"] }),
+    );
+    await screen.findByText("You're on a detached HEAD");
+    vi.mocked(gitStatus).mockResolvedValue(headOn("dev", false));
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "status"] }),
+    );
+    await parentButton();
+    expect(screen.queryByRole("button", { name: "Close stub" })).toBeNull();
+    expect(dialog()).toHaveAttribute("data-open", "false");
+  });
+
+  it("drops the latched target when the arm swaps out and the pick moves", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    await user.click(await parentButton());
+    expect(dialog()).toHaveAttribute("data-target", "upstream");
+    await swapArmOutAndBack(client, () =>
+      useUiStore.setState({ compareBranch: "dev" }),
+    );
+    await screen.findByRole("button", { name: /^Create pull request…/ });
+    expect(dialog()).toHaveAttribute("data-open", "false");
+    expect(dialog()).toHaveAttribute("data-target", "");
+  });
+
+  it("closes the mainline-parent dialog when the arm swaps out", async () => {
+    vi.mocked(gitCompareBranches).mockResolvedValue({
+      ahead: [{ ...COMMIT, isMerge: true }],
+      behind: [],
+    });
+    const user = userEvent.setup();
+    const client = renderPanel();
+    const row = await waitFor(() => {
+      const found = document.querySelector(`[data-row="${COMMIT.hash}"]`);
+      if (!found) throw new Error("no ahead row");
+      return found;
+    });
+    fireEvent.contextMenu(row);
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Revert changes in commit" }),
+    );
+    const mergeDialog = () => screen.getByTestId("merge-parent-dialog");
+    expect(mergeDialog()).toHaveAttribute("data-target", COMMIT.hash);
+    await swapArmOutAndBack(client);
+    await parentButton();
+    expect(mergeDialog()).toHaveAttribute("data-target", "");
   });
 });
 
@@ -295,44 +439,63 @@ describe("Compare create hotkeys", () => {
 
 // Stands in for the two app-level create registrations in
 // src/features/repository/RepositoryView.tsx, gate included: `create-pr`
-// behind `canCreatePr`, `create-local-pr` always. The pin below ties the copy
-// to that file's text.
-function AppCreateHotkeys({ canCreatePr }: { canCreatePr: boolean }) {
+// behind `canCreatePr`, `create-local-pr` always. It wraps the panel as
+// RepositoryView does, so registrations run in the app's parent-child order.
+// The pins below tie the copy, and the gate's definition, to that file's text.
+function AppCreateHotkeys({
+  canCreatePr,
+  children,
+}: {
+  canCreatePr: boolean;
+  children: ReactNode;
+}) {
   const requestCreate = useUiStore((s) => s.requestCreate);
   useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
   useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
-  return null;
+  return children;
 }
 
 describe("Compare create hotkeys stand-in (source pin)", () => {
-  // White space is the only freedom: any other change to either line means
-  // the stand-in above no longer mirrors the app. Each must be a whole live
-  // line, so a `//` line or a line inside a block comment never counts.
-  const squash = (s: string) => s.replace(/\s+/g, "");
-  const liveLines = (source: string) => {
-    const lines: string[] = [];
-    let inBlock = false;
-    for (const raw of source.split(/\r?\n/)) {
-      const text = raw.trim();
-      if (inBlock) {
-        if (text.includes("*/")) inBlock = false;
-        continue;
-      }
-      if (/^\{?\/\*/.test(text)) {
-        inBlock = !text.includes("*/");
-        continue;
-      }
-      lines.push(squash(text));
-    }
-    return lines;
-  };
-
-  it.each([
+  // White space is the only freedom: any other change to one of these lines
+  // means the stand-in above no longer mirrors the app. Each must be a whole
+  // live line (see ./live-lines).
+  const PINNED = [
     'useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);',
     'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));',
-  ])("RepositoryView.tsx still registers %s", (line) => {
+    'const canCreatePr = forgeFeatureReady(gh.data, "mrCreate");',
+  ];
+  const holds = (source: string, line: string) =>
+    liveLines(source).includes(squash(line));
+
+  it.each(PINNED)("RepositoryView.tsx still holds %s", (line) => {
     // A boolean, so a miss doesn't print the whole file.
-    expect(liveLines(repositoryViewSource).includes(squash(line))).toBe(true);
+    expect(holds(repositoryViewSource, line)).toBe(true);
+  });
+
+  it("fails the gate pin when the gate's definition changes", () => {
+    const gate = PINNED[2];
+    const ungated = repositoryViewSource.replace(
+      'forgeFeatureReady(gh.data, "mrCreate");',
+      "true;",
+    );
+    expect(ungated).not.toBe(repositoryViewSource);
+    expect(holds(ungated, gate)).toBe(false);
+  });
+
+  const LINE = PINNED[1];
+  it.each<[string, string, boolean]>([
+    ["a bare line", LINE, true],
+    ["a line comment", `// ${LINE}`, false],
+    ["a block comment opening its own line", `/*\n${LINE}\n*/`, false],
+    ["a one-line JSX comment", `{/* ${LINE} */}`, false],
+    ["a multi-line JSX comment", `{/*\n${LINE}\n*/}`, false],
+    ["a block comment opened after code", `foo(); /*\n${LINE}\n*/`, false],
+    ["a trailing line comment", `${LINE} // note`, true],
+    ["a leading closed block comment", `/* c */ ${LINE}`, true],
+    ["a glob string before it", `const g = "src/**/*.ts";\n${LINE}`, true],
+    ["a block comment with CRLF endings", `/*\r\n${LINE}\r\n*/`, false],
+  ])("liveLines reads %s as live: %s", (_name, fixture, live) => {
+    expect(liveLines(fixture).includes(squash(LINE))).toBe(live);
   });
 });
 
@@ -351,12 +514,14 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <AppCreateHotkeys canCreatePr={canCreatePr} />
-        <TabPanel active>
-          <ComparePanel repoPath={REPO} />
-        </TabPanel>
+        <AppCreateHotkeys canCreatePr={canCreatePr}>
+          <TabPanel active>
+            <ComparePanel repoPath={REPO} />
+          </TabPanel>
+        </AppCreateHotkeys>
       </QueryClientProvider>,
     );
+    return client;
   }
 
   const localButton = () =>
@@ -430,4 +595,249 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
     expect(useUiStore.getState().repoTab).toBe("compare");
     expect(useUiStore.getState().pendingCreate).toBeNull();
   });
+
+  it("hands both to the app entries while the main arm is swapped out", async () => {
+    const client = renderWithApp(true);
+    await waitFor(async () =>
+      expect(await localButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    // The pick is archived and was the last alternative: the empty arm shows
+    // while the pick and its cached comparison survive.
+    vi.mocked(gitBranches).mockResolvedValue([
+      branch("feat", true),
+      { ...branch("main"), archived: true },
+    ]);
+    vi.mocked(gitRemoteBranches).mockResolvedValue([]);
+    // The remote read is off while a local branch is offered: marked stale
+    // now, it re-reads when the archive turns it on.
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["repo", REPO, "remote-branches"] }),
+    );
+    await act(() => client.refetchQueries({ queryKey: ["repo", REPO] }));
+    await screen.findByText("No other branches");
+    expect(useUiStore.getState().compareBranch).toBe("main");
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+    act(() => {
+      expect(dispatchAction("create-local-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().pendingCreate).toBe("local-pr");
+    expect(useUiStore.getState().localPrCreate).toBeNull();
+    act(() => useUiStore.setState({ pendingCreate: null, repoTab: "compare" }));
+    act(() => {
+      expect(dispatchAction("create-pr")).toBe(true);
+    });
+    expect(useUiStore.getState().pendingCreate).toBe("pr");
+    vi.mocked(gitBranches).mockResolvedValue([
+      branch("feat", true),
+      branch("main"),
+    ]);
+    await act(() => client.refetchQueries({ queryKey: ["repo", REPO] }));
+    await localButton();
+    expect(dialogOpen()).toBe("false");
+  });
+});
+
+describe("Compare create-ref dialogs across a repository switch", () => {
+  const OTHER = "C:/other";
+
+  function mount(repo: string) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const ui = (shown: string) => (
+      <QueryClientProvider client={client}>
+        <TabPanel active>
+          <ComparePanel repoPath={shown} />
+        </TabPanel>
+      </QueryClientProvider>
+    );
+    const view = render(ui(repo));
+    return { client, show: (shown: string) => view.rerender(ui(shown)) };
+  }
+
+  // A switch remounts the keyed commit menu's list, whose scroll area settles
+  // on a timer; let it land inside act before the test ends.
+  const flushRemount = () => act(() => new Promise((r) => setTimeout(r, 20)));
+
+  // OTHER is read first (the git mocks ignore the repository), so a later
+  // switch to it serves every read from the cache and the main arm never
+  // leaves: only the repository guard can close a dialog there.
+  async function mountWarm() {
+    const app = mount(OTHER);
+    await aheadRow();
+    app.show(REPO);
+    await aheadRow();
+    return app;
+  }
+
+  it.each(CREATE_REFS)(
+    "%s closes on a repo switch and stays closed",
+    async (item, title) => {
+      const app = mount(REPO);
+      await openCreateRef(item, title, COMMIT.hash);
+      for (const repo of [OTHER, REPO]) {
+        app.show(repo);
+        await aheadRow();
+        await waitFor(() =>
+          expect(screen.queryByRole("dialog", { name: title })).toBeNull(),
+        );
+      }
+    },
+  );
+
+  it.each(CREATE_REFS)(
+    "%s closes on a switch to a cached repo",
+    async (item, title) => {
+      const app = await mountWarm();
+      await openCreateRef(item, title, COMMIT.hash);
+      act(() => app.show(OTHER));
+      expect(rowOf(COMMIT.hash)).not.toBeNull();
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: title })).toBeNull(),
+      );
+    },
+  );
+
+  it.each(CREATE_REFS)(
+    "%s keeps its typed name across an arm swap in one repo",
+    async (item, title, field) => {
+      const app = mount(REPO);
+      await openCreateRef(item, title, COMMIT.hash);
+      const user = userEvent.setup();
+      await user.type(screen.getByRole("textbox", { name: field }), "topic");
+      await swapArmOutAndBack(app.client);
+      expect(await screen.findByRole("dialog", { name: title })).toBeVisible();
+      expect(screen.getByRole("textbox", { name: field })).toHaveValue("topic");
+    },
+  );
+
+  it("closes the mainline-parent dialog on a switch to a cached repo", async () => {
+    vi.mocked(gitCompareBranches).mockResolvedValue({
+      ahead: [{ ...COMMIT, isMerge: true }],
+      behind: [],
+    });
+    const app = await mountWarm();
+    const user = userEvent.setup();
+    fireEvent.contextMenu(await aheadRow());
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Revert changes in commit" }),
+    );
+    const mergeDialog = () => screen.getByTestId("merge-parent-dialog");
+    expect(mergeDialog()).toHaveAttribute("data-target", COMMIT.hash);
+    act(() => app.show(OTHER));
+    expect(rowOf(COMMIT.hash)).not.toBeNull();
+    expect(mergeDialog()).toHaveAttribute("data-target", "");
+    await flushRemount();
+  });
+
+  it("closes an open commit menu on a switch to a cached repo", async () => {
+    const app = await mountWarm();
+    fireEvent.contextMenu(await aheadRow());
+    expect(
+      await screen.findByRole("menuitem", { name: "Create tag…" }),
+    ).toBeInTheDocument();
+    act(() => app.show(OTHER));
+    expect(rowOf(COMMIT.hash)).not.toBeNull();
+    expect(screen.queryAllByRole("menuitem", { hidden: true })).toEqual([]);
+    expect(screen.queryByRole("menu", { hidden: true })).toBeNull();
+    await flushRemount();
+  });
+});
+
+describe("Compare create-ref dialogs when a create settles", () => {
+  const SECOND = {
+    ...COMMIT,
+    hash: "c".repeat(40),
+    subject: "more ahead work",
+  } as CommitSummary;
+
+  beforeEach(() => {
+    vi.mocked(gitCompareBranches).mockResolvedValue({
+      ahead: [COMMIT, SECOND],
+      behind: [],
+    });
+    vi.spyOn(toast, "success");
+  });
+
+  // The next submit's command stays pending until the returned settle runs.
+  function holdNext(command: (...args: never[]) => Promise<void>) {
+    let settle!: () => void;
+    vi.mocked(command).mockReturnValueOnce(
+      new Promise<void>((r) => {
+        settle = r;
+      }),
+    );
+    return settle;
+  }
+
+  async function submitHeld(
+    item: string,
+    title: string,
+    field: string,
+    submit: string,
+    command: (...args: never[]) => Promise<void>,
+  ) {
+    const settle = holdNext(command);
+    renderPanel();
+    await openCreateRef(item, title, COMMIT.hash);
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("textbox", { name: field }), "first");
+    await user.click(screen.getByRole("button", { name: submit }));
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
+    return { user, settle };
+  }
+
+  // Waits past the settle's toast, so a close it ran has had time to land.
+  async function settleAndReport(settle: () => void, toastLine: string) {
+    await act(async () => settle());
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(`${toastLine} first`),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 20)));
+  }
+
+  it.each(CREATE_REFS)(
+    "%s closes when its own create settles",
+    async (item, title, field, submit, command, toastLine) => {
+      const { settle } = await submitHeld(item, title, field, submit, command);
+      await settleAndReport(settle, toastLine);
+      expect(screen.queryByRole("dialog", { name: title })).toBeNull();
+    },
+  );
+
+  // Submits "first" on the first commit, cancels, reopens on `reopenOn` and
+  // types "second" before the held create settles.
+  async function reopenThenSettle(
+    [item, title, field, submit, command, toastLine]: (typeof CREATE_REFS)[0],
+    reopenOn: string,
+  ) {
+    const { user, settle } = await submitHeld(
+      item,
+      title,
+      field,
+      submit,
+      command,
+    );
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: title })).toBeNull(),
+    );
+    await openCreateRef(item, title, reopenOn);
+    await user.type(screen.getByRole("textbox", { name: field }), "second");
+    await settleAndReport(settle, toastLine);
+    expect(screen.getByRole("dialog", { name: title })).toHaveTextContent(
+      reopenOn.slice(0, 7),
+    );
+    expect(screen.getByRole("textbox", { name: field })).toHaveValue("second");
+  }
+
+  it.each(CREATE_REFS)(
+    "%s settling late leaves a dialog reopened on another commit open",
+    (...row) => reopenThenSettle(row, SECOND.hash),
+  );
+
+  it.each(CREATE_REFS)(
+    "%s settling late leaves a dialog reopened on the same commit open",
+    (...row) => reopenThenSettle(row, COMMIT.hash),
+  );
 });

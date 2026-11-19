@@ -234,12 +234,15 @@ interface PrunedRecord {
  * pick's canonical remote now, which the reconnect fetches: a pick parked under
  * a fallback split may resolve to another remote once the remotes list answers.
  * `currentPickListed`: the last successful remote-branch read lists that pick.
+ * `currentPickRemoteGone`: a successful remotes read does not list that pick's
+ * remote.
  */
 export function useCompareRemoteFetch(
   repoPath: string,
   currentPick: string | null,
   currentPickRemote: string | null,
   currentPickListed: boolean,
+  currentPickRemoteGone: boolean,
 ) {
   const queryClient = useQueryClient();
   const [stamp, setStamp] = useState<CompareFetchStamp | null>(null);
@@ -267,12 +270,18 @@ export function useCompareRemoteFetch(
     setPrunedRecord(null);
   }
   // The record describes only the pick as it resolves now, and only while the
-  // list still lacks it: another pick or remote, or a listing read, retires it.
+  // list still lacks it and its remote is still listed: another pick or remote,
+  // a listing read, or a successful remotes read without the remote retires it,
+  // so a remote removed and re-added under the same name keeps no record once
+  // a read has seen the removal; one no read observed keeps it. A transient
+  // read that drops the remote costs a true record; the line then falls back
+  // to the weaker "no longer in your remote branches".
   const prunedStale =
     prunedRecord !== null &&
     (prunedRecord.pickedValue !== currentPick ||
       prunedRecord.remote !== currentPickRemote ||
-      currentPickListed);
+      currentPickListed ||
+      currentPickRemoteGone);
   if (prunedStale) setPrunedRecord(null);
   const prunedByFetch =
     !prunedStale &&

@@ -258,6 +258,21 @@ describe("BranchDiffView file filter", () => {
     expect(rendered()).toEqual([]);
   });
 
+  it("the status empties when the next comparison fails to load", async () => {
+    lists.one = ["a/x.ts", "b/y.ts", "c/z.md"];
+    const failed = Promise.reject({ kind: "git", message: "boom" });
+    failed.catch(() => undefined);
+    lists.two = failed;
+    const user = userEvent.setup();
+    const { switchTo } = renderView("one");
+    await expectOpen("a/x.ts");
+    await user.type(field(), "t");
+    expect(status()?.textContent).toBe("Showing 2 of 3 files");
+    switchTo("two");
+    await screen.findByText("Could not compare these branches");
+    expect(status()?.textContent).toBe("");
+  });
+
   it("C-i: the compare surface claims Mod+F tab-wide; surfaces keep separate text", async () => {
     lists.one = THIRTEEN;
     const user = userEvent.setup();
@@ -306,6 +321,18 @@ describe("BranchDiffView file filter", () => {
     await refetch();
     await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull());
     expect(document.activeElement).toBe(outside);
+  });
+
+  it("C-l: the list emptying leaves focus on <body> when the list never held it", async () => {
+    lists.one = THIRTEEN;
+    const { refetch } = renderView("one");
+    await expectOpen("src/alpha.ts");
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    expect(document.activeElement).toBe(document.body);
+    lists.one = [];
+    await refetch();
+    await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull());
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("C-l: a new comparison settling empty under a focused placeholder row lands focus on the host", async () => {

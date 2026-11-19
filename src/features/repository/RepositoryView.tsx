@@ -991,7 +991,11 @@ export function RepositoryView() {
           </TabPanel>
           <TabPanel active={repoTab === "history"}>
             {deferredCommitHash ? (
-              <CommitDetailView repoPath={repoPath} hash={deferredCommitHash} />
+              <CommitDetailView
+                repoPath={repoPath}
+                hash={deferredCommitHash}
+                filterSurface="history"
+              />
             ) : (
               <DiffPlaceholder
                 icon={GitCommitIcon}

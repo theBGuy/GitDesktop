@@ -685,20 +685,25 @@ and table row are the reference).
 - A file rail's filter rides `DetailRail`'s `filter` prop
   (`src/components/detail-rail.tsx`), built only by `useFileListFilter`
   (`src/components/use-file-list-filter.ts`), and renders its field in the
-  caret strip. With a filter, the strip and the collapsed caret box share one
-  taller box (the diff path row's 41px) from the one `FILTER_BOX_Y` value, so
-  the caret holds its height in both branches; without one, both stay `h-7`. A
-  consumer derives its rendered rows, its `listKeyboardNav` items and its open
-  path from the hook (`visible`, `activeIndex`, `openPath`), never from the
-  full list, and renders `DetailRailFilterStatus` outside its own `aria-busy`
-  wrapper. A rail without a filter may still pass one short line (a count)
-  through `header`; never a first-child band inside `children`: the strip is
-  already a bordered row, so a band under it stacks a second border and spends
-  vertical space the list wants. When a whole rail goes away with its field
-  focused, a same-scope rail mounting in that commit takes the field over by
-  itself (the module's `fieldHandoff`, cleared by a microtask); a host that
-  swaps views of different types adds its own change-only landing for the rest
-  (`SessionChanges` in `src/features/sessions/SessionView.tsx`).
+  caret strip. With a filter, the strip and the collapsed caret box wrap an
+  `h-7` line in the same `FILTER_BOX_Y` padding, so the caret sits at the
+  same height in both branches: the expanded strip adds its bottom border
+  (41px, matching the diff path row) and the collapsed box has none (40px);
+  without one, both stay `h-7`. A consumer derives its rendered rows, its
+  `listKeyboardNav` items and its open path from the hook (`visible`,
+  `activeIndex`, `openPath`), never from the full list, and renders
+  `DetailRailFilterStatus` outside its own `aria-busy` wrapper. A rail
+  without a filter may still pass one short line (a count) through `header`;
+  never a first-child band inside `children`: the strip is already a bordered
+  row, so a band under it stacks a second border and spends vertical space
+  the list wants. When a whole rail goes away with its field focused, a
+  same-scope rail mounting in that commit takes focus over by itself, onto
+  its field, or onto its caret when it mounts collapsed (the module's
+  `fieldHandoff`, cleared by a microtask; only while focus fell to
+  `<body>`); a host that swaps views of different types lands the rest with
+  `useRetryFocusRescue`, one instance per view on a keyed `contents` wrapper,
+  so focus moves only when it was inside the view that left (`SessionChanges`
+  in `src/features/sessions/SessionView.tsx`).
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.

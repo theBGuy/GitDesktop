@@ -137,15 +137,23 @@ export function PrCommitDetail({
     useUiStore.getState().noteUserInteraction();
     setSelectedPath(path);
   };
-  // The filter's pin before a text edit is a user pick too: it is made inside
-  // the user's own keystroke.
+  const openPathRef = useRef<string | null>(null);
+  // Through the filter, only a pick that moves the open file (as last committed)
+  // is noted: its pin before a text edit keeps it, and a draft moves no epoch.
   const filter = useFileListFilter({
     ...FILE_FILTER_SURFACES["pr-commits"],
     files,
     settled: diff.data !== undefined,
     picked: selectedPath,
-    onPick: pickPath,
+    onPick: (path) => {
+      if (path !== openPathRef.current)
+        useUiStore.getState().noteUserInteraction();
+      setSelectedPath(path);
+    },
   });
+  useLayoutEffect(() => {
+    openPathRef.current = filter.openPath;
+  }, [filter.openPath]);
   // The user's pick, else the first match under a filter, else the first file
   // (derived, so there's no empty-selection frame while an effect catches up).
   const effectivePath = filter.openPath;

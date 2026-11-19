@@ -93,11 +93,13 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
   const [measureRef, width] = useContainerWidth<HTMLDivElement>();
   // State, not a ref: the row's tab stop follows whether a filter rail is in it.
   const [focusFilter, setFocusFilter] = useState<(() => void) | null>(null);
-  const binding = useEffectiveBindings().get("focus-filter") ?? null;
+  const bindings = useEffectiveBindings();
+  const binding = bindings.get("focus-filter") ?? null;
   // Focus anywhere in the row (rail or diff) sends the filter shortcut to this
   // rail's field, under the global listener's guards (a subset of what it would
   // dispatch, so a key a child already consumed stays that child's); the
-  // listener then skips the prevented event.
+  // listener then skips the prevented event. A chord several actions share
+  // belongs to the first holder in the bindings map, as in the listener.
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (focusFilter === null || binding === null || e.repeat) return;
     if (e.defaultPrevented) return;
@@ -105,6 +107,11 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
     if (!(e.target instanceof Node) || !e.currentTarget.contains(e.target))
       return;
     if (eventToBinding(e) !== binding) return;
+    for (const [id, held] of bindings) {
+      if (held !== binding) continue;
+      if (id !== "focus-filter") return;
+      break;
+    }
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
     if (
       !hasModifier(binding) &&
@@ -189,8 +196,11 @@ export function DetailRail({
   // a second meaning of `refocus`. Armed only by a "focus the filter" that
   // issued a flip; cleared by the caret, the rollback and the hide/unmount
   // cleanup; consumed by the same commits as `refocus`.
-  const fieldClaim = useRef(false);
-  // The last node inside the rail that took focus, for the removal rescue.
+  // It holds the element focused at the press, and the field takes focus only
+  // from that element or from <body> (the expansion removed it): a focus move
+  // made before the expanding commit is the user's, and stays.
+  const fieldClaim = useRef<Element | null>(null);
+  // The last node inside the rail that took focus, for the rescue effect.
   const heldNode = useRef<HTMLElement | null>(null);
   const wasActive = useRef(filter?.active ?? false);
 
@@ -219,7 +229,7 @@ export function DetailRail({
       // Re-armed for the rollback's own commit, only while the rail still holds
       // focus — a user who has moved on must not have it stolen back. A field
       // claim dies here: the expand it waited for was just undone.
-      fieldClaim.current = false;
+      fieldClaim.current = null;
       refocus.current =
         !narrow && railRef.current?.contains(document.activeElement)
           ? !previous.diffFileListCollapsed
@@ -249,7 +259,7 @@ export function DetailRail({
   const toggle = () => {
     const held = Boolean(railRef.current?.contains(document.activeElement));
     refocus.current = null;
-    fieldClaim.current = false;
+    fieldClaim.current = null;
     if (narrow) {
       refocus.current = held ? !transientExpand : null;
       setTransientExpand((prev) => !prev);
@@ -269,7 +279,7 @@ export function DetailRail({
       fieldRef.current?.select();
       return;
     }
-    fieldClaim.current = true;
+    fieldClaim.current = document.activeElement ?? document.body;
     if (narrow) setTransientExpand(true);
     else flipCollapsePref(false);
   };
@@ -291,11 +301,14 @@ export function DetailRail({
   useLayoutEffect(() => {
     const claimed = fieldClaim.current;
     const pending = refocus.current;
-    fieldClaim.current = false;
+    fieldClaim.current = null;
     refocus.current = null;
-    if (claimed && expanded) {
-      fieldRef.current?.focus();
-      fieldRef.current?.select();
+    if (claimed !== null && expanded) {
+      const active = document.activeElement;
+      if (active === document.body || active === claimed) {
+        fieldRef.current?.focus();
+        fieldRef.current?.select();
+      }
       return;
     }
     if (pending === null) return;
@@ -321,7 +334,7 @@ export function DetailRail({
       }
     }
     return () => {
-      fieldClaim.current = false;
+      fieldClaim.current = null;
       heldNode.current = null;
       const leaving = handoffScope.current;
       const field = fieldRef.current;
@@ -351,14 +364,29 @@ export function DetailRail({
       ?.scrollIntoView({ block: "nearest" });
   });
 
+  // A zero-file list keeps the caller's own list area: nothing is hidden there.
+  const nothingMatches =
+    filter !== undefined &&
+    filter.active &&
+    filter.matchCount === 0 &&
+    filter.totalCount > 0;
+
   // A focused node the rail removed (a row the list dropped, the field on a
-  // width collapse) would leave focus on <body>: land it on the field, else the
-  // caret. Runs after the arm above, which may already have placed focus.
+  // width collapse) or hid inside the list while nothing matches lands on the
+  // field, else the caret. Only from <body> or that hidden node: a row action's
+  // portalled menu or dialog keeps focus. Runs after the arm above.
   useLayoutEffect(() => {
     const node = heldNode.current;
-    if (node === null || node.isConnected) return;
+    if (node === null) return;
+    const hidden = node.isConnected;
+    if (hidden && !(nothingMatches && listRef.current?.contains(node))) return;
     heldNode.current = null;
-    if (!filter || !panelActive || document.activeElement !== document.body)
+    const active = document.activeElement;
+    if (
+      !filter ||
+      !panelActive ||
+      (active !== document.body && !(hidden && active === node))
+    )
       return;
     (fieldRef.current ?? toggleRef.current)?.focus();
   });
@@ -454,12 +482,6 @@ export function DetailRail({
       <CaretLeftIcon />
     </Button>
   );
-  // A zero-file list keeps the caller's own list area: nothing is hidden there.
-  const nothingMatches =
-    filter !== undefined &&
-    filter.active &&
-    filter.matchCount === 0 &&
-    filter.totalCount > 0;
   // The x and the empty state's button unmount as the text empties, so focus
   // moves to the field (the same node throughout) in the same handler.
   const clearFilter = () => {
@@ -604,7 +626,7 @@ interface FilterStatusState {
   text: string;
   /** Whether the filter was active at the last settled render. */
   active: boolean;
-  /** The list total `text` was built from. */
+  /** The list total at the last settled render. */
   total: number;
 }
 
@@ -642,8 +664,13 @@ function nextFilterStatus(
  */
 export function DetailRailFilterStatus({
   filter,
+  blank = false,
 }: {
   filter: DetailRailFilter;
+  /** The consumer's error arm is shown. The status empties and forgets the
+   *  filter, so a list that settles later announces its counts once; other
+   *  non-list arms keep the text, which the next settled list replaces. */
+  blank?: boolean;
 }) {
   const [status, setStatus] = useState<FilterStatusState>({
     text: "",
@@ -654,8 +681,10 @@ export function DetailRailFilterStatus({
   // placeholder's rows are another identity's, so its counts are never
   // announced, and an edge crossed meanwhile lands on the next settled render.
   // The guard compares every field, so the render after a store stores nothing.
-  if (filter.settled) {
-    const next = nextFilterStatus(status, filter);
+  if (blank || filter.settled) {
+    const next = blank
+      ? { text: "", active: false, total: status.total }
+      : nextFilterStatus(status, filter);
     if (
       next.text !== status.text ||
       next.active !== status.active ||

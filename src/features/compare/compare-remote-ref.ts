@@ -217,13 +217,15 @@ function remoteRank(remote: string): number {
  * is known each row is re-split against it first, so it stays congruent with
  * `parseRemoteCompareValue` when this list and the backend's read differ (a
  * remote added or removed between them), and the HEAD filter covers that
- * window; without a list the backend's split stands.
+ * window; without a list the backend's split stands. A row is a session branch
+ * when either split names one, since a stale list can prefix the backend's name.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
   remotes?: readonly string[],
 ): RemoteCompareRow[] {
   return (remoteBranches ?? [])
+    .filter((b) => !isSessionBranchName(b.name))
     .map((b) => ({
       ...(remotes === undefined
         ? b
@@ -261,10 +263,14 @@ export const GONE_PICK_COPY: Record<
   "pruned" | "remote-gone" | "missing",
   (remote: string, name: string) => string
 > = {
-  // Only after this pick's own successful fetch of `remote` left it unlisted.
+  // Only while the record of this pick's own successful fetch of `remote`
+  // leaving the ref unlisted is still live (`prunedStale` retires it, as when
+  // a render since it was written saw a successful remotes read without
+  // `remote`), and a successful remotes read lists `remote` now.
   pruned: (remote, name) => `${remote}/${name} was deleted on ${remote}.`,
   "remote-gone": (remote) => `${remote} is no longer a remote.`,
-  // The ref is unlisted and no successful remotes read or fetch says why.
+  // Every other unlisted pick whose remote isn't known gone: no such fetch
+  // record, the record was retired, or the remotes read hasn't succeeded.
   missing: (remote, name) =>
     `${remote}/${name} is no longer in your remote branches.`,
 };

@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
@@ -522,5 +529,221 @@ describe("Compare picker colliding local row", () => {
     await waitFor(() =>
       expect(useUiStore.getState().compareBranch).toBe("next"),
     );
+  });
+});
+
+describe("Compare picker twin cue (closed trigger)", () => {
+  async function pickTwin(
+    user: ReturnType<typeof userEvent.setup>,
+    kind: "Local" | "Remote",
+    row: RegExp = /^origin\/x/,
+    shown = "main",
+  ) {
+    const list = await openPicker(user, shown);
+    await user.click(
+      await within(group(list, kind)).findByRole("option", { name: row }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("listbox", { name: "Branches to compare with" }),
+      ).toBeNull(),
+    );
+  }
+
+  it("says remote after the Remote twin", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await pickTwin(user, "Remote");
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*remote$/),
+    );
+  });
+
+  it("says local after the Local twin", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await pickTwin(user, "Local");
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*local$/),
+    );
+  });
+
+  it("tells the two twin picks apart", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await pickTwin(user, "Local");
+    await waitFor(() =>
+      expect(useUiStore.getState().compareBranch).toBe("origin/x"),
+    );
+    const local = trigger().textContent;
+    await pickTwin(user, "Remote", /^origin\/x/, "origin/x");
+    await waitFor(() =>
+      expect(useUiStore.getState().compareBranch).toBe("refs/remotes/origin/x"),
+    );
+    const remote = trigger().textContent;
+    expect(local).not.toBe(remote);
+  });
+
+  it("keeps a pick with no twin to its bare name span", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await pickTwin(user, "Remote", /^origin\/y/);
+    await waitFor(() =>
+      expect(useUiStore.getState().compareBranch).toBe("refs/remotes/origin/y"),
+    );
+    expect(trigger().textContent).toBe("origin/y");
+    expect(trigger().firstElementChild?.childElementCount).toBe(0);
+    await pickTwin(user, "Local", /^main/, "origin/y");
+    expect(trigger().textContent).toBe("main");
+    expect(trigger().firstElementChild?.childElementCount).toBe(0);
+  });
+
+  it("puts the word right after the name, in one box with it", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await pickTwin(user, "Remote");
+    const word = await within(trigger()).findByText("remote");
+    const box = trigger().firstElementChild;
+    expect(word.parentElement).toBe(box);
+    const name = within(trigger()).getByText("origin/x");
+    expect(name.parentElement).toBe(box);
+    expect(
+      name.compareDocumentPosition(word) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // The comma is for AT only and the word never gives way to the name.
+    expect(within(box as HTMLElement).getByText(",")).toHaveClass("sr-only");
+    expect(word).toHaveClass("shrink-0");
+    expect(word).not.toHaveClass("sr-only");
+    expect(word.closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it("drops a clipped name's tooltip when the pick changes under the pointer", async () => {
+    renderPanel();
+    await waitFor(() => expect(trigger()).toHaveTextContent("main"));
+    const plain = trigger().firstElementChild as HTMLElement;
+    Object.defineProperty(plain, "scrollWidth", { value: 200 });
+    Object.defineProperty(plain, "clientWidth", { value: 100 });
+    fireEvent.mouseEnter(plain);
+    expect(plain).toHaveAttribute("title", "main");
+    // No new mouseenter: the pointer rests while the value changes.
+    act(() => useUiStore.setState({ compareBranch: "refs/remotes/origin/y" }));
+    await waitFor(() => expect(trigger().textContent).toBe("origin/y"));
+    expect(trigger().firstElementChild).not.toHaveAttribute("title");
+  });
+
+  it("marks a remote twin with no remote rows read", async () => {
+    useUiStore.setState({ compareBranch: "refs/remotes/origin/x" });
+    vi.mocked(gitRemoteBranches).mockResolvedValue([]);
+    renderPanel();
+    await screen.findByText("origin/x is no longer in your remote branches.", {
+      selector: "p[role=status]",
+    });
+    expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*remote$/);
+  });
+
+  it("drops a clipped name's tooltip when the twin box replaces the span", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await waitFor(() => expect(trigger()).toHaveTextContent("main"));
+    const plain = trigger().firstElementChild as HTMLElement;
+    Object.defineProperty(plain, "scrollWidth", { value: 200 });
+    Object.defineProperty(plain, "clientWidth", { value: 100 });
+    fireEvent.mouseEnter(plain);
+    expect(plain).toHaveAttribute("title", "main");
+    await pickTwin(user, "Remote");
+    await waitFor(() => expect(trigger()).toHaveTextContent(/remote$/));
+    expect(trigger().firstElementChild).not.toHaveAttribute("title");
+  });
+
+  it("drops a clipped name's tooltip when one twin pick replaces another", async () => {
+    vi.mocked(gitBranches).mockResolvedValue([
+      branch("feat", day(9), true),
+      branch("main", day(8)),
+      branch("origin/x", day(7)),
+      branch("origin/y", day(6)),
+    ]);
+    useUiStore.setState({ compareBranch: "refs/remotes/origin/x" });
+    renderPanel();
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*remote$/),
+    );
+    const name = within(trigger()).getByText("origin/x");
+    Object.defineProperty(name, "scrollWidth", { value: 200 });
+    Object.defineProperty(name, "clientWidth", { value: 100 });
+    fireEvent.mouseEnter(name);
+    expect(name).toHaveAttribute("title", "origin/x");
+    // No new mouseenter: the pointer rests while the value changes.
+    act(() => useUiStore.setState({ compareBranch: "refs/remotes/origin/y" }));
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/y\s*,\s*remote$/),
+    );
+    expect(within(trigger()).getByText("origin/y")).not.toHaveAttribute(
+      "title",
+    );
+  });
+
+  it("never turns the remote read on for a stored local twin", async () => {
+    // The gate's no-local-branch arm holds while the branch list loads, so a
+    // cold mount reads once; after that only an enabled read is refetched.
+    useUiStore.setState({ compareBranch: "origin/x" });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={client}>
+        <ComparePanel repoPath={REPO} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(trigger()).toHaveTextContent("origin/x"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    const reads = vi.mocked(gitRemoteBranches).mock.calls.length;
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["repo", REPO, "remote-branches"] }),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(vi.mocked(gitRemoteBranches).mock.calls.length).toBe(reads);
+    await openPicker(user, "origin/x");
+    await waitFor(() =>
+      expect(vi.mocked(gitRemoteBranches).mock.calls.length).toBe(reads + 1),
+    );
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*local$/),
+    );
+  });
+
+  it("marks a remote pick named like the current branch", async () => {
+    vi.mocked(gitStatus).mockResolvedValue(statusOf("origin/x"));
+    vi.mocked(gitBranches).mockResolvedValue([
+      branch("origin/x", day(9), true),
+      branch("main", day(8)),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await pickTwin(user, "Remote");
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*remote$/),
+    );
+  });
+
+  it("drops the local word once the remote twin leaves the list", async () => {
+    useUiStore.setState({ compareBranch: "origin/x" });
+    const user = userEvent.setup();
+    renderPanel();
+    await openPicker(user, "origin/x");
+    await waitFor(() =>
+      expect(trigger()).toHaveTextContent(/^origin\/x\s*,\s*local$/),
+    );
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("listbox", { name: "Branches to compare with" }),
+      ).toBeNull(),
+    );
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      remote("origin", "y", day(3)),
+    ]);
+    await user.click(trigger());
+    await waitFor(() => expect(trigger().textContent).toBe("origin/x"));
   });
 });

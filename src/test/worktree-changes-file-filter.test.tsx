@@ -195,6 +195,9 @@ describe("WorktreeChangesView file filter", () => {
     await poll();
     await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull());
     expect(document.activeElement).toBe(landing());
+    expect(document.activeElement).toBe(
+      screen.getByRole("group", { name: "Changes" }),
+    );
 
     paths = ["a.ts", "b.ts"];
     await poll();
@@ -216,6 +219,49 @@ describe("WorktreeChangesView file filter", () => {
     await poll();
     await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull());
     expect(document.activeElement).toBe(outside);
+  });
+
+  it("C-l: a poll emptying the list leaves focus on <body> when the row never held it", async () => {
+    paths = ["a.ts", "b.ts"];
+    const { poll } = renderView();
+    await expectOpen("a.ts");
+    expect(document.activeElement).toBe(document.body);
+    paths = [];
+    await poll();
+    await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull());
+    expect(document.activeElement).toBe(document.body);
+
+    paths = ["a.ts", "b.ts"];
+    await poll();
+    await waitFor(() => expect(rendered()).toEqual(["a.ts", "b.ts"]));
+    const row = rail().parentElement as HTMLElement;
+    act(() => row.focus());
+    expect(document.activeElement).toBe(row);
+    paths = [];
+    await poll();
+    await waitFor(() => expect(screen.queryByRole("complementary")).toBeNull());
+    expect(document.activeElement).toBe(landing());
+  });
+
+  it("C-m: a poll leaving nothing to match moves focus from the hidden list to the field", async () => {
+    paths = ["a.ts", "b.ts"];
+    const user = userEvent.setup();
+    const { poll } = renderView();
+    await expectOpen("a.ts");
+    await user.type(field(), "b");
+    const viewport = rail().querySelector<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    );
+    expect(viewport).toBeTruthy();
+    act(() => viewport?.focus());
+    expect(document.activeElement).toBe(viewport);
+    paths = ["a.ts", "c.ts"];
+    await poll();
+    await waitFor(() =>
+      expect(screen.getByText("No files match the filter")).toBeTruthy(),
+    );
+    expect(viewport?.isConnected).toBe(true);
+    expect(document.activeElement).toBe(field());
   });
 
   it("C-k: an untouched list follows a new first file; a typed filter pins the open file", async () => {

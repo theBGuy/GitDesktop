@@ -33,6 +33,7 @@ import {
   displayCompareValue,
   LOCAL_REF_PREFIX,
   localCompareItem,
+  REMOTE_REF_PREFIX,
   type RemoteCompareRow,
 } from "./compare-remote-ref";
 
@@ -41,6 +42,14 @@ const COLLIDING_ROW_REASON =
   "Can't be picked: Compare reads this name as a remote branch.";
 
 const ADD_UPSTREAM_LABEL = "Add upstream remote";
+
+type TwinKind = "local" | "remote";
+
+/** The closed trigger's word after a pick whose name the other kind shares. */
+const TWIN_CUE: Record<TwinKind, string> = {
+  local: "local",
+  remote: "remote",
+};
 
 /** The Remote group's add-upstream action row, when the repo is a GitHub fork
  *  without that remote. */
@@ -84,6 +93,7 @@ export function CompareBranchCombobox({
   open,
   onOpenChange,
   triggerRef,
+  popupRef,
   placeholder,
   remoteNotice,
   remoteSearched,
@@ -105,6 +115,8 @@ export function CompareBranchCombobox({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   triggerRef?: Ref<HTMLButtonElement>;
+  /** The popup node, for the caller's focus rescue. */
+  popupRef?: Ref<HTMLDivElement>;
   /** The trigger's text while nothing is picked. */
   placeholder: string | null;
   /** The remote read's footer line while it hasn't succeeded (loading, failed,
@@ -183,6 +195,18 @@ export function CompareBranchCombobox({
     ];
   }, [sorted, remoteRows, addUpstream]);
 
+  // A pick whose shown name the other kind also has: a remote pick against the
+  // Local rows and the current branch, a local pick against the Remote rows.
+  const shownName = value === null ? null : displayCompareValue(value);
+  const twinKind = ((): TwinKind | null => {
+    if (value === null || shownName === null) return null;
+    if (value.startsWith(REMOTE_REF_PREFIX))
+      return branchByName.has(shownName) || shownName === currentName
+        ? "remote"
+        : null;
+    return remoteRows.some((r) => r.display === value) ? "local" : null;
+  })();
+
   return (
     <Combobox
       items={groups}
@@ -227,19 +251,46 @@ export function CompareBranchCombobox({
         {/* Clamp the selected branch name (the vendored SelectTrigger's
             line-clamp idiom) so a long name truncates and the caret stays put in
             the narrow Compare sidebar. The display form is rendered directly: a
-            remote pick is stored as its full ref. */}
-        <span
-          className="min-w-0 flex-1 truncate text-left"
-          onMouseEnter={clipTitleFromText}
-        >
-          {value === null ? (
-            <span className="text-muted-foreground">{placeholder}</span>
-          ) : (
-            displayCompareValue(value)
-          )}
-        </span>
+            remote pick is stored as its full ref. Each name node is keyed by
+            its form and the shown name: `clipTitleFromText` sets `title` only
+            on hover, so a node reused for another name or form would keep the
+            old tooltip until the pointer re-enters. */}
+        {twinKind === null ? (
+          <span
+            key={`name:${shownName ?? ""}`}
+            className="min-w-0 flex-1 truncate text-left"
+            onMouseEnter={clipTitleFromText}
+          >
+            {shownName === null ? (
+              <span className="text-muted-foreground">{placeholder}</span>
+            ) : (
+              shownName
+            )}
+          </span>
+        ) : (
+          // A twin's two picks show the same name, so the kind is said in words
+          // after it; the comma is hidden and the bare space renders nothing
+          // between flex items. A remote twin is always marked; `local` follows
+          // the remote rows last read and never triggers a read.
+          <span
+            key="twin"
+            className="flex min-w-0 flex-1 items-baseline gap-1.5"
+          >
+            <span
+              key={shownName}
+              className="min-w-0 truncate text-left"
+              onMouseEnter={clipTitleFromText}
+            >
+              {shownName}
+            </span>
+            <span className="sr-only">,</span>{" "}
+            <span className="shrink-0 text-[10px] text-muted-foreground">
+              {TWIN_CUE[twinKind]}
+            </span>
+          </span>
+        )}
       </ComboboxTrigger>
-      <ComboboxContent>
+      <ComboboxContent ref={popupRef}>
         <ComboboxInput showTrigger={false} placeholder="Filter branches…" />
         {/* Until remote rows are known, a miss can only speak for the local
             branches; cached rows a failed refresh left were searched too. */}
@@ -407,9 +458,11 @@ function BranchRow({
   // in the branch dropdown, while this row selects a compare base.
   const copy = rowCheckoutCopy(worktree?.isMain);
   const date = branch?.lastCommitDate;
-  // The option's name comes from its content (every row in this file): each part
-  // after the first is led by a hidden comma and a bare space, gated with it so
-  // none dangles. A whitespace-only run between flex items renders nothing.
+  // The option's name comes from its content (every row in this file). A part
+  // shown beside the name is led by a hidden comma and a bare space, gated with
+  // it so none dangles; a whitespace-only run between flex items renders
+  // nothing. A chip inside the name span is hidden from AT and named by one
+  // hidden copy after the span that holds its own comma and space.
   return (
     <ComboboxItem value={localCompareItem(name)}>
       <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>
