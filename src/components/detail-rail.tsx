@@ -39,6 +39,7 @@ import {
   isTypeaheadTarget,
 } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { focusInOpenModal } from "@/lib/hotkeys/open-modal";
 import type { AppSettings } from "@/lib/settings/api";
 import {
   settingsKeys,
@@ -143,7 +144,12 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
 // The tab-wide `focus-filter` answer. Mounted only when claimed: a registered
 // but disabled handler still makes the window listener swallow the chord.
 function FocusFilterClaim({ run }: { run: () => void }) {
-  useHotkeyAction("focus-filter", run, usePanelActive());
+  // Inert under an open modal: the field sits behind it, aria-hidden there,
+  // and a collapsed rail's expand would write the preference for nothing.
+  const answer = () => {
+    if (!focusInOpenModal()) run();
+  };
+  useHotkeyAction("focus-filter", answer, usePanelActive());
   return null;
 }
 
@@ -494,11 +500,17 @@ export function DetailRail({
       ?.focus();
   const onFieldKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     // Bound chords (Go back's Alt+arrow) reach the window listener untouched.
+    // An unsettled list is another identity's placeholder: no key picks from it.
     if (!filter || hasChordModifier(e)) return;
     if (e.key === "Enter") {
       // A held Enter that activated the x, `Clear filter` or the funnel repeats
       // into the field once they move focus here; a repeat picks nothing.
-      if (e.nativeEvent.isComposing || e.repeat || filter.firstPath === null)
+      if (
+        e.nativeEvent.isComposing ||
+        e.repeat ||
+        !filter.settled ||
+        filter.firstPath === null
+      )
         return;
       e.preventDefault();
       filter.onPick(filter.firstPath);
@@ -509,7 +521,8 @@ export function DetailRail({
       // Shift+Arrow Down extends the text selection. While composing, WebKit
       // sends the real key, and Down walks the IME's candidates.
       if (e.shiftKey || e.nativeEvent.isComposing) return;
-      const path = filter.openRowPath ?? filter.firstPath;
+      const path =
+        filter.openRowPath ?? (filter.settled ? filter.firstPath : null);
       if (path === null) return;
       e.preventDefault();
       if (filter.openRowPath === null) filter.onPick(path);

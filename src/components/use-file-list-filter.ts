@@ -17,13 +17,19 @@ interface FileFilterState {
   setText: (scope: string, text: string) => void;
 }
 
+// By own key: `texts` is a plain object, so a scope named like one of its
+// inherited members would otherwise read a function.
+function storedText(texts: Record<string, string>, scope: string): string {
+  return Object.hasOwn(texts, scope) ? texts[scope] : "";
+}
+
 /** In-memory text per scope. Cleared whenever the ui store's `repoPath` changes. */
 export const useFileFilterStore: UseBoundStore<StoreApi<FileFilterState>> =
   create<FileFilterState>()((set) => ({
     texts: {},
     setText: (scope, text) =>
       set((s) =>
-        (s.texts[scope] ?? "") === text
+        storedText(s.texts, scope) === text
           ? s
           : { texts: { ...s.texts, [scope]: text } },
       ),
@@ -71,8 +77,8 @@ export interface DetailRailFilter {
   onPick: (path: string) => void;
   /** The mount registers the tab-wide `focus-filter` answer (Compare only). */
   claimFocusFilter: boolean;
-  /** The caller's `settled`, passed through. Only `DetailRailFilterStatus` reads
-   *  it: the status holds its text while this is false. */
+  /** The caller's `settled`, passed through. While it is false the status holds
+   *  its text, and the field's Enter and Arrow Down pick nothing. */
   settled: boolean;
 }
 
@@ -122,7 +128,7 @@ export function useFileListFilter<T extends { path: string }>({
   picked,
   onPick,
 }: FileListFilterOptions<T>): FileListFilter<T> {
-  const text = useFileFilterStore((s) => s.texts[scope] ?? "");
+  const text = useFileFilterStore((s) => storedText(s.texts, scope));
   const query = fileFilterQuery(text);
   const active = query !== "";
   const visible = active

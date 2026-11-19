@@ -213,7 +213,7 @@ export function PrCommitDetail({
       tabIndex={-1}
       className="flex h-full flex-col outline-none"
     >
-      <DetailRailFilterStatus filter={filter.rail} />
+      <DetailRailFilterStatus filter={filter.rail} blank={pane === "error"} />
       <header className="space-y-1 border-b px-4 py-3">
         <Button
           variant="ghost"

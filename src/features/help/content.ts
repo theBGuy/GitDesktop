@@ -776,8 +776,9 @@ If the history can't be read, the tab says why and offers **Retry**. A failed re
 
 ## Searching history
 
-The box above the list ({{kbd:focus-filter}}) filters the commits already loaded by
-subject, author or SHA. To look past them, choose **Search all history for "…"** below
+The box above the list filters the commits already loaded by subject, author or SHA;
+{{kbd:focus-filter}} focuses it, or the file filter while focus is in a commit's file
+list or diff. To look past those commits, choose **Search all history for "…"** below
 the list: it searches the message of every commit on the branch, and a query of 4 to 64
 hex characters also finds the commit with that SHA, so a hash pasted from a terminal, a
 CI log or a review comment lands on its commit even when it isn't loaded yet. A short

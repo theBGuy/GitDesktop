@@ -541,6 +541,8 @@ export function SessionChanges({ session }: { session: AgentSession }) {
   const worktreeRescue = useRetryFocusRescue(arm === "worktree");
   const placeholderRescue = useRetryFocusRescue(arm === "placeholder");
   const diffRescue = useRetryFocusRescue(arm === "diff");
+  // A place to continue from, not a control: like the other panes' landing
+  // hosts it is named for a screen reader and draws no focus ring.
   const landing = (
     <span
       ref={(node) => {

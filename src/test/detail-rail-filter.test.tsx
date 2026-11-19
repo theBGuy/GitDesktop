@@ -17,12 +17,14 @@ import {
   DetailRailRow,
 } from "@/components/detail-rail";
 import { PanelActivityBoundary } from "@/components/panel-portal";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   useFileFilterStore,
   useFileListFilter,
 } from "@/components/use-file-list-filter";
 import { getAvailableSnapshot } from "@/lib/hotkeys/handler-registry";
 import { dispatchAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
+import { focusInOpenModal } from "@/lib/hotkeys/open-modal";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   type AppSettings,
@@ -100,6 +102,8 @@ interface HarnessProps {
   consumer?: boolean;
   /** Renders a row action in the list whose press opens a portalled dialog. */
   rowDialog?: boolean;
+  /** Renders an open modal dialog over the tab, holding a button. */
+  modal?: boolean;
 }
 
 /** A row action owning its dialog's open state, as FileRowActions does. */
@@ -133,6 +137,7 @@ function Harness({
   portal = false,
   consumer = false,
   rowDialog = false,
+  modal = false,
 }: HarnessProps) {
   const [picked, setPicked] = useState<string | null>(null);
   const [pickedFor, setPickedFor] = useState(identity);
@@ -216,6 +221,14 @@ function Harness({
           </DetailRailRow>
         </div>
       </div>
+      {modal ? (
+        <Dialog open>
+          <DialogContent>
+            <DialogTitle>Create tag</DialogTitle>
+            <button type="button">Dialog button</button>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </PanelActivityBoundary>
   );
 }
@@ -513,6 +526,38 @@ describe("field keys", () => {
     expect(lastPrevented("Enter")).toBe(false);
     expect(pickSpy).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(field());
+  });
+
+  it("R04c Enter and Arrow Down pick nothing from an unsettled list", async () => {
+    const user = userEvent.setup();
+    const { rerenderWith } = renderRail({ files: THIRTEEN, settled: false });
+    watchKeys();
+    await user.type(field(), "beta");
+    expect(rendered()).toEqual(["src/beta.ts"]);
+    pickSpy.mockClear();
+    await user.keyboard("{Enter}");
+    expect(lastPrevented("Enter")).toBe(false);
+    await user.keyboard("{ArrowDown}");
+    expect(lastPrevented("ArrowDown")).toBe(false);
+    expect(pickSpy).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(field());
+
+    // The open row is rendered: Arrow Down still moves onto it, picking nothing.
+    await user.clear(field());
+    await user.type(field(), "alpha");
+    pickSpy.mockClear();
+    await user.keyboard("{ArrowDown}");
+    expect(pickSpy).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(row("src/alpha.ts"));
+
+    rerenderWith({ files: THIRTEEN, settled: true });
+    await user.click(field());
+    await user.clear(field());
+    await user.type(field(), "beta");
+    pickSpy.mockClear();
+    await user.keyboard("{Enter}");
+    expect(pickSpy.mock.calls).toEqual([["src/beta.ts"]]);
+    expect(document.activeElement).toBe(row("src/beta.ts"));
   });
 });
 
@@ -875,6 +920,35 @@ describe("the focus-filter shortcut", () => {
     await user.keyboard(MOD_F);
     expect(document.activeElement).toBe(document.body);
   });
+
+  it.each([
+    ["expanded", "Collapse file list", false],
+    ["collapsed", "Expand file list", true],
+  ] as const)(
+    "R12b a claiming mount stands down while focus is in an open modal, %s",
+    async (_, caretLabel, collapsed) => {
+      stored = { ...DEFAULT_SETTINGS, diffFileListCollapsed: collapsed };
+      // The modal marks the tab aria-hidden, out of reach of role queries.
+      const byLabel = () =>
+        document.querySelector(`[aria-label="${caretLabel}"]`);
+      renderRail({ files: THIRTEEN, claim: true, modal: true });
+      const inDialog = await screen.findByRole("button", {
+        name: "Dialog button",
+      });
+      await focusOn(inDialog);
+      expect(focusInOpenModal()).toBe(true);
+      expect(byLabel()).not.toBeNull();
+      act(() => {
+        dispatchAction("focus-filter");
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(document.activeElement).toBe(inDialog);
+      expect(byLabel()).not.toBeNull();
+      expect(saveSettingsMerged).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("focus landings", () => {
@@ -964,6 +1038,10 @@ describe("focus landings", () => {
     const diffButton = screen.getByRole("button", { name: "Diff action" });
     await focusOn(diffButton);
     await user.keyboard(MOD_F);
+    // The expand was attempted: the rejection, not inaction, leaves it collapsed.
+    expect(saveSettingsMerged).toHaveBeenCalledWith(
+      expect.objectContaining({ diffFileListCollapsed: false }),
+    );
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });

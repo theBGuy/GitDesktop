@@ -183,43 +183,56 @@ function landing(cache: QueryCache, query: Query): Promise<boolean> {
  * since `refetchQueries` skips a query whose observers are all disabled. Only
  * the reads that decide a pick's Create hold and pruned line are passed, so a
  * slow unrelated read (an open file diff) never holds the stamp. Never
- * rejects: resolves, per key, whether its read after the fetch failed (false
- * when it had none to make); the read's own arms report its error.
+ * rejects: resolves, per key, the data its read after the fetch returned, or
+ * undefined when that read failed, was skipped, was cancelled back to its
+ * stale state, or there was none to make.
  */
 async function settleFreshReads(
   queryClient: QueryClient,
   straddling: ReadonlySet<Query>,
   keys: readonly QueryKey[],
-): Promise<boolean[]> {
+): Promise<unknown[]> {
   const cache = queryClient.getQueryCache();
   const read = (query: Query) =>
     query.fetch().then(
-      () => false,
-      () => true,
+      (data) => data,
+      () => undefined,
     );
   return Promise.all(
     keys.map(async (queryKey) => {
       const query = cache.find({ queryKey, exact: true });
-      if (query === undefined) return false;
+      if (query === undefined) return undefined;
       if (straddling.has(query))
-        return (await landing(cache, query)) ? read(query) : false;
+        return (await landing(cache, query)) ? read(query) : undefined;
       if (query.state.fetchStatus === "fetching") {
+        // The join follows a read that a refetch replaced mid-flight.
         await queryClient.refetchQueries(
           { queryKey, exact: true },
           { cancelRefetch: false },
         );
-        return query.state.status === "error";
+        const after = query.state;
+        // Failed; skipped with no enabled observer, so still in flight; or
+        // cancelled back to its stale state: no read after the fetch landed.
+        if (
+          after.status === "error" ||
+          after.fetchStatus !== "idle" ||
+          after.isInvalidated
+        )
+          return undefined;
+        return after.data;
       }
       // No enabled observer: the invalidation only marked it stale.
       if (query.state.isInvalidated) return read(query);
-      return false;
+      // Its read after the fetch already landed.
+      return query.state.status === "error" ? undefined : query.state.data;
     }),
   );
 }
 
-/** A successful fetch of `remote`, fired for this pick, left the pick's ref
- *  unlisted: the one measured cause "was deleted on" may name. Kept apart from
- *  the stamp, whose slot a follow-up can take over. */
+/** A successful fetch of `remote`, fired for this pick, whose own list read
+ *  after it left the pick's ref unlisted: the one measured cause "was deleted
+ *  on" may name. Kept apart from the stamp, whose slot a follow-up can take
+ *  over. */
 interface PrunedRecord {
   repoPath: string;
   pickedValue: string;
@@ -396,16 +409,15 @@ export function useCompareRemoteFetch(
             : s,
         );
         const listKey = remoteBranchesOptions(req.repo).queryKey;
-        const [listFailed] = await settleFreshReads(queryClient, straddling, [
+        const [listed] = (await settleFreshReads(queryClient, straddling, [
           listKey,
           repoKeys.compare(req.repo, req.pickedValue, req.currentBranch),
-        ]);
+        ])) as [RemoteBranch[] | undefined, unknown];
         // Only the newest pick fire, with no pick since it started (a local one
         // included) and its pick still committed (Back restores one with no
-        // pick call), may say what this fetch proved about the pick.
-        const listed = listFailed
-          ? undefined
-          : queryClient.getQueryData<RemoteBranch[]>(listKey);
+        // pick call), may say what this fetch proved about the pick, and only
+        // from the list its own read returned: a later read (a picker open)
+        // can replace the cached list before the comparison settles.
         if (
           listed !== undefined &&
           pickFire === pickFires.current &&

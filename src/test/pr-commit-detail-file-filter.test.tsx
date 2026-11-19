@@ -98,6 +98,7 @@ function renderView(oid: string) {
     ...utils,
     show: (o: string | null) => utils.rerender(view(o)),
     refetch: () => act(() => client.refetchQueries()),
+    reset: () => act(() => client.resetQueries()),
   };
 }
 
@@ -279,5 +280,21 @@ describe("PrCommitDetail file filter", () => {
     // The held pane is busy until the slow file settles or its bound runs out.
     expect(document.querySelector('[aria-busy="true"]')).toBeTruthy();
     expectOneStatusOutsideBusy();
+  });
+
+  it("C-p: the status empties when a reset read of the diff fails", async () => {
+    lists[A] = ["src/a.ts", "src/b.md", "lib/c.ts"];
+    const user = userEvent.setup();
+    const { reset } = renderView(A);
+    await expectOpen("src/a.ts");
+    await user.type(field(), "lib");
+    const status = () =>
+      document.querySelector<HTMLElement>("[data-file-filter-status]");
+    expect(status()?.textContent).toBe("Showing 1 of 3 files");
+    vi.mocked(forgePrCommitDiff).mockRejectedValue(new Error("gone"));
+    await reset();
+    await screen.findByText("Could not load this commit's changes");
+    expectOneStatusOutsideBusy();
+    expect(status()?.textContent).toBe("");
   });
 });

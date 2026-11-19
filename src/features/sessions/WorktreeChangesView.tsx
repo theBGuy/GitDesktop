@@ -108,7 +108,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
       <span role="status" className="sr-only">
         {readFailed ? STATUS_READ_FAILED_REASON : null}
       </span>
-      <DetailRailFilterStatus filter={filter.rail} />
+      <DetailRailFilterStatus filter={filter.rail} blank={readFailed} />
     </>
   );
 

@@ -707,6 +707,99 @@ describe("Compare gone pick and its Fetch action (arm g)", () => {
     expect(screen.queryByText(/was deleted on/)).toBeNull();
   });
 
+  it("records nothing when a later read drops the ref this fetch's read listed", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    const fetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockReturnValueOnce(fetch.promise);
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine("Fetching origin…");
+    const reads = vi.mocked(gitRemoteBranches).mock.calls.length;
+    const comparison = deferred<{ ahead: CommitSummary[]; behind: [] }>();
+    vi.mocked(gitCompareBranches).mockReturnValueOnce(comparison.promise);
+    await act(async () => fetch.resolve());
+    await waitFor(() =>
+      expect(vi.mocked(gitRemoteBranches).mock.calls.length).toBeGreaterThan(
+        reads,
+      ),
+    );
+    await settle();
+    // A picker open's read replaces the list this fetch's own read returned.
+    act(() =>
+      client.setQueryData(remoteBranchesOptions(REPO).queryKey, UNLISTED()),
+    );
+    expect(statusText()).toBe("Updating the comparison…");
+    await act(async () => comparison.resolve({ ahead: [COMMIT], behind: [] }));
+    await settle();
+    expect(statusText()).toBe(S11);
+    expect(screen.queryByText(/was deleted on/)).toBeNull();
+  });
+
+  /** Holds the next list read; resolves once that read has started. */
+  async function holdNextListRead() {
+    const held = deferred<RemoteBranch[]>();
+    const reads = vi.mocked(gitRemoteBranches).mock.calls.length;
+    vi.mocked(gitRemoteBranches).mockReturnValueOnce(held.promise);
+    return {
+      held,
+      started: () =>
+        waitFor(() =>
+          expect(vi.mocked(gitRemoteBranches).mock.calls.length).toBe(
+            reads + 1,
+          ),
+        ),
+    };
+  }
+
+  it("says deleted when the list read after the fetch is joined in flight", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const fetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockReturnValueOnce(fetch.promise);
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine("Fetching origin…");
+    const list = await holdNextListRead();
+    await act(async () => fetch.resolve());
+    await list.started();
+    await act(async () => list.held.resolve(UNLISTED()));
+    expect(await statusLine(S10)).toBeInTheDocument();
+  });
+
+  it("says deleted when a refetch replaces the joined list read", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    const fetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockReturnValueOnce(fetch.promise);
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine("Fetching origin…");
+    const list = await holdNextListRead();
+    await act(async () => fetch.resolve());
+    await list.started();
+    vi.mocked(gitRemoteBranches).mockResolvedValue(UNLISTED());
+    await act(() =>
+      client.refetchQueries({
+        queryKey: remoteBranchesOptions(REPO).queryKey,
+      }),
+    );
+    expect(await statusLine(S10)).toBeInTheDocument();
+  });
+
+  it("records nothing when the joined list read is cancelled back", async () => {
+    const user = userEvent.setup();
+    const client = renderPanel();
+    await reachS11(user, client);
+    const list = await holdNextListRead();
+    await user.click(fetchButton());
+    await list.started();
+    await act(() =>
+      client.cancelQueries({ queryKey: remoteBranchesOptions(REPO).queryKey }),
+    );
+    await settle();
+    await settle();
+    expect(statusText()).toBe(S11);
+    expect(screen.queryByText(/was deleted on/)).toBeNull();
+  });
+
   it("keeps the deleted line once the add-upstream follow-up's line is gone", async () => {
     forkWithoutUpstream();
     const user = userEvent.setup();

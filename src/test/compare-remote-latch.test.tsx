@@ -7,11 +7,10 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ComparePanel } from "@/features/compare/ComparePanel";
-import repositoryViewSource from "@/features/repository/RepositoryView.tsx?raw";
+import { AppCreateHotkeys } from "@/features/repository/AppCreateHotkeys";
 import { TabPanel } from "@/features/repository/TabPanel";
 import {
   forgeStatus,
@@ -32,12 +31,11 @@ import type {
   RemoteBranch,
   RepoStatus,
 } from "@/lib/git/types";
-import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import type { ActionId } from "@/lib/hotkeys/registry";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
-import { liveLines, squash } from "./live-lines";
 
 // The dialog's own props are what these tests pin, so a stub reports them.
 vi.mock("@/features/pulls/CreatePrDialog", async (importOriginal) => ({
@@ -437,68 +435,6 @@ describe("Compare create hotkeys", () => {
   });
 });
 
-// Stands in for the two app-level create registrations in
-// src/features/repository/RepositoryView.tsx, gate included: `create-pr`
-// behind `canCreatePr`, `create-local-pr` always. It wraps the panel as
-// RepositoryView does, so registrations run in the app's parent-child order.
-// The pins below tie the copy, and the gate's definition, to that file's text.
-function AppCreateHotkeys({
-  canCreatePr,
-  children,
-}: {
-  canCreatePr: boolean;
-  children: ReactNode;
-}) {
-  const requestCreate = useUiStore((s) => s.requestCreate);
-  useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
-  useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
-  return children;
-}
-
-describe("Compare create hotkeys stand-in (source pin)", () => {
-  // White space is the only freedom: any other change to one of these lines
-  // means the stand-in above no longer mirrors the app. Each must be a whole
-  // live line (see ./live-lines).
-  const PINNED = [
-    'useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);',
-    'useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));',
-    'const canCreatePr = forgeFeatureReady(gh.data, "mrCreate");',
-  ];
-  const holds = (source: string, line: string) =>
-    liveLines(source).includes(squash(line));
-
-  it.each(PINNED)("RepositoryView.tsx still holds %s", (line) => {
-    // A boolean, so a miss doesn't print the whole file.
-    expect(holds(repositoryViewSource, line)).toBe(true);
-  });
-
-  it("fails the gate pin when the gate's definition changes", () => {
-    const gate = PINNED[2];
-    const ungated = repositoryViewSource.replace(
-      'forgeFeatureReady(gh.data, "mrCreate");',
-      "true;",
-    );
-    expect(ungated).not.toBe(repositoryViewSource);
-    expect(holds(ungated, gate)).toBe(false);
-  });
-
-  const LINE = PINNED[1];
-  it.each<[string, string, boolean]>([
-    ["a bare line", LINE, true],
-    ["a line comment", `// ${LINE}`, false],
-    ["a block comment opening its own line", `/*\n${LINE}\n*/`, false],
-    ["a one-line JSX comment", `{/* ${LINE} */}`, false],
-    ["a multi-line JSX comment", `{/*\n${LINE}\n*/}`, false],
-    ["a block comment opened after code", `foo(); /*\n${LINE}\n*/`, false],
-    ["a trailing line comment", `${LINE} // note`, true],
-    ["a leading closed block comment", `/* c */ ${LINE}`, true],
-    ["a glob string before it", `const g = "src/**/*.ts";\n${LINE}`, true],
-    ["a block comment with CRLF endings", `/*\r\n${LINE}\r\n*/`, false],
-  ])("liveLines reads %s as live: %s", (_name, fixture, live) => {
-    expect(liveLines(fixture).includes(squash(LINE))).toBe(live);
-  });
-});
-
 describe("Compare create hotkeys while Create is held (contract)", () => {
   beforeEach(() => {
     useUiStore.setState({
@@ -508,28 +444,38 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
     });
   });
 
-  function renderWithApp(canCreatePr: boolean) {
+  // The app entries mount after the panel, as in RepositoryView, so their
+  // registrations run after the panel's in a commit.
+  function renderWithApp() {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
     render(
       <QueryClientProvider client={client}>
-        <AppCreateHotkeys canCreatePr={canCreatePr}>
-          <TabPanel active>
-            <ComparePanel repoPath={REPO} />
-          </TabPanel>
-        </AppCreateHotkeys>
+        <TabPanel active>
+          <ComparePanel repoPath={REPO} />
+        </TabPanel>
+        <AppCreateHotkeys repoPath={REPO} />
       </QueryClientProvider>,
     );
     return client;
   }
 
-  const localButton = () =>
-    screen.findByRole("button", { name: /^Create pull request…/ });
+  const forgeKey = ["repo", REPO, "forge-status"];
+  const forgeAnswered = (client: QueryClient) =>
+    waitFor(() =>
+      expect(client.getQueryState(forgeKey)?.status).toBe("success"),
+    );
 
-  async function heldOnComparing() {
+  // Without a forge that creates pull requests it reads "Create local PR…".
+  const localButton = (name = /^Create pull request…/) =>
+    screen.findByRole("button", { name });
+
+  // Waits for the forge read too, so the app gate is settled when it acts.
+  async function heldOnComparing(client: QueryClient, name?: RegExp) {
+    await forgeAnswered(client);
     await waitFor(async () =>
-      expect(await localButton()).toHaveAccessibleDescription("Comparing…"),
+      expect(await localButton(name)).toHaveAccessibleDescription("Comparing…"),
     );
     await act(() => new Promise((r) => setTimeout(r, 20)));
   }
@@ -539,8 +485,8 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
 
   it("hands create-pr to the app entry while the forge can create one", async () => {
     vi.mocked(gitCompareBranches).mockReturnValue(new Promise(() => undefined));
-    renderWithApp(true);
-    await heldOnComparing();
+    const client = renderWithApp();
+    await heldOnComparing(client);
     act(() => {
       expect(dispatchAction("create-pr")).toBe(true);
     });
@@ -551,8 +497,8 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
 
   it("hands create-local-pr to the app entry", async () => {
     vi.mocked(gitCompareBranches).mockReturnValue(new Promise(() => undefined));
-    renderWithApp(true);
-    await heldOnComparing();
+    const client = renderWithApp();
+    await heldOnComparing(client);
     act(() => {
       expect(dispatchAction("create-local-pr")).toBe(true);
     });
@@ -563,8 +509,12 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
 
   it("runs nothing for create-pr when no entry is enabled", async () => {
     vi.mocked(gitCompareBranches).mockReturnValue(new Promise(() => undefined));
-    renderWithApp(false);
-    await heldOnComparing();
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITHUB,
+      implemented: { pullRequests: true },
+    } as ForgeStatus);
+    const client = renderWithApp();
+    await heldOnComparing(client, /^Create local PR…/);
     act(() => {
       expect(dispatchAction("create-pr")).toBe(false);
     });
@@ -579,7 +529,8 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
   });
 
   it("keeps both on Compare once the comparison answers", async () => {
-    renderWithApp(true);
+    const client = renderWithApp();
+    await forgeAnswered(client);
     await waitFor(async () =>
       expect(await localButton()).not.toHaveAttribute("aria-disabled", "true"),
     );
@@ -597,7 +548,8 @@ describe("Compare create hotkeys while Create is held (contract)", () => {
   });
 
   it("hands both to the app entries while the main arm is swapped out", async () => {
-    const client = renderWithApp(true);
+    const client = renderWithApp();
+    await forgeAnswered(client);
     await waitFor(async () =>
       expect(await localButton()).not.toHaveAttribute("aria-disabled", "true"),
     );

@@ -250,6 +250,24 @@ describe("the text store", () => {
     expect(again.result.current.rail.text).toBe("");
     expect(two.result.current.rail.text).toBe("");
   });
+
+  it("H10 reads a scope by own key, never an inherited member", () => {
+    const before = useFileFilterStore.getState();
+    act(() => before.setText("constructor", ""));
+    expect(useFileFilterStore.getState()).toBe(before);
+    expect(
+      Object.hasOwn(useFileFilterStore.getState().texts, "constructor"),
+    ).toBe(false);
+
+    const { result } = renderHook(() =>
+      useConsumer({ scope: "constructor", files: [] }),
+    );
+    expect(result.current.rail.text).toBe("");
+    expect(result.current.rail.active).toBe(false);
+    act(() => result.current.rail.setText("abc"));
+    expect(result.current.rail.text).toBe("abc");
+    expect(useFileFilterStore.getState().texts).toEqual({ constructor: "abc" });
+  });
 });
 
 // The host-owned shape: a parent owns the pick and its reset and calls the

@@ -61,6 +61,8 @@ function renderView({ seed }: { seed?: RepoStatus } = {}) {
       act(() =>
         client.refetchQueries({ queryKey: ["session-worktree-status"] }),
       ),
+    reset: () =>
+      act(() => client.resetQueries({ queryKey: ["session-worktree-status"] })),
   };
 }
 
@@ -326,6 +328,28 @@ describe("WorktreeChangesView file filter", () => {
       ).toBe(true),
     );
     oneStatus();
+  });
+
+  it("C-h: the filter status empties when a reset status read fails", async () => {
+    paths = ["a.ts", "b.ts"];
+    const user = userEvent.setup();
+    const { reset } = renderView();
+    await expectOpen("a.ts");
+    await user.type(field(), "b");
+    expect(oneStatus().textContent).toBe("Showing 1 of 2 files");
+    vi.mocked(gitStatus).mockRejectedValue(new Error("status failed"));
+    await reset();
+    await waitFor(() =>
+      expect(
+        Array.from(
+          document.querySelectorAll(
+            '[role="status"]:not([data-file-filter-status])',
+          ),
+        ).some((el) => el.textContent === STATUS_READ_FAILED_REASON),
+      ).toBe(true),
+    );
+    expect(screen.queryByRole("complementary")).toBeNull();
+    expect(oneStatus().textContent).toBe("");
   });
 
   it("C-l: a first load straight into the empty arm takes no focus", async () => {

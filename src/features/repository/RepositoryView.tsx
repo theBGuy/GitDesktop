@@ -105,6 +105,7 @@ import {
   useUiStore,
 } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
+import { AppCreateHotkeys } from "./AppCreateHotkeys";
 import { ChangesPanel } from "./ChangesPanel";
 import { InsightsPanel } from "./insights/InsightsPanel";
 import { OpRecoveryBanner } from "./OpRecoveryBanner";
@@ -426,7 +427,6 @@ export function RepositoryView() {
     Boolean(gh.data?.installed && gh.data?.authenticated && gh.data?.repo) &&
     gh.data?.provider === "github";
   const canCreateIssue = forgeFeatureReady(gh.data, "issueCreate");
-  const canCreatePr = forgeFeatureReady(gh.data, "mrCreate");
   const canCreateRelease = forgeFeatureReady(gh.data, "releaseCreate");
   // Jira create is a separate axis (a linked project, not the git host); gate on
   // a link AND the project's createIssues permission. These queries dedupe with
@@ -605,8 +605,6 @@ export function RepositoryView() {
     () => requestCreate("jira-issue"),
     canCreateJira,
   );
-  useHotkeyAction("create-pr", () => requestCreate("pr"), canCreatePr);
-  useHotkeyAction("create-local-pr", () => requestCreate("local-pr"));
   useHotkeyAction(
     "create-discussion",
     () => requestCreate("discussion"),
@@ -718,7 +716,9 @@ export function RepositoryView() {
     };
   }, []);
 
-  if (!repoPath) return null;
+  // The two create entries stay registered without a repository: a live entry,
+  // even a disabled one, keeps its chord from the webview.
+  if (!repoPath) return <AppCreateHotkeys repoPath={null} />;
 
   const secondaryTabs = secondaryTabRows(aiEnabled, bindings);
   const activeSecondary = secondaryTabs.find((t) => t.tab === repoTab);
@@ -1183,6 +1183,9 @@ export function RepositoryView() {
           )}
         </main>
       </div>
+      {/* After the tab panels: its registrations then run after theirs in a
+          commit, so a panel's own enabled entry stays the newest. */}
+      <AppCreateHotkeys repoPath={repoPath} />
 
       {/* Palette "Blame file…": pick a tracked file, then blame its worktree
           contents (no rev — "blame this file as it is now"). */}
