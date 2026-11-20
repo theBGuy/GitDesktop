@@ -149,9 +149,13 @@ function renderPanel() {
   const view = render(ui(REPO));
   return {
     client,
+    // The store write runs inside act with the rerender, so its update
+    // doesn't warn.
     switchTo: (r: string) => {
-      useUiStore.setState({ repoPath: r, compareBranch: null });
-      view.rerender(ui(r));
+      act(() => {
+        useUiStore.setState({ repoPath: r, compareBranch: null });
+        view.rerender(ui(r));
+      });
     },
   };
 }
@@ -220,8 +224,10 @@ beforeEach(() => {
   vi.mocked(gitRemotes).mockResolvedValue(["origin", "upstream"]);
 });
 
-afterEach(() => {
-  onlineManager.setOnline(true);
+// Reconnecting resumes a parked write while the panel is still mounted, so its
+// updates land inside act.
+afterEach(async () => {
+  await act(async () => onlineManager.setOnline(true));
 });
 
 describe("Compare with no local branch to default to", () => {

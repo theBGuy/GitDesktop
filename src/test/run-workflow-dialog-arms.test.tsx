@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   afterAll,
@@ -100,6 +100,10 @@ let probes: Record<string, ProbeAnswer>;
 let dispatchError: unknown = null;
 
 beforeEach(() => {
+  // The ref debounce runs on a fake clock that waitFor moves (it detects the clock
+  // through the jest stub). Only timeouts are faked: React and Base UI read the rest.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.stubGlobal("jest", { advanceTimersByTime: vi.advanceTimersByTime });
   stray.length = 0;
   provider = "github";
   workflows = [CI];
@@ -127,7 +131,14 @@ beforeEach(() => {
     }
   });
 });
-afterEach(() => vi.mocked(invoke).mockReset());
+afterEach(() => {
+  // Unmount on the fake clock: setup.ts's cleanup runs after this hook, and the
+  // last query observer leaving would arm a real gc timer that outlives the case.
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.mocked(invoke).mockReset();
+});
 
 const probeCalls = (ref?: string) =>
   vi
@@ -143,8 +154,14 @@ const sent = () =>
     .mock.calls.filter(([cmd]) => cmd === "forge_ci_dispatch")
     .map(([, args]) => (args as { inputs: Record<string, string> }).inputs);
 
+/** user-event drives the fake clock when one is installed. */
+const setupUser = () =>
+  userEvent.setup(
+    vi.isFakeTimers() ? { advanceTimers: vi.advanceTimersByTime } : {},
+  );
+
 function renderDialog(defaultRef = "main") {
-  const user = userEvent.setup();
+  const user = setupUser();
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -172,7 +189,10 @@ const field = (name: string) =>
 const statusIs = (text: string) =>
   waitFor(() => expect(status()).toHaveTextContent(text), { timeout: 2000 });
 
-/** Replaces the ref and waits out the dialog's debounce. */
+/**
+ * Replaces the ref. The debounce runs on the fake clock, so the next action lands
+ * inside it until a wait advances the clock.
+ */
 async function typeRef(user: ReturnType<typeof userEvent.setup>, ref: string) {
   await user.clear(refField());
   if (ref) await user.type(refField(), ref);
@@ -288,16 +308,19 @@ describe("RunWorkflowDialog input arms", () => {
     expect(field("version")).toBe(node);
     expect(field("version")).toHaveValue("2.0");
 
-    const rereads: Record<string, DispatchProbe>[] = [
-      {},
-      { "1": declared(null) },
+    // One ref per answer: the probe caches per ref, so a reused ref would
+    // never fetch its second answer.
+    const rereads: [string, Record<string, DispatchProbe>][] = [
+      ["mai2", {}],
+      ["mai4", { "1": declared(null) }],
     ];
-    for (const answer of rereads) {
-      probes.mai2 = answer;
-      await typeRef(user, "mai2");
+    for (const [ref, answer] of rereads) {
+      probes[ref] = answer;
+      await typeRef(user, ref);
       await statusIs(
-        "Couldn't read inputs on mai2; showing the inputs read on main",
+        `Couldn't read inputs on ${ref}; showing the inputs read on main`,
       );
+      expect(probeCalls(ref)).toBe(1);
       expect(field("version")).toHaveValue("2.0");
       await typeRef(user, "main");
       await waitFor(() => expect(status()).toHaveTextContent(/^$/), {
@@ -426,31 +449,6 @@ describe("RunWorkflowDialog input arms", () => {
     expect(disclosure()).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("workflow change re-seeds every field while rows and the disclosure persist", async () => {
-    workflows = [CI, DEPLOY];
-    probes.main = {
-      "1": declared([input("version", "string", { default: "1.0" })]),
-      "2": declared([input("version", "string", { default: "5.0" })]),
-    };
-    const user = renderDialog();
-    await waitFor(() => expect(field("version")).toHaveValue("1.0"));
-    await user.clear(field("version"));
-    await user.type(field("version"), "edited");
-    await user.click(disclosure());
-    await user.click(screen.getByRole("button", { name: "Add input" }));
-    await user.type(screen.getByRole("textbox", { name: "Input name" }), "x");
-    await user.click(screen.getByRole("combobox", { name: "Workflow" }));
-    await user.click(await screen.findByRole("option", { name: "Deploy" }));
-    await waitFor(() => expect(field("version")).toHaveValue("5.0"));
-    expect(screen.getByRole("textbox", { name: "Input name" })).toHaveValue(
-      "x",
-    );
-    expect(disclosure()).toHaveAttribute("aria-expanded", "true");
-    await user.click(screen.getByRole("combobox", { name: "Workflow" }));
-    await user.click(await screen.findByRole("option", { name: "CI" }));
-    await waitFor(() => expect(field("version")).toHaveValue("1.0"));
-  });
-
   it("a failed dispatch for which isDispatchInputsError is true re-probes while open", async () => {
     probes.main = {
       "1": declared([input("version", "string", { default: "1.0" })]),
@@ -484,7 +482,7 @@ describe("RunWorkflowDialog input arms", () => {
     await waitFor(() => expect(field("version")).toBeInTheDocument());
     await user.click(runButton());
     await waitFor(() => expect(sent()).toHaveLength(1));
-    await new Promise((r) => setTimeout(r, 50));
+    await act(() => vi.advanceTimersByTimeAsync(50));
     expect(probeCalls("main")).toBe(1);
   });
 
@@ -529,6 +527,9 @@ describe("RunWorkflowDialog input arms", () => {
       await user.type(field("note"), "hi");
       await typeRef(user, "release/1.0");
       await statusIs(line);
+      // "Checking inputs" shows before the debounce fires, so wait for the probe
+      // to start or the pending arm would dispatch without ever reading the ref.
+      await waitFor(() => expect(probeCalls("release/1.0")).toBe(1));
       expect(field("target")).toHaveValue("staging");
       await user.click(runButton());
       await waitFor(() => expect(sent()).toEqual([{ note: "hi" }]));
@@ -601,41 +602,76 @@ describe("RunWorkflowDialog input arms", () => {
     expect(add).toHaveFocus();
   });
 
-  it("a reopen over a cached probe re-seeds the held schema without a reading arm", async () => {
-    probes.main = {
-      "1": declared([input("version", "string", { default: "1.0" })]),
-    };
-    const user = userEvent.setup();
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
+  // On the fake clock a click on a Select option stalls (it stays
+  // `pointer-events: none`) and a closing dialog never unmounts (measured), so
+  // the two cases needing either run on real timers.
+  describe("on real timers", () => {
+    beforeEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
     });
-    const ui = (open: boolean) => (
-      <QueryClientProvider client={client}>
-        <RunWorkflowDialog
-          repoPath={REPO}
-          open={open}
-          onOpenChange={() => undefined}
-          defaultRef="main"
-        />
-      </QueryClientProvider>
-    );
-    const { rerender } = render(ui(true));
-    await waitFor(() => expect(field("version")).toHaveValue("1.0"));
-    await user.clear(field("version"));
-    await user.type(field("version"), "2.0");
-    rerender(ui(false));
-    await waitFor(() =>
-      expect(
-        screen.queryByLabelText("version", { selector: "input" }),
-      ).toBeNull(),
-    );
-    rerender(ui(true));
-    expect(screen.queryByText("Reading inputs…")).toBeNull();
-    await waitFor(() => expect(field("version")).toHaveValue("1.0"));
-    expect(screen.queryByText("Reading inputs…")).toBeNull();
-    expect(group().querySelector("[aria-busy]")).toBeNull();
-    expect(disclosure()).toHaveAttribute("aria-expanded", "false");
-    expect(probeCalls("main")).toBe(1);
+
+    it("workflow change re-seeds every field while rows and the disclosure persist", async () => {
+      workflows = [CI, DEPLOY];
+      probes.main = {
+        "1": declared([input("version", "string", { default: "1.0" })]),
+        "2": declared([input("version", "string", { default: "5.0" })]),
+      };
+      const user = renderDialog();
+      await waitFor(() => expect(field("version")).toHaveValue("1.0"));
+      await user.clear(field("version"));
+      await user.type(field("version"), "edited");
+      await user.click(disclosure());
+      await user.click(screen.getByRole("button", { name: "Add input" }));
+      await user.type(screen.getByRole("textbox", { name: "Input name" }), "x");
+      await user.click(screen.getByRole("combobox", { name: "Workflow" }));
+      await user.click(await screen.findByRole("option", { name: "Deploy" }));
+      await waitFor(() => expect(field("version")).toHaveValue("5.0"));
+      expect(screen.getByRole("textbox", { name: "Input name" })).toHaveValue(
+        "x",
+      );
+      expect(disclosure()).toHaveAttribute("aria-expanded", "true");
+      await user.click(screen.getByRole("combobox", { name: "Workflow" }));
+      await user.click(await screen.findByRole("option", { name: "CI" }));
+      await waitFor(() => expect(field("version")).toHaveValue("1.0"));
+    });
+
+    it("a reopen over a cached probe re-seeds the held schema without a reading arm", async () => {
+      probes.main = {
+        "1": declared([input("version", "string", { default: "1.0" })]),
+      };
+      const user = setupUser();
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const ui = (open: boolean) => (
+        <QueryClientProvider client={client}>
+          <RunWorkflowDialog
+            repoPath={REPO}
+            open={open}
+            onOpenChange={() => undefined}
+            defaultRef="main"
+          />
+        </QueryClientProvider>
+      );
+      const { rerender } = render(ui(true));
+      await waitFor(() => expect(field("version")).toHaveValue("1.0"));
+      await user.clear(field("version"));
+      await user.type(field("version"), "2.0");
+      rerender(ui(false));
+      await waitFor(() =>
+        expect(
+          screen.queryByLabelText("version", { selector: "input" }),
+        ).toBeNull(),
+      );
+      rerender(ui(true));
+      expect(screen.queryByText("Reading inputs…")).toBeNull();
+      await waitFor(() => expect(field("version")).toHaveValue("1.0"));
+      expect(screen.queryByText("Reading inputs…")).toBeNull();
+      expect(group().querySelector("[aria-busy]")).toBeNull();
+      expect(disclosure()).toHaveAttribute("aria-expanded", "false");
+      expect(probeCalls("main")).toBe(1);
+    });
   });
 
   it("free rows: removing focuses the next row, else the previous, else Add input", async () => {

@@ -27,6 +27,7 @@ jobs:
   # pointer if the section is missing (rename "Unreleased" → the version first).
   notes:
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     outputs:
       body: ${{ steps.extract.outputs.body }}
     steps:
@@ -66,6 +67,7 @@ jobs:
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -94,7 +96,9 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
+          bash .github/scripts/apt-prefer-canonical-mirror.sh
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \

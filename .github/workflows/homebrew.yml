@@ -23,6 +23,7 @@ jobs:
   bump-cask:
     if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       # Credentials stay persisted (no `persist-credentials: false` here): the
       # bump step's `git push` authenticates with this checkout's stored token.
