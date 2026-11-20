@@ -4298,18 +4298,25 @@ impl ClaimFence<'_> {
     /// `Ok(true)`: renewed, so write. `Ok(false)`: the entry was closed but `branch`
     /// already holds `new_sha` (another finish landed this commit after the claim lapsed),
     /// so write nothing and succeed. `Err`: the flow's busy or closed refusal, nothing
-    /// written.
+    /// written. "Already holds" reads the exact ref, so neither a case twin nor a
+    /// `refs/heads/…`-named branch answers for `branch`.
     async fn admits_write(&self, repo_path: &str, branch: &str, new_sha: &str) -> AppResult<bool> {
         match crate::oplog::renew_finish_claim(self.key, self.id, self.token).await {
             ClaimRenewal::Renewed => Ok(true),
             ClaimRenewal::Closed => {
                 let landed = match self.flow {
                     FinishFlow::Update { .. } => {
-                        existing_branch_tip(repo_path, branch).await? == new_sha
+                        existing_branch_tip(repo_path, branch).await?;
+                        let exact = crate::git::branches::exact_branch_tip(repo_path, branch);
+                        exact.await?.as_deref() == Some(new_sha)
                     }
                     FinishFlow::Merge { .. } => {
-                        let tip = branch_tip(repo_path, branch).await?;
-                        is_ancestor(repo_path, new_sha, &tip).await?
+                        branch_tip(repo_path, branch).await?;
+                        let exact = crate::git::branches::exact_branch_tip(repo_path, branch);
+                        match exact.await? {
+                            Some(tip) => is_ancestor(repo_path, new_sha, &tip).await?,
+                            None => false,
+                        }
                     }
                 };
                 if landed {
@@ -5184,6 +5191,7 @@ pub(crate) async fn finish_local_pr_merge(
         }
     };
 
+    let mut unrecorded = false;
     let step: AppResult<ControlFlow<LocalPrMergeOutcome, String>> = async {
         if let Some(landing) = &landed {
             return Ok(ControlFlow::Continue(landing.clone()));
@@ -5300,13 +5308,18 @@ pub(crate) async fn finish_local_pr_merge(
                 return Ok(ControlFlow::Continue(new_sha));
             }
         }
-        // Recorded before the base moves, so a finish interrupted after the move can be
-        // completed later. Only a commit built past the start tip is recorded: the base
-        // always contains the start tip, so recording it would prove nothing.
+        // A claimed finish that knows its start tip records a commit built past that tip
+        // before the base moves, or does not move it: a finish interrupted after the move
+        // must be completable. An unclaimed finish moves the base with no record. "Not
+        // held" goes on to the checks below, which answer it in their own words.
         let start = expected_tip.as_deref().filter(|tip| *tip != new_sha);
         if let (Some((token, id)), Some(start)) = (claim, start) {
-            if matches!(is_ancestor(repo_path, start, &new_sha).await, Ok(true)) {
-                crate::oplog::record_landing(&key, id, token, &new_sha).await;
+            if is_ancestor(repo_path, start, &new_sha).await? {
+                let recorded = crate::oplog::record_landing(&key, id, token, &new_sha).await;
+                if recorded.is_err() {
+                    unrecorded = true;
+                    return Err(AppError::Command(UNRECORDED_MERGE_LANDING.to_string()));
+                }
             }
         }
         finalize_base_fenced(
@@ -5324,7 +5337,12 @@ pub(crate) async fn finish_local_pr_merge(
     .await;
     if !matches!(step, Ok(ControlFlow::Continue(_))) {
         if let Some((token, id)) = claim {
-            crate::oplog::settle_finish_claim(&key, id, token, ClaimSettle::Release).await;
+            let released =
+                crate::oplog::settle_finish_claim(&key, id, token, ClaimSettle::Release).await;
+            // A claim left behind answers busy until it expires, so "try again" would fail.
+            if unrecorded && !released {
+                return Err(AppError::Command(UNRECORDED_LANDING_CLAIM_HELD.to_string()));
+            }
         }
     }
     let new_sha = match step? {
@@ -5787,6 +5805,10 @@ const UNJOURNALED_UPDATE: &str =
     "Couldn't record this update in the operation journal, so it wasn't started. Try again.";
 const UNJOURNALED_MERGE: &str =
     "Couldn't record this merge in the operation journal, so it wasn't started. Try again.";
+const UNRECORDED_MERGE_LANDING: &str =
+    "Couldn't record this merge in the operation journal, so it wasn't finished. Try again.";
+/// [`UNRECORDED_MERGE_LANDING`] when the finish's claim could not be released either.
+const UNRECORDED_LANDING_CLAIM_HELD: &str = "Couldn't record this merge in the operation journal, so it wasn't finished. Try again in a couple of minutes.";
 /// The remedy of every finish refusal that a retry cannot clear.
 const UPDATE_RESTART: &str = "Discard this update, then choose Resolve conflicts to start again.";
 /// Also answers a finish whose claim was lost, or could not be re-asserted, before head
@@ -5911,13 +5933,14 @@ enum WorktreeStanding {
     NotThisUpdates,
     /// HEAD builds on the start tip and head does not contain it yet.
     Unlanded,
-    /// HEAD moved past the start tip and head contains it: the update landed.
-    Landed,
+    /// HEAD moved past the start tip and head, at this tip, contains it: the update landed.
+    Landed(String),
 }
 
 /// The one comparison of the start tip, the worktree's HEAD and head's tip that binds a
 /// worktree to its entry and proves a landing while the worktree is still there. A
-/// failed read is an Err, never a verdict.
+/// failed read is an Err, never a verdict. The landing reads the exact ref, so neither a
+/// case twin nor a `refs/heads/…`-named branch answers for head.
 async fn worktree_standing(
     repo_path: &str,
     head: &str,
@@ -5932,12 +5955,13 @@ async fn worktree_standing(
     if at == pre_op_tip {
         return Ok(WorktreeStanding::Unlanded);
     }
-    let tip = branch_tip(repo_path, head).await?;
-    Ok(if is_ancestor(repo_path, &at, &tip).await? {
-        WorktreeStanding::Landed
-    } else {
-        WorktreeStanding::Unlanded
-    })
+    branch_tip(repo_path, head).await?;
+    if let Some(tip) = crate::git::branches::exact_branch_tip(repo_path, head).await? {
+        if is_ancestor(repo_path, &at, &tip).await? {
+            return Ok(WorktreeStanding::Landed(tip));
+        }
+    }
+    Ok(WorktreeStanding::Unlanded)
 }
 
 /// The entry's status as the journal reads it right now; None when unreadable or gone.
@@ -6272,7 +6296,8 @@ async fn update_journal_in(candidate: String, op_id: &str) -> Option<UpdateJourn
 
 /// Head's tip when the journal shows this update finished without error and head has
 /// moved on from where the update started: the finish landed even if no record says
-/// so. Every other case, a failed read included, is None.
+/// so. Every other case, a failed read included, is None. Head is the exact ref, so
+/// neither a case twin nor a `refs/heads/…`-named branch answers for it.
 async fn update_already_landed(
     repo_path: &str,
     head: &str,
@@ -6282,7 +6307,8 @@ async fn update_already_landed(
         return None;
     }
     crate::git::branches::validate_branch_name(head).ok()?;
-    let tip = branch_tip(repo_path, head).await.ok()?;
+    let exact = crate::git::branches::exact_branch_tip(repo_path, head).await;
+    let tip = exact.ok().flatten()?;
     if tip == journal.pre_op_tip {
         return None;
     }
@@ -6709,8 +6735,9 @@ async fn update_closed_entry(
     // head, or an uncommitted resolution would be deleted as landed.
     if let (Some(tip), Some(j)) = (landed, journal.as_ref()) {
         let standing = worktree_standing(repo_path, stored_head, worktree_path, &j.pre_op_tip);
-        if matches!(standing.await, Ok(WorktreeStanding::Landed)) {
-            let outcome = update_landed(tip, op_id, landed_key);
+        // The tip the worktree proved the landing against, not the journal read's.
+        if let Ok(WorktreeStanding::Landed(proved)) = standing.await {
+            let outcome = update_landed(proved, op_id, landed_key);
             remove_resolve_worktree(state, repo_path, worktree_path).await;
             return Ok(outcome);
         }
@@ -6727,17 +6754,18 @@ async fn update_closed_entry(
     )))
 }
 
-/// Discards an unfinished update. Once the repository's identity resolves it refuses
-/// while a finish holds the entry, or when its close could not read the journal while
-/// a fresh read still finds the entry unfinished (a retry then clears it). A journal
-/// unreadable from the start rules nothing out: the discard then removes no registered
-/// worktree and answers discarded. A record stays clearable: the worktree is removed
-/// only when it is this repository's own `<root>/gd-resolve-<id>` (a relocated
-/// repository's stored path no longer is) and builds on the entry's start tip, and the
-/// entry is closed only while unfinished.
-/// Removal is best-effort: a directory that survives it is reported nowhere. An update
-/// that landed, by the journal or by the worktree's own commit, reports `updated`, so
-/// the caller clears the approval as a finish would.
+/// Discards an unfinished update. Once the repository's identity resolves, and unless the
+/// update landed (by the journal, or by an unfinished entry's worktree commit; it then
+/// answers `updated`), it refuses while a finish holds the entry, or when its close could
+/// not be saved while a fresh read still finds the entry unfinished; a retry clears the
+/// entry once the journal can be written again. A journal unreadable from the start rules
+/// nothing out: the discard then removes no registered worktree and answers
+/// discarded. A record stays clearable: the worktree is removed only when it is this
+/// repository's own `<root>/gd-resolve-<id>` (a relocated repository's stored path no
+/// longer is) and builds on the entry's start tip, and the entry is closed only while
+/// unfinished. Removal is best-effort: a directory that survives it is reported nowhere.
+/// An update that landed, by the journal or by an unfinished entry's worktree commit,
+/// reports `updated`, so the caller clears the approval as a finish would.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
 pub async fn git_discard_local_pr_update(
@@ -6803,7 +6831,11 @@ struct UpdateHandles<'a> {
 
 /// What a discard does against `journal`: (remove the worktree, the update landed).
 async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>) -> (bool, bool) {
-    let (repo_path, head, worktree_path) = (at.repo_path, at.head, at.worktree_path);
+    let (repo_path, worktree_path) = (at.repo_path, at.worktree_path);
+    // The landing reads are case-exact, so they take head's stored spelling; a failed
+    // lookup keeps the name as given, since the discard still has to discard.
+    let stored = crate::git::branches::stored_branch_spelling(repo_path, at.head).await;
+    let head = stored.as_deref().unwrap_or(at.head);
     let by_journal = match journal {
         Some(j) => update_already_landed(repo_path, head, j).await.is_some(),
         None => false,
@@ -6818,7 +6850,7 @@ async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>)
             match standing.await {
                 Ok(WorktreeStanding::NotThisUpdates) => (false, false),
                 Ok(WorktreeStanding::Unlanded) => (true, false),
-                Ok(WorktreeStanding::Landed) => (true, is_unfinished(j) || by_journal),
+                Ok(WorktreeStanding::Landed(_)) => (true, is_unfinished(j) || by_journal),
                 // A worktree deleted outside the app holds nothing left to lose.
                 Err(_) => {
                     let gone = !Path::new(worktree_path).exists();
@@ -6836,8 +6868,7 @@ async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>)
 /// Closes the entry and removes the worktree per `assessed`, made against `journal`. A
 /// close that loses to a concurrent finish re-reads the journal and assesses again, so
 /// an update that landed meanwhile reports `updated` rather than the stale verdict. Over
-/// a finish's live claim it refuses, removing and writing nothing, unless the worktree
-/// proves head already holds the resolution.
+/// a finish's live claim it refuses, removing and writing nothing, unless the update landed.
 async fn settle_discard(
     state: &AppState,
     at: &UpdateHandles<'_>,
@@ -6853,8 +6884,8 @@ async fn settle_discard(
             let fresh = update_journal(at.repo_path, at.journal_repo, at.op_id).await;
             (remove, landed) = assess_discard(at, fresh.as_ref()).await;
             // Nothing reopens a closed entry, so one still unfinished after a close that
-            // did not close it means the close could not read the store, which may hide a
-            // live claim: refuse as over one.
+            // answered `NotUnfinished` means the close could not read or write the store,
+            // and an unread store may hide a live claim: refuse as over one.
             let still_open = fresh.as_ref().is_some_and(is_unfinished);
             if !landed && (close == CloseOutcome::Claimed || still_open) {
                 return Err(AppError::Command(UPDATE_DISCARD_BUSY.to_string()));
@@ -25934,7 +25965,8 @@ detached
         git(&wt, &["commit", "-m", "m"]).await;
         let landing = rev(&wt, "HEAD").await;
         seed_claim(&repo, &op, "crashed", 200);
-        assert!(crate::oplog::record_landing(&repo, &op, "crashed", &landing).await);
+        let recorded = crate::oplog::record_landing(&repo, &op, "crashed", &landing).await;
+        assert!(recorded.unwrap());
         if land {
             git(&repo, &["merge", "--ff-only", &landing]).await;
             assert_eq!(rev(&repo, &base).await, landing);
@@ -26150,7 +26182,7 @@ detached
                 "not-a-commit" => {
                     let fake = "0".repeat(40);
                     let recorded = crate::oplog::record_landing(&m.repo, &m.op, "crashed", &fake);
-                    assert!(recorded.await);
+                    assert!(recorded.await.unwrap());
                 }
                 "base-deleted" => {
                     git(&m.repo, &["switch", "-c", "side"]).await;
@@ -31392,7 +31424,7 @@ detached
             let stray = git(&m.repo, &["commit-tree", "HEAD^{tree}", "-m", "stray"]).await;
             let stray = stray.trim();
             let recorded = crate::oplog::record_landing(&m.repo, &m.op, "crashed", stray);
-            assert!(recorded.await);
+            assert!(recorded.await.unwrap());
             corrupt_loose_object(&m.repo, stray);
             let start = rev(&m.repo, &m.base).await;
             let roots = std::slice::from_ref(&m.root);
@@ -31549,5 +31581,287 @@ detached
         assert_eq!(body.matches(read).count(), 1);
         let add = body.find("&[\"worktree\", \"add\"").unwrap();
         assert!(body.find(read).unwrap() > add);
+    }
+
+    /// A landed update whose worktree is still registered: the standing carries head's
+    /// exact tip, and the closed-entry route reports that same commit.
+    #[tokio::test]
+    async fn local_pr_update_closed_entry_reports_the_tip_the_worktree_proved() {
+        let f = UpdateFixture::new("lpu-proved-tip", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        let tree = format!("{resolved}^{{tree}}");
+        let argv: [&str; 6] = ["commit-tree", "-p", &resolved, "-m", "next", &tree];
+        let next = git(&f.repo, &argv).await.trim().to_string();
+        let moved: [&str; 4] = ["update-ref", "refs/heads/feature", &next, &resolved];
+        git(&f.repo, &moved).await;
+        let (wt, _) = handles(&out);
+        let start = journal_entry(&f.repo, &out.op_id).await.pre_op_tip.unwrap();
+        let standing = worktree_standing(&f.repo, "feature", wt, &start).await;
+        let proved = WorktreeStanding::Landed(next.clone());
+        assert_eq!(standing.unwrap(), proved);
+        crate::oplog::finish(&out.journal_repo, &Some(out.op_id.clone()), None).await;
+
+        let done = f.finish(&state, &out).await;
+        let done = done.map_err(command_message).unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.head_tip.as_str()),
+            ("updated", next.as_str())
+        );
+    }
+
+    /// A closed merge entry whose base is gone, a branch literally named `refs/heads/<base>`
+    /// holding the landing: the fence refuses as closed rather than reading it as landed.
+    #[tokio::test]
+    async fn merge_claim_fence_never_reads_a_ref_search_fallback() {
+        let m = recorded_local_merge("lpr-fence-fallback", true).await;
+        git(&m.repo, &["switch", "--detach"]).await;
+        git(&m.repo, &["branch", "-D", &m.base]).await;
+        let fallback = match m.base.as_str() {
+            "master" => "refs/heads/refs/heads/master",
+            "main" => "refs/heads/refs/heads/main",
+            other => panic!("no fallback name for the fixture base {other}"),
+        };
+        git(&m.repo, &["update-ref", fallback, &m.landing]).await;
+        let read = branch_tip(&m.repo, &m.base).await.unwrap();
+        assert_eq!(read, m.landing, "fixture sanity: rev-parse reads it");
+        let aborted = Some("aborted by user".to_string());
+        let closed = crate::oplog::close_unfinished(&m.repo, &m.op, aborted).await;
+        assert_eq!(closed, CloseOutcome::Closed);
+
+        let fence = merge_fence(&m.repo, &m.op, &m.base);
+        let out = fence.admits_write(&m.repo, &m.base, &m.landing).await;
+        let refused = command_message(out.unwrap_err());
+        assert_eq!(refused, merge_closed_mid_finish(&m.base));
+    }
+
+    /// A closed update entry whose head is gone, a branch literally named
+    /// `refs/heads/<head>` at the resolution: the fence refuses as closed. The fallback
+    /// answers `rev-parse`, so the no-longer-exists refusal does not come first.
+    #[tokio::test]
+    async fn update_claim_fence_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-fence-fallback", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &resolved]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, resolved, "fixture sanity: rev-parse reads it");
+        let (key, id) = (out.journal_repo.as_str(), out.op_id.as_str());
+        let aborted = Some("aborted by user".to_string());
+        assert_eq!(
+            crate::oplog::close_unfinished(key, id, aborted).await,
+            CloseOutcome::Closed
+        );
+
+        let flow = FinishFlow::Update { head: "feature" };
+        let fence = ClaimFence {
+            key,
+            id,
+            token: "finish",
+            flow,
+        };
+        let out = fence.admits_write(&f.repo, "feature", &resolved).await;
+        let refused = command_message(out.unwrap_err());
+        assert_eq!(refused, update_closed_mid_finish("feature"));
+    }
+
+    /// A paused update whose worktree committed past the start tip, head gone and a branch
+    /// literally named `refs/heads/<head>` holding that commit: the fallback answers
+    /// `rev-parse`, so the standing is a verdict, and that verdict is not a landing.
+    #[tokio::test]
+    async fn worktree_standing_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-standing-fallback", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, _) = handles(&out);
+        git(wt, &["commit", "-m", "resolved"]).await;
+        let at = rev(wt, "HEAD").await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &at]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, at, "fixture sanity: rev-parse takes the fallback");
+        let start = journal_entry(&f.repo, &out.op_id).await.pre_op_tip.unwrap();
+
+        let standing = worktree_standing(&f.repo, "feature", wt, &start).await;
+        assert_eq!(standing.unwrap(), WorktreeStanding::Unlanded);
+    }
+
+    /// A done update entry, head gone and a branch literally named `refs/heads/<head>` past
+    /// the start tip: the journal proves no landing through the fallback.
+    #[tokio::test]
+    async fn update_already_landed_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-landed-fallback", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        crate::oplog::finish(&out.journal_repo, &Some(out.op_id.clone()), None).await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &resolved]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, resolved, "fixture sanity: rev-parse reads it");
+        let journal = update_journal(&f.repo, &out.journal_repo, &out.op_id).await;
+        let journal = journal.expect("the entry is found");
+        let read = (journal.status.as_str(), journal.error.as_deref());
+        assert_eq!(read, ("done", None));
+
+        let landed = update_already_landed(&f.repo, "feature", &journal).await;
+        assert_eq!(landed, None);
+    }
+
+    /// A landed update discarded under another case of head's loose ref: the landing reads
+    /// take head's stored spelling, so the discard still reports the landing, and a repeat
+    /// that only the done entry can prove reports it too. Returns early on a case-sensitive
+    /// filesystem, where git reads no ref by the other case.
+    #[tokio::test]
+    async fn local_pr_update_discard_reads_a_landing_under_the_stored_spelling() {
+        let f = UpdateFixture::new("lpu-discard-case", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+        if branch_tip(&f.repo, "Feature").await.is_err() {
+            return;
+        }
+        let (wt, id) = handles(&out);
+        let (op, journal_repo, root) = (&out.op_id, &out.journal_repo, f.root());
+        let discarded =
+            discard_local_pr_update(&state, &f.repo, "Feature", wt, id, op, journal_repo, &root)
+                .await;
+        let discarded = discarded.map_err(command_message).unwrap();
+        assert_eq!(discarded.status, "updated");
+        let removed = !Path::new(wt).exists();
+        assert!(removed, "the first discard removed the worktree");
+
+        let again =
+            discard_local_pr_update(&state, &f.repo, "Feature", wt, id, op, journal_repo, &root)
+                .await;
+        let again = again.map_err(command_message).unwrap();
+        assert_eq!(again.status, "updated", "the journal proves the landing");
+    }
+
+    fn failing_landing_store(_repo: &str, _id: &str) -> AppResult<()> {
+        let failure = std::io::Error::other("injected store failure");
+        Err(AppError::Io(failure))
+    }
+
+    /// Another holder takes the claim right before the landing write.
+    fn landing_claim_taken(repo: &str, id: &str) -> AppResult<()> {
+        let later = chrono::Utc::now() + chrono::Duration::days(1);
+        let taken = crate::oplog::claim_finish_at(repo, id, "other", later)?;
+        assert_eq!(taken, FinishClaim::Claimed("other".to_string()));
+        Ok(())
+    }
+
+    /// A finish whose landing record cannot be written refuses before the base moves,
+    /// keeps the worktree and frees its claim; once the journal takes it, Finish lands.
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_when_its_landing_cannot_be_recorded() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-unwritten").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::set_landing_hook(&repo, Some(failing_landing_store));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        crate::oplog::set_landing_hook(&repo, None);
+        assert_eq!(rev(&repo, &base).await, start, "base at its start tip");
+        assert_eq!(merge_refusal(err), UNRECORDED_MERGE_LANDING);
+        assert_eq!(resolve_worktree_count(&repo).await, 1);
+        assert!(Path::new(&wt).exists());
+        let entry = raw_entry(&repo, &op);
+        assert_eq!(entry["status"], "paused");
+        assert!(entry.get("finishClaim").is_none(), "the claim was released");
+        assert!(entry.get("landing").is_none());
+
+        let done = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(done.map_err(command_message).unwrap().status, "merged");
+        let landed = rev(&repo, &base).await;
+        assert_ne!(landed, start);
+        assert_eq!(raw_entry(&repo, &op)["landing"], landed.as_str());
+        assert_eq!(journal_entry(&repo, &op).await.status, "done");
+    }
+
+    /// The landing record and the claim's release both fail: the refusal says to wait,
+    /// since a retry while the claim lives answers busy.
+    #[tokio::test]
+    async fn local_pr_merge_finish_says_to_wait_when_its_claim_outlives_the_refusal() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-held").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::set_landing_hook(&repo, Some(failing_landing_store));
+        crate::oplog::set_settle_hook(&repo, Some(failing_landing_store));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        crate::oplog::set_settle_hook(&repo, None);
+        crate::oplog::set_landing_hook(&repo, None);
+        assert_eq!(rev(&repo, &base).await, start, "base at its start tip");
+        assert_eq!(merge_refusal(err), UNRECORDED_LANDING_CLAIM_HELD);
+        assert!(Path::new(&wt).exists());
+
+        let again = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(again), MERGE_BUSY);
+        assert_eq!(rev(&repo, &base).await, start);
+    }
+
+    /// A landing write that finds the claim gone is not a failed write: the fence answers.
+    #[tokio::test]
+    async fn local_pr_merge_finish_leaves_a_lost_claim_at_the_landing_to_its_fence() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-unheld").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::set_landing_hook(&repo, Some(landing_claim_taken));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        crate::oplog::set_landing_hook(&repo, None);
+        assert_eq!(merge_refusal(err), MERGE_BUSY);
+        assert_eq!(rev(&repo, &base).await, start);
+        let entry = raw_entry(&repo, &op);
+        assert_eq!(entry["finishClaim"]["token"], "other");
+        assert!(entry.get("landing").is_none());
+    }
+
+    /// A containment read that fails before the landing write is the finish's error, and
+    /// the base does not move unrecorded.
+    #[tokio::test]
+    async fn local_pr_merge_finish_returns_a_failed_landing_containment_read() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-unread-start").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        // The start commit's object goes once the merge commit exists, so only the
+        // containment read can trip over it.
+        let object = Path::new(&repo)
+            .join(".git")
+            .join("objects")
+            .join(&start[..2])
+            .join(&start[2..]);
+        assert!(object.exists(), "the start commit is a loose object");
+        let object = sh_path(&object.to_string_lossy());
+        install_update_hook(&repo, "post-commit", &format!("rm -f \"{object}\""));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert!(
+            matches!(err, Err(AppError::Git { .. })),
+            "{:?}",
+            err.map(|o| o.status)
+        );
+        assert_eq!(rev(&repo, &base).await, start);
+        assert!(raw_entry(&repo, &op).get("landing").is_none());
     }
 }

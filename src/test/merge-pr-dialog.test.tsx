@@ -1005,6 +1005,49 @@ describe("merge dialog: two commits", () => {
     expect(titleBox()).toHaveFocus();
   });
 
+  it("a typed title stays the user's after a default that briefly equals it", async () => {
+    const { user, rerender } = setup({
+      plan: squash({ title: "S", body: "" }),
+    });
+    await pressEdit(user);
+    await user.type(titleBox(), "2");
+    rerender({ plan: squash({ title: "S2", body: "" }) });
+    expect(hasReset()).toBe(false);
+    expect(sent()).toEqual({});
+    rerender({ plan: squash({ title: "S3", body: "" }) });
+    expect(titleBox()).toHaveValue("S2");
+    expect(hasReset()).toBe(true);
+    expect(sent()).toEqual({ squashMessage: { title: "S2", body: "" } });
+  });
+
+  it("a typed body stays the user's after a default that briefly equals it", async () => {
+    const { user, rerender } = setup({
+      plan: squash({ title: "S", body: "B" }),
+    });
+    await pressEdit(user);
+    await user.type(bodyBox(), "2");
+    rerender({ plan: squash({ title: "S", body: "B2" }) });
+    expect(hasReset()).toBe(false);
+    expect(sent()).toEqual({});
+    rerender({ plan: squash({ title: "S", body: "B3" }) });
+    expect(bodyBox()).toHaveValue("B2");
+    expect(hasReset()).toBe(true);
+    expect(sent()).toEqual({ squashMessage: { title: "S", body: "B2" } });
+  });
+
+  it("a title typed back to its default follows the next default again", async () => {
+    const { user, rerender } = setup({
+      plan: squash({ title: "S", body: "" }),
+    });
+    await pressEdit(user);
+    await user.type(titleBox(), "2");
+    await user.type(titleBox(), "{Backspace}");
+    expect(titleBox()).toHaveValue("S");
+    rerender({ plan: squash({ title: "S3", body: "" }) });
+    expect(titleBox()).toHaveValue("S3");
+    expect(sent()).toEqual({});
+  });
+
   it("a row the plan no longer lists is not sent, and waits out a plan that lists nothing", async () => {
     const { user, rerender } = setup({
       host: "GitLab",

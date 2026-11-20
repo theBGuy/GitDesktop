@@ -151,11 +151,13 @@ export const gitFinishLocalPrUpdate = (
     journalRepo,
   });
 
-/** Throws a paused update away. Once the repository resolves it refuses while a
- *  finish holds the entry, or when its close could not read the journal while a
- *  fresh read still finds the entry unfinished (a retry then clears it). A journal
- *  unreadable from the start rules nothing out: the discard then answers
- *  discarded without removing a registered worktree. */
+/** Throws a paused update away. Once the repository resolves, and unless the
+ *  update landed (by the journal, or by an unfinished entry's worktree commit;
+ *  it then answers updated), it refuses while a finish holds the entry, or when
+ *  its close could not be saved while a fresh read still finds the entry
+ *  unfinished; a retry clears the entry once the journal can be written again.
+ *  A journal unreadable from the start rules nothing out: the discard then
+ *  answers discarded without removing a registered worktree. */
 export const gitDiscardLocalPrUpdate = (
   repoPath: string,
   head: string,

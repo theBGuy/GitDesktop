@@ -117,11 +117,16 @@ export function bodyLineCount(body: string): number {
   return normalized === "" ? 0 : normalized.split("\n").length;
 }
 
-/** One open editor: what the user typed, and the default it started from. */
+/** One open editor: what the user typed, the default it started from, and
+ *  which fields the user owns. Ownership is recorded at each change, since a
+ *  newer default can briefly equal the typed text and equality would then hand
+ *  the field back to the defaults. */
 export type RowDraft = {
   title: string;
   body: string;
   baseline: MergeMessage | null;
+  titleOwned: boolean;
+  bodyOwned: boolean;
 };
 type MergeDraftRows = Partial<Record<MergeCommitKind, RowDraft>>;
 
@@ -177,7 +182,25 @@ function seeded(message: MergeMessage | null): RowDraft {
     title: message?.title ?? "",
     body: message?.body ?? "",
     baseline: message,
+    titleOwned: false,
+    bodyOwned: false,
   };
+}
+
+/** Pure. Applies a typed patch; a patched field is owned while its text
+ *  differs from the row's current baseline (an unknown one reads as empty). */
+function changed(
+  row: RowDraft,
+  patch: Partial<Pick<RowDraft, "title" | "body">>,
+): RowDraft {
+  const next = { ...row, ...patch };
+  if (patch.title !== undefined)
+    next.titleOwned =
+      normalizeTitle(patch.title) !== normalizeTitle(row.baseline?.title ?? "");
+  if (patch.body !== undefined)
+    next.bodyOwned =
+      normalizeBody(patch.body) !== normalizeBody(row.baseline?.body ?? "");
+  return next;
 }
 
 function sameDefaults(
@@ -204,10 +227,11 @@ function sameDefaults(
 const KINDS: readonly MergeCommitKind[] = ["squash", "merge"];
 
 /** Pure. An open row whose baseline differs from a ready plan's current default
- *  for its kind follows it per field: a field still equal to the old baseline's
- *  (an unknown one reads as empty) takes the new default's value, a field the
- *  user changed keeps their text, and the baseline moves to the new default, so
- *  an edited message re-read at a moved head carries the head's untouched parts.
+ *  for its kind follows it per field: a field the user doesn't own takes the
+ *  new default's value, an owned field keeps its text and its ownership (also
+ *  when the new default equals that text, which an equality test would read as
+ *  untouched), and the baseline moves to the new default, so an edited message
+ *  re-read at a moved head carries the head's untouched parts.
  *  A default that turns unknown under a known baseline changes nothing, so a
  *  transient read never lifts a hold or blanks a row. A plan that lists nothing
  *  leaves rows as they are. Idempotent, so the render-time update below
@@ -223,16 +247,14 @@ function followDefaults(
     const current = planDefault(plan, kind);
     if (current === undefined || sameMessage(row.baseline, current)) continue;
     if (current === null) continue;
-    const old = row.baseline;
-    const titleKept =
-      normalizeTitle(row.title) !== normalizeTitle(old?.title ?? "");
-    const bodyKept = normalizeBody(row.body) !== normalizeBody(old?.body ?? "");
     next = {
       ...next,
       [kind]: {
-        title: titleKept ? row.title : current.title,
-        body: bodyKept ? row.body : current.body,
+        title: row.titleOwned ? row.title : current.title,
+        body: row.bodyOwned ? row.body : current.body,
         baseline: current,
+        titleOwned: row.titleOwned,
+        bodyOwned: row.bodyOwned,
       },
     };
   }
@@ -285,7 +307,7 @@ export function useMergeMessageDraft(
     change: (kind, patch) =>
       setRows((r) => {
         const row = r[kind];
-        return row === undefined ? r : { ...r, [kind]: { ...row, ...patch } };
+        return row === undefined ? r : { ...r, [kind]: changed(row, patch) };
       }),
     resetRow: (kind) =>
       setRows((r) => {

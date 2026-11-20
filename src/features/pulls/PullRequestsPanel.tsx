@@ -678,6 +678,13 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // tab draws that row. Only `settleAlign` sets it, so plain clicks and arrow-key
   // nav (which scrolls on its own) never gain a scroll from it.
   const [alignScrollRow, setAlignScrollRow] = useState<string | null>(null);
+  // Set by an align that refreshed the landing list: a page or error from before
+  // that time can be the pre-align one, so it never retires the scroll (0: any).
+  const [alignScrollAfter, setAlignScrollAfter] = useState(0);
+  // The repository and lens the request was made in; any other drops it, since
+  // the panel outlives a repository switch and row keys are only `kind:id`.
+  const scrollScope = `${repoPath}\n${lens}`;
+  const [alignScrollScope, setAlignScrollScope] = useState(scrollScope);
   // The tab and the archived toggle are READ here rather than depended on: the align
   // is keyed on the PR's state landing, not on the state it is correcting.
   const settleAlign = useEffectEvent(
@@ -687,6 +694,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       if (target !== stateFilter) onStateFilter(target);
       if (revealArchived && !showArchived) setShowArchived(true);
       if (selectedPr) setAlignScrollRow(`${selectedPr.kind}:${selectedPr.id}`);
+      setAlignScrollAfter(0);
+      setAlignScrollScope(scrollScope);
       clearPendingPrAlign();
       return target !== stateFilter;
     },
@@ -806,24 +815,60 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         // probe case also refreshes the details' stale state. The lens's lists
         // are only marked stale, since the observer still sits on the tab
         // being left; the landing tab's own key refetches when it is on screen.
+        // Each marks synchronously, so the tab move's mount sees a stale page,
+        // then cancels reads in flight (only inactive ones before a mark-only
+        // pass: nothing would refetch an active observer's). The second pass
+        // re-marks what the cancel reverted, skips any other query a read
+        // since the mark answered, and joins a read still in flight
+        // (`cancelRefetch: false`).
         if ((moved || step.tab !== tab0) && alignRemoteNumber !== null) {
-          if (step.tab !== tab0)
+          setAlignScrollAfter(Date.now());
+          const refresh = (
+            filters: { queryKey: readonly unknown[]; exact?: boolean },
+            refetchType?: "none",
+          ) => {
             void queryClient.invalidateQueries({
+              ...filters,
+              refetchType: "none",
+            });
+            const cancel =
+              refetchType === "none"
+                ? { ...filters, type: "inactive" as const }
+                : filters;
+            const reverted = new Set(
+              queryClient
+                .getQueryCache()
+                .findAll(cancel)
+                .filter((q) => q.state.fetchStatus !== "idle"),
+            );
+            void queryClient
+              .cancelQueries(cancel)
+              .then(() =>
+                queryClient.invalidateQueries(
+                  {
+                    ...filters,
+                    refetchType,
+                    predicate: (q) => reverted.has(q) || q.state.isInvalidated,
+                  },
+                  { cancelRefetch: false },
+                ),
+              )
+              .catch(() => {
+                // Best-effort, as in `refreshPrList`.
+              });
+          };
+          if (step.tab !== tab0)
+            refresh({
               queryKey: prDetailsOptions(repoPath, alignRemoteNumber, lens)
                 .queryKey,
               exact: true,
             });
-          void queryClient.invalidateQueries({
-            queryKey: [...repoKeys.prList(repoPath), lens],
-            refetchType: "none",
-          });
-          void queryClient.invalidateQueries({
+          refresh({ queryKey: [...repoKeys.prList(repoPath), lens] }, "none");
+          refresh({
             queryKey: [...repoKeys.prList(repoPath), lens, step.tab],
           });
           // The list key's co-invalidation contract (prs.ts).
-          void queryClient.invalidateQueries({
-            queryKey: [...repoKeys.prReviewState(repoPath), lens],
-          });
+          refresh({ queryKey: [...repoKeys.prReviewState(repoPath), lens] });
         }
       }
     }
@@ -1135,11 +1180,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       heldRows.some((c) => `remote:${c.number}` === alignScrollRow));
   const alignScrollSettled =
     selectedPr?.kind === "local" ||
-    prList.isError ||
-    (prList.isSuccess && !prList.isPlaceholderData && !prList.isFetching);
+    (prList.isError && prList.errorUpdatedAt >= alignScrollAfter) ||
+    (prList.isSuccess &&
+      !prList.isPlaceholderData &&
+      !prList.isFetching &&
+      prList.dataUpdatedAt >= alignScrollAfter);
   useLayoutEffect(() => {
     if (alignScrollRow === null) return;
-    if (alignScrollRow !== selectedRowKey) {
+    if (alignScrollRow !== selectedRowKey || alignScrollScope !== scrollScope) {
       setAlignScrollRow(null);
       return;
     }
@@ -1154,7 +1202,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     } else if (alignScrollSettled) {
       setAlignScrollRow(null);
     }
-  }, [alignScrollRow, selectedRowKey, alignScrollDrawn, alignScrollSettled]);
+  }, [
+    alignScrollRow,
+    selectedRowKey,
+    alignScrollScope,
+    scrollScope,
+    alignScrollDrawn,
+    alignScrollSettled,
+  ]);
 
   // One spelling for "this number is the selection", shared by the real rows and
   // the held rows standing in for them — the swap only carries the selection

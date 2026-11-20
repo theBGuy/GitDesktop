@@ -1746,15 +1746,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   a claim records the commit it is about to land (`oplog::record_landing`,
   the entry's `landing`, never on the listing) before the base moves, and
   only when the entry's starting tip is known and that commit builds on the
-  tip without being it. A later finish or abort reads it (`oplog::landing`)
-  and treats the merge as landed only when the base contains that commit: a
-  finish then reports merged before its gates, whatever the worktree holds,
-  and cleans up; an abort refuses and removes nothing, so Finish is always
-  the next step. A bare `oplog::finish` on such an entry is written only
-  after the branch provably holds the commit: the update discard's
-  landed-under-claim done write, and a finish's (merge or update) done write
-  when its settle fails. `reconcile` closes only `pending` entries and reads
-  no claim.
+  tip without being it. A record that cannot be written, or a containment
+  read that fails, refuses the finish before the base moves. A later
+  finish or abort reads it (`oplog::landing`) and treats the merge as
+  landed only when the base contains that commit: a finish then reports
+  merged before its gates, whatever the worktree holds, and cleans up; an
+  abort refuses and removes nothing, so Finish is always the next step. A
+  bare `oplog::finish` on such an entry is written only after the branch
+  provably holds the commit: the update discard's landed-under-claim done
+  write, and a finish's (merge or update) done write when its settle fails.
+  `reconcile` closes only `pending` entries and reads no claim.
 - **Test code runs git on `TEST_GIT_HANG_GUARD`** (`git/runner.rs`, test
   builds only): fixture helpers and direct calls to the plain spawn runners
   (`PLAIN_GIT_RUNNERS` in check L's script) in tests pass it, never

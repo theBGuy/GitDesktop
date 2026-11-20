@@ -881,6 +881,8 @@ pub(crate) async fn settle_finish_claim(
 ) -> bool {
     let (repo, id, token) = (repo.to_string(), id.to_string(), token.to_string());
     let result = crate::store_lock::locked_store_task(move || {
+        #[cfg(test)]
+        run_settle_hook(&repo, &id)?;
         settle_finish_claim_with(&repo, &id, &token, how, chrono::Utc::now)
     })
     .await;
@@ -1130,21 +1132,78 @@ fn close_unfinished_with(
 
 /// Records `sha` as the commit the finish holding `token` on `id` is about to land, while
 /// the entry is pending or paused under that token. The claim's time is left as it was.
-/// True when written; a store error is logged and reads false.
-pub(crate) async fn record_landing(repo: &str, id: &str, token: &str, sha: &str) -> bool {
+/// `Ok(true)` when written, `Ok(false)` when the entry is not held under `token`, and
+/// `Err` (logged) when the store could not be read or written: the finish then refuses.
+pub(crate) async fn record_landing(
+    repo: &str,
+    id: &str,
+    token: &str,
+    sha: &str,
+) -> AppResult<bool> {
     let (repo, id) = (repo.to_string(), id.to_string());
     let (token, sha) = (token.to_string(), sha.to_string());
     let result =
         crate::store_lock::locked_store_task(move || record_landing_in(&repo, &id, &token, &sha))
             .await;
-    result.unwrap_or_else(|e| {
-        eprintln!("gitdesktop: opslog landing record failed (finish continues): {e}");
-        false
-    })
+    if let Err(e) = &result {
+        eprintln!("gitdesktop: opslog landing record failed (finish refused): {e}");
+    }
+    result
+}
+
+/// What [`record_landing`] runs first for a repository key, so a test can fail the write
+/// or change the entry right before it; keyed so parallel tests never meet.
+#[cfg(test)]
+type LandingHook = fn(&str, &str) -> AppResult<()>;
+#[cfg(test)]
+static LANDING_HOOKS: Mutex<std::collections::BTreeMap<String, LandingHook>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Sets (or, with `None`, clears) `repo`'s [`LandingHook`]; it gets the repo and the id.
+#[cfg(test)]
+pub(crate) fn set_landing_hook(repo: &str, hook: Option<LandingHook>) {
+    let mut hooks = LANDING_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    match hook {
+        Some(hook) => hooks.insert(norm_repo_key(repo), hook),
+        None => hooks.remove(&norm_repo_key(repo)),
+    };
+}
+
+/// What [`settle_finish_claim`] runs first for a repository key, so a test can fail the
+/// settle; keyed like [`set_landing_hook`].
+#[cfg(test)]
+static SETTLE_HOOKS: Mutex<std::collections::BTreeMap<String, LandingHook>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Sets (or, with `None`, clears) `repo`'s settle hook; it gets the repo and the id.
+#[cfg(test)]
+pub(crate) fn set_settle_hook(repo: &str, hook: Option<LandingHook>) {
+    let mut hooks = SETTLE_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    match hook {
+        Some(hook) => hooks.insert(norm_repo_key(repo), hook),
+        None => hooks.remove(&norm_repo_key(repo)),
+    };
+}
+
+#[cfg(test)]
+fn run_settle_hook(repo: &str, id: &str) -> AppResult<()> {
+    let hooks = SETTLE_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    let hook = hooks.get(&norm_repo_key(repo)).copied();
+    drop(hooks);
+    hook.map_or(Ok(()), |hook| hook(repo, id))
 }
 
 /// Core of [`record_landing`].
 fn record_landing_in(repo: &str, id: &str, token: &str, sha: &str) -> AppResult<bool> {
+    #[cfg(test)]
+    {
+        let hooks = LANDING_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+        let hook = hooks.get(&norm_repo_key(repo)).copied();
+        drop(hooks);
+        if let Some(hook) = hook {
+            hook(repo, id)?;
+        }
+    }
     decide_on_entry(repo, id, |entry| {
         let held =
             |obj: &Map<String, Value>| is_unfinished_entry(obj) && claim_token(obj) == Some(token);
@@ -2424,8 +2483,13 @@ mod tests {
         record
     }
 
-    fn store_bytes(repo: &str) -> Vec<u8> {
-        std::fs::read(store_path(repo).unwrap()).unwrap()
+    /// `repo`'s entries off disk, under both locks. Only these: a store `GD_OPLOG_DIR`
+    /// points every test at also holds other tests' entries, written at any time.
+    fn own_entries(repo: &str) -> Vec<Value> {
+        let path = store_path(repo).unwrap();
+        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _store_lock = crate::store_lock::lock_store(&path);
+        repo_entries(&read_store(&path).unwrap(), repo)
     }
 
     #[test]
@@ -2471,10 +2535,10 @@ mod tests {
             claim("failed-held", "t8"),
             FinishClaim::Ended("failed".to_string())
         );
-        let before = store_bytes(&repo);
+        let before = own_entries(&repo);
         let close = close_unfinished_entry(&repo, "failed-held", Some("x".to_string()), now);
         assert_eq!(close.unwrap(), CloseOutcome::NotUnfinished);
-        assert_eq!(store_bytes(&repo), before, "a leftover marker is inert");
+        assert_eq!(own_entries(&repo), before, "a leftover marker is inert");
         assert_eq!(claim("missing", "t6"), FinishClaim::Missing);
         let (_other, unknown) = scratch_repo_key("claim-unknown");
         let missing = claim_finish_at(&unknown, "paused", "t7", now).unwrap();
@@ -2564,7 +2628,7 @@ mod tests {
             assert!(stored_entry(&repo, id).get(FINISH_CLAIM).is_none(), "{id}");
         }
 
-        let before = store_bytes(&repo);
+        let before = own_entries(&repo);
         assert!(!settle("foreign", "other", ClaimSettle::Done));
         assert!(!settle(
             "reclaimed",
@@ -2576,12 +2640,12 @@ mod tests {
             "already settled"
         );
         assert!(!settle("missing", "t", ClaimSettle::Done));
-        assert_eq!(store_bytes(&repo), before, "a non-holder writes nothing");
+        assert_eq!(own_entries(&repo), before, "a non-holder writes nothing");
 
         let failed = settle("closed-held", "t", ClaimSettle::Failed("m".to_string()));
         assert!(!failed, "a failed settle never overwrites a done entry");
         assert!(!settle("closed-held", "t", ClaimSettle::Done));
-        assert_eq!(store_bytes(&repo), before, "a closed entry keeps its close");
+        assert_eq!(own_entries(&repo), before, "a closed entry keeps its close");
     }
 
     fn json_str(s: &str) -> Value {
@@ -2690,7 +2754,7 @@ mod tests {
             );
         }
 
-        let before = store_bytes(&repo);
+        let before = own_entries(&repo);
         for id in [
             "foreign",
             "released",
@@ -2702,7 +2766,7 @@ mod tests {
             assert!(!record(id), "{id}");
         }
         assert_eq!(
-            store_bytes(&repo),
+            own_entries(&repo),
             before,
             "only an unfinished entry's holder writes"
         );
@@ -2774,13 +2838,13 @@ mod tests {
         let close = close_unfinished_entry(&repo, "stale", Some("x".to_string()), inside);
         assert_eq!(close.unwrap(), CloseOutcome::Claimed);
 
-        let before = store_bytes(&repo);
+        let before = own_entries(&repo);
         assert_eq!(renew("done-held", now), ClaimRenewal::Closed);
         assert_eq!(renew("failed-bare", now), ClaimRenewal::Closed);
         assert_eq!(renew("missing", now), ClaimRenewal::Closed);
         assert_eq!(renew("reclaimed", now), ClaimRenewal::LostOrUnknown);
         assert_eq!(renew("released", now), ClaimRenewal::LostOrUnknown);
-        assert_eq!(store_bytes(&repo), before, "only a renewal writes");
+        assert_eq!(own_entries(&repo), before, "only a renewal writes");
 
         let (_corrupt_dir, corrupt) = tmp_store();
         std::fs::write(&corrupt, b"not json").unwrap();

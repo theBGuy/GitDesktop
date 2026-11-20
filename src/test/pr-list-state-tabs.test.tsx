@@ -2,6 +2,7 @@ import {
   onlineManager,
   QueryClient,
   QueryClientProvider,
+  QueryObserver,
   useQuery,
 } from "@tanstack/react-query";
 import {
@@ -13,7 +14,12 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { type ComponentProps, type ReactElement, useState } from "react";
+import {
+  type ComponentProps,
+  type ReactElement,
+  useEffect,
+  useState,
+} from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
@@ -25,12 +31,17 @@ import {
   gitRemotes,
   type PrStateFilter,
 } from "@/lib/git/api";
-import { glMrMergeStateOptions, prDetailsOptions } from "@/lib/git/queries";
+import {
+  glMrMergeStateOptions,
+  prDetailsOptions,
+  repoKeys,
+} from "@/lib/git/queries";
 import type {
   ForgeImplemented,
   ForgeStatus,
   GitLabMrMergeState,
   PrDetails,
+  PrListPage,
 } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { type LocalPr, listLocalPrs } from "@/lib/pulls/local";
@@ -634,6 +645,17 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     return null;
   }
 
+  /** Moves the mounted panel to another repository, as RepositoryView does
+   *  (the panel instance survives the switch). */
+  const panelRepo: { show: (repo: string) => void } = { show: noop };
+  function SwitchablePanel() {
+    const [repo, setRepo] = useState("C:/repo");
+    useEffect(() => {
+      panelRepo.show = setRepo;
+    }, []);
+    return <PullRequestsPanel repoPath={repo} />;
+  }
+
   /** Mounts the panel on PR `number`, armed unless `arm` is false; `seed`
    *  writes the client's cache before the first render. */
   function renderArmed(
@@ -677,7 +699,7 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     seed?.(client);
     render(
       <QueryClientProvider client={client}>
-        <PullRequestsPanel repoPath="C:/repo" />
+        <SwitchablePanel />
         <DetailsWatcher number={number} />
       </QueryClientProvider>,
     );
@@ -736,7 +758,31 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
       () => new Promise(() => undefined),
     );
     useUiStore.setState({ selectedPr: null, pendingPrAlign: false });
+    restoreScroll?.();
+    restoreScroll = undefined;
   });
+
+  /** Puts back the prototype's own `scrollIntoView` after a `recordScrolls`. */
+  let restoreScroll: (() => void) | undefined;
+  /** Records the `data-row` of every element scrolled into view (jsdom has no
+   *  `scrollIntoView`); the afterEach above restores the prototype. */
+  function recordScrolls() {
+    const scrolled: (string | null)[] = [];
+    const proto = Element.prototype;
+    const original = Object.getOwnPropertyDescriptor(proto, "scrollIntoView");
+    restoreScroll = () => {
+      if (original) Object.defineProperty(proto, "scrollIntoView", original);
+      else Reflect.deleteProperty(proto, "scrollIntoView");
+    };
+    Object.defineProperty(proto, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value(this: Element) {
+        scrolled.push(this.getAttribute("data-row"));
+      },
+    });
+    return scrolled;
+  }
 
   /** Presses one of the state tabs, as the user would. */
   async function pickTab(
@@ -812,6 +858,450 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     );
     await ticks();
     expect(listCalls("merged")).toBe(mergedListBefore + 1);
+  });
+
+  /** A Merged page of one row titled `title`, numbered `number`, in `state`. */
+  const mergedPage = (
+    title: string,
+    number = 9,
+    state: PrListPage["rows"][number]["state"] = "MERGED",
+  ): PrListPage => ({
+    rows: [
+      {
+        number,
+        url: `https://gitlab.com/owner/repo/-/merge_requests/${number}`,
+        title,
+        baseRefName: "main",
+        headRefName: "feat",
+        isDraft: false,
+        state,
+        author: null,
+        labels: [],
+        createdAt: "",
+        headSha: "",
+        stack: null,
+        stackUnknown: false,
+        crossRepository: false,
+      },
+    ],
+    capped: false,
+  });
+  const EMPTY_PAGE: PrListPage = { rows: [], capped: false };
+  /** Per state, whether each list read started after the align settled: the
+   *  unlocked answer was requested (a second probe read) and the arm is gone. */
+  let readStarts: Partial<Record<PrStateFilter, boolean[]>> = {};
+  /** Answers each state's reads from its queue in order, then Merged with the
+   *  fresh page and every other state empty. */
+  function listReads(
+    queues: Partial<Record<PrStateFilter, Promise<PrListPage>[]>>,
+  ) {
+    readStarts = {};
+    vi.mocked(forgePrListPage).mockImplementation(async (_repo, state) => {
+      (readStarts[state] ??= []).push(!armed() && probeCalls(7) >= 2);
+      const queued = queues[state]?.shift();
+      if (queued !== undefined) return queued;
+      return state === "merged" ? mergedPage("Fresh merged row") : EMPTY_PAGE;
+    });
+  }
+  const mergedReads = (queue: Promise<PrListPage>[]) =>
+    listReads({ merged: queue });
+  /** Reads of `state` that started after the align settled. */
+  const startedAfterSettle = (state: PrStateFilter) =>
+    (readStarts[state] ?? []).filter(Boolean).length;
+  /** The client's cached Merged page entry (the panel's own key). */
+  const mergedEntry = (client: QueryClient) => {
+    const [query] = client.getQueryCache().findAll({
+      queryKey: [...repoKeys.prList("C:/repo"), "origin", "merged"],
+    });
+    if (query === undefined) throw new Error("no cached Merged page");
+    return query;
+  };
+  /** The full key `usePrListPage` builds for the panel's `state` tab, read off
+   *  the panel's answered page of `from` (limit and filter axes included). */
+  const panelPageKey = (
+    client: QueryClient,
+    state: PrStateFilter,
+    from: PrStateFilter = "open",
+  ) => {
+    const answered = client
+      .getQueryCache()
+      .findAll({ queryKey: [...repoKeys.prList("C:/repo"), "origin", from] })
+      .filter(
+        (q) => q.state.dataUpdateCount > 0 && q.queryKey.at(-1) === "page",
+      );
+    if (answered.length !== 1)
+      throw new Error(`no single answered ${from} page`);
+    return answered[0].queryKey.map((axis, i) => (i === 4 ? state : axis));
+  };
+  /** A Closed page of one CLOSED row. */
+  const closedPage = (title: string, number: number) =>
+    mergedPage(title, number, "CLOSED");
+  /** Holds the continuation of every `cancelQueries` (the real cancel runs at
+   *  once) until the returned release; counts the held calls. */
+  function holdCancels(client: QueryClient) {
+    const gate = deferred<void>();
+    const cancel = client.cancelQueries.bind(client);
+    const held = { calls: 0 };
+    client.cancelQueries = ((...args: Parameters<typeof cancel>) => {
+      held.calls += 1;
+      return cancel(...args).then(() => gate.promise);
+    }) as typeof client.cancelQueries;
+    const release = () => act(async () => gate.resolve());
+    return { held, release };
+  }
+  const scrollsTo = (scrolled: (string | null)[], row: string) =>
+    scrolled.filter((r) => r === row).length;
+
+  it("re-reads a landing page whose first read is in flight when the align settles", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    renderArmed(7, { arm: false });
+    const held = deferred<PrListPage>();
+    mergedReads([held.promise]);
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the first Merged read");
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    expect(armed()).toBe(true);
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    await until(() => listCalls("merged") === 2, "a second Merged read");
+    expect(startedAfterSettle("merged")).toBe(1);
+    // The read from before the settle answers last, with what it saw then.
+    await act(async () => held.resolve(mergedPage("Stale merged row")));
+    await ticks();
+    expect(screen.getByText("Fresh merged row")).toBeInTheDocument();
+    expect(screen.queryByText("Stale merged row")).toBeNull();
+    expect(startedAfterSettle("merged")).toBe(1);
+  });
+
+  it("leaves another active lens list's first read to finish across the settle", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    // Another surface's Closed page under the same lens, not the landing tab's
+    // key; each of its reads gets its own answer.
+    const held = deferred<PrListPage>();
+    const first = closedPage("First closed answer", 3);
+    const closedRead = vi
+      .fn<() => Promise<PrListPage>>()
+      .mockReturnValueOnce(held.promise)
+      .mockResolvedValue(closedPage("Later closed answer", 4));
+    const other = new QueryObserver(client, {
+      queryKey: panelPageKey(client, "unmerged"),
+      queryFn: closedRead,
+    });
+    const unsubscribe = other.subscribe(noop);
+    await ticks();
+    expect(other.getCurrentResult().fetchStatus).toBe("fetching");
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    await ticks();
+    await act(async () => held.resolve(first));
+    await ticks();
+    expect(other.getCurrentResult().data).toEqual(first);
+    expect(closedRead).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("cancels an inactive lens list's read in flight, so its pre-merge answer never lands", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    const held = deferred<PrListPage>();
+    listReads({ unmerged: [held.promise] });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    // An earlier visit to Closed leaves its first read in flight, unobserved.
+    await pickTab(user, "Closed");
+    await until(() => listCalls("unmerged") === 1, "the Closed read");
+    await pickTab(user, "Open");
+    await ticks();
+    const closed = client
+      .getQueryCache()
+      .find({ queryKey: panelPageKey(client, "unmerged"), exact: true });
+    expect(closed?.isActive()).toBe(false);
+    expect(closed?.state.fetchStatus).toBe("fetching");
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    await ticks();
+    await act(async () => held.resolve(closedPage("Pre-merge closed row", 7)));
+    await ticks();
+    expect(closed?.state.data).toBeUndefined();
+    expect(closed?.state.isInvalidated).toBe(true);
+  });
+
+  it("re-reads a fresh landing page that lacks the row and scrolls the row into view", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    // The first Merged read predates the merge; the next one lists the row.
+    listReads({
+      merged: [
+        Promise.resolve(EMPTY_PAGE),
+        Promise.resolve(mergedPage("Merged row seven", 7)),
+      ],
+    });
+    const scrolled = recordScrolls();
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await pickTab(user, "Open");
+    await ticks();
+    expect(mergedEntry(client).isStaleByTime(30_000)).toBe(false);
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+    await until(() => startedAfterSettle("merged") === 1, "the re-read");
+    await until(() => scrolled.includes("remote:7"), "the row's scroll");
+    await ticks();
+    expect(startedAfterSettle("merged")).toBe(1);
+  });
+
+  /** Mounts on Open with the Merged page cached and fresh, answered without
+   *  row 7; the Merged read after the `between` answers lists it. */
+  async function cachedMergedWithoutRow(between: Promise<PrListPage>[] = []) {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    listReads({
+      merged: [
+        Promise.resolve(EMPTY_PAGE),
+        ...between,
+        Promise.resolve(mergedPage("Merged row seven", 7)),
+      ],
+    });
+    const scrolled = recordScrolls();
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await ticks();
+    expect(mergedEntry(client).isStaleByTime(30_000)).toBe(false);
+    return { client, scrolled, user };
+  }
+  const rowSevenDrawn = () => screen.queryByText("Merged row seven") !== null;
+  /** Arms MR 7 and lets the unlocked answer settle the align. */
+  async function settleOnMerged() {
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    await poll();
+    await until(() => !armed(), "the align to settle");
+  }
+
+  it("scrolls to the row when the tab move commits before the landing refresh continues", async () => {
+    const { client, scrolled, user } = await cachedMergedWithoutRow();
+    await pickTab(user, "Open");
+    await ticks();
+    const { held, release } = holdCancels(client);
+    await settleOnMerged();
+    expect(held.calls).toBeGreaterThan(0);
+    expect(pressedTab()).toBe("Merged");
+    // The settle marked the page before the move committed, so the mount
+    // reads it at once; the held continuation then joins nothing new.
+    await until(rowSevenDrawn, "row 7 drawn");
+    expect(startedAfterSettle("merged")).toBe(1);
+    await release();
+    await ticks();
+    expect(startedAfterSettle("merged")).toBe(1);
+    expect(scrollsTo(scrolled, "remote:7")).toBe(1);
+  });
+
+  it("scrolls to the row when the landing refresh continues before the tab move commits", async () => {
+    const { scrolled, user } = await cachedMergedWithoutRow();
+    await pickTab(user, "Open");
+    await ticks();
+    await settleOnMerged();
+    expect(pressedTab()).toBe("Merged");
+    await until(rowSevenDrawn, "row 7 drawn");
+    await ticks();
+    expect(startedAfterSettle("merged")).toBe(1);
+    expect(scrollsTo(scrolled, "remote:7")).toBe(1);
+  });
+
+  it("scrolls to the row when a same-tab align commits before the landing refresh continues", async () => {
+    // The panel already sits on Merged; the probe outranks the details' Closed.
+    const { client, scrolled } = await cachedMergedWithoutRow();
+    const { held, release } = holdCancels(client);
+    await settleOnMerged();
+    await ticks();
+    expect(held.calls).toBeGreaterThan(0);
+    expect(pressedTab()).toBe("Merged");
+    expect(screen.queryByText("Merged row seven")).toBeNull();
+    expect(scrolled).toEqual([]);
+    await release();
+    await until(rowSevenDrawn, "row 7 drawn");
+    await ticks();
+    expect(startedAfterSettle("merged")).toBe(1);
+    expect(scrollsTo(scrolled, "remote:7")).toBe(1);
+  });
+
+  it("scrolls to the row when another observer's landing read is cancelled back to a fresh page", async () => {
+    // A second observer keeps the landing page active, with a read of its own
+    // in flight over the cached page when the align settles.
+    const inFlight = deferred<PrListPage>();
+    const { client, scrolled, user } = await cachedMergedWithoutRow([
+      inFlight.promise,
+    ]);
+    await pickTab(user, "Open");
+    await ticks();
+    // The panel's own Merged read: the arguments its key was built from.
+    const args = vi
+      .mocked(forgePrListPage)
+      .mock.calls.find(([, state]) => state === "merged");
+    if (args === undefined) throw new Error("no Merged read");
+    const other = new QueryObserver(client, {
+      queryKey: panelPageKey(client, "merged", "merged"),
+      queryFn: () => forgePrListPage(...args),
+      staleTime: 30_000,
+    });
+    const unsubscribe = other.subscribe(noop);
+    void other.refetch();
+    await ticks();
+    expect(other.getCurrentResult().fetchStatus).toBe("fetching");
+    expect(other.getCurrentResult().data).toEqual(EMPTY_PAGE);
+    const { held, release } = holdCancels(client);
+    await settleOnMerged();
+    await ticks();
+    expect(held.calls).toBeGreaterThan(0);
+    expect(pressedTab()).toBe("Merged");
+    expect(screen.queryByText("Merged row seven")).toBeNull();
+    expect(scrolled).toEqual([]);
+    await release();
+    await until(rowSevenDrawn, "row 7 drawn");
+    await ticks();
+    expect(startedAfterSettle("merged")).toBe(1);
+    expect(scrollsTo(scrolled, "remote:7")).toBe(1);
+    unsubscribe();
+  });
+
+  it("keeps the scroll owed past a landing error from before a same-tab align", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    listReads({ merged: [Promise.resolve(mergedPage("Merged row seven", 7))] });
+    const scrolled = recordScrolls();
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    // The Merged tab's only read fails, unretried, and leaves no data.
+    vi.mocked(forgePrListPage).mockRejectedValueOnce({
+      kind: "invalidArgument",
+      message: "The list could not be read.",
+    });
+    await pickTab(user, "Merged");
+    await until(
+      () => mergedEntry(client).state.status === "error",
+      "the failed Merged read",
+    );
+    expect(mergedEntry(client).state.data).toBeUndefined();
+    const { held, release } = holdCancels(client);
+    await settleOnMerged();
+    await ticks();
+    expect(held.calls).toBeGreaterThan(0);
+    expect(pressedTab()).toBe("Merged");
+    expect(scrolled).toEqual([]);
+    await release();
+    await until(rowSevenDrawn, "row 7 drawn");
+    await ticks();
+    expect(startedAfterSettle("merged")).toBe(1);
+    expect(scrollsTo(scrolled, "remote:7")).toBe(1);
+  });
+
+  it("drops a pending scroll when the panel moves to another repository", async () => {
+    // Repository A's request stays pending behind the held landing refresh.
+    const { client, scrolled } = await cachedMergedWithoutRow();
+    const { held, release } = holdCancels(client);
+    await settleOnMerged();
+    await ticks();
+    expect(held.calls).toBeGreaterThan(0);
+    expect(scrolled).toEqual([]);
+    // Repository B with the same number selected; its Merged page lists it.
+    await act(async () => {
+      useUiStore.setState({ repoPath: "C:/repo-b" });
+      panelRepo.show("C:/repo-b");
+    });
+    await until(rowSevenDrawn, "B's row 7 drawn");
+    await ticks();
+    expect(useUiStore.getState().selectedPr).toEqual({
+      kind: "remote",
+      id: "7",
+    });
+    expect(pressedTab()).toBe("Merged");
+    expect(scrollsTo(scrolled, "remote:7")).toBe(0);
+    await release();
+    await ticks();
+    expect(scrollsTo(scrolled, "remote:7")).toBe(0);
+  });
+
+  it("starts exactly one read of an expired landing page after the settle", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    listReads({ merged: [Promise.resolve(EMPTY_PAGE)] });
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(() => listCalls("merged") === 1, "the Merged page");
+    await pickTab(user, "Open");
+    await ticks();
+    // Older than the list's 30 s staleTime.
+    const entry = mergedEntry(client);
+    entry.setState({ dataUpdatedAt: Date.now() - 60_000 });
+    expect(entry.isStaleByTime(30_000)).toBe(true);
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    expect(pressedTab()).toBe("Merged");
+    await until(() => startedAfterSettle("merged") >= 1, "the re-read");
+    await ticks(20);
+    expect(startedAfterSettle("merged")).toBe(1);
+  });
+
+  it("re-reads a cached landing page whose refetch is in flight when the align settles", async () => {
+    answers[7] = [LOCKED, { locked: false, state: "MERGED" }];
+    const client = renderArmed(7, { arm: false });
+    const held = deferred<PrListPage>();
+    mergedReads([
+      Promise.resolve(mergedPage("Cached merged row")),
+      held.promise,
+    ]);
+    const user = userEvent.setup();
+    await until(() => listCalls("open") === 1, "the Open page");
+    await pickTab(user, "Merged");
+    await until(
+      () => screen.queryByText("Cached merged row") !== null,
+      "the cached Merged page",
+    );
+    void client.refetchQueries({
+      queryKey: [...repoKeys.prList("C:/repo"), "origin", "merged"],
+    });
+    await until(() => listCalls("merged") === 2, "the Merged refetch");
+    await arm(7);
+    await until(() => probeCalls(7) === 1, "the first merge-state read");
+    await ticks();
+    expect(armed()).toBe(true);
+    await poll();
+    await until(() => !armed(), "the align to settle");
+    await until(() => listCalls("merged") === 3, "a third Merged read");
+    expect(startedAfterSettle("merged")).toBe(1);
+    await act(async () => held.resolve(mergedPage("Stale merged row")));
+    await ticks();
+    expect(screen.getByText("Fresh merged row")).toBeInTheDocument();
+    expect(screen.queryByText("Stale merged row")).toBeNull();
+    expect(startedAfterSettle("merged")).toBe(1);
   });
 
   it("keeps off the view's merge-state entry: its cached open answer settles nothing and keeps its own data", async () => {

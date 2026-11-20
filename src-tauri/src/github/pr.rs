@@ -2905,6 +2905,25 @@ fn gh_merge_stdin(message: Option<&crate::forge::MergeMessage>) -> String {
 }
 
 const HEAD_MOVED_REFUSAL: &str = "This pull request got new commits after its commit message was loaded, so nothing was merged. Check the message and merge again.";
+const ALREADY_MERGED_REFUSAL: &str =
+    "This pull request was already merged, so your edited message wasn't used.";
+
+/// Whether an exit-0 `gh pr merge` that sent a message reported the pull request as
+/// merged before this call, which then used no message: a stderr line whose text before
+/// its first `Pull request ` holds nothing alphanumeric (gh's icon, never an echoed
+/// `--subject` argument) and that ends with `#<number> was already merged`.
+/// The number alone identifies it: gh prints the slug as it resolved it, which need not
+/// match ours letter for letter.
+fn merged_before_with_message(message_sent: bool, number: u64, stderr: &str) -> bool {
+    let tail = format!("#{number} was already merged");
+    let bare_lead = |lead: &str| !lead.chars().any(char::is_alphanumeric);
+    message_sent
+        && stderr.lines().any(|line| {
+            let line = line.trim_end();
+            let lead = line.split_once("Pull request ").map(|(lead, _)| lead);
+            lead.is_some_and(bare_lead) && line.ends_with(&tail)
+        })
+}
 
 /// A full GitHub commit id. GitHub refuses a shorter `expectedHeadOid` even when it
 /// names the head, so nothing else may be sent as one.
@@ -3009,6 +3028,11 @@ pub async fn gh_pr_merge(
                     None if raw.is_empty() => format!("gh exited with code {}", out.code),
                     None => raw.to_string(),
                 }));
+            }
+            // gh 2.103.3 exits 0 for a pull request merged before this call, matching head
+            // or not, saying only `! Pull request <slug>#<n> was already merged` on stderr.
+            if merged_before_with_message(message.is_some(), number, &out.stderr) {
+                return Err(AppError::Gh(ALREADY_MERGED_REFUSAL.to_string()));
             }
             (false, false)
         };
@@ -17793,6 +17817,72 @@ mod merge_message_tests {
             Some(HEAD_MOVED_REFUSAL)
         );
         assert_eq!(classify_gh_merge_refusal("some other failure\n"), None);
+    }
+
+    #[test]
+    fn an_already_merged_answer_fails_a_merge_that_sent_a_message() {
+        let measured = "! Pull request o/r#5 was already merged\n";
+        let echoed = "--subject=Pull request o/r#5 was already merged\n";
+        for (sent, stderr, expected) in [
+            (true, measured, true),
+            (true, "! Pull request o/r#5 was already merged\r\n", true),
+            (true, "! Pull request o/r#5 was already merged\r", true),
+            (true, "! Pull request o/r#4 was already merged\n", false),
+            (true, "! Pull request o/r#15 was already merged\n", false),
+            (true, "Pull request o/r#5 was already merged\n", true),
+            (true, "* Pull request o/r#5 was already merged\n", true),
+            (
+                true,
+                "--subject=Explain how Pull request o/r#5 was already merged\n",
+                false,
+            ),
+            (true, echoed, false),
+            (true, "", false),
+            (true, "! warning: something unrelated\n", false),
+            (false, measured, false),
+        ] {
+            assert_eq!(
+                merged_before_with_message(sent, 5, stderr),
+                expected,
+                "{sent} {stderr:?}"
+            );
+        }
+        let gh = "! Pull request Octo-Org/Hello-World#147 was already merged\r\n";
+        assert!(merged_before_with_message(true, 147, gh));
+    }
+
+    const ALREADY_MERGED: &str =
+        "if merged_before_with_message(message.is_some(), number, &out.stderr) {";
+
+    /// The already-merged check runs on the plain branch after gh answered, before the
+    /// cleanup that would delete the head branch.
+    fn already_merged_before_cleanup(f: &str) -> bool {
+        match (
+            f.find("run_gh_input_raw("),
+            f.find(ALREADY_MERGED),
+            f.find("(false, false)"),
+            f.find("gh_delete_remote_head_branch("),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d)) => a < b && b < c && c < d,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn gh_pr_merge_fails_an_already_merged_answer_before_its_cleanup() {
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("pr.rs"), "gh_pr_merge");
+        let f = flat(&body);
+        assert!(already_merged_before_cleanup(&f), "{f}");
+        let gone = f.replacen(ALREADY_MERGED, "", 1);
+        assert!(!already_merged_before_cleanup(&gone));
+        let late = gone.replacen(
+            "Ok(PrMergeOutcome {",
+            &format!("{ALREADY_MERGED} Ok(PrMergeOutcome {{"),
+            1,
+        );
+        assert!(late.contains(ALREADY_MERGED), "{late}");
+        assert!(!already_merged_before_cleanup(&late));
     }
 
     #[test]
