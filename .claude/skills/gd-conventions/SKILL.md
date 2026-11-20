@@ -699,8 +699,10 @@ and table row are the reference).
   without one, both stay `h-7`. A consumer derives its rendered rows, its
   `listKeyboardNav` items and its open path from the hook (`visible`,
   `activeIndex`, `openPath`), never from the full list, and renders
-  `DetailRailFilterStatus` outside its own `aria-busy` wrapper. A rail
-  without a filter may still pass one short line (a count) through `header`;
+  `DetailRailFilterStatus` outside its own `aria-busy` wrapper. The pull
+  request view's is the one sanctioned exception: it sits in its hold
+  frame's host, which is `aria-busy` only during a hold, while the inert
+  frame holds the field. A rail without a filter takes no header line and
   never a first-child band inside `children`: the strip is already a bordered
   row, so a band under it stacks a second border and spends vertical space
   the list wants. When a whole rail goes away with its field focused, a

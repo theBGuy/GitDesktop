@@ -13,6 +13,11 @@ import {
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
+import {
+  DetailRail,
+  DetailRailFilterStatus,
+  DetailRailRow,
+} from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
@@ -29,6 +34,12 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  FILE_FILTER_SURFACES,
+  type FileFilterSurface,
+  useFileFilterStore,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import {
   DegradedListNotice,
   useRetryFocusRescue,
@@ -235,7 +246,12 @@ export function StashesDialog({
 
   // The dialog can be opened straight to either view; seed `view` from the
   // caller's intent each time it opens (mirrors the seed-on-open idiom).
-  const seedOnOpen = useEffectEvent(() => setView(initialView));
+  // The stash filters clear when the close completes (onOpenChangeComplete);
+  // this covers a reopen mid-close, which announces the cleared count once.
+  const seedOnOpen = useEffectEvent(() => {
+    setView(initialView);
+    clearStashFilters();
+  });
   useSeedOnOpen(open, seedOnOpen);
 
   const list = stashes.data ?? [];
@@ -363,7 +379,15 @@ export function StashesDialog({
   });
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      // Fires once the close transition ends and the popup unmounts, so a
+      // reopen's first render lists every file. A hidden panel never closes it.
+      onOpenChangeComplete={(isOpen) => {
+        if (!isOpen) clearStashFilters();
+      }}
+    >
       <DialogContent className="flex h-[70vh] flex-col sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle className="pr-8">{VIEW_COPY[view].title}</DialogTitle>
@@ -484,6 +508,7 @@ export function StashesDialog({
                 key={effective.sha}
                 repoPath={repoPath}
                 source={{ kind: "stash", sha: effective.sha }}
+                filterSurface="stash"
               />
             ) : null}
           </div>
@@ -1105,6 +1130,7 @@ function LostStashesPane({
               key={effectiveSha}
               repoPath={repoPath}
               source={{ kind: "orphaned", sha: effectiveSha }}
+              filterSurface="stash-recoverable"
             />
           ) : null}
 
@@ -1128,14 +1154,25 @@ function LostStashesPane({
   );
 }
 
+/** Empties both stash file filters; a no-op when they are already empty. */
+function clearStashFilters() {
+  const { setText } = useFileFilterStore.getState();
+  setText(FILE_FILTER_SURFACES.stash.scope, "");
+  setText(FILE_FILTER_SURFACES["stash-recoverable"].scope, "");
+}
+
 /** File list + selected file diff for one stash (live or orphaned), both read
  *  by the stash commit's sha; the `^1`/`^3` structure is identical. */
 function StashFiles({
   repoPath,
   source,
+  filterSurface,
 }: {
   repoPath: string;
   source: FileSource;
+  /** Required: each view keeps its own filter text, and a default would let a
+   *  new mount silently share another view's. */
+  filterSurface: Extract<FileFilterSurface, "stash" | "stash-recoverable">;
 }) {
   // The commit-ish the file lives under.
   const base = source.sha;
@@ -1143,10 +1180,16 @@ function StashFiles({
   const files = useOrphanedStashFiles(repoPath, base);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const effectivePath =
-    selectedPath && files.data?.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (files.data?.[0]?.path ?? null);
+  // The user's pick, else the first match under a filter, else the first file.
+  // The pick resets with the per-stash remount; the text persists in its store.
+  const filter = useFileListFilter({
+    ...FILE_FILTER_SURFACES[filterSurface],
+    files: files.data ?? [],
+    settled: files.data !== undefined && !files.isPlaceholderData,
+    picked: selectedPath,
+    onPick: setSelectedPath,
+  });
+  const effectivePath = filter.openPath;
   // Diff off a deferred path so rapid file arrowing only fetches the landed-on
   // file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
@@ -1196,6 +1239,7 @@ function StashFiles({
       tabIndex={-1}
       className="flex min-w-0 flex-1 flex-col outline-none"
     >
+      <DetailRailFilterStatus filter={filter.rail} blank={pane === "error"} />
       <DegradedListNotice
         noun="this stash"
         degraded={pane === "content-degraded"}
@@ -1246,22 +1290,21 @@ function StashFiles({
   const fileList = files.data;
   // Arrow keys walk the file list, mirroring the app's other lists.
   const onFilesKeyDown = listKeyboardNav({
-    items: fileList,
-    activeIndex: fileList.findIndex((f) => f.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (file) => setSelectedPath(file.path),
     rowKey: (file) => file.path,
     rowAttr: "data-path",
   });
 
   return shell(
-    <>
-      <aside className="flex w-60 shrink-0 flex-col border-r">
-        <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
-          {fileList.length} changed file{fileList.length === 1 ? "" : "s"}
-        </p>
-        <ScrollArea className="min-h-0 flex-1">
+    <DetailRailRow>
+      <DetailRail ariaLabel="Changed files" filter={filter.rail}>
+        {/* overflow-hidden contains the list's natural height (vendored Root
+            is `relative`-only) so a long file list can't leak a window scrollbar. */}
+        <ScrollArea className="min-h-0 flex-1 overflow-hidden">
           <div onKeyDown={onFilesKeyDown}>
-            {fileList.map((file) => (
+            {filter.visible.map((file) => (
               <button
                 type="button"
                 key={file.path}
@@ -1286,7 +1329,7 @@ function StashFiles({
             ))}
           </div>
         </ScrollArea>
-      </aside>
+      </DetailRail>
       <main className="min-w-0 flex-1">
         <FileSlots
           slots={diffSlots}
@@ -1310,7 +1353,7 @@ function StashFiles({
           }
         </FileSlots>
       </main>
-    </>,
+    </DetailRailRow>,
   );
 }
 

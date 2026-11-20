@@ -163,17 +163,12 @@ function FocusFilterClaim({ run }: { run: () => void }) {
 export function DetailRail({
   ariaLabel,
   className,
-  header,
   role,
   filter,
   children,
 }: {
   ariaLabel: string;
   className?: string;
-  /** Rendered start-aligned in the strip of a rail that has NO filter (e.g. a
-   *  file count), which owns the row's height — it must not grow past one short
-   *  line. Not rendered with a filter. */
-  header?: ReactNode;
   role?: AriaRole;
   /** The file filter, from `useFileListFilter`. Absent: no field, no rescue. */
   filter?: DetailRailFilter;
@@ -597,11 +592,6 @@ export function DetailRail({
         </div>
       ) : (
         <div className="flex h-7 shrink-0 items-center justify-end gap-2 border-b px-0.5">
-          {/* `pl-2.5` on top of the row's `px-0.5` puts the header's text column on
-              the same 12px inset as the `px-3` rows below it. */}
-          {header ? (
-            <div className="mr-auto min-w-0 pl-2.5">{header}</div>
-          ) : null}
           {collapseCaret}
         </div>
       )}

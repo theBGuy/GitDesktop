@@ -177,7 +177,6 @@ function Harness({
               ariaLabel="Changed files"
               role="listbox"
               filter={withFilter ? filter.rail : undefined}
-              header={withFilter ? undefined : <span>Header count</span>}
             >
               <div role="group" data-rows="" onKeyDown={nav}>
                 {rows.map((f) => (
@@ -324,7 +323,8 @@ describe("layout and copy", () => {
     expect(strip.className).toBe(
       "flex h-7 shrink-0 items-center justify-end gap-2 border-b px-0.5",
     );
-    expect(screen.getByText("Header count")).toBeTruthy();
+    // The strip holds the caret alone: a rail without a filter takes no header.
+    expect(Array.from(strip.children)).toEqual([caret("Collapse file list")]);
     expect(queryField()).toBeNull();
     const rowDiv = container.querySelector("aside")
       ?.parentElement as HTMLElement;
