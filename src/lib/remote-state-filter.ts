@@ -3,8 +3,8 @@
  * by its own `state`, never by the list read that returned it: a forge's list
  * membership can lag a merge, close or reopen the row itself already reports.
  * Every provider maps open to "OPEN" and merged to "MERGED"; a GitLab MR that
- * is mid-merge (`locked`) arrives as "MERGING" in the details read, filed like
- * "CLOSED" everywhere here, and only the merge-state read says whether it is
+ * is mid-merge (`locked`) maps to "MERGING" and is filed like "CLOSED" here,
+ * and only the merge-state read says whether it is
  * still locked ({@link prAlignStep} holds the align on that read). "closed"
  * means everything not open (the issue lists' Closed tab and the legacy PR
  * callers); the PR panel's tabs split that into "merged" and "unmerged",

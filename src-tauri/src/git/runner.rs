@@ -44,10 +44,18 @@ const TEST_GIT_ENV: [(&str, &str); 4] = [
 ];
 /// Inherited config and repository redirects removed from every test-build git spawned
 /// through the runner or [`TestGitEnv`], after [`TEST_GIT_ENV`] and before the caller's
-/// pairs. `GIT_CEILING_DIRECTORIES` stays: it only narrows discovery, and a site that
-/// sets it before `.test_git_env()` would lose it.
+/// pairs. Bound: git's `local_repo_env` at v2.51.1 minus `GIT_CONFIG_COUNT`, plus
+/// `GIT_TEMPLATE_DIR` and the names below it. `GIT_CONFIG_COUNT` stays because the
+/// submodule tests set it process-wide; `GIT_CEILING_DIRECTORIES` stays because it only
+/// narrows discovery and a site sets it before `.test_git_env()`.
 #[cfg(test)]
-const TEST_GIT_ENV_REMOVED: [&str; 15] = [
+const TEST_GIT_ENV_REMOVED: [&str; 21] = [
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_TEMPLATE_DIR",
     "GIT_CONFIG",
     "GIT_CONFIG_PARAMETERS",
     "GIT_DIR",
@@ -1847,10 +1855,13 @@ mod config_tests {
 
     /// Child half of `an_inherited_git_config_never_reaches_the_runner`, run in a
     /// re-executed test binary whose environment carries both variables; passes
-    /// trivially on its own.
+    /// trivially on its own, since only the parent sets [`PROBE_MARKER`].
     #[tokio::test]
     #[ignore = "run by an_inherited_git_config_never_reaches_the_runner"]
     async fn inherited_config_probe() {
+        if std::env::var_os(PROBE_MARKER).is_none() {
+            return;
+        }
         for key in ["gdfixture.file", "gdfixture.param"] {
             let out = run_git_raw(None, &["config", "--get", key], TEST_GIT_HANG_GUARD)
                 .await
@@ -1861,6 +1872,7 @@ mod config_tests {
                 "{key} reached the runner"
             );
         }
+        println!("{PROBE_SENTINEL}: inherited_config_probe");
     }
 
     /// Pins `TEST_GIT_ENV_REMOVED`: an inherited `GIT_CONFIG` or
@@ -1913,8 +1925,10 @@ mod config_tests {
                 "git::runner::config_tests::inherited_config_probe",
                 "--ignored",
                 "--test-threads=1",
+                "--nocapture",
             ])
             .current_dir(dir.path())
+            .env(PROBE_MARKER, "1")
             .env("GIT_CONFIG", &file)
             .env("GIT_CONFIG_PARAMETERS", INHERITED_PARAMS)
             .stdin(Stdio::null())
@@ -1924,14 +1938,22 @@ mod config_tests {
             .await
             .expect("the probe binary hung")
             .expect("spawn the probe binary");
-        assert_probe_passed(&out);
+        assert_probe_passed(&out, "inherited_config_probe");
     }
 
-    /// libtest exits 0 with "0 passed" on a filter that matches nothing.
-    fn assert_probe_passed(out: &std::process::Output) {
+    /// Set by a parent for its re-executed child; a child without it skips its checks.
+    const PROBE_MARKER: &str = "GD_TEST_GIT_ENV_PROBE";
+    /// Printed by a child that ran its checks, followed by its name.
+    const PROBE_SENTINEL: &str = "git-env probe checked";
+
+    /// libtest exits 0 with "0 passed" on a filter that matches nothing, and a child
+    /// that skipped its checks passes too, so the sentinel must also be printed.
+    fn assert_probe_passed(out: &std::process::Output, probe: &str) {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            out.status.success() && stdout.contains("1 passed"),
+            out.status.success()
+                && stdout.contains("1 passed")
+                && stdout.contains(&format!("{PROBE_SENTINEL}: {probe}")),
             "probe failed ({:?})\nstdout:\n{stdout}\nstderr:\n{}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
@@ -1939,10 +1961,14 @@ mod config_tests {
     }
 
     /// Child half of `an_inherited_git_dir_never_reaches_the_runner`, run from the inner
-    /// repository with the outer one's `GIT_DIR` and `GIT_INDEX_FILE` inherited.
+    /// repository with the outer one's `GIT_DIR` and `GIT_INDEX_FILE` inherited; passes
+    /// trivially on its own, since only the parent sets [`PROBE_MARKER`].
     #[tokio::test]
     #[ignore = "run by an_inherited_git_dir_never_reaches_the_runner"]
     async fn inherited_repository_probe() {
+        if std::env::var_os(PROBE_MARKER).is_none() {
+            return;
+        }
         for (args, answer) in [
             (&["rev-parse", "--git-dir"][..], ".git"),
             (&["ls-files"][..], "inner.txt"),
@@ -1956,6 +1982,7 @@ mod config_tests {
                 "git {args:?} read another repository"
             );
         }
+        println!("{PROBE_SENTINEL}: inherited_repository_probe");
     }
 
     /// Pins `TEST_GIT_ENV_REMOVED`'s repository arm: an inherited `GIT_DIR` or
@@ -2027,8 +2054,10 @@ mod config_tests {
                 "git::runner::config_tests::inherited_repository_probe",
                 "--ignored",
                 "--test-threads=1",
+                "--nocapture",
             ])
             .current_dir(inner)
+            .env(PROBE_MARKER, "1")
             .env("GIT_DIR", &git_dir)
             .env("GIT_INDEX_FILE", &index)
             .stdin(Stdio::null())
@@ -2038,7 +2067,46 @@ mod config_tests {
             .await
             .expect("the probe binary hung")
             .expect("spawn the probe binary");
-        assert_probe_passed(&out);
+        assert_probe_passed(&out, "inherited_repository_probe");
+    }
+
+    /// git's `local_repo_env` (environment.c at v2.51.1), its macros resolved through
+    /// environment.h at the same tag.
+    const GIT_LOCAL_REPO_ENV: [&str; 15] = [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    ];
+
+    /// Every repository-local name git itself clears is removed, except
+    /// `GIT_CONFIG_COUNT` (the submodule tests set it process-wide), and so is the
+    /// template dir.
+    #[test]
+    fn removed_env_covers_gits_local_repo_env() {
+        for name in GIT_LOCAL_REPO_ENV
+            .into_iter()
+            .filter(|n| *n != "GIT_CONFIG_COUNT")
+            .chain(["GIT_TEMPLATE_DIR"])
+        {
+            assert!(
+                TEST_GIT_ENV_REMOVED.contains(&name),
+                "{name} is not removed"
+            );
+        }
+        assert!(!TEST_GIT_ENV_REMOVED.contains(&"GIT_CONFIG_COUNT"));
+        assert!(!TEST_GIT_ENV_REMOVED.contains(&"GIT_CEILING_DIRECTORIES"));
     }
 }
 

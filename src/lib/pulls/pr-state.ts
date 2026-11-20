@@ -48,8 +48,9 @@ const PR_STATE: Partial<
   OPEN: { Icon: GitPullRequestIcon, tone: "text-success", label: "Open" },
   MERGED: { Icon: GitMergeIcon, tone: "text-merged", label: "Merged" },
   CLOSED: { Icon: XCircleIcon, tone: "text-destructive", label: "Closed" },
-  // GitLab's mid-merge `locked`: settles into MERGED within moments, so it shares
-  // that tone, and its glyph and word carry the difference.
+  // GitLab's mid-merge `locked`: a merge in progress, which can also end with the
+  // MR still open. It shares the merged tone as the outcome it is working toward;
+  // its glyph and word carry the difference.
   MERGING: {
     Icon: ArrowsMergeIcon,
     tone: "text-merged",

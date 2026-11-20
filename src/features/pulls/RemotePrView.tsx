@@ -1554,12 +1554,18 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-ready-for-review",
     () => {
-      if (shownIsDraft !== true || detailsStale) return;
+      if (
+        shownIsDraft !== true ||
+        details.data?.state !== "OPEN" ||
+        detailsStale
+      )
+        return;
       void markReadyForReview();
     },
     isSelectedPr &&
       draftPairVisible &&
       shownIsDraft === true &&
+      details.data?.state === "OPEN" &&
       !busy &&
       !detailsStale,
   );

@@ -517,9 +517,9 @@ and table row are the reference).
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
 - A failure line rendered in place (not a toast, not a terminal buffer) shows
-  `presentError(e).summary` from `@/lib/error-summary`, never raw
-  `errorMessage(e)`: the raw text keeps the Rust error-kind lead
-  (`invalid argument: …`) and every line of a multi-line message.
+  `presentError(e).summary` from `@/lib/error-summary`, never a raw
+  `errorMessage(e)`, which keeps the Rust error-kind lead (`invalid argument: …`)
+  and every line of a multi-line message.
 - A caption over a GROUP of controls rides `LabeledGroup`
   (`src/components/form/labeled-group.tsx`), which ties the group to it via
   `role="group"` + `aria-labelledby` — a `<Label>` that associates with nothing
@@ -1396,13 +1396,24 @@ one grep away on the named symbol. Grows via Conventions-sync.
   the shapes the scan can't see.
 - **Landed-merge details** — a merge that landed (not queued) also marks the
   request's details through `markMergeLanded` (`src/lib/git/queries/prs.ts`),
-  per QueryClient and keyed on the details query key, for
-  `LANDED_MERGE_TTL_MS`: a details read answering OPEN or MERGING is stored as
-  MERGED, a CLOSED answer from a read that wasn't cancelled retires the mark,
-  and its expiry re-reads the details
-  once. The neutral PR states are OPEN, MERGED, CLOSED and MERGING (GitLab's
-  `locked`); MERGING behaves as CLOSED in every list and align predicate, and
-  its words come from `prStateWord` / `prPill` (`src/lib/pulls/pr-state.ts`).
+  per QueryClient and keyed on the details query key, for `LANDED_MERGE_TTL_MS`.
+  Each mark holds one QueryCache listener that keeps the STORED entry out of
+  OPEN and MERGING for every writer (a read in flight at the mint, a mutation
+  rollback, a manual `setQueryData`), patching in the same notify batch, so a
+  synchronous observer can still see the OPEN first. Only an accepted fetch
+  answer of CLOSED retires it (query-core marks `setQueryData` writes `manual`,
+  a cancelled read stores nothing); the listener stops at the deadline, and the
+  expiry invalidates the details once by exact key (an active view re-reads, an
+  inactive entry is only marked stale). The details queryFn's overlay is a pure
+  transform (OPEN or MERGING answers return as MERGED) that never touches the
+  record or reads `signal`. While a GitLab MR's details read MERGING,
+  `useGlMergingWatch` (`queries/pr-actions.ts`) polls the slim merge-state read
+  under the view's own key every 2 s for up to 10 answers; an unlocked answer
+  invalidates the details by exact key (joining a read in flight), and an
+  unlocked MERGED marks the merge landed. The neutral PR states are OPEN,
+  MERGED, CLOSED and MERGING (GitLab's `locked`); MERGING behaves as CLOSED in
+  every list and align predicate, and its words come from `prStateWord` /
+  `prPill` (`src/lib/pulls/pr-state.ts`).
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`
@@ -1774,17 +1785,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
   same-file helper delegation for the override). Production-path mints and
   the other gaps listed in check I's header comment are review-enforced.
 - **Every test-build git goes through `TestGitEnv`** (`git/runner.rs`): the
-  runner applies it, and a test that spawns git itself calls
-  `.test_git_env()` — no system, global or XDG config, and no inherited
-  repository or config redirects. The consts behind it are private,
-  so a hand-copied `.envs(…)` fails to compile.
+  runner applies it, and a test that spawns git itself calls `.test_git_env()` —
+  no system, global or XDG config, and no inherited repository or config
+  redirects. The removal list covers git's `local_repo_env` (v2.51.1) except
+  `GIT_CONFIG_COUNT`, plus `GIT_TEMPLATE_DIR` and a few other repository-shape
+  names, and a test pins that coverage. Two names stay on purpose:
+  `GIT_CEILING_DIRECTORIES` (a caller sets that pair before the trait) and
+  `GIT_CONFIG_COUNT` (the submodule tests set it process-wide). The consts behind
+  it are private, so a hand-copied `.envs(…)` fails to compile.
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
-  app-data modules carry their own seams in the same arm order
-  (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`: the
-  `cfg!(test)` temp arm outranks the env override, which only non-test
-  builds read) —
-  a new store module mirrors one of these, never resolves app-data bare.
+  app-data modules carry their own seams in the same arm order (`oplog.rs`
+  `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`: the `cfg!(test)` temp
+  arm outranks the env override, which only non-test builds read) — a new store
+  module mirrors one of these, never resolves app-data bare.
   Its `cfg!(test)` temp arm calls `crate::oplog::test_fallback_dir`, never a
   hand-rolled `temp_dir()` join: the helper gives each test process its own
   `<name>-<pid>` dir (concurrent runs and nextest's per-test processes never

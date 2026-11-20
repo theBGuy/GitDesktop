@@ -445,6 +445,76 @@ pub async fn bb_get_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| bb_unreadable(what, format!("could not parse Bitbucket {what}: {e}")))
 }
 
+/// A failed [`bb_get_json_bytes`], split on the client-observed reqwest error kind, so a
+/// caller's copy never infers a transport failure from the error text.
+#[derive(Debug)]
+pub(crate) enum BbGetFailure {
+    /// The connection failed, timed out or was reset, sending or reading the body.
+    Transport(AppError),
+    /// Anything else: a non-2xx whose body was read, a body that couldn't be read for a
+    /// non-transport reason, or a URL refused before sending. A transport failure while
+    /// reading a non-2xx body is `Transport`.
+    Other(AppError),
+}
+
+/// [`bb_get_json`]'s request, auth and status mapping, returning a 2xx body's raw bytes
+/// for a caller that decodes them strictly (`resp.text()` replaces invalid UTF-8).
+pub(crate) async fn bb_get_json_bytes(
+    creds: &BbCredentials,
+    path_or_url: &str,
+    op: BbOpKind,
+) -> Result<Vec<u8>, BbGetFailure> {
+    bb_get_json_bytes_with(client(), creds, path_or_url, op).await
+}
+
+/// [`bb_get_json_bytes`] over a given client, so a test fixture can pass one that
+/// ignores proxy settings.
+pub(crate) async fn bb_get_json_bytes_with(
+    client: &Client,
+    creds: &BbCredentials,
+    path_or_url: &str,
+    op: BbOpKind,
+) -> Result<Vec<u8>, BbGetFailure> {
+    let url = resolve_url(path_or_url).map_err(BbGetFailure::Other)?;
+    let resp = client
+        .get(&url)
+        .basic_auth(&creds.email, Some(&creds.token))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| {
+            let error =
+                AppError::Bitbucket(transport_failure_message("Bitbucket request failed", &e));
+            if is_transport_failure(&e) {
+                BbGetFailure::Transport(error)
+            } else {
+                BbGetFailure::Other(error)
+            }
+        })?;
+    // Signals `BODY_READ_STARTED`, as `bb_send_split` does.
+    #[cfg(test)]
+    let _ = BODY_READ_STARTED.try_with(|started| {
+        if let Some(started) = started.borrow_mut().take() {
+            started.send(()).unwrap();
+        }
+    });
+    let status = resp.status().as_u16();
+    let body = resp.bytes().await.map_err(|e| {
+        if is_transport_failure(&e) {
+            BbGetFailure::Transport(bb_body_read_error(e))
+        } else {
+            BbGetFailure::Other(bb_body_read_error(e))
+        }
+    })?;
+    if !(200..300).contains(&status) {
+        let text = String::from_utf8_lossy(&body);
+        return Err(BbGetFailure::Other(AppError::Bitbucket(bb_error_detail(
+            status, &text, op,
+        ))));
+    }
+    Ok(body.to_vec())
+}
+
 /// GET that returns (status, body) for ANY status instead of mapping non-2xx
 /// to AppError — the Code Insights classifier discriminates on both.
 pub async fn bb_get_classified(
@@ -1062,6 +1132,76 @@ mod tests {
         assert!(matches!(put, Err(AppError::Bitbucket(_))), "{put:?}");
         assert!(empty.is_ok(), "{empty:?}");
         assert!(deleted.is_ok(), "{deleted:?}");
+    }
+
+    /// `bb_get_json_bytes` classifies by reqwest's error kind: a reset mid-body and a failed
+    /// send are `Transport`, a body that just ends early is `Other`. The fixture client
+    /// ignores proxy settings and every wait is bounded, so a broken setup fails, never hangs.
+    #[tokio::test]
+    async fn bb_get_json_bytes_splits_transport_from_other_failures() {
+        const BOUND: Duration = Duration::from_secs(10);
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let creds = BbCredentials {
+            email: "fixture".into(),
+            token: "fixture".into(),
+        };
+        let url_of = |req: reqwest::RequestBuilder| req.build().unwrap().url().to_string();
+        let read = |url: String| {
+            let (client, creds) = (&client, &creds);
+            async move {
+                tokio::time::timeout(
+                    BOUND,
+                    bb_get_json_bytes_with(client, creds, &url, BbOpKind::Read),
+                )
+                .await
+                .expect("the read hung")
+            }
+        };
+
+        let (req, body_started, server) = incomplete_body_request(false, true, false).await;
+        let reset = BODY_READ_STARTED
+            .scope(
+                std::cell::RefCell::new(Some(body_started)),
+                read(url_of(req)),
+            )
+            .await;
+        tokio::time::timeout(BOUND, server)
+            .await
+            .expect("the server hung")
+            .unwrap();
+        match reset {
+            Err(BbGetFailure::Transport(AppError::Bitbucket(m))) => {
+                assert!(m.contains("could not read Bitbucket response"), "{m}")
+            }
+            other => panic!("reset mid-body: {other:?}"),
+        }
+
+        let (req, _body_started, server) = incomplete_body_request(false, false, false).await;
+        let early = read(url_of(req)).await;
+        tokio::time::timeout(BOUND, server)
+            .await
+            .expect("the server hung")
+            .unwrap();
+        assert!(
+            matches!(early, Err(BbGetFailure::Other(_))),
+            "early close: {early:?}"
+        );
+
+        // Port zero cannot be claimed by another listener between setup and connect.
+        let started = std::time::Instant::now();
+        let refused = read("http://127.0.0.1:0/fixture".into()).await;
+        assert!(
+            matches!(
+                refused,
+                Err(BbGetFailure::Transport(AppError::Bitbucket(_)))
+            ),
+            "refused: {refused:?}"
+        );
+        assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
     }
 
     /// A refused write's unreadable body keeps the body read's own error.

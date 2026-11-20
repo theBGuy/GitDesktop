@@ -384,6 +384,53 @@ describe("PullRequestsPanel (real panel)", () => {
     expect([...new Set(states())]).toEqual(["open", "merged", "unmerged"]);
   });
 
+  it("badges Draft only on an open draft row", async () => {
+    const draftRow = (title: string, number: number, state: string) =>
+      ({
+        number,
+        url: `https://github.com/owner/repo/pull/${number}`,
+        title,
+        baseRefName: "main",
+        headRefName: `feat-${number}`,
+        isDraft: true,
+        state,
+        author: null,
+        labels: [],
+        createdAt: "",
+        headSha: "",
+        stack: null,
+        stackUnknown: false,
+        crossRepository: false,
+      }) as PrListPage["rows"][number];
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(READY_GITHUB);
+    vi.mocked(listLocalPrs).mockResolvedValue([]);
+    const rowByTab: Record<string, PrListPage["rows"][number]> = {
+      open: draftRow("Open draft", 1, "OPEN"),
+      merged: draftRow("Landed draft", 2, "MERGED"),
+      unmerged: draftRow("Closed draft", 3, "CLOSED"),
+    };
+    vi.mocked(forgePrListPage).mockImplementation(async (_repo, state) => ({
+      rows: [rowByTab[state] ?? rowByTab.open],
+      capped: false,
+    }));
+    const user = userEvent.setup();
+    renderPanel();
+    const rowOf = (title: string) =>
+      screen.getByText(title).closest("p") as HTMLElement;
+    await waitFor(() => screen.getByText("Open draft"));
+    expect(within(rowOf("Open draft")).queryByText("Draft")).not.toBeNull();
+    const group = screen.getByRole("group", { name: "Pull request state" });
+    await user.click(within(group).getByRole("button", { name: "Merged" }));
+    await waitFor(() => screen.getByText("Landed draft"));
+    expect(within(rowOf("Landed draft")).queryByText("Draft")).toBeNull();
+    expect(within(rowOf("Landed draft")).queryByText("merged")).not.toBeNull();
+    await user.click(within(group).getByRole("button", { name: "Closed" }));
+    await waitFor(() => screen.getByText("Closed draft"));
+    expect(within(rowOf("Closed draft")).queryByText("Draft")).toBeNull();
+    expect(within(rowOf("Closed draft")).queryByText("closed")).not.toBeNull();
+  });
+
   it("says merge requests for a repo saved as GitLab while the probe is pending", async () => {
     vi.mocked(loadSettings).mockResolvedValue({
       ...DEFAULT_SETTINGS,

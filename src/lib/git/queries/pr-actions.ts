@@ -858,10 +858,11 @@ export const WATCH_POLLS = 10;
 
 /** While a GitLab MR's shown details read MERGING (pass `null` otherwise), polls the
  *  view's own slim merge-state key until the lock ends. Only answers completed after
- *  the episode started count, failures included. An unlocked MERGED answer marks the
- *  merge landed (the `/changes` details read can lag it); any other unlocked answer
- *  re-reads the details, again per answer while they still read MERGING. Never a
- *  periodic details read, and exact keys only: the align's arm keys share the prefix. */
+ *  the episode started count, failures included. Every unlocked answer invalidates
+ *  the details, again per answer while they still read MERGING, joining a details
+ *  read already in flight; an unlocked MERGED also marks the merge landed (the
+ *  `/changes` details read can lag it). Never on a timer of its own, and by exact
+ *  key only: the align's arm keys share the prefix. */
 export function useGlMergingWatch(repo: string, number: number | null): void {
   const queryClient = useQueryClient();
   useEffect(() => {
@@ -882,6 +883,10 @@ export function useGlMergingWatch(repo: string, number: number | null): void {
     });
     const unsubscribe = observer.subscribe(() => {
       const state = observer.getCurrentQuery().state;
+      // A reset (`resetQueries`) restarts the counts at zero, so every answer
+      // after it is new to the episode.
+      if (state.dataUpdateCount < seenData) seenData = 0;
+      if (state.errorUpdateCount < seenErrors) seenErrors = 0;
       const newData = state.dataUpdateCount - seenData;
       const newErrors = state.errorUpdateCount - seenErrors;
       if (newData <= 0 && newErrors <= 0) return;

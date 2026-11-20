@@ -82,6 +82,13 @@ const LOCKED: GitLabMrMergeState = {
   state: "MERGING",
 };
 
+/** A lock that ended with the MR still open. */
+const UNLOCKED: GitLabMrMergeState = {
+  ...LOCKED,
+  locked: false,
+  state: "OPEN",
+};
+
 /** The detail view's own details read, mounted beside the panel. */
 function DetailsWatcher() {
   useQuery(prDetailsOptions(REPO, 7, "origin"));
@@ -136,6 +143,8 @@ type Run = {
   disarmedAt: number;
   probeOffWhileArmed: boolean;
   watchReads: number;
+  unlockedServed: number;
+  detailsReads: number;
 };
 
 /** Arms the align on #7 (details MERGING, probe locked) and walks the poll,
@@ -162,11 +171,25 @@ async function run(withWatch: boolean): Promise<Run> {
     },
     watch: 0,
   };
+  // The watch's own reads answer unlocked while every align read stays locked:
+  // query-core dispatches a read's fetch before it calls the queryFn.
+  let watchStarting = 0;
+  let unlockedServed = 0;
+  vi.mocked(forgeGlMrMergeState).mockImplementation(async () => {
+    if (watchStarting === 0) return LOCKED;
+    watchStarting -= 1;
+    unlockedServed += 1;
+    return UNLOCKED;
+  });
   let probeOffWhileArmed = false;
   const unsubscribe = client.getQueryCache().subscribe((e) => {
     if (e.type !== "updated" || e.action.type !== "fetch") return;
-    if (e.query.queryHash === JSON.stringify(viewKey)) counts.watch += 1;
+    if (e.query.queryHash === JSON.stringify(viewKey)) {
+      counts.watch += 1;
+      watchStarting += 1;
+    }
   });
+  const detailsBefore = vi.mocked(forgePrView).mock.calls.length;
   const armQueries = () =>
     client
       .getQueryCache()
@@ -204,9 +227,17 @@ async function run(withWatch: boolean): Promise<Run> {
   }
   unsubscribe();
   const watchReads = counts.watch;
+  const detailsReads = vi.mocked(forgePrView).mock.calls.length - detailsBefore;
   cleanup();
   client.clear();
-  return { armReads, disarmedAt, probeOffWhileArmed, watchReads };
+  return {
+    armReads,
+    disarmedAt,
+    probeOffWhileArmed,
+    watchReads,
+    unlockedServed,
+    detailsReads,
+  };
 }
 
 describe("the MERGING watch beside an armed align (AC15)", () => {
@@ -217,6 +248,12 @@ describe("the MERGING watch beside an armed align (AC15)", () => {
     expect(control.disarmedAt).toBeGreaterThan(0);
     expect(control.watchReads).toBe(0);
     expect(watched.watchReads).toBeGreaterThan(1);
+    // Every watch read answered unlocked and re-read the details, exact key only.
+    expect(control.unlockedServed).toBe(0);
+    expect(watched.unlockedServed).toBe(watched.watchReads);
+    expect(watched.detailsReads - control.detailsReads).toBe(
+      watched.unlockedServed,
+    );
     expect(watched.armReads).toEqual(control.armReads);
     expect(watched.disarmedAt).toBe(control.disarmedAt);
     expect(watched.probeOffWhileArmed).toBe(false);

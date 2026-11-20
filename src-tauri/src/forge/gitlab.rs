@@ -776,9 +776,9 @@ fn project_path_from_url(url: &str) -> AppResult<String> {
     })
 }
 
-/// Map GitLab's MR state onto the neutral `"OPEN"/"CLOSED"/"MERGED"/"MERGING"` the
-/// frontend expects. GitLab holds an MR in `locked` while a merge runs; the frontend
-/// shows it as merging, never closed.
+/// Map GitLab's MR state onto the neutral `"OPEN"/"CLOSED"/"MERGED"/"MERGING"`. Read by
+/// `from_glab_mr`'s rows (the list legs request opened/closed/merged, never locked), the
+/// MR detail read and `merge_state_from`; `locked` (a merge running) is never closed.
 fn map_mr_state(state: &str) -> String {
     match state {
         "opened" => "OPEN".to_string(),
@@ -7451,22 +7451,23 @@ const GL_UNCONFIRMED_LEAD: &str = "Couldn't confirm this merge request is still 
 
 /// Reads the merge request ahead of its first write. Its own function so the write
 /// roster never sees this GET inside the merge body.
-async fn mr_guard_read(repo_path: &str, enc: &str, number: u64) -> AppResult<String> {
-    let out = run_glab(
+async fn mr_guard_read(repo_path: &str, enc: &str, number: u64) -> AppResult<GlabOutput> {
+    run_glab(
         Some(repo_path),
         &["api", &format!("projects/{enc}/merge_requests/{number}")],
         GLAB_NETWORK_TIMEOUT,
     )
-    .await?;
-    Ok(out.stdout_lossy())
+    .await
 }
 
 /// Reads GitLab's raw `state`, not `map_mr_state`'s neutral value:
 /// `opened` or an unknown state lets the merge go; `closed`, `merged` and `locked`
 /// refuse, and so does a read that failed or didn't answer with a JSON object.
-fn gl_merge_guard_outcome(read: AppResult<String>) -> AppResult<()> {
-    let body = read.map_err(gl_merge_guard_failed)?;
-    let value = match serde_json::from_str::<serde_json::Value>(&body) {
+fn gl_merge_guard_outcome(read: AppResult<GlabOutput>) -> AppResult<()> {
+    let out = read.map_err(gl_merge_guard_failed)?;
+    // Strict UTF-8: a lossy decode turns an invalid byte in `state` into an unknown state,
+    // which would proceed.
+    let value = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
         Ok(value) if value.is_object() => value,
         Ok(_) => {
             return Err(AppError::Glab(gl_error_message(
@@ -18862,7 +18863,7 @@ mod tests {
     }
 
     /// `locked` is the raw mid-merge state alone; `state` is the neutral mapping the
-    /// list reads, so a locked MR says MERGING there.
+    /// slim merge-state read returns, so a locked MR says MERGING there.
     #[test]
     fn mr_merge_state_reports_the_lock_beside_the_neutral_state() {
         let read = |state: serde_json::Value| {
@@ -19572,9 +19573,18 @@ mod tests {
         }
     }
 
+    /// A successful glab run that printed `stdout`, as `run_glab` returns it.
+    fn glab_read(stdout: &[u8]) -> AppResult<GlabOutput> {
+        Ok(GlabOutput {
+            stdout: stdout.to_vec(),
+            stderr: String::new(),
+            code: 0,
+        })
+    }
+
     #[test]
     fn gl_merge_guard_outcome_refuses_all_but_an_open_or_unknown_merge_request() {
-        let outcome = |body: &str| gl_merge_guard_outcome(Ok(body.to_string()));
+        let outcome = |body: &str| gl_merge_guard_outcome(glab_read(body.as_bytes()));
         let refused = |body: &str| match outcome(body) {
             Err(AppError::Glab(t)) => t,
             other => panic!("{body}: {other:?}"),
@@ -19604,6 +19614,23 @@ mod tests {
             let text = refused(body);
             assert_eq!(text.lines().next(), Some(GL_UNCONFIRMED_LEAD), "{body}");
             assert!(text.lines().nth(1).is_some_and(|l| !l.is_empty()), "{body}");
+        }
+    }
+
+    /// An invalid UTF-8 byte anywhere in the body, the state value included, is a failed
+    /// read, never an unknown state that proceeds.
+    #[test]
+    fn gl_merge_guard_outcome_refuses_a_body_that_is_not_utf8() {
+        for body in [
+            &b"{\"state\":\"clos\xFFed\"}"[..],
+            b"{\"state\":\"opened\",\"title\":\"\xC3\"}",
+        ] {
+            match gl_merge_guard_outcome(glab_read(body)) {
+                Err(AppError::Glab(t)) => {
+                    assert_eq!(t.lines().next(), Some(GL_UNCONFIRMED_LEAD), "{body:?}")
+                }
+                other => panic!("{body:?}: {other:?}"),
+            }
         }
     }
 
@@ -19643,7 +19670,7 @@ mod tests {
         ));
     }
 
-    /// The copy the help guide quotes.
+    /// Pins the refusal copy; the help guide's merge paragraph paraphrases it.
     #[test]
     fn gl_merge_refusal_consts_keep_their_text() {
         assert_eq!(GL_CLOSED_REFUSAL, "This merge request was closed on GitLab, so nothing was merged. Reopen it if you still want to merge it.");

@@ -209,16 +209,33 @@ describe("a landed merge keeps the details merged", () => {
     expect(stateOf(client)).toBe("MERGED");
   });
 
-  it("an observed read started before the merge resolves MERGED (AC2)", async () => {
-    const { client, hook } = mount();
+  it("an observed read started before the mark resolves MERGED (AC2)", async () => {
+    // The merge's own settle cancels a read in flight, so the read that survives
+    // a mark is one the watch's mint leaves running: minted here directly.
+    const { client } = mount();
     await flush();
     const read = deferred<unknown>();
     views = [read.promise, details("OPEN")];
-    void client.refetchQueries({ queryKey: K(), exact: true });
-    await merge(hook, client);
-    await act(async () => read.resolve(details("OPEN")));
+    // The read's own resolved value pins the overlay's after-await sampling: the
+    // listener can repair the cache, never the value a caller awaited.
+    let resolved: unknown = "unresolved";
+    void client
+      .fetchQuery({ ...prDetailsOptions(REPO, 7, "origin"), staleTime: 0 })
+      .then((d) => {
+        resolved = d;
+      });
+    await flush(10);
+    act(() => markMergeLanded(client, REPO, "origin", 7));
+    const afterMerge = viewCalls();
+    await act(async () => read.resolve(details("OPEN", { title: "read A" })));
     await flush();
-    expect(stateOf(client)).toBe("MERGED");
+    // Read A's own answer is the one stored, with no later read behind it.
+    expect(resolved).toMatchObject({ state: "MERGED", title: "read A" });
+    expect(viewCalls()).toBe(afterMerge);
+    expect(client.getQueryData(K())).toMatchObject({
+      state: "MERGED",
+      title: "read A",
+    });
   });
 
   it("the entry's first read in flight at landing resolves MERGED (AC2b)", async () => {
@@ -286,6 +303,178 @@ describe("a landed merge keeps the details merged", () => {
     await act(async () => fresh.resolve(details("OPEN")));
     await flush();
     expect(stateOf(client)).toBe("MERGED");
+    // The record is still live: a later write of OPEN reads MERGED too.
+    act(() => {
+      client.setQueryData(K(), details("OPEN"));
+    });
+    expect(stateOf(client)).toBe("MERGED");
+  });
+
+  it("a whole-snapshot rollback to OPEN reads MERGED and keeps its fields", async () => {
+    const { client } = await landed();
+    act(() => {
+      client.setQueryData(K(), details("OPEN", { comments: ["kept"] }));
+    });
+    expect(client.getQueryData(K())).toMatchObject({
+      state: "MERGED",
+      comments: ["kept"],
+    });
+  });
+
+  it("a read in flight at the mint that stores OPEN after it reads MERGED", async () => {
+    const client = newClient();
+    client.setQueryData(K(), details("OPEN"));
+    // A read whose answer was produced before the mark: no overlay runs on it.
+    const read = deferred<PrDetails>();
+    let stored = false;
+    void client
+      .fetchQuery({ queryKey: K(), queryFn: () => read.promise, staleTime: 0 })
+      .then(() => {
+        stored = true;
+      });
+    await flush(10);
+    act(() => markMergeLanded(client, REPO, "origin", 7));
+    await act(async () => read.resolve(details("OPEN", { title: "late" })));
+    await flush(10);
+    expect(stored).toBe(true);
+    expect(client.getQueryData(K())).toMatchObject({
+      state: "MERGED",
+      title: "late",
+    });
+  });
+
+  it("a manual write of CLOSED never retires the record", async () => {
+    const { client } = await landed();
+    act(() => {
+      client.setQueryData(K(), details("CLOSED"));
+    });
+    expect(stateOf(client)).toBe("CLOSED");
+    views = [details("OPEN")];
+    await refetch(client);
+    expect(stateOf(client)).toBe("MERGED");
+  });
+
+  it("an accepted CLOSED fetch retires it: a later OPEN write stays OPEN", async () => {
+    const { client } = await landed();
+    views = [details("CLOSED")];
+    await refetch(client);
+    expect(stateOf(client)).toBe("CLOSED");
+    act(() => {
+      client.setQueryData(K(), details("OPEN"));
+    });
+    expect(stateOf(client)).toBe("OPEN");
+  });
+
+  it("the details read never reads its abort signal", async () => {
+    const client = newClient();
+    let signalReads = 0;
+    const context = {
+      client,
+      queryKey: K(),
+      meta: undefined,
+      get signal() {
+        signalReads += 1;
+        return new AbortController().signal;
+      },
+    };
+    const { queryFn } = prDetailsOptions(REPO, 7, "origin");
+    act(() => markMergeLanded(client, REPO, "origin", 7));
+    const answer = await (queryFn as (c: unknown) => Promise<PrDetails>)(
+      context,
+    );
+    expect(answer.state).toBe("MERGED");
+    expect(signalReads).toBe(0);
+  });
+
+  it("an unmount while a replacing read is pending keeps that read's answer", async () => {
+    const { client, hook } = await landed();
+    const replaced = deferred<unknown>();
+    const replacing = deferred<unknown>();
+    views = [replaced.promise, replacing.promise];
+    void client.refetchQueries({ queryKey: K(), exact: true });
+    await flush(10);
+    void client.refetchQueries({ queryKey: K(), exact: true });
+    await flush(10);
+    await act(async () => replaced.resolve(details("OPEN")));
+    hook.unmount();
+    await flush(10);
+    await act(async () =>
+      replacing.resolve(details("OPEN", { title: "replacing" })),
+    );
+    await flush(10);
+    expect(client.getQueryData(K())).toMatchObject({
+      state: "MERGED",
+      title: "replacing",
+    });
+  });
+
+  it("past the deadline with the timer late, a write of OPEN stays OPEN", async () => {
+    const { client } = await landed();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    // The clock passes the deadline without firing the timer (sleep/resume).
+    vi.setSystemTime(Date.now() + LANDED_MERGE_TTL_MS + 1_000);
+    act(() => {
+      client.setQueryData(K(), details("OPEN", { title: "late clock" }));
+    });
+    expect(stateOf(client)).toBe("OPEN");
+    expect(invalidate).not.toHaveBeenCalled();
+    await flush(LANDED_MERGE_TTL_MS);
+    const exact = invalidate.mock.calls.filter(
+      ([filters]) => filters?.exact === true,
+    );
+    expect(exact).toHaveLength(1);
+    expect(exact[0]?.[0]?.queryKey).toEqual(K());
+  });
+
+  it("leaves one listener per live mark and none once it is gone", async () => {
+    const client = newClient();
+    const listeners = () =>
+      (client.getQueryCache() as unknown as { listeners: Set<unknown> })
+        .listeners.size;
+    client.setQueryData(K(), details("OPEN"));
+    expect(listeners()).toBe(0);
+    act(() => markMergeLanded(client, REPO, "origin", 7));
+    expect(listeners()).toBe(1);
+    act(() => markMergeLanded(client, REPO, "origin", 7));
+    expect(listeners()).toBe(1);
+    await flush(LANDED_MERGE_TTL_MS + 100);
+    expect(listeners()).toBe(0);
+    act(() => markMergeLanded(client, REPO, "origin", 7));
+    expect(listeners()).toBe(1);
+    views = [details("CLOSED")];
+    await act(async () => {
+      await client.fetchQuery({
+        ...prDetailsOptions(REPO, 7, "origin"),
+        staleTime: 0,
+      });
+    });
+    expect(stateOf(client)).toBe("CLOSED");
+    expect(listeners()).toBe(0);
+  });
+
+  it("a CLOSED fetch of a sibling request leaves the mark alone", async () => {
+    const { client } = await landed();
+    views = [details("CLOSED")];
+    await act(async () => {
+      await client.fetchQuery({
+        ...prDetailsOptions(REPO, 8, "origin"),
+        staleTime: 0,
+      });
+    });
+    expect(stateOf(client, K(8))).toBe("CLOSED");
+    act(() => {
+      client.setQueryData(K(), details("OPEN"));
+    });
+    expect(stateOf(client)).toBe("MERGED");
+  });
+
+  it("after expiry a manual OPEN write stays OPEN", async () => {
+    const { client } = await landed();
+    await flush(LANDED_MERGE_TTL_MS + 100);
+    act(() => {
+      client.setQueryData(K(), details("OPEN", { title: "after" }));
+    });
+    expect(stateOf(client)).toBe("OPEN");
   });
 
   it("an empty state is stored as answered and keeps the record (AC4c)", async () => {
@@ -352,7 +541,9 @@ describe("a merge that did not land marks nothing (AC6)", () => {
     answerWire(null);
     const { client, hook } = mount();
     await flush();
-    await merge(hook, client, { which: "arm" });
+    const armed = await merge(hook, client, { which: "arm" });
+    expect(armed.error).toBeUndefined();
+    expect(armed.atResolve).toBe("OPEN");
     await refetch(client);
     expect(stateOf(client)).toBe("OPEN");
   });
@@ -537,6 +728,46 @@ describe("the MERGING watch (AC14)", () => {
     expect(stateOf(client)).toBe("MERGED");
     await flush(WATCH_POLL_MS * 5);
     expect(slimCalls()).toBe(1);
+  });
+
+  it("counts the first answer after a reset of the slim read", async () => {
+    views = [details("MERGING")];
+    const { client } = mountWatch();
+    await flush();
+    await flush(WATCH_POLL_MS);
+    await flush(WATCH_POLL_MS);
+    expect(slimCalls()).toBe(3);
+    expect(viewCalls()).toBe(1);
+    slims = [{ locked: false, state: "MERGED" }];
+    await act(async () => {
+      await client.resetQueries({
+        queryKey: glMrMergeStateOptions(REPO, 7).queryKey,
+        exact: true,
+      });
+    });
+    await flush();
+    expect(slimCalls()).toBe(4);
+    expect(viewCalls()).toBe(2);
+    expect(stateOf(client)).toBe("MERGED");
+  });
+
+  it("counts failures after a reset toward its budget", async () => {
+    views = [details("MERGING")];
+    slims = [new Error("down")];
+    const { client } = mountWatch();
+    await flush();
+    await flush(WATCH_POLL_MS);
+    await flush(WATCH_POLL_MS);
+    expect(slimCalls()).toBe(3);
+    await act(async () => {
+      await client.resetQueries({
+        queryKey: glMrMergeStateOptions(REPO, 7).queryKey,
+        exact: true,
+      });
+    });
+    await flush(WATCH_POLL_MS * (WATCH_POLLS + 5));
+    expect(slimCalls()).toBe(WATCH_POLLS);
+    expect(viewCalls()).toBe(1);
   });
 
   it("lets a details read slower than its cadence land (AC14c)", async () => {

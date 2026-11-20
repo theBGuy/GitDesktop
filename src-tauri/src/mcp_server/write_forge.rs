@@ -186,8 +186,8 @@ fn mcp_expected_head(raw: Option<String>) -> Option<String> {
 }
 
 /// A custom message on GitHub (`provider` None) or GitLab needs `expected_head_sha`,
-/// refused here in the tool's own terms before anything is sent, and so is a GitHub
-/// `expected_head_sha` that is not a full 40-character commit id.
+/// refused here in the tool's own terms before anything is sent. With a custom message,
+/// a GitHub `expected_head_sha` must also be a full 40-character commit id.
 fn mcp_merge_head_refusal(
     provider: Option<crate::forge::model::Provider>,
     messages: &crate::forge::MergeMessages,
@@ -904,9 +904,9 @@ impl GitDesktopMcp {
                        no commit of their own and take no message, and a GitHub stacked merge, \
                        which can land several pull requests, takes none either. A message for a \
                        commit the merge will not write is refused before anything is merged. \
-                       A pull request that is closed, already merged or, on GitLab, already \
-                       being merged is refused, and so is one whose state couldn't be read \
-                       from the forge; nothing is merged then. \
+                       A pull request that is closed (declined or superseded on Bitbucket), \
+                       already merged or, on GitLab, already being merged is refused, and so is \
+                       one whose state read failed; nothing is merged then. \
                        Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
@@ -2137,7 +2137,7 @@ mod tests {
         out
     }
 
-    const MERGE_STATE_SENTENCE: &str = "A pull request that is closed, already merged or, on GitLab, already being merged is refused, and so is one whose state couldn't be read from the forge; nothing is merged then.";
+    const MERGE_STATE_SENTENCE: &str = "A pull request that is closed (declined or superseded on Bitbucket), already merged or, on GitLab, already being merged is refused, and so is one whose state read failed; nothing is merged then.";
 
     #[test]
     fn merge_pull_request_description_names_the_state_refusals() {
@@ -2145,7 +2145,7 @@ mod tests {
         let described = |s: &str| merge_tool_description(s).contains(MERGE_STATE_SENTENCE);
         assert!(described(&source), "{}", merge_tool_description(&source));
         // The sentence moved onto the tool before it no longer describes this one.
-        let raw = "A pull request that is closed, already merged or, on GitLab, already \\";
+        let raw = "A pull request that is closed (declined or superseded on Bitbucket), \\";
         let fn_at = source.find("async fn merge_pull_request(").unwrap();
         let attr_at = source[..fn_at].rfind("#[tool(").unwrap();
         let start = attr_at + source[attr_at..].find(raw).unwrap();

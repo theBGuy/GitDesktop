@@ -98,22 +98,23 @@ interface MergePrDialogProps {
   finalFocus?: (popup: HTMLElement | null) => boolean;
 }
 
-/** Close-time focus: the default return while the footer is connected; else
- *  focus in the popup or on `<body>` moves to the frame itself, returning
- *  `false` (Base UI would pick a non-tabbable target's first tabbable child).
- *  Focus the user moved out of the dialog stays where it is. */
+/** Close-time focus, in order: focus the user moved out of the dialog stays
+ *  where it is (`false`); a connected footer takes Base UI's default return
+ *  (`true`); with no connected frame, the default return too (`true`); else
+ *  focus moves to the frame itself (`false`: Base UI would pick a non-tabbable
+ *  target's first tabbable child). */
 export function mergeDialogFinalFocus(
   footer: HTMLElement | null,
   frame: HTMLElement | null,
   popup: HTMLElement | null,
   active: Element | null = document.activeElement,
 ): boolean {
-  if (footer?.isConnected) return true;
   const moved =
     active !== null &&
     active !== active.ownerDocument.body &&
     !popup?.contains(active);
   if (moved) return false;
+  if (footer?.isConnected) return true;
   if (!frame?.isConnected) return true;
   frame.focus({ preventScroll: true });
   return false;

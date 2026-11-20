@@ -3080,8 +3080,8 @@ const GH_UNCONFIRMED_LEAD: &str =
     "Couldn't confirm this pull request is still open on GitHub, so nothing was merged. Try again.";
 
 /// The merge's one read of the pull request, before anything is sent: `Ok(stacked)`
-/// for an open (or unknown-state) one, read through the detail view's
-/// `pull_stack_ref` so the merge never cascades a stack the view didn't show.
+/// for an open (or unknown-state) one. Stack membership is read at merge time through
+/// `pull_stack_ref_value`, the same parser the detail view uses.
 async fn gh_merge_precheck(repo_path: &str, slug: &str, number: u64) -> AppResult<bool> {
     let endpoint = format!("repos/{slug}/pulls/{number}");
     let read = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await;
@@ -3101,8 +3101,9 @@ fn gh_merge_precheck_outcome(read: AppResult<GhOutput>) -> AppResult<bool> {
             raw.to_string()
         })));
     }
-    let body = out.stdout_lossy();
-    let value = match serde_json::from_str::<serde_json::Value>(&body) {
+    // Strict UTF-8: a lossy decode turns an invalid byte in `state` into an unknown state,
+    // which would proceed.
+    let value = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
         Ok(value) if value.is_object() => value,
         Ok(_) => {
             return Err(AppError::Gh(format!(
@@ -3126,7 +3127,7 @@ fn gh_merge_precheck_outcome(read: AppResult<GhOutput>) -> AppResult<bool> {
     if value.get("state").and_then(serde_json::Value::as_str) == Some("closed") {
         return Err(AppError::Gh(GH_CLOSED_REFUSAL.into()));
     }
-    Ok(pull_stack_ref(&body).is_some())
+    Ok(pull_stack_ref_value(&value).is_some())
 }
 
 /// A failed state read refuses the merge. A transport cause leads with "Couldn't reach",
@@ -4897,11 +4898,15 @@ struct GhPullStackRef {
 /// The `stack` triple (stack number, position, size) from a REST pull payload;
 /// `None` when the PR is unstacked (the key is absent or JSON null) or the object
 /// is incomplete or not an object (an array would deserialize positionally). The
-/// detail view and the merge path BOTH decide "is this PR stacked?" through here, so
-/// they can never disagree — a divergence would let one cascade a merge the other
-/// never disclosed. Pure — unit-tested.
+/// detail view and the merge path decide "is this PR stacked?" with the same parser,
+/// [`pull_stack_ref_value`]; membership can still change between their two reads.
+/// Pure — unit-tested.
 fn pull_stack_ref(body: &str) -> Option<(u64, u32, u32)> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    pull_stack_ref_value(&serde_json::from_str(body).ok()?)
+}
+
+/// [`pull_stack_ref`] over an already-parsed payload.
+fn pull_stack_ref_value(value: &serde_json::Value) -> Option<(u64, u32, u32)> {
     let stack = value.get("stack").filter(|s| s.is_object())?;
     let stack: GhPullStackRef = serde_json::from_value(stack.clone()).ok()?;
     Some((stack.number?, stack.position?, stack.size?))
@@ -18127,6 +18132,28 @@ mod merge_message_tests {
         }
     }
 
+    /// An invalid UTF-8 byte anywhere in the body, the state value included, is a failed
+    /// read, never an unknown state that proceeds.
+    #[test]
+    fn merge_precheck_outcome_refuses_a_body_that_is_not_utf8() {
+        for body in [
+            &b"{\"state\":\"clos\xFFed\"}"[..],
+            b"{\"state\":\"open\",\"title\":\"\xC3\"}",
+        ] {
+            let read = Ok(GhOutput {
+                stdout: body.to_vec(),
+                stderr: String::new(),
+                code: 0,
+            });
+            match gh_merge_precheck_outcome(read) {
+                Err(AppError::Gh(t)) => {
+                    assert_eq!(t.lines().next(), Some(GH_UNCONFIRMED_LEAD), "{body:?}")
+                }
+                other => panic!("{body:?}: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn merge_precheck_outcome_splits_unreachable_from_unconfirmed() {
         let refused = |read: AppResult<GhOutput>| match gh_merge_precheck_outcome(read) {
@@ -18191,7 +18218,7 @@ mod merge_message_tests {
         ));
     }
 
-    /// The copy the help guide quotes.
+    /// Pins the refusal copy; the help guide's merge paragraph paraphrases it.
     #[test]
     fn merge_refusal_consts_keep_their_text() {
         assert_eq!(GH_CLOSED_REFUSAL, "This pull request was closed on GitHub, so nothing was merged. Reopen it if you still want to merge it.");

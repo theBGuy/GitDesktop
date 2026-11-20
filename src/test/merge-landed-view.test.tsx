@@ -37,6 +37,7 @@ import type {
   MergeMessageDefaults,
   PrDetails,
 } from "@/lib/git/types";
+import { getAvailableSnapshot } from "@/lib/hotkeys/handler-registry";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -509,4 +510,37 @@ describe("the merge dialog's not-open reason", () => {
         "This merge request is no longer open.",
       );
   });
+});
+
+describe("the palette's Ready for review", () => {
+  /** A GitLab draft MR whose draft toggle is implemented, in `state`. */
+  async function readyEnabledIn(state: string) {
+    vi.mocked(forgeStatus).mockResolvedValue({
+      ...GITLAB,
+      implemented: { ...GITLAB.implemented, mrDraftToggle: true },
+    } as ForgeStatus);
+    vi.mocked(forgePrView).mockImplementation(async (_repo, number) => ({
+      ...pr(number),
+      state,
+      isDraft: true,
+    }));
+    const { client } = mount();
+    await waitFor(() =>
+      expect(
+        (client.getQueryData(DETAILS_KEY) as PrDetails | undefined)?.state,
+      ).toBe(state),
+    );
+    await settle();
+    return getAvailableSnapshot().has("pr-ready-for-review");
+  }
+
+  it("is enabled on an open draft", async () => {
+    expect(await readyEnabledIn("OPEN")).toBe(true);
+  });
+
+  for (const state of ["MERGED", "MERGING", "CLOSED"])
+    it(`is not enabled on a ${state} draft`, async () => {
+      vi.mocked(forgeGlMrMergeState).mockResolvedValue(LOCKED_SLIM);
+      expect(await readyEnabledIn(state)).toBe(false);
+    });
 });

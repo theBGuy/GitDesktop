@@ -66,4 +66,13 @@ describe("the merge dialog's close-time focus", () => {
     expect(mergeDialogFinalFocus(null, view, popup)).toBe(false);
     expect(document.activeElement).toBe(elsewhere);
   });
+
+  it("leaves moved-out focus where it is while the footer is still connected", () => {
+    const view = frame();
+    const popup = attached();
+    const elsewhere = attached().appendChild(document.createElement("input"));
+    elsewhere.focus();
+    expect(mergeDialogFinalFocus(attached(), view, popup)).toBe(false);
+    expect(document.activeElement).toBe(elsewhere);
+  });
 });
