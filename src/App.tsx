@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { AppAnnouncer } from "@/components/app-announcer";
 import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { Spinner } from "@/components/ui/spinner";
 import { ReconnectDialog } from "@/features/accounts/ReconnectDialog";
@@ -14,6 +15,7 @@ import { ExploreScreen } from "@/features/explore/ExploreScreen";
 import { HelpScreen } from "@/features/help/HelpScreen";
 import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
 import { RepoNotificationsDialogHost } from "@/features/notifications/RepoNotificationsDialog";
+import { OpenRepoLensKeeper } from "@/features/repository/OpenRepoLensKeeper";
 import { RepositoryView } from "@/features/repository/RepositoryView";
 import { usePickAndOpenRepo } from "@/features/repository/useOpenRepoByPath";
 import { SettingsScreen } from "@/features/settings/SettingsScreen";
@@ -343,6 +345,8 @@ function App() {
       <CloneRepoDialog open={cloneOpen} onOpenChange={setCloneOpen} />
       <CreateRepoDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ConfirmDialogHost />
+      <AppAnnouncer />
+      <OpenRepoLensKeeper />
       <ReconnectDialog />
       <UpdateChecker />
       <WhatsNew />

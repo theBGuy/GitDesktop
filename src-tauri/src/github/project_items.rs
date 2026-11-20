@@ -349,6 +349,11 @@ pub(crate) fn parse_content(item_type: &str, content: Option<Value>) -> BoardIte
     }
 }
 
+/// The built-in Title value duplicates the item content's title, so value readers drop it.
+pub(crate) fn is_title_value(value: &Value) -> bool {
+    value["field"]["dataType"] == "TITLE"
+}
+
 pub(crate) fn parse_board_item(value: Value) -> Result<BoardItem, String> {
     let node: ItemResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
     if node.id.trim().is_empty() {
@@ -365,6 +370,7 @@ pub(crate) fn parse_board_item(value: Value) -> Result<BoardItem, String> {
             .into_iter()
             .flatten()
             .flatten()
+            .filter(|value| !is_title_value(value))
             .map(|value| parse_field_value(&value))
             .collect(),
     })
@@ -1462,6 +1468,56 @@ mod tests {
         ] {
             assert!(parse_item_node(&unreadable).is_err(), "{unreadable}");
         }
+    }
+
+    /// A custom text value, the built-in Title, a custom TEXT field named "Title", and a
+    /// null node, in that order.
+    fn values_with_title() -> Value {
+        json!([
+            {"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"notes","name":"Notes","dataType":"TEXT"},"text":"A note"},
+            {"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"title","name":"Title","dataType":"TITLE"},"text":"Board card"},
+            {"__typename":"ProjectV2ItemFieldTextValue","field":{"id":"custom-title","name":"Title","dataType":"TEXT"},"text":"Custom"},
+            null
+        ])
+    }
+
+    fn value_ids(field_values: &Value) -> Vec<(String, String)> {
+        field_values
+            .as_array()
+            .expect("field values")
+            .iter()
+            .map(|v| {
+                (
+                    v["kind"].as_str().unwrap_or_default().to_string(),
+                    v["fieldId"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_built_in_title_value_is_dropped_and_a_text_field_named_title_kept() {
+        let expected = vec![
+            ("text".to_string(), "notes".to_string()),
+            ("text".to_string(), "custom-title".to_string()),
+        ];
+        let mut node = item("PVTI_one", "DRAFT_ISSUE", content("DraftIssue"));
+        node["fieldValues"]["nodes"] = values_with_title();
+
+        let board_item = parse_board_item(node.clone()).unwrap();
+        let wire = serde_json::to_value(&board_item).unwrap();
+        assert_eq!(value_ids(&wire["fieldValues"]), expected);
+
+        let board = parse_page(&page(json!([node.clone()]), false, None)).unwrap();
+        let wire = serde_json::to_value(&board).unwrap();
+        assert_eq!(value_ids(&wire["items"][0]["fieldValues"]), expected);
+
+        node["__typename"] = json!("ProjectV2Item");
+        node["project"] = json!({"id": "PVT_p"});
+        let body = json!({"data": {"node": node}}).to_string();
+        let found = parse_item_node(&body).unwrap().expect("an item");
+        let wire = serde_json::to_value(&found.item).unwrap();
+        assert_eq!(value_ids(&wire["fieldValues"]), expected);
     }
 
     const NOT_FOUND_BODY: &str = r#"{"data":{"node":null},"errors":[{"type":"NOT_FOUND","path":["node"],"locations":[{"line":1,"column":12}],"message":"Could not resolve to a node with the global id of 'PVTI_x'."}]}"#;

@@ -779,9 +779,16 @@ note was written and when it last changed, and an item you can't see says so
 rather than thinning the board silently. Open an issue or pull request
 straight from its card, or press **Space** for a **details peek**: its title,
 what it is, and when it was opened, joined this board, and last changed,
-without leaving the columns. **Go back** (`Alt`+`←`, `⌘`+`[` on macOS, or the
-mouse's back button) returns you to the board on the same project, view and
-card. Page through a large board with **Load more**, and move around the whole
+without leaving the columns. A card from another repository opens in the app
+too when a clone of that repository is among your repositories: GitDesktop
+switches to it (a pull request lands in the worktree that has its branch,
+when there is one), and a card from the other side of a fork switches sides.
+The card menu names where each open lands (**Open in** the repository,
+**Open in Upstream** or **Open in Fork**) and always offers **Open on GitHub**
+as well. **Go back** (`Alt`+`←`, `⌘`+`[` on macOS, or the mouse's back
+button) returns you to the board on the same project, view and card, even
+when the item opened in another repository.
+Page through a large board with **Load more**, and move around the whole
 thing from the keyboard. **Add item** puts work on the board without a trip to
 the browser: search this repository's issues and pull requests and add several
 in a row, or write a **draft** — a Markdown note that lives on the board alone
@@ -1385,9 +1392,10 @@ review via its subscription login. The full list is under
   GitHub-Desktop-compatible defaults, a generated cheat sheet (`Ctrl`/`⌘`+`/`),
   a command palette (`Ctrl`/`⌘`+`K`), a filterable shortcut list in Settings
   (by name, category, or key), **Back** and **Forward** through the tabs and
-  items you visited in a repository (`Alt`+`←` / `→`, `⌘`+`[` / `]` on macOS,
-  or the mouse's side buttons; on a roadmap row `Alt`+`←` / `→` shift the
-  item's dates instead), and arrow-key navigation everywhere.
+  items you visited, across repositories when a board card or a notification
+  took you to another one (`Alt`+`←` / `→`, `⌘`+`[` / `]` on macOS, or the
+  mouse's side buttons; on a roadmap row `Alt`+`←` / `→` shift the item's
+  dates instead), and arrow-key navigation everywhere.
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.

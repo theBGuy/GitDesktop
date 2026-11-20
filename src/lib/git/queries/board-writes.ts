@@ -229,16 +229,33 @@ export function pausedBoardWriteOn(
  *  the whole burst alongside the chase's fold entry (projects.ts
  *  `useShiftItemDates`). Its own map because the fold key carries the card too,
  *  and these reads are held per lens: the focus pass, the lens's
- *  `refetchOnMount`, and `settlesOnRepoWrite` (repo-mutation-options.ts). */
+ *  `refetchOnMount` and `staleTime`, and `settlesOnRepoWrite`
+ *  (repo-mutation-options.ts). */
 export const shiftChasedLenses = new Map<string, number>();
 
-/** Count one more live chase on the lens `hash`. */
+/** How many live date-shift chases run in each REPO, keyed by the `repo` string
+ *  the board settle receives (internal.ts `invalidateProjectBoards`). Held and
+ *  released beside the chase's lens hold with no await between, so it is positive
+ *  whenever {@link shiftChasedLenses} holds a lens of that repo. The board settle
+ *  defers on it (`boardWritesOutstanding`): between a chase's rounds no request is
+ *  in flight, and the last write out of the repo, a chase or not, re-reads from its
+ *  own settle (internal.ts `invalidateProjectBoards` names the one gap). It defers
+ *  that settle refetch, which reads active lenses only, for every lens of the repo,
+ *  a held one with no data included ({@link staleTimeUnlessHeld} can't: query-core
+ *  counts a lens static only while it holds data and has an observer attached).
+ *  Neither defers an observer's first load of a lens with no data; a chase that
+ *  started with no card cached stops after its first write unless a press folds
+ *  in (projects.ts `useShiftItemDates`). */
+export const shiftChasedRepos = new Map<string, number>();
+
+/** Count one more live chase on `hash`: a lens hash in {@link shiftChasedLenses},
+ *  a repo in {@link shiftChasedRepos}. */
 export function holdLens(held: Map<string, number>, hash: string): void {
   held.set(hash, (held.get(hash) ?? 0) + 1);
 }
 
-/** Count one chase on `hash` finished; the entry is DELETED at zero, so the map
- *  holds only lenses a chase is reading. */
+/** Count one chase on `hash` finished; the entry is DELETED at zero, so each map
+ *  holds only the lenses, or repos, a chase is reading. */
 export function releaseLens(held: Map<string, number>, hash: string): void {
   const left = (held.get(hash) ?? 1) - 1;
   if (left > 0) held.set(hash, left);
@@ -252,6 +269,21 @@ export function releaseLens(held: Map<string, number>, hash: string): void {
  */
 export function refetchOnMountUnlessHeld(held: ReadonlyMap<string, number>) {
   return (query: { queryHash: string }): boolean => !held.has(query.queryHash);
+}
+
+/**
+ * A board lens's `staleTime`: `"static"` while a date-shift chase holds the lens,
+ * `staleTime` otherwise (projects.ts `refreshRepoOnFocus` gives the reason). Which
+ * reads that holds off is query-core's to say: open `shouldFetchOn` and
+ * `Query.isStatic`. The chase's own guards, the cancel of a read already paused
+ * offline among them, are in projects.ts `useShiftItemDates`. Reads `held` LIVE.
+ */
+export function staleTimeUnlessHeld(
+  held: ReadonlyMap<string, number>,
+  staleTime: number,
+) {
+  return (query: { queryHash: string }): number | "static" =>
+    held.has(query.queryHash) ? "static" : staleTime;
 }
 
 /** The slice of a react-query `Query` the focus refetch reads. Options are read

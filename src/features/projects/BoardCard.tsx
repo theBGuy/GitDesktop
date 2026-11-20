@@ -32,6 +32,7 @@ import { prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { valueBelongsTo } from "./board-model";
+import { sameRepoSlug } from "./card-destination";
 
 /** How many assignee faces a card shows before the rest collapse into "+N" —
  *  three is what fits beside the number on the narrowest column. */
@@ -434,10 +435,9 @@ export const BoardCard = memo(function BoardCard({
   selected: boolean;
   /** {@link CardTitle}'s tick: selected, in a selection of several. */
   checked: boolean;
-  /** A write is changing this card in place — a draft being converted to an issue, or
-   *  one being edited. BUSY, not disabled: the card is still a real card and still
-   *  opens, and the menu rows that could collide with the write are held by the
-   *  panel. */
+  /** A write is changing this card in place (a draft converted or edited), or its
+   *  open has outlasted the wait threshold. BUSY, not disabled: the card keeps focus,
+   *  still opens, and the menu rows a write could collide with are held by the panel. */
   busy: boolean;
   /** This card's details peek is the one open. Drafts ignore it — their popover is
    *  the card's own trigger and Base UI owns its state. */
@@ -615,8 +615,7 @@ export const BoardCard = memo(function BoardCard({
   // means "not known yet", never "different", so the label stays off rather than
   // flickering onto every card.
   const repoLabel =
-    repoSlug !== null &&
-    content.repoNameWithOwner.toLowerCase() !== repoSlug.toLowerCase()
+    repoSlug !== null && !sameRepoSlug(content.repoNameWithOwner, repoSlug)
       ? content.repoNameWithOwner
       : null;
   // The same pair the head line draws, needed again as the peek's own sentence.
@@ -657,7 +656,14 @@ export const BoardCard = memo(function BoardCard({
         // reaches the global listener, which skips defaultPrevented events.
         onKeyDown={(e) => {
           noteChordSpace(e);
-          if (e.key !== " " || hasChordModifier(e)) return;
+          if (hasChordModifier(e)) return;
+          // A held Enter opens once: a repeat would supersede the open it started
+          // and retire its landing, or open the browser again.
+          if (e.key === "Enter") {
+            if (e.repeat) e.preventDefault();
+            return;
+          }
+          if (e.key !== " ") return;
           e.preventDefault();
           // A bare repeat after the chord's modifier came up is still the chord.
           if (e.repeat && chordSpace.current) return;

@@ -654,6 +654,7 @@ export function ProjectsRoadmapView({
   selectedIds,
   selectionSize,
   busyItemId,
+  openingItemId,
   peekItemId,
   items,
   sources,
@@ -679,6 +680,9 @@ export function ProjectsRoadmapView({
   selectedIds: ReadonlySet<string>;
   selectionSize: number;
   busyItemId: string | null;
+  /** The row whose open has outlasted the wait threshold: busy, bar included,
+   *  never disabled. */
+  openingItemId: string | null;
   peekItemId: string | null;
   /** Every item the view draws, folded sections included — the range spans them
    *  all, so folding a section doesn't re-scale the lane. */
@@ -1074,7 +1078,9 @@ export function ProjectsRoadmapView({
                   laneWidth={laneWidth}
                   selected={selected}
                   checked={selected && selectionSize >= 2}
-                  busy={item.itemId === busyItemId}
+                  busy={
+                    item.itemId === busyItemId || item.itemId === openingItemId
+                  }
                   peek={item.itemId === peekItemId}
                   tabCol={
                     tabStopRow === vi.index ? (tabStop?.colIndex ?? 0) : null

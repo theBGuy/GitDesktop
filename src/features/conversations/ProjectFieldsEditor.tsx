@@ -164,7 +164,8 @@ function fieldDiff(
   const applied = new Map<string, CommittedDraft | null>();
   for (const [fieldId, entry] of Object.entries(touched)) {
     // Neither an update nor a clear: the field keeps what the server holds while
-    // its control shows an entry still being typed.
+    // its control shows an entry that commits nothing (still being typed, or a
+    // number GitHub won't store).
     if (entry === INVALID_DRAFT) continue;
     // Defensive twin for a raw string that reached a parse from somewhere other
     // than a number input, whose own sanitizing never yields an unparseable one.

@@ -52,7 +52,8 @@ struct ProjectItemsArgs {
     /// A project node id (PVT_…) or the project's number from list_projects.
     project: ProjectSelector,
     /// Max items to return, 1-500 (out-of-range values clamp); default 100.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "saturating_limit")]
+    #[schemars(with = "Option<i64>")]
     limit: Option<i64>,
     /// The `endCursor` of a previous list_project_items call, to continue after it.
     #[serde(default)]
@@ -299,8 +300,34 @@ pub(super) fn resolve_project(
     }
 }
 
-/// `list_project_items`' page budget: absent means 100, any integer clamps into
-/// `1..=ITEMS_MAX` (the schema takes any i64, so a negative or huge value deserializes).
+/// Reads `limit` as any whole number serde_json can hold (a finite f64), saturating
+/// outside i64: serde_json reads an integer literal beyond u64 as f64, and `as` casts
+/// from f64 saturate. A fraction refuses below 2^52 in magnitude, where an f64 can hold one.
+fn saturating_limit<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(number) =
+        <Option<serde_json::Number> as serde::Deserialize>::deserialize(deserializer)?
+    else {
+        return Ok(None);
+    };
+    if let Some(n) = number.as_i64() {
+        return Ok(Some(n));
+    }
+    if number.as_u64().is_some() {
+        return Ok(Some(i64::MAX));
+    }
+    match number.as_f64() {
+        Some(f) if f.is_finite() && f.fract() == 0.0 => Ok(Some(f as i64)),
+        _ => Err(serde::de::Error::custom(format!(
+            "`limit` must be a whole number, got {number}"
+        ))),
+    }
+}
+
+/// `list_project_items`' page budget: absent means 100, and any whole number serde_json
+/// can hold (a finite f64) clamps into `1..=ITEMS_MAX`, however far outside i64 it lies.
 fn clamp_limit(limit: Option<i64>) -> usize {
     match limit {
         None => DEFAULT_ITEMS_LIMIT,
@@ -1016,6 +1043,68 @@ mod tests {
                 serde_json::from_value(json!({"project": 1, "limit": raw})).unwrap();
             assert_eq!(clamp_limit(args.limit), expected, "{raw}");
         }
+    }
+
+    /// The transport's path: JSON text to a Value, then the args struct.
+    fn limit_from_text(raw: &str) -> Result<Option<i64>, serde_json::Error> {
+        let value: serde_json::Value =
+            serde_json::from_str(&format!(r#"{{"project": 1, "limit": {raw}}}"#)).unwrap();
+        serde_json::from_value::<ProjectItemsArgs>(value).map(|args| args.limit)
+    }
+
+    #[test]
+    fn whole_limits_beyond_i64_clamp_and_fractions_refuse() {
+        for (raw, expected) in [
+            ("100000000000000000000", 500),
+            ("-100000000000000000000", 1),
+            ("18446744073709551615", 500),
+            ("1e3", 500),
+            ("100.0", 100),
+            ("null", 100),
+            ("-5", 1),
+            ("0", 1),
+            ("501", 500),
+            ("9223372036854775807", 500),
+            ("-9223372036854775808", 1),
+        ] {
+            let limit = limit_from_text(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(clamp_limit(limit), expected, "{raw}");
+        }
+        let absent: ProjectItemsArgs = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(r#"{"project": 1}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(clamp_limit(absent.limit), 100);
+        for raw in ["10.5", "-0.5"] {
+            let err = limit_from_text(raw).expect_err(raw).to_string();
+            assert!(
+                err.contains("`limit` must be a whole number"),
+                "{raw}: {err}"
+            );
+        }
+        assert!(limit_from_text("\"100\"").is_err());
+    }
+
+    /// The schema an agent reads still offers `limit` as an optional integer.
+    #[test]
+    fn list_project_items_schema_keeps_limit_an_optional_integer() {
+        let tool = GitDesktopMcp::read_projects_router()
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "list_project_items")
+            .expect("list_project_items is listed");
+        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        assert_eq!(schema["required"], json!(["project"]), "{schema}");
+        assert_eq!(
+            schema["properties"]["limit"],
+            json!({
+                "default": null,
+                "description": "Max items to return, 1-500 (out-of-range values clamp); default 100.",
+                "format": "int64",
+                "type": ["integer", "null"]
+            }),
+            "{schema}"
+        );
     }
 
     #[test]

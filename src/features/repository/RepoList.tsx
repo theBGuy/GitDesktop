@@ -47,6 +47,7 @@ import {
 import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useReopenHint } from "@/lib/last-checkout/hint";
+import { useMenuKeyFollowUpCanceller } from "@/lib/menu-key-follow-up";
 import {
   persistRepoVisibility,
   type RecentRepo,
@@ -90,10 +91,6 @@ const reopenTitle = (name: string) =>
 /** Inset from the row's leading edge for a keyboard-opened menu's anchor, so the
  *  popup hangs beside the row rather than off the viewport edge. */
 const MENU_KEY_ANCHOR_INSET_PX = 12;
-
-/** A last-resort bound on the Menu key's follow-up `contextmenu` canceller, for
- *  a keyup that never arrives; a key held past it disarms too. */
-const MENU_KEY_FOLLOW_UP_BOUND_MS = 10_000;
 
 // Paths whose visibility probe has already been attempted this app session, so
 // a failing probe (e.g. a signed-out provider) is retried at most once per
@@ -407,39 +404,7 @@ export function RepoList({
     );
   }
 
-  // WebView2 follows the Menu key's keyup with a trusted `contextmenu` that would
-  // stack its native menu over ours: cancel that one (never stop it), armed until
-  // it fires, a task after the keyup, a window blur, or the last-resort bound.
-  const disarmMenuKeyFollowUp = useRef<(() => void) | null>(null);
-  useEffect(() => () => disarmMenuKeyFollowUp.current?.(), []);
-
-  function armMenuKeyFollowUp() {
-    disarmMenuKeyFollowUp.current?.();
-    let afterKeyUp: number | undefined;
-    let bound: number | undefined;
-    const onContextMenu = (ev: Event) => {
-      ev.preventDefault();
-      disarm();
-    };
-    const onKeyUp = (ev: KeyboardEvent) => {
-      if (ev.key === "ContextMenu") afterKeyUp ??= window.setTimeout(disarm, 0);
-    };
-    const disarm = () => {
-      document.removeEventListener("contextmenu", onContextMenu, true);
-      document.removeEventListener("keyup", onKeyUp, true);
-      window.removeEventListener("blur", disarm);
-      window.clearTimeout(afterKeyUp);
-      window.clearTimeout(bound);
-      if (disarmMenuKeyFollowUp.current === disarm)
-        disarmMenuKeyFollowUp.current = null;
-    };
-    document.addEventListener("contextmenu", onContextMenu, true);
-    document.addEventListener("keyup", onKeyUp, true);
-    // A keyup that lands in another window would otherwise leave it armed.
-    window.addEventListener("blur", disarm);
-    bound = window.setTimeout(disarm, MENU_KEY_FOLLOW_UP_BOUND_MS);
-    disarmMenuKeyFollowUp.current = disarm;
-  }
+  const armMenuKeyFollowUp = useMenuKeyFollowUpCanceller();
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (hasChordModifier(e)) return;

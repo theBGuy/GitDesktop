@@ -25,6 +25,7 @@ describe("the board column's drop-target tint", () => {
         selectedIds={NO_SELECTION}
         selectionSize={0}
         busyItemId={null}
+        openingItemId={null}
         peekItemId={null}
         tabStopIndex={null}
         focusNonce={0}

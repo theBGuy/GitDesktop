@@ -709,7 +709,11 @@ and table row are the reference).
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
 - Shared-ContextMenu suppression for non-target right-clicks goes through
   `suppressContextMenu` (`src/lib/context-menu.ts`) — `preventDefault` alone
-  still opens Base UI's menu as an empty popup.
+  still opens Base UI's menu as an empty popup. A keydown that opens an app
+  menu for the Menu key arms `useMenuKeyFollowUpCanceller`
+  (`src/lib/menu-key-follow-up.ts`) right after its own dispatch, so
+  WebView2's trusted follow-up `contextmenu` can't stack the native menu over
+  it.
 - CI copy comes from `src/features/actions/status.tsx`, never hand-spelled: the
   provider's noun via `ciRunNoun` (labels and toasts derive from it, so no
   surface says "run" beside another's "pipeline"), the gitlab-or-bitbucket test
@@ -801,19 +805,19 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   `closeRepoUnguarded`. The exempt navigators and both escapes are pinned by
   `scripts/settings-leave-guard.test.mjs`.
 - Opening a repo the user picked goes through `useOpenRecordedRepo`
-  (`src/features/repository/useOpenRepoByPath.ts`): it warms the repo's shell
-  reads (`warmRepoShell`, a 250 ms budget on cold keys), records it in recents,
-  and switches only if no newer open or navigation arrived — never a
-  hand-rolled `addRecent` → `openRepo`. A caller whose own awaits are part of
-  the request claims first (`claimRepoOpen`); one whose pre-open await may end
-  in something other than an open (BranchSwitcher's worktree lookups) takes
-  `repoOpenWatermark()` and yields to a newer open instead. The known bypasses
-  hold on the same warm-up: RepoDialogs' failure reopen and a worktree
+  (`src/features/repository/useOpenRepoByPath.ts`): it warms the repo's
+  shell reads (`warmRepoShell`, a 250 ms budget on cold keys), records it in
+  recents, and switches only if no newer open or navigation arrived — never
+  a hand-rolled `addRecent` → `openRepo`. A caller whose own awaits are part
+  of the request claims first (`claimRepoOpen`); one whose pre-open await
+  may end in something other than an open (BranchSwitcher's worktree lookups)
+  takes `repoOpenWatermark()` and yields to a newer open instead. The known
+  bypasses hold on the same warm-up: RepoDialogs' failure reopen and a worktree
   promote's landing call `openRepo` after awaiting `claimWarmRepoShell`
-  (ui.ts), `useOpenWorktree` warms without recording, and the store
-  navigators' cross-repo arms (notification and My work jumps) hold through the
-  provider `useOpenRepoByPath` registers (`registerRepoShellWarmup`). The
-  reads that paint the repo view stay cached `REPO_SHELL_GC_TIME`
+  (ui.ts), `useOpenWorktree` warms without recording, and the store navigators'
+  cross-repo arms (notification, My work and board-card jumps) hold through
+  the provider `useOpenRepoByPath` registers (`registerRepoShellWarmup`).
+  The reads that paint the repo view stay cached `REPO_SHELL_GC_TIME`
   (`src/lib/query-cache-times.ts`) through curated `<thing>Options` factories:
   the local ones are spread by their hook and the warm-up, the network-backed
   ones (`publishTargetsOptions`, `latestRunOptions`) by their hook only. A
@@ -821,13 +825,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   it never spends the budget: `remoteBranchesOptions` and `branchesOptions`
   (the closed branch menu's Remote group and its local list). The shell
   factories without a window of their own carry `REPO_SHELL_WARM_STALE_MS`
-  (src/lib/query-cache-times.ts), so the mount right after a warm-up serves
-  the prefetched answer instead of respawning git; an observer that must
-  re-check on open (PromoteWorktreeDialog's status and op-state preconditions)
-  passes `staleTime: 0` explicitly. BranchSwitcher still prefetches remote
-  branches once per repo for a same-repo remount from a non-repo view, and
-  its hook stays open-gated. Never a `["repo"]` prefix default (it would
-  catch the notification baselines).
+  (src/lib/query-cache-times.ts), so the mount right after a warm-up serves the
+  prefetched answer instead of respawning git; an observer that must re-check
+  on open (PromoteWorktreeDialog's status and op-state preconditions) passes
+  `staleTime: 0` explicitly. BranchSwitcher still prefetches remote branches
+  once per repo for a same-repo remount from a non-repo view, and its hook
+  stays open-gated. Never a `["repo"]` prefix default (it would catch the
+  notification baselines).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module
   state go stale under it.
@@ -925,7 +929,7 @@ Wiring a NEW call site onto one of these surfaces means the governing idiom
 applies — cite it in the spec or record "none applies"; the canonical site is
 one grep away on the named symbol. Grows via Conventions-sync.
 
-- **In-repo history** — the recorder (the ui store subscriber at the
+- **Back/Forward history** — the recorder (the ui store subscriber at the
   end of `src/lib/stores/ui.ts`, whose rules are `recordNavigation` in
   `src/lib/stores/nav-history.ts`) observes committed location changes,
   so no call site pushes: a tab change always adds an entry, a selection
@@ -938,40 +942,100 @@ one grep away on the named symbol. Grows via Conventions-sync.
   provider (`registerNavAnchorProvider`) and consumes its return request while
   active, epoch-checked (`useBoardReturn` on Projects is the instance); leaving
   the repo view for an overlay records the current tab's anchor first, since
-  the panel unmounts under the overlay. A tab whose panel can stop rendering
-  is reported through `setNavHiddenTabs`; the history carries the lens it was
-  built under and `useNavLensSync` re-seeds it when the live lens differs; every
-  writer that keeps or adds entries returns through the module's one normalizer
-  (seeding writes one entry, and the stamp-only lens path returns the entries
-  unchanged); Back and Forward restore in one set and never call a navigator. A
-  mouse side-button press a surface spends on something else (cancelling a drag)
-  calls `vetoSideButtonNavigation` from its mousedown, so the release doesn't
-  also navigate.
+  the panel unmounts under the overlay. A tab whose panel can stop rendering is
+  reported through `setNavHiddenTabs`. The history is a list of segments, one
+  per stretch of one repository under one lens, and `useNavLensSync` re-seeds
+  the current segment alone when the live lens differs. A repository change
+  empties it, except a navigator landing that passes `carryHistory: true`
+  (the board's card opens and the Activity dock's four jumps): a change of
+  repository or of the same repository's lens then starts a new segment, with
+  the departing tab's anchor read at the landing; from under an overlay the
+  departing stop is the stored one, its anchor read when the view left. A
+  stamped segment left from under an overlay for another repository keeps its
+  stamp and its stops up to the current one, whatever the live lens; a
+  same-repository hop that lands under that stamp after the live lens moved off
+  it rejoins the segment the same way. `openPr` and `openIssue` report the state
+  they left from, read before `beforeSelect`, on every landing; a landing that
+  stays in its segment and is known to stay under the departing segment's lens
+  records from that stop and trail, since a selection clear in the callback is
+  no deselect of the user's. Every writer that keeps or adds entries returns
+  through the module's one normalizer (seeding writes one entry, and the
+  stamp-only lens path returns the entries unchanged). Back and Forward restore
+  inside a segment in one set and never call a navigator; a step into another
+  segment goes through `restoreNav`'s cross-segment arm (ui.ts): into the same
+  repository under the other lens it lands with no hold, its set applied through
+  `startViewTransition` (a task later, unless motion is reduced or the API is
+  missing); into another repository it is a held landing that warms the
+  repository shell and validates the target folder beside it, for at most 10 s.
+  Two answers each drop every segment of that repository and toast once: gone
+  (the backend answers not a directory or not a repository, or answers another
+  root) and refused (git answers and the folder cannot be opened: its fatal exit,
+  or a working tree it names that is not a directory). A check that fails any
+  other way, or passes the 10 s, drops nothing, lands nothing and toasts once.
+  All three act only while their press is still the current one. When the
+  repository's cached remotes list no longer holds `upstream`, a landing on a
+  segment stamped upstream applies no lens, drops the restored remote pull
+  request or issue, re-seeds that segment as origin and arms no board return.
+  When the list loses it under a segment stamped upstream while the stored choice
+  is still Upstream, `useNavLensSync` drops the remote selection and re-seeds the
+  segment as origin, without waiting for the forge status. `restoreNav` is the
+  sixth hold site `scripts/settings-leave-guard.test.mjs` pins, under its own
+  `RESTORE_HELPER` constant outside the five held navigators. A mouse side-button
+  press a surface spends on something else (cancelling a drag) calls
+  `vetoSideButtonNavigation` from its mousedown, so the release doesn't also
+  navigate.
 - **Repo-identity keying** — per-repo state keys on the repo IDENTITY
   (`useRepoIdentity` / the shared `--git-common-dir` resolver), never a raw
   checkout path; a raw-path key diverges across worktrees of one repo.
 - **Held repo navigation** — every route that opens a repo warms the shell
-  first and, except the worktree promote's landing (a system move off a
-  folder it is deleting), yields to newer intent: picked opens via
+  first and, except the worktree promote's landing (a system move off
+  a folder it is deleting), yields to newer intent: picked opens via
   `useOpenRecordedRepo` / `useOpenWorktree`, the ui-store navigators'
   cross-repo arms via the `registerRepoShellWarmup` provider (registered in
   useOpenRepoByPath.ts; same-repo arms stay synchronous), and the two direct
-  `openRepo` sites via `claimWarmRepoShell` (ui.ts). A new route that opens a
-  repo goes through one of these, never a bare `openRepo`. Except at the
-  promote's landing, which ignores its claim and keeps `bypassLeaveGuard`, a
-  held landing checks a `claimRepoOpen` claim (plus RepoDialogs' request-time
-  `repoOpenWatermark`) for supersession and re-runs `interceptSettingsLeave` at
-  settle — the guard can be registered during the hold without an epoch bump. A
+  `openRepo` sites and the cross-segment Back/Forward restore (`restoreNav`)
+  via `claimWarmRepoShell` (ui.ts). A new route that opens a repo goes through
+  one of these, never a bare `openRepo`. Except at the promote's landing,
+  which ignores its claim and keeps `bypassLeaveGuard`, a held landing checks
+  a `claimRepoOpen` claim (plus RepoDialogs' request-time `repoOpenWatermark`)
+  for supersession and re-runs `interceptSettingsLeave` at settle — the guard
+  can be registered during the hold without an epoch bump. `restoreNav` is
+  the one held landing that doesn't re-run it: it lands only while the repo
+  view shows and its press's epoch stands, and opening Settings moves both. A
   caller whose own awaits precede the navigator call claims (`claimRepoOpen`)
-  before them and checks that claim before calling, so a newer click retires an
-  older held landing and a newer open retires the click (My work's `openItem`,
-  the Activity dock's `navigate`). A submodule opens as a repository only through
-  `useOpenSubmoduleAsRepo` (`src/features/repository/`), which claims before its
-  probe, drops a press retired while the probe ran, and reports a bad folder by
-  its submodule-relative path.
+  before them and checks that claim before calling, so a newer click retires
+  an older held landing and a newer open retires the click (My work's
+  `openItem`, the board's `openInClone`, the Activity dock's `navigate`).
+  A submodule opens as a repository only through `useOpenSubmoduleAsRepo`
+  (`src/features/repository/`), which claims before its probe, drops
+  a press retired while the probe ran, and reports a bad folder by its
+  submodule-relative path.
+- **Forge item in a local clone** — opening a forge issue or pull request in
+  a local clone of its repository goes through `src/lib/local-landing`: the
+  synchronous candidate check (`hasOpenableMatch` / `openableMatches` in
+  `match.ts`, what a menu label may promise) and `resolveLocalLanding`
+  (`resolve.ts`, one `LOCAL_LANDING_BUDGET_MS` budget, the first folder check
+  included, and a non-pruning worktree read), never a copy of the matcher.
+  Each caller keeps its own generation, claim, `superseded()` and wait, and
+  re-checks `superseded()` after the await before acting on any result, a
+  browser one included (My work's `openItem` and the board's `useCardOpen`
+  are the instances). The wait's spoken line is `openingStatus` (`match.ts`).
+- **Same repository on the board** — whether a Projects card's
+  `owner/name` is the open repository (or its other fork side) is
+  `sameRepoSlug` (`src/features/projects/card-destination.ts`), the folder's
+  one case-insensitive slug compare; a new projects surface imports it rather
+  than comparing slugs inline.
+- **App-level announcements** — a status a screen reader must hear after the
+  view that raised it unmounts (a landing that switches repository) goes
+  through `announceApp` (`src/lib/app-announce.ts`), read by the one
+  `<AppAnnouncer />` App mounts; never a second app-wide live region. A view's
+  own waits stay in its own `role="status"` region.
 - **View lens** — a PR/issue number or blob is valid only in the lens that
   produced it (origin vs upstream vs local match); navigation and dock entry
-  points thread the lens (`beforeSelect`), never pass a bare number across.
+  points thread the lens (`beforeSelect`), never pass a bare number across. The
+  open repository's cached lens stays observed app-wide (`OpenRepoLensKeeper`),
+  so a session-only lens lives as long as the selections minted under it; a
+  repository left behind keeps the default expiry.
 - **Force/retry threading** — a re-run or retry carries its force/trigger
   marker end-to-end; downstream code distinguishing "original vs re-run" reads
   the marker, never infers from timing.

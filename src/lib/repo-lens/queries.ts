@@ -25,8 +25,9 @@ import { loadRepoLens, saveRepoLens } from "./store";
 export const lensKey = (repo: string) => ["repo-lens", repo] as const;
 
 /** The cached lens for a repo, unfiltered by the gate: the persisted choice, or
- *  a session-only lens a navigation applied over it. Read only by
- *  {@link useLensState}; surfaces take its projections. */
+ *  a session-only lens a navigation applied over it. Read by
+ *  {@link useLensState}, whose projections surfaces take, and held observed by
+ *  `OpenRepoLensKeeper`. */
 export function useRepoLensRaw(repo: string) {
   return useQuery({
     queryKey: lensKey(repo),
@@ -45,6 +46,11 @@ export function useRepoLensRaw(repo: string) {
 const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
   !q.isPending && !q.isFetching;
 
+/** The one spelling of "this remotes list offers the upstream lens", so the gate,
+ *  the waiting window and {@link cachedLensGone} can't disagree on it. */
+const offersUpstream = (remotes: readonly string[] | undefined) =>
+  Boolean(remotes?.includes("upstream"));
+
 /** The gate and lens from the three reads' data, shared by {@link useLensState} and
  *  {@link cachedRepoLens} so the two can't drift. A read with no data counts as
  *  failing its gate input, so a cold cache yields "origin". */
@@ -58,7 +64,7 @@ export function lensFromReads(
   const gate =
     forge?.provider === "github" &&
     Boolean(forge.authenticated) &&
-    Boolean(remotes?.includes("upstream"));
+    offersUpstream(remotes);
   return { gate, lens: gate && raw === "upstream" ? "upstream" : "origin" };
 }
 
@@ -73,7 +79,8 @@ export function cachedRepoLens(
 
 /** Whether every cache {@link cachedRepoLens} reads has answered. Until then its
  *  "origin" is a default, not a verdict, so an in-app select could later resolve
- *  under the other lens. */
+ *  under the other lens. A cached "origin" choice is a verdict already:
+ *  {@link cachedLensVerdict} answers it, this does not. */
 export function cachedLensInputsComplete(
   queryClient: QueryClient,
   repo: string,
@@ -81,7 +88,51 @@ export function cachedLensInputsComplete(
   return cachedLensInputs(queryClient, repo).every((v) => v !== undefined);
 }
 
-/** The three caches both imperative reads take, so they can't drift apart. */
+/** The cached lens, or null: "origin" for a cached choice of "origin" (no gate
+ *  turns it into "upstream"), the gated lens once all three caches hold data,
+ *  null otherwise. A cached input that is re-read can still move it, as for
+ *  every cached read here. */
+export function cachedLensVerdict(
+  queryClient: QueryClient,
+  repo: string,
+): RemoteLens | null {
+  const inputs = cachedLensInputs(queryClient, repo);
+  const raw = inputs[2];
+  if (raw === "origin") return "origin";
+  return inputs.every((v) => v !== undefined)
+    ? lensFromReads(inputs[0], inputs[1], raw).lens
+    : null;
+}
+
+/** Whether a recorded `lens` is known to no longer resolve: "upstream" while the cached
+ *  remotes list has answered without an `upstream` remote. Positive evidence only, so
+ *  no remotes data, a forge gate closed with the remote present and a recorded
+ *  "origin" all answer false; its answer depends on neither the forge status nor
+ *  the stored lens. */
+export function cachedLensGone(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+): boolean {
+  if (lens !== "upstream") return false;
+  return upstreamGoneFrom(cachedLensInputs(queryClient, repo)[1]);
+}
+
+/** A remotes list that has answered without `upstream`: the one predicate behind
+ *  {@link cachedLensGone} and {@link useUpstreamRemoteGone}, so the imperative and
+ *  the subscribed reads can't drift. No data is not evidence. */
+const upstreamGoneFrom = (remotes: readonly string[] | undefined) =>
+  remotes !== undefined && !offersUpstream(remotes);
+
+/** The subscribed twin of {@link cachedLensGone}'s remotes half: true once `repo`'s
+ *  remotes list has answered without an `upstream` remote. Re-renders when the list
+ *  loses it, which the gated lens alone can't signal while the forge status is
+ *  pending. */
+export function useUpstreamRemoteGone(repo: string): boolean {
+  return upstreamGoneFrom(useRemotes(repo).data);
+}
+
+/** The three caches the imperative reads take, so they can't drift apart. */
 function cachedLensInputs(queryClient: QueryClient, repo: string) {
   return [
     queryClient.getQueryData<ForgeStatus>(["repo", repo, "forge-status"]),
@@ -119,9 +170,7 @@ export function useLensState(repo: string): {
     settled: inputs.every(lensReadSettled),
     answered: inputs.every((q) => !q.isPending),
     waiting:
-      !gate &&
-      forgeAwaitingFirstAnswer(forge) &&
-      Boolean(remotes.data?.includes("upstream")),
+      !gate && forgeAwaitingFirstAnswer(forge) && offersUpstream(remotes.data),
     storedLens: raw.data ?? "origin",
   };
 }

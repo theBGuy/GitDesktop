@@ -41,6 +41,7 @@ export const BoardColumn = memo(function BoardColumn({
   selectedIds,
   selectionSize,
   busyItemId,
+  openingItemId,
   peekItemId,
   tabStopIndex,
   focusNonce,
@@ -80,6 +81,9 @@ export const BoardColumn = memo(function BoardColumn({
    *  primitive on purpose: this component is memoized, and the comparison is the
    *  default shallow one. */
   busyItemId: string | null;
+  /** The card whose open has outlasted the wait threshold, board-wide; a
+   *  primitive for the same memo reason. It shows as busy, never disabled. */
+  openingItemId: string | null;
   /** The card whose details peek is open, board-wide — one at a time, and the same
    *  id-not-index shape {@link busyItemId} keeps, for the same memo reason. */
   peekItemId: string | null;
@@ -319,7 +323,10 @@ export const BoardColumn = memo(function BoardColumn({
                       columnIndex={columnIndex}
                       selected={selected}
                       checked={selected && selectionSize >= 2}
-                      busy={items[vi.index].itemId === busyItemId}
+                      busy={
+                        items[vi.index].itemId === busyItemId ||
+                        items[vi.index].itemId === openingItemId
+                      }
                       peek={items[vi.index].itemId === peekItemId}
                       rovingTab={vi.index === tabStopIndex ? 0 : -1}
                       repoSlug={repoSlug}

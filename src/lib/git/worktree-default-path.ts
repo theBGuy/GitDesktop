@@ -78,6 +78,17 @@ export function sameCheckout(
   return key(a) === key(b);
 }
 
+/** `sameCheckout` for the open-in-place callers, which hand an item to the open
+ *  checkout when a proven clone is that folder. Letter case folds on Windows
+ *  only: a Mac volume can be case-sensitive, and a case-variant folder there can
+ *  be another repository. */
+export function sameOpenCheckout(
+  landingPath: string,
+  openPath: string,
+): boolean {
+  return sameCheckout(landingPath, openPath, { caseInsensitive: isWindows });
+}
+
 /** The registered worktree at `path`, by `sameCheckout`. */
 export function rowAtPath(
   rows: UserWorktree[] | undefined,

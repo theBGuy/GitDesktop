@@ -92,6 +92,8 @@ import {
   refetchRepoQueriesOnFocus,
   releaseLens,
   shiftChasedLenses,
+  shiftChasedRepos,
+  staleTimeUnlessHeld,
   statusWriteKind,
 } from "./board-writes";
 import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
@@ -961,6 +963,9 @@ function rebaseOwedReread(repo: string): void {
     scheduleOwedReread(armed.queryClient, repo, armed.full);
 }
 
+/** A board lens's staleTime: a minute, or static while a date-shift chase holds it. */
+const PROJECT_ITEMS_STALE_TIME = staleTimeUnlessHeld(shiftChasedLenses, 60_000);
+
 /** One board's items under one LENS, paged. Keyed on the board, the saved view's
  *  filter and the archived toggle: a board is the same object whichever remote
  *  reached it, but each filter and each archived state answers with a different set
@@ -998,15 +1003,12 @@ export function useProjectItems(
     initialPageParam: null as string | null,
     getNextPageParam: (last) => (last.truncated ? last.endCursor : null),
     enabled,
-    staleTime: 60_000,
+    // Held while a date-shift chase reads this lens, for the reason
+    // {@link refreshRepoOnFocus} gives: `staleTime` resolves to "static" and
+    // `refetchOnMount` to false (board-writes.ts). The rest of the hold, and what
+    // it leaves open: `shiftChasedRepos` and {@link useShiftItemDates}.
+    staleTime: PROJECT_ITEMS_STALE_TIME,
     retry: false,
-    // No mount refetch (a remount, or an Activity re-show) of a lens a date-shift
-    // chase is reading, for the reason {@link refreshRepoOnFocus} holds its
-    // focus read. The focus bridge never consults `refetchOnWindowFocus`, but
-    // query-core consults this on every observer mount; the chase's own settle
-    // brings a lens mounted during the hold current. Named residual: a view
-    // switched away and back mid-chase refetches a stale lens anyway — query-core's
-    // key-change fetch reads staleness alone.
     refetchOnMount: refetchOnMountUnlessHeld(shiftChasedLenses),
     // The board is a placeholder axis (index 3 in the key literal above); the filter
     // at index 4, the archived state at index 5 and the richness at index 6
@@ -2171,9 +2173,10 @@ const shiftingItems = new Map<
  * inactive query keeps its clock and the next show doesn't replay it. A lens a shift
  * chase is reading is only marked stale: its chase compares the cache against what
  * it last sent, so a read landing mid-chase would have it write the server's older
- * dates back. The chase's own settle re-reads that lens ({@link useShiftItemDates});
- * a mount of it is held the same way, through {@link useProjectItems}'
- * `refetchOnMount`, and a whole-repo write settle skips it (`settlesOnRepoWrite`).
+ * dates back. The chase's settle hands the lens to {@link invalidateProjectBoards}.
+ * Held for the burst the same way: {@link useProjectItems}' `staleTime` and
+ * `refetchOnMount`, `settlesOnRepoWrite`, and `shiftChasedRepos`, on which
+ * {@link invalidateProjectBoards} defers.
  *
  * Repositions need no hold: their chase steers by
  * {@link desiredRepositionTargets}, never a lens's cache. Focus reads still land
@@ -2283,11 +2286,16 @@ function shiftUpdates(
  * and a press arriving meanwhile patches the cache and folds in. The live
  * write re-reads the card's dates from that cache after each round trip (a
  * CALL-TIME read, never a render closure) and writes again until the two agree,
- * so a held key converges on where the bar is drawn; neither a window-focus read,
- * a mount refetch nor a whole-repo write settle refetches that lens during the
- * burst ({@link refreshRepoOnFocus}, {@link useProjectItems},
- * `settlesOnRepoWrite`), though they are not the only routes to it. The write
- * target rides the variables for the family's reason.
+ * so a held key converges on where the bar is drawn. During the burst the focus
+ * pass, a whole-repo write settle and a board write's own settle skip that lens
+ * ({@link refreshRepoOnFocus}, `settlesOnRepoWrite`,
+ * {@link boardWritesOutstanding}), it is static while observed and holding data
+ * ({@link useProjectItems}), and a read of it already paused offline when the
+ * chase starts is cancelled. Still open: the account-change reset, which wipes
+ * the lens and re-reads it, a board Retry, and cache writers that aren't reads.
+ * The lens and the repo are both held from before the first request until the
+ * `finally`, never only while a request is in flight. The write target rides the
+ * variables for the family's reason.
  *
  * The rollback is one card's touched fields wide. The settle is the field
  * writes' own ({@link useBulkSetItemFieldValues}): the boards and the rail
@@ -2349,7 +2357,17 @@ export function useShiftItemDates() {
       const lens = hashKey(key);
       shiftingItems.set(fold, burst);
       holdLens(shiftChasedLenses, lens);
+      holdLens(shiftChasedRepos, args.repo);
       try {
+        // The hold can't stop a read of the lens already paused offline: query-core
+        // calls its retryer's `continue()` from `Query.onFocus` and `Query.onOnline`
+        // whatever the staleTime. Cancelled here instead; the revert keeps the cache
+        // writes made since the read began (`Query.#revertState`), so no press's
+        // patch is lost. A parked Load more read is cancelled too.
+        void queryClient.cancelQueries({
+          queryKey: key,
+          fetchStatus: "paused",
+        });
         /** What the cache says the card's dates are now; null once the lens no
          *  longer draws it, which reads as agreement — nothing left to chase. */
         const cached = () => {
@@ -2392,8 +2410,15 @@ export function useShiftItemDates() {
           )?.error;
           if (typeof error === "string") throw new Error(error);
         };
-        let sent = cached() ?? shiftUpdates(args.values, fieldIds);
+        const seeded = cached();
+        let sent = seeded ?? shiftUpdates(args.values, fieldIds);
         await write(sent.updates);
+        // No card cached at the start and nothing folded in: a card drawn since
+        // came from a read (a collected lens's first load landing mid-write) or
+        // another write's patch, neither a press to write. The settle hands the
+        // lens to invalidateProjectBoards.
+        if (seeded === null && burst.presses === 0)
+          return { kind: "converged" };
         let rounds = 0;
         let seenPresses = burst.presses;
         for (;;) {
@@ -2420,6 +2445,7 @@ export function useShiftItemDates() {
       } finally {
         shiftingItems.delete(fold);
         releaseLens(shiftChasedLenses, lens);
+        releaseLens(shiftChasedRepos, args.repo);
       }
     },
     onMutate: async (args) => {
