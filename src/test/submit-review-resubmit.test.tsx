@@ -25,6 +25,7 @@ import {
 } from "vitest";
 import { ConfirmDialogHost } from "@/components/confirm-dialog-host";
 import { SubmitReviewDialog } from "@/features/pulls/SubmitReviewDialog";
+import { presentError } from "@/lib/error-summary";
 import { forgePrReviewSubmit } from "@/lib/git/api";
 import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
 import type { PrNoun } from "@/lib/pulls/pr-state";
@@ -114,6 +115,11 @@ const failures = {
   nothingPosted: { kind: "bitbucket", message: NOTHING_POSTED },
   refusal: { kind: "bitbucket", message: REFUSAL },
   verdictStep: { kind: "bitbucket", message: VERDICT_STEP },
+  // forge/mod.rs's empty-summary refusal, with the wire's Display lead.
+  invalidArgument: {
+    kind: "invalidArgument",
+    message: "invalid argument: A summary is required when requesting changes",
+  },
 } as const;
 
 /** Queues the submit's next outcomes, in order; later calls succeed. */
@@ -505,5 +511,35 @@ describe("Submit review after an attempt that may have posted", () => {
     expect(
       screen.getByText(HEDGE.split("\n")[0], { exact: false }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Submit review failure line", () => {
+  /** Presses Submit and waits for the one failed call to settle. */
+  async function failWith(key: keyof typeof failures) {
+    outcomes(key);
+    const { user } = renderDialog();
+    await user.click(submitButton());
+    await waitFor(() => expect(calls()).toBe(1));
+    return screen.findByText(presentError(failures[key]).summary);
+  }
+
+  it("drops the Rust error-kind lead", async () => {
+    await failWith("invalidArgument");
+    expect(
+      screen.getByText("A summary is required when requesting changes"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/invalid argument:/)).toBeNull();
+  });
+
+  it("shows only the first line of a multi-line message", async () => {
+    const line = await failWith("timeout");
+    expect(line.textContent).toBe(presentError(failures.timeout).summary);
+    expect(screen.queryByText(/Bitbucket request failed/)).toBeNull();
+  });
+
+  it("keeps the partial-posting headline", async () => {
+    const line = await failWith("partial");
+    expect(line.textContent).toMatch(/^Posted 2 of 5 review comments/);
   });
 });

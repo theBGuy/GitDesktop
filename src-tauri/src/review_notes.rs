@@ -26,8 +26,8 @@
 //!
 //! We resolve it here with the SAME `dirs::data_dir()` the Tauri path layer uses, joined with
 //! the identifier (reusing [`crate::local_prs::APP_IDENTIFIER`]) — so the two processes always
-//! agree on the file. A `GD_REVIEW_NOTES_DIR` override and a `cfg(test)` temp dir precede that
-//! resolution; see [`resolve_store_base`].
+//! agree on the file. A `cfg(test)` temp dir, then a `GD_REVIEW_NOTES_DIR` override, precede
+//! that resolution; see [`resolve_store_base`].
 //!
 //! ## Shape
 //!
@@ -80,12 +80,13 @@ const TEST_FALLBACK_NAME: &str = "gd-reviewnotes-test";
 
 /// Resolution of the store's base directory, in precedence order (mirroring
 /// [`crate::oplog::resolve_store_base`]):
-/// 1. a non-empty `GD_REVIEW_NOTES_DIR` override — the escape hatch for headless/test
+/// 1. under `cfg!(test)`, a temp subdir whatever the env says, so no in-crate test can
+///    write the user's real store or an exported folder (the rename migration runs for
+///    real under `cargo test`);
+/// 2. a non-empty `GD_REVIEW_NOTES_DIR` override — the escape hatch for headless
 ///    callers. Unlike the oplog (Rust-only), this store has a GUI reader/writer that
 ///    does NOT honor the override, so an override splits the Rust side from the GUI's
 ///    copy entirely;
-/// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can write the user's real
-///    store (the rename migration runs for real under `cargo test`);
 /// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`), mirroring
 ///    `tauri-plugin-store` v2's `BaseDirectory::AppData` — see the module contract.
 ///
@@ -94,8 +95,8 @@ const TEST_FALLBACK_NAME: &str = "gd-reviewnotes-test";
 /// process-per-test mode, sweeps stale ones ([`crate::oplog::test_fallback_dir`]).
 fn resolve_store_base(gd_review_notes_dir: Option<&str>, is_test: bool) -> AppResult<PathBuf> {
     match gd_review_notes_dir {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
         _ if is_test => Ok(crate::oplog::test_fallback_dir(TEST_FALLBACK_NAME)),
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
         _ => {
             let data = dirs::data_dir().ok_or_else(|| {
                 AppError::Command("could not resolve the app-data directory".to_string())
@@ -107,11 +108,12 @@ fn resolve_store_base(gd_review_notes_dir: Option<&str>, is_test: bool) -> AppRe
 
 /// Absolute path of the `review-notes.json` the frontend store writes —
 /// `<store base>/review-notes.json`; see [`resolve_store_base`] for how the base is chosen.
+/// Only non-test builds read the `GD_REVIEW_NOTES_DIR` override.
 pub(crate) fn store_path() -> AppResult<PathBuf> {
-    let base = resolve_store_base(
-        std::env::var("GD_REVIEW_NOTES_DIR").ok().as_deref(),
-        cfg!(test),
-    )?;
+    if cfg!(test) {
+        return Ok(resolve_store_base(None, true)?.join(STORE_FILE));
+    }
+    let base = resolve_store_base(std::env::var("GD_REVIEW_NOTES_DIR").ok().as_deref(), false)?;
     Ok(base.join(STORE_FILE))
 }
 
@@ -343,46 +345,44 @@ mod tests {
 
     #[test]
     fn store_path_avoids_the_real_store_under_test() {
-        // This runs in a cfg(test) build, so `store_path` takes arm 2 (temp subdir)
-        // UNLESS a GD_REVIEW_NOTES_DIR override is present in the environment. Branch on
-        // the var rather than mutating process env (which would race parallel tests).
+        // This runs in a cfg(test) build, so `store_path` takes arm 1 (temp subdir); no
+        // env var can redirect it.
         let path = store_path().unwrap();
         assert!(path.ends_with(STORE_FILE), "path: {}", path.display());
-        match std::env::var("GD_REVIEW_NOTES_DIR").ok().filter(|d| !d.is_empty()) {
-            Some(dir) => {
-                // Override wins even under test: path is under the override dir.
-                assert!(
-                    path.starts_with(&dir),
-                    "override path {path:?} should be under {dir}"
-                );
-            }
-            None => {
-                // The real store must NOT be reachable from an in-crate test.
-                assert!(
-                    path.starts_with(std::env::temp_dir()),
-                    "test store {path:?} should be under the temp dir"
-                );
-                assert!(
-                    !path.components().any(|c| c.as_os_str() == APP_IDENTIFIER),
-                    "test store {path:?} must not contain the real app-data segment {APP_IDENTIFIER}"
-                );
-            }
-        }
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "test store {path:?} should be under the temp dir"
+        );
+        assert!(
+            !path.components().any(|c| c.as_os_str() == APP_IDENTIFIER),
+            "test store {path:?} must not contain the real app-data segment {APP_IDENTIFIER}"
+        );
     }
 
     #[test]
-    fn store_path_honors_gd_review_notes_dir_override() {
+    fn store_path_returns_the_test_store_before_reading_the_override() {
+        crate::oplog::tests::assert_store_path_reads_env_last(include_str!("review_notes.rs"));
+    }
+
+    #[test]
+    fn store_base_arm_order() {
         // Drive the pure resolver directly — deterministic + parallel-safe (no
         // process-env mutation).
-        // 1. An explicit override wins regardless of the test flag.
-        let over = resolve_store_base(Some("C:/tmp/x"), true).unwrap();
-        assert_eq!(over, PathBuf::from("C:/tmp/x"));
+        // 1. The test arm outranks an override; outside tests the override wins.
+        assert_eq!(
+            resolve_store_base(Some("C:/tmp/x"), true).unwrap(),
+            crate::oplog::test_fallback_dir("gd-reviewnotes-test")
+        );
         let over_nontest = resolve_store_base(Some("C:/tmp/x"), false).unwrap();
         assert_eq!(over_nontest, PathBuf::from("C:/tmp/x"));
         // An empty override is ignored (falls through to the next arm).
         assert_eq!(
             resolve_store_base(Some(""), true).unwrap(),
             crate::oplog::test_fallback_dir("gd-reviewnotes-test")
+        );
+        assert_eq!(
+            resolve_store_base(Some(""), false).unwrap(),
+            dirs::data_dir().unwrap().join(APP_IDENTIFIER)
         );
         // 2. No override + test → the temp subdir.
         assert_eq!(

@@ -1248,6 +1248,9 @@ const NO_PR_AUTOMATION_COPY =
 const CLOSED_PR_COPY =
   "This pull request is closed — automations run on open pull requests.";
 
+const MERGING_PR_COPY =
+  "This merge request is being merged — automations run on open merge requests.";
+
 const UNRESOLVED_HEAD_COPY =
   "Couldn't resolve the pull request's current head — try refreshing.";
 
@@ -1337,6 +1340,11 @@ export function runAutomationNow(
         if (target.kind === "remote") {
           // Origin-pinned like every other store/forge touch on this path.
           const pr = await forgePrView(repoPath, target.number, "origin");
+          // MERGING is GitLab-only, so its copy names a merge request.
+          if (pr.state === "MERGING") {
+            toast.info(MERGING_PR_COPY);
+            return null;
+          }
           if (pr.state !== "OPEN") {
             toast.info(CLOSED_PR_COPY);
             return null;

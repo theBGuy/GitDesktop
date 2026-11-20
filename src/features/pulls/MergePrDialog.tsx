@@ -92,6 +92,32 @@ interface MergePrDialogProps {
   draft: MergeMessageDraft;
   /** The last attempt's failure text, shown because the text was kept. */
   failure?: string;
+  /** Where focus lands when the dialog closes (Base UI's `finalFocus`), given
+   *  the dialog's popup; absent = the default return to the element that
+   *  opened it. */
+  finalFocus?: (popup: HTMLElement | null) => boolean;
+}
+
+/** Close-time focus, in order: focus the user moved out of the dialog stays
+ *  where it is (`false`); a connected footer takes Base UI's default return
+ *  (`true`); with no connected frame, the default return too (`true`); else
+ *  focus moves to the frame itself (`false`: Base UI would pick a non-tabbable
+ *  target's first tabbable child). */
+export function mergeDialogFinalFocus(
+  footer: HTMLElement | null,
+  frame: HTMLElement | null,
+  popup: HTMLElement | null,
+  active: Element | null = document.activeElement,
+): boolean {
+  const moved =
+    active !== null &&
+    active !== active.ownerDocument.body &&
+    !popup?.contains(active);
+  if (moved) return false;
+  if (footer?.isConnected) return true;
+  if (!frame?.isConnected) return true;
+  frame.focus({ preventScroll: true });
+  return false;
 }
 
 /** Marks the message fields: the only targets the Ctrl/Cmd+Enter chord merges
@@ -252,6 +278,8 @@ export function MergePrDialog(props: MergePrDialogProps) {
   const { open, onClose, pending, heldReason, onConfirm, draft } = props;
   const messageHold = mergeMessageHold(draft.rows, draft.plan);
   const held = pending || heldReason !== undefined || messageHold !== null;
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const { finalFocus } = props;
   return (
     <Dialog
       open={open}
@@ -263,6 +291,8 @@ export function MergePrDialog(props: MergePrDialogProps) {
         // A column capped below the viewport: only the body (message, delete
         // option, failure) scrolls, so the title and the buttons stay in view.
         className="flex max-h-[85vh] flex-col sm:max-w-lg"
+        ref={popupRef}
+        finalFocus={finalFocus && (() => finalFocus(popupRef.current))}
         // The chord merges only from a message field and is swallowed everywhere
         // else in the dialog, so it never reaches the commit action behind it. On
         // DialogContent: the X close is a sibling of the fields. An IME's

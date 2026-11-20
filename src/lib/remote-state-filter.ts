@@ -3,11 +3,12 @@
  * by its own `state`, never by the list read that returned it: a forge's list
  * membership can lag a merge, close or reopen the row itself already reports.
  * Every provider maps open to "OPEN" and merged to "MERGED"; a GitLab MR that
- * is mid-merge (`locked`) arrives as "CLOSED" in the list and details reads, and
- * only the merge-state read says it is locked ({@link prAlignStep} holds the
- * align on that read). "closed" means everything not open (the issue lists'
- * Closed tab and the legacy PR callers); the PR panel's tabs split that into
- * "merged" and "unmerged", where every state but OPEN and MERGED lands.
+ * is mid-merge (`locked`) maps to "MERGING" and is filed like "CLOSED" here,
+ * and only the merge-state read says whether it is
+ * still locked ({@link prAlignStep} holds the align on that read). "closed"
+ * means everything not open (the issue lists' Closed tab and the legacy PR
+ * callers); the PR panel's tabs split that into "merged" and "unmerged",
+ * where every state but OPEN and MERGED lands.
  *
  * Import-free at runtime on purpose: `scripts/remote-state-filter.test.mjs`
  * and `scripts/pr-state-tabs.test.mjs` load it straight from `src/` under
@@ -55,7 +56,7 @@ export function localStateMatches(
 
 /** Which PR tab a remote PR's own state lands on. Total by construction, and
  *  congruent with {@link remoteStateMatches}. A GitLab MR mid-merge reports
- *  "CLOSED" here though no tab lists it, so the align consults
+ *  "MERGING", filed like "CLOSED", though no tab lists it, so the align consults
  *  {@link prAlignStep} before taking this answer for one. */
 export function prAlignTab(state: string): PrListTab {
   if (state === "OPEN") return "open";
@@ -74,7 +75,7 @@ export type PrAlignStepResult =
   | { do: "disarm" };
 
 /** What a pending remote align does next. Only a `lockable` provider's would-be
- *  Closed answer consults `probe`, since a locked GitLab MR reads "CLOSED" while
+ *  Closed answer consults `probe`, since a locked GitLab MR reads "MERGING" while
  *  its merge runs; the tab then comes from the probe's OWN state, so two reads
  *  can't straddle the unlock. A probe that never answered falls back to `tab0`,
  *  but once one read said locked (`sawLocked`) a failure never settles Closed:

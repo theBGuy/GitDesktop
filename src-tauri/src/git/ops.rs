@@ -9878,7 +9878,7 @@ mod tests {
         branch_state_present, stop_an_autostashed_squash, write_unguarded_branch_state,
     };
     use super::*;
-    use crate::git::runner::TEST_GIT_HANG_GUARD;
+    use crate::git::runner::{TestGitEnv, TEST_GIT_HANG_GUARD};
     // Test-only: the interleave control queues on the lock WITHOUT a wait bound.
     use crate::git::runner::acquire_repo_lock_unbounded;
 
@@ -20834,7 +20834,7 @@ detached
                 fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let key = crate::git::branches::keep_local_key("feature");
                 let set = std::process::Command::new("git")
-                    .envs(crate::git::runner::TEST_GIT_ENV)
+                    .test_git_env()
                     .current_dir(&repo)
                     .args(["config", &key, "true"])
                     .status()

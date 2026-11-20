@@ -81,7 +81,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { reloadLocalPrs } from "@/lib/pulls/local";
-import { PR_NOUN, type PrNoun } from "@/lib/pulls/pr-state";
+import { PR_NOUN, type PrNoun, prStateWord } from "@/lib/pulls/pr-state";
 import {
   LOCAL_PR_RECORD_WRITES_FAMILY,
   localPrKey,
@@ -703,13 +703,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       return target !== stateFilter;
     },
   );
-  // GitLab reports an MR mid-merge as CLOSED, a tab that never lists it, so a
-  // would-be Closed answer waits on the merge-state read, which says whether the
-  // MR is locked. The probe reads its own entry per arm (`staleTime: 0`), so no
-  // read requested before the arm, the view's poll or a prefetch included, can
-  // answer it; armed only once the details answered Closed, so every other align
-  // issues no extra read. The arm number is minted inside a function React
-  // calls, since the compiler may cache a zero-input call made in render.
+  // GitLab reports an MR mid-merge as MERGING, which files under the Closed
+  // tab, a tab that never lists it, so a would-be Closed answer waits on the
+  // merge-state read, which says whether the MR is locked. The probe reads its
+  // own entry per arm (`staleTime: 0`), so no read requested before the arm,
+  // the view's poll or a prefetch included, can answer it; armed only once the
+  // details answered a state that files under the Closed tab (MERGING among
+  // them), so every other align issues no extra read. The arm number is minted
+  // inside a function React calls, since the compiler may cache a zero-input
+  // call made in render.
   const alignKey =
     alignRemoteNumber === null
       ? ""
@@ -1551,10 +1553,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               <span className="min-w-0 truncate" title={pr.title}>
                 {pr.title}
               </span>
-              {pr.isDraft && <Badge variant="secondary">Draft</Badge>}
+              {pr.isDraft && pr.state === "OPEN" && (
+                <Badge variant="secondary">Draft</Badge>
+              )}
               {pr.state !== "OPEN" && (
                 <Badge variant="secondary" className="capitalize">
-                  {pr.state.toLowerCase()}
+                  {prStateWord(pr.state)}
                 </Badge>
               )}
               {ciMap?.get(pr.number) === "passing" && (

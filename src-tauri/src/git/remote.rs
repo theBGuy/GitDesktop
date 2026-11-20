@@ -1942,7 +1942,7 @@ mod tests {
     use crate::git::branches::UPSTREAM_WRITE_FAILED;
     use crate::git::runner::{
         config_lock_busy, hold_config_lock, is_config_lock_contention, run_git, run_git_raw,
-        DEFAULT_TIMEOUT, NETWORK_TIMEOUT, TEST_GIT_HANG_GUARD,
+        TestGitEnv, DEFAULT_TIMEOUT, NETWORK_TIMEOUT, TEST_GIT_HANG_GUARD,
     };
     use crate::state::AppState;
     use std::time::Duration;
@@ -3436,7 +3436,7 @@ mod tests {
         let config = std::path::Path::new(&work).join(".git").join("config");
         let set = |values: &[&str]| {
             let _ = std::process::Command::new("git")
-                .envs(crate::git::runner::TEST_GIT_ENV)
+                .test_git_env()
                 .current_dir(&work)
                 .args([
                     "config",
@@ -3743,7 +3743,7 @@ mod tests {
                         if mark {
                             let key = crate::git::branches::keep_local_key("feat/x");
                             let set = std::process::Command::new("git")
-                                .envs(crate::git::runner::TEST_GIT_ENV)
+                                .test_git_env()
                                 .current_dir(&work)
                                 .args(["config", &key, "true"])
                                 .status()
@@ -3867,7 +3867,7 @@ mod tests {
                     if mark {
                         let key = crate::git::branches::keep_local_key("feat/x");
                         let set = std::process::Command::new("git")
-                            .envs(crate::git::runner::TEST_GIT_ENV)
+                            .test_git_env()
                             .current_dir(&work)
                             .args(["config", &key, "true"])
                             .status()

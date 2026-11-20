@@ -114,8 +114,8 @@ export interface GitLabMrMergeState {
   /** GitLab holds the MR in `locked` while a merge runs. Absent from an answer
    *  that predates the field: reads as not locked. */
   locked?: boolean;
-  /** The MR's neutral state ("OPEN", "MERGED", "CLOSED"); "" when GitLab sent
-   *  none, absent from an older answer. */
+  /** The MR's neutral state ("OPEN", "MERGED", "CLOSED", "MERGING" while locked);
+   *  "" when GitLab sent none, absent from an older answer. */
   state?: string;
 }
 
