@@ -125,16 +125,6 @@ export function ExploreScreen() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Clear the lifted rows whenever the visible list changes (provider / query /
-  // mode / sort — sort re-keys the search query, so its refetch window counts
-  // too). The mounted list republishes its real rows via onRowsChange; this
-  // reset covers the non-ready states (loading / error / empty) that don't
-  // render a list at all, so stale rows can't drive the input's arrow nav.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: these are change-triggers, not values the body reads
-  useEffect(() => {
-    setFlatRepos([]);
-  }, [provider, query, effectiveZeroMode, sort]);
-
   // Arrow keys from the search input move the selection through the flat rows
   // (mirroring CloneRepoDialog); Enter jumps focus to the detail pane's first
   // action (Clone) so a keyboard user goes type → arrows → Enter → activate
@@ -507,8 +497,11 @@ function ResultsList({
   );
 
   // Publish the flat rows up so the search Input can drive arrow-key navigation.
+  // The cleanup clears them when this list leaves (a re-keyed view, or a
+  // loading / error / empty state), so stale rows never drive the arrows.
   useEffect(() => {
     onRowsChange(repoRows);
+    return () => onRowsChange([]);
   }, [repoRows, onRowsChange]);
 
   // Drop a selection that a provider/mode switch has hidden.
@@ -531,14 +524,21 @@ function ResultsList({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Arrow-key navigation lives on the search Input (combobox pattern), so
-          the listbox itself is not a Tab stop — it stays a pure a11y container. */}
+      {/* Focus stays in the search box (combobox). -1: Chromium makes an
+          overflowing scroller of unfocusable rows a Tab stop; the press guard
+          keeps every non-row press (scrollbar, an owner heading, the
+          virtualizer's spacer) from focusing the list. */}
       <div
         ref={parentRef}
         className="min-h-0 flex-1 overflow-y-auto"
         role="listbox"
         id={EXPLORE_LISTBOX_ID}
         aria-label="Search results"
+        tabIndex={-1}
+        onMouseDown={(e) => {
+          if (!(e.target as Element).closest('[role="option"]'))
+            e.preventDefault();
+        }}
       >
         <div
           className="relative w-full"

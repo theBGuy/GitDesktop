@@ -961,7 +961,12 @@ export function ProjectsRoadmapView({
     }
     const key = el.closest<HTMLElement>("[data-row-key]")?.dataset.rowKey;
     const entry = rows.find((row) => row.key === key);
-    if (entry?.kind === "item" && el.closest("[data-title-open]") !== null)
+    // One open per multi-click gesture; a keyboard click's `detail` is 0.
+    if (
+      entry?.kind === "item" &&
+      el.closest("[data-title-open]") !== null &&
+      e.detail <= 1
+    )
       onActivate(entry.item);
   }
 

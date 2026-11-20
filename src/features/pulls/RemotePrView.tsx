@@ -139,6 +139,7 @@ import {
   isPrArchivedRefusal,
   presentError,
 } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
 import {
   gitFetch,
   type MergeStrategy,
@@ -3467,6 +3468,11 @@ export function RemotePrView({
     },
     [hostRef],
   );
+  // A landing (mount, or an `<Activity>` show, which replays this setup) takes
+  // focus that was lost: a reveal leaves it on the hidden tab's control.
+  useLayoutEffect(() => {
+    if (focusIsLost()) viewRef.current?.focus({ preventScroll: true });
+  }, []);
   // No answer for the shown PR yet. Its placeholder is never painted here: past the
   // hold it is the PR the hold left, and it would flash back over the new one. A
   // tab arrival that lags the live selection shows this frame too, never the PR
@@ -3527,6 +3533,31 @@ export function RemotePrView({
       .querySelector<HTMLElement>(`[data-row="${member}"][aria-current="true"]`)
       ?.focus();
   }, [hold.holding, showsLoadingFrame, shownNumber]);
+  // A swap that unmounts the focused node (another PR shown, or an arm change)
+  // would drop focus to <body>; land it on the host. The arms are tested in the
+  // render's own order. Change-only, so a mount never takes focus from elsewhere.
+  const viewArm = (() => {
+    switch (true) {
+      case showsLoadingFrame:
+        return "loading";
+      case detailPane === "offline":
+        return "offline";
+      case detailPane === "error" || !pr:
+        return "error";
+      case Boolean(resolve):
+        return "resolve";
+      default:
+        return "content";
+    }
+  })();
+  const viewFrame = `${viewArm}:${hold.shownKey}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      viewRef.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
   // Every arm renders inside the same host and frame, so the frame's focus sink
   // survives an arm swap and the hold dims whichever arm the held PR showed.
   const framed = (content: ReactNode) => (

@@ -6,9 +6,15 @@ export type MyWorkTab = "all" | "prs" | "issues";
 export const MY_WORK_LISTBOX_ID = "my-work-listbox";
 
 /** Stable DOM id per row, so the filter input's aria-activedescendant can point
- *  at the keyboard-highlighted option. The item URL is unique per item. */
+ *  at the keyboard-highlighted option. The item URL is unique per item, and the
+ *  encoding is injective (every char outside `[A-Za-z0-9-]`, `_` included,
+ *  becomes `_` + its 4-hex UTF-16 unit), so the id stays unique and needs no
+ *  CSS escaping. */
 export const myWorkOptionId = (url: string) =>
-  `my-work-${url.replace(/[^\w-]/g, "_")}`;
+  `my-work-${url.replace(
+    /[^A-Za-z0-9-]/g,
+    (c) => `_${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  )}`;
 
 /**
  * Newest first by `updatedAt`. Forge timestamps are untrusted, so an

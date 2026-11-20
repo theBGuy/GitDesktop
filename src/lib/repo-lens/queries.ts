@@ -318,10 +318,13 @@ export function useRemoteSlug(
 /** "owner/repo" from a git remote URL, or null. Handles the SSH (`git@host:o/r`)
  *  and HTTP(S) (`https://host/o/r`) forms, with or without a trailing `.git`. */
 export function slugFromRemoteUrl(url: string): string | null {
-  const trimmed = url
-    .trim()
-    .replace(/\.git$/, "")
-    .replace(/\/+$/, "");
+  // A scheme URL naming only a host has no repository; the scheme strip below
+  // wouldn't match it and its parts would read as "<scheme>/<host>".
+  const unslashed = url.trim().replace(/\/+$/, "");
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^/]*$/i.test(unslashed)) return null;
+  // Case-sensitive to agree with Rust `remote_path`, whose slug the detail
+  // requests use: a `.GIT` remote keeps its suffix on both sides.
+  const trimmed = unslashed.replace(/\.git$/, "");
   // SSH: git@host:owner/repo
   const ssh = trimmed.match(/^[^@]+@[^:]+:(.+)$/);
   const path = ssh ? ssh[1] : trimmed.replace(/^[a-z]+:\/\/[^/]+\//i, "");

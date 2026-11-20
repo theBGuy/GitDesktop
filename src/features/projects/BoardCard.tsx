@@ -546,6 +546,11 @@ export const BoardCard = memo(function BoardCard({
     return (
       <Popover.Root>
         <Popover.Trigger
+          // One toggle per multi-click gesture: its later clicks carry `detail` > 1,
+          // while a keyboard-synthesized click carries 0.
+          onClick={(e) => {
+            if (e.detail > 1) e.preventBaseUIHandler();
+          }}
           render={
             <button
               type="button"
@@ -647,7 +652,12 @@ export const BoardCard = memo(function BoardCard({
           toneClass,
           busyClass,
         )}
-        onClick={() => onOpen(item)}
+        // One open per multi-click gesture: its later clicks carry `detail` > 1,
+        // while a keyboard-synthesized click carries 0.
+        onClick={(e) => {
+          if (e.detail > 1) return;
+          onOpen(item);
+        }}
         // Space peeks where Enter opens. These cards are `role="option"` in a roving
         // listbox, where Space previews and Enter activates, and `preventDefault` on
         // the KEYDOWN is what stops the click the browser would otherwise fire on

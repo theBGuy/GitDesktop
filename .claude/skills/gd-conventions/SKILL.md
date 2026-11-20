@@ -926,6 +926,17 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   holding `landId`, and leaves a reasoned `aria-disabled` hold focused, since
   that doesn't match `:disabled`. Pinned by
   `src/test/land-stranded-focus.test.tsx`.
+- Whether focus is lost is `focusIsLost()` (`src/lib/focus-lost.ts`): on
+  `<body>`, on nothing, on a detached node, or on an element that isn't
+  rendered. The last is the `<Activity>` reveal: the commit that shows a tab
+  hides the old one while focus still sits on its control, which a body-only
+  test misses. Every LANDING reads it: `RemoteIssueView`, `RemotePrView` and
+  `DiscussionView` on mount and show, and ConversationListPanel when its
+  detail closes, fed `detailKeyOf` of RepositoryView's deferred selection
+  (the one the pane renders from, never a deferral of the list's own). A
+  frame rescue that runs while its view stays mounted may keep the body-only
+  test. A landing still only TAKES lost focus, never moves it off a visible
+  element.
 
 ## Seam idioms (the spec template's "Idioms at this seam" field reads this list)
 

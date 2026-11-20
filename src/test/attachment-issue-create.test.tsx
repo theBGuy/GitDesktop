@@ -22,6 +22,7 @@ import { forgeIssueCreate, ghIssueAddSubIssue } from "@/lib/git/api";
 import { repoKeys } from "@/lib/git/queries";
 import { type IssueInfo, remoteListFilterKey } from "@/lib/git/types";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
+import { lensKey } from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useErrorDialog } from "@/lib/stores/error-dialog";
@@ -191,6 +192,9 @@ function mount(
     defaultOptions: { queries: { retry: false } },
   });
   client.setQueryData<IssueInfo[]>(LIST_KEY, []);
+  // Both dialog hosts subscribe the stored lens, so a warm cache gives the
+  // settle a verdict.
+  client.setQueryData(lensKey(REPO), "origin");
   const openers = dialogs.map(
     () =>
       ({

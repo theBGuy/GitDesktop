@@ -204,7 +204,14 @@ function newPrLabel(
   return hostName ? `Pull request on ${hostName}…` : "Remote pull request…";
 }
 
-export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
+export function PullRequestsPanel({
+  repoPath,
+  detailKey,
+}: {
+  repoPath: string;
+  /** The detail pane's item key; see ConversationListPanel's `detailKey`. */
+  detailKey?: string | null;
+}) {
   const gh = useForgeStatus(repoPath);
   const provider = gh.data?.provider;
   // Copy names the saved provider until the probe answers; gates keep the raw probe.
@@ -1299,6 +1306,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       <SessionExpiryNotice repoPath={repoPath} />
       <ConversationListPanel
         repoPath={repoPath}
+        detailKey={detailKey}
         feature={remoteNoun}
         remoteLabel={remoteLabel}
         stateFilter={stateFilter}

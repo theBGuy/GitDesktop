@@ -248,6 +248,13 @@ const FIRST_PAINT_GRACE_MS = 3500;
  *  app by itself. Read only from handlers and continuations, never in render. */
 let openGen = 0;
 
+/** Moves the open generation on from outside the component, so a new writer adds
+ *  no React Compiler bail-out reason of its own. */
+function bumpOpenGen(): number {
+  openGen += 1;
+  return openGen;
+}
+
 /** What the shared resolver needs to know about a row. The authority comes from
  *  the row's URL, the only place a My Work item carries its port. */
 function landingTarget(item: MyWorkItem): LocalLandingTarget {
@@ -602,6 +609,15 @@ export function MyWorkScreen() {
     }
   }
 
+  // The row menu's browser open retires a pending local open the way openItem's
+  // browser-only arm does: generation first, then the wait. It claims nothing, so
+  // an open made elsewhere stands.
+  function openOnWeb(item: MyWorkItem) {
+    bumpOpenGen();
+    setPendingOpen(null);
+    openUrl(item.url).catch(toastError);
+  }
+
   const armMenuKeyFollowUp = useMenuKeyFollowUpCanceller();
 
   // Arrow keys from the filter input move the selection through the visible
@@ -730,6 +746,7 @@ export function MyWorkScreen() {
         onRetry={refresh}
         onSelect={setActiveUrl}
         onOpen={(item, opts) => void openItem(item, opts)}
+        onOpenOnWeb={openOnWeb}
       />
       {/* Outside every body branch and never unmounted: a live region announces
           CHANGES, so one that appears already carrying its first line is silent.
@@ -770,6 +787,7 @@ function MyWorkBody({
   onRetry,
   onSelect,
   onOpen,
+  onOpenOnWeb,
 }: {
   loading: boolean;
   /** Nothing drawn while a leg waits offline: a parked first fetch never ends
@@ -789,6 +807,7 @@ function MyWorkBody({
   onRetry: () => void;
   onSelect: (url: string) => void;
   onOpen: OpenItem;
+  onOpenOnWeb: (item: MyWorkItem) => void;
 }) {
   if (offline) {
     return <QuietLine>{offlinePendingMessage("your work")}</QuietLine>;
@@ -854,6 +873,7 @@ function MyWorkBody({
         pendingOpenUrl={pendingOpenUrl}
         onSelect={onSelect}
         onOpen={onOpen}
+        onOpenOnWeb={onOpenOnWeb}
       />
       {capped && <CapNote />}
     </>
@@ -869,6 +889,7 @@ function MyWorkList({
   pendingOpenUrl,
   onSelect,
   onOpen,
+  onOpenOnWeb,
 }: {
   items: MyWorkItem[];
   activeIndex: number;
@@ -876,6 +897,7 @@ function MyWorkList({
   pendingOpenUrl: string | null;
   onSelect: (url: string) => void;
   onOpen: OpenItem;
+  onOpenOnWeb: (item: MyWorkItem) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [menuItem, setMenuItem] = useState<MyWorkItem | null>(null);
@@ -943,16 +965,21 @@ function MyWorkList({
             />
           }
         >
-          {/* Arrow-key navigation lives on the filter Input (combobox pattern),
-              so the listbox itself is neither a Tab stop nor the owner of
-              aria-activedescendant — focus never leaves the input, and a second
-              copy here would be inert. A pure a11y container. */}
+          {/* Focus stays in the filter. -1: Chromium makes an overflowing
+              scroller of unfocusable rows a Tab stop; the press guard keeps
+              every non-row press (scrollbar, the virtualizer's spacer) from
+              focusing the list. */}
           <div
             ref={parentRef}
             className="min-h-0 flex-1 overflow-y-auto"
             role="listbox"
             id={MY_WORK_LISTBOX_ID}
             aria-label="Your work"
+            tabIndex={-1}
+            onMouseDown={(e) => {
+              if (!(e.target as Element).closest('[role="option"]'))
+                e.preventDefault();
+            }}
           >
             <div
               className="relative w-full"
@@ -1000,9 +1027,7 @@ function MyWorkList({
                     Open in main workspace
                   </ContextMenuItem>
                 )}
-              <ContextMenuItem
-                onClick={() => openUrl(menuItem.url).catch(toastError)}
-              >
+              <ContextMenuItem onClick={() => onOpenOnWeb(menuItem)}>
                 {`Open on ${providerLabel(menuItem.provider)}`}
               </ContextMenuItem>
               <ContextMenuItem
@@ -1104,6 +1129,9 @@ function MyWorkRow({
       // suppressing mousedown's default keeps focus without affecting activation.
       onMouseDown={(e) => e.preventDefault()}
       onClick={(e) => {
+        // One multi-click gesture opens once: a second browser page or resolve
+        // would duplicate the first. A keyboard-synthesized click has detail 0.
+        if (e.detail > 1) return;
         onSelect(item.url);
         // Shift-click mirrors Shift+Enter: open the main workspace instead of
         // the worktree holding the head branch.
