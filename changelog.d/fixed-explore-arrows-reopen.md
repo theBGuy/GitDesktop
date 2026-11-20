@@ -1,2 +1,2 @@
-- In **Explore**, the arrow keys move through results that were already loaded
-  straight away, after reopening it or switching back to a tab, search or sort.
+- In **Explore**, the arrow keys move through already-loaded results straight
+  away after you reopen it or switch back to a tab, search or sort.

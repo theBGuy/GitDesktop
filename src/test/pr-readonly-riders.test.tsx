@@ -97,7 +97,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitBranches: vi.fn(async () => []),
   gitDefaultBranch: vi.fn(async () => "main"),
   gitRemotes: vi.fn(async () => ["origin"]),
-  gitStatus: vi.fn(async () => ({
+  // The resolve worktree holds one conflicted file; every other tree is clean.
+  gitStatus: vi.fn(async (repoPath: string) => ({
     branch: {
       name: "main",
       detached: false,
@@ -108,7 +109,10 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
       upstreamGone: false,
       upstreamRemote: null,
     },
-    entries: [],
+    entries:
+      repoPath === "C:/wt/resolve-7"
+        ? [{ path: "src/a.ts", staged: null, unstaged: "conflicted" }]
+        : [],
   })),
   readRepoBranchRules: vi.fn(async () => null),
   // The GitHub fork's extra reads (the landing-focus frame cases).
@@ -117,6 +121,20 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ghItemProjects: vi.fn(async () => ({ items: [], truncated: false })),
   gitRemoteUrl: vi.fn(async () => "https://github.com/owner/repo.git"),
   forgePrListPage: vi.fn(async () => ({ rows: [], capped: false })),
+  // The conflict-resolution cases; read only on the Pull requests tab.
+  forgePrMergeability: vi.fn(async () => ({
+    state: "conflicting",
+    detail: null,
+  })),
+  gitConflictPreview: vi.fn(async () => ({ status: "unknown", conflicts: [] })),
+  gitFindRemotePrResolve: vi.fn(async () => null),
+  gitMergeRemotePr: vi.fn(async () => ({
+    status: "conflicts",
+    conflicts: ["src/a.ts"],
+    worktreePath: "C:/wt/resolve-7",
+    worktreeId: "wt-7",
+    pushedSha: null,
+  })),
 }));
 // The raw path is the resolver's own "no identity" answer.
 vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
@@ -167,6 +185,22 @@ vi.mock("@/lib/repo-lens/queries", async (importOriginal) => {
 vi.mock("@/lib/jira/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/jira/store")>()),
   getJiraLink: vi.fn(async () => null),
+}));
+// The resolve worktree's one conflicted file, as its editor reads it.
+vi.mock("@/lib/git/conflict", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
+  conflictSides: vi.fn(async () => ({
+    working: "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n",
+    base: "base\n",
+    ours: "ours\n",
+    theirs: "theirs\n",
+    aiIgnored: { ignored: false, unreadable: false },
+    workingExists: true,
+    workingUndecodable: false,
+    undecodable: false,
+    workingHash: "deadbeef",
+    workingMatchesSurvivor: null,
+  })),
 }));
 
 const REPO = "C:/repo";
@@ -1544,5 +1578,64 @@ describe("RemotePrView landing focus", () => {
     // The loading frame's composer is another node: the content arm's left.
     expect(focused.isConnected).toBe(false);
     expect(document.activeElement).toBe(input);
+  });
+
+  describe("the conflict-resolution view", () => {
+    // The view owns the live selection on the Pull requests tab, as when opened.
+    beforeEach(() =>
+      useUiStore.setState({
+        repoTab: "pulls",
+        selectedPr: { kind: "remote", id: "7" },
+      }),
+    );
+    afterEach(() =>
+      useUiStore.setState({ repoTab: "changes", selectedPr: null }),
+    );
+
+    /** Presses the banner's Resolve and waits for the resolve view. */
+    async function resolveFrom(qc: QueryClient) {
+      const { rerender } = render(<Tabs viewShown qc={qc} />);
+      const press = await screen.findByRole(
+        "button",
+        { name: "Resolve conflicts" },
+        { timeout: 3000 },
+      );
+      await waitFor(() => expect(press).not.toHaveAttribute("aria-disabled"));
+      press.focus();
+      fireEvent.click(press);
+      await screen.findByRole("option", { name: /a\.ts/ });
+      expect(press.isConnected).toBe(false);
+      return rerender;
+    }
+    /** The resolve view's root: the host, holding the PR's title row and no
+     *  comment box (the content arm's). */
+    const expectOnResolveRoot = () => {
+      const root = host();
+      expect(document.activeElement).toBe(root);
+      expect(root).toHaveAttribute("tabindex", "-1");
+      expect(root).toContainElement(
+        screen.getByRole("heading", { name: /Merge request seven/ }),
+      );
+      expect(screen.queryByRole("textbox", { name: "Leave a comment" })).toBe(
+        null,
+      );
+    };
+
+    it("lands the focus the unmounted Resolve button dropped on the resolve root", async () => {
+      await resolveFrom(client());
+      expectOnResolveRoot();
+    });
+
+    it("takes focus on <body> back to the resolve root when its tab is shown again", async () => {
+      const qc = client();
+      const rerender = await resolveFrom(qc);
+      rerender(<Tabs viewShown={false} qc={qc} />);
+      // jsdom keeps focus on the hidden host through blur(); a removed focused
+      // node is what drops it to <body>.
+      outsideInput().remove();
+      expect(document.activeElement).toBe(document.body);
+      rerender(<Tabs viewShown qc={qc} />);
+      expectOnResolveRoot();
+    });
   });
 });

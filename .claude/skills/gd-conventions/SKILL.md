@@ -225,6 +225,9 @@ the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
 invariant, not polish. A list container that co-hosts a text editor (inline
 edit field, reply box) passes `ignoreTextEntry` so arrows keep moving the
 caret; leave it off where arrows deliberately drive nav from a filter input.
+A combobox-driven listbox whose rows aren't tabbable (My work, Explore) takes
+`keepNonRowPressOffList` (same module) as its `onMouseDown`, so a press off the
+rows never moves focus out of the input.
 The clamped pickers (command palette, task picker, the co-author and
 Bitbucket add-reviewer popovers, RepoList, the session composer's @ and /
 menus) read one cursor that `clampHighlight` derives from the stored index

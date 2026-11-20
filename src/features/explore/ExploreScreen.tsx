@@ -34,7 +34,10 @@ import {
 } from "@/lib/git/queries";
 import type { ForgeProvider, ForgeSearchRepo } from "@/lib/git/types";
 import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  keepNonRowPressOffList,
+  listKeyboardNav,
+} from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
@@ -524,10 +527,8 @@ function ResultsList({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Focus stays in the search box (combobox). -1: Chromium makes an
-          overflowing scroller of unfocusable rows a Tab stop; the press guard
-          keeps every non-row press (scrollbar, an owner heading, the
-          virtualizer's spacer) from focusing the list. */}
+      {/* -1: Chromium makes an overflowing scroller of unfocusable rows a Tab
+          stop. */}
       <div
         ref={parentRef}
         className="min-h-0 flex-1 overflow-y-auto"
@@ -535,10 +536,7 @@ function ResultsList({
         id={EXPLORE_LISTBOX_ID}
         aria-label="Search results"
         tabIndex={-1}
-        onMouseDown={(e) => {
-          if (!(e.target as Element).closest('[role="option"]'))
-            e.preventDefault();
-        }}
+        onMouseDown={keepNonRowPressOffList}
       >
         <div
           className="relative w-full"

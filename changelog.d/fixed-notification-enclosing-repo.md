@@ -1,2 +1,2 @@
-- A notification from a folder that has since become part of another
-  repository no longer opens in that repository.
+- A notification whose folder has since become part of another repository opens
+  only in its own repository, never in the one that now contains that folder.

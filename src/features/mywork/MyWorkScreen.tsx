@@ -51,7 +51,10 @@ import {
   providerLabel,
 } from "@/lib/git/types";
 import { sameOpenCheckout } from "@/lib/git/worktree-default-path";
-import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import {
+  keepNonRowPressOffList,
+  listKeyboardNav,
+} from "@/lib/list-keyboard-nav";
 import {
   hasOpenableMatch,
   type LocalLandingTarget,
@@ -965,10 +968,8 @@ function MyWorkList({
             />
           }
         >
-          {/* Focus stays in the filter. -1: Chromium makes an overflowing
-              scroller of unfocusable rows a Tab stop; the press guard keeps
-              every non-row press (scrollbar, the virtualizer's spacer) from
-              focusing the list. */}
+          {/* -1: Chromium makes an overflowing scroller of unfocusable rows a
+              Tab stop. */}
           <div
             ref={parentRef}
             className="min-h-0 flex-1 overflow-y-auto"
@@ -976,10 +977,7 @@ function MyWorkList({
             id={MY_WORK_LISTBOX_ID}
             aria-label="Your work"
             tabIndex={-1}
-            onMouseDown={(e) => {
-              if (!(e.target as Element).closest('[role="option"]'))
-                e.preventDefault();
-            }}
+            onMouseDown={keepNonRowPressOffList}
           >
             <div
               className="relative w-full"

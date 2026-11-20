@@ -3558,8 +3558,9 @@ export function RemotePrView({
     if (document.activeElement === document.body)
       viewRef.current?.focus({ preventScroll: true });
   }, [viewFrame]);
-  // Every arm renders inside the same host and frame, so the frame's focus sink
-  // survives an arm swap and the hold dims whichever arm the held PR showed.
+  // Every arm but the resolve view renders inside the same host and frame, so the
+  // frame's focus sink survives an arm swap and the hold dims whichever arm the
+  // held PR showed. The resolve view replaces the sections: host node, no frame.
   const framed = (content: ReactNode) => (
     <div
       ref={setHostNode}
@@ -4217,7 +4218,11 @@ export function RemotePrView({
   // Finish/Discard in place of the PR's normal sections and footer.
   if (resolve) {
     return (
-      <div className="flex h-full flex-col">
+      <div
+        ref={setHostNode}
+        tabIndex={-1}
+        className="flex h-full flex-col outline-none"
+      >
         <header className="space-y-2 border-b px-4 py-3">
           <DetailTitleRow
             heading={
