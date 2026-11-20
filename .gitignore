@@ -35,6 +35,12 @@ dist-ssr
 /.env.claude
 /.claude/settings.local.json
 
+# Impeccable hook state lands in whatever dir the agent shell is in, and its
+# self-written info/exclude entry is ignored by git inside linked worktrees.
+**/.impeccable/hook.cache.json
+**/.impeccable/hook.pending.json
+**/.impeccable/config.local.json
+
 # The owner's /delegate skill and agent definitions are junction-mounted here
 # from a private skills repo (personal workflow, not shipped with the project)
 /.claude/skills/delegate/
