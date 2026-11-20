@@ -13,48 +13,43 @@
 //
 // Reading fails closed. parseWorkflow reads one document of block mappings
 // and sequences holding plain, quoted, block and balanced flow scalars
-// (block scalars keep YAML's chomping, so a clipped `|` ends in a line
-// break, which makes a `${{ }}` condition a template); any other shape
+// (block scalars keep YAML's chomping, so a clipped or kept `|` ends in a
+// line break, even on a file's unterminated last line as yaml reads it, and
+// a `${{ }}` condition there is a template); any other shape
 // (multi-document files, anchors and aliases among them) is `unreadable`,
-// as is a flow value whose quotes or brackets it can't pair (an apostrophe
-// in a plain scalar inside one: use a block mapping). The remedy is to
-// spell it plainly, as for a local action spelled with backslashes
+// as is a carriage return outside a CRLF line ending (YAML breaks a line
+// there), and a flow value whose quotes or brackets it can't pair (an
+// apostrophe in a plain scalar inside one: use a block mapping). The remedy
+// is to spell it plainly, as for a local action spelled with backslashes
 // (`.\...`): spell it `./...`. An `if:` holding a quoted `}}` reads as a
 // template and is flagged: spell the condition without one. A node run is a
-// NODE_COMMAND or SCRIPT_COMMAND match in a run's non-comment lines, each
-// `${{ }}` read as one plain word, or a node shell. False positives by
-// design: a NODE_COMMAND or STATUS_CALL word inside an argument, a string
-// literal or a trailing shell comment still counts (`command -v node`,
-// `cargo test # npm ci`, `contains(x, 'failure()')`), as does a script path
-// right after a closing backtick (``cp `ls` dist/app.js``), after a command
-// separator inside a quoted string (`echo 'packaged; dist/app.js'`) or as a
-// path argument on a backslash-continued line (`cp "$a" \` + `dist/app.js`);
-// reword it. Out of reach: a command
-// supplied by an expression (`${{ matrix.cmd }}`), wherever it appears, and
-// an expression holding a quoted `}}` inside a run block; a command behind a
-// variable, alias, function, sourced script, third-party action, a wrapper's
-// options or a quoted path with spaces (`"./a b.mjs"`); a script inside a
-// string another program runs (`bash -c "./x.mjs"`); a command in a `case`
-// arm body (`pat) cmd ;;`: command position is only SCRIPT_COMMAND's start
-// and CHAIN); a runtime version switch after setup-node; a checkout of
-// another repository or path that supplies the `.node-version` setup-node
-// reads (this guard reads the repository's own file and takes any checkout
-// as its source); a script behind a `$(...)` assignment prefix
-// (`V=$(cmd) ./x.mjs`), after an assignment whose value has text glued past
-// a backtick (``V=`c`b ./x.mjs``) or holding an escaped command separator
-// (`V=a\;b ./x.mjs`), or after a redirection before the command
-// (`2>log ./x.mjs`, `V=a>log ./x.mjs`); a
-// same-repository action spelled `$/...` (it reads as a third-party action);
-// a checkout run with `background:`; and a reusable-workflow caller job,
-// which skips both rules as GitHub refuses timeout-minutes there (its callee
-// is checked on its own). Sync steps (`wait`, `wait-all`, `cancel`) and
-// `parallel` blocks are unreadable: they carry neither uses nor run. Not
-// checked: setup-node's own version (any ref counts, as Dependabot moves it;
-// an `@v1` predating node-version-file is out of reach). The 1..360 range
+// node-family word or a word ending in .js, .mjs or .cjs anywhere in a run's
+// text (comments included; each `${{ }}` reads as a blank), or a node shell.
+// False positives by design: any mention counts, as an argument
+// (`cp dist/app.js out/`, `command -v node`), in a comment
+// (`# npm ci runs later`), a string (`echo see node docs`, `"node: $NODE"`)
+// or a glob (`git diff -- '*.js'`), as an array element or a here-document
+// line, and as `$env:NODE`, `file.node`, `App.tsx` or a path component
+// (`C:\tools\node\bin`), as does a STATUS_CALL word in a string literal
+// (`contains(x, 'failure()')`); set up Node before the step, or reword it.
+// Out of reach: a command supplied by an expression (`${{ matrix.cmd }}`),
+// wherever it appears; a command word the shell assembles from other text:
+// an escape, quotes, a glob or brace expansion inside it (`n\ode`,
+// `no""de`, `nod[e]`, `n{o,}de`), or one glued to an option
+// (`env -Snode`, `cmd /cnode`); a command behind a variable (`$NODE`),
+// alias, function, sourced script or third-party action; a script with no
+// Node extension (a shebang `./tool`); a runtime version switch after
+// setup-node; a checkout of another repository or path that supplies the
+// `.node-version` setup-node reads (this guard reads the repository's own
+// file and takes any checkout as its source); a same-repository action
+// spelled `$/...` (it reads as a third-party action); a checkout run with
+// `background:`; and a reusable-workflow caller job, which skips both rules
+// as GitHub refuses timeout-minutes there (its callee is checked on its own).
+// Sync steps (`wait`, `wait-all`, `cancel`) and `parallel` blocks are
+// unreadable: they carry neither uses nor run. Not checked: setup-node's own
+// version (any ref counts, as Dependabot moves it; an `@v1` predating
+// node-version-file is out of reach). The 1..360 range
 // follows hosted runners, so a self-hosted job's longer bound is refused.
-// Scanning is linear on ordinary input; crafted run lines far beyond
-// ordinary length (hundreds of kilobytes of repeated `node_modules/.bin/`
-// components or of quote-and-escape assignment chains) may take seconds.
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -80,47 +75,22 @@ const setupFix = (step) =>
 const GATE_FIX =
   "gate it with `if: steps.<setup-node id>.outcome == 'success'`, or make it non-gating with `continue-on-error: true`";
 
-// A node-family command at a command boundary, after cmd's `@` echo
-// suppression and an optional path prefix.
+// A node-family word counts anywhere it stands alone, so the guard errs only
+// toward a false red. A `$`/`${` reference is excluded: a variable is never
+// the command itself (a command behind one is out of reach).
 const NODE_COMMAND =
-  /(?:^|[\s;&|(`'"])@?(?:[^\s;&|()<>`'"]*[\\/])?(?:(?:node|nodejs|npm|npx|pnpm|pnpx|corepack|yarn|tsx|ts-node|vite-node|babel-node)(?:\.exe|\.cmd|\.ps1|\.bat)?|node_modules[\\/]\.bin[\\/][^\s;&|()<>`'"]+)(?=$|[\s;&|<>)`'"])/im;
-// Command position: a start, then any run of VAR=value prefixes, shell
-// keywords (COMMAND_WORDS' if..else, `!`) and words that run their argument
-// (exec..xargs). A word counts only in that chain, so `echo "to env ./x.mjs"`
-// keeps its script path an argument. An assignment's value takes a quoted
-// span within its line and a backslash escape whole, as the shell does, and
-// otherwise stops at a backtick, `;&|()<>` or `{ `, an escaped one included:
-// a value spanning a command start makes every start re-scan the chain (so
-// would a `\"` read as opening a span). Each blank run belongs to one
-// repetition, as one the chain can split two ways makes it exponential.
-const COMMAND_WORDS = String.raw`(?:\w+=(?:[^\s;&|()<>\`'"{\\]|\\[^;&|(\`{\n]|\{(?![ \t])|"(?:[^"\\\n]|\\.)*"|'[^'\n]*')*|if|elif|while|until|then|do|else|!|exec|sudo|time|env|command|xargs)`;
-const CHAIN = String.raw`[ \t]*(?:${COMMAND_WORDS}[ \t]+)*`;
+  /(?<![\w$-])(?<!\$\{)(?:(?:node|nodejs|npm|npx|pnpm|pnpx|corepack|yarn|tsx|ts-node|vite-node|babel-node)(?:\.(?:exe|cmd|ps1|bat))?(?![\w.-])|node_modules[\\/]\.bin[\\/])/i;
 // A call of a GitHub status function in an `if:` expression.
 const STATUS_CALL = /\b(?:success|failure|always|cancelled)\s*\(/i;
-// A script path in command position: line start, after ;&|( or a backtick, or
-// after a `{ ` group opener, then CHAIN and an optional opening quote. A quote
-// starts no command: a closing one would make the next argument one
-// (`cp "$a" dist/app.js`). A word holding `=` there is an assignment, so the
-// path takes none.
-const SCRIPT_COMMAND = new RegExp(
-  `(?:^|[;&|(\`]|\\{(?=[ \\t]))${CHAIN}['"]?[^\\s;&|()<>\`'"=]*\\.(?:mjs|cjs|js)(?=$|[\\s;&|<>)\`'"])`,
-  "im",
-);
+// Any word ending in a Node script extension counts wherever it appears, so
+// the guard errs only toward a false red (no command-position grammar).
+const SCRIPT_WORD = /[.](?:mjs|cjs|js)(?![A-Za-z0-9])/i;
 
-// Drops shell comment lines, whose text never runs. Lines are never joined at
-// a trailing `\`: a comment's or another shell's (pwsh) backslash would glue a
-// real command into the line before it.
-const shellText = (text) =>
-  text
-    .split("\n")
-    .filter((line) => !/^[ \t]*#/.test(line))
-    .join("\n");
-
-// The runner substitutes each `${{ ... }}` before the shell reads the line, so
-// each reads as one plain word: its inner blanks would otherwise split a
-// `V=${{ x }} ./a.mjs` prefix. This guard ends one at its first `}}` (the
-// runner skips one inside a '...' string) and leaves an unclosed one as is.
-// A loop, as a regex retried at every unclosed `${{` re-scans the rest.
+// Run text is scanned whole, comments included. Each `${{ ... }}` reads as a
+// blank, so a literal command word beside one stands alone. This guard ends
+// one at its first `}}` (the runner skips one inside a '...' string) and
+// leaves an unclosed one as is. A loop, as a regex retried at every unclosed
+// `${{` re-scans the rest.
 function plainExpressions(text) {
   let out = "";
   let from = 0;
@@ -128,14 +98,14 @@ function plainExpressions(text) {
     const open = text.indexOf("${{", from);
     const close = open < 0 ? -1 : text.indexOf("}}", open + 3);
     if (close < 0) return out + text.slice(from);
-    out += `${text.slice(from, open)}_`;
+    out += `${text.slice(from, open)} `;
     from = close + 2;
   }
 }
 
 export function runsNode(text) {
-  const script = plainExpressions(shellText(text));
-  return NODE_COMMAND.test(script) || SCRIPT_COMMAND.test(script);
+  const script = plainExpressions(text);
+  return NODE_COMMAND.test(script) || SCRIPT_WORD.test(script);
 }
 
 class Unreadable extends Error {
@@ -162,7 +132,19 @@ function hostile(code) {
   );
 }
 
+// A CR outside a CRLF pair is a line break to YAML but not to this reader, and
+// normalizing CRLF first could pair it with the LF after it, so it is refused
+// before then; readCorpus leaves such a text unnormalized for this check.
+const LONE_CR = /\r(?!\n)/;
+
 function sourceLines(source) {
+  const lone = source.search(LONE_CR);
+  if (lone >= 0) {
+    throw new Unreadable(
+      source.slice(0, lone).split("\n").length,
+      "a carriage return outside a CRLF line ending is not read",
+    );
+  }
   const text = (
     source.charCodeAt(0) === 0xfeff ? source.slice(1) : source
   ).replace(/\r\n/g, "\n");
@@ -466,7 +448,10 @@ export function parseWorkflow(source, file) {
     let i = 0;
     // Each part is one character, an escape's character, `'`, the fold's space
     // or a run of breaks, so popping all-blank parts trims exactly the blanks.
+    // A fold trims only literal blanks: `kept` parts end at the last escape,
+    // whose blank (`\t`, `\x20`) YAML keeps as content.
     const parts = [];
+    let kept = 0;
     let joined = false;
     for (;;) {
       if (i >= text.length) {
@@ -479,7 +464,11 @@ export function parseWorkflow(source, file) {
         if (spaces(at.text) <= parent || MARKER.test(at.text)) {
           fail(at.n, "a quoted value continues at or left of its key");
         }
-        while (!joined && parts.length && /^[ \t]+$/.test(parts.at(-1))) {
+        while (
+          !joined &&
+          parts.length > kept &&
+          /^[ \t]+$/.test(parts.at(-1))
+        ) {
           parts.pop();
         }
         if (!joined || gaps) parts.push(gaps ? "\n".repeat(gaps) : " ");
@@ -516,7 +505,7 @@ export function parseWorkflow(source, file) {
         joined = true;
         i++;
       } else if (Object.hasOwn(ESCAPES, code)) {
-        parts.push(ESCAPES[code]);
+        kept = parts.push(ESCAPES[code]);
         i += 2;
       } else if (Object.hasOwn(HEX_ESCAPES, code)) {
         const hex = text.slice(i + 2, i + 2 + HEX_ESCAPES[code]);
@@ -528,7 +517,7 @@ export function parseWorkflow(source, file) {
         ) {
           fail(at.n, `invalid \\${code} escape`);
         }
-        parts.push(String.fromCodePoint(point));
+        kept = parts.push(String.fromCodePoint(point));
         i += 2 + hex.length;
       } else fail(at.n, `escape \\${code} is not read`);
     }
@@ -585,7 +574,9 @@ export function parseWorkflow(source, file) {
     let next = line.i + 1;
     if (indent < 0) {
       let probe = next;
-      while (probe < count && BLANK.test(lines[probe].text)) probe++;
+      // Only a space-only line is skipped: YAML takes the first line holding
+      // anything else, a TAB included, as content that sets the indent.
+      while (probe < count && /^ *$/.test(lines[probe].text)) probe++;
       const first = probe < count ? spaces(lines[probe].text) : 0;
       indent = first > parent ? first : Number.POSITIVE_INFINITY;
     }
@@ -1380,7 +1371,8 @@ export function readCorpus(root, read = readFileSync) {
       const bytes = read(join(root, path));
       if (!(bytes instanceof Uint8Array))
         return new Error("the read returned no bytes");
-      return decoder.decode(bytes).replace(/\r\n/g, "\n");
+      const text = decoder.decode(bytes);
+      return LONE_CR.test(text) ? text : text.replace(/\r\n/g, "\n");
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));
     }

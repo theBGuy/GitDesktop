@@ -12,8 +12,8 @@ name: rust-tests
 # matrix whenever the exact Rust content was ALREADY proven green — see the job
 # comment below. This kills two redundancies: the post-merge `push: master`
 # re-run of a PR that just passed (the squash commit's identity equals the
-# PR's last tested merge commit's when base did not move `src-tauri` or the
-# workflow, gate and apt-script blobs since), and a non-Rust follow-up commit
+# PR's last tested merge commit's when base did not move `src-tauri` or any
+# other identity member since), and a non-Rust follow-up commit
 # on a PR re-triggering the whole matrix (the `pull_request` `paths` filter
 # matches the cumulative base…head diff, so one earlier Rust commit keeps
 # re-arming it).
@@ -23,13 +23,20 @@ name: rust-tests
 #
 # Evidence: the gate signs the checkout the matrix itself tests (the merge
 # commit on `pull_request`): its `src-tauri` tree plus the workflow, gate and
-# apt-script blobs. Inputs outside those (`../package.json`, the stubbed
-# `../dist`, the root `.gitattributes`, a root `.cargo/config.toml`) can change
+# apt-script blobs and the root Rust inputs (`.cargo/config.toml`,
+# `.cargo/config`, `rust-toolchain.toml`, `rust-toolchain`, `.gitattributes`),
+# each as its blob or absent. `../package.json` (moved by every frontend
+# dependency bump) and the stubbed `../dist` stay outside: they can change
 # what the matrix runs without changing the identity or tripping the paths
-# filter. A base that moved `src-tauri` or any of those blobs changes the
-# identity, so the PR runs unless that exact identity already passed. Each
-# gate records its identity as an artifact name, kept 14 days, and only a
-# green run's artifact counts.
+# filter. A base that moved `src-tauri` or any of those members changes the
+# identity, so the PR runs unless that exact identity already passed. A gate
+# records its identity as an artifact name, kept 14 days, only when the matrix
+# will run and decide emitted an identity, and only a green run's artifact
+# counts; a skip records nothing, so its evidence ages from the tested run.
+# That run's GitHub-recorded head commit must match the same members,
+# absences included, so a PR that edits the gate or workflow cannot mint
+# evidence its later commits or master trust; code that runs inside the test
+# matrix and uploads an artifact itself stays out of reach.
 
 on:
   pull_request:
@@ -38,6 +45,11 @@ on:
       - ".github/workflows/rust-tests.yml"
       - ".github/scripts/apt-prefer-canonical-mirror.sh"
       - "scripts/check-rust-gate.mjs"
+      - ".cargo/config.toml"
+      - ".cargo/config"
+      - "rust-toolchain.toml"
+      - "rust-toolchain"
+      - ".gitattributes"
   push:
     branches:
       - master
@@ -46,6 +58,11 @@ on:
       - ".github/workflows/rust-tests.yml"
       - ".github/scripts/apt-prefer-canonical-mirror.sh"
       - "scripts/check-rust-gate.mjs"
+      - ".cargo/config.toml"
+      - ".cargo/config"
+      - "rust-toolchain.toml"
+      - "rust-toolchain"
+      - ".gitattributes"
 
 # One in-flight run per ref; a force-push cancels the superseded run instead of
 # stacking a second one.
@@ -60,11 +77,16 @@ permissions:
 jobs:
   # The decision lives in scripts/check-rust-gate.mjs: it signs the checked-out
   # commit (the one `test` checks out too) as its `src-tauri` tree plus the
-  # workflow, gate-script and apt-script blobs, and skips only when a green run
-  # of this workflow recorded that exact identity (header block above). A
-  # change to any of those blobs re-keys all evidence.
-  # The record step uploads the identity only after the decision, so it can
-  # never turn a run into a skip; a failed upload loses a future skip at most.
+  # workflow, gate-script and apt-script blobs and the root Rust inputs, and
+  # skips only when a green run of this workflow recorded that exact identity
+  # (header block above). A change to any of those blobs re-keys all evidence.
+  # That run's head commit must match the same members, absences included (one
+  # tree listing), so an edited gate cannot vouch for later commits; matrix
+  # code uploading an artifact is out of reach.
+  # The record step uploads the identity only after the decision and only when
+  # the matrix will run (the test job's own condition) and decide emitted an
+  # identity, so it can never turn a run into a skip and a skip never extends
+  # evidence; a failed upload loses a future skip at most.
   # The wiring fails OPEN: `test` skips only on `run=false` from a decide step
   # that succeeded in a gate job that succeeded, so a setup-node failure, a
   # script crash or hang, a missing output or a failed gate job all still run
@@ -103,7 +125,7 @@ jobs:
         run: node scripts/check-rust-gate.mjs
 
       - name: Record the tested checkout's identity
-        if: ${{ !cancelled() && steps.decide.outputs.identity != '' }}
+        if: ${{ !cancelled() && steps.decide.outputs.identity != '' && (steps.decide.outcome != 'success' || steps.decide.outputs.run != 'false') }}
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/upload-artifact@v7.0.2

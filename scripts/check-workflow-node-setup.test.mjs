@@ -273,7 +273,7 @@ describe("setup-node rules", () => {
         run: node scripts/check-rust-gate.mjs
 
       - name: Record the tested checkout's identity
-        if: \${{ !cancelled() && steps.decide.outputs.identity != '' }}
+        if: \${{ !cancelled() && steps.decide.outputs.identity != '' && (steps.decide.outcome != 'success' || steps.decide.outputs.run != 'false') }}
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/upload-artifact@v7.0.2
@@ -692,6 +692,8 @@ describe("node run detection", () => {
     'V=1 "./x.mjs"',
     'V=a"b"c ./x.mjs',
     'V="a\\"b" ./x.mjs',
+    'NODE_OPTIONS+=" --enable-source-maps" ./scripts/check.mjs',
+    "V+=x ./x.mjs",
   ];
   for (const command of hits) {
     test(`a run of ${command} needs setup-node`, () => {
@@ -711,33 +713,158 @@ describe("node run detection", () => {
       "echo $NODE_VERSION",
       "ls nodes",
       'echo "(setup-node: $NODE, decide: $DECIDE)"',
-      "cat src/App.tsx",
-      "echo wow! ./x.mjs",
-      "echo to env ./x.mjs",
-      "asset=dist/app.js",
-      "X=./a.mjs",
-      "echo {a,b}.js",
-      "V=a|b ./x.mjs",
+      "cat package.json",
+      "vite build --outDir dist",
+      "ls src/*.jsx",
+      'echo "jsonc"',
+      "echo V+=x",
+      "echo nodejs.org",
+      "cat yarn.lock",
+      "rm -rf node_modules",
+      "ls ts-node-dev",
+      "echo $NODE",
+      "echo ${NODE}",
+      "x=$node",
     ]) {
       assert.equal(runsNode(text), false, text);
     }
   });
 
-  // A closing quote ends an argument; it starts no command.
-  test("a script path after a quoted argument is an argument", () => {
+  // False positive by design: a node-family word counts anywhere it stands
+  // alone, comments included; the remedy is setup-node or rewording.
+  test("a node-family mention counts wherever it stands alone", () => {
     for (const text of [
+      "# npm ci runs later",
+      "# npm ci later\ncargo test",
+      "# ./x.mjs",
+      "echo see node docs",
+      '"node: $NODE"',
+      "$env:NODE",
+      "file.node",
+      "cat src/App.tsx",
+      "cd C:\\tools\\node\\bin",
+    ]) {
+      assert.equal(runsNode(text), true, text);
+    }
+  });
+
+  // Each closes a layer a boundary or comment rule once hid: a `#` line that
+  // closes a pwsh string, a `}` boundary, and an expression glued to a word.
+  test("a node word after a string-closing comment line, a brace or an expression is a run", () => {
+    for (const text of [
+      "Write-Output 'first\n# last'; node --version",
+      "&{'console.log(42)' | node}",
+      "node${{ ' --version' }}",
+    ]) {
+      assert.equal(runsNode(text), true, text);
+    }
+    const source = workflow(
+      `${CHECKOUT}      - shell: pwsh\n        run: |\n          &{'console.log(42)' | node}\n`,
+    );
+    assert.deepEqual(shape(check(source)), [
+      ["setup-node-missing", WF, lineOf(source, "- shell: pwsh")],
+    ]);
+  });
+
+  // No quantifier spans words, so dense command-like text stays linear.
+  test("dense node-family text stays linear", () => {
+    for (const [text, expected] of [
+      ["node ".repeat(200000), true],
+      ["a-node".repeat(100000), false],
+      [`${"node_modules/.bin/".repeat(16000)}(`, true],
+    ]) {
+      const { result, elapsed } = timed(() => runsNode(text));
+      assert.equal(result, expected, text.slice(0, 8));
+      assert.ok(
+        elapsed < LINEAR_BUDGET_MS,
+        `${text.slice(0, 8)}: ${elapsed} ms`,
+      );
+    }
+  });
+
+  // Ordinary runs a command-position grammar missed: any script-extension
+  // word counts, and so does a node-family word beside `{` or `=`.
+  test("a script-extension word or a braced node command is a run", () => {
+    for (const text of [
+      "timeout 60 ./x.mjs",
+      "nohup ./x.mjs",
+      '"$GITHUB_WORKSPACE"/scripts/x.mjs',
+      "$out = ./scripts/x.mjs",
+      '"./a b.mjs"',
+      'bash -c "./x.mjs"',
+      "sh -c './x.mjs'",
+      "./dist/bundle=dev.mjs",
+      "{./x.mjs}",
+      "X.MJS",
+      "$result=(./check.mjs)",
+      "V=$(./x.mjs)",
+      "V=`c`b ./x.mjs",
+      "V=a\\;b ./x.mjs",
+      "2>log ./x.mjs",
+      "Start-Job {npm ci}",
+      "& {node --version}",
+      "$v=node -v",
+    ]) {
+      assert.equal(runsNode(text), true, text);
+    }
+    const source = workflow(
+      `${CHECKOUT}      - shell: pwsh\n        run: $result=(./check.mjs)\n`,
+    );
+    assert.deepEqual(shape(check(source)), [
+      ["setup-node-missing", WF, lineOf(source, "- shell: pwsh")],
+    ]);
+  });
+
+  // False positive by design: telling an argument from a command needs a
+  // shell parser, so the remedy is setup-node before the step.
+  test("a script-extension word counts wherever it appears", () => {
+    for (const text of [
+      "cp dist/app.js out/",
       'cp "$artifact" dist/app.js',
       'cp "$a" "dist/app.js"',
-      "cp '$a' dist/app.js",
       'echo "done" > out/app.js',
+      'echo "built app.js"',
+      "echo 'packaged; dist/app.js'",
+      "git diff -- '*.js'",
+      "echo {a,b}.js",
+      "echo wow! ./x.mjs",
+      "echo to env ./x.mjs",
+      "echo a+=b ./x.mjs",
+      "asset=dist/app.js",
+      "X=./a.mjs",
+      "X+=./a.mjs",
+      "assets=(dist/app.js)",
+      "assets+=(dist/app.js)",
+      "assets=( dist/app.js )",
+      "declare -a a=(dist/app.js)",
+      "local a=(dist/app.js)",
+      "assets=(\n  dist/app.js\n)",
+      "cat <<'EOF' > list.txt\ndist/app.js\nEOF",
+      "make # see x.mjs",
     ]) {
-      assert.equal(runsNode(text), false, text);
+      assert.equal(runsNode(text), true, text);
     }
-    const result = check(
-      workflow(`${CHECKOUT}      - run: cp "$artifact" dist/app.js\n`),
+    const source = workflow(
+      `${CHECKOUT}      - run: cp "$artifact" dist/app.js\n`,
     );
-    passes(result);
-    assert.deepEqual(result.nodeJobs, []);
+    assert.deepEqual(shape(check(source)), [
+      ["setup-node-missing", WF, lineOf(source, "- run: cp")],
+    ]);
+  });
+
+  // The pattern has no quantifier, so dense extension-like text stays linear.
+  test("a dense line of extension-like words stays linear", () => {
+    for (const [text, expected] of [
+      [".js.".repeat(50000), true],
+      ["a.mjsx".repeat(33334), false],
+    ]) {
+      const { result, elapsed } = timed(() => runsNode(text));
+      assert.equal(result, expected, text.slice(0, 8));
+      assert.ok(
+        elapsed < LINEAR_BUDGET_MS,
+        `${text.slice(0, 8)}: ${elapsed} ms`,
+      );
+    }
   });
 
   // Lines are never joined at a trailing backslash, so a continued path
@@ -768,90 +895,10 @@ describe("node run detection", () => {
     assert.ok(elapsed < LINEAR_BUDGET_MS, `${elapsed} ms`);
   });
 
-  // False positive by design: the scan doesn't track quotes, so a separator
-  // inside a string restarts it.
-  test("a command separator inside a quoted string still starts a command", () => {
-    assert.equal(runsNode("echo 'packaged; dist/app.js'"), true);
-  });
-
-  // An assignment's value takes a backslash escape whole, as the shell does,
-  // except an escaped command separator, which stays out of reach.
-  test("an escaped character in an assignment stays in its value", () => {
-    for (const text of [
-      "LABEL=release\\ candidate ./x.mjs",
-      'V=a\\"b ./x.mjs',
-      "V=a\\'b ./x.mjs",
-    ]) {
-      assert.equal(runsNode(text), true, text);
-    }
-    assert.equal(runsNode("V=a\\;b ./x.mjs"), false);
-  });
-
-  // A `\"` read as opening a span, or an escaped separator taken into a value,
-  // would let every separator inside the chain re-scan it to the end.
-  test("assignment chains with quotes and escaped separators stay linear", () => {
-    for (const unit of ['V=";V=a\\"b"', "V=a\\;V=b", "V=a\\{ V=b"]) {
-      for (const text of [
-        `${unit.repeat(16000)} make build.js`,
-        `${`${unit} `.repeat(16000)}make build.js`,
-      ]) {
-        const { result, elapsed } = timed(() => runsNode(text));
-        assert.equal(result, false, unit);
-        assert.ok(elapsed < LINEAR_BUDGET_MS, `${unit}: ${elapsed} ms`);
-      }
-    }
-  });
-
-  // Out of reach by contract: a value's backtick substitution ends it, so text
-  // glued past one leaves the script an argument; a string another program
-  // runs is that program's argument.
-  test("a script glued past a backtick or in another program's string is out of reach", () => {
-    for (const text of [
-      "V=`c`b ./x.mjs",
-      'bash -c "./x.mjs"',
-      "sh -c './x.mjs'",
-    ]) {
-      assert.equal(runsNode(text), false, text);
-    }
-  });
-
-  // A super-linear chain would stall the required guards job on this shape.
-  test("aligned assignment prefixes stay linear", () => {
-    const prefixes = Array.from({ length: 13 }, (_, i) => `V${i}=x`).join(
-      "    ",
-    );
-    for (const [tail, expected] of [
-      ["    make build", false],
-      ["    ./x.mjs", true],
-    ]) {
-      const { result, elapsed } = timed(() => runsNode(prefixes + tail));
-      assert.equal(result, expected, tail);
-      assert.ok(elapsed < LINEAR_BUDGET_MS, `${tail}: ${elapsed} ms`);
-    }
-  });
-
-  // A value spanning a command start would make every start re-scan the chain.
-  test("assignment values that hold a command-start character stay linear", () => {
-    for (const prefix of [
-      "V='x' ",
-      "V=a{ ",
-      "V='x;V=1' ",
-      'V="a b" ',
-      'V=" ',
-      'V="\\" ',
-    ]) {
-      const { result, elapsed } = timed(() =>
-        runsNode(`${prefix.repeat(20000)}make build`),
-      );
-      assert.equal(result, false, prefix);
-      assert.ok(elapsed < LINEAR_BUDGET_MS, `${prefix}: ${elapsed} ms`);
-    }
-  });
-
   // A substitution retried at every unclosed `${{` would re-scan the rest.
   test("many unclosed or closed expressions in a run stay linear", () => {
     for (const [text, expected] of [
-      [`${"${{ a ".repeat(30000)}./x.mjs`, false],
+      [`${"${{ a ".repeat(30000)}make build`, false],
       [`${"V=${{ a }} ".repeat(30000)}./x.mjs`, true],
     ]) {
       const { result, elapsed } = timed(() => runsNode(text));
@@ -863,25 +910,40 @@ describe("node run detection", () => {
     }
   });
 
-  test("a standalone assignment naming a script is not a run", () => {
-    const result = check(
-      workflow(
-        `${CHECKOUT}      - run: |\n          asset=dist/app.js\n          X=./a.mjs\n          echo "$asset $X"\n`,
-      ),
-    );
-    passes(result);
-    assert.deepEqual(result.nodeJobs, []);
+  // An unquoted here-document body runs `$(...)` and backticks on a `#` line,
+  // so comment lines are read whole.
+  test("a comment-led line holding a substitution is read", () => {
+    for (const text of [
+      "cat <<EOF\n# Build $(node --version)\nEOF",
+      "cat <<EOF\n# Build `node --version`\nEOF",
+      "# npm ci later\ncargo test",
+    ]) {
+      assert.equal(runsNode(text), true, text);
+    }
   });
 
-  test("shell comment lines are not runs", () => {
-    assert.equal(runsNode("# node x.mjs\n  # npm ci\necho hi"), false);
-    const result = check(
-      workflow(
-        `${CHECKOUT}      - run: |\n          # node scripts/x.mjs runs in the next job\n          echo hi\n`,
-      ),
-    );
-    passes(result);
-    assert.deepEqual(result.nodeJobs, []);
+  test("a case pattern's `)` starts a node command", () => {
+    assert.equal(runsNode("case x in x)node --version;; esac"), true);
+  });
+
+  test("a node command continued by a trailing backslash is a run", () => {
+    assert.equal(runsNode("node\\\n  --version"), true);
+    assert.equal(runsNode("node`\n  --version"), true);
+  });
+
+  // Out of reach by contract: the header names a command word the shell
+  // assembles from other text, or one glued to an option.
+  test("a command word the shell assembles is out of reach", () => {
+    for (const text of [
+      "n\\ode --version",
+      'no""de --version',
+      "/usr/local/bin/nod[e] --version",
+      "n{o,}de --version",
+      "env -Snode --version",
+      "cmd /cnode --version",
+    ]) {
+      assert.equal(runsNode(text), false, text);
+    }
   });
 
   // Declined: telling an argument from a command needs a shell parser, so the
@@ -908,13 +970,6 @@ describe("node run detection", () => {
         lines,
       );
     }
-    const folded = check(
-      workflow(
-        `${CHECKOUT}      - run: >-\n          echo ready\n          ./scripts/task.mjs\n`,
-      ),
-    );
-    passes(folded);
-    assert.deepEqual(folded.nodeJobs, []);
   });
 
   // Out of reach by contract: a command an expression supplies is invisible,
@@ -941,7 +996,6 @@ describe("node run detection", () => {
       "X=${{ matrix.x }} ./run.sh",
       'echo "Deploying to env ${{ inputs.environment }}"',
       'echo "Building (${{ matrix.os }})"',
-      "${{ matrix.tool }} ./x.mjs",
     ]) {
       const result = check(
         workflow(
@@ -1186,6 +1240,31 @@ jobs:
     assert.equal(valueOf('k: "a \t\n  \t b"\n'), "a b");
     assert.equal(valueOf("k: [a] \t\n"), "[a]");
     assert.deepEqual([...parsed("k \t: 1\n").keys()], ["k"]);
+  });
+
+  // Expected values are yaml@2.9.1's: a fold trims only literal blanks.
+  test("an escaped blank before a quoted line fold is content", () => {
+    const valueOf = (source) =>
+      parseWorkflow(source, "f.yml").entries.get("k").value;
+    for (const [source, want] of [
+      ['k: "a\\x20\n  b"\n', "a  b"],
+      ['k: "a\\t\n  b"\n', "a\t b"],
+      ['k: "a\\ \n  b"\n', "a  b"],
+      ['k: "a\\t  \n  b"\n', "a\t b"],
+      ['k: "a\\x20 \t\n  b"\n', "a  b"],
+      ['k: "a\\u0020\n\n  b"\n', "a \nb"],
+      ['k: "a \n  b"\n', "a b"],
+      ['k: "a\t\n  b"\n', "a b"],
+      ['k: "a\\x20\\\n  b"\n', "a b"],
+    ]) {
+      assert.equal(valueOf(source), want, source);
+    }
+    const source = workflow(
+      `${CHECKOUT}      - run: "MODE=x\\x5C\\x20\n          ./x.mjs"\n`,
+    );
+    assert.deepEqual(shape(check(source)), [
+      ["setup-node-missing", WF, lineOf(source, "- run:")],
+    ]);
   });
 
   test("balanced flow values, quoted brackets and multi-line flow are opaque text", () => {
@@ -1725,6 +1804,35 @@ describe("corpus and unreadable input", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // YAML breaks a line at a lone CR, so `true\` CR then `node --version` is
+  // two commands; normalizing CRLF first would glue them into one word.
+  test("a carriage return outside a CRLF line ending is unreadable", () => {
+    const cr = String.fromCharCode(13);
+    const source = `on: push\njobs:\n  demo:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n      - run: "true\\${cr}${cr}\n          node --version"\n`;
+    assert.deepEqual(shape(check(source)), [["unreadable", WF, 7]]);
+    const dir = tree({ [WF]: source, ".node-version": "24\n" });
+    try {
+      const corpus = readCorpus(dir);
+      assert.deepEqual(shape(verdict(corpus.files, corpus.nodeVersion)), [
+        ["unreadable", WF, 7],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // YAML takes a spaces-and-TAB line as content that sets a block scalar's
+  // indent, so the less-indented `# last'` line below stays in the run.
+  test("a TAB-holding first line sets a block scalar's indent", () => {
+    const tab = String.fromCharCode(9);
+    const source = workflow(
+      `${CHECKOUT}      - run: |\n${" ".repeat(10)}${tab}\n            echo 'first\n          # last'; node --version\n`,
+    );
+    assert.deepEqual(shape(check(source)), [
+      ["setup-node-missing", WF, lineOf(source, "- run: |")],
+    ]);
   });
 
   // A key regex whose blank run two quantifiers share would stall the guards job.

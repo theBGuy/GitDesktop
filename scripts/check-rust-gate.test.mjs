@@ -28,17 +28,22 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  ABSENT,
   APT_PATH,
   DIGEST_LENGTH,
+  DIGEST_MEMBERS,
   decide,
   EVIDENCE_FILE,
   GATE_PATH,
   ghArtifacts,
   ghGreenRunIds,
+  ghHeadEntries,
   gitRunner,
   IDENTITY_MEMBERS,
   identityName,
+  MAX_VERIFIED,
   NAME_PREFIX,
+  OPTIONAL_MEMBERS,
   readIdentity,
   runCli,
   TREE_PATH,
@@ -185,6 +190,23 @@ const repo = buildOrClean(() =>
       files: { [`${TREE_PATH}/src/lib.rs`]: LIB_CHANGED },
     },
     { name: "noapt", from: "comment", files: { [APT_PATH]: null } },
+    {
+      name: "cargo",
+      from: "base",
+      files: {
+        ".cargo/config.toml": '[build]\ntarget = "not-a-real-target"\n',
+      },
+    },
+    {
+      name: "linkattrs",
+      from: "base",
+      files: { ".gitattributes": { mode: "120000", data: "elsewhere" } },
+    },
+    {
+      name: "toolchaindir",
+      from: "base",
+      files: { "rust-toolchain/channel": "stable\n" },
+    },
   ]),
 );
 const sha = repo.shas;
@@ -195,19 +217,35 @@ const failing = { ok: false, stdout: Buffer.alloc(0) };
 /** One lookup answer as ghArtifacts returns it. */
 const artifactPage = (items) => ({ items });
 
-/** decide() with collected log lines. `greens` (run ids) and `artifacts`
- *  (`{ name, expired, runId }`) back the two gh seams, each call counted in
- *  `gh`, unless a test passes its own seam. */
+/** A headEntries seam answering from `heads` (commit -> { path: oid or
+ *  ABSENT }) as regular-file entries, every listing recorded in `reads`; an
+ *  unknown commit lists no member. */
+const entriesFrom = (heads, reads) => (sha) => {
+  reads.push(sha);
+  const blobs = heads.get(sha) ?? {};
+  return Object.fromEntries(
+    DIGEST_MEMBERS.filter((path) => blobs[path] && blobs[path] !== ABSENT).map(
+      (path) => [path, { mode: "100644", type: "blob", sha: blobs[path] }],
+    ),
+  );
+};
+
+/** decide() with collected log lines. `greens` (run ids), `artifacts`
+ *  (`{ name, expired, runId, headSha }`) and `heads` back the gh seams, the
+ *  run list and lookup counted in `gh.calls`, tree listings in `gh.reads`,
+ *  unless a test passes its own seam. */
 function run({
   env,
   git: gitFn,
   greens = [],
   artifacts = [],
+  heads = new Map(),
   listGreens,
   findArtifacts,
+  headEntries,
 }) {
   const lines = [];
-  const gh = { calls: 0, names: [] };
+  const gh = { calls: 0, names: [], reads: [] };
   const result = decide({
     env,
     git: gitFn,
@@ -226,6 +264,7 @@ function run({
           artifacts.filter((item) => item.name === name).slice(0, 100),
         );
       }),
+    headEntries: headEntries ?? entriesFrom(heads, gh.reads),
     log: (line) => lines.push(line),
   });
   return { ...result, lines, text: lines.join("\n"), gh };
@@ -241,15 +280,19 @@ const treeOf = (commit) =>
   git(repo.dir, ["rev-parse", `${commit}:${TREE_PATH}`]).trim();
 const runIdOf = (i) => String(9000 + i);
 /** Evidence that each of `commits` passed: its identity, read on real git, as
- *  the artifact of green run `runIdOf(i)`. */
+ *  the artifact of green run `runIdOf(i)` headed by that commit. */
 function evidenceOf(commits) {
+  const heads = new Map();
   const artifacts = commits.map((commit, i) => {
-    const { name } = readIdentity(atHead(realGit, commit), commit);
+    const { name, blobs } = readIdentity(atHead(realGit, commit), commit);
     assert.ok(name, commit);
-    return { name, expired: false, runId: runIdOf(i) };
+    heads.set(commit, blobs);
+    return { name, expired: false, runId: runIdOf(i), headSha: commit };
   });
-  return { artifacts, greens: artifacts.map((item) => item.runId) };
+  return { artifacts, greens: artifacts.map((item) => item.runId), heads };
 }
+const passedIn = (runId, headSha) =>
+  `identical content passed in run ${runId} (head ${short(headSha)})`;
 const onRepo = (head, passed, extra = {}) =>
   run({
     env: pushEnv(head),
@@ -263,15 +306,21 @@ const onRepo = (head, passed, extra = {}) =>
 let serial = 0;
 const nextOid = () => (++serial).toString(16).padStart(40, "0");
 
-/** A test-side model answering rev-parse and `cat-file -t` from maps,
- *  recording every call, beside an evidence store. `evidence(tree, opts)`
- *  records an artifact naming `tree` under the head's blobs (or `opts`
- *  overrides) from a new run, green unless `green: false`, and returns its
- *  run id. */
+/** A test-side model answering rev-parse, `cat-file -t` and the optional
+ *  members' `ls-tree` from maps, recording every call, beside an evidence
+ *  store. `listing` maps an optional path to its ls-tree record text, or
+ *  `failing` for a git error; an unlisted path lists nothing (absent).
+ *  `setOptional(path, oid)` gives the head a regular file there.
+ *  `evidence(tree, opts)` records an artifact naming `tree` under the head's
+ *  blobs (or `opts` overrides: wf, gate, apt or an optional path) from a new
+ *  run, green unless `green: false`, whose head commit carries the named blobs
+ *  with `opts.at` overriding them (`opts.headSha` replaces the recorded head),
+ *  and returns its run id. */
 function fakeRepo() {
   const refs = new Map();
   const blobs = new Map();
   const trees = new Set();
+  const listing = new Map();
   const calls = [];
   const answer = (stdout) => ({ ok: true, stdout: Buffer.from(stdout) });
   const gitFn = (args) => {
@@ -284,7 +333,19 @@ function fakeRepo() {
       if (trees.has(args[2])) return answer("tree\n");
       return blobs.has(args[2]) ? answer("blob\n") : failing;
     }
+    if (args[0] === "ls-tree") {
+      const record = listing.get(args.at(-1));
+      if (record === failing) return failing;
+      return answer(record ?? "");
+    }
     return failing;
+  };
+  const optional = Object.fromEntries(
+    OPTIONAL_MEMBERS.map((path) => [path, ABSENT]),
+  );
+  const setOptional = (path, oid) => {
+    optional[path] = oid;
+    listing.set(path, `100644 blob ${oid}\t${path}\0`);
   };
   const head = nextOid();
   const tree = nextOid();
@@ -297,21 +358,36 @@ function fakeRepo() {
   refs.set(`${head}:${WORKFLOW_PATH}`, wf);
   refs.set(`${head}:${GATE_PATH}`, gate);
   refs.set(`${head}:${APT_PATH}`, apt);
-  const blobsOf = ({ wf: w = wf, gate: g = gate, apt: a = apt } = {}) => ({
+  const blobsOf = ({
+    wf: w = wf,
+    gate: g = gate,
+    apt: a = apt,
+    ...paths
+  } = {}) => ({
     [WORKFLOW_PATH]: w,
     [GATE_PATH]: g,
     [APT_PATH]: a,
+    ...optional,
+    ...paths,
   });
   const greens = [];
   const artifacts = [];
+  const heads = new Map();
   let runs = 0;
-  const evidence = (t, { green = true, expired = false, ...over } = {}) => {
+  const evidence = (
+    t,
+    { green = true, expired = false, at = {}, headSha, ...over } = {},
+  ) => {
     const runId = String(++runs);
     if (green) greens.push(runId);
     const name = identityName({ tree: t, blobs: blobsOf(over) });
-    artifacts.push({ name, expired, runId });
+    const commit = nextOid();
+    heads.set(commit, blobsOf({ ...over, ...at }));
+    artifacts.push({ name, expired, runId, headSha: headSha ?? commit });
     return runId;
   };
+  const headOf = (runId) =>
+    artifacts.find((item) => item.runId === runId).headSha;
   return {
     git: gitFn,
     refs,
@@ -324,9 +400,15 @@ function fakeRepo() {
     gate,
     apt,
     blobsOf,
-    name: identityName({ tree, blobs: blobsOf() }),
+    get name() {
+      return identityName({ tree, blobs: blobsOf() });
+    },
+    listing,
+    setOptional,
     greens,
     artifacts,
+    heads,
+    headOf,
     evidence,
     env: pushEnv(head),
   };
@@ -338,10 +420,12 @@ const onFake = (fake, extra = {}) =>
     git: fake.git,
     greens: fake.greens,
     artifacts: fake.artifacts,
+    heads: fake.heads,
     ...extra,
   });
 const NO_IDENTITY = "no src-tauri tree or identity blob at this commit";
 const NO_EVIDENCE = "no prior green run for this exact content";
+const NO_VERIFIED = "no verified green run for this exact content";
 
 // ---------------------------------------------------------------- identity
 
@@ -353,25 +437,37 @@ const SIGNATURE_KEYS = [
 ];
 
 test("identityName: every member and the tree move the name; the order is fixed", () => {
-  const blobs = Object.fromEntries(
-    IDENTITY_MEMBERS.map((path, i) => [path, String(i + 1).repeat(40)]),
-  );
+  const blobs = Object.fromEntries([
+    ...IDENTITY_MEMBERS.map((path, i) => [path, String(i + 1).repeat(40)]),
+    ...OPTIONAL_MEMBERS.map((path) => [path, ABSENT]),
+  ]);
   const tree = "c".repeat(40);
   const base = identityName({ tree, blobs });
-  const lines = IDENTITY_MEMBERS.map((path) => `${path} ${blobs[path]}\n`);
+  // With every optional member absent the digest is still the fixed sha256
+  // over all eight lines, so the name depends only on the required blobs.
+  const lines = DIGEST_MEMBERS.map((path) => `${path} ${blobs[path]}\n`);
   const digest = createHash("sha256")
     .update(lines.join(""))
     .digest("hex")
     .slice(0, DIGEST_LENGTH);
   assert.equal(base, `${NAME_PREFIX}${digest}-${tree}`);
+  assert.ok(lines.join("").includes(".gitattributes absent\n"));
   assert.deepEqual(IDENTITY_MEMBERS, [WORKFLOW_PATH, GATE_PATH, APT_PATH]);
+  assert.deepEqual(OPTIONAL_MEMBERS, [
+    ".cargo/config.toml",
+    ".cargo/config",
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    ".gitattributes",
+  ]);
+  assert.deepEqual(DIGEST_MEMBERS, [...IDENTITY_MEMBERS, ...OPTIONAL_MEMBERS]);
   const names = new Set([base, identityName({ tree: "d".repeat(40), blobs })]);
-  for (const path of IDENTITY_MEMBERS) {
+  for (const path of DIGEST_MEMBERS) {
     names.add(
       identityName({ tree, blobs: { ...blobs, [path]: "f".repeat(40) } }),
     );
   }
-  assert.equal(names.size, IDENTITY_MEMBERS.length + 2);
+  assert.equal(names.size, DIGEST_MEMBERS.length + 2);
   // Two members trading oids is another identity: position is in the digest.
   const traded = {
     ...blobs,
@@ -608,7 +704,7 @@ test("malformed and duplicate green run ids are dropped and counted (fake git)",
   const malformed = ["0", "-1", "1e3", "abc", "9007199254740993", "", "01", 7];
   const out = onFake(fake, { greens: [...malformed, runId, runId] });
   assert.equal(out.run, false, out.text);
-  assert.equal(out.reason, `identical content passed in run ${runId}`);
+  assert.equal(out.reason, passedIn(runId, fake.headOf(runId)));
   assert.ok(
     out.lines.includes(
       `rust-gate: listed 1 green runs (${malformed.length} malformed dropped)`,
@@ -631,20 +727,23 @@ test("malformed and duplicate green run ids are dropped and counted (fake git)",
 
 // ------------------------------------------------------- the exact lookup
 
-test("an exact green unexpired match skips (fake git)", () => {
+test("an exact green unexpired match whose head carries the blobs skips (fake git)", () => {
   const fake = fakeRepo();
   const runId = fake.evidence(fake.tree);
+  const headSha = fake.headOf(runId);
   const out = onFake(fake);
   assert.equal(out.run, false);
-  assert.equal(out.reason, `identical content passed in run ${runId}`);
+  assert.equal(out.reason, passedIn(runId, headSha));
   assert.equal(out.identity, fake.name);
   assert.deepEqual(out.lines.slice(2), [
     "rust-gate: listed 1 green runs (0 malformed dropped)",
     `rust-gate: 1 artifacts named ${fake.name}, 1 from green runs.`,
-    `rust-gate: decision run=false (identical content passed in run ${runId})`,
+    `rust-gate: decision run=false (identical content passed in run ${runId} (head ${short(headSha)}))`,
   ]);
   assert.deepEqual(out.gh.names, [fake.name]);
   assert.equal(out.gh.calls, 2);
+  // One tree listing, of the run's head commit.
+  assert.deepEqual(out.gh.reads, [headSha]);
 });
 
 test("a match from a green run listed 100th skips (fake git)", () => {
@@ -653,7 +752,7 @@ test("a match from a green run listed 100th skips (fake git)", () => {
   const greens = Array.from({ length: 99 }, (_, i) => String(5000 + i));
   const out = onFake(fake, { greens: [...greens, runId] });
   assert.equal(out.run, false);
-  assert.equal(out.reason, `identical content passed in run ${runId}`);
+  assert.equal(out.reason, passedIn(runId, fake.headOf(runId)));
   assert.ok(
     out.lines.includes(
       "rust-gate: listed 100 green runs (0 malformed dropped)",
@@ -754,6 +853,367 @@ test("a failed or malformed lookup runs the matrix (fake git)", () => {
   }
 });
 
+// ------------------------------------------------- the run's head commit
+
+// The attack: a commit whose edited gate, workflow or apt script uploads the
+// name the real gate computes for a later commit. GitHub records the uploading
+// run's head commit, which carries the edited blob, so that name never skips.
+test("evidence whose run's head carries another member blob does not skip (fake git)", () => {
+  for (const [member, path] of [
+    ["wf", WORKFLOW_PATH],
+    ["gate", GATE_PATH],
+    ["apt", APT_PATH],
+  ]) {
+    const fake = fakeRepo();
+    const edited = nextOid();
+    const runId = fake.evidence(fake.tree, { at: { [member]: edited } });
+    const out = onFake(fake);
+    assert.equal(out.run, true, member);
+    assert.equal(out.reason, NO_VERIFIED, member);
+    assert.equal(out.identity, fake.name, member);
+    assert.deepEqual(out.lines.slice(-3), [
+      `rust-gate: 1 artifacts named ${fake.name}, 1 from green runs.`,
+      `rust-gate: run ${runId} (head ${short(fake.headOf(runId))}) is no evidence: ${path} there is ${short(edited)}, not ${short(fake[member])}.`,
+      `rust-gate: decision run=true (${NO_VERIFIED})`,
+    ]);
+  }
+});
+
+test("a head tree that cannot be listed or holds no regular member rejects the candidate (fake git)", () => {
+  /** The honest listing of `sha`, with `edit(entries)` applied. */
+  const edited = (fake, edit) => (sha) =>
+    edit(entriesFrom(fake.heads, [])(sha));
+  const failingWith = (message) => () => () => {
+    throw new Error(message);
+  };
+  for (const [seamOf, why] of [
+    [
+      failingWith("gh exited 1: HTTP 422\nInvalid object"),
+      "could not list its tree (gh exited 1: HTTP 422 Invalid object)",
+    ],
+    [() => () => null, "could not list its tree (no entry map)"],
+    [() => () => "x", "could not list its tree (no entry map)"],
+    [
+      (fake) =>
+        edited(fake, (entries) => {
+          delete entries[GATE_PATH];
+          return entries;
+        }),
+      `${GATE_PATH} is absent there`,
+    ],
+    [
+      (fake) =>
+        edited(fake, (entries) => ({
+          ...entries,
+          [APT_PATH]: { ...entries[APT_PATH], mode: "120000" },
+        })),
+      `${APT_PATH} there is no regular blob (mode "120000", type "blob")`,
+    ],
+    [
+      (fake) =>
+        edited(fake, (entries) => ({
+          ...entries,
+          [WORKFLOW_PATH]: {
+            mode: "100644",
+            type: "blob",
+            sha: "A".repeat(40),
+          },
+        })),
+      `${WORKFLOW_PATH} there is no regular blob (mode "100644", type "blob")`,
+    ],
+    [
+      (fake) =>
+        edited(fake, (entries) => ({
+          ...entries,
+          [WORKFLOW_PATH]: { sha: entries[WORKFLOW_PATH].sha },
+        })),
+      `${WORKFLOW_PATH} there is no regular blob (mode "", type "")`,
+    ],
+  ]) {
+    const fake = fakeRepo();
+    const runId = fake.evidence(fake.tree);
+    const out = onFake(fake, { headEntries: seamOf(fake) });
+    assert.equal(out.run, true, why);
+    assert.equal(out.reason, NO_VERIFIED, why);
+    assert.deepEqual(out.lines.slice(-2), [
+      `rust-gate: run ${runId} (head ${short(fake.headOf(runId))}) is no evidence: ${why}.`,
+      `rust-gate: decision run=true (${NO_VERIFIED})`,
+    ]);
+  }
+});
+
+// The local reader requires type blob, so the head side does too: a regular
+// mode and the matching sha under another type is no blob.
+test("a head member listed as no blob type rejects that candidate only (fake git)", () => {
+  /** Honest listings, except the member `path` of `badHead` listed as a tree
+   *  under its own mode and sha. */
+  const typed = (fake, badHead, path) => (sha) => {
+    const entries = entriesFrom(fake.heads, [])(sha);
+    if (sha === badHead) entries[path] = { ...entries[path], type: "tree" };
+    return entries;
+  };
+  for (const path of [GATE_PATH, ".gitattributes"]) {
+    const fake = fakeRepo();
+    if (path === ".gitattributes") fake.setOptional(path, nextOid());
+    const bad = fake.evidence(fake.tree);
+    const why = `${path} there is no regular blob (mode "100644", type "tree")`;
+    const alone = onFake(fake, {
+      headEntries: typed(fake, fake.headOf(bad), path),
+    });
+    assert.equal(alone.run, true, path);
+    assert.equal(alone.reason, NO_VERIFIED, path);
+    assert.deepEqual(alone.lines.slice(-2), [
+      `rust-gate: run ${bad} (head ${short(fake.headOf(bad))}) is no evidence: ${why}.`,
+      `rust-gate: decision run=true (${NO_VERIFIED})`,
+    ]);
+
+    // A good candidate after it still verifies.
+    const good = fake.evidence(fake.tree);
+    const then = onFake(fake, {
+      headEntries: typed(fake, fake.headOf(bad), path),
+    });
+    assert.equal(then.run, false, then.text);
+    assert.equal(then.reason, passedIn(good, fake.headOf(good)));
+    assert.ok(
+      then.lines.includes(
+        `rust-gate: run ${bad} (head ${short(fake.headOf(bad))}) is no evidence: ${why}.`,
+      ),
+      then.text,
+    );
+  }
+});
+
+test("a candidate without a valid head commit is rejected unread (fake git)", () => {
+  for (const headSha of [undefined, "", "A".repeat(40), "a".repeat(39), 7]) {
+    const fake = fakeRepo();
+    const runId = fake.evidence(fake.tree, { headSha });
+    // `headSha: undefined` keeps the recorded head, so drop it here.
+    if (headSha === undefined) delete fake.artifacts[0].headSha;
+    const out = onFake(fake);
+    assert.equal(out.run, true, String(headSha));
+    assert.equal(out.reason, NO_VERIFIED);
+    assert.deepEqual(out.lines.slice(-2), [
+      `rust-gate: run ${runId} (head ?) is no evidence: it names no valid head commit.`,
+      `rust-gate: decision run=true (${NO_VERIFIED})`,
+    ]);
+    assert.deepEqual(out.gh.reads, []);
+  }
+});
+
+test("candidates verify in API order, at most MAX_VERIFIED of them (fake git)", () => {
+  assert.equal(MAX_VERIFIED, 3);
+  const fake = fakeRepo();
+  const bad = fake.evidence(fake.tree, { at: { gate: nextOid() } });
+  const good = fake.evidence(fake.tree);
+  const out = onFake(fake);
+  assert.equal(out.run, false, out.text);
+  assert.equal(out.reason, passedIn(good, fake.headOf(good)));
+  assert.ok(
+    out.lines.some((line) =>
+      line.startsWith(
+        `rust-gate: run ${bad} (head ${short(fake.headOf(bad))}) is no evidence: ${GATE_PATH} there is `,
+      ),
+    ),
+    out.text,
+  );
+  // One listing per candidate, in order.
+  assert.deepEqual(out.gh.reads, [fake.headOf(bad), fake.headOf(good)]);
+
+  // Four rejected candidates: the first three are listed, the fourth never,
+  // so the gh calls stop at the run list, the lookup and MAX_VERIFIED
+  // listings, whose timeouts (120 s, 30 s, 60 s, pinned in the gh seam tests)
+  // keep the worst case within 6 of the decide step's 8 minutes.
+  const all = fakeRepo();
+  const ids = [0, 1, 2, 3].map(() =>
+    all.evidence(all.tree, { at: { ".gitattributes": nextOid() } }),
+  );
+  const capped = onFake(all);
+  assert.equal(capped.run, true);
+  assert.equal(capped.reason, NO_VERIFIED);
+  assert.equal(capped.gh.calls, 2);
+  assert.deepEqual(
+    capped.gh.reads,
+    ids.slice(0, MAX_VERIFIED).map((id) => all.headOf(id)),
+  );
+  assert.ok(120 + 30 + MAX_VERIFIED * 60 <= 6 * 60);
+  assert.ok(
+    capped.lines.includes("rust-gate: verifying the first 3 of 4 candidates."),
+    capped.text,
+  );
+  assert.ok(!capped.text.includes(`run ${ids[3]} `), capped.text);
+});
+
+// ------------------------------------------------- optional root inputs
+
+test("optional root inputs sign as their blob or as absent (fake git)", () => {
+  const fake = fakeRepo();
+  const passed = fake.evidence(fake.tree);
+  const allAbsent = fake.name;
+  const out = onFake(fake);
+  assert.equal(out.run, false, out.text);
+  assert.equal(out.reason, passedIn(passed, fake.headOf(passed)));
+  assert.equal(
+    allAbsent,
+    identityName({ tree: fake.tree, blobs: fake.blobsOf() }),
+  );
+  assert.deepEqual(
+    fake.calls.filter((args) => args[0] === "ls-tree"),
+    OPTIONAL_MEMBERS.map((path) => [
+      "ls-tree",
+      "-z",
+      "--full-tree",
+      fake.head,
+      "--",
+      path,
+    ]),
+  );
+  // A listing that names only another path holds no entry at this one.
+  const sibling = fakeRepo();
+  sibling.listing.set(
+    ".cargo/config",
+    `100644 blob ${nextOid()}\t.cargo/config.toml\0`,
+  );
+  assert.equal(onFake(sibling).identity, sibling.name);
+
+  // The scenario: the same tree passed, then a root input appeared.
+  for (const path of OPTIONAL_MEMBERS) {
+    const later = fakeRepo();
+    later.evidence(later.tree);
+    const before = later.name;
+    later.setOptional(path, nextOid());
+    const added = onFake(later);
+    assert.notEqual(added.identity, before, path);
+    assert.equal(added.run, true, path);
+    assert.equal(added.reason, NO_EVIDENCE, path);
+    assert.ok(
+      added.lines.includes(
+        `rust-gate: 0 artifacts named ${later.name}, 0 from green runs.`,
+      ),
+      added.text,
+    );
+  }
+});
+
+test("a root input git cannot list, or lists as no regular file, is no identity (fake git)", () => {
+  const oid = "9".repeat(40);
+  const record = (path, mode, type) => `${mode} ${type} ${oid}\t${path}\0`;
+  for (const [path, listed, why] of [
+    [
+      ".cargo/config.toml",
+      failing,
+      "could not list .cargo/config.toml at this commit",
+    ],
+    [
+      ".gitattributes",
+      record(".gitattributes", "120000", "blob"),
+      ".gitattributes is no regular file at this commit (mode 120000)",
+    ],
+    [
+      "rust-toolchain",
+      record("rust-toolchain", "040000", "tree"),
+      "rust-toolchain is no regular file at this commit (mode 040000)",
+    ],
+    [
+      ".cargo/config",
+      record(".cargo/config", "160000", "commit"),
+      ".cargo/config is no regular file at this commit (mode 160000)",
+    ],
+    [
+      "rust-toolchain.toml",
+      "junk\0",
+      "unreadable listing for rust-toolchain.toml",
+    ],
+  ]) {
+    const fake = fakeRepo();
+    fake.evidence(fake.tree);
+    fake.listing.set(path, listed);
+    const out = onFake(fake);
+    assert.equal(out.run, true, why);
+    assert.equal(out.reason, why);
+    assert.equal(out.identity, "", why);
+    assert.ok(out.lines.includes(`rust-gate: no identity (${why})`), out.text);
+    assert.equal(out.gh.calls, 0, why);
+  }
+});
+
+test("the head commit must carry each optional member as signed (fake git)", () => {
+  const path = ".cargo/config.toml";
+  const here = nextOid();
+  const other = nextOid();
+  for (const [setup, at, why] of [
+    [true, {}, ""],
+    [false, {}, ""],
+    [true, { [path]: ABSENT }, `${path} is absent there`],
+    [false, { [path]: other }, `${path} there is ${short(other)}, not absent`],
+    [
+      true,
+      { [path]: other },
+      `${path} there is ${short(other)}, not ${short(here)}`,
+    ],
+  ]) {
+    const fake = fakeRepo();
+    if (setup) fake.setOptional(path, here);
+    const runId = fake.evidence(fake.tree, { at });
+    const out = onFake(fake);
+    const where = `${setup} ${JSON.stringify(at)}`;
+    if (!why) {
+      assert.equal(out.run, false, where);
+      assert.equal(out.reason, passedIn(runId, fake.headOf(runId)), where);
+      continue;
+    }
+    assert.equal(out.run, true, where);
+    assert.equal(out.reason, NO_VERIFIED, where);
+    assert.ok(
+      out.lines.includes(
+        `rust-gate: run ${runId} (head ${short(fake.headOf(runId))}) is no evidence: ${why}.`,
+      ),
+      out.text,
+    );
+  }
+});
+
+// The listing GitHub sent may hold the very member this side lacks; an entry
+// the reader cannot name must not read as that member's absence.
+test("a head listing with an unreadable entry rejects the candidate (fake git, real reader)", () => {
+  for (const unreadable of [null, { path: null }, { path: 7 }, "x"]) {
+    const fake = fakeRepo();
+    const runId = fake.evidence(fake.tree);
+    const blobs = fake.heads.get(fake.headOf(runId));
+    assert.equal(blobs[".cargo/config.toml"], ABSENT);
+    const tree = DIGEST_MEMBERS.filter((path) => blobs[path] !== ABSENT).map(
+      (path) => ({ path, mode: "100644", type: "blob", sha: blobs[path] }),
+    );
+    const stdout = JSON.stringify({
+      tree: [...tree, unreadable],
+      truncated: false,
+    });
+    const spawn = () => ({ status: 0, stdout, stderr: "" });
+    const out = onFake(fake, {
+      headEntries: (sha) => ghHeadEntries(sha, {}, spawn),
+    });
+    const where = JSON.stringify(unreadable);
+    assert.equal(out.run, true, where);
+    assert.equal(out.reason, NO_VERIFIED, where);
+    assert.ok(
+      out.lines.includes(
+        `rust-gate: run ${runId} (head ${short(fake.headOf(runId))}) is no evidence: could not list its tree (the tree lists an entry without a path).`,
+      ),
+      out.text,
+    );
+    // The same listing without the unreadable entry verifies.
+    const clean = JSON.stringify({ tree, truncated: false });
+    const honest = onFake(fake, {
+      headEntries: (sha) =>
+        ghHeadEntries(sha, {}, () => ({
+          status: 0,
+          stdout: clean,
+          stderr: "",
+        })),
+    });
+    assert.equal(honest.run, false, honest.text);
+  }
+});
+
 // ------------------------------------------------------------------ gh seams
 
 test("ghGreenRunIds asks gh for this workflow's successful run ids", () => {
@@ -793,19 +1253,46 @@ test("ghGreenRunIds asks gh for this workflow's successful run ids", () => {
 
 test("ghArtifacts asks gh api for one page and keeps only well-formed items", () => {
   const env = { GH_TOKEN: "t", GH_REPO: "o/r" };
-  const good = { name: "n", expired: false, workflow_run: { id: 42 } };
+  const sha256 = "b".repeat(64);
+  /** A workflow_run with a valid head unless `extra` replaces it. */
+  const wr = (id, extra = {}) => ({ id, head_sha: SHA_A, ...extra });
+  const good = { name: "n", expired: false, workflow_run: wr(42) };
+  const good256 = {
+    name: "n",
+    expired: true,
+    workflow_run: wr(43, { head_sha: sha256 }),
+  };
   const malformed = [
-    { expired: false, workflow_run: { id: 1 } },
-    { name: 5, expired: false, workflow_run: { id: 1 } },
-    { name: "n", expired: "false", workflow_run: { id: 1 } },
-    { name: "n", workflow_run: { id: 1 } },
+    { expired: false, workflow_run: wr(1) },
+    { name: 5, expired: false, workflow_run: wr(1) },
+    { name: "n", expired: "false", workflow_run: wr(1) },
+    { name: "n", workflow_run: wr(1) },
     { name: "n", expired: false, workflow_run: null },
     { name: "n", expired: false },
-    { name: "n", expired: false, workflow_run: { id: 0 } },
-    { name: "n", expired: false, workflow_run: { id: -3 } },
-    { name: "n", expired: false, workflow_run: { id: 1.5 } },
-    { name: "n", expired: false, workflow_run: { id: 2 ** 53 } },
-    { name: "n", expired: false, workflow_run: { id: "7" } },
+    { name: "n", expired: false, workflow_run: wr(0) },
+    { name: "n", expired: false, workflow_run: wr(-3) },
+    { name: "n", expired: false, workflow_run: wr(1.5) },
+    { name: "n", expired: false, workflow_run: wr(2 ** 53) },
+    { name: "n", expired: false, workflow_run: wr("7") },
+    { name: "n", expired: false, workflow_run: { id: 1 } },
+    { name: "n", expired: false, workflow_run: wr(1, { head_sha: null }) },
+    { name: "n", expired: false, workflow_run: wr(1, { head_sha: "" }) },
+    {
+      name: "n",
+      expired: false,
+      workflow_run: wr(1, { head_sha: "A".repeat(40) }),
+    },
+    {
+      name: "n",
+      expired: false,
+      workflow_run: wr(1, { head_sha: "a".repeat(39) }),
+    },
+    {
+      name: "n",
+      expired: false,
+      workflow_run: wr(1, { head_sha: `${SHA_A}\n` }),
+    },
+    { name: "n", expired: false, workflow_run: wr(1, { head_sha: 7 }) },
     null,
   ];
   const seen = [];
@@ -814,11 +1301,14 @@ test("ghArtifacts asks gh api for one page and keeps only well-formed items", ()
     return { status: 0, stdout: body, stderr: "" };
   };
   const body = JSON.stringify({
-    total_count: 13,
-    artifacts: [good, ...malformed],
+    total_count: 21,
+    artifacts: [good, ...malformed, good256],
   });
   assert.deepEqual(ghArtifacts("name=n&per_page=100", env, answering(body)), {
-    items: [{ name: "n", expired: false, runId: "42" }],
+    items: [
+      { name: "n", expired: false, runId: "42", headSha: SHA_A },
+      { name: "n", expired: true, runId: "43", headSha: sha256 },
+    ],
   });
   assert.equal(seen[0].cmd, "gh");
   assert.deepEqual(seen[0].args, [
@@ -848,6 +1338,94 @@ test("ghArtifacts asks gh api for one page and keeps only well-formed items", ()
   );
 });
 
+test("ghHeadEntries lists one commit's tree and keeps the members only", () => {
+  const env = { GH_TOKEN: "t", GH_REPO: "o/r" };
+  const blob = "c".repeat(40);
+  const entry = (path, extra = {}) => ({
+    path,
+    mode: "100644",
+    type: "blob",
+    sha: blob,
+    ...extra,
+  });
+  const body = (tree, truncated = false) =>
+    JSON.stringify({ sha: SHA_A, tree, truncated });
+  const seen = [];
+  const answering = (stdout) => (cmd, args, options) => {
+    seen.push({ cmd, args, options });
+    return { status: 0, stdout, stderr: "" };
+  };
+  const listed = body([
+    entry(GATE_PATH),
+    entry(".gitattributes", { mode: "120000" }),
+    entry("README.md"),
+    entry(".cargo", { mode: "040000", type: "tree" }),
+    { path: "LICENSE" },
+  ]);
+  assert.deepEqual(ghHeadEntries(SHA_A, env, answering(listed)), {
+    [GATE_PATH]: { mode: "100644", type: "blob", sha: blob },
+    ".gitattributes": { mode: "120000", type: "blob", sha: blob },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].cmd, "gh");
+  assert.deepEqual(seen[0].args, [
+    "api",
+    `repos/{owner}/{repo}/git/trees/${SHA_A}?recursive=1`,
+  ]);
+  // gh alone keeps the token, untouched.
+  assert.equal(seen[0].options.env, env);
+  assert.equal(seen[0].options.timeout, 60_000);
+
+  // A commit that is no object id never reaches the URL.
+  for (const ref of ["master", "A".repeat(40), "a".repeat(39), undefined]) {
+    assert.throws(
+      () => ghHeadEntries(ref, env, answering(listed)),
+      /^Error: not an object id$/,
+    );
+  }
+  assert.equal(seen.length, 1);
+  // A truncated listing could drop a member, which would read as absent.
+  for (const [stdout, message] of [
+    ["not json", /^Error: unparseable tree answer$/],
+    ["{}", /^Error: the tree answer holds no list$/],
+    [body([entry(GATE_PATH)], true), /^Error: the tree listing is truncated$/],
+    [
+      JSON.stringify({ tree: [entry(GATE_PATH)] }),
+      /^Error: the tree listing is truncated$/,
+    ],
+    // An entry whose path cannot be read could be a member, so the listing
+    // is unreadable; a member entry must carry its mode, type and sha.
+    ...[null, { path: 7 }, "x", 3, [], { mode: "100644" }].map((bad) => [
+      body([entry(GATE_PATH), bad]),
+      /^Error: the tree lists an entry without a path$/,
+    ]),
+    ...["mode", "type", "sha"].map((field) => [
+      body([entry(".gitattributes", { [field]: undefined })]),
+      new RegExp(`^Error: the tree lists \\.gitattributes without a ${field}$`),
+    ]),
+    [
+      body([entry(".gitattributes", { sha: 7 })]),
+      /^Error: the tree lists \.gitattributes without a sha$/,
+    ],
+    [
+      body([entry(GATE_PATH), entry(GATE_PATH)]),
+      /^Error: the tree lists scripts\/check-rust-gate.mjs twice$/,
+    ],
+  ]) {
+    assert.throws(() => ghHeadEntries(SHA_A, env, answering(stdout)), message);
+  }
+  // Any failure throws, a missing commit included.
+  const missing = () => ({
+    status: 1,
+    stdout: "",
+    stderr: "gh: Invalid object requested. (HTTP 422)\n",
+  });
+  assert.throws(
+    () => ghHeadEntries(SHA_A, env, missing),
+    /^Error: gh exited 1: gh: Invalid object requested\. \(HTTP 422\)$/,
+  );
+});
+
 // ---------------------------------------------------------------- real git
 
 test("a real checkout's identity signs its tree and the three blobs (real git)", () => {
@@ -860,6 +1438,9 @@ test("a real checkout's identity signs its tree and the three blobs (real git)",
       path,
     );
   }
+  for (const path of OPTIONAL_MEMBERS) {
+    assert.equal(identity.blobs[path], ABSENT, path);
+  }
   assert.equal(identity.name, identityName(identity));
   assert.equal(identity.sha, sha.comment);
   // The fixture's checkout is the base branch, which is not this commit.
@@ -871,11 +1452,49 @@ test("a real checkout's identity signs its tree and the three blobs (real git)",
 test("identical content skips on real git", () => {
   const out = onRepo(sha.base, [sha.base]);
   assert.equal(out.run, false);
-  assert.equal(out.reason, `identical content passed in run ${runIdOf(0)}`);
+  assert.equal(out.reason, passedIn(runIdOf(0), sha.base));
   assert.equal(out.identity, evidenceOf([sha.base]).artifacts[0].name);
   assert.ok(
     out.lines.includes("rust-gate: listed 1 green runs (0 malformed dropped)"),
   );
+});
+
+// A root `.cargo/config.toml` can retarget the whole build without touching
+// src-tauri, so one added after a pass is a new identity.
+test("a root Rust input added after a pass runs the matrix (real git)", () => {
+  const out = onRepo(sha.cargo, [sha.base]);
+  assert.equal(out.run, true, out.text);
+  assert.equal(out.reason, NO_EVIDENCE);
+  assert.notEqual(out.identity, evidenceOf([sha.base]).artifacts[0].name);
+  assert.equal(treeOf(sha.cargo), treeOf(sha.base));
+  const identity = readIdentity(atHead(realGit, sha.cargo), sha.cargo);
+  assert.equal(
+    identity.blobs[".cargo/config.toml"],
+    git(repo.dir, ["rev-parse", `${sha.cargo}:.cargo/config.toml`]).trim(),
+  );
+  assert.equal(identity.blobs[".cargo/config"], ABSENT);
+  const again = onRepo(sha.cargo, [sha.cargo]);
+  assert.equal(again.run, false, again.text);
+  assert.equal(again.reason, passedIn(runIdOf(0), sha.cargo));
+});
+
+test("a symlinked or directory root input is no identity (real git)", () => {
+  for (const [head, why] of [
+    [
+      sha.linkattrs,
+      ".gitattributes is no regular file at this commit (mode 120000)",
+    ],
+    [
+      sha.toolchaindir,
+      "rust-toolchain is no regular file at this commit (mode 040000)",
+    ],
+  ]) {
+    const out = onRepo(head, [sha.base]);
+    assert.equal(out.run, true, why);
+    assert.equal(out.reason, why);
+    assert.equal(out.identity, "");
+    assert.equal(out.gh.calls, 0);
+  }
 });
 
 // Source-reading `include_str!` tests see comments, so a comment-only edit is
@@ -1095,6 +1714,7 @@ const fakeDeps = (fake, lines) => ({
   listGreens: () => fake.greens,
   findArtifacts: (name) =>
     artifactPage(fake.artifacts.filter((item) => item.name === name)),
+  headEntries: entriesFrom(fake.heads, []),
   log: (line) => lines.push(line),
 });
 
@@ -1121,7 +1741,7 @@ test("runCli writes the evidence file, then identity and run, after an exact mat
   );
   assert.equal(
     lines.at(-1),
-    `rust-gate: decision run=false (identical content passed in run ${runId})`,
+    `rust-gate: decision run=false (${passedIn(runId, fake.headOf(runId))})`,
   );
 });
 
@@ -1194,7 +1814,10 @@ const DECIDE_ENV = [
   ["GH_TOKEN", "${{ github.token }}"],
 ];
 const RECORD_NAME = "Record the tested checkout's identity";
-const RECORD_IF = "${{ !cancelled() && steps.decide.outputs.identity != '' }}";
+// The record step runs only when the test job's own condition will run the
+// matrix and decide emitted an identity, so a skip never extends evidence.
+const RECORD_IF =
+  "${{ !cancelled() && steps.decide.outputs.identity != '' && (steps.decide.outcome != 'success' || steps.decide.outputs.run != 'false') }}";
 const RECORD_WITH = [
   ["if-no-files-found", "error"],
   ["name", "${{ steps.decide.outputs.identity }}"],
@@ -1205,7 +1828,13 @@ const RECORD_WITH = [
 const REPORT_RUN =
   'echo "::error::rust-tests gate made no decision (setup-node: $NODE, decide: $DECIDE); the test matrix runs (fail-open)."';
 // What the gate signs: a change to any of these must trigger the workflow.
-const IDENTITY_PATHS = ["src-tauri/**", WORKFLOW_PATH, GATE_PATH, APT_PATH];
+const IDENTITY_PATHS = [
+  "src-tauri/**",
+  WORKFLOW_PATH,
+  GATE_PATH,
+  APT_PATH,
+  ...OPTIONAL_MEMBERS,
+];
 const APT_NAME = "Install Linux dependencies";
 const APT_RUN = `bash ${APT_PATH}`;
 const APT_CALLERS = [
@@ -1215,9 +1844,14 @@ const APT_CALLERS = [
 ];
 const APT_SCRIPT = readRepoText(APT_PATH);
 
-const indentOf = (line) => line.length - line.trimStart().length;
+// YAML's blanks are space and TAB only; JS trim also strips NBSP and other
+// Unicode spaces, which YAML keeps in a scalar (a condition ending in one is
+// a non-empty string template, always true).
+const trimStartYaml = (text) => text.replace(/^[ \t]+/, "");
+const trimYaml = (text) => trimStartYaml(text).replace(/[ \t]+$/, "");
+const indentOf = (line) => line.length - trimStartYaml(line).length;
 const isNoise = (line) =>
-  line.trim() === "" || line.trimStart().startsWith("#");
+  trimYaml(line) === "" || trimStartYaml(line).startsWith("#");
 
 function blockAfter(lines, start) {
   const base = indentOf(lines[start]);
@@ -1238,15 +1872,22 @@ function entries(lines, where) {
   const map = new Map();
   lines.forEach((line, i) => {
     if (isNoise(line) || indentOf(line) !== indent) return;
-    const match = /^\s*([A-Za-z0-9_-]+):(?:\s+(.*))?$/.exec(line);
+    const match = /^[ \t]*([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$/.exec(line);
     if (!match)
       throw new Error(`${where}: unreadable line ${JSON.stringify(line)}`);
     if (map.has(match[1]))
       throw new Error(`${where}: duplicate key ${match[1]}`);
-    map.set(match[1], {
-      value: (match[2] ?? "").trim(),
-      children: blockAfter(lines, i),
-    });
+    const value = trimYaml(match[2] ?? "");
+    const children = blockAfter(lines, i);
+    // A more-indented line under an inline scalar folds into its value, which
+    // `value` (one physical line) would not show; block scalars own theirs.
+    const folded = children.find((child) => !isNoise(child));
+    if (value !== "" && !/^[|>]/.test(value) && folded !== undefined) {
+      throw new Error(
+        `${where}: ${match[1]} continues on ${JSON.stringify(folded)}`,
+      );
+    }
+    map.set(match[1], { value, children });
   });
   return map;
 }
@@ -1257,7 +1898,12 @@ function get(map, key, where) {
   return entry;
 }
 
-const topOf = (text) => entries(text.split("\n"), "workflow");
+// readRepoText already turned CRLF into LF, so any CR left is a line break to
+// YAML that this LF-only split would bury inside another line.
+function topOf(text) {
+  assert.ok(!text.includes("\r"), "workflow: a carriage return is not read");
+  return entries(text.split("\n"), "workflow");
+}
 
 function jobOf(text, name) {
   const jobs = entries(get(topOf(text), "jobs", "workflow").children, "jobs");
@@ -1270,7 +1916,7 @@ function stepsOf(job, where) {
   const steps = [];
   for (const line of lines) {
     if (!isNoise(line) && indentOf(line) === indent) {
-      if (!line.trimStart().startsWith("- ")) {
+      if (!trimStartYaml(line).startsWith("- ")) {
         throw new Error(
           `${where}: unreadable step line ${JSON.stringify(line)}`,
         );
@@ -1295,7 +1941,7 @@ function stepWith(steps, key, value, where) {
 
 const runLines = (entry) =>
   entry.value === "|"
-    ? entry.children.map((line) => line.trim()).filter((line) => line !== "")
+    ? entry.children.map(trimYaml).filter((line) => line !== "")
     : [entry.value];
 
 /** `on.<event>.paths` items as written after `- `, quotes and any trailing
@@ -1303,13 +1949,18 @@ const runLines = (entry) =>
 function rawPathsOf(text, event) {
   const on = entries(get(topOf(text), "on", "workflow").children, "on");
   const trigger = entries(get(on, event, "on").children, `on.${event}`);
-  return get(trigger, "paths", `on.${event}`)
-    .children.filter((line) => !isNoise(line))
-    .map((line) => {
-      const match = /^\s*- (\S.*)$/.exec(line);
-      if (!match) throw new Error(`on.${event}.paths: unreadable ${line}`);
-      return match[1];
-    });
+  const items = get(trigger, "paths", `on.${event}`).children.filter(
+    (line) => !isNoise(line),
+  );
+  // An over-indented `- ` line folds into the item above as plain text.
+  const indent = Math.min(...items.map(indentOf));
+  return items.map((line) => {
+    const match = /^[ \t]*- (\S.*)$/.exec(line);
+    if (!match || indentOf(line) !== indent) {
+      throw new Error(`on.${event}.paths: unreadable ${line}`);
+    }
+    return match[1];
+  });
 }
 
 /** A plain or simply quoted scalar's value: a comment after a space or TAB
@@ -1331,8 +1982,17 @@ function scalarOf(raw, where) {
 const pathsOf = (text, event) =>
   rawPathsOf(text, event).map((item) => scalarOf(item, `on.${event}.paths`));
 
-/** A step's `uses:` value, decoded; "" when it has none. */
-const usesOf = (step, where) => scalarOf(step.get("uses")?.value ?? "", where);
+/** A step's `uses:` value, decoded; "" when it has none. A present `uses:`
+ *  whose scalar is not inline (a child line, a `|`/`>` block) fails loudly. */
+function usesOf(step, where) {
+  const entry = step.get("uses");
+  if (entry === undefined) return "";
+  assert.ok(
+    entry.value !== "" && !/^[|>]/.test(entry.value),
+    `${where}: uses is not an inline scalar`,
+  );
+  return scalarOf(entry.value, where);
+}
 
 /** With no exclusion in a list, a literal item is matched as written, so no
  *  glob engine is needed. The raw text is read because a backslash in a
@@ -1419,6 +2079,25 @@ function pinRecord(text) {
   const record = stepWith(steps, "name", RECORD_NAME, "job gate");
   const decideStep = stepWith(steps, "id", "decide", "job gate");
   const report = stepWith(steps, "name", REPORT_NAME, "job gate");
+  // The gate runs exactly these five steps: any other one, whatever its
+  // spelling (an upload, or a run that uploads with gh), could record a skip.
+  const node = stepWith(steps, "id", "node", "job gate");
+  assert.equal(steps.length, 5, "the gate runs exactly five steps");
+  assert.ok(
+    /^actions\/checkout@/i.test(usesOf(steps[0], "job gate")),
+    "the gate's first step is the checkout",
+  );
+  assert.deepEqual(
+    [node.index, decideStep.index, record.index, report.index],
+    [1, 2, 3, 4],
+    "the gate's step order",
+  );
+  // The record step is the gate's only upload: another, unnamed one could
+  // record on the skip that must not.
+  const uploads = steps.flatMap((step, index) =>
+    /^actions\/upload-artifact@/i.test(usesOf(step, "job gate")) ? [index] : [],
+  );
+  assert.deepEqual(uploads, [record.index], "the gate's only upload");
   assert.ok(record.index > decideStep.index, "record must follow decide");
   assert.ok(record.index < report.index, "record must precede the report");
   assert.equal(get(record.step, "if", "record").value, RECORD_IF);
@@ -1451,6 +2130,11 @@ function pinCheckouts(text) {
       /^actions\/checkout@/i.test(usesOf(step, where)),
     );
     assert.equal(checkouts.length, 1, `${where}: checkout steps`);
+    // A skipped checkout leaves the job without sources, so no condition.
+    assert.ok(
+      ![...checkouts[0].keys()].some((key) => key.toLowerCase() === "if"),
+      `${where}: checkout if`,
+    );
     const inputs = checkouts[0].has("with")
       ? entries(get(checkouts[0], "with", where).children, `${where} with`)
       : new Map();
@@ -1784,10 +2468,18 @@ test("P6 both path filters list every identity member and no exclusion", () => {
     pr + swap(rest, gateLine, ""),
     pr + swap(rest, `      - "${APT_PATH}"\n`, ""),
     swap(pr, '      - "src-tauri/**"\n', "") + rest,
+    swap(pr, '      - ".cargo/config.toml"\n', "") + rest,
+    pr + swap(rest, '      - ".gitattributes"\n', ""),
     afterGate('      - "!scripts/check-rust-gate.mjs"\n'),
     afterGate("      - '!scripts/check-rust-gate.mjs'\n"),
     afterGate('      - "!scripts/check-rust-gate.mjs" # why\n'),
     afterGate(`      - "${BACKSLASH}x21scripts/check-rust-gate.mjs"\n`),
+    // An over-indented item folds into the one above as plain text.
+    swap(
+      pr,
+      '      - ".cargo/config"\n',
+      '      - docs\n        - ".cargo/config"\n',
+    ) + rest,
   ]) {
     assert.throws(() => pinPaths(broken));
   }
@@ -1968,10 +2660,56 @@ test("P9 the gate records its identity after deciding, never gating the decision
       "${{ !cancelled() && steps.decide.outputs.identity",
       "${{ steps.decide.outputs.identity",
     ),
+    // A skip must record nothing: each run clause, and the old condition.
+    swap(
+      WORKFLOW,
+      " && (steps.decide.outcome != 'success' || steps.decide.outputs.run != 'false') }}",
+      " && steps.decide.outcome != 'success' }}",
+    ),
+    swap(
+      WORKFLOW,
+      " && (steps.decide.outcome != 'success' || steps.decide.outputs.run != 'false') }}",
+      " && steps.decide.outputs.run != 'false' }}",
+    ),
+    swap(
+      WORKFLOW,
+      " && (steps.decide.outcome != 'success' || steps.decide.outputs.run != 'false') }}",
+      " }}",
+    ),
+    // A second, unnamed upload that records on the skip.
+    swap(
+      WORKFLOW,
+      "\n\n  test:\n",
+      `\n\n      - uses: "actions/upload-artifact@v7.0.2"\n        if: steps.decide.outputs.run == 'false'\n        with:\n          name: "\${{ steps.decide.outputs.identity }}"\n          path: "\${{ runner.temp }}/rust-gate-evidence/identity.txt"\n\n  test:\n`,
+    ),
+    // The same upload with `uses` on a child line, or an empty path segment
+    // the runner drops, and a run step that could upload any other way.
+    swap(
+      WORKFLOW,
+      "\n\n  test:\n",
+      `\n\n      - uses:\n          "actions/upload-artifact@v7.0.2"\n        with:\n          name: "\${{ steps.decide.outputs.identity }}"\n          path: "\${{ runner.temp }}/rust-gate-evidence/identity.txt"\n\n  test:\n`,
+    ),
+    swap(
+      WORKFLOW,
+      "\n\n  test:\n",
+      `\n\n      - uses: actions/upload-artifact/@v7.0.2\n        with:\n          name: "\${{ steps.decide.outputs.identity }}"\n          path: "\${{ runner.temp }}/rust-gate-evidence/identity.txt"\n\n  test:\n`,
+    ),
+    swap(
+      WORKFLOW,
+      "\n\n  test:\n",
+      "\n\n      - run: echo recorded\n\n  test:\n",
+    ),
     swap(
       WORKFLOW,
       "          retention-days: 14\n",
       "          retention-days: 14\n          archive: false\n",
+    ),
+    // A lone CR is a YAML line break, so the "comment" ends and the input
+    // after it counts.
+    swap(
+      WORKFLOW,
+      "          retention-days: 14\n",
+      `          retention-days: 14\n          # Packaging${String.fromCharCode(13)}          archive: false\n`,
     ),
     swap(
       WORKFLOW,
@@ -2001,6 +2739,36 @@ test("P9 the gate records its identity after deciding, never gating the decision
   );
 });
 
+test("a pinned scalar's folded continuation line is refused", () => {
+  // A more-indented line folds into the scalar above it, so a pin reading only
+  // its first physical line would vouch for a value it never saw.
+  const foldedName = swap(
+    WORKFLOW,
+    "          name: ${{ steps.decide.outputs.identity }}\n",
+    "          name: ${{ steps.decide.outputs.identity }}\n            evidence\n",
+  );
+  const foldedRun = swap(
+    WORKFLOW,
+    "        run: node scripts/check-rust-gate.mjs\n",
+    "        run: node scripts/check-rust-gate.mjs\n          --dry-run\n",
+  );
+  assert.throws(() => pinRecord(foldedName), /name continues on/);
+  assert.throws(() => pinDecide(foldedRun), /run continues on/);
+  pinDecide(WORKFLOW);
+});
+
+test("a pinned scalar keeps a trailing non-YAML blank", () => {
+  // YAML keeps an NBSP after `}}`, so Actions reads the condition as a
+  // non-empty string template, which is always true.
+  const nbsp = String.fromCharCode(0xa0);
+  const trailing = swap(
+    WORKFLOW,
+    `        if: ${RECORD_IF}\n`,
+    `        if: ${RECORD_IF}${nbsp}\n`,
+  );
+  assert.throws(() => pinRecord(trailing));
+});
+
 /** P10's controls over `text`, each `[text, message]`, keyed on each job's own
  *  checkout line, so a bumped ref keeps them live. */
 function checkoutControls(text) {
@@ -2015,7 +2783,16 @@ function checkoutControls(text) {
       const step = `      - uses: ${uses}\n        with:\n          ref: master\n\n`;
       return swap(body, checkout, step + checkout);
     });
+  const condition = (job, key = "if") =>
+    inJob(text, job, (body) => {
+      const checkout = checkoutOf(body);
+      return swap(body, checkout, `${checkout}        ${key}: \${{ false }}\n`);
+    });
   return [
+    [condition("test"), "job test: checkout if"],
+    [condition("gate"), "job gate: checkout if"],
+    [condition("test", "If"), "job test: checkout if"],
+    [condition("gate", "IF"), "job gate: checkout if"],
     [
       add("test", "ref: ${{ github.event.pull_request.head.sha }}"),
       "job test: checkout ref",

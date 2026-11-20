@@ -1998,7 +1998,10 @@ block (`src/test/help-guide-markdown.test.tsx` fails on one).
   files, empty corpora, non-string values, duplicate keys — and FAILS on
   them instead of skipping (not `scripts/check-rust-gate.mjs`: it selects the
   rust-tests matrix, skipping only on a valid exact identity a green run
-  recorded; a failed lookup, or no such match, runs the matrix).
+  recorded whose head commit matches the identity's eight members,
+  absences included, the tested `src-tauri` tree resting on the artifact
+  name alone; a failed artifact lookup, or no verified match, runs the
+  matrix; a candidate whose head listing cannot be read is rejected).
   Mining minted the fail-open-checker-arm class on 12+ records across 6 PRs,
   concentrated in the guard scripts the tripwire rule itself ships: a scanner
   that exits 0 on input it could not parse approves exactly what it cannot
