@@ -27,7 +27,11 @@ import {
   useSideButtonNavigation,
   vetoSideButtonNavigation,
 } from "@/lib/hotkeys/side-buttons";
-import { cachedLensGone, lensKey } from "@/lib/repo-lens/queries";
+import {
+  applyRepoLens,
+  cachedLensGone,
+  lensKey,
+} from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import {
@@ -537,6 +541,23 @@ describe("the history's lens reader", () => {
     host.unmount();
     expect(readNavLens(REPO)).toBeNull();
   });
+
+  it("answers a cached Fork choice before the gate's inputs answer", () => {
+    const client = new QueryClient();
+    const host = render(
+      <QueryClientProvider client={client}>
+        <Host />
+      </QueryClientProvider>,
+    );
+    client.setQueryData(lensKey(REPO), "origin");
+    expect(readNavLens(REPO)).toBe("origin");
+    client.setQueryData(remotesOptions(REPO).queryKey, ["origin", "upstream"]);
+    expect(readNavLens(REPO)).toBe("origin");
+    // The forge status is still uncached, so an Upstream choice is no verdict.
+    client.setQueryData(lensKey(REPO), "upstream");
+    expect(readNavLens(REPO)).toBeNull();
+    host.unmount();
+  });
 });
 
 describe("Go back and Go forward across repositories", () => {
@@ -974,6 +995,57 @@ describe("Go back and Go forward across repositories", () => {
     await settle();
     expect(st().repoPath).toBe(REPO);
     expect(client.getQueryData(lensKey(REPO))).toBe("upstream");
+  });
+
+  it("stamps a Fork landing in a cold repository and re-applies it on Forward", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(["repo", REPO, "forge-status"], {
+      provider: "github",
+      authenticated: true,
+    });
+    client.setQueryData(remotesOptions(REPO).queryKey, ["origin", "upstream"]);
+    client.setQueryData(lensKey(REPO), "upstream");
+    const host = render(
+      <QueryClientProvider client={client}>
+        <Host />
+      </QueryClientProvider>,
+    );
+    await host.findByText("alt+left");
+    act(() => {
+      st().openRepo({ root: REPO, name: "alpha" });
+      st().openIssue({
+        repoPath: OTHER,
+        repoName: "beta",
+        number: 2,
+        carryHistory: true,
+        beforeSelect: () =>
+          applyRepoLens(client, OTHER, "origin", {
+            clearSelections: true,
+            persist: false,
+          }),
+      });
+    });
+    expect(st().repoPath).toBe(OTHER);
+    expect(st().navHistory.segments.at(-1)).toMatchObject({
+      repoPath: OTHER,
+      lens: "origin",
+    });
+    answers(REPO);
+    press("ArrowLeft");
+    await settle();
+    expect(st().repoPath).toBe(REPO);
+    // The session-only lens collected and the saved Upstream choice re-read.
+    act(() => client.setQueryData(lensKey(OTHER), "upstream"));
+    answers(OTHER);
+    press("ArrowRight");
+    await settle();
+    expect(st()).toMatchObject({
+      repoPath: OTHER,
+      selectedIssue: { kind: "remote", id: "2" },
+    });
+    expect(client.getQueryData(lensKey(OTHER))).toBe("origin");
   });
 
   describe("a stop recorded on Upstream", () => {

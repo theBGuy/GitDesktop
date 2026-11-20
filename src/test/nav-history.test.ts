@@ -107,6 +107,7 @@ const historyOf = (
 const entriesOf = (h: NavHistory): readonly NavEntry[] =>
   currentSegment(h)?.entries ?? [];
 const carryOf = (over: Partial<NavCarry> = {}): NavCarry => ({
+  keepsHistory: true,
   lensFrom: null,
   lens: null,
   live: baseState(),
@@ -1637,6 +1638,288 @@ describe("carried hops", () => {
     expect(session.history.segments[0].entries[0].selection).toEqual({
       selectedPr: pr(2),
     });
+  });
+});
+
+describe("a landing's reported departure", () => {
+  // Each landing below reports the state before a `beforeSelect` whose remote-selection
+  // clear was recorded first, and arms the hop, as `openPr` and `openIssue` do.
+  const CLEARED: Partial<Sim> = { selectedPr: null, selectedIssue: null };
+  const KNOWN = {
+    keepsHistory: true,
+    lensFrom: "origin",
+    lens: "origin",
+  } as const;
+
+  /** A session at `start` (under Settings when `overlay`), the clear, the landing. */
+  function reportedLanding(
+    start: Partial<Sim>,
+    land: Partial<Sim>,
+    mark: Partial<NavCarry>,
+    overlay = false,
+  ) {
+    const session = new Session(start);
+    session.checkInvariants = true;
+    if (overlay) session.write({ view: "settings" });
+    const live = session.s;
+    session.write(CLEARED);
+    session.carry(land, { live, ...mark }, true);
+    return { session, live };
+  }
+
+  const ON_ISSUE_7: Partial<Sim> = {
+    repoTab: "issues",
+    selectedIssue: issue(7),
+  };
+  const ON_PR_5: Partial<Sim> = { repoTab: "pulls", selectedPr: pr(5) };
+  const TO_PR_12: Partial<Sim> = { repoTab: "pulls", selectedPr: pr(12) };
+
+  it("keeps the issue a tab-changing landing leaves, reading its anchor once", () => {
+    const a = anchor("card-1");
+    const provider = vi.fn(() => a);
+    registerNavAnchorProvider("issues", provider);
+    const { session } = reportedLanding(ON_ISSUE_7, TO_PR_12, KNOWN);
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(session.history).toEqual(
+      historyOf(
+        [
+          segOf(REPO, null, [
+            entry("issues", { selectedIssue: issue(7) }, a),
+            entry("pulls", { selectedPr: pr(12) }),
+          ]),
+        ],
+        0,
+        1,
+      ),
+    );
+  });
+
+  it("keeps the pull request a same-tab landing leaves", () => {
+    const { session } = reportedLanding(ON_PR_5, { selectedPr: pr(9) }, KNOWN);
+    expect(session.history).toEqual(
+      historyOf(
+        [
+          segOf(REPO, null, [
+            entry("pulls", { selectedPr: pr(5) }),
+            entry("pulls", { selectedPr: pr(9) }),
+          ]),
+        ],
+        0,
+        1,
+      ),
+    );
+  });
+
+  it("returns the trail as shown when the landing is the location it left", () => {
+    const { session, live } = reportedLanding(
+      ON_PR_5,
+      { selectedPr: pr(5) },
+      KNOWN,
+    );
+    expect(session.history).toBe(live.navHistory);
+  });
+
+  it("prunes a stop on a tab hidden in beforeSelect from the trail it returns", () => {
+    const session = new Session({ repoTab: "tags" });
+    session.write(ON_PR_5);
+    const live = session.s;
+    session.write(CLEARED);
+    session.hide(["tags"]);
+    session.carry({ selectedPr: pr(5) }, { live, ...KNOWN }, true);
+    expect(session.history).toEqual(
+      historyOf(
+        [segOf(REPO, null, [entry("pulls", { selectedPr: pr(5) })])],
+        0,
+        0,
+      ),
+    );
+  });
+
+  it("keeps the issue a landing from under an overlay leaves", () => {
+    const { session } = reportedLanding(
+      ON_ISSUE_7,
+      { view: "repo", ...TO_PR_12 },
+      KNOWN,
+      true,
+    );
+    expect(session.entries).toEqual([
+      entry("issues", { selectedIssue: issue(7) }),
+      entry("pulls", { selectedPr: pr(12) }),
+    ]);
+  });
+
+  const KEEPS_NOTHING = {
+    keepsHistory: false,
+    lensFrom: null,
+    lens: "origin",
+  } as const;
+  it.each([
+    [
+      "a tab change",
+      ON_ISSUE_7,
+      TO_PR_12,
+      [
+        entry("issues", { selectedIssue: issue(7) }),
+        entry("pulls", { selectedPr: pr(12) }),
+      ],
+    ],
+    [
+      "a same-tab landing",
+      ON_PR_5,
+      { selectedPr: pr(9) },
+      [
+        entry("pulls", { selectedPr: pr(5) }),
+        entry("pulls", { selectedPr: pr(9) }),
+      ],
+    ],
+  ] as const)(
+    "a report that keeps no history departs from it too: %s",
+    (_n, start, land, expected) => {
+      const { session } = reportedLanding(start, land, KEEPS_NOTHING);
+      expect(session.history.segments).toHaveLength(1);
+      expect(session.entries).toEqual(expected);
+      expect(session.history.index).toBe(1);
+    },
+  );
+
+  it("a report that keeps no history returns the trail as shown on the location it left", () => {
+    const { session, live } = reportedLanding(
+      ON_PR_5,
+      { selectedPr: pr(5) },
+      KEEPS_NOTHING,
+    );
+    expect(session.history).toBe(live.navHistory);
+  });
+
+  it("a report that keeps no history into another repository seeds there", () => {
+    const { session } = reportedLanding(
+      ON_PR_5,
+      { repoPath: BETA, repoName: "beta", selectedPr: pr(9) },
+      KEEPS_NOTHING,
+    );
+    expect(session.history).toEqual(
+      historyOf(
+        [segOf(BETA, null, [entry("pulls", { selectedPr: pr(9) })])],
+        0,
+        0,
+      ),
+    );
+  });
+
+  it("restores a stop the clear merged into its neighbour", () => {
+    const session = new Session({ repoTab: "pulls" });
+    session.checkInvariants = true;
+    session.write({ selectedPr: pr(5) }, true);
+    expect(session.entries).toEqual([
+      entry("pulls"),
+      entry("pulls", { selectedPr: pr(5) }),
+    ]);
+    const live = session.s;
+    session.write(CLEARED);
+    expect(session.entries).toEqual([entry("pulls")]);
+    session.carry({ selectedPr: pr(9) }, { live, ...KNOWN }, true);
+    expect(session.entries).toEqual([
+      entry("pulls"),
+      entry("pulls", { selectedPr: pr(5) }),
+      entry("pulls", { selectedPr: pr(9) }),
+    ]);
+    expect(session.history.index).toBe(2);
+  });
+
+  it("builds on the trail as found, and `prev`, when the shown trail names another segment count", () => {
+    const run = (marked: boolean) => {
+      const session = new Session(ON_ISSUE_7);
+      const live = {
+        ...session.s,
+        navHistory: historyOf(
+          [...session.history.segments, segOf(GAMMA, null, [entry("tags")])],
+          0,
+          0,
+        ),
+      };
+      session.write(CLEARED);
+      if (marked) session.carry(TO_PR_12, { live, ...KNOWN }, true);
+      else session.write(TO_PR_12, true);
+      return session.history;
+    };
+    expect(run(true)).toEqual(run(false));
+    expect(entriesOf(run(true))).toEqual([
+      entry("issues"),
+      entry("pulls", { selectedPr: pr(12) }),
+    ]);
+  });
+
+  it("an unmarked deselect stays one, and a selection written under an overlay folds in", () => {
+    const repo = new Session(ON_ISSUE_7);
+    repo.write(CLEARED);
+    repo.write({ repoTab: "tags" });
+    expect(repo.entries).toEqual([entry("issues"), entry("tags")]);
+
+    const overlay = new Session(ON_ISSUE_7);
+    overlay.write({ view: "settings" });
+    overlay.write({ selectedIssue: issue(8) });
+    overlay.write({ view: "repo", ...TO_PR_12 });
+    expect(overlay.entries).toEqual([
+      entry("issues", { selectedIssue: issue(8) }),
+      entry("pulls", { selectedPr: pr(12) }),
+    ]);
+  });
+
+  it.each([
+    ["keeps the history", true],
+    ["keeps no history", false],
+  ] as const)(
+    "an untold lens records as found: a landing that %s",
+    (_n, keepsHistory) => {
+      const mark = { keepsHistory, lensFrom: "origin", lens: null } as const;
+      const tab = reportedLanding(ON_ISSUE_7, TO_PR_12, mark).session;
+      expect(tab.entries).toEqual([
+        entry("issues"),
+        entry("pulls", { selectedPr: pr(12) }),
+      ]);
+      const same = reportedLanding(
+        ON_PR_5,
+        { selectedPr: pr(9) },
+        mark,
+      ).session;
+      expect(same.entries).toEqual([
+        entry("pulls"),
+        entry("pulls", { selectedPr: pr(9) }),
+      ]);
+    },
+  );
+
+  it("a landing that keeps no history records onto another lens as found, in one segment", () => {
+    const { session } = reportedLanding(ON_ISSUE_7, TO_PR_12, {
+      keepsHistory: false,
+      lensFrom: "origin",
+      lens: "upstream",
+    });
+    expect(session.history.segments).toHaveLength(1);
+    expect(session.entries).toEqual([
+      entry("issues"),
+      entry("pulls", { selectedPr: pr(12) }),
+    ]);
+  });
+
+  it("a departing segment stamped with another lens records as found", () => {
+    const session = new Session({ repoTab: "issues" });
+    session.checkInvariants = true;
+    session.sync("upstream");
+    session.write({ selectedIssue: issue(7) });
+    const live = session.s;
+    session.write(CLEARED);
+    session.carry(
+      TO_PR_12,
+      { live, keepsHistory: false, lensFrom: "origin", lens: "origin" },
+      true,
+    );
+    expect(session.history.segments).toHaveLength(1);
+    expect(session.lens).toBe("upstream");
+    expect(session.entries).toEqual([
+      entry("issues"),
+      entry("pulls", { selectedPr: pr(12) }),
+    ]);
   });
 });
 

@@ -50,6 +50,7 @@ import {
   type MyWorkItem,
   providerLabel,
 } from "@/lib/git/types";
+import { sameCheckout } from "@/lib/git/worktree-default-path";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   hasOpenableMatch,
@@ -554,8 +555,12 @@ export function MyWorkScreen() {
       }
       return;
     }
-    const targetPath = landing.path;
-    const targetName = landing.name;
+    // Recents can spell the open checkout differently, and the store tells a
+    // same-repository landing by strict string equality, so the store's own path.
+    const { repoPath: openPath, repoName: openName } = useUiStore.getState();
+    const here = openPath !== null && sameCheckout(landing.path, openPath);
+    const targetPath = here ? openPath : landing.path;
+    const targetName = (here ? openName : null) ?? landing.name;
     // Land under the origin lens (the match keyed on the ORIGIN slug): a fork
     // sitting on "upstream" resolves this number against the parent repo. Keyed on
     // the path actually navigated to, since a worktree carries its own lens. The

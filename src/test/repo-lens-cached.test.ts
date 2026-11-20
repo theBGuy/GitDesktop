@@ -7,6 +7,7 @@ import type { ForgeStatus, RemoteLens } from "@/lib/git/types";
 import {
   cachedLensGone,
   cachedLensInputsComplete,
+  cachedLensVerdict,
   cachedRepoLens,
   lensKey,
   useLensState,
@@ -95,6 +96,60 @@ describe("cachedRepoLens", () => {
     const { result } = renderHook(() => useLensState(REPO), { wrapper });
     expect(result.current.lens).toBe(lens);
     expect(cachedRepoLens(client, REPO)).toBe(result.current.lens);
+  });
+});
+
+describe("cachedLensVerdict", () => {
+  it.each(CASES.filter(([, seed]) => seed.forge && seed.remotes && seed.raw))(
+    "with every input cached, agrees with cachedRepoLens: %s",
+    (_name, seed, lens) => {
+      const client = seeded(seed);
+      expect(cachedLensInputsComplete(client, REPO)).toBe(true);
+      expect(cachedLensVerdict(client, REPO)).toBe(lens);
+      expect(cachedRepoLens(client, REPO)).toBe(lens);
+    },
+  );
+
+  it("answers null with nothing cached", () => {
+    expect(cachedLensVerdict(seeded({}), REPO)).toBeNull();
+  });
+
+  it.each([
+    ["nothing else", { raw: "origin" }],
+    ["only the forge status", { forge: FORK.forge, raw: "origin" }],
+    ["only the remotes list", { remotes: FORK.remotes, raw: "origin" }],
+  ] as [string, Seed][])(
+    "answers a cached Fork choice with %s cached",
+    (_name, seed) => {
+      expect(cachedLensVerdict(seeded(seed), REPO)).toBe("origin");
+    },
+  );
+
+  it.each([
+    ["nothing else", { raw: "upstream" }],
+    [
+      "only a gate-passing forge status",
+      { forge: FORK.forge, raw: "upstream" },
+    ],
+    [
+      "only a remotes list holding upstream",
+      { remotes: ["origin", "upstream"], raw: "upstream" },
+    ],
+    [
+      "only a remotes list without upstream",
+      { remotes: ["origin"], raw: "upstream" },
+    ],
+  ] as [string, Seed][])(
+    "answers null for a cached Upstream choice with %s cached",
+    (_name, seed) => {
+      expect(cachedLensVerdict(seeded(seed), REPO)).toBeNull();
+    },
+  );
+
+  it("answers null with both gate inputs cached and no stored choice", () => {
+    expect(
+      cachedLensVerdict(seeded({ ...FORK, raw: undefined }), REPO),
+    ).toBeNull();
   });
 });
 

@@ -8,9 +8,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
-import { normPath } from "@/lib/git/path";
 import type { BoardItem, RemoteLens } from "@/lib/git/types";
-import { isMac, isWindows } from "@/lib/hotkeys/binding";
+import { sameCheckout } from "@/lib/git/worktree-default-path";
 import {
   type LocalLandingTarget,
   openingStatus,
@@ -40,14 +39,6 @@ let boardOpenGen = 0;
 function bumpBoardOpenGen(): number {
   boardOpenGen += 1;
   return boardOpenGen;
-}
-
-/** Whether two spellings name one checkout. Separators always fold; letter case
- *  folds only where the platform's disks do by default, since on a
- *  case-sensitive disk two paths that differ by case are two repositories. */
-function sameCheckout(a: string, b: string): boolean {
-  if (isWindows || isMac) return normPath(a) === normPath(b);
-  return a.replace(/\\/g, "/") === b.replace(/\\/g, "/");
 }
 
 /** A card `openItem` let through: an issue or a pull request. */

@@ -79,12 +79,29 @@ export function cachedRepoLens(
 
 /** Whether every cache {@link cachedRepoLens} reads has answered. Until then its
  *  "origin" is a default, not a verdict, so an in-app select could later resolve
- *  under the other lens. */
+ *  under the other lens. A cached "origin" choice is a verdict already:
+ *  {@link cachedLensVerdict} answers it, this does not. */
 export function cachedLensInputsComplete(
   queryClient: QueryClient,
   repo: string,
 ): boolean {
   return cachedLensInputs(queryClient, repo).every((v) => v !== undefined);
+}
+
+/** The cached lens, or null: "origin" for a cached choice of "origin" (no gate
+ *  turns it into "upstream"), the gated lens once all three caches hold data,
+ *  null otherwise. A cached input that is re-read can still move it, as for
+ *  every cached read here. */
+export function cachedLensVerdict(
+  queryClient: QueryClient,
+  repo: string,
+): RemoteLens | null {
+  const inputs = cachedLensInputs(queryClient, repo);
+  const raw = inputs[2];
+  if (raw === "origin") return "origin";
+  return inputs.every((v) => v !== undefined)
+    ? lensFromReads(inputs[0], inputs[1], raw).lens
+    : null;
 }
 
 /** Whether a recorded `lens` is known to no longer resolve: "upstream" while the cached

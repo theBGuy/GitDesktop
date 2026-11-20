@@ -934,8 +934,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   stamped segment left from under an overlay for another repository keeps its
   stamp and its stops up to the current one, whatever the live lens; a
   same-repository hop that lands under that stamp after the live lens moved off
-  it rejoins the segment the same way. Every writer that keeps or adds entries
-  returns through the module's one normalizer (seeding writes one entry, and the
+  it rejoins the segment the same way. `openPr` and `openIssue` report the state
+  they left from, read before `beforeSelect`, on every landing; a landing that
+  stays in its segment and is known to stay under the departing segment's lens
+  records from that stop and trail, since a selection clear in the callback is
+  no deselect of the user's. Every writer that keeps or adds entries returns
+  through the module's one normalizer (seeding writes one entry, and the
   stamp-only lens path returns the entries unchanged). Back and Forward restore
   inside a segment in one set and never call a navigator; a step into another
   segment goes through `restoreNav`'s cross-segment arm (ui.ts): into the same

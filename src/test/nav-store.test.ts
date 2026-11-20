@@ -74,7 +74,8 @@ function countNotifications() {
  *  entry on a hidden tab, never empty; across segments: the cap, no two equal neighbours,
  *  `segment` and `index` on an entry) and "canGo* true exactly when a press changes
  *  location", a repository or lens change counting as one, checked after every store
- *  change until the returned function runs. */
+ *  change until the returned function runs, or the file's `afterEach` ends it for a case
+ *  that failed first. */
 function watchInvariants(): () => string[] {
   const problems: string[] = [];
   const unsubscribe = useUiStore.subscribe((s) => {
@@ -112,17 +113,24 @@ function watchInvariants(): () => string[] {
     if (canGoForward(s) !== fwdMoves)
       problems.push("canGoForward disagrees with the trail");
   });
+  openWatches.add(unsubscribe);
   return () => {
+    openWatches.delete(unsubscribe);
     unsubscribe();
     return problems;
   };
 }
+
+/** The subscriptions `watchInvariants` opened that no call has ended yet. */
+const openWatches = new Set<() => void>();
 
 beforeEach(() => {
   useUiStore.setState(useUiStore.getInitialState(), true);
   __resetNavHistoryForTests();
 });
 afterEach(() => {
+  for (const end of openWatches) end();
+  openWatches.clear();
   useUiStore.setState(useUiStore.getInitialState(), true);
   __resetNavHistoryForTests();
 });
@@ -1459,6 +1467,129 @@ describe("carried hops", () => {
     expect(st()).toMatchObject({ repoTab: "pulls", selectedPr: pr(1) });
     expect(hist()).toMatchObject({ segment: 0, index: 0 });
   });
+
+  describe("a landing whose beforeSelect clears under a known, unchanged lens", () => {
+    /** Alpha stamped origin with the reader agreeing, on `tab` with `select` run. */
+    function knownOrigin(tab: RepoTab, select: () => void) {
+      readLenses({ [REPO]: "origin" });
+      enterRepo();
+      st().syncNavLens(REPO, "origin");
+      st().setRepoTab(tab);
+      select();
+    }
+    /** An `openPr` of alpha's `ref` whose `beforeSelect` clears the remote selections,
+     *  the raw lens flip with the reader unmoved (the branch chip when not carried). */
+    const clearingOpen = (
+      ref: string,
+      carryHistory: boolean,
+      beforeSelect = () => st().clearRemoteSelections(),
+    ) =>
+      st().openPr({
+        kind: "remote",
+        repoPath: REPO,
+        repoName: "alpha",
+        ref,
+        section: null,
+        ...(carryHistory ? { carryHistory: true } : {}),
+        beforeSelect,
+      });
+
+    it.each([
+      ["carried", true],
+      ["not carried", false],
+    ] as const)(
+      "%s from Issues: the issue stop stays and Back restores it",
+      (_n, carryHistory) => {
+        const check = watchInvariants();
+        knownOrigin("issues", () => st().selectIssue(issue(7)));
+        clearingOpen("12", carryHistory);
+        expect(segmentTabs()).toEqual([
+          [REPO, "origin", ["changes", "issues", "pulls"]],
+        ]);
+        expect(entries()[1].selection).toEqual({ selectedIssue: issue(7) });
+        st().goBack();
+        expect(st()).toMatchObject({
+          repoTab: "issues",
+          selectedIssue: issue(7),
+        });
+        expect(check()).toEqual([]);
+      },
+    );
+
+    it.each([
+      ["carried", true],
+      ["not carried", false],
+    ] as const)(
+      "%s from Pulls onto another pull request: Back restores the first",
+      (_n, carryHistory) => {
+        const check = watchInvariants();
+        knownOrigin("pulls", () => st().selectPr(pr(5)));
+        clearingOpen("9", carryHistory);
+        expect(entries().map((e) => e.selection)).toEqual([
+          { selectedFile: null },
+          { selectedPr: pr(5) },
+          { selectedPr: pr(9) },
+        ]);
+        st().goBack();
+        expect(st()).toMatchObject({ repoTab: "pulls", selectedPr: pr(5) });
+        expect(check()).toEqual([]);
+      },
+    );
+
+    it.each([
+      ["carried", true],
+      ["not carried", false],
+    ] as const)(
+      "%s onto the pull request already open: the history stays as it was",
+      (_n, carryHistory) => {
+        const check = watchInvariants();
+        knownOrigin("pulls", () => st().selectPr(pr(5)));
+        const before = hist();
+        clearingOpen("5", carryHistory);
+        expect(hist()).toEqual(before);
+        expect(st().selectedPr).toEqual(pr(5));
+        expect(check()).toEqual([]);
+      },
+    );
+
+    it("from under My work: the issue stop stays and Back restores it", () => {
+      knownOrigin("issues", () => st().selectIssue(issue(7)));
+      st().openMyWork();
+      expect(st().view).toBe("mywork");
+      clearingOpen("12", false);
+      expect(tabs()).toEqual(["changes", "issues", "pulls"]);
+      expect(entries()[1].selection).toEqual({ selectedIssue: issue(7) });
+      st().goBack();
+      expect(st()).toMatchObject({
+        repoTab: "issues",
+        selectedIssue: issue(7),
+      });
+    });
+
+    it("an untold lens records the clear as found", () => {
+      readLenses({});
+      enterRepo();
+      st().setRepoTab("issues");
+      st().selectIssue(issue(7));
+      clearingOpen("12", true);
+      expect(segmentTabs()).toEqual([
+        [REPO, null, ["changes", "issues", "pulls"]],
+      ]);
+      expect(entries()[1].selection).toEqual({ selectedIssue: null });
+    });
+
+    it("a lens the reader turned inside beforeSelect records the clear as found", () => {
+      knownOrigin("issues", () => st().selectIssue(issue(7)));
+      clearingOpen("12", false, () => {
+        lensOf[REPO] = "upstream";
+        st().clearRemoteSelections();
+      });
+      expect(segmentTabs()).toEqual([
+        [REPO, "origin", ["changes", "issues", "pulls"]],
+      ]);
+      expect(entries()[1].selection).toEqual({ selectedIssue: null });
+    });
+  });
 });
 
 const GAMMA = "C:/repos/gamma";
@@ -2522,6 +2653,25 @@ describe("a restore whose recorded lens is gone", () => {
       expect(hist().segments[0].entries[2]).toBe(held.entries[2]);
       expect(hist()).toMatchObject({ segment: 1, index: 0 });
       expect(current()).toEqual(prArrival(3));
+    });
+
+    it("a hop that clears under the stamp it stays under keeps the departing stop", () => {
+      const held = stampedUnderOverlay("origin", "origin");
+      carriedPr(3, "origin");
+      expect(hist()).toEqual({
+        segments: [{ ...held, entries: [...held.entries, prArrival(3)] }],
+        segment: 0,
+        index: 3,
+      });
+      expect(hist().segments[0].entries[2]).toEqual(held.entries[2]);
+      const applyLens = lensApply();
+      st().goBack({ applyLens });
+      expect(applyLens).not.toHaveBeenCalled();
+      expect(st()).toMatchObject({
+        repoPath: REPO,
+        repoTab: "issues",
+        selectedIssue: issue(7),
+      });
     });
   });
 });

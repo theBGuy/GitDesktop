@@ -96,8 +96,14 @@ export interface NavSegmentTarget {
   lens: RemoteLens | null;
 }
 
-/** What a navigator that keeps the history knows at its landing. */
+/** What a landing reports: every `openPr` and `openIssue` landing, and any navigator's
+ *  landing that keeps the history. */
 export interface NavCarry {
+  /** Whether the landing keeps the history (`carryHistory`): only such a landing adds a
+   *  segment to the trail or rejoins one (rule C). One that keeps none reports its
+   *  departure for the ordinary rules alone, its `lensFrom` is unread, and in another
+   *  repository it seeds a new trail. */
+  keepsHistory: boolean;
   /** The OPEN repository's lens before `beforeSelect` ran, by the reader; null when it
    *  could not tell. From under an overlay a recorded stamp outranks it on a hop to
    *  another repository, or back under that stamp. */
@@ -420,6 +426,29 @@ function arrivalOf(next: NavState): NavEntry {
   return { tab, selection: selectionOf(tab, next), anchor: null };
 }
 
+/** The trail as it stood before `beforeSelect`, with the state that held it, while it
+ *  names the segment the landing found (`here`, current in `found`); null otherwise.
+ *  In the repository view, a selection clear in there rewrites a departing stop that
+ *  shows the cleared item to nothing selected, which can merge away an equal stop
+ *  before it that the user saw (under an overlay nothing is recorded). A navigator run
+ *  in there that moved the history to another segment keeps what it recorded. Whatever
+ *  else was written in there inside that segment (a nested landing's stop; a reset,
+ *  while the counts still match) is dropped with it: it never painted. */
+function departureTrail(
+  carry: NavCarry,
+  found: NavHistory,
+  here: NavSegment,
+): { before: NavHistory; from: NavSegment; live: NavCarry["live"] } | null {
+  const shown = carry.live.navHistory;
+  const from = currentSegment(shown);
+  return from !== null &&
+    from.repoPath === here.repoPath &&
+    shown.segment === found.segment &&
+    shown.segments.length === found.segments.length
+    ? { before: shown, from, live: carry.live }
+    : null;
+}
+
 /** A carried hop's history, or null when the hop neither starts a segment nor rejoins one
  *  and the ordinary rules apply (the lens sync then does its own work). */
 function carriedHistory(
@@ -439,26 +468,16 @@ function carriedHistory(
   // this refuses only a landing set that wrote a history of its own.
   if (next.navHistory !== prev.navHistory && next.navHistory.segment !== -1)
     return null;
-  // The trail as it stood before `beforeSelect`, while it names the same segment: a
-  // selection clear in there rewrites the departing stop to nothing selected, which can
-  // merge away an equal stop before it that the user saw. A navigator run in there that
-  // moved the history to another segment keeps what it recorded.
-  const shown = carry.live.navHistory;
-  const shownFrom = currentSegment(shown);
-  const keepShown =
-    shownFrom !== null &&
-    shownFrom.repoPath === here.repoPath &&
-    shown.segment === prev.navHistory.segment &&
-    shown.segments.length === prev.navHistory.segments.length;
-  const before = keepShown ? shown : prev.navHistory;
-  const from = keepShown ? shownFrom : here;
+  const shown = departureTrail(carry, prev.navHistory, here);
+  const before = shown?.before ?? prev.navHistory;
+  const from = shown?.from ?? here;
   const switching = next.repoPath !== prev.repoPath;
   const stamp = from.lens ?? PROVISIONAL_NAV_LENS;
   // Under an overlay the lens sync is unmounted, so a recorded stamp outranks the live
   // lens: the stored stops still stand under it. That holds on leaving the repository,
   // and on a same-repository hop that lands under the stamp after the live lens moved
-  // off it, which rejoins the segment here because the ordinary tab-change rule would
-  // rewrite the departing stop from a selection `beforeSelect` may have cleared.
+  // off it, which rejoins the segment here so the departing entry is taken as stored,
+  // with the anchor read when the view left.
   const overlaid = prev.view !== "repo" && from.lens !== null;
   const rejoins =
     overlaid &&
@@ -514,8 +533,10 @@ function carriedHistory(
 }
 
 /** The history after observing one committed store change; returns `next.navHistory`
- *  itself (same identity) when there is nothing to write. `carry` is the landing's carry
- *  mark, spent whether or not it applies. */
+ *  itself (same identity) when there is nothing to write, except that a reported landing
+ *  under a known, unchanged lens on the location it left returns the trail as shown
+ *  before its `beforeSelect`, normalized. `carry` is the landing's carry mark, spent
+ *  whether or not it applies. */
 export function recordNavigation(
   next: NavState,
   prev: NavState,
@@ -532,8 +553,10 @@ export function recordNavigation(
       ? anchorOnLeave(next, prev, anchorFor)
       : history;
   }
-  // C: a carried hop that changes the repository or the lens starts or rejoins a segment.
-  if (carry !== null) {
+  // C: a landing that keeps the history adds a segment to the trail, or rejoins one, when
+  // it changes the repository or the lens; one that keeps none never does (in another
+  // repository it seeds a new trail, N2a).
+  if (carry?.keepsHistory) {
     const carried = carriedHistory(
       { ...next, repoPath: next.repoPath },
       prev,
@@ -554,18 +577,34 @@ export function recordNavigation(
   if (next.repoPath !== prev.repoPath || seg.repoPath !== next.repoPath) {
     return seedHistory(next);
   }
-  const { entries } = seg;
-  const { index } = history;
+  // A reported landing known to stay under the departing segment's lens departs from the
+  // trail and state shown before its `beforeSelect`: a selection clear in there is no
+  // deselect of the user's, though the rules would read it as one (N7 records it; from
+  // under an overlay N4 reads the cleared state). An untold lens may still turn,
+  // and the lens sync would then re-stamp a kept stop under the other lens, so that
+  // landing, like one onto another lens, records as found.
+  const shown = carry === null ? null : departureTrail(carry, history, seg);
+  const reported =
+    shown !== null &&
+    carry !== null &&
+    carry.lens !== null &&
+    carry.lens === (shown.from.lens ?? PROVISIONAL_NAV_LENS)
+      ? shown
+      : null;
+  const before = reported?.before ?? history;
+  const { entries } = reported?.from ?? seg;
+  const live = reported?.live ?? prev;
+  const { index } = before;
   const current = entries[index];
   const arrival = arrivalOf(next);
   // N4: a tab change pushes, whatever wrote it; every later stop is dropped.
   if (arrival.tab !== current.tab) {
     return normalize(
       withCurrentEntries(
-        history,
+        before,
         [
           ...entries.slice(0, index),
-          departingEntry(current, prev, anchorFor),
+          departingEntry(current, live, anchorFor),
           arrival,
         ],
         index + 1,
@@ -574,13 +613,17 @@ export function recordNavigation(
       next.navHiddenTabs,
     );
   }
-  // N5: a duplicate location never pushes, hop or not.
-  if (sameLocation(current, arrival)) return history;
+  // N5: a duplicate location never pushes, hop or not. A reported landing returns the
+  // trail as shown, which undoes the clear recorded before it, normalized against the
+  // tabs hidden now; an unreported one keeps its identity return.
+  if (sameLocation(current, arrival)) {
+    return before === history ? history : normalize(before, next.navHiddenTabs);
+  }
   // N6: a link hop pushes, dropping every later stop.
   if (hop) {
     return normalize(
       withCurrentEntries(
-        history,
+        before,
         [...entries.slice(0, index + 1), arrival],
         index + 1,
         true,
@@ -592,7 +635,7 @@ export function recordNavigation(
   const rewritten = [...entries];
   rewritten[index] = { ...current, selection: arrival.selection };
   return normalize(
-    withCurrentEntries(history, rewritten, index, false),
+    withCurrentEntries(before, rewritten, index, false),
     next.navHiddenTabs,
   );
 }

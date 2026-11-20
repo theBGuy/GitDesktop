@@ -894,6 +894,28 @@ describe("a clone landing on the open repository", () => {
     },
   );
 
+  it("on Linux, a proven clone whose path differs from the open checkout by one backslash lands in that clone", async () => {
+    platformIs.windows = false;
+    platformIs.mac = false;
+    const h = renderOpen(
+      forkCtx({
+        recents: [
+          { ...WIDGETS_CLONE, path: "C:/src\\harbor", name: "harbor-clone" },
+        ],
+      }),
+    );
+    open(h, WIDGETS_ISSUE);
+    await pending[0].settle({
+      kind: "local",
+      path: "C:/src\\harbor",
+      name: "harbor-clone",
+    });
+    expect(onlyArg(openIssue)).toMatchObject({
+      repoPath: "C:/src\\harbor",
+      repoName: "harbor-clone",
+    });
+  });
+
   it("H15: under Upstream the landing switches to the Fork and says so", async () => {
     const h = renderOpen(
       upstreamCtx({

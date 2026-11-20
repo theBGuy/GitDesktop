@@ -13,6 +13,7 @@ import { MyWorkScreen } from "@/features/mywork/MyWorkScreen";
 import { forgePrHeadRef, repoOriginPath, validateRepo } from "@/lib/git/api";
 import type { MyWorkItem, RepoInfo, RepoOrigin } from "@/lib/git/types";
 import { listUserWorktrees } from "@/lib/git/worktree";
+import { lensKey } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -80,6 +81,18 @@ vi.mock("@/features/repository/useOpenRepoByPath", async (importOriginal) => ({
   >()),
   claimRepoOpen: () => () => true,
 }));
+// `isWindows` and `isMac` are read once at import, and jsdom's empty platform
+// reads as neither: getters let a case pick the platform.
+const platformIs = vi.hoisted(() => ({ windows: false, mac: false }));
+vi.mock("@/lib/hotkeys/binding", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hotkeys/binding")>()),
+  get isWindows() {
+    return platformIs.windows;
+  },
+  get isMac() {
+    return platformIs.mac;
+  },
+}));
 // The opener plugin calls Tauri directly, past the test transport.
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/toast", async (importOriginal) => ({
@@ -144,6 +157,8 @@ const never = <T,>() => new Promise<T>(() => undefined);
 
 beforeEach(() => {
   vi.useFakeTimers();
+  platformIs.windows = false;
+  platformIs.mac = false;
   validate.mockReset().mockImplementation(
     async (p): Promise<RepoInfo> => ({
       root: p,
@@ -166,10 +181,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function renderScreen() {
-  const client = new QueryClient({
+function renderScreen(
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
-  });
+  }),
+) {
   render(
     <QueryClientProvider client={client}>
       <MyWorkScreen />
@@ -489,5 +505,87 @@ describe("My work open", () => {
     expect(openPr).toHaveBeenLastCalledWith(
       expect.objectContaining({ repoPath: "C:/src/widgets-feat" }),
     );
+  });
+
+  describe("M1: a recents entry spelling the open checkout differently", () => {
+    // The two open-checkout cases run as Windows, where separators fold; the
+    // cases after them run with both platform flags false, where a backslash
+    // is part of the name.
+    const OPEN = "C:\\src\\widgets";
+    let saved: { repoPath: string | null; repoName: string | null };
+    beforeEach(() => {
+      const { repoPath, repoName } = useUiStore.getState();
+      saved = { repoPath, repoName };
+    });
+    afterEach(() => {
+      useUiStore.setState(saved);
+    });
+
+    it.each([
+      ["a pull request", true, openPr],
+      ["an issue", false, openIssue],
+    ] as const)(
+      "opens %s under the store's own path and name",
+      async (_name, isPullRequest, navigate) => {
+        platformIs.windows = true;
+        useUiStore.setState({ repoPath: OPEN, repoName: "widgets (open)" });
+        data.items = [
+          item("widgets", 12, isPullRequest, "2026-01-02T00:00:00Z"),
+        ];
+        data.recents = [recent("widgets")];
+        const client = new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        });
+        const input = renderScreen(client);
+        openNext(input);
+        await advance(0);
+        expect(navigate).toHaveBeenCalledTimes(1);
+        const request = navigate.mock.calls[0][0];
+        expect(request).toEqual(
+          expect.objectContaining({
+            repoPath: OPEN,
+            repoName: "widgets (open)",
+          }),
+        );
+        act(() => request.beforeSelect());
+        expect(client.getQueryData(lensKey(OPEN))).toBe("origin");
+        expect(client.getQueryData(lensKey("C:/src/widgets"))).toBeUndefined();
+      },
+    );
+
+    it("off Windows, a backslash spelling of the open checkout keeps the recents' spelling and name", async () => {
+      useUiStore.setState({ repoPath: OPEN, repoName: "widgets (open)" });
+      data.items = [item("widgets", 12, true, "2026-01-02T00:00:00Z")];
+      data.recents = [recent("widgets")];
+      const input = renderScreen();
+      openNext(input);
+      await advance(0);
+      expect(openPr).toHaveBeenCalledTimes(1);
+      expect(openPr).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repoPath: "C:/src/widgets",
+          repoName: "widgets",
+        }),
+      );
+    });
+
+    it("another repository open keeps the recents' spelling and name", async () => {
+      useUiStore.setState({
+        repoPath: "C:\\src\\gadgets",
+        repoName: "gadgets",
+      });
+      data.items = [item("widgets", 12, true, "2026-01-02T00:00:00Z")];
+      data.recents = [recent("widgets")];
+      const input = renderScreen();
+      openNext(input);
+      await advance(0);
+      expect(openPr).toHaveBeenCalledTimes(1);
+      expect(openPr).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repoPath: "C:/src/widgets",
+          repoName: "widgets",
+        }),
+      );
+    });
   });
 });

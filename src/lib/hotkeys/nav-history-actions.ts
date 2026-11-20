@@ -6,8 +6,7 @@ import { normPath } from "@/lib/git/path";
 import {
   applyRepoLens,
   cachedLensGone,
-  cachedLensInputsComplete,
-  cachedRepoLens,
+  cachedLensVerdict,
 } from "@/lib/repo-lens/queries";
 import {
   canGoBack,
@@ -131,18 +130,18 @@ function restoreOptions(queryClient: QueryClient): NavRestoreOptions {
  *  An empty direction keeps its registration, disabled, so the chord is still
  *  consumed rather than reaching the webview's native back. A modal holding focus
  *  stands both down at fire time; App's own dialogs and the gated ones come in as
- *  `dialogOpen`. Also registers the history's lens reader, here because App mounts
- *  this in every view, so a landing made under an overlay still has one. */
+ *  `dialogOpen`. Also registers the history's lens reader (a lens only once no
+ *  missing input could change it), here because App mounts this in every view, so a
+ *  landing made under an overlay still has one. */
 export function useNavHistoryActions(dialogOpen: boolean): void {
   const queryClient = useQueryClient();
-  // The cached lens only once its inputs answered: before that the provisional lens
-  // would read as a real one and start or skip a segment wrongly.
+  // Only a lens no missing input could change: a provisional one would read as real
+  // and start or skip a segment wrongly. A cached Fork choice is such a lens, since no
+  // gate turns it into Upstream.
   useEffect(
     () =>
       registerNavLensReader((repoPath) =>
-        cachedLensInputsComplete(queryClient, repoPath)
-          ? cachedRepoLens(queryClient, repoPath)
-          : null,
+        cachedLensVerdict(queryClient, repoPath),
       ),
     [queryClient],
   );

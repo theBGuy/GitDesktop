@@ -877,9 +877,9 @@ export const useUiStore = create<UiState>()((set, get) => {
   // callback ran, such as a pending repo open.
   let inBeforeSelect = false;
 
-  // The departing stop of a landing that keeps the history: the state, and the open
-  // repository's lens by the registered reader, both read before `beforeSelect` runs
-  // (it may clear the selection and flip the lens the departing segment was under).
+  // The departing stop a landing reports: the state, and the open repository's lens by
+  // the registered reader, both read before `beforeSelect` runs (it may clear the
+  // selection and flip the lens the departing segment was under).
   type Departure = { state: UiState; lensFrom: RemoteLens | null };
   const departureNow = (): Departure => {
     const state = get();
@@ -909,11 +909,18 @@ export const useUiStore = create<UiState>()((set, get) => {
     }
   };
 
-  // Marks the landing set that follows as a carried hop; call it immediately before
-  // that set, since any store write in between would spend it.
-  const armCarryTo = (repoPath: string, departure: Departure | null) => {
+  // Reports the landing set that follows; call it immediately before that set, since
+  // any store write in between would spend it. Every `openPr` and `openIssue` landing
+  // reports, since its `beforeSelect` may clear the departing selection; `carryHistory`
+  // alone opts a landing into `recordNavigation`'s rule C.
+  const armCarryTo = (
+    repoPath: string,
+    departure: Departure | null,
+    keepsHistory: boolean,
+  ) => {
     if (departure === null) return;
     armCarry({
+      keepsHistory,
       lensFrom: departure.lensFrom,
       lens: readNavLens(repoPath),
       live: departure.state,
@@ -1176,7 +1183,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           const switchingRepo = get().repoPath !== target.repoPath;
           // After `beforeSelect`, which can write the store and would spend the marks.
           armLinkHop();
-          if (target.carryHistory) armCarryTo(target.repoPath, departure);
+          armCarryTo(target.repoPath, departure, target.carryHistory === true);
           set({
             view: "repo",
             previousView: "repo",
@@ -1234,7 +1241,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           const departure = beforeSelectDeparture;
           const switchingRepo = get().repoPath !== target.repoPath;
           armLinkHop();
-          if (target.carryHistory) armCarryTo(target.repoPath, departure);
+          armCarryTo(target.repoPath, departure, target.carryHistory === true);
           set({
             view: "repo",
             previousView: "repo",
@@ -1273,7 +1280,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           const departure = departureNow();
           const switchingRepo = get().repoPath !== target.repoPath;
           armLinkHop();
-          if (target.carryHistory) armCarryTo(target.repoPath, departure);
+          if (target.carryHistory) armCarryTo(target.repoPath, departure, true);
           set({
             view: "repo",
             previousView: "repo",
@@ -1310,7 +1317,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           if (target.stillValid?.(epochAtRequest) === false) return;
           const departure = departureNow();
           const switchingRepo = get().repoPath !== target.repoPath;
-          if (target.carryHistory) armCarryTo(target.repoPath, departure);
+          if (target.carryHistory) armCarryTo(target.repoPath, departure, true);
           set({
             view: "repo",
             previousView: "repo",
@@ -1345,7 +1352,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           if (target.stillValid?.(epochAtRequest) === false) return;
           const departure = departureNow();
           const switchingRepo = get().repoPath !== target.repoPath;
-          if (target.carryHistory) armCarryTo(target.repoPath, departure);
+          if (target.carryHistory) armCarryTo(target.repoPath, departure, true);
           set({
             view: "repo",
             previousView: "repo",
