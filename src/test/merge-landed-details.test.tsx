@@ -377,11 +377,11 @@ describe("a landed merge keeps the details merged", () => {
         return new AbortController().signal;
       },
     };
-    const { queryFn } = prDetailsOptions(REPO, 7, "origin");
+    const read = prDetailsOptions(REPO, 7, "origin").queryFn as (
+      c: unknown,
+    ) => Promise<PrDetails>;
     act(() => markMergeLanded(client, REPO, "origin", 7));
-    const answer = await (queryFn as (c: unknown) => Promise<PrDetails>)(
-      context,
-    );
+    const answer = await read(context);
     expect(answer.state).toBe("MERGED");
     expect(signalReads).toBe(0);
   });
