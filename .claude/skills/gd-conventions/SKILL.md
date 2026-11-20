@@ -1804,7 +1804,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Every test-build git goes through `TestGitEnv`** (`git/runner.rs`): the
   runner applies it, and a test that spawns git itself calls `.test_git_env()` —
   no system, global or XDG config, and no inherited repository or config
-  redirects. The removal list covers git's `local_repo_env` (v2.51.1) except
+  redirects. A test that needs global config passes a `GIT_CONFIG_GLOBAL`
+  file of its own: the runner panics on a `config --global` write without
+  one. The removal list covers git's `local_repo_env` (v2.51.1) except
   `GIT_CONFIG_COUNT`, plus `GIT_TEMPLATE_DIR` and a few other repository-shape
   names, and a test pins that coverage. Two names stay on purpose:
   `GIT_CEILING_DIRECTORIES` (a caller sets that pair before the trait) and
@@ -1876,13 +1878,6 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `DEFAULT_TIMEOUT`. A budget a test passes to product code under test, the
   lock-taking and retrying wrappers included, stays the product's (a helper
   that does so takes an allowlist row; guard: check-rust-invariants check L).
-- **Test git children run on `TEST_GIT_ENV`** (`git/runner.rs`, test builds
-  only: no system, global or XDG config). `run_git_spawn` applies it before
-  the caller's pairs, which win; a test that spawns git itself passes
-  `cmd.envs(TEST_GIT_ENV)`, or that git reads the developer's config. A test
-  that needs global config passes a `GIT_CONFIG_GLOBAL` file of its own: the
-  runner panics on a `config --global` write without one. No guard covers a
-  direct spawn (review-enforced).
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag

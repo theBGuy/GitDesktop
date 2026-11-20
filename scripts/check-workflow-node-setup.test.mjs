@@ -1679,6 +1679,34 @@ describe("corpus and unreadable input", () => {
         "&co",
       ],
       alias: [workflow(`${CHECKOUT}${SETUP}      - run: *cmd\n`), "*cmd"],
+      "anchor and alias in a flow mapping": [
+        workflow(
+          `${CHECKOUT}${SETUP}      - env: {A: &value hello, B: *value}\n        run: echo hi\n`,
+        ),
+        "&value",
+      ],
+      "alias as a flow step's run": [
+        workflow(`${CHECKOUT}${SETUP}      - {run: *n}\n`),
+        "*n",
+      ],
+      "alias in a flow sequence": [
+        workflow(CHECKOUT + SETUP + NODE, {
+          head: `${HEAD}    needs: [main,\n      *other]\n`,
+        }),
+        "needs: [",
+      ],
+      "tag in a flow mapping": [
+        workflow(
+          `${CHECKOUT}${SETUP}      - env: {a: !!str x}\n        run: echo hi\n`,
+        ),
+        "!!str",
+      ],
+      "tag in a flow sequence": [
+        workflow(CHECKOUT + SETUP + NODE, {
+          head: `${HEAD}    needs: [!tag x]\n`,
+        }),
+        "needs: [",
+      ],
       "merge key": [PASSING.replace(HEAD, `${HEAD}    <<: x\n`), "<<: x"],
       tag: [
         workflow(`${CHECKOUT}${SETUP}      - run: !!str node x\n`),
@@ -1755,6 +1783,23 @@ describe("corpus and unreadable input", () => {
         assert.match(result.failures[0], /flow-style/);
       else assert.doesNotMatch(result.failures[0], /flow-style/, label);
     }
+  });
+
+  test("`&`, `*` and `!` inside a flow value's quotes or plain words stay readable", () => {
+    passes(
+      check(
+        workflow(
+          `${CHECKOUT}${SETUP}      - env: {A: "&v", B: a&b, C: x*y, D: '*q', E: [ "*", '&' ]}\n        run: node x.mjs\n`,
+        ),
+      ),
+    );
+    passes(
+      check(
+        workflow(
+          `${CHECKOUT}${SETUP}      - env: {A: "!x", B: a!b}\n        run: node x.mjs\n`,
+        ),
+      ),
+    );
   });
 
   test("a read error or a non-workflow path is unreadable", () => {
@@ -1987,6 +2032,21 @@ describe("CLI", () => {
   });
 });
 
+// Removes the setup-node step from frontend.yml's `build` job only: the search
+// stops at the next line indented two spaces or less, so a later job's setup
+// is never the one removed, and a build without one fails here.
+function withoutBuildSetup(text) {
+  const start = text.indexOf("\n  build:\n");
+  assert.ok(start >= 0, "frontend.yml has no build job");
+  const next = text.slice(start + 1).search(/\n {0,2}[^\s#]/);
+  const end = next < 0 ? text.length : start + next + 2;
+  const block = text.slice(start, end);
+  const setup =
+    /\n {6}- (?:[^\n]*\n(?: {8}(?!uses:)[^\n]*\n)* {8})?uses: actions\/setup-node@[^\n]*\n(?: {8,}[^\n]*\n)*/;
+  assert.match(block, setup, "build has no setup-node step");
+  return text.slice(0, start) + block.replace(setup, "\n") + text.slice(end);
+}
+
 describe("real tree", () => {
   const SITES = [
     "appimage-check.yml#appimage",
@@ -2015,22 +2075,21 @@ describe("real tree", () => {
     const { files, nodeVersion } = readCorpus(ROOT);
     const file = ".github/workflows/frontend.yml";
     const before = files.get(file);
-    const start = before.indexOf("\n  build:\n");
-    assert.ok(start >= 0);
-    const after =
-      before.slice(0, start) +
-      before
-        .slice(start)
-        .replace(
-          /\n {6}- (?:[^\n]*\n(?: {8}(?!uses:)[^\n]*\n)* {8})?uses: actions\/setup-node@[^\n]*\n(?: {8,}[^\n]*\n)*/,
-          "\n",
-        );
+    const after = withoutBuildSetup(before);
     assert.notEqual(after, before);
     files.set(file, after);
-    assert.deepEqual(
-      shape(verdict(files, nodeVersion)).map(([rule, path]) => [rule, path]),
-      [["setup-node-missing", file]],
-    );
+    const steps = parseWorkflow(after, file)
+      .entries.get("jobs")
+      .entries.get("build")
+      .entries.get("steps");
+    const first = steps.items.findIndex((step) => {
+      const run = step.entries?.get("run");
+      return run?.kind === "scalar" && runsNode(run.value);
+    });
+    assert.ok(first >= 0, "build runs no node step");
+    assert.deepEqual(shape(verdict(files, nodeVersion)), [
+      ["setup-node-missing", file, steps.lines[first]],
+    ]);
   });
 
   test("real tree: release notes without its bound fails at the job key", () => {

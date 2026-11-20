@@ -2120,7 +2120,7 @@ function pinRecord(text) {
 }
 
 /** The gate signs the commit the matrix tests only while both jobs check out
- *  the default commit into the default path. */
+ *  the default commit's whole tree into the default path. */
 function pinCheckouts(text) {
   for (const job of ["gate", "test"]) {
     const where = `job ${job}`;
@@ -2140,7 +2140,16 @@ function pinCheckouts(text) {
       : new Map();
     // The runner exports `with:` keys case-insensitively, as INPUT_<NAME>.
     const names = new Set([...inputs.keys()].map((key) => key.toLowerCase()));
-    for (const key of ["ref", "repository", "path"]) {
+    // checkout v7's action.yml: `filter` partially clones and `sparse-checkout`
+    // (with its cone mode) materializes only the listed patterns.
+    for (const key of [
+      "ref",
+      "repository",
+      "path",
+      "filter",
+      "sparse-checkout",
+      "sparse-checkout-cone-mode",
+    ]) {
       assert.ok(!names.has(key), `${where}: checkout ${key}`);
     }
   }
@@ -2805,6 +2814,20 @@ function checkoutControls(text) {
     [add("gate", "Ref: master"), "job gate: checkout ref"],
     [add("test", "REPOSITORY: other/repo"), "job test: checkout repository"],
     [add("gate", "Path: src"), "job gate: checkout path"],
+    // A partial checkout leaves the matrix without src-tauri/Cargo.toml.
+    [
+      add("test", "sparse-checkout: .github"),
+      "job test: checkout sparse-checkout",
+    ],
+    [add("test", "filter: blob:none"), "job test: checkout filter"],
+    [
+      add("test", "Sparse-Checkout-Cone-Mode: false"),
+      "job test: checkout sparse-checkout-cone-mode",
+    ],
+    [
+      add("gate", "SPARSE-CHECKOUT: scripts"),
+      "job gate: checkout sparse-checkout",
+    ],
     // GitHub resolves the action's owner/repo case-insensitively too.
     [extra("test"), "job test: checkout steps"],
     [extra("gate"), "job gate: checkout steps"],

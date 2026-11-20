@@ -370,10 +370,13 @@ export function parseWorkflow(source, file) {
 
   // A flow value stays opaque only once its brackets, counted outside quotes,
   // close in order and nothing follows the outermost one; YAML would otherwise
-  // read on into the next keys, or fail.
+  // read on into the next keys, or fail. A token opening with `&`, `*` or `!`
+  // (after `{`, `[`, `,` or a `: `) is an anchor, alias or tag, refused as the
+  // block forms are: an alias could stand for a node command.
   function balanced(value, n) {
     const open = [];
     let quote = "";
+    let token = true;
     for (let i = 0; i < value.length; i++) {
       const char = value[i];
       if (quote === "'") {
@@ -387,12 +390,20 @@ export function parseWorkflow(source, file) {
           fail(n, "content after a flow collection");
         }
         if (i === 0) open.push(char === "{" ? "}" : "]");
+      } else if (/[ \t\n]/.test(char)) continue;
+      else if (token && "&*!".includes(char)) {
+        fail(n, "anchors, aliases and tags are not read");
       } else if (char === "'" || char === '"') quote = char;
       else if (char === "{") open.push("}");
       else if (char === "[") open.push("]");
       else if (char === "}" || char === "]") {
         if (open.pop() !== char) fail(n, "mismatched brackets in a flow value");
       }
+      token =
+        char === "{" ||
+        char === "[" ||
+        char === "," ||
+        (char === ":" && /^(?:[ \t\n]|$)/.test(value[i + 1] ?? ""));
     }
     if (quote || open.length) fail(n, "unterminated flow collection");
   }
