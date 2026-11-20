@@ -81,7 +81,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { reloadLocalPrs } from "@/lib/pulls/local";
-import { PR_NOUN, type PrNoun } from "@/lib/pulls/pr-state";
+import { PR_NOUN, type PrNoun, prStateWord } from "@/lib/pulls/pr-state";
 import {
   LOCAL_PR_RECORD_WRITES_FAMILY,
   localPrKey,
@@ -1558,7 +1558,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
               )}
               {pr.state !== "OPEN" && (
                 <Badge variant="secondary" className="capitalize">
-                  {pr.state.toLowerCase()}
+                  {prStateWord(pr.state)}
                 </Badge>
               )}
               {ciMap?.get(pr.number) === "passing" && (
