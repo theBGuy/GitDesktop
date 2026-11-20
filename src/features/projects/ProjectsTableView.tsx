@@ -402,7 +402,9 @@ export function ProjectsTableView({
       onEditCell(entry.item, edit);
       return;
     }
-    if (el.closest("[data-title-open]") !== null) onActivate(entry.item);
+    // One open per multi-click gesture; a keyboard click's `detail` is 0.
+    if (el.closest("[data-title-open]") !== null && e.detail <= 1)
+      onActivate(entry.item);
   }
 
   const scrollMargin = virtualizer.options.scrollMargin;

@@ -271,15 +271,19 @@ async function resolveLiveTarget(
   if (superseded()) return null;
   if (captured) {
     if (stamp === undefined) {
+      // With no identity to check, only the stored folder itself is that
+      // repository: git's walk-up answers an ENCLOSING repo for a folder that
+      // is no longer one, and its pull requests and runs are someone else's.
+      if (normPath(captured.root) !== normPath(n.repoPath)) return null;
       return { repoPath: captured.root, repoName: captured.name };
     }
-    // Belt check: a folder recreated at the same path (or an enclosing repo the
-    // walk-up found) is a DIFFERENT repository, so a mismatch falls into the
-    // ladder rather than opening someone else's pull request. An unknown identity
-    // stands: this checkout is live, and it is the one the event named.
+    // Belt check: a folder recreated at the same path is a DIFFERENT repository,
+    // so a mismatch falls into the ladder. An unknown identity stands only for the
+    // stored folder itself; an enclosing root the walk-up found must match.
     const verdict = await identityVerdict(captured.root, stamp);
     if (superseded()) return null;
-    if (verdict !== "mismatch") {
+    const sameFolder = normPath(captured.root) === normPath(n.repoPath);
+    if (verdict === "match" || (verdict === "unknown" && sameFolder)) {
       return { repoPath: captured.root, repoName: captured.name };
     }
   }
@@ -290,7 +294,15 @@ async function resolveLiveTarget(
   // the user's other selections survive. Validated first — it may ITSELF be the
   // deleted worktree, and the resolver must only ever see a live path.
   const cur = useUiStore.getState().repoPath;
-  if (cur) {
+  // The first rung found the stored folder resolving to an enclosing repository,
+  // and the identity memo can still answer the stamp for that dead path, so the
+  // same folder on screen is not taken here (the stored folder only).
+  const storedFolderGone =
+    captured !== null &&
+    normPath(captured.root) !== normPath(n.repoPath) &&
+    cur !== null &&
+    normPath(cur) === normPath(n.repoPath);
+  if (cur && !storedFolderGone) {
     const info = await validateRepo(cur).catch(() => null);
     if (superseded()) return null;
     if (info) {

@@ -126,7 +126,14 @@ function JiraStatusChip({ issue }: { issue: JiraIssueInfo }) {
   );
 }
 
-export function IssuesPanel({ repoPath }: { repoPath: string }) {
+export function IssuesPanel({
+  repoPath,
+  detailKey,
+}: {
+  repoPath: string;
+  /** The detail pane's item key; see ConversationListPanel's `detailKey`. */
+  detailKey?: string | null;
+}) {
   const gh = useForgeStatus(repoPath);
   const provider = gh.data?.provider;
   const isGitLab = provider === "gitlab";
@@ -494,6 +501,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
       <SessionExpiryNotice repoPath={repoPath} />
       <ConversationListPanel
         repoPath={repoPath}
+        detailKey={detailKey}
         feature="issues"
         remoteLabel={remoteLabel}
         stateFilter={stateFilter}

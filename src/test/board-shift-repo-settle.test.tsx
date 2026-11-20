@@ -354,3 +354,82 @@ describe.each(DRIVERS)("a whole-repo write settle: $name", (driver) => {
     }).toEqual({ reads: 2, cached: NEW });
   });
 });
+
+describe.each(DRIVERS)("the shift hold is per repository: $name", (driver) => {
+  it("a settle on another repository re-reads that repository's board while the chase holds", async () => {
+    const held = freshRepo();
+    const other = freshRepo();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result: hook } = renderHook(
+      () => ({
+        items: useProjectItems(held, PROJECT, null, true, false, false),
+        otherItems: useProjectItems(other, PROJECT, null, true, false, false),
+        shift: useShiftItemDates(),
+        remote: useSetRemoteUrl(other),
+      }),
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      },
+    );
+    await waitFor(() => {
+      expect(hook.current.items.isSuccess).toBe(true);
+      expect(hook.current.otherItems.isSuccess).toBe(true);
+    });
+    const readsOf = (repo: string) =>
+      vi.mocked(ghProjectItems).mock.calls.filter(([r]) => r === repo).length;
+    let shift: Promise<string> | undefined;
+    act(() => {
+      shift = hook.current.shift
+        .mutateAsync({
+          repo: held,
+          projectId: PROJECT,
+          itemId: ITEM,
+          issueId: null,
+          issueFieldIdByFieldId: {},
+          values: [
+            dateValue(START, "Start", NEW.start),
+            dateValue(TARGET, "Target", NEW.target),
+          ],
+          query: null,
+          archived: false,
+          rich: false,
+        })
+        .then(
+          (o) => o.kind,
+          (e) => `threw: ${String(e)}`,
+        );
+    });
+    let observed: object = {};
+    let outcome = "never shifted";
+    try {
+      await waitFor(() =>
+        expect(vi.mocked(ghSetItemsFieldValues)).toHaveBeenCalledTimes(1),
+      );
+      const before = { held: readsOf(held), other: readsOf(other) };
+      const driverRan = await driver.run({ client, hook }, other);
+      await macrotasks(4);
+      observed = {
+        driverRan,
+        heldReads: readsOf(held) - before.held,
+        otherReads: readsOf(other) - before.other,
+      };
+    } finally {
+      // A throw above must not tear down with the chase still running.
+      openGate();
+      if (shift !== undefined)
+        outcome = await act(() => shift as Promise<string>);
+    }
+    await macrotasks(4);
+    expect({ ...observed, outcome, server }).toEqual({
+      driverRan: true,
+      heldReads: 0,
+      otherReads: 1,
+      outcome: "converged",
+      server: NEW,
+    });
+  });
+});

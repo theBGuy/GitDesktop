@@ -64,6 +64,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
 import type {
   DiscussionCloseReason,
   DiscussionLockReason,
@@ -351,6 +352,11 @@ export function DiscussionView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // A landing (mount, or an `<Activity>` show, which replays this setup) takes
+  // focus that was lost: a reveal leaves it on the hidden tab's control.
+  useLayoutEffect(() => {
+    if (focusIsLost()) focusHost.current?.focus({ preventScroll: true });
+  }, []);
   // The scope hint docks on the composer, so toasts clear its copy button too.
   // Every arm without data returns early below, so data is its mount condition.
   const scopeHintRef = useRef<HTMLDivElement>(null);

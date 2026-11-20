@@ -225,6 +225,9 @@ the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
 invariant, not polish. A list container that co-hosts a text editor (inline
 edit field, reply box) passes `ignoreTextEntry` so arrows keep moving the
 caret; leave it off where arrows deliberately drive nav from a filter input.
+A combobox-driven listbox whose rows aren't tabbable (My work, Explore) takes
+`keepNonRowPressOffList` (same module) as its `onMouseDown`, so a press off the
+rows never moves focus out of the input.
 The clamped pickers (command palette, task picker, the co-author and
 Bitbucket add-reviewer popovers, RepoList, the session composer's @ and /
 menus) read one cursor that `clampHighlight` derives from the stored index
@@ -926,6 +929,17 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   holding `landId`, and leaves a reasoned `aria-disabled` hold focused, since
   that doesn't match `:disabled`. Pinned by
   `src/test/land-stranded-focus.test.tsx`.
+- Whether focus is lost is `focusIsLost()` (`src/lib/focus-lost.ts`): on
+  `<body>`, on nothing, on a detached node, or on an element that isn't
+  rendered. The last is the `<Activity>` reveal: the commit that shows a tab
+  hides the old one while focus still sits on its control, which a body-only
+  test misses. Every LANDING reads it: `RemoteIssueView`, `RemotePrView` and
+  `DiscussionView` on mount and show, and ConversationListPanel when its
+  detail closes, fed `detailKeyOf` of RepositoryView's deferred selection
+  (the one the pane renders from, never a deferral of the list's own). A
+  frame rescue that runs while its view stays mounted may keep the body-only
+  test. A landing still only TAKES lost focus, never moves it off a visible
+  element.
 
 ## Seam idioms (the spec template's "Idioms at this seam" field reads this list)
 
