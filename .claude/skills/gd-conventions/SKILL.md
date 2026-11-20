@@ -70,7 +70,10 @@ the length of the run; its exit code is the suite's.
   `cargo test --manifest-path src-tauri/Cargo.toml -- git::branches:: git::remote::`),
   plus the modules that CALL each changed item, found with
   `git grep -n "<item>" -- src-tauri/src`. Frontend:
-  `pnpm exec vitest related --run <changed src files> <edited test files>`.
+  `pnpm exec vitest related --run <changed src files> <edited test files>`,
+  plus `node scripts/check-banned-patterns.mjs` on every frontend step: it
+  scans `src/test/` too, and tsc, biome and vitest all pass code it fails; the
+  required `guards` job runs it.
   In a session whose worktree-isolated Bash guard refuses a cargo filter
   containing `git::`, run the same command with the PowerShell tool.
 - **Full, once, at the end.** Before reporting done, commit-ready, or handing
@@ -1826,6 +1829,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `DEFAULT_TIMEOUT`. A budget a test passes to product code under test, the
   lock-taking and retrying wrappers included, stays the product's (a helper
   that does so takes an allowlist row; guard: check-rust-invariants check L).
+- **Test git children run on `TEST_GIT_ENV`** (`git/runner.rs`, test builds
+  only: no system, global or XDG config). `run_git_spawn` applies it before
+  the caller's pairs, which win; a test that spawns git itself passes
+  `cmd.envs(TEST_GIT_ENV)`, or that git reads the developer's config. A test
+  that needs global config passes a `GIT_CONFIG_GLOBAL` file of its own: the
+  runner panics on a `config --global` write without one. No guard covers a
+  direct spawn (review-enforced).
 - **Forge gating:** per-action `Implemented` flags. Shared-with-GitHub
   controls gate on `canWrite || forgeFeatureReady` (GitHub must be zero-diff);
   provider-only controls gate on `forgeFeatureReady` alone with the flag
@@ -1970,21 +1980,35 @@ block (`src/test/help-guide-markdown.test.tsx` fails on one).
   inline `node -e`/shell string in a workflow file — it is invisible to biome,
   to `node --test`, and to every static review lane (four independent defects
   once shipped in one such predicate). Extract to `scripts/check-*.mjs` with
-  hit/miss fixtures in `scripts/checks.test.mjs`; the YAML step only invokes
-  the script.
+  hit/miss fixtures in `scripts/checks.test.mjs` or the script's own
+  `scripts/check-<name>.test.mjs`; the YAML step only invokes the script.
+- **CI jobs are bounded and run Node from `.node-version`:** every job that
+  runs steps carries a literal job-level `timeout-minutes` set from measured
+  durations, and a job that runs Node or a Node package manager first sets
+  Node up with `actions/setup-node` and `node-version-file: .node-version`,
+  after checkout. A setup-node under `continue-on-error` covers a later step
+  only if that step is `continue-on-error` too or its `if:` requires
+  `steps.<id>.outcome == 'success'`. A job without a bound runs to GitHub's
+  6-hour default on a hang, and the image's Node drifts from `.node-version`.
+  `scripts/check-workflow-node-setup.mjs` gates both; its `EXEMPT` map waives
+  only a container job or a composite action running Node, with a reason.
 - **Guard scripts default CLOSED on inputs they cannot read:** every
-  `scripts/check-*.mjs` enumerates its unreadable-input arms — unquoted or
-  folded YAML scalars, binary bytes, deleted/missing files, empty corpora,
-  non-string values, duplicate keys — and FAILS on them instead of skipping.
+  `scripts/check-*.mjs` validation guard enumerates its unreadable-input
+  arms — unquoted or folded YAML scalars, binary bytes, deleted/missing
+  files, empty corpora, non-string values, duplicate keys — and FAILS on
+  them instead of skipping (not `scripts/check-rust-gate.mjs`: it selects the
+  rust-tests matrix and fails OPEN: an error in its own run or on the current
+  side runs the matrix, and a candidate it cannot compare is only rejected).
   Mining minted the fail-open-checker-arm class on 12+ records across 6 PRs,
   concentrated in the guard scripts the tripwire rule itself ships: a scanner
   that exits 0 on input it could not parse approves exactly what it cannot
-  see. Each arm gets a miss fixture in `scripts/checks.test.mjs`, and an
-  empty-corpus / zero-files-matched result is a FAIL or an explicit annotated
-  skip, never a pass. **A PR that ships a scanner/guard is a parser-grade
-  adversarial surface:** budget a dedicated adversarial loop over its input
-  grammar (aliased/namespace imports, destructured params, catch bindings —
-  the shapes reviewers actually threw) or ship the guard as its own PR — one
+  see. Each arm gets a miss fixture in `scripts/checks.test.mjs` or the
+  script's own `scripts/check-<name>.test.mjs`, and an empty-corpus /
+  zero-files-matched result is a FAIL or an explicit annotated skip, never a
+  pass. **A PR that ships a scanner/guard is a parser-grade adversarial
+  surface:** budget a dedicated adversarial loop over its input grammar
+  (aliased/namespace imports, destructured params, catch bindings — the
+  shapes reviewers actually threw) or ship the guard as its own PR — one
   cycle-3 PR (#425) paid 9+ consecutive reviewer rounds draining exactly those
   arms one at a time.
 

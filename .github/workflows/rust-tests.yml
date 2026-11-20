@@ -54,6 +54,7 @@ on:
       - "src-tauri/**"
       - ".github/workflows/rust-tests.yml"
       - ".github/scripts/canonicalize-rust.py"
+      - "scripts/check-rust-gate.mjs"
   push:
     branches:
       - master
@@ -61,6 +62,7 @@ on:
       - "src-tauri/**"
       - ".github/workflows/rust-tests.yml"
       - ".github/scripts/canonicalize-rust.py"
+      - "scripts/check-rust-gate.mjs"
 
 # One in-flight run per ref; a force-push cancels the superseded run instead of
 # stacking a second one.
@@ -73,24 +75,25 @@ permissions:
   actions: read # gate reads this workflow's own run history
 
 jobs:
-  # Decide whether the expensive matrix actually needs to run. The signature of
-  # what the matrix would build is the `src-tauri` tree object + this workflow
-  # file's blob; if a byte-identical signature already passed a recent run, the
-  # result is a foregone conclusion and we skip. Content-addressed via git's own
-  # tree hashes, so it's exact — an identical tree skips, a changed one runs,
-  # including any direct push to master. Fail-open by construction: any hiccup
-  # (API error, unresolved commit) leaves the decision at "run", so the worst
-  # case is a redundant run, never a silently-skipped failure.
-  #
-  # Two passes (see the header block for the accepted risk of pass 2):
-  #   pass 1 — exact tree+wf signature match against recent greens (unchanged).
-  #   pass 2 — only when pass 1 finds nothing: comment/format-only equivalence
-  #            in `.rs` files, via `.github/scripts/canonicalize-rust.py`.
+  # The decision lives in scripts/check-rust-gate.mjs: pass 1 skips when an
+  # identical `src-tauri` tree already passed under the same workflow,
+  # gate-script and canonicalizer blobs, pass 2 when the delta vs a green with
+  # those same blobs is comment/format-only `.rs` (header block above). The
+  # gate and canonicalizer blobs are in the identity, so a change to either
+  # re-runs the matrix, as does a merge commit whose gate or workflow differs
+  # from the PR head's (a PR green is listed by head SHA but ran its merge
+  # commit, a limit the script header names). The wiring fails OPEN: `test`
+  # skips only on `run=false` from a decide step that succeeded in a gate job
+  # that succeeded, so a setup-node failure, a script crash or hang, a missing
+  # output or a failed gate job all still run the matrix, and the report step
+  # makes the miss visible.
   gate:
     name: gate (skip if this Rust content already passed)
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      decided: ${{ steps.decide.outcome }}
     steps:
       # fetch-depth: 0 pulls all branches/tags, so every past green run's commit
       # (PR-branch heads included — branches aren't deleted on merge) is present
@@ -100,8 +103,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install Node
+        id: node
+        continue-on-error: true
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: .node-version
+
       - name: Decide whether the matrix must run
         id: decide
+        if: steps.node.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 8
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -109,193 +122,20 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PUSH_SHA: ${{ github.sha }}
           ATTEMPT: ${{ github.run_attempt }}
+        run: node scripts/check-rust-gate.mjs
+
+      - name: Report a gate that made no decision
+        if: ${{ !cancelled() && (steps.decide.outcome != 'success' || steps.decide.outputs.run == '') }}
+        env:
+          NODE: ${{ steps.node.outcome }}
+          DECIDE: ${{ steps.decide.outcome }}
         shell: bash
         run: |
-          # An explicit re-run ("Re-run all jobs") means "actually run it" —
-          # toolchain drift, a flake you want reconfirmed — so never short-circuit.
-          if [ "$ATTEMPT" != "1" ]; then
-            echo "run_attempt=$ATTEMPT — explicit re-run, running the matrix."
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Sign the content the matrix would build. Use HEAD SHAs on both sides
-          # (PR head for pull_request, the pushed commit for push) so the frame
-          # is consistent: a merged PR and its squash commit on master share the
-          # same src-tauri tree, which is what makes the post-merge run skippable.
-          if [ "$EVENT" = "pull_request" ]; then sha="$PR_HEAD"; else sha="$PUSH_SHA"; fi
-          cur_tree=$(git rev-parse "${sha}:src-tauri" 2>/dev/null || true)
-          cur_wf=$(git rev-parse "${sha}:.github/workflows/rust-tests.yml" 2>/dev/null || true)
-          # The canonicalizer's own blob, as of this commit — used in pass 2 to
-          # require chained greens share identical equivalence semantics.
-          cur_canon=$(git rev-parse "${sha}:.github/scripts/canonicalize-rust.py" 2>/dev/null || true)
-          echo "signature for ${sha:0:8}: tree=${cur_tree:-?} wf=${cur_wf:-?}"
-
-          decision=true
-
-          # Head SHAs of recent GREEN rust-tests runs, across every branch. A
-          # matrix-skipped run also concludes "success", so its commit joins
-          # this set — sound, because tree-identity (and, in pass 2, canonical
-          # equivalence under an identical script) is transitive.
-          greens=$(gh run list --workflow rust-tests.yml --status success \
-                     --limit 100 --json headSha --jq '.[].headSha' 2>/dev/null || true)
-
-          # --- Pass 1: exact tree+wf signature. Strictly stronger evidence than
-          # pass 2 (carries none of its accepted risk), so scan ALL candidates
-          # for an exact hit before attempting any equivalence. ---
-          if [ -n "$cur_tree" ] && [ -n "$cur_wf" ]; then
-            while read -r past; do
-              [ -z "$past" ] && continue
-              pt=$(git rev-parse "${past}:src-tauri" 2>/dev/null || true)
-              pw=$(git rev-parse "${past}:.github/workflows/rust-tests.yml" 2>/dev/null || true)
-              if [ -n "$pt" ] && [ "$pt" = "$cur_tree" ] && [ "$pw" = "$cur_wf" ]; then
-                echo "Identical Rust content already passed in ${past:0:8} — skipping the matrix."
-                decision=false
-                break
-              fi
-            done <<< "$greens"
-          fi
-
-          # --- Pass 2: comment/format-only equivalence. Only when pass 1 found
-          # no exact match. Preconditions (else skip pass 2, logging why): we
-          # have a src-tauri tree + a canonicalizer blob for this commit, and
-          # that canonicalizer's own self-test passes (a self-test failure in CI
-          # means environment drift → fail open by running the matrix). ---
-          if [ "$decision" = "true" ] && [ -n "$cur_tree" ]; then
-            if [ -z "$cur_canon" ]; then
-              echo "Pass 2 skipped: no canonicalizer blob at this commit."
-            else
-              # Extract the canonicalizer AS OF this commit and self-test it, so
-              # pass 2 never trusts a script that behaves unexpectedly here. Guard
-              # the extraction (the step runs under `-e`) so an impossible-in-
-              # practice failure fails OPEN like every other guard, not job-red.
-              if ! git show "${sha}:.github/scripts/canonicalize-rust.py" > "$RUNNER_TEMP/canonicalize-rust.py"; then
-                echo "Pass 2 skipped: could not extract canonicalizer."
-              elif ! python3 "$RUNNER_TEMP/canonicalize-rust.py" --self-test; then
-                echo "Pass 2 skipped: canonicalizer self-test failed (environment drift) — failing open."
-              else
-                # Per-path cache of the CURRENT side's canonical output, so
-                # repeated candidates don't recanonicalize the same blob.
-                cur_cache="$RUNNER_TEMP/canon-cur"
-                mkdir -p "$cur_cache"
-
-                # Compare one changed `.rs` path across the two trees. Returns 0
-                # if canonically equivalent, non-zero otherwise (anomaly counts
-                # as non-equivalent — an anomaly means fail open here).
-                compare_path() {
-                  local past_tree="$1" path="$2"
-                  # Cache the current side keyed by its BLOB OID, not a flattened
-                  # path: `tr '/' '_'` would collide `a/b_c.rs` with `a_b/c.rs`,
-                  # and any coincidental equality violates the fail-open bar.
-                  # Content-addressed keys are collision-free and let two paths
-                  # with identical content share a cache entry correctly. Empty
-                  # OID (blob missing — shouldn't happen for a diff-tree M path)
-                  # fails open.
-                  local key
-                  key=$(git rev-parse "${cur_tree}:${path}" 2>/dev/null || true)
-                  if [ -z "$key" ]; then
-                    echo "  $path: could not resolve current blob OID — failing open."
-                    return 1
-                  fi
-                  local cur_out="$cur_cache/$key"
-                  if [ ! -f "$cur_out" ]; then
-                    if ! git cat-file blob "${cur_tree}:${path}" \
-                         | python3 "$RUNNER_TEMP/canonicalize-rust.py" > "$cur_out" 2>/dev/null; then
-                      echo "  $path: canonicalizer anomaly on current side."
-                      rm -f "$cur_out"
-                      return 1
-                    fi
-                  fi
-                  local past_out="$RUNNER_TEMP/canon-past"
-                  if ! git cat-file blob "${past_tree}:${path}" \
-                       | python3 "$RUNNER_TEMP/canonicalize-rust.py" > "$past_out" 2>/dev/null; then
-                    echo "  $path: canonicalizer anomaly on past side."
-                    return 1
-                  fi
-                  if cmp -s "$past_out" "$cur_out"; then
-                    return 0
-                  fi
-                  echo "  $path: canonical mismatch (real code change)."
-                  return 1
-                }
-
-                compared=0  # candidates that reached the per-file stage
-                while read -r past; do
-                  [ -z "$past" ] && continue
-                  pt=$(git rev-parse "${past}:src-tauri" 2>/dev/null || true)
-                  pw=$(git rev-parse "${past}:.github/workflows/rust-tests.yml" 2>/dev/null || true)
-                  # Same workflow file (the matrix definition must match).
-                  [ -n "$pt" ] && [ "$pw" = "$cur_wf" ] || continue
-                  # Candidate's canonicalizer blob must equal ours. This keeps
-                  # CHAINS sound: a pass-2 skip concludes "success" and joins the
-                  # greens set, so equivalence is transitive only while every
-                  # link used identical equivalence semantics — a script change
-                  # restarts chains from a real matrix run. A pre-script-era
-                  # green has no blob (empty) → rejected automatically.
-                  pc=$(git rev-parse "${past}:.github/scripts/canonicalize-rust.py" 2>/dev/null || true)
-                  [ -n "$pc" ] && [ "$pc" = "$cur_canon" ] || continue
-
-                  # Every changed path must be a modified `.rs` file. Any add/
-                  # delete/rename/type-change (status != M) or non-`.rs` path
-                  # rejects the candidate. (An empty diff can't occur — pass 1
-                  # would have matched it exactly.)
-                  status=$(git diff-tree -r --name-status "$pt" "$cur_tree" 2>/dev/null || true)
-                  reject=""
-                  changed_files=""
-                  count=0
-                  while IFS=$'\t' read -r st path rest; do
-                    [ -z "$st" ] && continue
-                    count=$((count + 1))
-                    if [ "$st" != "M" ] || [ "${path%.rs}" = "$path" ]; then
-                      reject="non-.rs or non-modify change ($st $path)"
-                      break
-                    fi
-                    changed_files="$changed_files $path"
-                  done <<< "$status"
-
-                  if [ -n "$reject" ]; then
-                    echo "Pass 2: ${past:0:8} rejected — $reject."
-                    continue
-                  fi
-                  # Guard: too many changed files → not a plausible comment-only
-                  # follow-up; reject rather than churn through it.
-                  if [ "$count" -gt 60 ]; then
-                    echo "Pass 2: ${past:0:8} rejected — $count changed files (> 60)."
-                    continue
-                  fi
-
-                  # Guard: cap how many candidates reach per-file comparison.
-                  compared=$((compared + 1))
-                  if [ "$compared" -gt 15 ]; then
-                    echo "Pass 2: stopping after 15 candidates reached per-file comparison."
-                    break
-                  fi
-
-                  all_equiv=true
-                  for path in $changed_files; do
-                    if ! compare_path "$pt" "$path"; then
-                      all_equiv=false
-                      break
-                    fi
-                  done
-
-                  if [ "$all_equiv" = "true" ]; then
-                    echo "Comment/format-only delta vs ${past:0:8} ($count .rs files) — skipping the matrix."
-                    for path in $changed_files; do echo "  $path"; done
-                    decision=false
-                    break
-                  fi
-                done <<< "$greens"
-              fi
-            fi
-          fi
-
-          [ "$decision" = "true" ] && echo "No prior green run for this exact content — running the matrix."
-          echo "run=$decision" >> "$GITHUB_OUTPUT"
+          echo "::error::rust-tests gate made no decision (setup-node: $NODE, decide: $DECIDE); the test matrix runs (fail-open)."
 
   test:
     needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
+    if: ${{ !cancelled() && (needs.gate.result != 'success' || needs.gate.outputs.decided != 'success' || needs.gate.outputs.run != 'false') }}
     name: test (${{ matrix.platform }}${{ matrix.shard && format(' {0}/2', matrix.shard) || '' }})
     strategy:
       # Each platform is independent signal — one leg failing shouldn't cancel
@@ -323,6 +163,7 @@ jobs:
           - platform: ubuntu-26.04
             clippy: true
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -355,7 +196,21 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
+          # AWS-placed runners get a regional EC2 archive mirror that ran at 59-95 kB/s
+          # on this list (13-21 min, run 44371845274); Canonical's hosts were fast there.
+          ec2_host='[a-z0-9-]+\.ec2\.archive\.ubuntu\.com'
+          apt_files=(/etc/apt/sources.list /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources)
+          mapfile -d '' -t ec2_lists < <(sudo grep -lZE "://$ec2_host/" "${apt_files[@]}" 2>/dev/null || true)
+          if [ "${#ec2_lists[@]}" -eq 0 ]; then
+            echo "apt: no EC2 regional mirror configured"
+          elif sudo sed -i -E "s#://$ec2_host/#://archive.ubuntu.com/#g" "${ec2_lists[@]}"; then
+            printf 'apt: EC2 regional mirror replaced in:\n'
+            printf '%s\n' "${ec2_lists[@]}"
+          else
+            echo "apt: EC2 mirror rewrite failed; continuing with the files as they are"
+          fi
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -370,7 +225,7 @@ jobs:
       # `tauri::generate_context!` embeds that directory at COMPILE time, so
       # `cargo test` fails on a fresh checkout without it. A stub index.html is
       # enough — contents are irrelevant to the Rust tests, and this keeps
-      # Node/pnpm entirely out of the Rust gate.
+      # Node/pnpm out of the test matrix (only the gate job runs Node).
       - name: Stub frontend dist
         shell: bash
         run: |

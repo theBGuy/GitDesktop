@@ -1,8 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { createRef, type ReactNode } from "react";
 import { toast } from "sonner";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
 import { aiExcludePatterns } from "@/lib/ai/ignore";
@@ -141,7 +149,25 @@ beforeEach(() => {
   useConflictResolve.setState(useConflictResolve.getInitialState(), true);
 });
 
+afterEach(() => {
+  // Unmount on the fake clock: setup.ts's cleanup runs after this hook, and the
+  // last query observer leaving would arm a real gc timer that outlives the case.
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
 afterAll(() => expect(unmockedCommands).toEqual([]));
+
+/** Fakes timeouts and intervals (the poll, the io retry delay, A5's 2500 ms
+ *  advance); rAF, performance and setImmediate stay real for React and Base UI.
+ *  waitFor moves the fake clock, detecting it through the jest stub. */
+function installFakeClock() {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+  });
+  vi.stubGlobal("jest", { advanceTimersByTime: vi.advanceTimersByTime });
+}
 
 function newClient() {
   const client = new QueryClient({
@@ -177,7 +203,8 @@ function renderView() {
         void client.refetchQueries({
           queryKey: ["repo", REPO, "conflict-file", PATH],
         });
-        await new Promise((r) => setTimeout(r, 50));
+        if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(50);
+        else await new Promise((r) => setTimeout(r, 50));
       }),
   };
 }
@@ -213,6 +240,7 @@ const acceptAll = (side: "current" | "incoming") =>
 
 describe("ConflictFileView holds its read error across re-reads", () => {
   it("A1/A3: a poll re-read in flight keeps the error, and a success replaces it", async () => {
+    installFakeClock();
     const view = renderView();
     await screen.findByText((content) => content.includes(IO_COPY));
     const stop = watchSpinner(view.container);
@@ -257,7 +285,7 @@ describe("ConflictFileView holds its read error across re-reads", () => {
     expect(
       screen.getByRole("button", { name: "Resolve with AI" }),
     ).toBeInTheDocument();
-  }, 10_000);
+  });
 
   it("A3: a later failure with data kept shows the error as before", async () => {
     disk = MARKED;
@@ -331,6 +359,7 @@ describe("ConflictFileView holds its read error across re-reads", () => {
 
 describe("ConflictResolveView reads its sides once", () => {
   it("A5: a failed sides read settles on Try again and never re-reads by itself", async () => {
+    installFakeClock();
     const client = newClient();
     render(
       <QueryClientProvider client={client}>
@@ -343,8 +372,8 @@ describe("ConflictResolveView reads its sides once", () => {
     expect(toast.error).toHaveBeenCalled();
     expect(conflictSides).toHaveBeenCalledTimes(1);
     // Longer than ConflictFileView's poll interval: nothing here polls.
-    await act(() => new Promise((r) => setTimeout(r, 2500)));
+    await act(() => vi.advanceTimersByTimeAsync(2500));
     expect(conflictSides).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(READING)).not.toBeInTheDocument();
-  }, 10_000);
+  });
 });
