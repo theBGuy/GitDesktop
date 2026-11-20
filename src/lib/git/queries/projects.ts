@@ -2187,6 +2187,15 @@ export function refreshRepoOnFocus(queryClient: QueryClient): void {
   refetchRepoQueriesOnFocus(queryClient, shiftChasedLenses);
 }
 
+/** An app-wide invalidation's filter (About's Re-check and an account switch):
+ *  false only for a lens a date-shift chase is reading, which a read landing
+ *  mid-chase would have write the server's older dates back (as
+ *  {@link refreshRepoOnFocus} explains); the chase's own settle re-reads it.
+ *  Reads the hold LIVE at call time. */
+export function outsideShiftChase(query: { queryHash: string }): boolean {
+  return !shiftChasedLenses.has(query.queryHash);
+}
+
 /** How many FOLLOW-UP writes one shift burst may spend catching up with the
  *  card's cached dates SINCE ITS LAST PRESS before the settle's re-read takes
  *  over. A press folding in is new intent and restarts the count, so the cap

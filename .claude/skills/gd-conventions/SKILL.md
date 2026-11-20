@@ -345,7 +345,11 @@ and table row are the reference).
   fixed. Label composites (`Saved to <PathText/>`) space via `gap-*` on the
   flex row, never a trailing space in the label — flex line boxes trim it.
   Non-flex-item text is exempt: the absolutely-positioned `sr-only` badge
-  spans keep their trailing announcement space.
+  spans keep their trailing announcement space. A path with a directory takes
+  its accessible name from a visually hidden full-path copy behind
+  `aria-hidden` visual spans, so a text query on such a path finds that copy
+  and an exact `textContent` holds the path twice; a test reads the shown text
+  with the copy removed.
 - A `SelectControl`/`SelectField` `items` Record silently reorders integer-like
   keys to the front (JS object semantics) — any picker whose option values are
   user-supplied identifiers that can be all-digits (logins, slugs) must pass
@@ -678,12 +682,28 @@ and table row are the reference).
   (only a focused press moves focus to the first revealed hunk), and
   `GitDiffView` hosts without a scroller (agent transcript inline diffs, the
   conflict view) keep it on neither a switch nor an expand.
-- A file rail's header content (a count, a filter summary) rides `DetailRail`'s
-  `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
-  caret strip — never a first-child band inside `children`: the strip is already
-  a bordered row, so a band under it stacks a second border and spends vertical
-  space the list wants. Keep that content to one short line; the strip's h-7 is
-  what pins the caret at the same height in both branches, so it must not grow.
+- A file rail's filter rides `DetailRail`'s `filter` prop
+  (`src/components/detail-rail.tsx`), built only by `useFileListFilter`
+  (`src/components/use-file-list-filter.ts`), and renders its field in the
+  caret strip. With a filter, the strip and the collapsed caret box wrap an
+  `h-7` line in the same `FILTER_BOX_Y` padding, so the caret sits at the
+  same height in both branches: the expanded strip adds its bottom border
+  (41px, matching the diff path row) and the collapsed box has none (40px);
+  without one, both stay `h-7`. A consumer derives its rendered rows, its
+  `listKeyboardNav` items and its open path from the hook (`visible`,
+  `activeIndex`, `openPath`), never from the full list, and renders
+  `DetailRailFilterStatus` outside its own `aria-busy` wrapper. A rail
+  without a filter may still pass one short line (a count) through `header`;
+  never a first-child band inside `children`: the strip is already a bordered
+  row, so a band under it stacks a second border and spends vertical space
+  the list wants. When a whole rail goes away with its field focused, a
+  same-scope rail mounting in that commit takes focus over by itself, onto
+  its field, or onto its caret when it mounts collapsed (the module's
+  `fieldHandoff`, cleared by a microtask; only while focus fell to
+  `<body>`); a host that swaps views of different types lands the rest with
+  `useRetryFocusRescue`, one instance per view on a keyed `contents` wrapper,
+  so focus moves only when it was inside the view that left (`SessionChanges`
+  in `src/features/sessions/SessionView.tsx`).
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.
@@ -1656,6 +1676,29 @@ one grep away on the named symbol. Grows via Conventions-sync.
   helpers under `CMD_SCRIPT_PRELUDE` (refusals before any write; `%` escaped;
   trailing backslashes per the receiving program) — never inline
   quote-wrapping into a script body.
+- **Whole-tree kills:** a spawned child whose descendants must die with it (a
+  timeout, a cancel, a dropped future) rides `proc_tree::TreeGuard`:
+  `TreeGuard::prepare(&mut cmd)` before the spawn, `TreeGuard::arm(&child)`
+  right after it, the guard declared after the `Child` so it drops first (an
+  unreaped leader pins the unix group id), and `disarm()` only once
+  `child.wait()` returned Ok, whatever the exit code. Every abandoned path
+  stays armed, and `kill_on_drop(true)` stays as the fallback for a failed
+  arm: alone it reaches only the direct child, so Git for Windows' `git.exe`
+  shim would leave the real git and its hooks running. A caller that must kill
+  before it can reap (an agent run's Stop) calls `terminate()` on Windows, or
+  signals the group on unix, and still disarms only after a reap. Adopters:
+  the git runner (`run_git_spawn`), the gh and glab runners, host-mode agent
+  runs, and the login-shell probes, which arm their `setsid` child and never
+  call `prepare`. Unarmed on purpose: the gh/glab sign-in child in
+  forge/session.rs and the two console launchers. Not armed yet:
+  the PTY children and their `taskkill` path (pty.rs `kill_tree`),
+  mcp.rs `run_client_cli`, agent_sandbox.rs `run_build`, hooks.rs
+  `git_run_hook_manager` and agent.rs `run_capture_parts` (the CLI probes,
+  the model listing and the container runtime commands). Tree tests build
+  on the fixtures in `proc_tree::test_support` (`Holder`, `wait_until`,
+  `HANG_GUARD`, `started_within`, `remove_when_free`): they observe the
+  holder start and die and never sleep for either, and a survivor is proven
+  by `confirm_alive`, never by a bare `alive()`.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline

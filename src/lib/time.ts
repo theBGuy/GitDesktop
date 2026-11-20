@@ -98,3 +98,20 @@ export function formatRelativeTime(isoDate: string, now: number): string {
   }
   return "just now";
 }
+
+/**
+ * Orders two ISO-8601 instants newest first by their parsed time, so strings
+ * carrying different UTC offsets order by instant, not by text. A missing,
+ * empty or unparseable value sorts after every valid one; two such values,
+ * and two equal instants, compare 0 so a caller's own tiebreak decides.
+ */
+export function compareInstantsNewestFirst(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): number {
+  const aTime = Date.parse(a ?? "");
+  const bTime = Date.parse(b ?? "");
+  if (Number.isNaN(aTime)) return Number.isNaN(bTime) ? 0 : 1;
+  if (Number.isNaN(bTime)) return -1;
+  return bTime - aTime;
+}

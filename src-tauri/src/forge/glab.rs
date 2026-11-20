@@ -41,7 +41,9 @@ impl GlabOutput {
 /// Finder/Dock. Cached exactly like the `git`/`gh` runners
 /// (`git::runner::git_bin`): the login-shell fallback isn't free, and only a
 /// *successful* resolution is cached, so a glab installed after launch is still
-/// picked up on the next call without a restart.
+/// picked up on the next call, unless only the login shell can find it: the
+/// resolver remembers that shell's miss (macOS/Linux) until the process
+/// restarts, or in the app until About > Re-check.
 static GLAB_BIN: OnceCell<PathBuf> = OnceCell::const_new();
 
 async fn glab_bin() -> AppResult<PathBuf> {
@@ -263,29 +265,7 @@ async fn run_glab_raw_scoped(
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    cmd.kill_on_drop(true);
-
-    let output = tokio::time::timeout(timeout, cmd.output())
-        .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                AppError::GlabNotFound
-            } else {
-                AppError::Io(e)
-            }
-        })?;
-
-    Ok(GlabOutput {
-        stdout: output.stdout,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        code: output.status.code().unwrap_or(-1),
-    })
+    glab_exchange(cmd, None, timeout).await
 }
 
 // ── Known hosts (self-managed GitLab detection) ─────────────────────────────
@@ -1096,11 +1076,11 @@ pub async fn run_glab_ex(
     Ok(out)
 }
 
-/// Spawns `cmd` and runs its stdin exchange (the shared
+/// Spawns `cmd` with its tree armed and runs its stdin exchange (the shared
 /// [`crate::github::runner::exchange_with_stdin`]) inside the one `timeout`, returning
-/// the raw output. Once glab is reaped its exit code and stderr are the result,
-/// whatever the stdin write returned, so a glab that exits before reading reports its
-/// own error rather than a broken pipe.
+/// the raw output. Once glab is reaped its exit code and stderr are the result, whatever
+/// became of the stdin write, so a glab that exits before reading reports its own error
+/// rather than a broken pipe. A timed-out or dropped call kills glab's whole tree.
 async fn glab_exchange(
     mut cmd: Command,
     input: Option<&str>,
@@ -1115,20 +1095,31 @@ async fn glab_exchange(
     .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    crate::proc_tree::TreeGuard::prepare(&mut cmd);
     cmd.kill_on_drop(true);
 
-    let child = cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::GlabNotFound
-        } else {
-            AppError::Io(e)
-        }
-    })?;
-    let exchange = crate::github::runner::exchange_with_stdin(child, input.map(str::as_bytes));
+    // Spawn, exchange and reap all sit inside the one timeout. The guard is declared right
+    // after `child` so it drops first, killing the tree while the leader is unreaped; only
+    // a reaped call disarms.
+    let exchange = async {
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AppError::GlabNotFound
+            } else {
+                AppError::Io(e)
+            }
+        })?;
+        let guard = crate::proc_tree::TreeGuard::arm(&child);
+        let output =
+            crate::github::runner::exchange_with_stdin(&mut child, input.map(str::as_bytes))
+                .await
+                .map_err(AppError::Io)?;
+        guard.disarm();
+        Ok::<_, AppError>(output)
+    };
     let output = tokio::time::timeout(timeout, exchange)
         .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))?
-        .map_err(AppError::Io)?;
+        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
     Ok(GlabOutput {
         stdout: output.stdout,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -2471,5 +2462,211 @@ hosts:
         );
         // No readable config at all → just the env host, so GitHub stays default.
         assert!(known_hosts_from(&[], None).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use super::glab_exchange;
+    use crate::error::AppError;
+    use crate::github::runner::tree_fixture::{unarmed_spawns, Wrapper};
+    use crate::proc_tree::test_support::{
+        remove_when_free, started_within, wait_until, Holder, Keeps, HANG_GUARD,
+    };
+
+    fn tree_dir(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("create temp dir")
+    }
+
+    /// Dropping an armed glab call kills everything its wrapper started. The holder keeps
+    /// none of the runner's pipes, so only the Job Object (Windows) or the process group
+    /// (unix) can reach it. The stdin text is never read, so the drop lands on an
+    /// unfinished write.
+    #[tokio::test]
+    async fn an_abandoned_glab_call_kills_its_wrappers_whole_tree() {
+        let dir = tree_dir("gd-glab-tree-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "glab", &holder, Keeps::Neither);
+        let line = format!("{}\n", "x".repeat(100));
+        let text = line.repeat((4 << 20) / line.len() + 1);
+        let mut run = Box::pin(glab_exchange(wrapper.command(), Some(&text), HANG_GUARD));
+        // The first poll spawns and arms; only then may the wrapper start the holder.
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled before its gate: {:?}", r.map(|o| o.code)),
+            () = std::future::ready(()) => {}
+        }
+        wrapper.mark_armed();
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled under its holder: {:?}", r.map(|o| o.code)),
+            ok = started_within(&holder, HANG_GUARD) => assert!(ok, "the holder never started"),
+        }
+        drop(run);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the abandoned glab call"
+        );
+        remove_when_free(dir);
+    }
+
+    /// The control for the kill test above: the same wrapper spawned the runner's way but
+    /// never armed, killed directly with its read ends dropped, leaves the holder running.
+    #[tokio::test]
+    async fn a_direct_kill_alone_leaves_the_glab_wrappers_child_running() {
+        let dir = tree_dir("gd-glab-direct-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "glab", &holder, Keeps::Neither);
+        let mut cmd = wrapper.command();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        crate::proc_tree::TreeGuard::prepare(&mut cmd);
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn the wrapper");
+        wrapper.mark_armed();
+        assert!(
+            started_within(&holder, HANG_GUARD).await,
+            "the holder never started"
+        );
+        child.kill().await.expect("kill the wrapper");
+        drop(child.stdout.take());
+        drop(child.stderr.take());
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with a wrapper killed alone"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+
+    /// A reaped glab call disarms, so what it started keeps running. The holder keeps
+    /// neither of the runner's pipes, so both reach EOF and the wrapper is reaped while
+    /// the holder lives.
+    #[tokio::test]
+    async fn a_reaped_glab_call_leaves_what_it_started_running() {
+        let dir = tree_dir("gd-glab-reaped-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "glab", &holder, Keeps::Neither);
+        let mut run = Box::pin(glab_exchange(wrapper.command(), None, HANG_GUARD));
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled before its gate: {:?}", r.map(|o| o.code)),
+            () = std::future::ready(()) => {}
+        }
+        wrapper.mark_armed();
+        tokio::select! {
+            biased;
+            r = &mut run => panic!("the call settled under its holder: {:?}", r.map(|o| o.code)),
+            ok = started_within(&holder, HANG_GUARD) => assert!(ok, "the holder never started"),
+        }
+        wrapper.let_finish();
+        let out = run.await.unwrap_or_else(|e| {
+            let why = "the holder kept one of the runner's pipes (a Keeps::Neither failure)";
+            panic!("{e:?}: {why}, or the wrapper never saw its finish gate")
+        });
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+        assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with the reaped glab call"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+
+    /// The Timeout mapping: a wrapper that never passes its first gate outlasts any
+    /// budget, so the error kind is the only thing asserted.
+    #[tokio::test]
+    async fn a_glab_call_past_its_budget_is_a_timeout() {
+        let dir = tree_dir("gd-glab-budget-");
+        let holder = Holder::new(dir.path());
+        let wrapper = Wrapper::new(dir.path(), "glab", &holder, Keeps::Neither);
+        let res = glab_exchange(wrapper.command(), None, Duration::from_secs(1)).await;
+        assert!(
+            matches!(res, Err(AppError::Timeout(1))),
+            "{:?}",
+            res.map(|o| o.code)
+        );
+        remove_when_free(dir);
+    }
+
+    /// Every glab spawn in this file is tree-armed and nothing hides the Child. The
+    /// property's controls live in github/runner.rs's `every_gh_spawn_is_tree_armed`.
+    #[test]
+    fn every_glab_spawn_is_tree_armed() {
+        let src = include_str!("glab.rs").replace("\r\n", "\n");
+        let (violations, roster) = unarmed_spawns(&src);
+        assert!(violations.is_empty(), "{violations:#?}");
+        assert_eq!(
+            roster,
+            ["glab_exchange"],
+            "a new correctly armed spawning fn: add its name to this roster"
+        );
+        let unarmed = src.replacen("guard.disarm();", "", 1);
+        assert_ne!(unarmed, src);
+        assert!(
+            !unarmed_spawns(&unarmed).0.is_empty(),
+            "a dropped disarm must trip"
+        );
+        // One control per body rule, each tripping that rule's own message.
+        let arm = "let guard = crate::proc_tree::TreeGuard::arm(&child);";
+        let below_arm = |text: &str| src.replacen(arm, &format!("{arm}\n{text}"), 1);
+        let controls = [
+            (
+                src.replacen(arm, &format!("tokio::task::yield_now().await;\n{arm}"), 1),
+                "`glab_exchange` awaits between",
+            ),
+            (
+                src.replacen("guard.disarm();", "settle().await?;\nguard.disarm();", 1),
+                "`glab_exchange`'s disarm",
+            ),
+            (below_arm("let _ = cmd.spawn();"), "`glab_exchange` spawns"),
+            (
+                below_arm("let _ = TreeGuard::arm(&child);"),
+                "`glab_exchange` spawns",
+            ),
+            (
+                src.replacen("guard.disarm();", "if ok { guard.disarm(); }", 1),
+                "`glab_exchange`'s disarm",
+            ),
+            (
+                src.replacen("guard.disarm();", "guard.disarm();\nguard.disarm();", 1),
+                "`glab_exchange`'s disarm",
+            ),
+            (
+                below_arm("let mut child = child;"),
+                "`glab_exchange` moves or rebinds",
+            ),
+            (
+                below_arm("consume(child);"),
+                "`glab_exchange` moves or rebinds",
+            ),
+        ];
+        for (text, mark) in &controls {
+            assert_ne!(text, &src, "the {mark} control must change the text");
+            let (found, _) = unarmed_spawns(text);
+            assert!(
+                found.iter().any(|v| v.contains(mark)),
+                "a control left no {mark} violation: {found:#?}"
+            );
+        }
     }
 }

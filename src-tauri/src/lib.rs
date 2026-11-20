@@ -31,6 +31,7 @@ mod mcp_server;
 mod nav_guard;
 mod oplog;
 mod path_launcher;
+mod proc_tree;
 mod pty;
 mod research;
 mod review_notes;

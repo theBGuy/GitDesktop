@@ -299,7 +299,7 @@ describe("Compare fetch status line", () => {
     expect(gitFetchRemote).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a pruned pick, says so, and opens the picker on request", async () => {
+  it("keeps a missing pick, says so, and opens the picker on request", async () => {
     vi.mocked(gitCompareBranches).mockRejectedValue({
       kind: "git",
       message: "unknown revision",
@@ -308,7 +308,10 @@ describe("Compare fetch status line", () => {
     const user = userEvent.setup();
     renderPanel();
     expect(
-      await screen.findByText("origin/gone was deleted on origin.", STATUS),
+      await screen.findByText(
+        "origin/gone is no longer in your remote branches.",
+        STATUS,
+      ),
     ).toBeInTheDocument();
     expect(useUiStore.getState().compareBranch).toBe(
       "refs/remotes/origin/gone",

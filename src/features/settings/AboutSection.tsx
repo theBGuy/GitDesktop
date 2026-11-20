@@ -22,6 +22,7 @@ import { Spinner } from "@/components/ui/spinner";
 import type { AuthStatus } from "@/lib/ai/agent";
 import {
   cliFloorWarning,
+  recheckSystemHealth,
   type ToolStatus,
   useSystemHealth,
 } from "@/lib/system/health";
@@ -324,7 +325,7 @@ export function AboutSection() {
             variant="ghost"
             size="xs"
             disabled={health.isFetching}
-            onClick={() => health.refetch()}
+            onClick={() => recheckSystemHealth(health)}
           >
             {health.isFetching ? (
               <Spinner data-icon="inline-start" />

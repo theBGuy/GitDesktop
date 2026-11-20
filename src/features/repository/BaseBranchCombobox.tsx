@@ -23,6 +23,7 @@ import {
 } from "@/lib/git/queries";
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { Branch } from "@/lib/git/types";
+import { compareInstantsNewestFirst, parseableDate } from "@/lib/time";
 import { rowCheckoutCopy } from "./checkout-copy";
 
 /** Whether a local branch may be offered as a base: drop the agent-session
@@ -120,7 +121,7 @@ export function BaseBranchCombobox({
       if (b.name === currentName) return 1;
       if (a.name === defaultName) return -1;
       if (b.name === defaultName) return 1;
-      return b.lastCommitDate.localeCompare(a.lastCommitDate);
+      return compareInstantsNewestFirst(a.lastCommitDate, b.lastCommitDate);
     });
   }, [branches.data, currentName, defaultName]);
 
@@ -142,7 +143,10 @@ export function BaseBranchCombobox({
       .map((b) => ({ value: `${b.remote}/${b.name}`, meta: b }))
       .filter((r) => !localSet.has(r.value))
       .sort((a, b) =>
-        b.meta.lastCommitDate.localeCompare(a.meta.lastCommitDate),
+        compareInstantsNewestFirst(
+          a.meta.lastCommitDate,
+          b.meta.lastCommitDate,
+        ),
       );
   }, [remoteBranches.data, localSet]);
 
@@ -199,7 +203,7 @@ export function BaseBranchCombobox({
       <ComboboxContent>
         <ComboboxInput showTrigger={false} placeholder="Filter branches…" />
         <ComboboxEmpty>No branches match</ComboboxEmpty>
-        <ComboboxList>
+        <ComboboxList aria-label="Base branches">
           {(group: { value: string; items: string[] }) => (
             <ComboboxGroup key={group.value} items={group.items}>
               <ComboboxLabel>{group.value}</ComboboxLabel>
@@ -293,34 +297,59 @@ function BaseBranchRow({
   // `title` arm is deliberately not used: its "this row opens it" clause is true
   // in the branch dropdown, while this row picks a base branch.
   const copy = rowCheckoutCopy(meta?.worktree?.isMain);
+  const date = meta?.lastCommitDate;
+  // The option's name comes from its content. A part shown beside the name is
+  // led by a hidden comma and a bare space, gated with it so none dangles; a
+  // whitespace-only run between flex items renders nothing. A chip inside the
+  // name span is hidden from AT and named by one hidden copy after the span
+  // that holds its own comma and space.
   return (
     <ComboboxItem value={name}>
       <span className="min-w-0 flex-1 truncate" onMouseEnter={clipTitle(name)}>
         {name}
+        {/* A separator's space inside this inline span would render, so each
+            visible chip is hidden from AT and named by a copy after the span.
+            The copies stay row children: absolutely positioned inside this
+            clipped span, they would land past a long name's end, outside the
+            row, and widen the list's scroll range. */}
         {name === currentName && (
-          <span className="ml-1.5 text-[10px] text-muted-foreground">
+          <span
+            aria-hidden="true"
+            className="ml-1.5 text-[10px] text-muted-foreground"
+          >
             (current)
           </span>
         )}
         {name === defaultName && (
-          <span className="ml-1.5 text-[10px] text-muted-foreground">
+          <span
+            aria-hidden="true"
+            className="ml-1.5 text-[10px] text-muted-foreground"
+          >
             default
           </span>
         )}
       </span>
+      {name === currentName && <span className="sr-only">, (current)</span>}
+      {name === defaultName && <span className="sr-only">, default</span>}
       {meta?.worktree && (
-        <span
-          className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
-          title={copy.blockedTitle(meta.worktree.path)}
-        >
-          <TreeStructureIcon className="size-3" weight="bold" />
-          {copy.noun}
-        </span>
+        <>
+          <span className="sr-only">,</span>{" "}
+          <span
+            className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
+            title={copy.blockedTitle(meta.worktree.path)}
+          >
+            <TreeStructureIcon className="size-3" weight="bold" />
+            {copy.noun}
+          </span>
+        </>
       )}
-      {meta?.lastCommitDate && (
-        <span className="shrink-0 text-[11px] text-muted-foreground">
-          <RelativeTime date={meta.lastCommitDate} />
-        </span>
+      {date && parseableDate(date) && (
+        <>
+          <span className="sr-only">,</span>{" "}
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            <RelativeTime date={date} />
+          </span>
+        </>
       )}
     </ComboboxItem>
   );

@@ -1,12 +1,20 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { DetailRail, DetailRailRow } from "@/components/detail-rail";
+import {
+  DetailRail,
+  DetailRailFilterStatus,
+  DetailRailRow,
+} from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  FILE_FILTER_SURFACES,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import {
   DegradedListNotice,
   useRetryFocusRescue,
@@ -123,22 +131,36 @@ export function PrCommitDetail({
   );
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  // Default to the first file until the user picks one (derived, so there's no
-  // empty-selection frame while an effect catches up).
-  const effectivePath =
-    selectedPath && files.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (files[0]?.path ?? null);
   // A user file pick, noted first so a pending continuation (a markdown
   // `#N` lookup) strands; the automatic selections stay silent.
   const pickPath = (path: string) => {
     useUiStore.getState().noteUserInteraction();
     setSelectedPath(path);
   };
+  const openPathRef = useRef<string | null>(null);
+  // Through the filter, only a pick that moves the open file (as last committed)
+  // is noted: its pin before a text edit keeps it, and a draft moves no epoch.
+  const filter = useFileListFilter({
+    ...FILE_FILTER_SURFACES["pr-commits"],
+    files,
+    settled: diff.data !== undefined,
+    picked: selectedPath,
+    onPick: (path) => {
+      if (path !== openPathRef.current)
+        useUiStore.getState().noteUserInteraction();
+      setSelectedPath(path);
+    },
+  });
+  useLayoutEffect(() => {
+    openPathRef.current = filter.openPath;
+  }, [filter.openPath]);
+  // The user's pick, else the first match under a filter, else the first file
+  // (derived, so there's no empty-selection frame while an effect catches up).
+  const effectivePath = filter.openPath;
 
   const onFilesKeyDown = listKeyboardNav({
-    items: files,
-    activeIndex: files.findIndex((f) => f.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (f) => pickPath(f.path),
     rowKey: (f) => f.path,
     rowAttr: "data-path",
@@ -191,6 +213,7 @@ export function PrCommitDetail({
       tabIndex={-1}
       className="flex h-full flex-col outline-none"
     >
+      <DetailRailFilterStatus filter={filter.rail} blank={pane === "error"} />
       <header className="space-y-1 border-b px-4 py-3">
         <Button
           variant="ghost"
@@ -292,15 +315,7 @@ export function PrCommitDetail({
                   className="shrink-0 border-b px-4 py-1.5"
                 />
                 <DetailRailRow>
-                  <DetailRail
-                    ariaLabel="Changed files"
-                    header={
-                      <p className="truncate text-xs text-muted-foreground">
-                        {files.length} changed file
-                        {files.length === 1 ? "" : "s"}
-                      </p>
-                    }
-                  >
+                  <DetailRail ariaLabel="Changed files" filter={filter.rail}>
                     {/* overflow-hidden contains the list's natural height (vendored Root
                         is `relative`-only) so a long file list can't leak a window scrollbar. */}
                     <ScrollArea className="min-h-0 flex-1 overflow-hidden">
@@ -309,7 +324,7 @@ export function PrCommitDetail({
                         blameRev={commit.oid}
                         onKeyDown={onFilesKeyDown}
                       >
-                        {files.map((file) => (
+                        {filter.visible.map((file) => (
                           <button
                             type="button"
                             key={file.path}

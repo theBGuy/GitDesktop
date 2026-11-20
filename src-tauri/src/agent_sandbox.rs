@@ -268,10 +268,12 @@ const RUNTIME_SLOTS: usize = 2;
 /// `agent.rs`'s per-kind CLI resolve cache, and by the settled-runtime memo, so tuning
 /// it moves all three. It buys the one-shot callers (session discard, Test panel
 /// mount, shell open) and a turn burst ONE resolution instead of one per call, which
-/// matters because resolving an ABSENT binary costs a login-shell spawn on
-/// macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a cached MISS
-/// is what holds the "not installed" copy up, so a longer TTL would keep that copy
-/// past the very tick meant to clear it once an engine is installed.
+/// matters because a binary only the login shell finds costs a spawn per resolution
+/// on macOS/Linux. Matched to the sandbox status view's 15s recovery poll: a cached
+/// MISS is what holds the "not installed" copy up, so a longer TTL would keep that
+/// copy past the very tick meant to clear it once an engine is installed. An engine
+/// only the login shell would find is held by the resolver's own miss instead, until
+/// About > Re-check or a restart.
 pub(crate) const CANDIDATE_TTL: Duration = Duration::from_secs(15);
 
 type CandidateCache = [Option<(Instant, Option<(PathBuf, String)>)>; RUNTIME_SLOTS];
@@ -328,6 +330,33 @@ async fn candidate_at(i: usize) -> Option<(PathBuf, String)> {
         c[i] = Some((Instant::now(), resolved.clone()));
     }
     resolved
+}
+
+/// Empties every runtime slot (About > Re-check), so the next lookup resolves again. The
+/// settled-runtime memo is kept: its expiry, never a refresh, re-prefers an engine.
+pub(crate) fn forget_runtime_candidates() {
+    if let Ok(mut c) = candidate_cache().lock() {
+        c.fill(None);
+    }
+}
+
+/// Held for its whole body by every test that seeds, reads or empties `candidate_cache`
+/// or agent.rs's `resolve_cache`: a forget in one test would empty a slot another asserts
+/// on.
+#[cfg(test)]
+pub(crate) static LOOKUP_MEMO_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
+/// Seeds runtime slot `i` as freshly resolved to `value`.
+#[cfg(test)]
+pub(crate) fn seed_runtime_candidate(i: usize, value: Option<(PathBuf, String)>) {
+    candidate_cache().lock().unwrap()[i] = Some((Instant::now(), value));
+}
+
+/// Whether every runtime slot is empty, read raw: an expired entry still counts as held.
+#[cfg(test)]
+pub(crate) fn runtime_candidates_empty() -> bool {
+    candidate_cache().lock().unwrap().iter().all(Option::is_none)
 }
 
 /// Resolves preference slot `i` for real: 0 is Docker on PATH, 1 is Podman on PATH,
@@ -1358,13 +1387,12 @@ fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<St
     ))
 }
 
-/// A batch file's self-delete: `(goto)` ends the batch context, so the `del` runs
-/// without cmd then failing to read the deleted file (measured on Windows 10 through
-/// `cmd /c start`, whose `cmd /K` console then stays open at a prompt). It also ends the
-/// prelude's `setlocal`, so the `del` runs under cmd's registry default for delayed
-/// expansion: with that on, a `!` in %TEMP% makes the `del` miss and the script stays.
+/// A batch file's self-delete, then `exit`. `(goto)` ends the batch context, so the
+/// `del` runs without cmd then failing to read the deleted file, and no later line of
+/// the file is read: the `exit` must share this line to close the `cmd /K` console
+/// `start` runs the script under (measured on Windows 10).
 #[cfg(any(windows, test))]
-const CMD_SCRIPT_SELF_DELETE: &str = "(goto) 2>nul & del \"%~f0\"\r\n";
+const CMD_SCRIPT_SELF_DELETE: &str = "(goto) 2>nul & del \"%~f0\" & exit\r\n";
 
 /// Windows: `start` a temp `.cmd` for a fresh, fully-wired console; a direct
 /// spawn leaves stdio bound to ours, so it cannot take keyboard input.
@@ -1953,6 +1981,24 @@ mod tests {
         forget_settled_runtime();
     }
 
+    /// The forget empties a fresh cached miss and a fresh hit alike. Every read is of the
+    /// raw slots, so no TTL decides either side of the forget.
+    #[test]
+    fn forgetting_the_runtime_candidates_leaves_every_slot_cold() {
+        let _memos = LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        seed_runtime_candidate(0, None);
+        seed_runtime_candidate(1, Some((PathBuf::from("pm"), "podman".to_string())));
+        let seeded: Vec<Option<bool>> = candidate_cache()
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_ref().map(|(_, v)| v.is_some()))
+            .collect();
+        assert_eq!(seeded, [Some(false), Some(true)], "each slot holds its seeded value");
+        forget_runtime_candidates();
+        assert!(runtime_candidates_empty(), "a runtime slot stayed cached");
+    }
+
     #[test]
     fn runtime_label_names_the_engine() {
         assert_eq!(runtime_label("podman"), "Podman");
@@ -2188,14 +2234,14 @@ mod tests {
             "echo.\r\n",
             "echo (container exited) Press any key to close...\r\n",
             "pause >nul\r\n",
-            "(goto) 2>nul & del \"%~f0\"\r\n",
+            "(goto) 2>nul & del \"%~f0\" & exit\r\n",
         );
         let script = container_shell_script(bin, &args, tip).unwrap();
         assert_eq!(script, expected);
         // The self-delete must be the last line: cmd reads the file by offset.
         assert_eq!(
             script.trim_end_matches("\r\n").rsplit("\r\n").next(),
-            Some("(goto) 2>nul & del \"%~f0\"")
+            Some("(goto) 2>nul & del \"%~f0\" & exit")
         );
     }
 

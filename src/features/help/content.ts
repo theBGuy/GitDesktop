@@ -697,6 +697,17 @@ the last list up, with a line above it saying it couldn't refresh.
   collapses it for you. You'll find that list on a commit's files, in **Compare**, on a
   pull request's **Files** and **Commits** tabs, and anywhere else a file list
   sits beside a diff.
+- **Filter the file list beside a diff** by typing in the field above it: the list
+  narrows to the paths that contain what you typed, and the count in the field shows
+  how many match ("2 of 13"). The open file's diff stays where it is while you type.
+  Press {{key:enter}} to open the first match, or {{key:down}} to move into the list.
+  {{kbd:focus-filter}} focuses the field while focus is in the file list or the diff,
+  and from anywhere on the **Compare** tab while it lists files; it expands a collapsed
+  list first. {{key:escape}} or the field's clear button empties it. Your text stays as
+  you move from one commit or comparison to the next, and a collapsed list shows a
+  funnel while a filter is applied. The filter is on a commit's files, in **Compare**,
+  on local pull requests and on a pull request's **Commits** tab{{ai}}, plus an agent
+  session's changes{{/ai}}.
 
 ## Committing
 
@@ -766,8 +777,9 @@ If the history can't be read, the tab says why and offers **Retry**. A failed re
 
 ## Searching history
 
-The box above the list ({{kbd:focus-filter}}) filters the commits already loaded by
-subject, author or SHA. To look past them, choose **Search all history for "…"** below
+The box above the list filters the commits already loaded by subject, author or SHA;
+{{kbd:focus-filter}} focuses it, or the file filter while focus is in a commit's file
+list or diff. To look past those commits, choose **Search all history for "…"** below
 the list: it searches the message of every commit on the branch, and a query of 4 to 64
 hex characters also finds the commit with that SHA, so a hash pasted from a terminal, a
 CI log or a review comment lands on its commit even when it isn't loaded yet. A short
@@ -1215,15 +1227,23 @@ behind, and the full three-dot diff a PR would show. The base-branch picker is s
 (type to filter) and lists your **Local** branches, then a **Remote** group with every
 remote's branches: \`upstream\` first, then \`origin\`, then any others. It hides archived
 branches, and shows which local branches live in other worktrees plus, when one has
-diverged, how far it is ahead of and behind your current branch. From here you can jump
+diverged, how far it is ahead of and behind your current branch. A local branch named like
+a remote branch (such as \`origin/x\`) is listed as well as that remote branch, each in its
+own group, and the closed picker tells the two apart with a **local** or **remote** mark
+after the name (the **local** mark shows once that remote branch is listed). A local branch
+whose name starts with \`refs/remotes/\` is listed but can't be picked there. The picker
+re-reads your remotes and their branches each time it opens. From here you can jump
 straight to opening a pull request.
 
 Picking a remote branch fetches that remote once, with a status line across the panel
-("Fetching origin…") while it runs. If the fetch fails, or you're offline, the panel
-compares against that remote's last fetch, says so, and offers **Retry** after a failed
-fetch. A picked branch that's no longer among your remote branches, or whose remote was
-removed, says so, with **Pick another branch**. Picking your own branch's copy on
-\`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
+("Fetching origin…") while it runs. If the fetch fails, or you're offline, a branch still
+among your remote branches is compared against that remote's last fetch; the line says
+so, and offers **Retry** after a failed fetch. A picked branch that's no longer among
+your remote branches says so and offers
+to fetch its remote (**Fetch origin**, for a branch on \`origin\`) beside **Pick another
+branch**; once Compare's own fetch confirms it, the line says the branch was deleted on
+that remote. A branch whose remote was removed offers **Pick another branch**. Picking your own
+branch's copy on \`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
 line explains the counts: ahead is what you haven't pushed, behind is what you haven't
 pulled.
 
@@ -4563,7 +4583,9 @@ Sections:
   (Git, the GitHub / GitLab CLIs{{ai}}, and the Claude Code / Codex / Copilot / opencode
   agents{{/ai}}) that flags anything missing (and warns when Git or the GitHub CLI is
   older than a feature needs), with a download link either way, and the current window
-  position.
+  position. **Re-check** runs the health check again and has the app reload the data it
+  had cached; use it after installing a tool so GitDesktop looks for it afresh without
+  waiting for each screen's own refresh.
 
 ## Staying up to date
 

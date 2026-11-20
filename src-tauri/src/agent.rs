@@ -695,24 +695,240 @@ pub(crate) fn find_executable(names: &[&str]) -> Option<PathBuf> {
 
 /// macOS/Linux fallback: a packaged GUI app inherits launchd's minimal PATH, so
 /// a version-manager-installed CLI (nvm/fnm/asdf) is on neither PATH nor in
-/// `candidate_dirs`. Ask the user's login+interactive shell to resolve it.
+/// `candidate_dirs`. Ask the user's login+interactive shell to resolve it; the
+/// shell's misses are remembered per [`LoginShellMisses`], its hits never.
 #[cfg(not(windows))]
 async fn resolve_via_login_shell(names: &[&str]) -> Option<PathBuf> {
+    resolve_via_login_shell_with(
+        names,
+        login_shell_misses(),
+        || SHELL_PATH.get().cloned(),
+        Instant::now,
+        probe_login_shell,
+    )
+    .await
+}
+
+/// How long a FAILED probe (spawn error, EOF, the byte cap, the timeout) stands in
+/// for an answer: it measured nothing, so it is retried, unlike a measured miss.
+#[cfg(any(not(windows), test))]
+const FAILED_PROBE_TTL: Duration = Duration::from_secs(60);
+
+/// Most names [`LoginShellMisses`] keeps entries or gates for; a new name past it
+/// empties the entry map, or drops the idle gates, first. The gate map can exceed it
+/// by the gates in use, since a gate someone holds or waits on is never dropped.
+#[cfg(any(not(windows), test))]
+const LOGIN_SHELL_CACHE_CAP: usize = 64;
+
+/// One login-shell probe of one name. `Missing` is a closed marker pair with no
+/// match; `Failed` is no pair at all, which measured nothing.
+#[cfg(any(not(windows), test))]
+#[derive(Debug, Clone, PartialEq)]
+enum LoginShellProbe {
+    Found(PathBuf),
+    Missing,
+    Failed,
+}
+
+#[cfg(any(not(windows), test))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MissEntry {
+    Measured,
+    Failed { at: Instant },
+}
+
+/// A name's single-flight gate. Its slot holds the hit of the flight holding it (or
+/// last holding it) with the generation that flight started in, read only by callers
+/// that found the gate held and whose own ticket is that generation.
+#[cfg(any(not(windows), test))]
+type ProbeGate = Arc<tokio::sync::Mutex<Option<(u64, PathBuf)>>>;
+
+/// The login shell's misses per name, valid only for the captured PATH they were
+/// measured under. A probe stores its miss, and shares its hit, only under the
+/// generation it started in: after a capture change or a clear during a probe, only
+/// that probe's own caller gets what it measured.
+#[cfg(any(not(windows), test))]
+#[derive(Default)]
+struct LoginShellMisses {
+    capture: Option<String>,
+    generation: u64,
+    entries: HashMap<String, MissEntry>,
+    gates: HashMap<String, ProbeGate>,
+}
+
+#[cfg(any(not(windows), test))]
+impl LoginShellMisses {
+    /// Drops every entry when `capture` differs from the one they were measured under.
+    fn follow(&mut self, capture: Option<String>) {
+        if self.capture != capture {
+            self.entries.clear();
+            self.capture = capture;
+            self.generation += 1;
+        }
+    }
+
+    fn fresh(&mut self, name: &str, capture: Option<String>, now: Instant) -> bool {
+        self.follow(capture);
+        match self.entries.get(name) {
+            Some(MissEntry::Measured) => true,
+            Some(MissEntry::Failed { at }) => {
+                crate::agent_sandbox::cache_entry_fresh(*at, now, FAILED_PROBE_TTL)
+            }
+            None => false,
+        }
+    }
+
+    /// At the cap, drops only the idle gates, so a name's gate is never replaced while a
+    /// caller holds or waits on it and the map may exceed the cap by those gates. Clones
+    /// are made only here, under the cache mutex: a count above one means in use.
+    fn gate(&mut self, name: &str) -> ProbeGate {
+        if !self.gates.contains_key(name) && self.gates.len() >= LOGIN_SHELL_CACHE_CAP {
+            self.gates.retain(|_, g| Arc::strong_count(g) > 1);
+        }
+        self.gates.entry(name.to_owned()).or_default().clone()
+    }
+
+    fn ticket(&mut self, capture: Option<String>) -> u64 {
+        self.follow(capture);
+        self.generation
+    }
+
+    /// A hit removes the name's entry: hits are never cached.
+    fn store(
+        &mut self,
+        name: &str,
+        ticket: u64,
+        capture: Option<String>,
+        outcome: &LoginShellProbe,
+        now: Instant,
+    ) {
+        self.follow(capture);
+        if self.generation != ticket {
+            return;
+        }
+        let entry = match outcome {
+            LoginShellProbe::Found(_) => {
+                self.entries.remove(name);
+                return;
+            }
+            LoginShellProbe::Missing => MissEntry::Measured,
+            LoginShellProbe::Failed => MissEntry::Failed { at: now },
+        };
+        if !self.entries.contains_key(name) && self.entries.len() >= LOGIN_SHELL_CACHE_CAP {
+            self.entries.clear();
+        }
+        self.entries.insert(name.to_owned(), entry);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.generation += 1;
+    }
+}
+
+/// [`resolve_via_login_shell`] over an injected cache, capture, clock and probe;
+/// `capture` and `now` are read at every cache access. One probe per name at a time,
+/// the cap included: a caller queued on a name's gate takes the flight's miss from
+/// the cache while it is still there, or its hit from its slot when its ticket is the
+/// flight's generation, and otherwise probes in its turn. A name's gate is released
+/// before the next name is tried, and the std mutex is never held across an await; a
+/// poisoned one reads as cold and shares no hit.
+#[cfg(any(not(windows), test))]
+async fn resolve_via_login_shell_with<Fut>(
+    names: &[&str],
+    cache: &Mutex<LoginShellMisses>,
+    capture: impl Fn() -> Option<String>,
+    now: impl Fn() -> Instant,
+    probe: impl Fn(String, String) -> Fut,
+) -> Option<PathBuf>
+where
+    Fut: std::future::Future<Output = LoginShellProbe>,
+{
     for name in names {
-        let marker = capture_marker();
         let Some(body) = command_v_body(name) else {
             continue;
         };
-        let script = marker_wrapped_script(&marker, &body);
-        let Some(stdout) = run_login_shell(&script, &marker).await else {
-            continue;
+        let gate = match cache.lock() {
+            Ok(mut misses) => {
+                if misses.fresh(name, capture(), now()) {
+                    continue;
+                }
+                Some(misses.gate(name))
+            }
+            Err(_) => None,
         };
-        if let Some(found) = command_v_match(&stdout, &marker, name, Path::is_file) {
+        let Some(gate) = gate else {
+            match probe((*name).to_owned(), body).await {
+                LoginShellProbe::Found(found) => return Some(found),
+                _ => continue,
+            }
+        };
+        let (mut slot, joined) = match gate.try_lock() {
+            Ok(slot) => (slot, false),
+            Err(_) => (gate.lock().await, true),
+        };
+        let ticket = match cache.lock() {
+            Ok(mut misses) => {
+                if misses.fresh(name, capture(), now()) {
+                    continue;
+                }
+                Some(misses.ticket(capture()))
+            }
+            Err(_) => None,
+        };
+        if let (true, Some(ticket), Some((generation, found))) = (joined, ticket, slot.as_ref()) {
+            if *generation == ticket {
+                return Some(found.clone());
+            }
+        }
+        *slot = None;
+        let outcome = probe((*name).to_owned(), body).await;
+        if let (Some(ticket), Ok(mut misses)) = (ticket, cache.lock()) {
+            misses.store(name, ticket, capture(), &outcome, now());
+        }
+        if let LoginShellProbe::Found(found) = outcome {
+            if let Some(ticket) = ticket {
+                *slot = Some((ticket, found.clone()));
+            }
             return Some(found);
         }
     }
     None
 }
+
+/// The process-wide [`LoginShellMisses`].
+#[cfg(not(windows))]
+fn login_shell_misses() -> &'static Mutex<LoginShellMisses> {
+    static CACHE: OnceLock<Mutex<LoginShellMisses>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(LoginShellMisses::default()))
+}
+
+/// One real login-shell probe of `name`, whose `command -v` line is `body`.
+#[cfg(not(windows))]
+async fn probe_login_shell(name: String, body: String) -> LoginShellProbe {
+    let marker = capture_marker();
+    let script = marker_wrapped_script(&marker, &body);
+    let Some(stdout) = run_login_shell(&script, &marker).await else {
+        return LoginShellProbe::Failed;
+    };
+    match command_v_match(&stdout, &marker, &name, Path::is_file) {
+        Some(found) => LoginShellProbe::Found(found),
+        None => LoginShellProbe::Missing,
+    }
+}
+
+/// Forgets every remembered login-shell miss (About > Re-check), so each absent name
+/// is probed again; a probe already in flight stores nothing.
+#[cfg(not(windows))]
+fn clear_login_shell_misses() {
+    if let Ok(mut misses) = login_shell_misses().lock() {
+        misses.clear();
+    }
+}
+
+/// Windows has no login-shell probe; the stub keeps call sites cfg-free.
+#[cfg(windows)]
+fn clear_login_shell_misses() {}
 
 /// The resolver's `command -v` line with the name single-quoted, or None for a name
 /// holding a quote, a backslash or a control character: a user-configured launcher
@@ -1241,6 +1457,14 @@ fn login_shell_program() -> String {
 async fn run_login_shell(script: &str, marker: &str) -> Option<Vec<u8>> {
     let mut cmd = Command::new(login_shell_program());
     sanitize_child_env(&mut cmd);
+    run_probe_shell(cmd, script, marker, tokio::time::sleep(DETECT_TIMEOUT)).await
+}
+
+/// The login-shell probe's spawn settings for `cmd`: `-lic script`, stdin closed,
+/// stdout piped, stderr discarded, and a new session, so the shell leads its own
+/// process group.
+#[cfg(not(windows))]
+fn configure_probe_shell(cmd: &mut Command, script: &str) {
     // -l sources the profile and -i the rc files, where zsh/bash users commonly set
     // PATH (nvm, `brew shellenv`, …); stdin is closed so the shell never waits on it.
     cmd.arg("-lic")
@@ -1251,7 +1475,9 @@ async fn run_login_shell(script: &str, marker: &str) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         .kill_on_drop(true);
     // A new session: an interactive shell must never take over a launching terminal
-    // (`tauri dev`, an AppImage run from one), and this runs on every startup.
+    // (`tauri dev`, an AppImage run from one), and this runs on every startup. Never
+    // also put it in a group (`TreeGuard::prepare`): std runs setpgid before pre_exec
+    // closures, so setsid would then fail.
     #[cfg(unix)]
     // SAFETY: the hook runs between fork and exec and calls only `setsid`, which is
     // async-signal-safe.
@@ -1263,10 +1489,32 @@ async fn run_login_shell(script: &str, marker: &str) -> Option<Vec<u8>> {
             Ok(())
         });
     }
+}
+
+/// [`run_login_shell`] over a prepared `cmd`, with `deadline` in place of
+/// `DETECT_TIMEOUT`. Every exit kills the shell's process group, so a job an rc file
+/// started in it dies with the probe. A job outside that group escapes: one that calls
+/// setsid itself, or any job started after an rc file turns job control on (`set -m`),
+/// which gives each job a group of its own.
+#[cfg(not(windows))]
+async fn run_probe_shell(
+    mut cmd: Command,
+    script: &str,
+    marker: &str,
+    deadline: impl std::future::Future<Output = ()>,
+) -> Option<Vec<u8>> {
+    configure_probe_shell(&mut cmd, script);
+    // The guard is declared right after `child` so it drops first: the unreaped shell
+    // still pins the group id when the kill lands, also when this future is dropped.
     let mut child = cmd.spawn().ok()?;
+    let _tree = crate::proc_tree::TreeGuard::arm(&child);
     let mut stdout = child.stdout.take()?;
     let read = read_until_marker_pair(&mut stdout, marker.as_bytes(), SHELL_PATH_CAPTURE_CAP);
-    tokio::time::timeout(DETECT_TIMEOUT, read).await.ok()?
+    tokio::select! {
+        biased;
+        got = read => got,
+        () = deadline => None,
+    }
 }
 
 /// Runs `$SHELL -lic` to print PATH between random markers, so rc-file banners can't
@@ -1287,10 +1535,11 @@ const RESOLVE_SLOTS: usize = 4;
 type ResolveCache = [Option<(Instant, Option<PathBuf>)>; RESOLVE_SLOTS];
 
 /// Per-kind memo of the no-override resolution, held for
-/// [`crate::agent_sandbox::CANDIDATE_TTL`]. Caching the MISS is the point — an absent
-/// CLI costs a login-shell spawn per resolution on macOS/Linux — so a just-installed CLI
-/// can read "not installed" until the entry expires, on the same cadence as the container
-/// runtimes' recovery.
+/// [`crate::agent_sandbox::CANDIDATE_TTL`]. It spares a login-shell spawn per resolution
+/// for a CLI only that shell finds (macOS/Linux; the resolver remembers the shell's
+/// misses, never its hits). A just-installed CLI can read "not installed" until the entry
+/// expires, on the same cadence as the container runtimes' recovery; one only the login
+/// shell would find reads so until About > Re-check or a restart.
 fn resolve_cache() -> &'static Mutex<ResolveCache> {
     static CACHE: OnceLock<Mutex<ResolveCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(std::array::from_fn(|_| None)))
@@ -1343,6 +1592,20 @@ async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
         c[i] = Some((Instant::now(), resolved.clone()));
     }
     resolved
+}
+
+/// Forgets every cached lookup that can read "not installed" (About > Re-check): the
+/// remembered login-shell misses, then the per-kind resolutions, then the
+/// container-runtime slots. The misses go first, so a COLD lookup that starts
+/// afterwards asks a resolver that has already forgotten. A lookup already in flight
+/// may still store its answer, and one queued behind it takes that answer; either is
+/// held for at most one [`crate::agent_sandbox::CANDIDATE_TTL`].
+pub(crate) fn forget_cli_lookups() {
+    clear_login_shell_misses();
+    if let Ok(mut c) = resolve_cache().lock() {
+        c.fill(None);
+    }
+    crate::agent_sandbox::forget_runtime_candidates();
 }
 
 // --- detection -------------------------------------------------------------
@@ -3879,16 +4142,15 @@ fn has_blank_line(text: &str) -> bool {
     })
 }
 
-/// Kills the entire process tree of a host-mode agent child: on cancel or timeout,
-/// when the post-run exit grace runs out, and on unix at every review run's exit.
-///
-/// `child.start_kill()` reaches only the direct child, but the agent CLI is a
-/// shim that spawns node workers, MCP servers and tool subprocesses — killing
-/// the shim orphans them (they keep burning tokens and holding worktree file
-/// handles). `taskkill /T` on Windows; `killpg` on Unix through
-/// `git::runner::kill_process_group` (the child leads its own group — see
-/// `process_group(0)` at the spawn site).
-fn kill_process_tree(child: &mut tokio::process::Child) {
+/// Kills a run's process tree from its leader: on cancel or timeout, when the exit
+/// grace runs out, and on unix at every review run's end. Unix signals the leader's
+/// process group (it leads one, see `TreeGuard::prepare` at the spawn). Windows
+/// terminates the run's job and leaves the guard armed for the caller's decision; only
+/// a run whose job failed to arm walks the tree with `taskkill /T`, unwaited. The
+/// direct kill of the leader follows on every platform.
+fn kill_process_tree(child: &mut tokio::process::Child, tree: &crate::proc_tree::TreeGuard) {
+    #[cfg(not(windows))]
+    let _ = tree;
     let Some(pid) = child.id() else {
         // Already reaped — nothing to signal.
         let _ = child.start_kill();
@@ -3897,22 +4159,35 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
 
     #[cfg(windows)]
     {
-        // taskkill is always present on Windows and kills the whole tree.
-        // Fire-and-forget; CREATE_NO_WINDOW suppresses the console flash.
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn();
+        if tree.is_armed() {
+            tree.terminate();
+        } else {
+            // Fallback for a run whose job failed to arm: `taskkill /T`,
+            // fire-and-forget; CREATE_NO_WINDOW suppresses the console flash.
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .spawn();
+        }
     }
 
     // The child leads its own group (pgid == pid), so this reaches every descendant.
     #[cfg(unix)]
-    crate::git::runner::kill_process_group(pid);
+    crate::proc_tree::kill_process_group(pid);
 
-    // Belt-and-braces: the tree-kill can race the child exiting, and this is
-    // the last-resort direct kill on any platform.
+    // The direct kill of the leader, on every platform: it covers a failed terminate
+    // and the unwaited `taskkill` fallback.
     let _ = child.start_kill();
+}
+
+/// Whether a run's tree guard disarms at its end; otherwise it kills the tree. Only a
+/// reaped leader disarms. Unix disarms whenever the leader was reaped: the group kill,
+/// where one is due, already ran before the reap. Windows disarms only a session turn
+/// that ended cleanly; a review, a cancel, a timeout and an expired exit grace close
+/// the job.
+fn tree_guard_disarms(unix: bool, reaped: bool, kill_tree_on_exit: bool, forced: bool) -> bool {
+    reaped && (unix || (!kill_tree_on_exit && !forced))
 }
 
 /// Bounds each trailing wait once the pump loop ends — first the child's exit, then the
@@ -4057,10 +4332,10 @@ async fn stream_agent(
     // `(runtime, container name)` to force-remove on cancel/timeout — killing the
     // `run` client alone leaves the engine's container running.
     container_kill: Option<(PathBuf, String)>,
-    // Unix: kill the child's process group on EVERY exit, the clean one included, so a
-    // member holding only stderr (an SDK-spawned MCP server) can't outlive the run.
-    // Reviews only: a session's group may hold processes its agent started on purpose.
-    kill_group_on_exit: bool,
+    // Whether the run's whole tree dies at EVERY exit, the clean one included: true for
+    // reviews. A session passes false and keeps what its turn started when the turn ends
+    // cleanly; cancel, timeout and an expired exit grace still take the tree.
+    kill_tree_on_exit: bool,
     // Extra environment for the spawned process — used to pass a Copilot container's
     // `COPILOT_GITHUB_TOKEN` to the docker/podman client by name (the run args carry
     // `-e COPILOT_GITHUB_TOKEN` with no value, so the token is inherited here and
@@ -4068,8 +4343,6 @@ async fn stream_agent(
     extra_env: &[(&str, String)],
     on_event: &dyn EventSink,
 ) -> AppResult<Option<ReviewEvent>> {
-    #[cfg(not(unix))]
-    let _ = kill_group_on_exit;
     // Before the sanitize below, which reads whatever that capture landed.
     if wait_for_executing_capture(&cancel).await {
         return Ok(None);
@@ -4086,11 +4359,9 @@ async fn stream_agent(
         .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    // Put the child in its own process group so a group-kill (on cancel, timeout, and
-    // every review run's exit) reaches the whole tree (the CLI shim spawns node
-    // workers, MCP-server children, and tool subprocesses). See `kill_process_tree`.
-    #[cfg(unix)]
-    cmd.process_group(0);
+    // The child leads its own process group on unix, and `tree` below holds its job on
+    // Windows: together they are how a kill reaches what the CLI spawned.
+    crate::proc_tree::TreeGuard::prepare(&mut cmd);
     cmd.kill_on_drop(true);
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -4100,6 +4371,10 @@ async fn stream_agent(
             AppError::Io(e)
         }
     })?;
+    // Armed with nothing between spawn and arm (no await, no early exit), and declared
+    // right after `child` so it drops first: on unix an unreaped leader pins the group
+    // id the guard's kill names.
+    let tree = crate::proc_tree::TreeGuard::arm(&child);
 
     // Write the prompt on a detached task so a large diff can't deadlock
     // against stdout filling its pipe while we're still writing stdin.
@@ -4148,12 +4423,12 @@ async fn stream_agent(
         tokio::select! {
             _ = &mut deadline => {
                 timed_out = true;
-                kill_process_tree(&mut child);
+                kill_process_tree(&mut child, &tree);
                 break;
             }
             _ = cancel.notified() => {
                 cancelled = true;
-                kill_process_tree(&mut child);
+                kill_process_tree(&mut child, &tree);
                 break;
             }
             line = lines.next_line() => {
@@ -4190,16 +4465,15 @@ async fn stream_agent(
         }
     }
 
-    // On a review run (`kill_group_on_exit`), group kill on every exit: wait (bounded)
-    // for the leader WITHOUT reaping it, kill its process group, then reap.
-    // Kill-before-reap is the invariant — an unreaped zombie pins its pid and pgid, so
-    // the `killpg` can't land on a recycled group. The non-reaping wait still lets a
-    // cleanly exiting leader flush stderr first.
+    // Unix, review run (`kill_tree_on_exit`): wait (bounded) for the leader WITHOUT
+    // reaping it, kill its process group, then reap. Kill-before-reap is the invariant:
+    // an unreaped zombie pins its pid and pgid, so the `killpg` can't land on a recycled
+    // group. The non-reaping wait still lets a cleanly exiting leader flush stderr first.
     #[cfg(unix)]
     let group_killed = match child.id() {
-        Some(pid) if kill_group_on_exit => {
+        Some(pid) if kill_tree_on_exit => {
             wait_exit_unreaped(pid, CHILD_EXIT_GRACE).await;
-            kill_process_tree(&mut child);
+            kill_process_tree(&mut child, &tree);
             let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
             true
         }
@@ -4207,16 +4481,30 @@ async fn stream_agent(
     };
     #[cfg(not(unix))]
     let group_killed = false;
-    // Without the group kill above (sessions, and runs off unix) both waits below stay
-    // bounded: a surviving grandchild holding the pipes costs a bounded delay, never a
-    // hung command, and on a clean EOF nothing is killed until this grace elapses.
-    if !group_killed
+    // Every other run waits here, bounded. A leader still alive when the grace ends is
+    // killed with its tree by `kill_process_tree`, before the reap: on unix it signals
+    // the group, on Windows it terminates the job (an unarmed guard walks the tree with
+    // `taskkill /T` instead).
+    let grace_expired = !group_killed
         && tokio::time::timeout(CHILD_EXIT_GRACE, child.wait())
             .await
-            .is_err()
-    {
-        kill_process_tree(&mut child);
+            .is_err();
+    if grace_expired {
+        kill_process_tree(&mut child, &tree);
         let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
+    }
+    // The guard's one decision, with no await since the last `child.wait()`: on unix a
+    // guard still armed after the reap could signal a recycled group. It precedes the
+    // `rm -f` and the stderr join: on Windows closing an armed job is what lets a cleanly
+    // ended review's stderr reach EOF. `grace_expired` feeds `forced`, so on Windows a
+    // leader that outlived the grace never disarms; on unix its group was already
+    // signalled above, and once the leader is reaped its guard disarms.
+    let forced = cancelled || timed_out || grace_expired;
+    let reaped = child.id().is_none();
+    if tree_guard_disarms(cfg!(unix), reaped, kill_tree_on_exit, forced) {
+        tree.disarm();
+    } else {
+        tree.kill();
     }
     // A killed `docker/podman run` client doesn't stop the container — force-
     // remove it so a cancelled/timed-out agent isn't left running detached.
@@ -6319,6 +6607,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_serves_the_cache_but_an_override_bypasses_it() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.lock().await;
         // A planted path that no real resolution could produce (it doesn't exist), so
         // getting it back proves the cached value was served without re-resolving.
         let kind = AgentKind::Opencode;
@@ -6340,6 +6629,41 @@ mod tests {
             cache[kind.slot()] = None;
         }
         assert_eq!(found, Some(override_file));
+    }
+
+    /// About > Re-check's forget empties every resolve slot, fresh misses and hits alike.
+    /// Every read is of the raw slots, so no TTL decides either side of the forget.
+    #[test]
+    fn forgetting_the_cli_lookups_leaves_every_resolve_slot_cold() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        let seeded: Vec<Option<bool>> = {
+            let mut cache = resolve_cache().lock().unwrap();
+            for (i, slot) in cache.iter_mut().enumerate() {
+                let hit = (i % 2 == 1).then(|| PathBuf::from(format!("gd-planted-{i}")));
+                *slot = Some((Instant::now(), hit));
+            }
+            cache
+                .iter()
+                .map(|s| s.as_ref().map(|(_, v)| v.is_some()))
+                .collect()
+        };
+        let expected: Vec<Option<bool>> = (0..RESOLVE_SLOTS).map(|i| Some(i % 2 == 1)).collect();
+        assert_eq!(seeded, expected, "each slot holds its seeded miss or hit");
+        forget_cli_lookups();
+        let all_empty = resolve_cache().lock().unwrap().iter().all(Option::is_none);
+        assert!(all_empty, "a resolve slot stayed cached");
+    }
+
+    /// The same forget reaches the container-runtime slots.
+    #[test]
+    fn forgetting_the_cli_lookups_empties_the_runtime_candidates() {
+        use crate::agent_sandbox::{runtime_candidates_empty, seed_runtime_candidate};
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        seed_runtime_candidate(0, None);
+        seed_runtime_candidate(1, Some((PathBuf::from("pm"), "podman".to_string())));
+        assert!(!runtime_candidates_empty(), "the seeded slots");
+        forget_cli_lookups();
+        assert!(runtime_candidates_empty(), "a runtime slot stayed cached");
     }
 
     #[tokio::test]
@@ -9336,86 +9660,821 @@ opencode/x-preview-f-free
             .any(|e| matches!(e, ReviewEvent::Done { .. } | ReviewEvent::Error { .. })));
     }
 
-    /// Whether `pid` is gone: no such process, or (linux) a zombie its new parent has
-    /// not reaped yet, so a slow init can't read as a survivor.
-    #[cfg(unix)]
-    fn process_is_dead(pid: libc::pid_t) -> bool {
-        // SAFETY: signal 0 only probes whether the process exists.
-        if unsafe { libc::kill(pid, 0) } == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        {
-            return true;
-        }
-        // The state letter follows the parenthesized command name.
-        #[cfg(target_os = "linux")]
-        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            return stat
-                .rsplit_once(')')
-                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
-        }
-        false
+    // A run's process tree: a fake agent CLI that starts a holder (proc_tree's test
+    // support) and then waits for `go`. Each test starts its run the same way
+    // (`start_run`), so no Windows holder is born before its job assignment.
+
+    use crate::proc_tree::test_support::{
+        remove_when_free, started_within, wait_until, Holder, HostShell, Keeps, HANG_GUARD,
+    };
+    use crate::proc_tree::TreeGuard;
+
+    /// What the fake CLI writes to its stderr as it ends; shares no text with the
+    /// holder's release marker.
+    const MARKER: &str = "RUN-TREE-STDERR-MARKER";
+
+    /// The Claude `result` line: the smallest stdout that ends a run with `Done`.
+    const RESULT_LINE: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"The review.","total_cost_usd":0.25}"#;
+
+    fn tree_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("gd-agent-tree-")
+            .tempdir()
+            .expect("create temp dir")
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn review_eof_kills_a_group_member_holding_only_stderr() {
-        let dir = std::env::temp_dir().join(format!("gd-eof-group-kill-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("fixture dir");
-        let pid_path = dir.join("grandchild.pid");
-        // The sleeper's stdout goes elsewhere, so stdout reaches EOF when `sh` exits
-        // while the sleeper still holds the inherited stderr pipe.
-        let args = vec![
-            "-c".to_string(),
-            "sleep 30 >/dev/null & echo $! > \"$1\"".to_string(),
-            "sh".to_string(),
-            pid_path.to_string_lossy().into_owned(),
+    /// The fake CLI, a batch root (the shape of a `.cmd` shim) run as
+    /// `cmd /d /c .\agent.cmd`: it launches the holder only once `armed` exists, then
+    /// waits for `go`, writes MARKER to stderr and, given `emit`, prints `out.jsonl`.
+    /// Each loop steps with a one-second ping, 900 passes in all (a leak cap).
+    #[cfg(windows)]
+    fn fake_agent(dir: &Path, holder: &Holder, keeps: Keeps, emit: bool) -> (PathBuf, Vec<String>) {
+        let step = r#""%SystemRoot%\System32\ping.exe" -n 2 127.0.0.1 >nul"#;
+        let lines = [
+            "@echo off".to_string(),
+            "set n=0".into(),
+            ":armed".into(),
+            "if exist armed goto launch".into(),
+            "set /a n+=1 >nul".into(),
+            "if %n% geq 900 goto done".into(),
+            step.into(),
+            "goto armed".into(),
+            ":launch".into(),
+            holder.launch_snippet(HostShell::Cmd, keeps),
+            ":wait".into(),
+            "if exist go goto done".into(),
+            "set /a n+=1 >nul".into(),
+            "if %n% geq 900 goto done".into(),
+            step.into(),
+            "goto wait".into(),
+            ":done".into(),
+            format!("echo {MARKER} 1>&2"),
+            r#"if "%~1"=="emit" type out.jsonl"#.into(),
         ];
-        let sink = collector();
-        let started = Instant::now();
-        let result = stream_agent(
-            Arc::new(Notify::new()),
+        std::fs::write(dir.join("agent.cmd"), lines.join("\r\n") + "\r\n")
+            .expect("write agent.cmd");
+        // `.\`: cmd skips the current directory for a bare name when
+        // NoDefaultCurrentDirectoryInExePath is set.
+        let mut args = vec!["/d".to_string(), "/c".into(), r".\agent.cmd".into()];
+        if emit {
+            std::fs::write(dir.join("out.jsonl"), format!("{RESULT_LINE}\n"))
+                .expect("write out.jsonl");
+            args.push("emit".into());
+        }
+        (PathBuf::from("cmd"), args)
+    }
+
+    /// The fake CLI as an sh script run as `sh agent.sh`: it launches the holder, then
+    /// waits for `go`, writes MARKER to stderr and, given `emit`, prints `out.jsonl`.
+    /// No `armed` gate: the process group exists before exec. The loop's cap is a leak
+    /// cap (about 15 minutes).
+    #[cfg(unix)]
+    fn fake_agent(dir: &Path, holder: &Holder, keeps: Keeps, emit: bool) -> (PathBuf, Vec<String>) {
+        let lines = [
+            holder.launch_snippet(HostShell::Sh, keeps),
+            r#"i=0; while [ ! -e go ] && [ "$i" -lt 18000 ]; do sleep 0.05; i=$((i+1)); done"#
+                .to_string(),
+            format!("echo {MARKER} >&2"),
+            r#"if [ "$1" = emit ]; then cat out.jsonl; fi"#.into(),
+            "exit 0".into(),
+        ];
+        std::fs::write(dir.join("agent.sh"), lines.join("\n") + "\n").expect("write agent.sh");
+        let mut args = vec!["agent.sh".to_string()];
+        if emit {
+            std::fs::write(dir.join("out.jsonl"), format!("{RESULT_LINE}\n"))
+                .expect("write out.jsonl");
+            args.push("emit".into());
+        }
+        (PathBuf::from("sh"), args)
+    }
+
+    /// stream_agent over the fake CLI in `dir`: a review when `kill_tree_on_exit`, else
+    /// a session. Its 600 s timeout is a failure-only ceiling.
+    fn fake_run<'a>(
+        cancel: Arc<Notify>,
+        bin: &'a Path,
+        args: Vec<String>,
+        dir: &'a Path,
+        kill_tree_on_exit: bool,
+        sink: &'a CollectorSink,
+    ) -> impl std::future::Future<Output = AppResult<Option<ReviewEvent>>> + 'a {
+        let noun = if kill_tree_on_exit {
+            "review"
+        } else {
+            "session"
+        };
+        stream_agent(
+            cancel,
             AgentKind::Claude,
-            Path::new("sh"),
+            bin,
             args,
             String::new(),
             dir.to_str().expect("utf-8 temp dir"),
             Duration::from_secs(600),
-            "review",
+            noun,
             false,
             None,
-            true,
+            kill_tree_on_exit,
             &[],
-            &sink,
+            sink,
         )
-        .await;
-        let elapsed = started.elapsed();
-        let gpid: libc::pid_t = std::fs::read_to_string(&pid_path)
-            .expect("the leader wrote the sleeper's pid")
-            .trim()
-            .parse()
-            .expect("a numeric pid");
-        let mut dead = process_is_dead(gpid);
-        for _ in 0..20 {
-            if dead {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            dead = process_is_dead(gpid);
-        }
-        if !dead && gpid > 1 {
-            // SAFETY: plain integers; a surviving sleeper must not outlive the test.
-            unsafe { libc::kill(gpid, libc::SIGKILL) };
-        }
-        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // A survivor holding stderr would burn the stderr join's full grace.
+    /// Polls `run` once, only then opens the `armed` gate, and keeps polling it until
+    /// the holder has started. On Windows the spawn and the guard's arm happen in that
+    /// first poll; elsewhere a wait for an executing PATH capture may come before them.
+    async fn start_run<F>(run: &mut std::pin::Pin<Box<F>>, dir: &Path, holder: &Holder)
+    where
+        F: std::future::Future<Output = AppResult<Option<ReviewEvent>>>,
+    {
+        tokio::select! {
+            biased;
+            r = run.as_mut() => panic!("the run ended at once: {r:?}"),
+            () = std::future::ready(()) => {}
+        }
+        std::fs::write(dir.join("armed"), "").expect("open the armed gate");
+        tokio::select! {
+            r = run.as_mut() => panic!("the run ended before its holder started: {r:?}"),
+            s = started_within(holder, HANG_GUARD) => assert!(s, "the holder never started"),
+        }
+    }
+
+    /// Lets the fake CLI end.
+    fn let_go(dir: &Path) {
+        std::fs::write(dir.join("go"), "").expect("let the fake CLI end");
+    }
+
+    /// The error message a run that streamed no result ends with.
+    fn no_result_message(result: &AppResult<Option<ReviewEvent>>) -> String {
+        match result {
+            Ok(Some(ReviewEvent::Error { message, .. })) => message.clone(),
+            other => panic!("expected the no-result Error, got {other:?}"),
+        }
+    }
+
+    /// A review's clean end kills a holder that keeps only the CLI's stderr, so the
+    /// stderr join reaches EOF and the CLI's own stderr text becomes the message. What
+    /// this rests on is the product's behaviour, not a test margin: after the tree kill
+    /// the read must end inside the product's own stderr-join grace, or the product
+    /// reports no stderr and the marker is missing. The test reads no clock.
+    #[tokio::test]
+    async fn run_tree_review_end_kills_a_stderr_holder() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::StderrOnly, false);
+        let sink = collector();
+        let cancel = Arc::new(Notify::new());
+        let mut run = Box::pin(fake_run(cancel, &bin, args, dir.path(), true, &sink));
+        start_run(&mut run, dir.path(), &holder).await;
+        let_go(dir.path());
+        let result = run.await;
+        let died = wait_until(|| !holder.alive(), HANG_GUARD);
+        let message = no_result_message(&result);
         assert!(
-            elapsed < Duration::from_secs(3),
-            "stream_agent took {elapsed:?}"
+            message.contains(MARKER),
+            "the stderr text never arrived (holder died: {died}): {message:?}"
         );
-        assert!(dead, "the stderr-holding group member outlived the run");
-        // No claude-format line streamed, so the no-result arm reports the run.
-        assert!(matches!(result, Ok(Some(ReviewEvent::Error { .. }))));
+        assert!(died, "the stderr holder outlived the review");
+        remove_when_free(dir);
+    }
+
+    /// The control for the test above: a session's clean end keeps the holder, so the
+    /// stderr join gives up and the marker cannot arrive.
+    #[tokio::test]
+    async fn run_tree_session_end_keeps_a_stderr_holder() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::StderrOnly, false);
+        let sink = collector();
+        let cancel = Arc::new(Notify::new());
+        let mut run = Box::pin(fake_run(cancel, &bin, args, dir.path(), false, &sink));
+        start_run(&mut run, dir.path(), &holder).await;
+        let_go(dir.path());
+        let result = run.await;
+        let message = no_result_message(&result);
+        assert!(
+            !message.contains(MARKER),
+            "the marker arrived while the holder kept stderr: {message:?}"
+        );
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the session's clean end killed its holder"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+
+    /// One clean end, with a result streamed and no pipe kept: a review kills the
+    /// holder, a session keeps it.
+    async fn clean_end(kill_tree_on_exit: bool) {
+        let kind = if kill_tree_on_exit {
+            "review"
+        } else {
+            "session"
+        };
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::Neither, true);
+        let sink = collector();
+        let cancel = Arc::new(Notify::new());
+        let mut run = Box::pin(fake_run(
+            cancel,
+            &bin,
+            args,
+            dir.path(),
+            kill_tree_on_exit,
+            &sink,
+        ));
+        start_run(&mut run, dir.path(), &holder).await;
+        let_go(dir.path());
+        let result = run.await;
+        assert!(
+            matches!(
+                result,
+                Ok(Some(ReviewEvent::Done {
+                    is_error: false,
+                    ..
+                }))
+            ),
+            "{kind}: expected a clean Done, got {result:?}"
+        );
+        if kill_tree_on_exit {
+            assert!(
+                wait_until(|| !holder.alive(), HANG_GUARD),
+                "{kind}: the holder outlived the run"
+            );
+        } else {
+            assert!(
+                holder.confirm_alive(HANG_GUARD),
+                "{kind}: the clean end killed the holder"
+            );
+            holder.release();
+            assert!(
+                wait_until(|| !holder.alive(), HANG_GUARD),
+                "{kind}: the released holder never exited"
+            );
+        }
+        remove_when_free(dir);
+    }
+
+    /// Each arm is the other's control.
+    #[tokio::test]
+    async fn run_tree_clean_end_by_run_kind() {
+        clean_end(true).await;
+        clean_end(false).await;
+    }
+
+    #[tokio::test]
+    async fn run_tree_cancelled_session_kills_its_holder() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::Both, false);
+        let sink = collector();
+        let cancel = Arc::new(Notify::new());
+        let mut run = Box::pin(fake_run(
+            cancel.clone(),
+            &bin,
+            args,
+            dir.path(),
+            false,
+            &sink,
+        ));
+        start_run(&mut run, dir.path(), &holder).await;
+        cancel.notify_one();
+        let result = run.await;
+        assert!(
+            matches!(result, Ok(None)),
+            "a cancelled run returns no terminal, got {result:?}"
+        );
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the cancelled session"
+        );
+        remove_when_free(dir);
+    }
+
+    #[tokio::test]
+    async fn run_tree_dropped_run_kills_its_holder() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::Both, false);
+        let sink = collector();
+        let cancel = Arc::new(Notify::new());
+        let mut run = Box::pin(fake_run(cancel, &bin, args, dir.path(), false, &sink));
+        start_run(&mut run, dir.path(), &holder).await;
+        drop(run);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the dropped run"
+        );
+        remove_when_free(dir);
+    }
+
+    /// The negative control for the two kill tests above: the same fake CLI spawned
+    /// the product's way, its guard disarmed, then the CLI killed directly, leaves the
+    /// holder running.
+    #[tokio::test]
+    async fn run_tree_control_disarmed_guard_keeps_the_holder() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::Both, false);
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args)
+            .current_dir(dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        TreeGuard::prepare(&mut cmd);
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn the fake CLI");
+        let guard = TreeGuard::arm(&child);
+        std::fs::write(dir.path().join("armed"), "").expect("open the armed gate");
+        assert!(guard.is_armed(), "the guard armed");
+        assert!(
+            started_within(&holder, HANG_GUARD).await,
+            "the holder never started"
+        );
+        guard.disarm();
+        child.kill().await.expect("kill and reap the fake CLI");
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with a disarmed guard and a direct kill"
+        );
+        holder.release();
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the released holder never exited"
+        );
+        remove_when_free(dir);
+    }
+
+    /// A forced end's kill takes the whole tree at once, while the run still holds its
+    /// armed guard and has yet to reap the leader: the job's terminate on Windows, the
+    /// group signal on unix.
+    #[tokio::test]
+    async fn run_tree_kill_takes_the_holder_while_the_guard_is_held() {
+        let dir = tree_dir();
+        let holder = Holder::new(dir.path());
+        let (bin, args) = fake_agent(dir.path(), &holder, Keeps::Both, false);
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args)
+            .current_dir(dir.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        TreeGuard::prepare(&mut cmd);
+        cmd.kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn the fake CLI");
+        let guard = TreeGuard::arm(&child);
+        std::fs::write(dir.path().join("armed"), "").expect("open the armed gate");
+        assert!(guard.is_armed(), "the guard armed");
+        assert!(
+            started_within(&holder, HANG_GUARD).await,
+            "the holder never started"
+        );
+        kill_process_tree(&mut child, &guard);
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived the kill while the guard was held"
+        );
+        drop(guard);
+        let _ = child.wait().await;
+        remove_when_free(dir);
+    }
+
+    /// The guard's decision over all 16 inputs: unix disarms exactly when the leader
+    /// was reaped; Windows only when reaped, a session and not forced; an unreaped
+    /// leader never disarms.
+    #[test]
+    fn run_tree_guard_disarm_table() {
+        // ((unix, reaped, kill_tree_on_exit, forced), disarms)
+        let table = [
+            ((true, true, true, true), true),
+            ((true, true, true, false), true),
+            ((true, true, false, true), true),
+            ((true, true, false, false), true),
+            ((true, false, true, true), false),
+            ((true, false, true, false), false),
+            ((true, false, false, true), false),
+            ((true, false, false, false), false),
+            ((false, true, true, true), false),
+            ((false, true, true, false), false),
+            ((false, true, false, true), false),
+            ((false, true, false, false), true),
+            ((false, false, true, true), false),
+            ((false, false, true, false), false),
+            ((false, false, false, true), false),
+            ((false, false, false, false), false),
+        ];
+        let inputs: HashSet<_> = table.iter().map(|(input, _)| *input).collect();
+        assert_eq!(inputs.len(), 16, "every input combination, once");
+        for ((unix, reaped, kill_tree_on_exit, forced), disarms) in table {
+            assert_eq!(
+                tree_guard_disarms(unix, reaped, kill_tree_on_exit, forced),
+                disarms,
+                "unix {unix}, reaped {reaped}, kill_tree_on_exit {kill_tree_on_exit}, forced {forced}"
+            );
+        }
+    }
+
+    /// The body of the first fn whose header starts at `head`, as the wiring pins read
+    /// it: CRLF normalised, whole comment lines dropped, all whitespace stripped, and a
+    /// comma directly before `)` dropped (rustfmt adds one when it breaks a call across
+    /// lines).
+    pub(super) fn stripped_fn_body(src: &str, head: &str) -> Option<String> {
+        let src = src.replace("\r\n", "\n");
+        let start = src.find(head)?;
+        let open = start + src[start..].find("{\n")? + 2;
+        let close = open + src[open..].find("\n}\n")?;
+        let code: String = src[open..close]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        let stripped: String = code.split_whitespace().collect();
+        Some(stripped.replace(",)", ")"))
+    }
+
+    /// stream_agent's body as the wiring pin reads it.
+    fn stream_agent_body(src: &str) -> Option<String> {
+        stripped_fn_body(src, "async fn stream_agent(")
+    }
+
+    /// The statement of `body` that starts with `head`, through its `;`, when exactly
+    /// one statement does (a statement starts after `;`, `{`, `}` or an attribute's `]`).
+    fn sole_statement<'b>(body: &'b str, head: &str) -> Result<&'b str, String> {
+        let starts: Vec<usize> = body
+            .match_indices(head)
+            .map(|(i, _)| i)
+            .filter(|&i| body[..i].ends_with([';', '{', '}', ']']))
+            .collect();
+        let [i] = starts[..] else {
+            return Err(format!("{} statements start `{head}`", starts.len()));
+        };
+        match body[i..].find(';') {
+            Some(end) => Ok(&body[i..=i + end]),
+            None => Err(format!("`{head}` has no `;`")),
+        }
+    }
+
+    const DECISION_CALL: &str = "tree_guard_disarms(cfg!(unix),reaped,kill_tree_on_exit,forced)";
+    const DECISION: &str = "iftree_guard_disarms(cfg!(unix),reaped,kill_tree_on_exit,forced){tree.disarm();}else{tree.kill();}";
+    const GRACE_KILL: &str = "ifgrace_expired{kill_process_tree(&mutchild,&tree);let_=tokio::time::timeout(CHILD_REAP_GRACE,child.wait()).await;}";
+
+    /// Breaches of the guard decision's wiring in stream_agent's stripped body, one
+    /// message per broken rule, each led by its number. No process test reaches them:
+    /// no fixture outlives the exit grace, and `let reaped = true;` passes every one.
+    fn run_tree_wiring_violations(body: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        match sole_statement(body, "letgrace_expired=") {
+            Ok(s)
+                if ["CHILD_EXIT_GRACE", "child.wait()", ".is_err()"]
+                    .iter()
+                    .all(|n| s.contains(n)) => {}
+            Ok(s) => bad.push(format!(
+                "1: grace_expired is not the bounded wait's result: {s}"
+            )),
+            Err(e) => bad.push(format!("1: {e}")),
+        }
+        match sole_statement(body, "letforced=") {
+            Ok(s)
+                if ["cancelled", "timed_out", "grace_expired"]
+                    .iter()
+                    .all(|n| s.contains(n))
+                    && !s.contains("&&")
+                    && !s.contains('!') => {}
+            Ok(s) => bad.push(format!(
+                "2: forced is not cancelled || timed_out || grace_expired: {s}"
+            )),
+            Err(e) => bad.push(format!("2: {e}")),
+        }
+        match sole_statement(body, "letreaped=") {
+            Ok("letreaped=child.id().is_none();") => {}
+            Ok(s) => bad.push(format!("3: reaped is not asked of the child: {s}")),
+            Err(e) => bad.push(format!("3: {e}")),
+        }
+        let calls = body.matches("tree_guard_disarms(").count();
+        if calls != 1 || !body.contains(DECISION) {
+            bad.push(format!(
+                "4: {calls} decision calls, expected one `{DECISION}`"
+            ));
+        }
+        let reap = "child.wait()).await";
+        let at = [
+            body.rfind(reap).map(|i| i + reap.len()),
+            body.find("letforced="),
+            body.find(DECISION_CALL),
+            body.find("tree.kill()"),
+            body.find("\"rm\""),
+            body.find("&mutstderr_task"),
+        ];
+        match at {
+            [Some(w), Some(f), Some(d), Some(k), Some(r), Some(j)] => {
+                if !(w < f && f < d && d < k && k < r && r < j) {
+                    bad.push(
+                        "5: the order is not reap, forced, decision, kill, rm, stderr join".into(),
+                    );
+                } else if body[w..k].contains(".await") {
+                    bad.push("5: an await sits between the last reap and the decision".into());
+                }
+            }
+            _ => bad.push(format!("5: a step is missing: {at:?}")),
+        }
+        let after_spawn = body
+            .find("cmd.spawn()")
+            .and_then(|s| body[s..].find("?;").map(|q| &body[s + q + 2..]));
+        match after_spawn {
+            Some(rest)
+                if rest.starts_with("lettree=")
+                    && rest[..rest.find(';').unwrap_or(rest.len())]
+                        .contains("TreeGuard::arm(&child)") => {}
+            Some(rest) => bad.push(format!(
+                "6: the spawn is not followed by the arm: {}",
+                rest.chars().take(80).collect::<String>()
+            )),
+            None => bad.push("6: no `cmd.spawn()` followed by `?;`".into()),
+        }
+        // From the first `group_killed` to the last reap: the unix non-reaping wait, the
+        // two bounded reaps and the grace wait, so a dropped future between them can only
+        // land on an unreaped leader. Rule 5 covers the rest of the way to the decision.
+        let span = body
+            .find("letgroup_killed=")
+            .zip(body.rfind(reap).map(|i| i + reap.len()));
+        match span {
+            Some((g, w)) if g < w => {
+                let awaits = body[g..w].matches(".await").count();
+                if awaits != 4 {
+                    bad.push(format!(
+                        "7: {awaits} awaits from group_killed to the last reap, expected 4"
+                    ));
+                }
+            }
+            _ => bad.push(format!("7: no group_killed before the last reap: {span:?}")),
+        }
+        for (arm, flag) in [
+            ("_=&mutdeadline=>{", "timed_out=true;"),
+            ("_=cancel.notified()=>{", "cancelled=true;"),
+        ] {
+            let pinned = format!("{arm}{flag}kill_process_tree(&mutchild,&tree);break;}}");
+            if !body.contains(&pinned) {
+                bad.push(format!("8: the `{arm}` arm does not set its flag and kill"));
+            }
+        }
+        if body.matches(GRACE_KILL).count() != 1 {
+            bad.push("9: an expired grace does not kill the tree, then reap".into());
+        }
+        bad
+    }
+
+    #[test]
+    fn run_tree_decision_wiring_is_pinned() {
+        let body = stream_agent_body(include_str!("agent.rs")).expect("stream_agent's body");
+        assert_eq!(run_tree_wiring_violations(&body), Vec::<String>::new());
+        let mutate = |needle: &str, with: &str| {
+            assert!(
+                body.contains(needle),
+                "`{needle}` is not in the stripped body"
+            );
+            body.replacen(needle, with, 1)
+        };
+        let breaks = |mutated: &str, rule: &str| {
+            let bad = run_tree_wiring_violations(mutated);
+            assert!(
+                bad.len() == 1 && bad[0].starts_with(rule),
+                "expected one violation of rule {rule}: {bad:?}"
+            );
+        };
+        breaks(&mutate("||grace_expired;", ";"), "2");
+        let grace = sole_statement(&body, "letgrace_expired=").expect("the grace statement");
+        breaks(&mutate(grace, &grace.replace(".is_err()", ".is_ok()")), "1");
+        // Dropping the bounded wait altogether also drops one of rule 7's awaits.
+        let unbounded = run_tree_wiring_violations(&mutate(grace, "letgrace_expired=false;"));
+        let rules: Vec<char> = unbounded.iter().filter_map(|v| v.chars().next()).collect();
+        assert_eq!(rules, ['1', '7'], "{unbounded:?}");
+        breaks(
+            &mutate("letreaped=child.id().is_none();", "letreaped=true;"),
+            "3",
+        );
+        breaks(
+            &mutate("letforced=", "tokio::task::yield_now().await;letforced="),
+            "5",
+        );
+        // The decision moved to directly after the container removal, before the join.
+        let end = "else{tree.kill();}";
+        let from = body.find("letforced=").expect("the decision's start");
+        let to = body.find(end).expect("the decision's end") + end.len();
+        let lifted = format!("{}{}", &body[..from], &body[to..]);
+        let join = lifted.find("letstderr_text=").expect("the stderr join");
+        let moved = format!("{}{}{}", &lifted[..join], &body[from..to], &lifted[join..]);
+        breaks(&moved, "5");
+        breaks(
+            &mutate("lettree=", "tokio::task::yield_now().await;lettree="),
+            "6",
+        );
+        let yield_now = "tokio::task::yield_now().await;";
+        breaks(
+            &mutate("ifgrace_expired{", &format!("{yield_now}ifgrace_expired{{")),
+            "7",
+        );
+        breaks(
+            &mutate(
+                "letgrace_expired=",
+                &format!("{yield_now}letgrace_expired="),
+            ),
+            "7",
+        );
+        let kill = "kill_process_tree(&mutchild,&tree);break;}";
+        for (arm, flag) in [
+            ("_=&mutdeadline=>{", "timed_out=true;"),
+            ("_=cancel.notified()=>{", "cancelled=true;"),
+        ] {
+            let whole = format!("{arm}{flag}{kill}");
+            breaks(&mutate(&whole, &format!("{arm}{kill}")), "8");
+            breaks(&mutate(&whole, &format!("{arm}{flag}break;}}")), "8");
+        }
+        breaks(
+            &mutate("iftree_guard_disarms(", "if!tree_guard_disarms("),
+            "4",
+        );
+        breaks(
+            &mutate(
+                "ifgrace_expired{kill_process_tree(&mutchild,&tree);",
+                "ifgrace_expired{",
+            ),
+            "9",
+        );
+    }
+
+    /// kill_process_tree's body as its pin reads it.
+    fn kill_process_tree_body(src: &str) -> Option<String> {
+        stripped_fn_body(src, "\nfn kill_process_tree(")
+    }
+
+    /// kill_process_tree's whole stripped body. Before updating it, re-check the three
+    /// effects: the Windows block (an armed guard terminates the job, an unarmed one spawns
+    /// `taskkill /F /T /PID`), the unix group kill under `#[cfg(unix)]`, and the leader's
+    /// direct kill as the last statement.
+    const KILL_TREE_BODY: &str = "#[cfg(not(windows))]let_=tree;letSome(pid)=child.id()else{let_=child.start_kill();return;};#[cfg(windows)]{iftree.is_armed(){tree.terminate();}else{usestd::os::windows::process::CommandExt;let_=std::process::Command::new(\"taskkill\").args([\"/F\",\"/T\",\"/PID\",&pid.to_string()]).creation_flags(0x0800_0000)//CREATE_NO_WINDOW.spawn();}}#[cfg(unix)]crate::proc_tree::kill_process_group(pid);let_=child.start_kill();";
+    const KILL_LEADER: &str = "let_=child.start_kill();";
+
+    /// An equality pin over the whole body, so it needs no mutation controls (there is no
+    /// scanner to evade); the asserts on the const's own text keep an update from dropping
+    /// an effect.
+    #[test]
+    fn run_tree_kill_wiring_is_pinned() {
+        let body = kill_process_tree_body(include_str!("agent.rs")).expect("its body");
+        assert_eq!(
+            body, KILL_TREE_BODY,
+            "kill_process_tree changed: before updating KILL_TREE_BODY, re-check that an armed \
+             Windows guard terminates the job and an unarmed one spawns `taskkill /F /T /PID`, \
+             that the unix group kill sits under `#[cfg(unix)]`, and that the leader's direct \
+             kill is the last statement"
+        );
+        for effect in [
+            "#[cfg(windows)]{iftree.is_armed(){tree.terminate();}else{",
+            "let_=std::process::Command::new(\"taskkill\").args([\"/F\",\"/T\",\"/PID\",&pid.to_string()]).creation_flags(0x0800_0000)//CREATE_NO_WINDOW.spawn();}}",
+            "#[cfg(unix)]crate::proc_tree::kill_process_group(pid);",
+        ] {
+            assert!(
+                KILL_TREE_BODY.contains(effect),
+                "the pinned body lost `{effect}`"
+            );
+        }
+        assert_eq!(
+            KILL_TREE_BODY.matches(KILL_LEADER).count(),
+            2,
+            "the early return's direct kill and the last statement's"
+        );
+        assert!(
+            KILL_TREE_BODY.ends_with(KILL_LEADER),
+            "the leader's direct kill ends the body"
+        );
+    }
+
+    /// Each `stream_agent(` call in `text` (definitions skipped): the column-0 fn it sits
+    /// in, and its arguments' trimmed byte ranges, split at top-level commas.
+    fn stream_agent_calls(text: &str) -> Vec<(String, Vec<std::ops::Range<usize>>)> {
+        let mut fn_at = Vec::new();
+        let mut offset = 0;
+        for line in text.split('\n') {
+            if let Some(name) = crate::github::runner::tree_fixture::fn_name(line) {
+                fn_at.push((offset, name));
+            }
+            offset += line.len() + 1;
+        }
+        let mut calls = Vec::new();
+        for (at, call) in text.match_indices("stream_agent(") {
+            let before = &text[..at];
+            if before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                || before.ends_with("fn ")
+            {
+                continue;
+            }
+            let caller = fn_at.iter().rev().find(|(start, _)| *start < at);
+            let caller = caller.map_or("?", |(_, name)| name).to_string();
+            let open = at + call.len();
+            let (mut depth, mut args, mut from) = (0usize, Vec::new(), open);
+            for (i, c) in text[open..].char_indices() {
+                match c {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' if depth == 0 => {
+                        args.push(from..open + i);
+                        break;
+                    }
+                    ')' | ']' | '}' => depth -= 1,
+                    ',' if depth == 0 => {
+                        args.push(from..open + i);
+                        from = open + i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            let trimmed = args.into_iter().map(|r| {
+                let lead = text[r.clone()].len() - text[r.clone()].trim_start().len();
+                r.start + lead..r.start + lead + text[r].trim().len()
+            });
+            calls.push((caller, trimmed.collect()));
+        }
+        calls
+    }
+
+    /// stream_agent's run-kind argument (its eleventh) at each production call: reviews
+    /// kill the tree at every exit, sessions keep it on a clean end. A flip keeps every
+    /// process test green, since those call stream_agent directly. The bare name appears
+    /// only in its definition and those calls, so an alias can't add an unread call.
+    fn run_kind_violations(text: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        let found: Vec<String> = stream_agent_calls(text)
+            .into_iter()
+            .map(|(caller, args)| {
+                let kind = args.get(10).map_or("", |r| &text[r.clone()]);
+                format!("{caller}:{kind}")
+            })
+            .collect();
+        let expected = [
+            "agent_review:true",
+            "agent_session:false",
+            "agent_session:false",
+        ];
+        if found != expected {
+            bad.push(format!(
+                "the run kinds are {found:?}, expected {expected:?}"
+            ));
+        }
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let named = text
+            .match_indices("stream_agent")
+            .filter(|(at, name)| {
+                !text[..*at].ends_with(ident) && !text[at + name.len()..].starts_with(ident)
+            })
+            .count();
+        if named != 1 + expected.len() {
+            bad.push(format!(
+                "`stream_agent` is named {named} times, not in its definition and {} calls only",
+                expected.len()
+            ));
+        }
+        bad
+    }
+
+    #[test]
+    fn run_tree_callers_pass_their_run_kind() {
+        let src = include_str!("agent.rs").replace("\r\n", "\n");
+        let mut misread = Vec::new();
+        let text = crate::github::runner::tree_fixture::production_text(&src, &mut misread);
+        assert_eq!(misread, Vec::<String>::new());
+        assert_eq!(run_kind_violations(&text), Vec::<String>::new());
+        let calls = stream_agent_calls(&text);
+        for (n, (caller, args)) in calls.iter().enumerate() {
+            let span = args[10].clone();
+            let flipped = if &text[span.clone()] == "true" {
+                "false"
+            } else {
+                "true"
+            };
+            let text = format!("{}{flipped}{}", &text[..span.start], &text[span.end..]);
+            let bad = run_kind_violations(&text);
+            assert_eq!(bad.len(), 1, "flipping call {n} in {caller}: {bad:?}");
+        }
+        // An added or dropped call also moves the name count.
+        let fourth = format!("{text}\nfn extra() {{\n    stream_agent(a, b, c, d, e, f, g, h, i, None, false, j, k);\n}}\n");
+        assert_eq!(run_kind_violations(&fourth).len(), 2, "a fourth call");
+        let missing = text.replacen("return stream_agent(", "return other_agent(", 1);
+        assert_ne!(missing, text);
+        assert_eq!(run_kind_violations(&missing).len(), 2, "a missing call");
+        let alias = format!("{text}\nfn extra() {{\n    let run = stream_agent;\n}}\n");
+        let bad = run_kind_violations(&alias);
+        assert!(
+            bad.len() == 1 && bad[0].starts_with("`stream_agent` is named 5 times"),
+            "an alias: {bad:?}"
+        );
     }
 
     #[test]
@@ -9460,5 +10519,824 @@ opencode/x-preview-f-free
         assert_eq!(human_duration(1200), "20 minutes");
         assert_eq!(human_duration(90), "90 seconds");
         assert_eq!(human_duration(7200), "120 minutes");
+    }
+}
+
+/// The login-shell probe's group kill on a real `/bin/sh`: a fixture HOME whose
+/// `.profile` starts a holder in the background, and a script that blocks until the
+/// test creates `go`, so every event under test lands after the holder started.
+#[cfg(all(test, unix))]
+mod login_shell_probe_tests {
+    use super::{
+        capture_marker, capture_pair_closed, configure_probe_shell, marker_wrapped_script,
+        read_until_marker_pair, run_probe_shell, SHELL_PATH_CAPTURE_CAP,
+    };
+    use crate::proc_tree::test_support::{wait_until, Holder, HostShell, Keeps, HANG_GUARD};
+    use std::path::Path;
+    use tokio::process::Command;
+
+    /// Blocks until `$HOME/go` exists, polling with a real delay step; gives up after
+    /// about 15 minutes so a failed test leaks no shell for long.
+    const WAIT_FOR_GO: &str =
+        r#"n=0; until [ -e "$HOME/go" ] || [ "$n" -ge 9000 ]; do sleep 0.1; n=$((n+1)); done"#;
+
+    fn temp(case: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("gd-probe-{case}-"))
+            .tempdir()
+            .expect("create temp dir")
+    }
+
+    /// `/bin/sh` with `dir` as HOME and no `ENV`, whose `.profile` starts `holder`.
+    fn probe_shell(dir: &Path, holder: &Holder, keeps: Keeps) -> Command {
+        let snippet = holder.launch_snippet(HostShell::Sh, keeps);
+        std::fs::write(dir.join(".profile"), format!("{snippet}\n")).expect("write .profile");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.env("HOME", dir).env_remove("ENV");
+        cmd
+    }
+
+    fn go(dir: &Path) {
+        std::fs::write(dir.join("go"), "").expect("create the go file");
+    }
+
+    fn assert_started(holder: &Holder) {
+        assert!(
+            wait_until(|| holder.started(), HANG_GUARD),
+            "the holder never started"
+        );
+    }
+
+    fn assert_dies(holder: &Holder, what: &str) {
+        assert!(
+            wait_until(|| !holder.alive(), HANG_GUARD),
+            "the holder outlived {what}"
+        );
+    }
+
+    /// A probe that reads its pair returns the bytes, then kills the rc job, which
+    /// keeps the probe's stdout pipe open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_probe_that_reads_its_pair_kills_what_its_rc_files_started() {
+        let dir = temp("success");
+        let holder = Holder::new(dir.path());
+        let cmd = probe_shell(dir.path(), &holder, Keeps::Both);
+        let marker = capture_marker();
+        let script = marker_wrapped_script(&marker, WAIT_FOR_GO);
+        let probe = tokio::spawn({
+            let marker = marker.clone();
+            async move { run_probe_shell(cmd, &script, &marker, std::future::pending()).await }
+        });
+        assert_started(&holder);
+        go(dir.path());
+        let got = tokio::time::timeout(HANG_GUARD, probe)
+            .await
+            .expect("the probe returns once its pair closes")
+            .expect("the probe task");
+        let buf = got.expect("the probe read its pair");
+        assert!(capture_pair_closed(&buf, marker.as_bytes()), "{buf:?}");
+        assert_dies(&holder, "a probe that read its pair");
+    }
+
+    /// The deadline is a future the test completes once the holder runs, so no budget
+    /// races the shell's startup.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_probe_at_its_deadline_kills_what_its_rc_files_started() {
+        let dir = temp("timeout");
+        let holder = Holder::new(dir.path());
+        let cmd = probe_shell(dir.path(), &holder, Keeps::Both);
+        let marker = capture_marker();
+        let script = marker_wrapped_script(&marker, WAIT_FOR_GO);
+        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+        let probe = tokio::spawn(async move {
+            let deadline = async move {
+                let _ = fired.await;
+            };
+            run_probe_shell(cmd, &script, &marker, deadline).await
+        });
+        assert_started(&holder);
+        fire.send(())
+            .expect("the probe still waits on its deadline");
+        let got = tokio::time::timeout(HANG_GUARD, probe)
+            .await
+            .expect("the probe returns at its deadline")
+            .expect("the probe task");
+        assert_eq!(got, None);
+        assert_dies(&holder, "a probe past its deadline");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_probe_kills_what_its_rc_files_started() {
+        let dir = temp("drop");
+        let holder = Holder::new(dir.path());
+        let cmd = probe_shell(dir.path(), &holder, Keeps::Both);
+        let marker = capture_marker();
+        let script = marker_wrapped_script(&marker, WAIT_FOR_GO);
+        let probe = tokio::spawn(async move {
+            run_probe_shell(cmd, &script, &marker, std::future::pending()).await
+        });
+        assert_started(&holder);
+        probe.abort();
+        let ended = tokio::time::timeout(HANG_GUARD, probe)
+            .await
+            .expect("the aborted probe ends");
+        assert!(
+            ended.is_err_and(|e| e.is_cancelled()),
+            "the probe was cancelled"
+        );
+        assert_dies(&holder, "a dropped probe");
+    }
+
+    /// The shell prints only the pair's opening marker and exits; the holder keeps
+    /// neither pipe, so the read meets EOF while the holder lives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_probe_that_meets_eof_kills_what_its_rc_files_started() {
+        let dir = temp("eof");
+        let holder = Holder::new(dir.path());
+        let cmd = probe_shell(dir.path(), &holder, Keeps::Neither);
+        let marker = capture_marker();
+        let script = format!("{WAIT_FOR_GO}; printf '%s' '{marker}'");
+        let probe = tokio::spawn(async move {
+            run_probe_shell(cmd, &script, &marker, std::future::pending()).await
+        });
+        assert_started(&holder);
+        go(dir.path());
+        let got = tokio::time::timeout(HANG_GUARD, probe)
+            .await
+            .expect("the probe returns at EOF")
+            .expect("the probe task");
+        assert_eq!(got, None);
+        assert_dies(&holder, "a probe that met EOF");
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_cannot_spawn_returns_none() {
+        let cmd = Command::new("/nonexistent/gd-probe-shell");
+        let marker = capture_marker();
+        let script = marker_wrapped_script(&marker, ":");
+        let got = run_probe_shell(cmd, &script, &marker, std::future::pending()).await;
+        assert_eq!(got, None);
+    }
+
+    /// The control that proves the kill is the guard's: the same fixture spawned with no
+    /// guard, its shell killed alone and reaped, leaves the rc job running.
+    #[tokio::test]
+    async fn an_unguarded_probe_shell_killed_alone_leaves_its_rc_job_running() {
+        let dir = temp("control");
+        let holder = Holder::new(dir.path());
+        let mut cmd = probe_shell(dir.path(), &holder, Keeps::Both);
+        let marker = capture_marker();
+        configure_probe_shell(&mut cmd, &marker_wrapped_script(&marker, WAIT_FOR_GO));
+        let mut child = cmd.spawn().expect("spawn the probe shell");
+        let mut stdout = child.stdout.take().expect("a piped stdout");
+        assert_started(&holder);
+        go(dir.path());
+        let read = read_until_marker_pair(&mut stdout, marker.as_bytes(), SHELL_PATH_CAPTURE_CAP);
+        let got = tokio::time::timeout(HANG_GUARD, read)
+            .await
+            .expect("the read returns once the pair closes");
+        assert!(got.is_some(), "the shell printed its pair");
+        child.kill().await.expect("kill and reap the shell");
+        assert!(
+            holder.confirm_alive(HANG_GUARD),
+            "the holder died with the shell killed alone"
+        );
+        holder.release();
+        assert_dies(&holder, "its release");
+    }
+}
+
+/// Source pins over the login-shell probe, and the resolver's miss cache driven with
+/// an injected capture, clock and probe.
+#[cfg(test)]
+mod login_shell_tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::fmt::Debug;
+    use std::future::Future;
+    use std::path::PathBuf;
+    use std::pin::{pin, Pin};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::{mpsc, watch};
+
+    use super::LoginShellProbe::{Failed, Found, Missing};
+    use super::{
+        resolve_via_login_shell_with, LoginShellMisses, LoginShellProbe, MissEntry,
+        LOGIN_SHELL_CACHE_CAP,
+    };
+    use super::tests::stripped_fn_body;
+    use crate::proc_tree::test_support::HANG_GUARD;
+
+    /// Breaches of the probe's guard shape in `src` (this file's text). Each body is
+    /// found by its header at a line start, so the indented test text never stands in
+    /// for a production fn, and read through [`stripped_fn_body`]. No test runs the
+    /// wrapper, so this is its only guard.
+    fn probe_guard_violations(src: &str) -> Vec<String> {
+        let mut bad = Vec::new();
+        let mut core = None;
+        for (name, header) in [
+            ("run_login_shell", "\nasync fn run_login_shell("),
+            ("configure_probe_shell", "\nfn configure_probe_shell("),
+            ("run_probe_shell", "\nasync fn run_probe_shell("),
+        ] {
+            let Some(code) = stripped_fn_body(src, header) else {
+                bad.push(format!("no {name} at a line start"));
+                continue;
+            };
+            for token in ["prepare(", "process_group("] {
+                if code.contains(token) {
+                    bad.push(format!("{name} calls {token}"));
+                }
+            }
+            // The group kill relies on the shell leading a session of its own, and the
+            // wrapper reaches the shell only through the guarded core.
+            let required = match name {
+                "configure_probe_shell" => "libc::setsid()",
+                "run_probe_shell" => "configure_probe_shell(",
+                _ => "run_probe_shell(",
+            };
+            if !code.contains(required) {
+                bad.push(format!("{name} does not call {required}"));
+            }
+            if name == "run_login_shell" && code.contains(".spawn()") {
+                bad.push("run_login_shell spawns a child of its own".into());
+            }
+            if name == "run_probe_shell" {
+                core = Some(code);
+            }
+        }
+        if let Some(core) = core {
+            let armed = concat!(
+                "letmutchild=cmd.spawn().ok()?;",
+                "let_tree=crate::proc_tree::TreeGuard::arm(&child);",
+            );
+            if !core.contains(armed) {
+                bad.push("run_probe_shell does not arm its guard right after the spawn".into());
+            }
+            if core.contains("disarm(") {
+                bad.push("run_probe_shell disarms its guard".into());
+            }
+        }
+        bad
+    }
+
+    /// The probe runs only through its core, which configures a setsid shell, arms a tree
+    /// guard on it and never groups or disarms it. Each control mutates the real text in
+    /// memory and must add exactly the violation it names.
+    #[test]
+    fn the_login_shell_probe_arms_its_tree_guard() {
+        let src = include_str!("agent.rs").replace("\r\n", "\n");
+        assert_eq!(probe_guard_violations(&src), Vec::<String>::new());
+
+        // Replaces the first `from` inside the fn headed `header`.
+        let edit = |header: &str, from: &str, to: &str| -> String {
+            let start = src.find(header).unwrap_or_else(|| panic!("{header:?}"));
+            let end = start + src[start..].find("\n}\n").expect("the fn's closing line");
+            let at = start
+                + src[start..end]
+                    .find(from)
+                    .unwrap_or_else(|| panic!("{from:?} in {header:?}"));
+            format!("{}{to}{}", &src[..at], &src[at + from.len()..])
+        };
+        let core = "\nasync fn run_probe_shell(";
+        let helper = "\nfn configure_probe_shell(";
+        let wrapper = "\nasync fn run_login_shell(";
+        let spawn = "    let mut child = cmd.spawn().ok()?;\n";
+        let arm = "    let _tree = crate::proc_tree::TreeGuard::arm(&child);\n";
+        let lic = "    cmd.arg(\"-lic\")";
+        let sanitize = "    sanitize_child_env(&mut cmd);\n";
+        let group = "    cmd.process_group(0);\n";
+        let prepare_mut = "    crate::proc_tree::TreeGuard::prepare(&mut cmd);\n";
+        let prepare_ref = "    crate::proc_tree::TreeGuard::prepare(cmd);\n";
+        let not_armed = "does not arm its guard";
+        let controls = [
+            (
+                edit(core, &format!("{spawn}{arm}"), &format!("{arm}{spawn}")),
+                not_armed,
+            ),
+            (edit(core, "let _tree =", "let _ ="), not_armed),
+            (
+                edit(
+                    core,
+                    arm,
+                    "    // let _tree = crate::proc_tree::TreeGuard::arm(&child);\n",
+                ),
+                not_armed,
+            ),
+            (
+                edit(core, arm, &format!("{arm}    _tree.disarm();\n")),
+                "disarms its guard",
+            ),
+            (
+                edit(core, spawn, &format!("{group}{spawn}")),
+                "run_probe_shell calls process_group(",
+            ),
+            (
+                edit(core, spawn, &format!("{prepare_mut}{spawn}")),
+                "run_probe_shell calls prepare(",
+            ),
+            (
+                edit(helper, lic, &format!("{group}{lic}")),
+                "configure_probe_shell calls process_group(",
+            ),
+            (
+                edit(helper, lic, &format!("{prepare_ref}{lic}")),
+                "configure_probe_shell calls prepare(",
+            ),
+            (
+                edit(wrapper, sanitize, &format!("{sanitize}{prepare_mut}")),
+                "run_login_shell calls prepare(",
+            ),
+            (
+                edit(wrapper, sanitize, &format!("{sanitize}{group}")),
+                "run_login_shell calls process_group(",
+            ),
+            (
+                src.replacen(core, "\nasync fn run_probe_shell_renamed(", 1),
+                "no run_probe_shell at a line start",
+            ),
+            (
+                edit(helper, "libc::setsid()", "libc::getpid()"),
+                "configure_probe_shell does not call libc::setsid()",
+            ),
+            (
+                edit(core, "    configure_probe_shell(&mut cmd, script);\n", ""),
+                "run_probe_shell does not call configure_probe_shell(",
+            ),
+            (
+                edit(wrapper, "run_probe_shell(", "run_other_shell("),
+                "run_login_shell does not call run_probe_shell(",
+            ),
+            (
+                edit(
+                    wrapper,
+                    sanitize,
+                    &format!("{sanitize}    let _ = cmd.spawn();\n"),
+                ),
+                "run_login_shell spawns a child of its own",
+            ),
+        ];
+        for (text, mark) in &controls {
+            assert_ne!(text, &src, "the `{mark}` control must change the text");
+            let bad = probe_guard_violations(text);
+            assert!(
+                bad.len() == 1 && bad[0].contains(mark),
+                "the `{mark}` control: {bad:?}"
+            );
+        }
+    }
+
+    /// One test's cache, capture and clock, and a probe that counts its runs, reports
+    /// each start on the receiver [`rig`] returns, and parks until its name is answered.
+    struct Rig {
+        cache: Mutex<LoginShellMisses>,
+        capture: RefCell<Option<String>>,
+        t0: Instant,
+        clock: Cell<Instant>,
+        runs: RefCell<Vec<String>>,
+        entered: mpsc::UnboundedSender<String>,
+        answers: watch::Sender<HashMap<String, LoginShellProbe>>,
+    }
+
+    fn rig(capture: Option<&str>) -> (Rig, mpsc::UnboundedReceiver<String>) {
+        let (entered, started) = mpsc::unbounded_channel();
+        let t0 = Instant::now();
+        let rig = Rig {
+            cache: Mutex::default(),
+            capture: RefCell::new(capture.map(str::to_owned)),
+            t0,
+            clock: Cell::new(t0),
+            runs: RefCell::default(),
+            entered,
+            answers: watch::channel(HashMap::new()).0,
+        };
+        (rig, started)
+    }
+
+    impl Rig {
+        fn call<'a>(&'a self, names: &'a [&'a str]) -> impl Future<Output = Option<PathBuf>> + 'a {
+            resolve_via_login_shell_with(
+                names,
+                &self.cache,
+                move || self.capture.borrow().clone(),
+                move || self.clock.get(),
+                move |name, _body| self.probe(name),
+            )
+        }
+
+        fn probe(&self, name: String) -> Pin<Box<dyn Future<Output = LoginShellProbe>>> {
+            self.runs.borrow_mut().push(name.clone());
+            let _ = self.entered.send(name.clone());
+            let mut answers = self.answers.subscribe();
+            Box::pin(async move {
+                let answered = answers.wait_for(|a| a.contains_key(&name)).await;
+                answered.expect("the rig outlives its probes")[&name].clone()
+            })
+        }
+
+        fn answer(&self, name: &str, outcome: LoginShellProbe) {
+            self.answers.send_modify(|a| {
+                a.insert(name.to_owned(), outcome);
+            });
+        }
+
+        fn unanswer(&self, name: &str) {
+            self.answers.send_modify(|a| {
+                a.remove(name);
+            });
+        }
+
+        fn runs(&self, name: &str) -> usize {
+            self.runs.borrow().iter().filter(|n| *n == name).count()
+        }
+
+        fn at(&self, secs: u64) {
+            self.clock.set(self.t0 + Duration::from_secs(secs));
+        }
+
+        fn set_capture(&self, capture: Option<&str>) {
+            *self.capture.borrow_mut() = capture.map(str::to_owned);
+        }
+
+        fn entry(&self, name: &str) -> Option<MissEntry> {
+            self.cache.lock().unwrap().entries.get(name).copied()
+        }
+    }
+
+    fn path(p: &str) -> PathBuf {
+        PathBuf::from(p)
+    }
+
+    async fn within<F: std::future::IntoFuture>(fut: F) -> F::Output {
+        tokio::time::timeout(HANG_GUARD, fut)
+            .await
+            .expect("a wait hung to HANG_GUARD")
+    }
+
+    /// Polls `fut` until its probe of `name` has started; it is then parked in it.
+    async fn park<F>(fut: &mut F, started: &mut mpsc::UnboundedReceiver<String>, name: &str)
+    where
+        F: Future + Unpin,
+        F::Output: Debug,
+    {
+        within(async {
+            loop {
+                tokio::select! {
+                    biased;
+                    out = &mut *fut => panic!("finished with {out:?} before probing {name}"),
+                    got = started.recv() => if got.as_deref() == Some(name) {
+                        return;
+                    },
+                }
+            }
+        })
+        .await;
+    }
+
+    /// Polls `fut` once and requires it to wait.
+    async fn waits<F>(fut: &mut F, who: &str)
+    where
+        F: Future + Unpin,
+        F::Output: Debug,
+    {
+        tokio::select! {
+            biased;
+            out = fut => panic!("{who} did not wait: {out:?}"),
+            () = std::future::ready(()) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn a_measured_miss_is_probed_once_per_capture() {
+        let (rig, _started) = rig(Some("/a:/b"));
+        rig.answer("a", Missing);
+        assert_eq!(within(rig.call(&["a"])).await, None);
+        assert_eq!(within(rig.call(&["a"])).await, None);
+        assert_eq!(rig.runs("a"), 1);
+        assert_eq!(rig.entry("a"), Some(MissEntry::Measured));
+    }
+
+    #[tokio::test]
+    async fn a_changed_capture_drops_the_remembered_misses() {
+        let (rig, _started) = rig(None);
+        rig.answer("a", Missing);
+        within(rig.call(&["a"])).await;
+        rig.set_capture(Some("/a:/b"));
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 2, "None -> Some");
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 2, "an unchanged capture keeps the miss");
+        rig.set_capture(Some("/c"));
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 3, "Some(a) -> Some(b)");
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_retries_60s_after_its_store_and_a_measured_miss_never_expires() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        // The probe takes 20 s, so a window counted from the call would close 20 s early.
+        let mut x = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        rig.at(20);
+        rig.answer("a", Failed);
+        assert_eq!(within(&mut x).await, None);
+        rig.at(20 + 59);
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 1, "59 s after the store");
+        rig.at(20 + 60);
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 2, "60 s after the store");
+
+        rig.answer("m", Missing);
+        within(rig.call(&["m"])).await;
+        rig.at(20 + 60 + 86_400);
+        within(rig.call(&["m"])).await;
+        assert_eq!(rig.runs("m"), 1, "a measured miss a day later");
+    }
+
+    #[tokio::test]
+    async fn a_clear_forgets_a_measured_miss() {
+        let (rig, _started) = rig(Some("/a:/b"));
+        rig.answer("a", Missing);
+        within(rig.call(&["a"])).await;
+        rig.cache.lock().unwrap().clear();
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_probe_straddling_a_capture_change_or_a_clear_stores_nothing() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        rig.set_capture(Some("/c"));
+        rig.answer("a", Missing);
+        assert_eq!(within(&mut x).await, None);
+        assert_eq!(rig.entry("a"), None, "the capture changed mid-probe");
+        within(rig.call(&["a"])).await;
+        within(rig.call(&["a"])).await;
+        assert_eq!(rig.runs("a"), 2, "probed again, then remembered");
+
+        let mut y = pin!(rig.call(&["b"]));
+        park(&mut y, &mut started, "b").await;
+        rig.cache.lock().unwrap().clear();
+        rig.answer("b", Missing);
+        assert_eq!(within(&mut y).await, None);
+        assert_eq!(rig.entry("b"), None, "cleared mid-probe");
+        within(rig.call(&["b"])).await;
+        within(rig.call(&["b"])).await;
+        assert_eq!(rig.runs("b"), 2, "probed again, then remembered");
+    }
+
+    #[tokio::test]
+    async fn a_hit_is_never_remembered_and_the_first_hit_wins() {
+        let (rig, _started) = rig(Some("/a:/b"));
+        rig.answer("a", Failed);
+        within(rig.call(&["a"])).await;
+        assert!(matches!(rig.entry("a"), Some(MissEntry::Failed { .. })));
+        rig.at(60);
+        rig.answer("a", Found(path("/x/a")));
+        rig.answer("b", Found(path("/x/b")));
+        assert_eq!(within(rig.call(&["a", "b"])).await, Some(path("/x/a")));
+        assert_eq!(rig.entry("a"), None, "the hit removed the failed entry");
+        assert_eq!(rig.runs("b"), 0, "the first hit wins");
+    }
+
+    #[tokio::test]
+    async fn a_name_is_released_and_its_miss_stored_before_the_next_name_is_probed() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a", "b"]));
+        park(&mut x, &mut started, "a").await;
+        let mut y = pin!(rig.call(&["a"]));
+        waits(&mut y, "Y behind a's probe").await;
+        rig.answer("a", Missing);
+        park(&mut x, &mut started, "b").await;
+        assert_eq!(rig.entry("a"), Some(MissEntry::Measured));
+        let shared = within(async {
+            tokio::select! {
+                biased;
+                out = &mut x => panic!("X left b's probe with {out:?}"),
+                out = &mut y => out,
+            }
+        })
+        .await;
+        assert_eq!(shared, None);
+        assert_eq!(rig.runs("a"), 1, "Y took a's stored miss");
+        rig.answer("b", Found(path("/x/b")));
+        assert_eq!(within(&mut x).await, Some(path("/x/b")));
+    }
+
+    #[tokio::test]
+    async fn an_unquotable_name_is_never_probed_or_remembered() {
+        let (rig, _started) = rig(Some("/a:/b"));
+        rig.answer("a'b", Missing);
+        assert_eq!(within(rig.call(&["a'b"])).await, None);
+        assert_eq!(rig.runs("a'b"), 0);
+        let misses = rig.cache.lock().unwrap();
+        assert!(misses.entries.is_empty() && misses.gates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_callers_share_one_flights_hit_and_it_ends_with_the_flight() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        let mut y = pin!(rig.call(&["a"]));
+        let mut z = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        waits(&mut y, "Y").await;
+        waits(&mut z, "Z").await;
+        rig.answer("a", Found(path("/x/a")));
+        let hit = Some(path("/x/a"));
+        let all = within(async move { tokio::join!(x, y, z) }).await;
+        assert_eq!(all, (hit.clone(), hit.clone(), hit.clone()));
+        assert_eq!(rig.runs("a"), 1, "one flight");
+
+        assert_eq!(within(rig.call(&["a"])).await, hit);
+        assert_eq!(rig.runs("a"), 2, "a shared hit is not a cache");
+
+        // A flier dropped mid-probe: one queued caller probes, and both take its answer.
+        rig.unanswer("a");
+        let mut flier = Box::pin(rig.call(&["a"]));
+        park(&mut flier, &mut started, "a").await;
+        let mut q1 = pin!(rig.call(&["a"]));
+        let mut q2 = pin!(rig.call(&["a"]));
+        waits(&mut q1, "Q1").await;
+        waits(&mut q2, "Q2").await;
+        drop(flier);
+        park(&mut q1, &mut started, "a").await;
+        rig.answer("a", Found(path("/y/a")));
+        let both = within(async move { tokio::join!(q1, q2) }).await;
+        assert_eq!(both, (Some(path("/y/a")), Some(path("/y/a"))));
+        assert_eq!(rig.runs("a"), 4, "the dropped flight's probe and one more");
+    }
+
+    #[tokio::test]
+    async fn queued_callers_share_one_flights_miss() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        let mut y = pin!(rig.call(&["a"]));
+        let mut z = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        waits(&mut y, "Y").await;
+        waits(&mut z, "Z").await;
+        rig.answer("a", Missing);
+        let all = within(async move { tokio::join!(x, y, z) }).await;
+        assert_eq!(all, (None, None, None));
+        assert_eq!(rig.runs("a"), 1);
+    }
+
+    /// Parks X's probe, runs `bump`, then queues Y behind it: X's hit belongs to the
+    /// generation before the bump, so Y probes again and keeps its own answer.
+    async fn a_hit_from_before(bump: impl Fn(&Rig), what: &str) {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        bump(&rig);
+        let mut y = pin!(rig.call(&["a"]));
+        waits(&mut y, "Y").await;
+        assert_eq!(rig.runs("a"), 1, "{what}: Y waits on X's gate");
+        rig.answer("a", Found(path("/old/a")));
+        assert_eq!(within(&mut x).await, Some(path("/old/a")));
+        rig.unanswer("a");
+        park(&mut y, &mut started, "a").await;
+        rig.answer("a", Found(path("/new/a")));
+        assert_eq!(within(&mut y).await, Some(path("/new/a")), "{what}");
+        assert_eq!(rig.runs("a"), 2, "{what}: Y probed again");
+    }
+
+    #[tokio::test]
+    async fn a_hit_measured_before_a_clear_is_not_shared_after_it() {
+        a_hit_from_before(|rig| rig.cache.lock().unwrap().clear(), "a clear").await;
+    }
+
+    #[tokio::test]
+    async fn a_hit_measured_before_a_capture_change_is_not_shared_after_it() {
+        a_hit_from_before(|rig| rig.set_capture(Some("/c")), "a capture change").await;
+    }
+
+    #[tokio::test]
+    async fn another_name_never_waits_on_a_parked_probe() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        rig.answer("e", Missing);
+        let other = within(async {
+            tokio::select! {
+                biased;
+                out = &mut x => panic!("X left its probe with {out:?}"),
+                out = rig.call(&["e"]) => out,
+            }
+        })
+        .await;
+        assert_eq!(other, None);
+        assert_eq!(rig.runs("e"), 1);
+    }
+
+    #[tokio::test]
+    async fn the_name_past_the_cap_empties_the_map() {
+        let (rig, _started) = rig(Some("/a:/b"));
+        let names: Vec<String> = (0..=LOGIN_SHELL_CACHE_CAP)
+            .map(|i| format!("n{i}"))
+            .collect();
+        for name in &names {
+            rig.answer(name, Missing);
+            within(rig.call(&[name.as_str()])).await;
+        }
+        {
+            let misses = rig.cache.lock().unwrap();
+            assert_eq!((misses.entries.len(), misses.gates.len()), (1, 1));
+        }
+        within(rig.call(&["n0"])).await;
+        assert_eq!(rig.runs("n0"), 2, "the first name probes again");
+    }
+
+    /// The cap drops only idle gates: a caller arriving for a name whose flight is parked
+    /// across the cap waits on that flight, and the map stays bounded by the cap plus the
+    /// gates in use.
+    #[tokio::test]
+    async fn the_gate_cap_keeps_a_gate_in_use() {
+        let (rig, mut started) = rig(Some("/a:/b"));
+        let mut x = pin!(rig.call(&["a"]));
+        park(&mut x, &mut started, "a").await;
+        for i in 0..LOGIN_SHELL_CACHE_CAP {
+            let name = format!("n{i}");
+            rig.answer(&name, Missing);
+            within(rig.call(&[name.as_str()])).await;
+        }
+        let mut y = pin!(rig.call(&["a"]));
+        waits(&mut y, "Y behind a's parked flight").await;
+        assert_eq!(rig.runs("a"), 1, "Y probed a itself");
+        {
+            let misses = rig.cache.lock().unwrap();
+            let mut names: Vec<&str> = misses.gates.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            let last = format!("n{}", LOGIN_SHELL_CACHE_CAP - 1);
+            assert_eq!(names, ["a", last.as_str()], "the idle gates were dropped");
+        }
+        rig.answer("a", Found(path("/x/a")));
+        let both = within(async move { tokio::join!(x, y) }).await;
+        assert_eq!(both, (Some(path("/x/a")), Some(path("/x/a"))));
+        assert_eq!(rig.runs("a"), 1, "one flight");
+
+        rig.answer("z", Missing);
+        within(rig.call(&["z"])).await;
+        let gates = rig.cache.lock().unwrap().gates.len();
+        assert!(
+            gates <= LOGIN_SHELL_CACHE_CAP,
+            "{gates} gates with none in use"
+        );
+    }
+
+    /// About > Re-check's clear reaches the process-wide cache: the miss is gone and the
+    /// generation moved, so a probe in flight stores nothing.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_recheck_clear_empties_the_process_wide_cache() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        let name = "gd-test-no-such-tool-recheck";
+        // Every assert runs after its guard drops: a failure while holding the
+        // process-wide mutex would poison it for the rest of the test process.
+        let (stored, before) = {
+            let mut misses = super::login_shell_misses().lock().unwrap();
+            let capture = misses.capture.clone();
+            let ticket = misses.ticket(capture.clone());
+            misses.store(name, ticket, capture, &Missing, Instant::now());
+            (misses.entries.get(name).copied(), misses.generation)
+        };
+        assert_eq!(stored, Some(MissEntry::Measured));
+        super::clear_login_shell_misses();
+        let (kept, after) = {
+            let misses = super::login_shell_misses().lock().unwrap();
+            (misses.entries.get(name).copied(), misses.generation)
+        };
+        assert_eq!(kept, None, "the clear kept the miss");
+        assert!(after > before, "the clear kept the generation");
+    }
+
+    /// The Re-check's one entry point still forgets the remembered misses.
+    #[cfg(not(windows))]
+    #[test]
+    fn forgetting_the_cli_lookups_clears_the_remembered_misses() {
+        let _memos = crate::agent_sandbox::LOOKUP_MEMO_TEST_LOCK.blocking_lock();
+        let name = "gd-test-no-such-tool-forget";
+        // Asserts run after the guard drops, as in the test above.
+        let stored = {
+            let mut misses = super::login_shell_misses().lock().unwrap();
+            let capture = misses.capture.clone();
+            let ticket = misses.ticket(capture.clone());
+            misses.store(name, ticket, capture, &Missing, Instant::now());
+            misses.entries.get(name).copied()
+        };
+        assert_eq!(stored, Some(MissEntry::Measured));
+        super::forget_cli_lookups();
+        let kept = super::login_shell_misses()
+            .lock()
+            .unwrap()
+            .entries
+            .get(name)
+            .copied();
+        assert_eq!(kept, None, "the forget kept the miss");
     }
 }
