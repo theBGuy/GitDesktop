@@ -678,9 +678,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // tab draws that row. Only `settleAlign` sets it, so plain clicks and arrow-key
   // nav (which scrolls on its own) never gain a scroll from it.
   const [alignScrollRow, setAlignScrollRow] = useState<string | null>(null);
-  // Set by an align that refreshed the landing list: a page or error from before
-  // that time can be the pre-align one, so it never retires the scroll (0: any).
+  // A remote request is served when `alignScrollDrawn` sees its row, and given
+  // up only by a page or an error dated after the align (0: any), or when the
+  // selection, repository or lens changes; a local cache write counts as a page.
   const [alignScrollAfter, setAlignScrollAfter] = useState(0);
+  const afterAlign = (at: number) =>
+    alignScrollAfter === 0 || at > alignScrollAfter;
   // The repository and lens the request was made in; any other drops it, since
   // the panel outlives a repository switch and row keys are only `kind:id`.
   const scrollScope = `${repoPath}\n${lens}`;
@@ -810,17 +813,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         setAlignLockPollMs(false);
         // OPEN lands on Open, MERGED on Merged, anything else on Closed.
         const moved = settleAlign(step.tab, false);
-        // A tab move, or a probe that outranked the details, re-reads the
-        // landing list, whose cached page can predate the PR's new state; the
-        // probe case also refreshes the details' stale state. The lens's lists
-        // are only marked stale, since the observer still sits on the tab
-        // being left; the landing tab's own key refetches when it is on screen.
-        // Each marks synchronously, so the tab move's mount sees a stale page,
-        // then cancels reads in flight (only inactive ones before a mark-only
-        // pass: nothing would refetch an active observer's). The second pass
-        // re-marks what the cancel reverted, skips any other query a read
-        // since the mark answered, and joins a read still in flight
-        // (`cancelRefetch: false`).
+        // After this refresh the landing page, the review state and (when the
+        // probe outranked the details) the details are stale and read again
+        // wherever something observes them; every other list of the lens ends
+        // stale unless a read requested after the align answered it, and the
+        // mark-only pass cancels nothing an active observer waits on (a read it
+        // leaves in flight is re-marked once it answers). Each pass marks, then
+        // cancels, then invalidates again what the cancel reverted or no read
+        // has answered since, joining a read in flight (`cancelRefetch: false`).
         if ((moved || step.tab !== tab0) && alignRemoteNumber !== null) {
           setAlignScrollAfter(Date.now());
           const refresh = (
@@ -863,7 +863,27 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
                 .queryKey,
               exact: true,
             });
-          refresh({ queryKey: [...repoKeys.prList(repoPath), lens] }, "none");
+          const lensLists = { queryKey: [...repoKeys.prList(repoPath), lens] };
+          // `promise` is the read's own: a cancel, a superseding read or a
+          // failure rejects it, so only that read's answer re-marks.
+          const inFlight = queryClient
+            .getQueryCache()
+            .findAll(lensLists)
+            .flatMap((q) => (q.promise ? [{ q, read: q.promise }] : []));
+          refresh(lensLists, "none");
+          for (const { q, read } of inFlight)
+            void read
+              .then(() =>
+                queryClient.invalidateQueries({
+                  queryKey: q.queryKey,
+                  exact: true,
+                  refetchType: "none",
+                }),
+              )
+              .catch(() => {
+                // A cancelled, superseded or failed read answered nothing; a
+                // failed re-mark is best effort.
+              });
           refresh({
             queryKey: [...repoKeys.prList(repoPath), lens, step.tab],
           });
@@ -1180,11 +1200,11 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       heldRows.some((c) => `remote:${c.number}` === alignScrollRow));
   const alignScrollSettled =
     selectedPr?.kind === "local" ||
-    (prList.isError && prList.errorUpdatedAt >= alignScrollAfter) ||
+    (prList.isError && afterAlign(prList.errorUpdatedAt)) ||
     (prList.isSuccess &&
       !prList.isPlaceholderData &&
       !prList.isFetching &&
-      prList.dataUpdatedAt >= alignScrollAfter);
+      afterAlign(prList.dataUpdatedAt));
   useLayoutEffect(() => {
     if (alignScrollRow === null) return;
     if (alignScrollRow !== selectedRowKey || alignScrollScope !== scrollScope) {

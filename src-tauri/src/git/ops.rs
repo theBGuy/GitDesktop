@@ -31484,9 +31484,12 @@ detached
         let m = recorded_local_merge("lpr-landed-fallback", true).await;
         git(&m.repo, &["switch", "--detach"]).await;
         git(&m.repo, &["branch", "-D", &m.base]).await;
-        let heads = Path::new(&m.repo).join(".git/refs/heads/refs/heads");
-        std::fs::create_dir_all(&heads).unwrap();
-        std::fs::write(heads.join(&m.base), format!("{}\n", m.landing)).unwrap();
+        let fallback = match m.base.as_str() {
+            "master" => "refs/heads/refs/heads/master",
+            "main" => "refs/heads/refs/heads/main",
+            other => panic!("no fallback name for the fixture base {other}"),
+        };
+        git(&m.repo, &["update-ref", fallback, &m.landing]).await;
         let read = branch_tip(&m.repo, &m.base).await.unwrap();
         assert_eq!(read, m.landing, "fixture sanity: rev-parse reads it");
 
