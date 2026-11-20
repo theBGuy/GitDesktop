@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useState } from "react";
+import { type KeyboardEvent, type MouseEvent, useState } from "react";
 
 export interface ListKeyboardNavOptions<T> {
   /** The navigable rows, in render order. */
@@ -94,6 +94,13 @@ export function listKeyboardNav<T>({
       el?.scrollIntoView({ block: "nearest" });
     }
   };
+}
+
+/** `onMouseDown` for a combobox-driven listbox: focus stays in the combobox's
+ *  input, so a press on anything but a row (scrollbar, heading, spacer) must not
+ *  focus the `tabIndex={-1}` scroller. Rows prevent their own press. */
+export function keepNonRowPressOffList(e: MouseEvent) {
+  if (!(e.target as Element).closest('[role="option"]')) e.preventDefault();
 }
 
 /**

@@ -1,4 +1,12 @@
-import { createEvent, fireEvent, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { BoardCard } from "@/features/projects/BoardCard";
 import type { BoardItem } from "@/lib/git/types";
@@ -44,7 +52,10 @@ const NO_FIELDS: never[] = [];
 // What macOS reports for Option+Space: a non-breaking space on the Space key.
 const OPTION_SPACE_KEY = String.fromCharCode(0xa0);
 
-function renderCard(item: BoardItem = ITEM) {
+function renderCard(
+  item: BoardItem = ITEM,
+  wrapper?: (props: { children: ReactNode }) => ReactNode,
+) {
   const onPeekChange = vi.fn();
   const onOpen = vi.fn();
   render(
@@ -65,6 +76,7 @@ function renderCard(item: BoardItem = ITEM) {
       onPeekChange={onPeekChange}
       onOpen={onOpen}
     />,
+    { wrapper },
   );
   return { card: screen.getByRole("option"), onPeekChange, onOpen };
 }
@@ -164,6 +176,58 @@ function enter(card: HTMLElement, mods: Mods = {}) {
   fireEvent(card, event);
   return event;
 }
+
+// RTL's click defaults `detail` to 0, a keyboard click's count, so every mouse
+// click here passes its count.
+describe("Clicking an issue card", () => {
+  it("opens once on a single click", () => {
+    const { card, onOpen } = renderCard();
+    fireEvent.click(card, { detail: 1 });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens once on a double click", () => {
+    const { card, onOpen } = renderCard();
+    fireEvent.click(card, { detail: 1 });
+    fireEvent.click(card, { detail: 2 });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens once on a triple click", () => {
+    const { card, onOpen } = renderCard();
+    fireEvent.click(card, { detail: 1 });
+    fireEvent.click(card, { detail: 2 });
+    fireEvent.click(card, { detail: 3 });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens on a keyboard-synthesized click", () => {
+    const { card, onOpen } = renderCard();
+    fireEvent.click(card, { detail: 0 });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpen).toHaveBeenCalledWith(ITEM);
+  });
+});
+
+// The trigger sets `aria-expanded` synchronously; a closing popup stays mounted
+// through its exit transition, so its presence is no verdict.
+describe("Clicking a draft card", () => {
+  it("opens its notes once on a double click, and a keyboard click closes them", async () => {
+    // The open notes render Markdown, which reads through react-query.
+    const client = new QueryClient();
+    const { card } = renderCard(DRAFT, ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ));
+    fireEvent.click(card, { detail: 1 });
+    expect(card.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(card, { detail: 2 });
+    expect(card.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(card, { detail: 0 });
+    await waitFor(() =>
+      expect(card.getAttribute("aria-expanded")).toBe("false"),
+    );
+  });
+});
 
 // Preventing the keydown is what cancels a button's Enter activation click.
 describe("Enter on an issue card", () => {

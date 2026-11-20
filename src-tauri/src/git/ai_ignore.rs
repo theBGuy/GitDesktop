@@ -2331,11 +2331,12 @@ mod tests {
     /// `git mktree` fed RAW bytes, for a fixture whose name is not valid UTF-8 —
     /// the `run_git` helpers are `&str`-typed and cannot express one.
     fn mktree_raw(repo: &str, input: &[u8]) -> String {
+        use crate::git::runner::TestGitEnv;
         use std::io::Write as _;
         use std::process::{Command, Stdio};
         let mut child = Command::new("git")
             .arg("mktree")
-            .envs(crate::git::runner::TEST_GIT_ENV)
+            .test_git_env()
             .current_dir(repo)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

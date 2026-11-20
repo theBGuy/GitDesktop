@@ -2103,7 +2103,18 @@ commits it loads the new default, a field you changed keeps what you typed and a
 field you left alone follows the new default. If commits land that the dialog hasn't
 loaded yet, **GitHub** and **GitLab** refuse the merge and nothing is merged: the
 dialog stays open with your text, loads the new default, and you can merge again.
-**Bitbucket** has no such check.
+**Bitbucket** has no such check. On GitHub this needs GitHub CLI 2.13 or newer:
+with an older gh, a merge with an edited message isn't sent and the error says to
+update gh.
+
+Before a pull request or merge request merges, GitDesktop reads its state from the
+forge. One that was closed (declined or superseded on **Bitbucket**) or already merged
+since you opened it isn't merged, and the message says which; on GitHub and GitLab,
+reopen a closed one first if you still want it merged. A **GitLab** merge request that
+is already being merged is left as it is: check it again in a moment to see the result.
+If the state read fails (the forge can't be reached, refuses the read, or sends an
+answer GitDesktop can't read), nothing is merged and you can try again.
+Merges an agent sends through GitDesktop's MCP server get the same check.
 
 ## Maintaining a pull request from a fork
 

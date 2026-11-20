@@ -2,11 +2,12 @@ import {
   type MutationCache,
   type QueryClient,
   type QueryKey,
+  QueryObserver,
   queryOptions,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
 import { cascadedStackNumbers, patchRowState } from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
@@ -49,6 +50,7 @@ import {
   readPendingPrWrite,
 } from "./pr-writes";
 import {
+  markMergeLanded,
   prBaseDivergencePrefix,
   prDetailsOptions,
   prReviewThreadsKey,
@@ -667,6 +669,10 @@ export function useMergePr(repo: string) {
             [...repoKeys.issueList(repo), args.lens],
             ["repo", repo, "issue", args.lens],
           ]);
+          // The details twin of the re-file below, for the merged request only:
+          // the cascaded layers come from cached stack membership, so they keep
+          // just the row re-file and its delayed re-read.
+          markMergeLanded(queryClient, repo, args.lens, args.number);
           patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");
           for (const n of data.cascaded)
             patchPrListState(queryClient, repo, args.lens, n, "MERGED");
@@ -844,6 +850,68 @@ export const glMrMergeStateAlignOptions = (
     retry: false,
     gcTime: 0,
   });
+
+/** The MERGING watch's cadence and per-episode budget: the align's lock ladder
+ *  cadence, with twice its reads since the view stays on screen longer. */
+export const WATCH_POLL_MS = 2_000;
+export const WATCH_POLLS = 10;
+
+/** While a GitLab MR's shown details read MERGING (pass `null` otherwise), polls the
+ *  view's own slim merge-state key until the lock ends. Only answers completed after
+ *  the episode started count, failures included. Every unlocked answer invalidates
+ *  the details, again per answer while they still read MERGING, joining a details
+ *  read already in flight; an unlocked MERGED also marks the merge landed (the
+ *  `/changes` details read can lag it). Never on a timer of its own, and by exact
+ *  key only: the align's arm keys share the prefix. */
+export function useGlMergingWatch(repo: string, number: number | null): void {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (number === null) return;
+    const options = glMrMergeStateOptions(repo, number);
+    const detailsKey = prDetailsOptions(repo, number, "origin").queryKey;
+    const before = queryClient.getQueryCache().find({
+      queryKey: options.queryKey,
+      exact: true,
+    })?.state;
+    let seenData = before?.dataUpdateCount ?? 0;
+    let seenErrors = before?.errorUpdateCount ?? 0;
+    let reads = 0;
+    const observer = new QueryObserver(queryClient, {
+      ...options,
+      refetchInterval: WATCH_POLL_MS,
+      refetchIntervalInBackground: false,
+    });
+    const unsubscribe = observer.subscribe(() => {
+      const state = observer.getCurrentQuery().state;
+      // A reset (`resetQueries`) restarts the counts at zero, so every answer
+      // after it is new to the episode.
+      if (state.dataUpdateCount < seenData) seenData = 0;
+      if (state.errorUpdateCount < seenErrors) seenErrors = 0;
+      const newData = state.dataUpdateCount - seenData;
+      const newErrors = state.errorUpdateCount - seenErrors;
+      if (newData <= 0 && newErrors <= 0) return;
+      seenData = state.dataUpdateCount;
+      seenErrors = state.errorUpdateCount;
+      reads += Math.max(newData, 0) + Math.max(newErrors, 0);
+      const answered =
+        newData > 0 &&
+        (newErrors <= 0 || state.dataUpdatedAt >= state.errorUpdatedAt);
+      const answer = answered ? state.data : undefined;
+      if (answer && answer.locked !== true) {
+        if (answer.state === "MERGED")
+          markMergeLanded(queryClient, repo, "origin", number);
+        // Never cancels a slower details read in flight, which would keep the
+        // view MERGING until the budget runs out.
+        void queryClient.invalidateQueries(
+          { queryKey: detailsKey, exact: true },
+          { cancelRefetch: false },
+        );
+      }
+      if (reads >= WATCH_POLLS) unsubscribe();
+    });
+    return unsubscribe;
+  }, [queryClient, repo, number]);
+}
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the

@@ -186,8 +186,8 @@ fn mcp_expected_head(raw: Option<String>) -> Option<String> {
 }
 
 /// A custom message on GitHub (`provider` None) or GitLab needs `expected_head_sha`,
-/// refused here in the tool's own terms before anything is sent. The value's shape is
-/// left to `forge_pr_merge`, which refuses a GitHub head that is not a full id.
+/// refused here in the tool's own terms before anything is sent. With a custom message,
+/// a GitHub `expected_head_sha` must also be a full 40-character commit id.
 fn mcp_merge_head_refusal(
     provider: Option<crate::forge::model::Provider>,
     messages: &crate::forge::MergeMessages,
@@ -198,6 +198,15 @@ fn mcp_merge_head_refusal(
     if has_message && !has_head && provider != Some(crate::forge::model::Provider::Bitbucket) {
         return Err(AppError::InvalidArgument(
             "A custom commit message needs expected_head_sha on GitHub and GitLab: pass the headSha that get_pull_request returned, so the message can only land on the commits you read."
+                .into(),
+        ));
+    }
+    if has_message
+        && provider.is_none()
+        && expected_head_sha.is_some_and(|s| !crate::github::pr::is_github_head_oid(s))
+    {
+        return Err(AppError::InvalidArgument(
+            "expected_head_sha must be a full 40-character commit id on GitHub: pass the headSha that get_pull_request returned, so the message can only land on the commits you read."
                 .into(),
         ));
     }
@@ -895,6 +904,9 @@ impl GitDesktopMcp {
                        no commit of their own and take no message, and a GitHub stacked merge, \
                        which can land several pull requests, takes none either. A message for a \
                        commit the merge will not write is refused before anything is merged. \
+                       A pull request that is closed (declined or superseded on Bitbucket), \
+                       already merged or, on GitLab, already being merged is refused, and so is \
+                       one whose state read failed; nothing is merged then. \
                        Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
@@ -2022,6 +2034,143 @@ mod tests {
 
     const NEEDS_HEAD: &str = "A custom commit message needs expected_head_sha on GitHub and GitLab: pass the headSha that get_pull_request returned, so the message can only land on the commits you read.";
 
+    const NEEDS_FULL_HEAD: &str = "expected_head_sha must be a full 40-character commit id on GitHub: pass the headSha that get_pull_request returned, so the message can only land on the commits you read.";
+
+    #[test]
+    fn mcp_merge_head_refusal_refuses_a_github_head_that_is_not_a_full_id() {
+        use crate::forge::model::Provider;
+        let message = crate::forge::MergeMessages {
+            squash: Some(head_msg("s")),
+            merge: None,
+        };
+        let full = "a1b2c3d4".repeat(5);
+        for head in [
+            "a".repeat(39),
+            "a".repeat(64),
+            "z".repeat(40),
+            format!("{full} "),
+            "abc1234".into(),
+        ] {
+            match mcp_merge_head_refusal(None, &message, Some(&head)) {
+                Err(AppError::InvalidArgument(t)) => assert_eq!(t, NEEDS_FULL_HEAD, "{head}"),
+                other => panic!("{head}: {other:?}"),
+            }
+        }
+        assert!(mcp_merge_head_refusal(None, &message, Some(&full)).is_ok());
+        assert!(mcp_merge_head_refusal(Some(Provider::GitLab), &message, Some("abc1234")).is_ok());
+        assert!(mcp_merge_head_refusal(Some(Provider::Bitbucket), &message, Some("abc")).is_ok());
+        let none = crate::forge::MergeMessages::default();
+        assert!(mcp_merge_head_refusal(None, &none, Some("abc")).is_ok());
+    }
+
+    /// The MCP refusal of a closed pull request is the merge's own sentence.
+    #[test]
+    fn a_closed_pull_request_refusal_reaches_the_tool_as_its_sentence() {
+        let err = app_err(AppError::Gh(crate::github::pr::GH_CLOSED_REFUSAL.into()));
+        assert_eq!(err.message, crate::github::pr::GH_CLOSED_REFUSAL);
+    }
+
+    /// Over the flattened tool body: `forge_pr_merge`'s own Err goes through `app_err`.
+    fn merge_tool_propagates_the_merge_error(body: &str) -> bool {
+        let call = "crate::forge::forge_pr_merge(";
+        let Some(at) = body.find(call) else {
+            return false;
+        };
+        let Some(end) = body[at..].find(';') else {
+            return false;
+        };
+        body.matches(call).count() == 1
+            && body[at..=at + end].ends_with(") .await .map_err(app_err)?;")
+    }
+
+    #[test]
+    fn merge_pull_request_hands_the_merge_error_to_app_err() {
+        let source = include_str!("write_forge.rs").replace("\r\n", "\n");
+        let start = source.find("async fn merge_pull_request(").unwrap();
+        let end = start + source[start..].find("#[tool(").unwrap();
+        let body = source[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(merge_tool_propagates_the_merge_error(&body), "{body}");
+        let own = ".map_err(|_| app_err(AppError::Gh(String::new())))?;";
+        for (what, mutant) in [
+            (
+                "own error",
+                body.replacen(".await .map_err(app_err)?;", &format!(".await {own}"), 1),
+            ),
+            (
+                "swallowed",
+                body.replacen(".await .map_err(app_err)?;", ".await .ok();", 1),
+            ),
+        ] {
+            assert_ne!(mutant, body, "{what}");
+            assert!(
+                !merge_tool_propagates_the_merge_error(&mutant),
+                "{what}: {mutant}"
+            );
+        }
+    }
+
+    /// `merge_pull_request`'s own description, with Rust's `\` line continuations applied.
+    fn merge_tool_description(source: &str) -> String {
+        let source = source.replace("\r\n", "\n");
+        let fn_at = source.find("async fn merge_pull_request(").unwrap();
+        let attr_at = source[..fn_at].rfind("#[tool(").unwrap();
+        let mut out = String::new();
+        let mut lines = source[attr_at..fn_at].split('\n');
+        if let Some(first) = lines.next() {
+            out.push_str(first);
+        }
+        for line in lines {
+            match out.strip_suffix('\\') {
+                Some(kept) => {
+                    out = kept.to_string();
+                    out.push_str(line.trim_start());
+                }
+                None => {
+                    out.push('\n');
+                    out.push_str(line);
+                }
+            }
+        }
+        out
+    }
+
+    const MERGE_STATE_SENTENCE: &str = "A pull request that is closed (declined or superseded on Bitbucket), already merged or, on GitLab, already being merged is refused, and so is one whose state read failed; nothing is merged then.";
+
+    #[test]
+    fn merge_pull_request_description_names_the_state_refusals() {
+        let source = include_str!("write_forge.rs").replace("\r\n", "\n");
+        let described = |s: &str| merge_tool_description(s).contains(MERGE_STATE_SENTENCE);
+        assert!(described(&source), "{}", merge_tool_description(&source));
+        // The sentence moved onto the tool before it no longer describes this one.
+        let raw = "A pull request that is closed (declined or superseded on Bitbucket), \\";
+        let fn_at = source.find("async fn merge_pull_request(").unwrap();
+        let attr_at = source[..fn_at].rfind("#[tool(").unwrap();
+        let start = attr_at + source[attr_at..].find(raw).unwrap();
+        let end = start
+            + source[start..]
+                .find("Requires --allow-remote-write.")
+                .unwrap();
+        let moved_text = &source[start..end];
+        let without = format!("{}{}", &source[..start], &source[end..]);
+        let prev_attr = without[..attr_at].rfind("#[tool(").unwrap();
+        let prev_req = prev_attr + without[prev_attr..].find("Requires ").unwrap();
+        assert!(
+            prev_req < attr_at,
+            "the insertion must land on the previous tool"
+        );
+        let moved = format!(
+            "{}{moved_text}{}",
+            &without[..prev_req],
+            &without[prev_req..]
+        );
+        assert_ne!(moved, source);
+        assert!(moved.contains(MERGE_STATE_SENTENCE.split(' ').next().unwrap()));
+        assert!(!described(&moved), "{}", merge_tool_description(&moved));
+    }
+
     fn head_msg(t: &str) -> crate::forge::MergeMessage {
         crate::forge::MergeMessage {
             title: t.into(),
@@ -2073,14 +2222,22 @@ mod tests {
                 for head in heads {
                     let got = mcp_merge_head_refusal(provider, &slots(squash, merge), head);
                     let at = format!("{provider:?} {squash} {merge} {head:?}");
-                    let refused = (squash || merge)
+                    let has_message = squash || merge;
+                    let refused = has_message
                         && provider != Some(Provider::Bitbucket)
                         && head.is_none_or(|h| h.trim().is_empty());
+                    let short = has_message
+                        && provider.is_none()
+                        && !refused
+                        && head.is_some_and(|h| !crate::github::pr::is_github_head_oid(h));
                     match got {
                         Err(AppError::InvalidArgument(t)) if refused => {
                             assert_eq!(t, NEEDS_HEAD, "{at}")
                         }
-                        Ok(()) if !refused => {}
+                        Err(AppError::InvalidArgument(t)) if short => {
+                            assert_eq!(t, NEEDS_FULL_HEAD, "{at}")
+                        }
+                        Ok(()) if !refused && !short => {}
                         other => panic!("{at}: {other:?}"),
                     }
                 }
@@ -2218,6 +2375,7 @@ mod tests {
     /// so a removed guard ends in the GitHub arm's local title refusal.
     #[tokio::test]
     async fn keep_local_refuses_create_pull_request_as_invalid_params() {
+        use crate::git::runner::TestGitEnv;
         let dir = tempfile::Builder::new()
             .prefix("gd-mcp-keep-local-pr-")
             .tempdir()
@@ -2239,7 +2397,7 @@ mod tests {
             &["branch", "feat/x"],
         ] {
             let out = std::process::Command::new("git")
-                .envs(crate::git::runner::TEST_GIT_ENV)
+                .test_git_env()
                 .current_dir(&repo)
                 .args(args)
                 .output()

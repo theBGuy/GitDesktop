@@ -6,6 +6,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { toast } from "sonner";
 import {
   afterAll,
   afterEach,
@@ -17,9 +18,12 @@ import {
 } from "vitest";
 import { ActivityDock } from "@/features/activity/ActivityDock";
 import { openAutomationResult } from "@/lib/automations/results";
-import { validateRepo } from "@/lib/git/api";
+import { pathIsDir, validateRepo } from "@/lib/git/api";
+import { remotesOptions } from "@/lib/git/queries";
+import { repoIdentity } from "@/lib/git/repo-identity";
 import type { RepoInfo } from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
+import { applyRepoLens, cachedRepoLens } from "@/lib/repo-lens/queries";
 import {
   loadSettings,
   type NotificationOutcome,
@@ -36,12 +40,19 @@ import { useUiStore } from "@/lib/stores/ui";
 import { unmockedCommands } from "./setup";
 
 // The dock's resolve ladder validates the captured checkout first; a row with no
-// identity stamp lands there, so validateRepo is the only git read a click makes.
-// pathIsDir answering false keeps emit from stamping an identity on the row.
+// identity stamp lands there, so validateRepo is its only git read. pathIsDir
+// answering false keeps emit from stamping an identity on the row; the stamped
+// cases flip it and answer repoIdentity (mocked below) themselves.
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   pathIsDir: vi.fn(async () => false),
   validateRepo: vi.fn(),
+}));
+// Echoes the path, the resolver's own stand-in, so an identity reads "unknown"
+// unless a case answers otherwise; the real read would reach an unmocked command.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+  repoIdentity: vi.fn(async (path: string) => path),
 }));
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
@@ -58,6 +69,11 @@ vi.mock("@/lib/plugin-store", async (importOriginal) => {
     ...(await importOriginal<typeof import("@/lib/plugin-store")>()),
     memoizedStoreLoader: () => async () => store,
   };
+});
+// A call-through spy: the lens write still lands, and the test reads which ones ran.
+vi.mock("@/lib/repo-lens/queries", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/repo-lens/queries")>();
+  return { ...real, applyRepoLens: vi.fn(real.applyRepoLens) };
 });
 vi.mock("@/lib/automations/results", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/automations/results")>()),
@@ -96,7 +112,10 @@ beforeEach(() => {
     async (path: string) =>
       ({ root: path, name: path.split("/").pop() }) as RepoInfo,
   );
+  vi.mocked(pathIsDir).mockImplementation(async () => false);
+  vi.mocked(repoIdentity).mockImplementation(async (path: string) => path);
   vi.mocked(openAutomationResult).mockReset();
+  vi.mocked(applyRepoLens).mockClear();
 });
 
 afterEach(() => {
@@ -124,10 +143,12 @@ const ROUTE: Partial<
   "review-posted": { source: "reviews" },
 };
 
-/** Alpha open on History, the dock open over one row for beta. */
+/** Alpha open on History, the dock open over one row for beta, rendered
+ *  under `client`. */
 async function mountWithRow(
   kind: NotificationKind,
   target?: NotificationTarget,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
 ) {
   const route = ROUTE[kind];
   if (!route) throw new Error(`no source routed for ${kind}`);
@@ -148,9 +169,6 @@ async function mountWithRow(
     st().setActivityOpen(true);
     // emit delivers after its settings and override reads settle.
     await new Promise((r) => setTimeout(r, 0));
-  });
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
   });
   render(
     <QueryClientProvider client={client}>
@@ -228,5 +246,219 @@ describe("dock clicks that open nothing leave the history alone", () => {
     expect(st().navHistory).toBe(before);
     expect(validateRepo).not.toHaveBeenCalled();
     expect(vi.mocked(openAutomationResult).mock.calls).toEqual(resultOpens);
+  });
+});
+
+describe("an unstamped row opens only the folder it names", () => {
+  // No identity stamp, so git's top level for the stored folder is the only
+  // evidence; a walk-up to an enclosing repository is someone else's repo.
+  it("refuses an enclosing repository and says nothing was opened", async () => {
+    const info = vi.spyOn(toast, "info");
+    vi.mocked(validateRepo).mockImplementation(
+      async () => ({ root: "C:/repos", name: "repos" }) as RepoInfo,
+    );
+    const row = await mountWithRow("pr-opened", {
+      type: "pr",
+      kind: "remote",
+      ref: "7",
+    });
+    const before = st().navHistory;
+    fireEvent.click(row);
+    await waitFor(() => expect(info).toHaveBeenCalledTimes(1));
+    expect(info.mock.calls[0][0]).toMatch(/no longer exists/);
+    expect(validateRepo).toHaveBeenCalledWith(OTHER);
+    expect(st().repoPath).toBe(REPO);
+    expect(st().selectedPr).toBeNull();
+    expect(st().navHistory).toBe(before);
+    info.mockRestore();
+  });
+
+  it("opens the same folder in another slash and case spelling", async () => {
+    const root = String.raw`C:\Repos\Beta`;
+    vi.mocked(validateRepo).mockImplementation(
+      async () => ({ root, name: "beta" }) as RepoInfo,
+    );
+    fireEvent.click(
+      await mountWithRow("pr-opened", { type: "pr", kind: "remote", ref: "7" }),
+    );
+    await waitFor(() => expect(st().repoPath).toBe(root));
+    expect(st().selectedPr).toEqual({ kind: "remote", id: "7" });
+  });
+});
+
+describe("a stamped row opens its stored folder only as that repository", () => {
+  const STAMP = "C:/repos/beta/.git";
+  /** A row emitted with an identity stamp, whose identity then reads "unknown"
+   *  (the resolver's path stand-in) at the click. */
+  async function stampedRow(stamp = STAMP) {
+    vi.mocked(pathIsDir).mockImplementation(async () => true);
+    vi.mocked(repoIdentity).mockImplementation(async (path: string) =>
+      path === OTHER ? stamp : path,
+    );
+    const row = await mountWithRow("pr-opened", {
+      type: "pr",
+      kind: "remote",
+      ref: "7",
+    });
+    vi.mocked(repoIdentity).mockImplementation(async (path: string) => path);
+    // emit itself reads the identity; only the click's reads are asserted.
+    vi.mocked(repoIdentity).mockClear();
+    return row;
+  }
+
+  it("refuses an enclosing repository whose identity is unknown", async () => {
+    const info = vi.spyOn(toast, "info");
+    const row = await stampedRow();
+    // git's walk-up answers the enclosing repository for every candidate.
+    vi.mocked(validateRepo).mockImplementation(
+      async () => ({ root: "C:/repos", name: "repos" }) as RepoInfo,
+    );
+    const before = st().navHistory;
+    fireEvent.click(row);
+    await waitFor(() => expect(info).toHaveBeenCalledTimes(1));
+    expect(info.mock.calls[0][0]).toMatch(/no longer exists/);
+    expect(validateRepo).toHaveBeenCalledWith(OTHER);
+    // The stamped arm ran: the unstamped one never reads an identity.
+    expect(repoIdentity).toHaveBeenCalledWith("C:/repos");
+    expect(st().repoPath).toBe(REPO);
+    expect(st().selectedPr).toBeNull();
+    expect(st().navHistory).toBe(before);
+    info.mockRestore();
+  });
+
+  it("opens the stored folder itself when its identity is unknown", async () => {
+    fireEvent.click(await stampedRow());
+    await waitFor(() => expect(st().repoPath).toBe(OTHER));
+    expect(repoIdentity).toHaveBeenCalledWith(OTHER);
+    expect(st().selectedPr).toEqual({ kind: "remote", id: "7" });
+  });
+
+  it("refuses the repo on screen when it validates to an enclosing repository", async () => {
+    const info = vi.spyOn(toast, "info");
+    const row = await stampedRow();
+    // The child on screen lost its git metadata: every candidate validates to
+    // the enclosing repo, while the memo still answers the stamp for the child.
+    act(() => st().openRepo({ root: OTHER, name: "beta" }));
+    vi.mocked(validateRepo).mockImplementation(
+      async () => ({ root: "C:/repos", name: "repos" }) as RepoInfo,
+    );
+    vi.mocked(repoIdentity).mockImplementation(async (path: string) =>
+      path === OTHER ? STAMP : "C:/repos/.git",
+    );
+    fireEvent.click(row);
+    await waitFor(() => expect(info).toHaveBeenCalledTimes(1));
+    expect(info.mock.calls[0][0]).toMatch(/no longer exists/);
+    expect(validateRepo).toHaveBeenCalledWith(OTHER);
+    expect(st().repoPath).toBe(OTHER);
+    expect(st().selectedPr).toBeNull();
+    info.mockRestore();
+  });
+
+  it("keeps another live checkout of the repository on screen", async () => {
+    const info = vi.spyOn(toast, "info");
+    const row = await stampedRow();
+    const wt = "C:/wt/beta";
+    act(() => st().openRepo({ root: wt, name: "beta" }));
+    // The stored folder is a stale child of another repository, while the
+    // linked worktree on screen is live and carries the stamp. Exactly OTHER
+    // maps to the enclosing root, so the stored folder is not the one on screen.
+    // Validate answers Windows' backslashed spelling: the rung lands on the
+    // store's own spelling, never validate's.
+    vi.mocked(validateRepo).mockImplementation(async (path: string) => {
+      if (path === OTHER) {
+        return { root: "C:/repos", name: "repos" } as RepoInfo;
+      }
+      if (path === wt) {
+        return { root: String.raw`C:\wt\beta`, name: "beta" } as RepoInfo;
+      }
+      throw new Error("not a repository");
+    });
+    vi.mocked(repoIdentity).mockImplementation(async (path: string) => {
+      if (path === wt) return STAMP;
+      return path === "C:/repos" ? "C:/repos/.git" : path;
+    });
+    fireEvent.click(row);
+    await waitFor(() =>
+      expect(st().selectedPr).toEqual({ kind: "remote", id: "7" }),
+    );
+    expect(st().repoPath).toBe(wt);
+    expect(info).not.toHaveBeenCalled();
+    info.mockRestore();
+  });
+
+  it("lands a stale nested repository at the enclosing main checkout", async () => {
+    const stamp = "C:/main/.git";
+    const row = await stampedRow(stamp);
+    act(() => {
+      st().openRepo({ root: "C:/main/sub", name: "sub" });
+      useUiStore.setState({ selectedIssue: { kind: "remote", id: "3" } });
+    });
+    vi.mocked(validateRepo).mockImplementation(async (path: string) => {
+      if (path === "C:/main/sub" || path === "C:/main") {
+        return { root: "C:/main", name: "main" } as RepoInfo;
+      }
+      throw new Error("not a repository");
+    });
+    // The nested folder's memo still answers its own, different repository.
+    vi.mocked(repoIdentity).mockImplementation(async (path: string) => {
+      if (path === "C:/main") return stamp;
+      return path === "C:/main/sub" ? "C:/main/sub/.git" : path;
+    });
+    fireEvent.click(row);
+    await waitFor(() => expect(st().repoPath).toBe("C:/main"));
+    expect(st().selectedPr).toEqual({ kind: "remote", id: "7" });
+  });
+});
+
+describe("a pull request row lands under the lens it happened under", () => {
+  const landed = async (
+    target: NotificationTarget,
+    kind: string,
+    client?: QueryClient,
+  ) => {
+    fireEvent.click(await mountWithRow("pr-opened", target, client));
+    await waitFor(() => expect(st().repoPath).toBe(OTHER));
+    expect(st().selectedPr).toEqual({ kind, id: "7" });
+  };
+
+  it("a remote row stamped upstream applies upstream, session-only", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    // Beta's gate is open (an authenticated GitHub fork) with no lens stored,
+    // so only the landing's apply can make the effective lens upstream.
+    client.setQueryData(["repo", OTHER, "forge-status"], {
+      provider: "github",
+      authenticated: true,
+    });
+    client.setQueryData(remotesOptions(OTHER).queryKey, ["origin", "upstream"]);
+    expect(cachedRepoLens(client, OTHER)).toBe("origin");
+    await landed(
+      { type: "pr", kind: "remote", ref: "7", lens: "upstream" },
+      "remote",
+      client,
+    );
+    expect(cachedRepoLens(client, OTHER)).toBe("upstream");
+    expect(vi.mocked(applyRepoLens).mock.calls).toEqual([
+      [
+        expect.any(QueryClient),
+        OTHER,
+        "upstream",
+        { clearSelections: true, persist: false },
+      ],
+    ]);
+  });
+
+  it("a remote row with no lens leaves the lens alone", async () => {
+    await landed({ type: "pr", kind: "remote", ref: "7" }, "remote");
+    expect(applyRepoLens).not.toHaveBeenCalled();
+  });
+
+  it("a local row never applies a lens, even one it carries", async () => {
+    await landed(
+      { type: "pr", kind: "local", ref: "7", lens: "upstream" },
+      "local",
+    );
+    expect(applyRepoLens).not.toHaveBeenCalled();
   });
 });

@@ -99,16 +99,16 @@ fn oplog_lock() -> &'static Mutex<()> {
     OPLOG_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// A non-empty override wins; otherwise tests use a Git admin directory under
-/// temp or a normalized-repo hash under temp; the app uses its app-data directory.
-/// Only the test arm touches the filesystem: it probes paths and gitdir pointers, and the
-/// process's first hashed-base resolution resets its own temp folder and, outside
-/// nextest's process-per-test mode, sweeps stale ones ([`test_fallback_dir`]).
+/// Tests use a Git admin directory under temp or a normalized-repo hash under temp,
+/// whatever the override says; otherwise a non-empty override wins, then the app-data
+/// directory. Only the test arm touches the filesystem: it probes paths and gitdir
+/// pointers, and the process's first hashed-base resolution resets its own temp folder
+/// and, outside nextest's process-per-test mode, sweeps stale ones ([`test_fallback_dir`]).
 /// Parents are created on write.
 fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool, repo: &str) -> AppResult<PathBuf> {
     match gd_oplog_dir {
-        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
         _ if is_test => Ok(resolve_test_store(repo).0),
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
         _ => {
             let data = dirs::data_dir().ok_or_else(|| {
                 AppError::Command("could not resolve the app-data directory".to_string())
@@ -258,13 +258,14 @@ fn sweep_stale_fallback_dirs(
 }
 
 /// Store path: tests with a Git admin directory under temp use `gd-oplog-test.json`;
-/// overrides, hashed test bases and the app-data base use `opslog.json`.
+/// overrides, hashed test bases and the app-data base use `opslog.json`. Only non-test
+/// builds read the `GD_OPLOG_DIR` override.
 pub fn store_path(repo: &str) -> AppResult<PathBuf> {
-    let override_dir = std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty());
-    if cfg!(test) && override_dir.is_none() {
+    if cfg!(test) {
         let (base, name) = resolve_test_store(repo);
         return Ok(base.join(name));
     }
+    let override_dir = std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty());
     Ok(resolve_store_base(override_dir.as_deref(), false, repo)?.join(STORE_FILE))
 }
 
@@ -1436,9 +1437,45 @@ pub async fn git_oplog_dismiss(repo_path: String, id: String) -> AppResult<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Over a store's `store_path` body: the `cfg!(test)` arm returns before the one
+    /// override read. CI never exports the override, so no other test sees the order.
+    fn test_arm_precedes_env_read(body: &str) -> bool {
+        let (Some(arm), Some(env)) = (body.find("if cfg!(test) {"), body.find("std::env::var("))
+        else {
+            return false;
+        };
+        body.matches("std::env::var(").count() == 1
+            && arm < env
+            && body[arm..env].contains("return Ok(")
+    }
+
+    /// The pin, and its control: the env read's statement hoisted above the arm fails it.
+    pub(crate) fn assert_store_path_reads_env_last(source: &str) {
+        let body = crate::github::repo_meta::tests::wiring_body(source, "store_path");
+        assert!(test_arm_precedes_env_read(&body), "{body}");
+        let arm = body.find("if cfg!(test) {").unwrap();
+        let env = body.find("std::env::var(").unwrap();
+        let start = body[..env].rfind('\n').map_or(0, |i| i + 1);
+        let end = env + body[env..].find(';').unwrap() + 1;
+        let hoisted = format!(
+            "{}{}\n{}{}",
+            &body[..arm],
+            &body[start..end],
+            &body[arm..start],
+            &body[end..]
+        );
+        assert_ne!(hoisted, body);
+        assert!(!test_arm_precedes_env_read(&hoisted), "{hoisted}");
+    }
+
+    #[test]
+    fn store_path_returns_the_test_store_before_reading_the_override() {
+        assert_store_path_reads_env_last(include_str!("oplog.rs"));
+    }
 
     // These tests exercise the pure store logic against a temp file, driving the
     // SAME read/mutate/write helpers the public fns use but with an explicit path,
@@ -1481,30 +1518,17 @@ mod tests {
 
     #[test]
     fn store_path_avoids_the_real_store_under_test() {
-        // This repo key is outside temp, so tests use its hashed temp-dir store
-        // unless GD_OPLOG_DIR overrides it. Branch on the var without mutating
-        // process env, which would race parallel tests.
+        // This repo key is outside temp, so tests use its hashed temp-dir store; no
+        // env var can redirect a test build's store.
         let path = store_path(r"C:\oplog\resolver-pin").unwrap();
-        match std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty()) {
-            Some(dir) => {
-                // Override wins even under test: path is under the override dir.
-                assert!(
-                    path.starts_with(&dir),
-                    "override path {path:?} should be under {dir}"
-                );
-            }
-            None => {
-                // The real store must NOT be reachable from an in-crate test.
-                assert!(
-                    path.starts_with(std::env::temp_dir()),
-                    "test store {path:?} should be under the temp dir"
-                );
-                assert!(
-                    !path.components().any(|c| c.as_os_str() == APP_IDENTIFIER),
-                    "test store {path:?} must not contain the real app-data segment {APP_IDENTIFIER}"
-                );
-            }
-        }
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "test store {path:?} should be under the temp dir"
+        );
+        assert!(
+            !path.components().any(|c| c.as_os_str() == APP_IDENTIFIER),
+            "test store {path:?} must not contain the real app-data segment {APP_IDENTIFIER}"
+        );
     }
 
     #[test]
@@ -1711,12 +1735,14 @@ mod tests {
     }
 
     #[test]
-    fn store_path_honors_gd_oplog_dir_override() {
+    fn store_base_arm_order() {
         // Drive the pure resolver directly — deterministic + parallel-safe (no
         // process-env mutation).
-        // 1. An explicit override wins regardless of the test flag.
-        let over = resolve_store_base(Some("C:/tmp/x"), true, r"C:\oplog\resolver-pin").unwrap();
-        assert_eq!(over, PathBuf::from("C:/tmp/x"));
+        // 1. The test arm outranks an override; outside tests the override wins.
+        assert_eq!(
+            resolve_store_base(Some("C:/tmp/x"), true, r"C:\oplog\resolver-pin").unwrap(),
+            resolve_store_base(None, true, r"C:\oplog\resolver-pin").unwrap()
+        );
         let over_nontest =
             resolve_store_base(Some("C:/tmp/x"), false, r"C:\oplog\resolver-pin").unwrap();
         assert_eq!(over_nontest, PathBuf::from("C:/tmp/x"));
@@ -1724,6 +1750,10 @@ mod tests {
         assert_eq!(
             resolve_store_base(Some(""), true, r"C:\oplog\resolver-pin").unwrap(),
             resolve_store_base(None, true, r"C:\oplog\resolver-pin").unwrap()
+        );
+        assert_eq!(
+            resolve_store_base(Some(""), false, r"C:\oplog\resolver-pin").unwrap(),
+            resolve_store_base(None, false, r"C:\oplog\resolver-pin").unwrap()
         );
         // 2. No override + test → the temp subdir.
         assert_eq!(
@@ -1764,19 +1794,13 @@ mod tests {
         assert_eq!(resolve_store_base(None, true, repo).unwrap(), dot_git);
         assert_eq!(
             resolve_store_base(Some("C:/tmp/x"), true, repo).unwrap(),
-            PathBuf::from("C:/tmp/x")
+            dot_git
         );
-        let override_dir = std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty());
-        let expected = override_dir.as_ref().map_or_else(
-            || dot_git.join("gd-oplog-test.json"),
-            |dir| PathBuf::from(dir).join(STORE_FILE),
+        assert_eq!(
+            store_path(repo).unwrap(),
+            dot_git.join("gd-oplog-test.json")
         );
-        assert_eq!(store_path(repo).unwrap(), expected);
-        let expected_fake = override_dir.as_ref().map_or_else(
-            || first.join(STORE_FILE),
-            |dir| PathBuf::from(dir).join(STORE_FILE),
-        );
-        assert_eq!(store_path(r"C:\x").unwrap(), expected_fake);
+        assert_eq!(store_path(r"C:\x").unwrap(), first.join(STORE_FILE));
         assert_eq!(
             resolve_store_base(None, false, repo).unwrap(),
             resolve_store_base(None, false, r"C:\y").unwrap()
@@ -1828,13 +1852,7 @@ mod tests {
                 std::fs::canonicalize(&base).unwrap(),
                 std::fs::canonicalize(&admin).unwrap()
             );
-            let expected = std::env::var("GD_OPLOG_DIR")
-                .ok()
-                .filter(|d| !d.is_empty())
-                .map_or_else(
-                    || base.join("gd-oplog-test.json"),
-                    |dir| PathBuf::from(dir).join(STORE_FILE),
-                );
+            let expected = base.join("gd-oplog-test.json");
             assert_eq!(store_path(repo).unwrap(), expected);
         }
     }
@@ -2294,8 +2312,7 @@ mod tests {
     // Real reconcile calls use each repo's test store, isolated from app data.
     // Seeds replace only their own key under the same locks production takes.
 
-    /// A unique repo key whose test store lives in `<tmp>/.git/` and goes with the guard,
-    /// unless `GD_OPLOG_DIR` overrides it.
+    /// A unique repo key whose test store lives in `<tmp>/.git/` and goes with the guard.
     fn scratch_repo_key(label: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::Builder::new()
             .prefix(&format!("gd-oplog-{label}-"))
@@ -2483,8 +2500,7 @@ mod tests {
         record
     }
 
-    /// `repo`'s entries off disk, under both locks. Only these: a store `GD_OPLOG_DIR`
-    /// points every test at also holds other tests' entries, written at any time.
+    /// `repo`'s entries off disk, under both locks.
     fn own_entries(repo: &str) -> Vec<Value> {
         let path = store_path(repo).unwrap();
         let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());

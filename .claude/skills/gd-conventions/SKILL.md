@@ -228,6 +228,9 @@ the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
 invariant, not polish. A list container that co-hosts a text editor (inline
 edit field, reply box) passes `ignoreTextEntry` so arrows keep moving the
 caret; leave it off where arrows deliberately drive nav from a filter input.
+A combobox-driven listbox whose rows aren't tabbable (My work, Explore) takes
+`keepNonRowPressOffList` (same module) as its `onMouseDown`, so a press off the
+rows never moves focus out of the input.
 The clamped pickers (command palette, task picker, the co-author and
 Bitbucket add-reviewer popovers, RepoList, the session composer's @ and /
 menus) read one cursor that `clampHighlight` derives from the stored index
@@ -519,6 +522,10 @@ and table row are the reference).
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
+- A failure line rendered in place (not a toast, not a terminal buffer) shows
+  `presentError(e).summary` from `@/lib/error-summary`, never a raw
+  `errorMessage(e)`, which keeps the Rust error-kind lead (`invalid argument: …`)
+  and every line of a multi-line message.
 - A caption over a GROUP of controls rides `LabeledGroup`
   (`src/components/form/labeled-group.tsx`), which ties the group to it via
   `role="group"` + `aria-labelledby` — a `<Label>` that associates with nothing
@@ -925,6 +932,17 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   holding `landId`, and leaves a reasoned `aria-disabled` hold focused, since
   that doesn't match `:disabled`. Pinned by
   `src/test/land-stranded-focus.test.tsx`.
+- Whether focus is lost is `focusIsLost()` (`src/lib/focus-lost.ts`): on
+  `<body>`, on nothing, on a detached node, or on an element that isn't
+  rendered. The last is the `<Activity>` reveal: the commit that shows a tab
+  hides the old one while focus still sits on its control, which a body-only
+  test misses. Every LANDING reads it: `RemoteIssueView`, `RemotePrView` and
+  `DiscussionView` on mount and show, and ConversationListPanel when its
+  detail closes, fed `detailKeyOf` of RepositoryView's deferred selection
+  (the one the pane renders from, never a deferral of the list's own). A
+  frame rescue that runs while its view stays mounted may keep the body-only
+  test. A landing still only TAKES lost focus, never moves it off a visible
+  element.
 
 ## Seam idioms (the spec template's "Idioms at this seam" field reads this list)
 
@@ -1393,6 +1411,26 @@ one grep away on the named symbol. Grows via Conventions-sync.
   src/-wide scan in `scripts/remote-row-state-wiring.test.mjs` pins every
   caller of the five forge state writes it can see; that test's header lists
   the shapes the scan can't see.
+- **Landed-merge details** — a merge that landed (not queued) also marks the
+  request's details through `markMergeLanded` (`src/lib/git/queries/prs.ts`),
+  per QueryClient and keyed on the details query key, for `LANDED_MERGE_TTL_MS`.
+  Each mark holds one QueryCache listener that keeps the STORED entry out of
+  OPEN and MERGING for every writer (a read in flight at the mint, a mutation
+  rollback, a manual `setQueryData`), patching in the same notify batch, so a
+  synchronous observer can still see the OPEN first. Only an accepted fetch
+  answer of CLOSED retires it (query-core marks `setQueryData` writes `manual`,
+  a cancelled read stores nothing); the listener stops at the deadline, and the
+  expiry invalidates the details once by exact key (an active view re-reads, an
+  inactive entry is only marked stale). The details queryFn's overlay is a pure
+  transform (OPEN or MERGING answers return as MERGED) that never touches the
+  record or reads `signal`. While a GitLab MR's details read MERGING,
+  `useGlMergingWatch` (`queries/pr-actions.ts`) polls the slim merge-state read
+  under the view's own key every 2 s for up to 10 answers; an unlocked answer
+  invalidates the details by exact key (joining a read in flight), and an
+  unlocked MERGED marks the merge landed. The neutral PR states are OPEN,
+  MERGED, CLOSED and MERGING (GitLab's `locked`); MERGING behaves as CLOSED in
+  every list and align predicate, and its words come from `prStateWord` /
+  `prPill` (`src/lib/pulls/pr-state.ts`).
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`
@@ -1763,12 +1801,21 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `UpdateMarker::create_for` calls in test modules, following one level of
   same-file helper delegation for the override). Production-path mints and
   the other gaps listed in check I's header comment are review-enforced.
+- **Every test-build git goes through `TestGitEnv`** (`git/runner.rs`): the
+  runner applies it, and a test that spawns git itself calls `.test_git_env()` —
+  no system, global or XDG config, and no inherited repository or config
+  redirects. The removal list covers git's `local_repo_env` (v2.51.1) except
+  `GIT_CONFIG_COUNT`, plus `GIT_TEMPLATE_DIR` and a few other repository-shape
+  names, and a test pins that coverage. Two names stay on purpose:
+  `GIT_CEILING_DIRECTORIES` (a caller sets that pair before the trait) and
+  `GIT_CONFIG_COUNT` (the submodule tests set it process-wide). The consts behind
+  it are private, so a hand-copied `.envs(…)` fails to compile.
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
-  app-data modules carry their own seams with the opposite arm order
-  (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`:
-  env override outranks the `cfg!(test)` temp arm; both ship in release) —
-  a new store module mirrors one of these, never resolves app-data bare.
+  app-data modules carry their own seams in the same arm order (`oplog.rs`
+  `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`: the `cfg!(test)` temp
+  arm outranks the env override, which only non-test builds read) — a new store
+  module mirrors one of these, never resolves app-data bare.
   Its `cfg!(test)` temp arm calls `crate::oplog::test_fallback_dir`, never a
   hand-rolled `temp_dir()` join: the helper gives each test process its own
   `<name>-<pid>` dir (concurrent runs and nextest's per-test processes never

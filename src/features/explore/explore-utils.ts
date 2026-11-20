@@ -93,8 +93,14 @@ export function starParts(
 }
 
 /** Stable DOM id per result row, so the search input's aria-activedescendant can
- *  point at the keyboard-highlighted option for screen readers. */
+ *  point at the keyboard-highlighted option for screen readers. The encoding is
+ *  injective (every char outside `[A-Za-z0-9-]`, `_` included, becomes `_` +
+ *  its 4-hex UTF-16 unit), so `ui.kit` and `ui_kit` never share an id and the
+ *  id needs no CSS escaping. */
 export const exploreOptionId = (fullName: string) =>
-  `explore-repo-${fullName.replace(/[^\w-]/g, "_")}`;
+  `explore-repo-${fullName.replace(
+    /[^A-Za-z0-9-]/g,
+    (c) => `_${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  )}`;
 
 export const EXPLORE_LISTBOX_ID = "explore-repo-listbox";

@@ -18,15 +18,20 @@ import type { RecentRepo } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 
+/** The sources every case starts from; the beforeEach restores them. */
+const DEFAULT_SOURCES = { github: true, gitlab: false, bitbucket: false };
 const data = vi.hoisted(() => ({
   items: [] as MyWorkItem[],
   recents: [] as RecentRepo[],
+  // Which sources are on, and which forge leg serves `items`.
+  sources: { github: true, gitlab: false, bitbucket: false },
+  leg: "github",
 }));
 
 vi.mock("@/lib/git/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/queries")>()),
   useMyWorkSources: () => ({
-    data: { github: true, gitlab: false, bitbucket: false },
+    data: data.sources,
     isPending: false,
     isSuccess: true,
     isError: false,
@@ -35,7 +40,7 @@ vi.mock("@/lib/git/queries", async (importOriginal) => ({
     refetch: vi.fn(),
   }),
   useForgeMyWork: (provider: string) =>
-    provider === "github"
+    provider === data.leg
       ? {
           data: { items: data.items, truncated: false },
           isPending: false,
@@ -157,6 +162,8 @@ const never = <T,>() => new Promise<T>(() => undefined);
 
 beforeEach(() => {
   vi.useFakeTimers();
+  data.sources = { ...DEFAULT_SOURCES };
+  data.leg = "github";
   platformIs.windows = false;
   platformIs.mac = false;
   validate.mockReset().mockImplementation(
@@ -305,6 +312,46 @@ describe("My work open", () => {
     expect(spoken()).toBe("");
     await advance(1500);
     expect(spoken()).toBe("");
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it("S4b: a GitLab subgroup row proves its clone against the full project path", async () => {
+    // The fields forge/gitlab.rs stores for a subgroup project: the owner is
+    // only the segment before the name, the full name keeps every group. The
+    // GitLab source alone is on, and its leg serves the row.
+    data.sources = { github: false, gitlab: true, bitbucket: false };
+    data.leg = "gitlab";
+    data.items = [
+      {
+        ...item("widgets", 12, true, "2026-01-02T00:00:00Z"),
+        repoFullName: "group/sub/widgets",
+        repoOwner: "sub",
+        host: "gitlab.com",
+        provider: "gitlab",
+        url: "https://gitlab.com/group/sub/widgets/-/merge_requests/12",
+      },
+    ];
+    data.recents = [
+      {
+        ...recent("widgets"),
+        host: "gitlab.com",
+        owner: "sub",
+        provider: "gitlab",
+      },
+    ];
+    origin.mockImplementation(async () => ({
+      host: "gitlab.com",
+      authority: "gitlab.com",
+      path: "group/sub/widgets",
+      provider: "gitlab",
+    }));
+    const input = renderScreen();
+    openNext(input);
+    await advance(0);
+    expect(openPr).toHaveBeenCalledTimes(1);
+    expect(openPr).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "remote", repoPath: "C:/src/widgets" }),
+    );
     expect(opened).not.toHaveBeenCalled();
   });
 

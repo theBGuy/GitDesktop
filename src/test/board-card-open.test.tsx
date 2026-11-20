@@ -554,7 +554,7 @@ describe("a card of another repository with a clone in recents", () => {
     expect(openIssue).not.toHaveBeenCalled();
   });
 
-  it("H19: a double click on one card resolves again and lands once", async () => {
+  it("H19: two opens of one card resolve again and land once", async () => {
     const h = renderOpen();
     open(h, WIDGETS_ISSUE);
     open(h, WIDGETS_ISSUE);

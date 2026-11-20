@@ -765,7 +765,7 @@ fn dropped_sha(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::TEST_GIT_HANG_GUARD;
+    use crate::git::runner::{TestGitEnv, TEST_GIT_HANG_GUARD};
 
     async fn git(repo: &str, args: &[&str]) -> String {
         run_git(Some(repo), args, TEST_GIT_HANG_GUARD)
@@ -2587,7 +2587,7 @@ mod tests {
     ) -> String {
         write(dir, "b.txt", content);
         let status = std::process::Command::new("git")
-            .envs(crate::git::runner::TEST_GIT_ENV)
+            .test_git_env()
             .args(["stash", "push", "-m", message])
             .current_dir(repo)
             .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
@@ -2714,7 +2714,7 @@ mod tests {
             let ran = std::sync::Arc::clone(&ran);
             std::sync::Arc::new(move || {
                 let status = std::process::Command::new("git")
-                    .envs(crate::git::runner::TEST_GIT_ENV)
+                    .test_git_env()
                     .args(["stash", "push", "-m", "raced push"])
                     .current_dir(&repo)
                     .status()
@@ -2761,7 +2761,7 @@ mod tests {
                 let repo = repo.clone();
                 std::sync::Arc::new(move || {
                     let status = std::process::Command::new("git")
-                        .envs(crate::git::runner::TEST_GIT_ENV)
+                        .test_git_env()
                         .args(["stash", "drop", external])
                         .current_dir(&repo)
                         .status()

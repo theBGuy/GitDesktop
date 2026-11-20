@@ -1,5 +1,6 @@
 import { Popover } from "@base-ui/react/popover";
 import { KanbanIcon, SparkleIcon, TagIcon, XIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -94,7 +95,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
-import { useRemoteSlug } from "@/lib/repo-lens/queries";
+import { cachedLensVerdict, useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -157,6 +158,7 @@ export function CreateIssueDialog({
    *  left behind (its draft text went with it), never the other host's. */
   host: CreateIssueHost;
 }) {
+  const queryClient = useQueryClient();
   const createIssue = useCreateIssue(repoPath, lens);
   // Per instance: two hosts mount this dialog, each holding its own form.
   const attachDraftKey = draftKeyFor("issue-create", useId());
@@ -300,6 +302,7 @@ export function CreateIssueDialog({
     defaultValues: { title: "", body: "" },
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
+      const submitLens = lens;
       const run = createHold.begin();
       try {
         // Begun after every early return, so a refusal leaves the chips as they were.
@@ -369,13 +372,21 @@ export function CreateIssueDialog({
          *  whatever repo is active now — somewhere else that is an unrelated issue,
          *  or a missing-issue view. The guard is the continuation rule's own shape,
          *  and the same one `CreateDiscussionDialog` puts on its post-create
-         *  navigate.
+         *  navigate. The lens is pinned the same way: `selectIssue` resolves the
+         *  number under the LIVE gated lens, which a Fork/Upstream switch (or a
+         *  gate flip) since submit would point at another repository, so the select
+         *  needs the settle-time lens VERDICT to equal the submit-time lens. There
+         *  is none until the stored lens reads "origin" or every lens cache has
+         *  answered (a stored-lens read that failed without data does neither);
+         *  without one the select is skipped, and the toast still names the issue.
          *
          *  The TOAST stays unconditional wherever the user ended up: it names the
          *  issue and carries its URL, which are true from any repo. */
         function openCreatedIssue() {
           if (number === null) return;
           if (useUiStore.getState().repoPath !== repoPath) return;
+          const settled = cachedLensVerdict(queryClient, repoPath);
+          if (settled === null || settled !== submitLens) return;
           selectIssue({ kind: "remote", id: String(number) });
         }
         // The post-create links are INDEPENDENT of each other: a board refusing the

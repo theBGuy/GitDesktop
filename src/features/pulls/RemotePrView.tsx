@@ -139,6 +139,7 @@ import {
   isPrArchivedRefusal,
   presentError,
 } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
 import {
   gitFetch,
   type MergeStrategy,
@@ -193,6 +194,7 @@ import {
   useForgeStatus,
   useGlArmAutoMerge,
   useGlCancelAutoMerge,
+  useGlMergingWatch,
   useGlMrMergeState,
   useGlMrTimeStats,
   useMergeMessageDefaults,
@@ -269,7 +271,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import type { PrSection } from "@/lib/pulls/pr-section";
-import { PR_NOUN } from "@/lib/pulls/pr-state";
+import { PR_NOUN, prStateWord } from "@/lib/pulls/pr-state";
 import {
   type ClearReviewDraftsVars,
   LOCAL_REVIEW_WRITES_FAMILY,
@@ -293,7 +295,7 @@ import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
-import { MergePrDialog } from "./MergePrDialog";
+import { MergePrDialog, mergeDialogFinalFocus } from "./MergePrDialog";
 import {
   MERGE_LABEL,
   MERGE_METHOD_RULE_REASON,
@@ -435,6 +437,22 @@ function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
  *  unknown. */
 const MERGE_GUARD_MISSING_REASON =
   "Reload to merge — couldn't load the head commit to guard the merge";
+
+/** The open merge dialog's hold once the request stopped reading OPEN, by its
+ *  state; any state not listed is no longer open. */
+const MERGE_NOT_OPEN_REASON: Partial<Record<string, (noun: string) => string>> =
+  {
+    MERGING: (noun) => `This ${noun} is already being merged.`,
+  };
+const mergeNoLongerOpen = (noun: string) => `This ${noun} is no longer open.`;
+
+/** Own keys only: a forge string such as `toString` falls to the default. */
+export function mergeNotOpenReason(state: string, noun: string): string {
+  const reason = Object.hasOwn(MERGE_NOT_OPEN_REASON, state)
+    ? MERGE_NOT_OPEN_REASON[state]
+    : undefined;
+  return (reason ?? mergeNoLongerOpen)(noun);
+}
 
 /** Defensive fallback for a `busy` hold whose term `composerReason` doesn't
  *  (yet) name — coverage holds today, but this keeps the four sites that
@@ -1099,6 +1117,18 @@ export function RemotePrView({
       ? shownNumber
       : null,
   );
+  // A GitLab MR mid-merge (MERGING) watches its own slim merge-state read until the
+  // lock ends; a gate of its own, since the auto-merge read above wants OPEN.
+  useGlMergingWatch(
+    repoPath,
+    repoTab === "pulls" &&
+      provider === "gitlab" &&
+      hold.interactive &&
+      !detailsPlaceholder &&
+      details.data?.state === "MERGING"
+      ? shownNumber
+      : null,
+  );
   const armAutoMerge = useGlArmAutoMerge(repoPath);
   const cancelAutoMerge = useGlCancelAutoMerge(repoPath);
   const isOpenPr = details.data?.state === "OPEN";
@@ -1525,12 +1555,18 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-ready-for-review",
     () => {
-      if (shownIsDraft !== true || detailsStale) return;
+      if (
+        shownIsDraft !== true ||
+        details.data?.state !== "OPEN" ||
+        detailsStale
+      )
+        return;
       void markReadyForReview();
     },
     isSelectedPr &&
       draftPairVisible &&
       shownIsDraft === true &&
+      details.data?.state === "OPEN" &&
       !busy &&
       !detailsStale,
   );
@@ -3187,7 +3223,7 @@ export function RemotePrView({
       case offlineHold !== undefined:
         return offlineHold;
       case mergeNotOpen:
-        return `This ${prNoun} is no longer open.`;
+        return mergeNotOpenReason(pr?.state ?? "", prNoun);
       case mergeGuardMissing:
         return MERGE_GUARD_MISSING_REASON;
       default:
@@ -3432,6 +3468,11 @@ export function RemotePrView({
     },
     [hostRef],
   );
+  // A landing (mount, or an `<Activity>` show, which replays this setup) takes
+  // focus that was lost: a reveal leaves it on the hidden tab's control.
+  useLayoutEffect(() => {
+    if (focusIsLost()) viewRef.current?.focus({ preventScroll: true });
+  }, []);
   // No answer for the shown PR yet. Its placeholder is never painted here: past the
   // hold it is the PR the hold left, and it would flash back over the new one. A
   // tab arrival that lags the live selection shows this frame too, never the PR
@@ -3492,8 +3533,34 @@ export function RemotePrView({
       .querySelector<HTMLElement>(`[data-row="${member}"][aria-current="true"]`)
       ?.focus();
   }, [hold.holding, showsLoadingFrame, shownNumber]);
-  // Every arm renders inside the same host and frame, so the frame's focus sink
-  // survives an arm swap and the hold dims whichever arm the held PR showed.
+  // A swap that unmounts the focused node (another PR shown, or an arm change)
+  // would drop focus to <body>; land it on the host. The arms are tested in the
+  // render's own order. Change-only, so a mount never takes focus from elsewhere.
+  const viewArm = (() => {
+    switch (true) {
+      case showsLoadingFrame:
+        return "loading";
+      case detailPane === "offline":
+        return "offline";
+      case detailPane === "error" || !pr:
+        return "error";
+      case Boolean(resolve):
+        return "resolve";
+      default:
+        return "content";
+    }
+  })();
+  const viewFrame = `${viewArm}:${hold.shownKey}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      viewRef.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  // Every arm but the resolve view renders inside the same host and frame, so the
+  // frame's focus sink survives an arm swap and the hold dims whichever arm the
+  // held PR showed. The resolve view replaces the sections: host node, no frame.
   const framed = (content: ReactNode) => (
     <div
       ref={setHostNode}
@@ -3620,7 +3687,9 @@ export function RemotePrView({
           ) : (
             <>
               <Badge variant={rowOpen ? "default" : "secondary"}>
-                {row.isDraft ? "Draft" : row.state.toLowerCase()}
+                {row.isDraft && row.state === "OPEN"
+                  ? "Draft"
+                  : prStateWord(row.state)}
               </Badge>
               {author ? (
                 <ForgeUserAvatar login={author} ghHost={ghHost} decorative />
@@ -4149,7 +4218,11 @@ export function RemotePrView({
   // Finish/Discard in place of the PR's normal sections and footer.
   if (resolve) {
     return (
-      <div className="flex h-full flex-col">
+      <div
+        ref={setHostNode}
+        tabIndex={-1}
+        className="flex h-full flex-col outline-none"
+      >
         <header className="space-y-2 border-b px-4 py-3">
           <DetailTitleRow
             heading={
@@ -4162,7 +4235,7 @@ export function RemotePrView({
             }
           >
             <Badge variant="secondary" className="capitalize">
-              {pr.state.toLowerCase()}
+              {prStateWord(pr.state)}
             </Badge>
           </DetailTitleRow>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -4547,7 +4620,9 @@ export function RemotePrView({
         />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant={pr.state === "OPEN" ? "default" : "secondary"}>
-            {pr.isDraft ? "Draft" : pr.state.toLowerCase()}
+            {pr.isDraft && pr.state === "OPEN"
+              ? "Draft"
+              : prStateWord(pr.state)}
           </Badge>
           {pr.locked === true && (
             <Badge variant="secondary">
@@ -5712,6 +5787,11 @@ export function RemotePrView({
         pending={mergeAuto ? armAutoMergePending : mergePending}
         heldReason={mergeDialogHold}
         onConfirm={confirmMerge}
+        // A landed merge unmounts the footer holding the Merge trigger, so the
+        // close lands on the framed view itself instead of <body>.
+        finalFocus={(popup) =>
+          mergeDialogFinalFocus(openFooterRef.current, viewRef.current, popup)
+        }
         auto={mergeAuto}
         stackNotice={stackMerge?.notice}
         confirmLabel={stackMerge?.confirmLabel}
