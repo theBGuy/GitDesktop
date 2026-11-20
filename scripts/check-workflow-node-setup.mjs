@@ -12,24 +12,38 @@
 // unreadable. Stdlib only: the guards job runs it before any install.
 //
 // Reading fails closed. parseWorkflow reads one document of block mappings
-// and sequences holding plain, quoted, block and balanced flow scalars; any
-// other shape (multi-document files, anchors and aliases among them) is
-// `unreadable`, as is a flow value whose quotes or brackets it can't pair (an
-// apostrophe in a plain scalar inside one: use a block mapping). The remedy
-// is to spell it plainly. A node run is a NODE_COMMAND or SCRIPT_COMMAND
-// match in a run's non-comment lines, or a node shell. False positives by
+// and sequences holding plain, quoted, block and balanced flow scalars
+// (block scalars keep YAML's chomping, so a clipped `|` ends in a line
+// break, which makes a `${{ }}` condition a template); any other shape
+// (multi-document files, anchors and aliases among them) is `unreadable`,
+// as is a flow value whose quotes or brackets it can't pair (an apostrophe
+// in a plain scalar inside one: use a block mapping). The remedy is to
+// spell it plainly, as for a local action spelled with backslashes
+// (`.\...`): spell it `./...`. An `if:` holding a quoted `}}` reads as a
+// template and is flagged: spell the condition without one. A node run is a
+// NODE_COMMAND or SCRIPT_COMMAND match in a run's non-comment lines, each
+// `${{ }}` read as one plain word, or a node shell. False positives by
 // design: a NODE_COMMAND or STATUS_CALL word inside an argument, a string
 // literal or a trailing shell comment still counts (`command -v node`,
-// `cargo test # npm ci`, `contains(x, 'failure()')`); reword it. Out of
-// reach: a command supplied by an expression (`${{ matrix.cmd }}`), wherever
-// it appears; a command behind a variable, alias, function, sourced script,
-// third-party action, a wrapper's options or a quoted path with spaces
-// (`"./a b.mjs"`); a command in a `case` arm body (`pat) cmd ;;`: command
-// position is only SCRIPT_COMMAND's start and CHAIN); a runtime version
-// switch after setup-node; a checkout of another repository or path that
-// supplies the `.node-version` setup-node reads (this guard reads the
-// repository's own file and takes any checkout as its source); a script
-// behind a `$(...)` assignment prefix (`V=$(cmd) ./x.mjs`); a
+// `cargo test # npm ci`, `contains(x, 'failure()')`), as does a script path
+// right after a closing backtick (``cp `ls` dist/app.js``), after a command
+// separator inside a quoted string (`echo 'packaged; dist/app.js'`) or as a
+// path argument on a backslash-continued line (`cp "$a" \` + `dist/app.js`);
+// reword it. Out of reach: a command
+// supplied by an expression (`${{ matrix.cmd }}`), wherever it appears, and
+// an expression holding a quoted `}}` inside a run block; a command behind a
+// variable, alias, function, sourced script, third-party action, a wrapper's
+// options or a quoted path with spaces (`"./a b.mjs"`); a script inside a
+// string another program runs (`bash -c "./x.mjs"`); a command in a `case`
+// arm body (`pat) cmd ;;`: command position is only SCRIPT_COMMAND's start
+// and CHAIN); a runtime version switch after setup-node; a checkout of
+// another repository or path that supplies the `.node-version` setup-node
+// reads (this guard reads the repository's own file and takes any checkout
+// as its source); a script behind a `$(...)` assignment prefix
+// (`V=$(cmd) ./x.mjs`), after an assignment whose value has text glued past
+// a backtick (``V=`c`b ./x.mjs``) or holding an escaped command separator
+// (`V=a\;b ./x.mjs`), or after a redirection before the command
+// (`2>log ./x.mjs`, `V=a>log ./x.mjs`); a
 // same-repository action spelled `$/...` (it reads as a third-party action);
 // a checkout run with `background:`; and a reusable-workflow caller job,
 // which skips both rules as GitHub refuses timeout-minutes there (its callee
@@ -38,6 +52,9 @@
 // checked: setup-node's own version (any ref counts, as Dependabot moves it;
 // an `@v1` predating node-version-file is out of reach). The 1..360 range
 // follows hosted runners, so a self-hosted job's longer bound is refused.
+// Scanning is linear on ordinary input; crafted run lines far beyond
+// ordinary length (hundreds of kilobytes of repeated `node_modules/.bin/`
+// components or of quote-and-escape assignment chains) may take seconds.
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -70,28 +87,54 @@ const NODE_COMMAND =
 // Command position: a start, then any run of VAR=value prefixes, shell
 // keywords (COMMAND_WORDS' if..else, `!`) and words that run their argument
 // (exec..xargs). A word counts only in that chain, so `echo "to env ./x.mjs"`
-// keeps its script path an argument.
-const COMMAND_WORDS = String.raw`(?:\w+=\S*|if|elif|while|until|then|do|else|!|exec|sudo|time|env|command|xargs)`;
-const CHAIN = String.raw`(?:[ \t]*${COMMAND_WORDS}[ \t]+)*[ \t]*`;
+// keeps its script path an argument. An assignment's value takes a quoted
+// span within its line and a backslash escape whole, as the shell does, and
+// otherwise stops at a backtick, `;&|()<>` or `{ `, an escaped one included:
+// a value spanning a command start makes every start re-scan the chain (so
+// would a `\"` read as opening a span). Each blank run belongs to one
+// repetition, as one the chain can split two ways makes it exponential.
+const COMMAND_WORDS = String.raw`(?:\w+=(?:[^\s;&|()<>\`'"{\\]|\\[^;&|(\`{\n]|\{(?![ \t])|"(?:[^"\\\n]|\\.)*"|'[^'\n]*')*|if|elif|while|until|then|do|else|!|exec|sudo|time|env|command|xargs)`;
+const CHAIN = String.raw`[ \t]*(?:${COMMAND_WORDS}[ \t]+)*`;
 // A call of a GitHub status function in an `if:` expression.
 const STATUS_CALL = /\b(?:success|failure|always|cancelled)\s*\(/i;
-// A script path in command position: line start, after ;&|( a backtick or a
-// quote, or after a `{ ` group opener, then CHAIN. A word holding `=` there
-// is an assignment, so the path takes none.
+// A script path in command position: line start, after ;&|( or a backtick, or
+// after a `{ ` group opener, then CHAIN and an optional opening quote. A quote
+// starts no command: a closing one would make the next argument one
+// (`cp "$a" dist/app.js`). A word holding `=` there is an assignment, so the
+// path takes none.
 const SCRIPT_COMMAND = new RegExp(
-  `(?:^|[;&|(\`'"]|\\{(?=[ \\t]))${CHAIN}[^\\s;&|()<>\`'"=]*\\.(?:mjs|cjs|js)(?=$|[\\s;&|<>)\`'"])`,
+  `(?:^|[;&|(\`]|\\{(?=[ \\t]))${CHAIN}['"]?[^\\s;&|()<>\`'"=]*\\.(?:mjs|cjs|js)(?=$|[\\s;&|<>)\`'"])`,
   "im",
 );
 
-// Drops shell comment lines, whose text never runs.
+// Drops shell comment lines, whose text never runs. Lines are never joined at
+// a trailing `\`: a comment's or another shell's (pwsh) backslash would glue a
+// real command into the line before it.
 const shellText = (text) =>
   text
     .split("\n")
     .filter((line) => !/^[ \t]*#/.test(line))
     .join("\n");
 
+// The runner substitutes each `${{ ... }}` before the shell reads the line, so
+// each reads as one plain word: its inner blanks would otherwise split a
+// `V=${{ x }} ./a.mjs` prefix. This guard ends one at its first `}}` (the
+// runner skips one inside a '...' string) and leaves an unclosed one as is.
+// A loop, as a regex retried at every unclosed `${{` re-scans the rest.
+function plainExpressions(text) {
+  let out = "";
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("${{", from);
+    const close = open < 0 ? -1 : text.indexOf("}}", open + 3);
+    if (close < 0) return out + text.slice(from);
+    out += `${text.slice(from, open)}_`;
+    from = close + 2;
+  }
+}
+
 export function runsNode(text) {
-  const script = shellText(text);
+  const script = plainExpressions(shellText(text));
   return NODE_COMMAND.test(script) || SCRIPT_COMMAND.test(script);
 }
 
@@ -139,10 +182,17 @@ function sourceLines(source) {
 }
 
 const BLANK = /^[ \t]*$/;
+// YAML's white space is space and TAB: trim() would also drop a U+00A0 or
+// other Unicode space that YAML keeps as content. The lookbehind starts the
+// end trim at a blank run's first blank, so each run is tried once.
+const trimEndBlanks = (text) => text.replace(/(?<![ \t])[ \t]+$/, "");
 const COMMENT = /^[ \t]*#/;
 const MARKER = /^(?:---|\.\.\.)(?:[ \t]+#.*|[ \t]*)$/;
+// Blanks before `:` belong to a quoted key's alternative only: a plain key's
+// lazy text already takes them (trimmed later), and two quantifiers sharing
+// one blank run make the match quadratic.
 const PAIR =
-  /^(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|((?:[^\s#'"{}[\],&*!|>%@`?:-]|[?:-][^\s#])[^#]*?))[ \t]*:(?:[ \t]+(.*))?$/;
+  /^(?:"((?:[^"\\]|\\.)*)"[ \t]*|'((?:[^']|'')*)'[ \t]*|((?:[^\s#'"{}[\],&*!|>%@`?:-]|[?:-][^\s#])[^#]*?)):(?:[ \t]+(.*))?$/;
 const QUOTED_TAIL = /^(?:[ \t]+#.*|[ \t]*)$/;
 const ESCAPES = {
   0: "\0",
@@ -265,7 +315,8 @@ export function parseWorkflow(source, file) {
       const pair = line.body.match(PAIR);
       if (!pair) fail(line.n, "expected a mapping key");
       if (pair[1]?.includes("\\")) fail(line.n, "escaped keys are not read");
-      const key = pair[1] ?? pair[2]?.replace(/''/g, "'") ?? pair[3].trimEnd();
+      const key =
+        pair[1] ?? pair[2]?.replace(/''/g, "'") ?? trimEndBlanks(pair[3]);
       if (key === "<<") fail(line.n, "merge keys are not read");
       if (node.entries.has(key)) fail(line.n, `duplicate key ${key}`);
       const rest = pair[4] ?? "";
@@ -307,8 +358,8 @@ export function parseWorkflow(source, file) {
   const cut = (text) => {
     const hash = text.search(/[ \t]#/);
     return hash < 0
-      ? { text: text.trimEnd(), comment: false }
-      : { text: text.slice(0, hash).trimEnd(), comment: true };
+      ? { text: trimEndBlanks(text), comment: false }
+      : { text: trimEndBlanks(text.slice(0, hash)), comment: true };
   };
 
   // In a flow value a ` #` inside quotes is text, and a comment ends only its
@@ -329,10 +380,10 @@ export function parseWorkflow(source, file) {
       else if (char === "{" || char === "[") level++;
       else if (char === "}" || char === "]") level--;
       else if (char === "#" && /[ \t]/.test(text[i - 1] ?? "")) {
-        return { text: text.slice(0, i).trimEnd(), quote, depth: level };
+        return { text: trimEndBlanks(text.slice(0, i)), quote, depth: level };
       }
     }
-    return { text: text.trimEnd(), quote, depth: level };
+    return { text: trimEndBlanks(text), quote, depth: level };
   };
 
   // A flow value stays opaque only once its brackets, counted outside quotes,
@@ -350,7 +401,7 @@ export function parseWorkflow(source, file) {
         if (char === "\\") i++;
         else if (char === '"') quote = "";
       } else if (!open.length) {
-        if (i > 0 && !/\s/.test(char)) {
+        if (i > 0 && !/[ \t\n]/.test(char)) {
           fail(n, "content after a flow collection");
         }
         if (i === 0) open.push(char === "{" ? "}" : "]");
@@ -413,7 +464,9 @@ export function parseWorkflow(source, file) {
     let at = line;
     let text = rest.slice(1);
     let i = 0;
-    let value = "";
+    // Each part is one character, an escape's character, `'`, the fold's space
+    // or a run of breaks, so popping all-blank parts trims exactly the blanks.
+    const parts = [];
     let joined = false;
     for (;;) {
       if (i >= text.length) {
@@ -426,20 +479,22 @@ export function parseWorkflow(source, file) {
         if (spaces(at.text) <= parent || MARKER.test(at.text)) {
           fail(at.n, "a quoted value continues at or left of its key");
         }
-        if (!joined) value = value.replace(/[ \t]+$/, "");
-        if (!joined || gaps) value += gaps ? "\n".repeat(gaps) : " ";
+        while (!joined && parts.length && /^[ \t]+$/.test(parts.at(-1))) {
+          parts.pop();
+        }
+        if (!joined || gaps) parts.push(gaps ? "\n".repeat(gaps) : " ");
         joined = false;
-        text = at.text.trimStart();
+        text = at.text.replace(/^[ \t]+/, "");
         i = 0;
         continue;
       }
       const char = text[i];
       if (quote === "'") {
         if (char !== "'") {
-          value += char;
+          parts.push(char);
           i++;
         } else if (text[i + 1] === "'") {
-          value += "'";
+          parts.push("'");
           i += 2;
         } else {
           i++;
@@ -452,7 +507,7 @@ export function parseWorkflow(source, file) {
         break;
       }
       if (char !== "\\") {
-        value += char;
+        parts.push(char);
         i++;
         continue;
       }
@@ -461,7 +516,7 @@ export function parseWorkflow(source, file) {
         joined = true;
         i++;
       } else if (Object.hasOwn(ESCAPES, code)) {
-        value += ESCAPES[code];
+        parts.push(ESCAPES[code]);
         i += 2;
       } else if (Object.hasOwn(HEX_ESCAPES, code)) {
         const hex = text.slice(i + 2, i + 2 + HEX_ESCAPES[code]);
@@ -473,13 +528,14 @@ export function parseWorkflow(source, file) {
         ) {
           fail(at.n, `invalid \\${code} escape`);
         }
-        value += String.fromCodePoint(point);
+        parts.push(String.fromCodePoint(point));
         i += 2 + hex.length;
       } else fail(at.n, `escape \\${code} is not read`);
     }
     if (!QUOTED_TAIL.test(text.slice(i))) {
       fail(at.n, "content after a quoted value");
     }
+    const value = parts.join("");
     for (const char of value) {
       const code = char.codePointAt(0);
       if (code !== 0x09 && code !== 0x0a && hostile(code)) {
@@ -520,10 +576,11 @@ export function parseWorkflow(source, file) {
 
   function blockScalar(line, rest, parent) {
     const header = rest.match(
-      /^([|>])(?:([1-9])[+-]?|[+-]([1-9])?)?(?:[ \t]+#.*|[ \t]*)$/,
+      /^([|>])(?:([1-9])([+-])?|([+-])([1-9])?)?(?:[ \t]+#.*|[ \t]*)$/,
     );
     if (!header) fail(line.n, "unsupported block scalar header");
-    const step = header[2] ?? header[3];
+    const step = header[2] ?? header[5];
+    const chomp = header[3] ?? header[4];
     let indent = step ? parent + Number(step) : -1;
     let next = line.i + 1;
     if (indent < 0) {
@@ -532,20 +589,36 @@ export function parseWorkflow(source, file) {
       const first = probe < count ? spaces(lines[probe].text) : 0;
       indent = first > parent ? first : Number.POSITIVE_INFINITY;
     }
-    // Content may hold TABs and `#` past its indent; a shorter line ends it.
+    // Content may hold TABs and `#` past its indent; a shorter line ends it. A
+    // blank line longer than the indent is content (YAML's empty line holds at
+    // most `indent` spaces). The last content line gets its break even when
+    // the file ends on it, as yaml reads it (GitHub's reader is unverified, and
+    // the break makes a `${{ }}` a template); a trailing empty line adds one
+    // only when newline-terminated.
     const body = [];
     while (next < count) {
       const text = lines[next].text;
-      if (BLANK.test(text)) body.push("");
-      else if (spaces(text) < indent) break;
-      else body.push(text.slice(indent));
+      const terminated = next < count - 1;
+      if (BLANK.test(text)) {
+        const deeper = spaces(text) >= indent && text.length > indent;
+        body.push({ text: deeper ? text.slice(indent) : "", terminated });
+      } else if (spaces(text) < indent) break;
+      else body.push({ text: text.slice(indent), terminated });
       next++;
     }
-    while (body.length && body[body.length - 1] === "") body.pop();
+    let end = body.length;
+    while (end && body[end - 1].text === "") end--;
+    const content = body.slice(0, end).map((entry) => entry.text);
+    // YAML chomping: strip (`-`) keeps no final break, clip keeps one, keep
+    // (`+`) also keeps the trailing empty lines' breaks.
+    const broken = end > 0 ? "\n" : "";
+    const kept = body.slice(end).filter((entry) => entry.terminated).length;
+    const tail =
+      chomp === "-" ? "" : broken + (chomp === "+" ? "\n".repeat(kept) : "");
     pos = next;
     return {
       kind: "scalar",
-      value: header[1] === "|" ? body.join("\n") : fold(body),
+      value: (header[1] === "|" ? content.join("\n") : fold(content)) + tail,
       style: header[1] === "|" ? "literal" : "folded",
       line: line.n,
     };
@@ -691,19 +764,27 @@ export function verdict(files, nodeVersion, exempt = EXEMPT) {
   // An `if:` is an expression when it holds no `${{` or is wholly one
   // `${{ ... }}`; with `${{` anywhere else GitHub reads a string template,
   // truthy text that gates on nothing, so this returns null for it. Untrimmed:
-  // whitespace a quoted value keeps around its `${{ }}` makes it a template.
+  // whitespace a quoted value keeps around its `${{ }}` makes it a template,
+  // and so does a U+00A0 there, which YAML keeps as content. Inside the
+  // expression white space is the runner's (Char.IsWhiteSpace, U+00A0
+  // included; \s differs only on characters sourceLines already refuses).
   const expressionOf = (condition) => {
-    const text = condition.value.replace(/\s+/g, " ");
-    if (!text.includes("${{")) return text.trim();
-    const whole = text.match(/^\$\{\{((?:(?!\$\{\{|\}\}).)*)\}\}$/);
-    return whole ? whole[1].trim() : null;
+    const value = condition.value;
+    const whole = value.includes("${{")
+      ? value.match(/^\$\{\{((?:(?!\$\{\{|\}\})[\s\S])*)\}\}$/)?.[1]
+      : value;
+    return whole === undefined ? null : whole.replace(/\s+/g, " ").trim();
   };
 
-  // The `&&` operands at parenthesis depth 0, outside '...' strings ('' escapes
-  // a quote), so a negated or grouped conjunction stays one operand.
+  const CLOSERS = { "(": ")", "[": "]" };
+
+  // The `&&` operands outside parentheses and index brackets and outside
+  // '...' strings ('' escapes a quote), so a negated, grouped or indexed
+  // conjunction stays one operand. Null when an `||` stands at the top level
+  // or the brackets or quotes don't pair, so the caller reads no conjunction.
   function topConjuncts(expression) {
     const parts = [];
-    let depth = 0;
+    const open = [];
     let quoted = false;
     let start = 0;
     for (let i = 0; i < expression.length; i++) {
@@ -712,21 +793,26 @@ export function verdict(files, nodeVersion, exempt = EXEMPT) {
         if (char === "'" && expression[i + 1] === "'") i++;
         else if (char === "'") quoted = false;
       } else if (char === "'") quoted = true;
-      else if (char === "(") depth++;
-      else if (char === ")") depth--;
-      else if (depth === 0 && char === "&" && expression[i + 1] === "&") {
+      else if (char === "(" || char === "[") open.push(CLOSERS[char]);
+      else if (char === ")" || char === "]") {
+        if (open.pop() !== char) return null;
+      } else if (open.length || expression[i + 1] !== char) continue;
+      else if (char === "|") return null;
+      else if (char === "&") {
         parts.push(expression.slice(start, i));
         start = i + 2;
         i++;
       }
     }
+    if (quoted || open.length) return null;
     parts.push(expression.slice(start));
     return parts.map((part) => part.trim());
   }
 
   // A node step that can run without its setup-node succeeding is covered only
   // when it is non-gating itself or its condition requires a setup's success:
-  // a top-level `&&` conjunct `steps.<id>.outcome == 'success'`, and no `||`.
+  // a top-level `&&` conjunct `steps.<id>.outcome == 'success'`, and no
+  // top-level `||`.
   function gatedOnSetup(fields, ids) {
     const mayFail = fields.get("continue-on-error");
     if (
@@ -745,8 +831,9 @@ export function verdict(files, nodeVersion, exempt = EXEMPT) {
       return false;
     }
     const expression = expressionOf(condition);
-    if (expression === null || expression.includes("||")) return false;
-    return topConjuncts(expression).some((conjunct) => {
+    const conjuncts = expression === null ? null : topConjuncts(expression);
+    if (conjuncts === null) return false;
+    return conjuncts.some((conjunct) => {
       const parts = conjunct.match(
         /^steps\.([A-Za-z0-9_-]+)\.outcome ?== ?'success'$/i,
       );
@@ -756,9 +843,9 @@ export function verdict(files, nodeVersion, exempt = EXEMPT) {
 
   // Any status function drops the implicit success(), so the step may run
   // after a failed setup-node unless a top-level conjunct is a bare success()
-  // and no `||` stands anywhere; a template keeps the implicit success() only
-  // without one, and an `if:` that can't be read counts as running past a
-  // failure.
+  // and no `||` stands at the top level; a template keeps the implicit
+  // success() only without one, and an `if:` that can't be read counts as
+  // running past a failure.
   function runsPastFailure(fields) {
     const condition = fields.get("if");
     if (condition === undefined) return false;
@@ -766,10 +853,9 @@ export function verdict(files, nodeVersion, exempt = EXEMPT) {
     const expression = expressionOf(condition);
     if (expression === null) return STATUS_CALL.test(condition.value);
     if (!STATUS_CALL.test(expression)) return false;
-    if (expression.includes("||")) return true;
-    return !topConjuncts(expression).some((conjunct) =>
-      /^success\s*\(\s*\)$/i.test(conjunct),
-    );
+    const conjuncts = topConjuncts(expression);
+    if (conjuncts === null) return true;
+    return !conjuncts.some((conjunct) => /^success\s*\(\s*\)$/i.test(conjunct));
   }
 
   // Walks one job's or composite's steps in order. Returns whether it runs Node
@@ -995,8 +1081,10 @@ export function verdict(files, nodeVersion, exempt = EXEMPT) {
   }
 
   function local(target, line) {
+    // The lookbehind starts the trim only at a slash run's first slash, so a
+    // long run not at the end is tried once, not once per slash.
     const name = target
-      .replace(/\/+$/, "")
+      .replace(/(?<!\/)\/+$/, "")
       .match(/^\.\/\.github\/actions\/([^/]+)$/);
     if (!name) {
       throw new Unreadable(
@@ -1252,9 +1340,14 @@ export const format = ({ file, line, rule, message, fix }) =>
   `workflow-node-setup: FAIL ${file}:${line}: ${rule}: ${message} (fix: ${fix})`;
 
 // Reads bytes and decodes them strictly, so invalid UTF-8 fails instead of
-// turning into U+FFFD; the decoder drops one leading byte-order mark.
+// turning into U+FFFD. Workflow and action text keeps its byte-order mark, as
+// parseWorkflow strips exactly one; `.node-version`'s decoder drops one.
 export function readCorpus(root, read = readFileSync) {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const yamlDecoder = new TextDecoder("utf-8", {
+    fatal: true,
+    ignoreBOM: true,
+  });
+  const versionDecoder = new TextDecoder("utf-8", { fatal: true });
   const paths = readdirSync(join(root, ".github", "workflows"), {
     withFileTypes: true,
   })
@@ -1282,7 +1375,7 @@ export function readCorpus(root, read = readFileSync) {
       }
     }
   }
-  const decode = (path) => {
+  const decode = (path, decoder) => {
     try {
       const bytes = read(join(root, path));
       if (!(bytes instanceof Uint8Array))
@@ -1293,8 +1386,10 @@ export function readCorpus(root, read = readFileSync) {
     }
   };
   return {
-    files: new Map(paths.sort().map((path) => [path, decode(path)])),
-    nodeVersion: decode(".node-version"),
+    files: new Map(
+      paths.sort().map((path) => [path, decode(path, yamlDecoder)]),
+    ),
+    nodeVersion: decode(".node-version", versionDecoder),
   };
 }
 

@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import process from "node:process";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -65,6 +66,20 @@ const shape = (result) =>
 function passes(result) {
   assert.deepEqual(result.failures, []);
   assert.equal(result.ok, true);
+}
+
+// Bounds for adversarial inputs, which a super-linear regex takes seconds on.
+const LINEAR_BUDGET_MS = 250;
+// The guards job runs every suite in parallel, so a 60k-line parse gets room.
+const MANY_LINES_BUDGET_MS = 1000;
+
+// Process CPU time, so a worker descheduled under a parallel run can't fail
+// a budget its own work met.
+function timed(run) {
+  const start = process.cpuUsage();
+  const result = run();
+  const { user, system } = process.cpuUsage(start);
+  return { result, elapsed: (user + system) / 1000 };
 }
 
 function tree(files) {
@@ -230,12 +245,12 @@ describe("setup-node rules", () => {
     );
   });
 
-  // P1's gate (spec-p1-gate-port.md decisions D3 and D4): setup-node may fail
-  // open, and an echo naming setup-node runs no node.
+  // The rust-tests gate's shape: a setup-node under continue-on-error counts
+  // as setup, and an upload step (a `uses:` action) and an echo that names
+  // setup-node run no node.
   test("the gate's continue-on-error setup-node counts as setup", () => {
     const source = workflow(`      - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Node
@@ -249,14 +264,31 @@ describe("setup-node rules", () => {
         id: decide
         if: steps.node.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 8
         env:
           GH_TOKEN: \${{ github.token }}
+          GH_REPO: \${{ github.repository }}
+          EVENT: \${{ github.event_name }}
+          ATTEMPT: \${{ github.run_attempt }}
         run: node scripts/check-rust-gate.mjs
 
+      - name: Record the tested checkout's identity
+        if: \${{ !cancelled() && steps.decide.outputs.identity != '' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: \${{ steps.decide.outputs.identity }}
+          path: \${{ runner.temp }}/rust-gate-evidence/identity.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
       - name: Report a gate that made no decision
-        if: steps.node.outcome != 'success' || steps.decide.outcome != 'success'
+        if: \${{ !cancelled() && (steps.decide.outcome != 'success' || steps.decide.outputs.run == '') }}
         env:
           NODE: \${{ steps.node.outcome }}
+          DECIDE: \${{ steps.decide.outcome }}
         shell: bash
         run: |
           echo "::error::rust-tests gate made no decision (setup-node: $NODE, decide: $DECIDE); the test matrix runs (fail-open)."
@@ -281,6 +313,8 @@ describe("setup-node rules", () => {
         "        if: >-\n          github.event_name == 'push' &&\n          steps.node.outcome == 'success'\n",
         "        if: |\n          github.event_name == 'push' &&\n          steps.node.outcome == 'success'\n",
         "        if: |-\n          steps.node.outcome == 'success'\n",
+        "        if: |-\n          ${{ steps.node.outcome == 'success' }}\n",
+        "        if: >-\n          ${{ steps.node.outcome == 'success' }}\n",
         "        if: github.ref != 'a && (b' && steps.node.outcome == 'success'\n",
         "        continue-on-error: true\n",
       ]) {
@@ -327,6 +361,24 @@ describe("setup-node rules", () => {
           failOpen(),
           "        if: '${{ steps.node.outcome == ''success'' }} '\n",
         ],
+        // A clipped or kept block scalar ends in a line break, and a deeper
+        // blank-looking line is content: each makes the `${{ }}` a template.
+        [
+          failOpen(),
+          "        if: |\n          ${{ steps.node.outcome == 'success' }}\n",
+        ],
+        [
+          failOpen(),
+          "        if: >\n          ${{ steps.node.outcome == 'success' }}\n",
+        ],
+        [
+          failOpen(),
+          "        if: |+\n          ${{ steps.node.outcome == 'success' }}\n",
+        ],
+        [
+          failOpen(),
+          "        if: |-\n          ${{ steps.node.outcome == 'success' }}\n             \n",
+        ],
         [failOpen(), "        continue-on-error: ${{ true }}\n"],
         [failOpen(), "        continue-on-error: false\n"],
       ]) {
@@ -342,6 +394,103 @@ describe("setup-node rules", () => {
           /may fail open, without depending on its success \(fix: gate it with `if: steps\.<setup-node id>\.outcome == 'success'`, or make it non-gating with `continue-on-error: true`\)$/,
         );
       }
+    });
+
+    const missingRun = (source, label) =>
+      assert.deepEqual(
+        shape(check(source)),
+        [["setup-node-missing", WF, lineOf(source, "- name: Run")]],
+        label,
+      );
+
+    test("a U+00A0 after `${{ }}` is content; blanks and TABs still trim", () => {
+      const nbsp = String.fromCharCode(0xa0);
+      for (const fields of [
+        `        if: \${{ steps.node.outcome == 'success' }}${nbsp}\n`,
+        `        if: \${{ steps.node.outcome == 'success' }}${nbsp} # why\n`,
+        `        if: "\${{ steps.node.outcome == 'success' }}${nbsp}"\n`,
+        `        if: ${nbsp}\${{ steps.node.outcome == 'success' }}\n`,
+      ]) {
+        missingRun(
+          workflow(CHECKOUT + failOpen() + nodeStep(fields)),
+          JSON.stringify(fields),
+        );
+      }
+      for (const fields of [
+        "        if: ${{ steps.node.outcome == 'success' }} \t \n",
+        "        if: steps.node.outcome == 'success'\t# why\n",
+        "        if: \" steps.node.outcome == 'success' \t\"\n",
+        "        if: |-\n          steps.node.outcome == 'success' \t\n",
+      ]) {
+        passes(check(workflow(CHECKOUT + failOpen() + nodeStep(fields))));
+      }
+    });
+
+    // The runner's expression lexer skips Char.IsWhiteSpace, U+00A0 included.
+    test("a U+00A0 inside an expression is white space, so the conjunct gates", () => {
+      const nbsp = String.fromCharCode(0xa0);
+      for (const fields of [
+        `        if: \${{ steps.node.outcome == 'success'${nbsp}}}\n`,
+        `        if: \${{${nbsp}steps.node.outcome == 'success' }}\n`,
+        `        if: steps.node.outcome == 'success'${nbsp}\n`,
+        `        if: "steps.node.outcome == 'success'${nbsp}"\n`,
+        `        if: steps.node.outcome${nbsp}==${nbsp}'success'\n`,
+        `        if: steps.node.outcome == 'success'${nbsp}&& github.event_name == 'push'\n`,
+      ]) {
+        passes(check(workflow(CHECKOUT + failOpen() + nodeStep(fields))));
+      }
+    });
+
+    test("an `||` or `&&` inside brackets stays inside its operand", () => {
+      passes(
+        check(
+          workflow(
+            CHECKOUT +
+              failOpen() +
+              nodeStep(
+                "        if: steps.node.outcome == 'success' && vars[matrix.flag || 'RUN_NODE'] == 'true'\n",
+              ),
+          ),
+        ),
+      );
+      for (const fields of [
+        "        if: vars[env.FEATURE && steps.node.outcome == 'success' && 'SKIP_NODE'] != 'true'\n",
+        "        if: steps.node.outcome == 'success' && vars[x || y\n",
+        "        if: steps.node.outcome == 'success' && vars[x) || (y]\n",
+        "        if: steps.node.outcome == 'success' && (x] || [y)\n",
+      ]) {
+        missingRun(workflow(CHECKOUT + failOpen() + nodeStep(fields)), fields);
+      }
+    });
+
+    test("an `||` inside parentheses or quotes leaves the setup conjunct gating", () => {
+      for (const fields of [
+        "        if: steps.node.outcome == 'success' && (github.event_name == 'push' || github.event_name == 'pull_request')\n",
+        "        if: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && steps.node.outcome == 'success' }}\n",
+        "        if: steps.node.outcome == 'success' && github.ref != 'a || b'\n",
+      ]) {
+        passes(check(workflow(CHECKOUT + failOpen() + nodeStep(fields))));
+      }
+      for (const fields of [
+        "        if: github.event_name == 'push' || github.event_name == 'pull_request'\n",
+        "        if: steps.node.outcome == 'success' || github.event_name == 'push'\n",
+        "        if: steps.node.outcome == 'success' && (x || y\n",
+        "        if: steps.node.outcome == 'success' && x) || (y\n",
+        "        if: steps.node.outcome == 'success' && x == 'a || b\n",
+      ]) {
+        missingRun(workflow(CHECKOUT + failOpen() + nodeStep(fields)), fields);
+      }
+    });
+
+    test("a clipped or kept block `if:` the file ends on is a template", () => {
+      const last = (header) =>
+        workflow(
+          `${CHECKOUT}${failOpen()}      - name: Run\n        run: node scripts/x.mjs\n        if: ${header}\n          \${{ steps.node.outcome == 'success' }}`,
+        );
+      for (const header of ["|", ">", "|+", ">+"]) {
+        missingRun(last(header), header);
+      }
+      for (const header of ["|-", ">-"]) passes(check(last(header)));
     });
 
     test("a setup-node that fails closed covers every later step", () => {
@@ -412,6 +561,76 @@ describe("setup-node rules", () => {
         passes(check(workflow(CHECKOUT + setup + nodeStep(fields))));
       }
     });
+
+    test("a bare success() beside a grouped or quoted `||` still requires success", () => {
+      for (const fields of [
+        "        if: success() && (github.event_name == 'push' || github.event_name == 'pull_request')\n",
+        "        if: ${{ (github.event_name == 'push' || always()) && success() }}\n",
+        "        if: success() && github.ref != 'a || b'\n",
+      ]) {
+        passes(check(workflow(CHECKOUT + setup + nodeStep(fields))));
+      }
+      for (const condition of [
+        "(success() && github.event_name == 'push') || github.event_name == 'pull_request'",
+        "success() && (always() || github.event_name == 'push'",
+      ]) {
+        const source = workflow(
+          CHECKOUT + setup + nodeStep(`        if: ${condition}\n`),
+        );
+        assert.deepEqual(
+          shape(check(source)),
+          [["setup-node-missing", WF, lineOf(source, "- name: Run")]],
+          condition,
+        );
+      }
+    });
+
+    test("a success() inside an index is no bare conjunct; an indexed `||` is no top-level one", () => {
+      passes(
+        check(
+          workflow(
+            CHECKOUT +
+              setup +
+              nodeStep(
+                "        if: success() && vars[matrix.flag || 'RUN_NODE'] == 'true'\n",
+              ),
+          ),
+        ),
+      );
+      const source = workflow(
+        CHECKOUT +
+          setup +
+          nodeStep("        if: vars['A' && success() && 'B'] != 'x'\n"),
+      );
+      assert.deepEqual(shape(check(source)), [
+        ["setup-node-missing", WF, lineOf(source, "- name: Run")],
+      ]);
+    });
+
+    test("a clipped block success() is a template; a stripped one is an expression", () => {
+      const source = workflow(
+        CHECKOUT +
+          setup +
+          nodeStep("        if: |\n          ${{ success() }}\n"),
+      );
+      const result = check(source);
+      assert.deepEqual(shape(result), [
+        ["setup-node-missing", WF, lineOf(source, "- name: Run")],
+      ]);
+      assert.match(
+        result.failures[0],
+        /under a condition that can run it after a failed setup-node/,
+      );
+      passes(
+        check(
+          workflow(
+            CHECKOUT +
+              setup +
+              nodeStep("        if: |-\n          ${{ success() }}\n"),
+          ),
+        ),
+      );
+    });
   });
 });
 
@@ -463,6 +682,16 @@ describe("node run detection", () => {
     "{ ./scripts/check.mjs; }",
     '{ node x; } >> "$GITHUB_STEP_SUMMARY"',
     "true && { FOO=1 ./x.mjs; }",
+    'V="a b" ./x.mjs',
+    "NODE_OPTIONS='--x' ./x.mjs",
+    "MODE=${{ matrix.mode }} ./ci/check.mjs",
+    "A=${{ a }} B=${{ b }} ./x.mjs",
+    "node ${{ matrix.script }}",
+    '"./x.mjs"',
+    "'./x.mjs' --flag",
+    'V=1 "./x.mjs"',
+    'V=a"b"c ./x.mjs',
+    'V="a\\"b" ./x.mjs',
   ];
   for (const command of hits) {
     test(`a run of ${command} needs setup-node`, () => {
@@ -488,8 +717,149 @@ describe("node run detection", () => {
       "asset=dist/app.js",
       "X=./a.mjs",
       "echo {a,b}.js",
+      "V=a|b ./x.mjs",
     ]) {
       assert.equal(runsNode(text), false, text);
+    }
+  });
+
+  // A closing quote ends an argument; it starts no command.
+  test("a script path after a quoted argument is an argument", () => {
+    for (const text of [
+      'cp "$artifact" dist/app.js',
+      'cp "$a" "dist/app.js"',
+      "cp '$a' dist/app.js",
+      'echo "done" > out/app.js',
+    ]) {
+      assert.equal(runsNode(text), false, text);
+    }
+    const result = check(
+      workflow(`${CHECKOUT}      - run: cp "$artifact" dist/app.js\n`),
+    );
+    passes(result);
+    assert.deepEqual(result.nodeJobs, []);
+  });
+
+  // Lines are never joined at a trailing backslash, so a continued path
+  // argument reads as a command (false positive by design), while a command
+  // after a comment's or pwsh's trailing backslash is never hidden.
+  test("a trailing backslash never joins lines", () => {
+    for (const [text, expected] of [
+      ['cp "$artifact" \\\n  dist/app.js', true],
+      ["V=1 \\\n  ./x.mjs", true],
+      ["echo ready # staged under C:\\\n./scripts/check.mjs", true],
+      ["# note \\\necho hi", false],
+    ]) {
+      assert.equal(runsNode(text), expected, text);
+    }
+    const source = workflow(
+      `${CHECKOUT}      - shell: pwsh\n        run: |\n          Set-Location .\\scripts\\\n          node --version\n`,
+    );
+    assert.deepEqual(shape(check(source)), [
+      ["setup-node-missing", WF, lineOf(source, "- shell: pwsh")],
+    ]);
+  });
+
+  test("a long backslash run stays linear", () => {
+    const { result, elapsed } = timed(() =>
+      runsNode(`${"\\".repeat(100000)}x\nmake build`),
+    );
+    assert.equal(result, false);
+    assert.ok(elapsed < LINEAR_BUDGET_MS, `${elapsed} ms`);
+  });
+
+  // False positive by design: the scan doesn't track quotes, so a separator
+  // inside a string restarts it.
+  test("a command separator inside a quoted string still starts a command", () => {
+    assert.equal(runsNode("echo 'packaged; dist/app.js'"), true);
+  });
+
+  // An assignment's value takes a backslash escape whole, as the shell does,
+  // except an escaped command separator, which stays out of reach.
+  test("an escaped character in an assignment stays in its value", () => {
+    for (const text of [
+      "LABEL=release\\ candidate ./x.mjs",
+      'V=a\\"b ./x.mjs',
+      "V=a\\'b ./x.mjs",
+    ]) {
+      assert.equal(runsNode(text), true, text);
+    }
+    assert.equal(runsNode("V=a\\;b ./x.mjs"), false);
+  });
+
+  // A `\"` read as opening a span, or an escaped separator taken into a value,
+  // would let every separator inside the chain re-scan it to the end.
+  test("assignment chains with quotes and escaped separators stay linear", () => {
+    for (const unit of ['V=";V=a\\"b"', "V=a\\;V=b", "V=a\\{ V=b"]) {
+      for (const text of [
+        `${unit.repeat(16000)} make build.js`,
+        `${`${unit} `.repeat(16000)}make build.js`,
+      ]) {
+        const { result, elapsed } = timed(() => runsNode(text));
+        assert.equal(result, false, unit);
+        assert.ok(elapsed < LINEAR_BUDGET_MS, `${unit}: ${elapsed} ms`);
+      }
+    }
+  });
+
+  // Out of reach by contract: a value's backtick substitution ends it, so text
+  // glued past one leaves the script an argument; a string another program
+  // runs is that program's argument.
+  test("a script glued past a backtick or in another program's string is out of reach", () => {
+    for (const text of [
+      "V=`c`b ./x.mjs",
+      'bash -c "./x.mjs"',
+      "sh -c './x.mjs'",
+    ]) {
+      assert.equal(runsNode(text), false, text);
+    }
+  });
+
+  // A super-linear chain would stall the required guards job on this shape.
+  test("aligned assignment prefixes stay linear", () => {
+    const prefixes = Array.from({ length: 13 }, (_, i) => `V${i}=x`).join(
+      "    ",
+    );
+    for (const [tail, expected] of [
+      ["    make build", false],
+      ["    ./x.mjs", true],
+    ]) {
+      const { result, elapsed } = timed(() => runsNode(prefixes + tail));
+      assert.equal(result, expected, tail);
+      assert.ok(elapsed < LINEAR_BUDGET_MS, `${tail}: ${elapsed} ms`);
+    }
+  });
+
+  // A value spanning a command start would make every start re-scan the chain.
+  test("assignment values that hold a command-start character stay linear", () => {
+    for (const prefix of [
+      "V='x' ",
+      "V=a{ ",
+      "V='x;V=1' ",
+      'V="a b" ',
+      'V=" ',
+      'V="\\" ',
+    ]) {
+      const { result, elapsed } = timed(() =>
+        runsNode(`${prefix.repeat(20000)}make build`),
+      );
+      assert.equal(result, false, prefix);
+      assert.ok(elapsed < LINEAR_BUDGET_MS, `${prefix}: ${elapsed} ms`);
+    }
+  });
+
+  // A substitution retried at every unclosed `${{` would re-scan the rest.
+  test("many unclosed or closed expressions in a run stay linear", () => {
+    for (const [text, expected] of [
+      [`${"${{ a ".repeat(30000)}./x.mjs`, false],
+      [`${"V=${{ a }} ".repeat(30000)}./x.mjs`, true],
+    ]) {
+      const { result, elapsed } = timed(() => runsNode(text));
+      assert.equal(result, expected, text.slice(0, 12));
+      assert.ok(
+        elapsed < LINEAR_BUDGET_MS,
+        `${text.slice(0, 12)}: ${elapsed} ms`,
+      );
     }
   });
 
@@ -571,6 +941,7 @@ describe("node run detection", () => {
       "X=${{ matrix.x }} ./run.sh",
       'echo "Deploying to env ${{ inputs.environment }}"',
       'echo "Building (${{ matrix.os }})"',
+      "${{ matrix.tool }} ./x.mjs",
     ]) {
       const result = check(
         workflow(
@@ -679,6 +1050,28 @@ describe("hostile bytes", () => {
     passes(check(PASSING.replace(/\n/g, "\r\n")));
   });
 
+  test("two leading byte-order marks are unreadable through the corpus too", () => {
+    const bom = String.fromCharCode(0xfeff);
+    assert.deepEqual(shape(check(bom + bom + PASSING)), [
+      ["unreadable", WF, 1],
+    ]);
+    const dir = tree({
+      [WF]: Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf]),
+        Buffer.from(PASSING),
+      ]),
+      ".node-version": "24\n",
+    });
+    try {
+      const { files, nodeVersion } = readCorpus(dir);
+      assert.deepEqual(shape(verdict(files, nodeVersion)), [
+        ["unreadable", WF, 1],
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("invalid UTF-8 inside a run comment is unreadable, never decoded", () => {
     const line = "      - run: node x.mjs # caf";
     const bytes = (bad) =>
@@ -751,6 +1144,48 @@ jobs:
         ),
       );
     }
+  });
+
+  test("block scalars keep YAML's chomping", () => {
+    const valueOf = (source) =>
+      parseWorkflow(source, "f.yml").entries.get("k").value;
+    for (const style of ["|", ">"]) {
+      for (const [chomp, beforeKey, atEnd, unterminated, empty] of [
+        ["-", "x", "x", "x", ""],
+        ["", "x\n", "x\n", "x\n", ""],
+        ["+", "x\n\n\n", "x\n", "x\n", "\n"],
+      ]) {
+        const h = style + chomp;
+        assert.equal(valueOf(`k: ${h}\n  x\n\n\nz: 1\n`), beforeKey, h);
+        assert.equal(valueOf(`k: ${h}\n  x\n`), atEnd, `${h} at the end`);
+        assert.equal(
+          valueOf(`k: ${h}\n  x`),
+          unterminated,
+          `${h} unterminated`,
+        );
+        assert.equal(valueOf(`k: ${h}\n\nz: 1\n`), empty, `${h} empty`);
+      }
+    }
+    assert.equal(valueOf("k: >\n  a\n  b\n"), "a b\n");
+  });
+
+  test("a U+00A0 is content in plain, quoted, key and flow text; blanks and TABs trim", () => {
+    const nbsp = String.fromCharCode(0xa0);
+    const parsed = (source) => parseWorkflow(source, "f.yml").entries;
+    const valueOf = (source) => parsed(source).get("k").value;
+    assert.equal(valueOf(`k: a${nbsp} \t\n`), `a${nbsp}`);
+    assert.equal(valueOf(`k: a${nbsp} # c\n`), `a${nbsp}`);
+    assert.equal(valueOf(`k: ${nbsp}a\n`), `${nbsp}a`);
+    assert.equal(valueOf(`k: "a${nbsp} \n  ${nbsp}b"\n`), `a${nbsp} ${nbsp}b`);
+    assert.deepEqual([...parsed(`k${nbsp}: 1\n`).keys()], [`k${nbsp}`]);
+    assert.throws(
+      () => parseWorkflow(`k: [a]${nbsp}\n`, "f.yml"),
+      /content after a flow collection/,
+    );
+    assert.equal(valueOf("k: a \t\n"), "a");
+    assert.equal(valueOf('k: "a \t\n  \t b"\n'), "a b");
+    assert.equal(valueOf("k: [a] \t\n"), "[a]");
+    assert.deepEqual([...parsed("k \t: 1\n").keys()], ["k"]);
   });
 
   test("balanced flow values, quoted brackets and multi-line flow are opaque text", () => {
@@ -1054,8 +1489,12 @@ describe("composite and container jobs", () => {
     }
   });
 
-  test("a local action outside the corpus is unreadable", () => {
-    for (const target of ["./.github/actions/missing", "./tools/action"]) {
+  test("a local action outside the corpus or spelled with backslashes is unreadable", () => {
+    for (const target of [
+      "./.github/actions/missing",
+      "./tools/action",
+      ".\\.github\\actions\\tool",
+    ]) {
       const source = workflow(`${CHECKOUT}      - uses: ${target}\n`);
       assert.deepEqual(shape(check(source)), [
         ["unreadable", WF, lineOf(source, target)],
@@ -1257,7 +1696,7 @@ describe("corpus and unreadable input", () => {
     assert.equal(doc.entries.get("jobs").entries.get("build").kind, "map");
   });
 
-  test("readCorpus decodes, strips one byte-order mark and finds actions", () => {
+  test("readCorpus decodes, keeps a byte-order mark for the parser to strip, and finds actions", () => {
     const dir = tree({
       [WF]: Buffer.concat([
         Buffer.from([0xef, 0xbb, 0xbf]),
@@ -1286,6 +1725,60 @@ describe("corpus and unreadable input", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // A key regex whose blank run two quantifiers share would stall the guards job.
+  test("a long blank run in a plain scalar stays linear", () => {
+    const source = `a${" ".repeat(100000)}b`;
+    const { result, elapsed } = timed(() => parseWorkflow(source, "f.yml"));
+    assert.equal(result.kind, "scalar");
+    assert.equal(result.value, source);
+    assert.ok(elapsed < LINEAR_BUDGET_MS, `${elapsed} ms`);
+  });
+
+  // Re-trimming the whole value at each line break would stall the guards job.
+  test("a long blank run before a quoted line break stays linear", () => {
+    const blanks = " ".repeat(100000);
+    const { result, elapsed } = timed(() =>
+      parseWorkflow(`k: "a${blanks}b\n  c"\n`, "f.yml"),
+    );
+    assert.equal(result.entries.get("k").value, `a${blanks}b c`);
+    assert.ok(elapsed < LINEAR_BUDGET_MS, `${elapsed} ms`);
+  });
+
+  // A blank trim retried at every blank of a run it can't strip would stall it.
+  test("a long blank run before a closing U+00A0 stays linear", () => {
+    const nbsp = String.fromCharCode(0xa0);
+    const blanks = " ".repeat(100000);
+    const { result, elapsed } = timed(() =>
+      parseWorkflow(`k${blanks}${nbsp}: a${blanks}${nbsp}\n`, "f.yml"),
+    );
+    assert.equal(
+      result.entries.get(`k${blanks}${nbsp}`).value,
+      `a${blanks}${nbsp}`,
+    );
+    assert.ok(elapsed < LINEAR_BUDGET_MS, `${elapsed} ms`);
+  });
+
+  // Re-scanning the value per continuation line would stall the guards job.
+  test("a quoted value over many lines stays linear", () => {
+    const { result, elapsed } = timed(() =>
+      parseWorkflow(`k: "a\n${"  b\n".repeat(60000)}  c"\n`, "f.yml"),
+    );
+    assert.equal(result.entries.get("k").value, `a${" b".repeat(60000)} c`);
+    assert.ok(elapsed < MANY_LINES_BUDGET_MS, `${elapsed} ms`);
+  });
+
+  // A trailing-slash trim retried at every slash would stall the guards job.
+  test("a long slash run in a local action path stays linear", () => {
+    const source = workflow(
+      `${CHECKOUT}      - uses: ./.github/actions/x${"/".repeat(100000)}y\n`,
+    );
+    const { result, elapsed } = timed(() => check(source));
+    assert.deepEqual(shape(result), [
+      ["unreadable", WF, lineOf(source, "- uses: ./.github/actions/x")],
+    ]);
+    assert.ok(elapsed < LINEAR_BUDGET_MS, `${elapsed} ms`);
   });
 
   test("readCorpus throws when the workflows directory is missing", () => {

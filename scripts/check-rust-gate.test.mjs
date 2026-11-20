@@ -1,14 +1,16 @@
 // Pins scripts/check-rust-gate.mjs, the rust-tests gate decision. Small shapes
-// run on real git in throwaway repos built with one fast-import stream (names
-// Windows cannot hold on disk never touch the filesystem); large shapes run on
-// an in-process fake git and a stub canonicalizer, so the suite stays a few
-// seconds. CLI cases spawn the script with an env built from scratch, since the
-// guards step's own env carries GITHUB_OUTPUT. Every test asserts the reason or
-// a log line beside `run`, never `run` alone. The P-pins at the end read
-// rust-tests.yml itself and hold the fail-open wiring; each carries in-memory
-// mutations that must turn it red.
+// run on real git in throwaway repos built with one fast-import stream; large
+// shapes run on an in-process fake git, so the suite stays a few seconds. CLI
+// cases spawn the script with an env built from scratch, since the guards
+// step's own env carries GITHUB_OUTPUT. Every test asserts the reason or a log
+// line beside `run`, never `run` alone. The P-pins at the end read
+// rust-tests.yml itself (and the other apt-script callers) and hold the
+// fail-open wiring; each carries in-memory mutations that must turn it red,
+// all built before any `assert.throws`, so a mutation whose anchor is gone
+// fails the test instead of satisfying the throw.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFileSync,
   copyFileSync,
@@ -26,16 +28,18 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  CANONICALIZER_PATH,
-  CANONICALIZER_PROBE,
+  APT_PATH,
+  DIGEST_LENGTH,
   decide,
+  EVIDENCE_FILE,
   GATE_PATH,
-  ghGreens,
+  ghArtifacts,
+  ghGreenRunIds,
   gitRunner,
-  MAX_CHANGED,
-  MAX_COMPARED,
-  passTwo,
-  pythonCanonicalizer,
+  IDENTITY_MEMBERS,
+  identityName,
+  NAME_PREFIX,
+  readIdentity,
   runCli,
   TREE_PATH,
   WORKFLOW_PATH,
@@ -43,18 +47,14 @@ import {
 } from "./check-rust-gate.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./check-rust-gate.mjs", import.meta.url));
-const REAL_CANONICALIZER = readFileSync(
-  fileURLToPath(new URL(`../${CANONICALIZER_PATH}`, import.meta.url)),
-);
 const SHA_A = "a".repeat(40);
-const SHA_B = "b".repeat(40);
 const BACKSLASH = String.fromCharCode(92);
 
 const root = mkdtempSync(join(tmpdir(), "gd-rust-gate-test-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 const emptyConfig = join(root, "empty.gitconfig");
 writeFileSync(emptyConfig, "");
-/** An env holding only what node, git and Python need plus `vars`, so the
+/** An env holding only what node and git need plus `vars`, so the
  *  guards step's own GITHUB_OUTPUT, RUNNER_TEMP, CI and tokens never reach a
  *  fixture or CLI child. */
 function childEnv(vars) {
@@ -159,24 +159,6 @@ const LIB = "pub fn answer() -> u32 {\n    42\n}\n";
 const LIB_COMMENTED =
   "// The answer.\npub fn answer() -> u32 {\n    42 // fixed\n}\n";
 const LIB_CHANGED = "pub fn answer() -> u32 {\n    43\n}\n";
-// The rows 19a/26 shapes: git C-quotes the non-ASCII, quote and backslash names
-// without -z, and a shell word-splits or globs the rest.
-const ODD_PATHS = [
-  "src/a b.rs",
-  "src/glob*?.rs",
-  "src/[ab].rs",
-  `src/caf${String.fromCodePoint(0xe9)}.rs`,
-  'src/q"uote.rs',
-  `src/back${BACKSLASH}slash.rs`,
-  "src/-lead.rs",
-];
-const oddFiles = (commented) =>
-  Object.fromEntries(
-    ODD_PATHS.map((path, i) => [
-      `${TREE_PATH}/${path}`,
-      `${commented ? "// note\n" : ""}pub fn f${i}() {}\n`,
-    ]),
-  );
 
 // A throw here ends the file before any `after` hook runs, so this build
 // removes the temp root itself on failure.
@@ -186,79 +168,23 @@ const repo = buildOrClean(() =>
       name: "base",
       files: {
         [WORKFLOW_PATH]: "name: rust-tests\n",
-        [CANONICALIZER_PATH]: REAL_CANONICALIZER,
         [GATE_PATH]: "// gate\n",
+        [APT_PATH]: "#!/usr/bin/env bash\n",
         [`${TREE_PATH}/Cargo.toml`]: '[package]\nname = "x"\n',
         [`${TREE_PATH}/src/lib.rs`]: LIB,
-        [`${TREE_PATH}/src/del.rs`]: "pub fn gone() {}\n",
-        [`${TREE_PATH}/src/old.rs`]: "pub fn old() {}\n",
-        // A symlink target is its blob's text; `//` would canonicalize away.
-        [`${TREE_PATH}/src/link.rs`]: { mode: "120000", data: "x//one" },
-        ...oddFiles(false),
       },
-    },
-    {
-      name: "symlink",
-      from: "base",
-      files: {
-        [`${TREE_PATH}/src/link.rs`]: { mode: "120000", data: "x//two" },
-      },
-    },
-    {
-      name: "exec",
-      from: "base",
-      files: { [`${TREE_PATH}/src/lib.rs`]: { mode: "100755", data: LIB } },
     },
     {
       name: "comment",
       from: "base",
       files: { [`${TREE_PATH}/src/lib.rs`]: LIB_COMMENTED },
     },
-    { name: "comment2", from: "comment", files: {} },
     {
       name: "code",
       from: "base",
       files: { [`${TREE_PATH}/src/lib.rs`]: LIB_CHANGED },
     },
-    { name: "paths", from: "base", files: oddFiles(true) },
-    {
-      name: "cargo",
-      from: "base",
-      files: { [`${TREE_PATH}/Cargo.toml`]: '[package]\nname = "y"\n' },
-    },
-    {
-      name: "added",
-      from: "base",
-      files: { [`${TREE_PATH}/src/new.rs`]: "pub fn new() {}\n" },
-    },
-    {
-      name: "deleted",
-      from: "base",
-      files: { [`${TREE_PATH}/src/del.rs`]: null },
-    },
-    {
-      name: "renamed",
-      from: "base",
-      files: {
-        [`${TREE_PATH}/src/old.rs`]: null,
-        [`${TREE_PATH}/src/renamed.rs`]: "pub fn old() {}\n",
-      },
-    },
-    {
-      name: "nocanon",
-      from: "comment",
-      files: { [CANONICALIZER_PATH]: null },
-    },
-    {
-      name: "othercanon",
-      from: "base",
-      files: {
-        [CANONICALIZER_PATH]: Buffer.concat([
-          REAL_CANONICALIZER,
-          Buffer.from("\n# changed\n"),
-        ]),
-      },
-    },
+    { name: "noapt", from: "comment", files: { [APT_PATH]: null } },
   ]),
 );
 const sha = repo.shas;
@@ -266,38 +192,22 @@ const short = (oid) => oid.slice(0, 8);
 const realGit = gitRunner(repo.dir, gitEnv);
 const failing = { ok: false, stdout: Buffer.alloc(0) };
 
-/** Drops `//` line comments and all whitespace; records each input, the
- *  known-input probe in `probes` so `inputs` holds only compared blobs. */
-function stubCanonicalizer({ selfTest = true, nullWhen = () => false } = {}) {
-  const inputs = [];
-  const probes = [];
-  return {
-    inputs,
-    probes,
-    selfTest: () => selfTest,
-    canonicalize(_scriptPath, input) {
-      const text = input.toString("utf8");
-      if (input.equals(CANONICALIZER_PROBE)) probes.push(text);
-      else inputs.push(text);
-      if (nullWhen(text)) return null;
-      return Buffer.from(
-        text.replace(/\/\/[^\n]*/g, "").replace(/\s+/g, ""),
-        "utf8",
-      );
-    },
-  };
-}
+/** One lookup answer as ghArtifacts returns it. */
+const artifactPage = (items) => ({ items });
 
-/** decide() on `env` with collected log lines and a counting green list. */
+/** decide() with collected log lines. `greens` (run ids) and `artifacts`
+ *  (`{ name, expired, runId }`) back the two gh seams, each call counted in
+ *  `gh`, unless a test passes its own seam. */
 function run({
   env,
   git: gitFn,
   greens = [],
+  artifacts = [],
   listGreens,
-  canonicalizer = stubCanonicalizer(),
+  findArtifacts,
 }) {
   const lines = [];
-  const gh = { calls: 0 };
+  const gh = { calls: 0, names: [] };
   const result = decide({
     env,
     git: gitFn,
@@ -307,39 +217,61 @@ function run({
         gh.calls++;
         return greens;
       }),
-    canonicalizer,
+    findArtifacts:
+      findArtifacts ??
+      ((name) => {
+        gh.calls++;
+        gh.names.push(name);
+        return artifactPage(
+          artifacts.filter((item) => item.name === name).slice(0, 100),
+        );
+      }),
     log: (line) => lines.push(line),
   });
   return { ...result, lines, text: lines.join("\n"), gh };
 }
 
-const pushEnv = (head) => ({ ATTEMPT: "1", EVENT: "push", PUSH_SHA: head });
-const onRepo = (head, greens, extra = {}) =>
-  run({ env: pushEnv(head), git: realGit, greens, ...extra });
+const pushEnv = (head) => ({ ATTEMPT: "1", EVENT: "push", GITHUB_SHA: head });
+/** `gitFn` with `rev-parse HEAD` answering `head`, as a checkout of it would. */
+const atHead = (gitFn, head) => (args) =>
+  args.length === 2 && args[0] === "rev-parse" && args[1] === "HEAD"
+    ? { ok: true, stdout: Buffer.from(`${head}\n`) }
+    : gitFn(args);
+const treeOf = (commit) =>
+  git(repo.dir, ["rev-parse", `${commit}:${TREE_PATH}`]).trim();
+const runIdOf = (i) => String(9000 + i);
+/** Evidence that each of `commits` passed: its identity, read on real git, as
+ *  the artifact of green run `runIdOf(i)`. */
+function evidenceOf(commits) {
+  const artifacts = commits.map((commit, i) => {
+    const { name } = readIdentity(atHead(realGit, commit), commit);
+    assert.ok(name, commit);
+    return { name, expired: false, runId: runIdOf(i) };
+  });
+  return { artifacts, greens: artifacts.map((item) => item.runId) };
+}
+const onRepo = (head, passed, extra = {}) =>
+  run({
+    env: pushEnv(head),
+    git: atHead(realGit, head),
+    ...evidenceOf(passed),
+    ...extra,
+  });
 
 // ---------------------------------------------------------------- fake git
 
 let serial = 0;
 const nextOid = () => (++serial).toString(16).padStart(40, "0");
-const SAME = "fn a() {}\n";
-const COMMENTED = "// note\nfn a() {}\n";
-const CODE = "fn a() { b() }\n";
-/** One `diff-tree --raw` record header, as git prints it before the path. */
-const raw = (
-  oldOid,
-  newOid,
-  { oldMode = "100644", newMode = oldMode, status = "M" } = {},
-) => `:${oldMode} ${newMode} ${oldOid} ${newOid} ${status}`;
 
-/** A test-side model answering rev-parse, cat-file and diff-tree from maps,
- *  recording every call. `green(files)` adds a commit whose tree differs from
- *  head's by raw M records, `files` = { path: [pastContent, currentContent] };
- *  a path's current blob is minted once and shared by every green. */
+/** A test-side model answering rev-parse and `cat-file -t` from maps,
+ *  recording every call, beside an evidence store. `evidence(tree, opts)`
+ *  records an artifact naming `tree` under the head's blobs (or `opts`
+ *  overrides) from a new run, green unless `green: false`, and returns its
+ *  run id. */
 function fakeRepo() {
   const refs = new Map();
   const blobs = new Map();
   const trees = new Set();
-  const diffs = new Map();
   const calls = [];
   const answer = (stdout) => ({ ok: true, stdout: Buffer.from(stdout) });
   const gitFn = (args) => {
@@ -352,198 +284,253 @@ function fakeRepo() {
       if (trees.has(args[2])) return answer("tree\n");
       return blobs.has(args[2]) ? answer("blob\n") : failing;
     }
-    if (args[0] === "cat-file") {
-      const blob = blobs.get(args[2]);
-      return blob ? answer(blob) : failing;
-    }
-    if (args[0] === "diff-tree") {
-      const stream = diffs.get(`${args.at(-2)} ${args.at(-1)}`);
-      return stream ? answer(stream) : failing;
-    }
     return failing;
   };
   const head = nextOid();
   const tree = nextOid();
   const wf = nextOid();
   const gate = nextOid();
-  const canon = nextOid();
+  const apt = nextOid();
   trees.add(tree);
-  /** `tree` names a tree unless `asBlob`, which files it as a blob. */
-  const commit = ({
-    tree: t = nextOid(),
-    wf: w = wf,
-    gate: g = gate,
-    canon: c = canon,
-    asBlob = false,
-  } = {}) => {
-    const id = nextOid();
-    if (asBlob) blobs.set(t, Buffer.from("src-tauri-link"));
-    else trees.add(t);
-    refs.set(`${id}:${TREE_PATH}`, t);
-    refs.set(`${id}:${WORKFLOW_PATH}`, w);
-    refs.set(`${id}:${GATE_PATH}`, g);
-    refs.set(`${id}:${CANONICALIZER_PATH}`, c);
-    return { sha: id, tree: t };
-  };
+  refs.set("HEAD", head);
   refs.set(`${head}:${TREE_PATH}`, tree);
   refs.set(`${head}:${WORKFLOW_PATH}`, wf);
   refs.set(`${head}:${GATE_PATH}`, gate);
-  refs.set(`${head}:${CANONICALIZER_PATH}`, canon);
-  // The checked-out commit's gate and workflow: the head's, unless a test
-  // moves them.
-  refs.set(`HEAD:${GATE_PATH}`, gate);
-  refs.set(`HEAD:${WORKFLOW_PATH}`, wf);
-  blobs.set(canon, Buffer.from("# canonicalizer\n"));
-  const blob = (content) => {
-    const id = nextOid();
-    blobs.set(id, Buffer.from(content));
-    return id;
-  };
-  const currentBlobs = new Map();
-  const green = (files, opts) => {
-    const c = commit(opts);
-    let stream = "";
-    for (const [path, [past, current]] of Object.entries(files)) {
-      if (!currentBlobs.has(path)) currentBlobs.set(path, blob(current));
-      stream += `${raw(blob(past), currentBlobs.get(path))}\0${path}\0`;
-    }
-    diffs.set(`${c.tree} ${tree}`, Buffer.from(stream, "utf8"));
-    return c.sha;
+  refs.set(`${head}:${APT_PATH}`, apt);
+  const blobsOf = ({ wf: w = wf, gate: g = gate, apt: a = apt } = {}) => ({
+    [WORKFLOW_PATH]: w,
+    [GATE_PATH]: g,
+    [APT_PATH]: a,
+  });
+  const greens = [];
+  const artifacts = [];
+  let runs = 0;
+  const evidence = (t, { green = true, expired = false, ...over } = {}) => {
+    const runId = String(++runs);
+    if (green) greens.push(runId);
+    const name = identityName({ tree: t, blobs: blobsOf(over) });
+    artifacts.push({ name, expired, runId });
+    return runId;
   };
   return {
     git: gitFn,
     refs,
     blobs,
-    blob,
     trees,
-    diffs,
     calls,
     head,
     tree,
     wf,
     gate,
-    canon,
-    commit,
-    green,
+    apt,
+    blobsOf,
+    name: identityName({ tree, blobs: blobsOf() }),
+    greens,
+    artifacts,
+    evidence,
     env: pushEnv(head),
   };
 }
 
-const onFake = (fake, greens, extra = {}) =>
-  run({ env: fake.env, git: fake.git, greens, ...extra });
+const onFake = (fake, extra = {}) =>
+  run({
+    env: fake.env,
+    git: fake.git,
+    greens: fake.greens,
+    artifacts: fake.artifacts,
+    ...extra,
+  });
+const NO_IDENTITY = "no src-tauri tree or identity blob at this commit";
+const NO_EVIDENCE = "no prior green run for this exact content";
 
-// ------------------------------------------------------------ head and list
+// ---------------------------------------------------------------- identity
 
-test("a re-run attempt runs the matrix with no git or gh call (fake git)", () => {
-  for (const attempt of ["2", "", undefined]) {
-    const fake = fakeRepo();
-    const env = { ...fake.env, ATTEMPT: attempt };
-    if (attempt === undefined) delete env.ATTEMPT;
-    const out = run({ env, git: fake.git });
-    assert.equal(out.run, true);
-    assert.equal(out.reason, "explicit re-run");
-    assert.equal(
-      out.lines[0],
-      `rust-gate: run_attempt=${attempt ?? ""} is a re-run; running the matrix.`,
-    );
-    assert.equal(fake.calls.length, 0);
-    assert.equal(out.gh.calls, 0);
-  }
-});
+const SIGNATURE_KEYS = [
+  [TREE_PATH, "tree"],
+  [WORKFLOW_PATH, "wf"],
+  [GATE_PATH, "gate"],
+  [APT_PATH, "apt"],
+];
 
-test("the event picks the head SHA it signs (fake git)", () => {
-  const fake = fakeRepo();
-  const signature = `rust-gate: signature ${short(fake.head)} tree=${fake.tree} wf=${fake.wf} gate=${fake.gate} canon=${fake.canon}`;
-  for (const env of [
-    {
-      ATTEMPT: "1",
-      EVENT: "pull_request",
-      PR_HEAD: fake.head,
-      PUSH_SHA: SHA_A,
-    },
-    { ATTEMPT: "1", EVENT: "push", PUSH_SHA: fake.head, PR_HEAD: SHA_A },
-  ]) {
-    fake.calls.length = 0;
-    const out = run({ env, git: fake.git });
-    assert.equal(out.lines[0], signature);
-    assert.equal(out.reason, "no prior green run for this exact content");
-    assert.ok(fake.calls.every((args) => !args.join(" ").includes(SHA_A)));
-  }
-});
-
-test("an invalid head SHA runs the matrix before any git call (fake git)", () => {
-  for (const head of ["", "not-hex", "-x", "a".repeat(39), "A".repeat(40)]) {
-    const fake = fakeRepo();
-    const env = { ATTEMPT: "1", EVENT: "pull_request", PR_HEAD: head };
-    const out = run({ env, git: fake.git });
-    assert.equal(out.run, true);
-    assert.equal(out.reason, "invalid head SHA");
-    assert.deepEqual(out.lines, [
-      "rust-gate: decision run=true (invalid head SHA)",
-    ]);
-    assert.equal(fake.calls.length, 0);
-  }
-});
-
-test("a head without a src-tauri tree runs before listing greens (fake git)", () => {
-  const fake = fakeRepo();
-  fake.refs.delete(`${fake.head}:${TREE_PATH}`);
-  const out = onFake(fake, [SHA_A]);
-  assert.equal(out.run, true);
-  assert.equal(
-    out.reason,
-    "no src-tauri tree, workflow blob or gate script at this commit",
+test("identityName: every member and the tree move the name; the order is fixed", () => {
+  const blobs = Object.fromEntries(
+    IDENTITY_MEMBERS.map((path, i) => [path, String(i + 1).repeat(40)]),
   );
+  const tree = "c".repeat(40);
+  const base = identityName({ tree, blobs });
+  const lines = IDENTITY_MEMBERS.map((path) => `${path} ${blobs[path]}\n`);
+  const digest = createHash("sha256")
+    .update(lines.join(""))
+    .digest("hex")
+    .slice(0, DIGEST_LENGTH);
+  assert.equal(base, `${NAME_PREFIX}${digest}-${tree}`);
+  assert.deepEqual(IDENTITY_MEMBERS, [WORKFLOW_PATH, GATE_PATH, APT_PATH]);
+  const names = new Set([base, identityName({ tree: "d".repeat(40), blobs })]);
+  for (const path of IDENTITY_MEMBERS) {
+    names.add(
+      identityName({ tree, blobs: { ...blobs, [path]: "f".repeat(40) } }),
+    );
+  }
+  assert.equal(names.size, IDENTITY_MEMBERS.length + 2);
+  // Two members trading oids is another identity: position is in the digest.
+  const traded = {
+    ...blobs,
+    [WORKFLOW_PATH]: blobs[GATE_PATH],
+    [GATE_PATH]: blobs[WORKFLOW_PATH],
+  };
+  assert.notEqual(identityName({ tree, blobs: traded }), base);
+  const sha256 = identityName({ tree: "e".repeat(64), blobs });
+  assert.equal(base.length, 70);
+  assert.equal(sha256.length, 94);
+  // The characters upload-artifact refuses in a name.
+  const refused = ['"', ":", "<", ">", "|", "*", "?", "\r", "\n", BACKSLASH];
+  refused.push("/");
+  for (const name of [base, sha256]) {
+    assert.match(name, /^[a-z0-9-]+$/);
+    assert.ok(
+      refused.every((c) => !name.includes(c)),
+      name,
+    );
+  }
+});
+
+test("an invalid GITHUB_SHA is no identity and reads nothing, on both events (fake git)", () => {
+  for (const event of ["push", "pull_request"]) {
+    for (const sha of [
+      undefined,
+      "",
+      "not-hex",
+      "-x",
+      "a".repeat(39),
+      "A".repeat(40),
+    ]) {
+      const fake = fakeRepo();
+      fake.evidence(fake.tree);
+      const env = { ...fake.env, EVENT: event, GITHUB_SHA: sha };
+      if (sha === undefined) delete env.GITHUB_SHA;
+      const out = onFake(fake, { env });
+      const where = `${event} ${JSON.stringify(sha)}`;
+      assert.equal(out.run, true, where);
+      assert.equal(out.reason, "invalid checkout SHA", where);
+      assert.equal(out.identity, "", where);
+      assert.deepEqual(out.lines, [
+        "rust-gate: no identity (invalid checkout SHA)",
+        "rust-gate: decision run=true (invalid checkout SHA)",
+      ]);
+      assert.equal(fake.calls.length, 0, where);
+      assert.equal(out.gh.calls, 0, where);
+    }
+  }
+});
+
+test("an unresolvable HEAD or one other than GITHUB_SHA is no identity, on both events (fake git)", () => {
+  for (const event of ["push", "pull_request"]) {
+    const other = nextOid();
+    for (const [head, reasonOf] of [
+      [null, () => "could not resolve HEAD"],
+      ["not-an-oid", () => "could not resolve HEAD"],
+      ["A".repeat(40), () => "could not resolve HEAD"],
+      [
+        other,
+        (fake) => `HEAD ${short(other)} is not GITHUB_SHA ${short(fake.head)}`,
+      ],
+    ]) {
+      const fake = fakeRepo();
+      fake.evidence(fake.tree);
+      if (head === null) fake.refs.delete("HEAD");
+      else fake.refs.set("HEAD", head);
+      const reason = reasonOf(fake);
+      const out = onFake(fake, { env: { ...fake.env, EVENT: event } });
+      assert.equal(out.run, true, reason);
+      assert.equal(out.reason, reason);
+      assert.equal(out.identity, "");
+      assert.deepEqual(out.lines, [
+        `rust-gate: no identity (${reason})`,
+        `rust-gate: decision run=true (${reason})`,
+      ]);
+      assert.deepEqual(fake.calls, [["rev-parse", "HEAD"]]);
+      assert.equal(out.gh.calls, 0);
+    }
+  }
+});
+
+test("an identity needs the src-tauri tree and all three blobs (fake git)", () => {
+  for (const [path, key] of SIGNATURE_KEYS) {
+    const fake = fakeRepo();
+    fake.refs.delete(`${fake.head}:${path}`);
+    fake.evidence(fake.tree);
+    const out = onFake(fake);
+    assert.equal(out.run, true, path);
+    assert.equal(out.reason, NO_IDENTITY, path);
+    assert.equal(out.identity, "", path);
+    assert.deepEqual(
+      out.lines[0].split(" ").filter((word) => word.endsWith("=?")),
+      [`${key}=?`],
+    );
+    assert.equal(out.lines[1], `rust-gate: no identity (${NO_IDENTITY})`);
+    assert.equal(out.gh.calls, 0, path);
+  }
+  // A src-tauri blob, even one a recorded twin shares byte for byte.
+  const fake = fakeRepo();
+  fake.trees.delete(fake.tree);
+  fake.blobs.set(fake.tree, Buffer.from("src-tauri-link"));
+  fake.evidence(fake.tree);
+  const out = onFake(fake);
+  assert.equal(out.run, true);
+  assert.equal(out.reason, NO_IDENTITY);
   assert.match(out.lines[0], / tree=\? wf=/);
   assert.equal(out.gh.calls, 0);
 });
 
-test("an empty green list runs the matrix (fake git)", () => {
-  const out = onFake(fakeRepo(), []);
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: listed 0 green head SHAs (0 malformed dropped)",
-    ),
-  );
-  assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
-  assert.equal(
-    out.lines.at(-1),
-    "rust-gate: decision run=true (no prior green run for this exact content)",
-  );
+test("a non-hex rev-parse answer is no identity (fake git)", () => {
+  for (const answer of ["not-an-oid\n", `${"A".repeat(40)}\n`, "\n"]) {
+    const fake = fakeRepo();
+    fake.evidence(fake.tree);
+    const gitFn = (args) =>
+      args[0] === "rev-parse" && args[1].endsWith(`:${TREE_PATH}`)
+        ? { ok: true, stdout: Buffer.from(answer) }
+        : fake.git(args);
+    const out = onFake(fake, { git: gitFn });
+    assert.equal(out.run, true, JSON.stringify(answer));
+    assert.equal(out.reason, NO_IDENTITY);
+    assert.match(out.lines[0], / tree=\? wf=/);
+    assert.equal(out.gh.calls, 0);
+  }
 });
 
-test("a green list that fails is treated as empty (fake git)", () => {
-  const out = onFake(fakeRepo(), [], {
-    listGreens: () => {
-      throw new Error("HTTP 502\nbad gateway");
-    },
-  });
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: could not list green runs (HTTP 502 bad gateway); treating the list as empty.",
-    ),
-  );
+test("the signature and identity lines name the checkout, on both events (fake git)", () => {
+  for (const event of ["push", "pull_request"]) {
+    const fake = fakeRepo();
+    const out = onFake(fake, { env: { ...fake.env, EVENT: event } });
+    assert.deepEqual(out.lines.slice(0, 2), [
+      `rust-gate: signature ${short(fake.head)} tree=${fake.tree} wf=${fake.wf} gate=${fake.gate} apt=${fake.apt}`,
+      `rust-gate: identity ${fake.name} (checkout ${short(fake.head)})`,
+    ]);
+    assert.equal(out.identity, fake.name);
+    assert.equal(out.reason, NO_EVIDENCE);
+  }
 });
 
-test("malformed green entries are dropped and counted (fake git)", () => {
-  const fake = fakeRepo();
-  const out = onFake(fake, ["", "-x", "A".repeat(40), "a".repeat(39), SHA_B]);
-  assert.equal(out.run, true);
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: listed 1 green head SHAs (4 malformed dropped)",
-    ),
-  );
-  const args = fake.calls.flat().join("\n");
-  assert.ok(!args.includes("-x") && !args.includes("A".repeat(40)));
-  assert.ok(!args.includes(`${"a".repeat(39)}:`));
+test("a re-run reads and returns the identity, then runs with no gh call (fake git)", () => {
+  for (const attempt of ["2", "", undefined]) {
+    const fake = fakeRepo();
+    fake.evidence(fake.tree);
+    const env = { ...fake.env, ATTEMPT: attempt };
+    if (attempt === undefined) delete env.ATTEMPT;
+    const out = onFake(fake, { env });
+    assert.equal(out.run, true);
+    assert.equal(out.reason, "explicit re-run");
+    assert.equal(out.identity, fake.name);
+    assert.deepEqual(out.lines.slice(1), [
+      `rust-gate: identity ${fake.name} (checkout ${short(fake.head)})`,
+      `rust-gate: run_attempt=${attempt ?? ""} is a re-run; running the matrix.`,
+      "rust-gate: decision run=true (explicit re-run)",
+    ]);
+    assert.equal(out.gh.calls, 0);
+  }
 });
 
-test("an unknown or missing event runs the matrix before any lookup (fake git)", () => {
+test("an unknown or missing event runs the matrix with no gh call (fake git)", () => {
   for (const event of [
     undefined,
     "",
@@ -554,796 +541,396 @@ test("an unknown or missing event runs the matrix before any lookup (fake git)",
     "push\n::error::injected",
   ]) {
     const fake = fakeRepo();
-    const env = { ...fake.env, EVENT: event, PR_HEAD: fake.head };
+    fake.evidence(fake.tree);
+    const env = { ...fake.env, EVENT: event };
     if (event === undefined) delete env.EVENT;
-    const out = run({ env, git: fake.git });
+    const out = onFake(fake, { env });
     const reason = `unknown event ${JSON.stringify(event ?? "")}`;
     assert.ok(!reason.includes("\n"));
     assert.equal(out.run, true, String(event));
     assert.equal(out.reason, reason);
-    assert.deepEqual(out.lines, [`rust-gate: decision run=true (${reason})`]);
-    assert.equal(fake.calls.length, 0);
+    assert.equal(out.identity, fake.name);
+    assert.deepEqual(out.lines.slice(2), [
+      `rust-gate: decision run=true (${reason})`,
+    ]);
     assert.equal(out.gh.calls, 0);
   }
 });
 
-test("a non-hex rev-parse answer never compares equal (fake git)", () => {
-  for (const answer of ["not-an-oid\n", `${"A".repeat(40)}\n`, "\n"]) {
-    const fake = fakeRepo();
-    const exact = fake.commit({ tree: fake.tree }).sha;
-    const gitFn = (args) =>
-      args[0] === "rev-parse" && args[1].endsWith(`:${TREE_PATH}`)
-        ? { ok: true, stdout: Buffer.from(answer) }
-        : fake.git(args);
-    const out = onFake(fake, [exact], { git: gitFn });
-    assert.equal(out.run, true, JSON.stringify(answer));
-    assert.equal(
-      out.reason,
-      "no src-tauri tree, workflow blob or gate script at this commit",
-    );
-    assert.match(out.lines[0], / tree=\? wf=/);
-    assert.equal(out.gh.calls, 0);
-  }
-});
+// ------------------------------------------------------------ green run ids
 
-test("pass 1 needs the same workflow and gate blobs as well as the tree (fake git)", () => {
-  for (const opts of [{ wf: nextOid() }, { gate: nextOid() }]) {
-    const fake = fakeRepo();
-    const sameTree = fake.commit({ tree: fake.tree, ...opts }).sha;
-    const out = onFake(fake, [sameTree]);
-    assert.equal(out.run, true, Object.keys(opts)[0]);
-    assert.equal(out.reason, "no prior green run for this exact content");
-    assert.ok(!out.text.includes("pass 1"), out.text);
-    assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
-  }
-});
-
-test("pass 1 needs the same canonicalizer blob too (fake git)", () => {
+test("no green run reads no artifact and runs the matrix (fake git)", () => {
   const fake = fakeRepo();
-  const otherCanon = fake.commit({ tree: fake.tree, canon: nextOid() }).sha;
-  const out = onFake(fake, [otherCanon]);
+  fake.evidence(fake.tree, { green: false });
+  const out = onFake(fake);
   assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(!out.text.includes("pass 1"), out.text);
-  assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
+  assert.equal(out.reason, NO_EVIDENCE);
+  assert.deepEqual(out.lines.slice(2), [
+    "rust-gate: listed 0 green runs (0 malformed dropped)",
+    "rust-gate: no green runs; no evidence to read.",
+    `rust-gate: decision run=true (${NO_EVIDENCE})`,
+  ]);
+  assert.equal(out.gh.calls, 1);
+  assert.deepEqual(out.gh.names, []);
 });
 
-test("a head without the canonicalizer never skips, even vs a canonicalizer-less twin (fake git)", () => {
-  const fake = fakeRepo();
-  fake.refs.delete(`${fake.head}:${CANONICALIZER_PATH}`);
-  const twin = fake.commit({ tree: fake.tree }).sha;
-  fake.refs.delete(`${twin}:${CANONICALIZER_PATH}`);
-  const out = onFake(fake, [twin]);
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.match(out.lines[0], / canon=\?$/);
-  assert.ok(
-    out.lines.includes("rust-gate: pass 1 skipped: no canonicalizer blob."),
-  );
-  assert.ok(
-    out.lines.includes("rust-gate: pass 2 skipped: no canonicalizer blob."),
-  );
-  assert.ok(!out.text.includes("pass 1: identical"), out.text);
-});
-
-test("the running gate and workflow must be the head's, on both events (fake git)", () => {
-  // On pull_request the checked-out HEAD is the merge commit, never PR_HEAD;
-  // PUSH_SHA names that merge so no lookup can reach it by SHA.
-  const envs = {
-    push: (fake) => fake.env,
-    pull_request: (fake) => ({
-      ATTEMPT: "1",
-      EVENT: "pull_request",
-      PR_HEAD: fake.head,
-      PUSH_SHA: nextOid(),
-    }),
-  };
-  for (const [event, envOf] of Object.entries(envs)) {
-    // A merge that left both alone: the twin green is skippable.
-    const same = fakeRepo();
-    const exact = same.commit({ tree: same.tree }).sha;
-    const skip = run({ env: envOf(same), git: same.git, greens: [exact] });
-    assert.equal(skip.run, false, `${event}: ${skip.text}`);
-
-    for (const [path, running, reason] of [
-      [GATE_PATH, nextOid(), "the gate that runs differs from the head's gate"],
-      [GATE_PATH, null, "could not resolve the running gate at HEAD"],
-      [
-        WORKFLOW_PATH,
-        nextOid(),
-        "the workflow that runs differs from the head's workflow",
-      ],
-      [WORKFLOW_PATH, null, "could not resolve the running workflow at HEAD"],
-    ]) {
-      const fake = fakeRepo();
-      const twin = fake.commit({ tree: fake.tree }).sha;
-      if (running) fake.refs.set(`HEAD:${path}`, running);
-      else fake.refs.delete(`HEAD:${path}`);
-      const env = envOf(fake);
-      const out = run({ env, git: fake.git, greens: [twin] });
-      const where = `${event}: ${reason}`;
-      assert.equal(out.run, true, where);
-      assert.equal(out.reason, reason, where);
-      assert.equal(out.gh.calls, 0, where);
-      assert.equal(
-        out.lines.at(-1),
-        `rust-gate: decision run=true (${reason})`,
-      );
-      assert.ok(
-        fake.calls.some(
-          (args) => args[0] === "rev-parse" && args[1] === `HEAD:${path}`,
-        ),
-        where,
-      );
-      assert.ok(
-        fake.calls.every((args) => !args.join(" ").includes(env.PUSH_SHA)) ||
-          event === "push",
-        where,
-      );
-    }
-  }
-});
-
-test("diff-tree never lets submodule config hide a gitlink (fake git)", () => {
-  const fake = fakeRepo();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  onFake(fake, [past]);
-  const diffs = fake.calls.filter((args) => args[0] === "diff-tree");
-  assert.equal(diffs.length, 1);
-  assert.ok(diffs[0].includes("--ignore-submodules=none"), diffs[0].join(" "));
-  assert.ok(diffs[0].indexOf("--ignore-submodules=none") < diffs[0].length - 2);
-});
-
-test("a head without the gate script runs before listing greens (fake git)", () => {
-  const fake = fakeRepo();
-  fake.refs.delete(`${fake.head}:${GATE_PATH}`);
-  const exact = fake.commit({ tree: fake.tree }).sha;
-  const out = onFake(fake, [exact]);
-  assert.equal(out.run, true);
-  assert.equal(
-    out.reason,
-    "no src-tauri tree, workflow blob or gate script at this commit",
-  );
-  assert.match(out.lines[0], / gate=\? canon=/);
-  assert.equal(out.gh.calls, 0);
-});
-
-test("duplicate greens are compared once, first occurrence kept (fake git)", () => {
-  const fake = fakeRepo();
-  const code = fake.green({ "src/lib.rs": [CODE, COMMENTED] });
-  const out = onFake(fake, [code, code, SHA_A, code]);
-  assert.equal(out.run, true);
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: listed 2 green head SHAs (0 malformed dropped)",
-    ),
-  );
-  assert.ok(
-    out.lines.includes("rust-gate: dropped 2 duplicate green head SHAs."),
-  );
-  assert.ok(out.lines.includes("rust-gate: pass 2: 1 candidates compared."));
-  const treeReads = fake.calls.filter(
-    (args) => args[0] === "rev-parse" && args[1] === `${code}:${TREE_PATH}`,
-  );
-  // Once in pass 1, once in pass 2.
-  assert.equal(treeReads.length, 2);
-  assert.equal(fake.calls.filter((args) => args[0] === "diff-tree").length, 1);
-  const order = fake.calls
-    .filter((args) => args[0] === "rev-parse" && args[1].endsWith(TREE_PATH))
-    .map((args) => args[1].slice(0, 40));
-  assert.deepEqual(order.slice(1, 3), [code, SHA_A]);
-});
-
-test("pass 1 scans all 100 greens, the match last (fake git)", () => {
-  const fake = fakeRepo();
-  const greens = Array.from({ length: 99 }, () => nextOid());
-  const exact = fake.commit({ tree: fake.tree }).sha;
-  const out = onFake(fake, [...greens, exact]);
-  assert.equal(out.run, false);
-  assert.equal(
-    out.reason,
-    `pass 1: identical content passed in ${short(exact)}`,
-  );
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: listed 100 green head SHAs (0 malformed dropped)",
-    ),
-  );
-  assert.ok(
-    out.lines.includes(
-      `rust-gate: pass 1: identical content passed in ${short(exact)}.`,
-    ),
-  );
-});
-
-test("100 greens with no match run the matrix (fake git)", () => {
-  const fake = fakeRepo();
-  const out = onFake(
-    fake,
-    Array.from({ length: 100 }, () => fake.commit().sha),
-  );
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
-});
-
-// ------------------------------------------------------------ pass 2 limits
-
-test(`${MAX_CHANGED} comment-only .rs files skip, ${MAX_CHANGED + 1} reject (fake git)`, () => {
-  const files = (n) =>
-    Object.fromEntries(
-      Array.from({ length: n }, (_, k) => [`src/f${k}.rs`, [SAME, COMMENTED]]),
-    );
-  const fits = fakeRepo();
-  const ok = onFake(fits, [fits.green(files(MAX_CHANGED))]);
-  assert.equal(ok.run, false);
-  assert.match(
-    ok.reason,
-    /^pass 2: comment\/format-only delta vs [0-9a-f]{8} \(60 \.rs files\)$/,
-  );
-
-  const over = fakeRepo();
-  const past = over.green(files(MAX_CHANGED + 1));
-  const out = onFake(over, [past]);
-  assert.equal(out.run, true);
-  assert.ok(
-    out.lines.includes(
-      `rust-gate: pass 2: ${short(past)} rejected - 61 changed files (> 60).`,
-    ),
-  );
-});
-
-test(`at most ${MAX_COMPARED} candidates reach comparison (fake git)`, () => {
-  const fake = fakeRepo();
-  const canonicalizer = stubCanonicalizer();
-  const greens = Array.from({ length: 16 }, () =>
-    fake.green({ "src/lib.rs": [CODE, COMMENTED] }),
-  );
-  greens.push(fake.green({ "src/lib.rs": [SAME, COMMENTED] }));
-  const out = onFake(fake, greens, { canonicalizer });
-  assert.equal(out.run, true);
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: pass 2: stopping after 15 candidates reached per-file comparison.",
-    ),
-  );
-  assert.ok(out.lines.includes("rust-gate: pass 2: 15 candidates compared."));
-  // One current-side read (cached by blob OID) plus one past side per candidate.
-  assert.equal(canonicalizer.inputs.length, 1 + MAX_COMPARED);
-});
-
-test("the current side is canonicalized once across candidates (fake git)", () => {
-  const fake = fakeRepo();
-  const canonicalizer = stubCanonicalizer();
-  const greens = [
-    fake.green({ "src/lib.rs": [CODE, COMMENTED] }),
-    fake.green({ "src/lib.rs": [CODE, COMMENTED] }),
-  ];
-  const out = onFake(fake, greens, { canonicalizer });
-  assert.equal(out.run, true);
-  assert.ok(out.lines.includes("rust-gate: pass 2: 2 candidates compared."));
-  assert.equal(
-    canonicalizer.inputs.filter((text) => text === COMMENTED).length,
-    1,
-  );
-  assert.equal(canonicalizer.inputs.filter((text) => text === CODE).length, 2);
-});
-
-// --------------------------------------------- pass 2 unreadable inputs (fake)
-
-test("a failed diff-tree rejects the candidate (fake git)", () => {
-  const fake = fakeRepo();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const out = onFake(fake, [past], {
-    git: (args) => (args[0] === "diff-tree" ? failing : fake.git(args)),
-  });
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(
-    out.lines.includes(
-      `rust-gate: pass 2: ${short(past)} rejected - diff-tree failed.`,
-    ),
-  );
-});
-
-test("an empty diff-tree output rejects the candidate (fake git)", () => {
-  const fake = fakeRepo();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const out = onFake(fake, [past], {
-    git: (args) =>
-      args[0] === "diff-tree"
-        ? { ok: true, stdout: Buffer.alloc(0) }
-        : fake.git(args),
-  });
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(
-    out.lines.includes(
-      `rust-gate: pass 2: ${short(past)} rejected - empty diff-tree output.`,
-    ),
-  );
-});
-
-test("an unreadable diff-tree record rejects the candidate (fake git)", () => {
-  const [o1, o2] = [nextOid(), nextOid()];
-  const head = raw(o1, o2);
-  for (const stream of [
-    `${head}\0src/lib.rs\0${head}\0`,
-    `${head}\0src/lib.rs`,
-    `${head}\0\0`,
-    // Malformed headers: the --name-status form, a missing colon, a short or
-    // long field list, a non-hex or short OID, a bad mode, a bad status.
-    "M\0src/lib.rs\0",
-    `${head.slice(1)}\0src/lib.rs\0`,
-    `:100644 100644 ${o1} ${o2}\0src/lib.rs\0`,
-    `${head} X\0src/lib.rs\0`,
-    `${head.replace(o1, "g".repeat(40))}\0src/lib.rs\0`,
-    `${head.replace(o1, o1.toUpperCase().replace(/0/g, "A"))}\0src/lib.rs\0`,
-    `${head.replace(o1, o1.slice(1))}\0src/lib.rs\0`,
-    `${raw(o1, o2, { oldMode: "10064" })}\0src/lib.rs\0`,
-    `${raw(o1, o2, { status: "m" })}\0src/lib.rs\0`,
-    `${head.replace(" M", "  M")}\0src/lib.rs\0`,
+test("a green list that fails or is no array is treated as empty (fake git)", () => {
+  for (const [listGreens, why] of [
+    [
+      () => {
+        throw new Error("HTTP 502\nbad gateway");
+      },
+      "HTTP 502 bad gateway",
+    ],
+    [() => "1\n2", "the list is not an array"],
   ]) {
     const fake = fakeRepo();
-    const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-    const out = onFake(fake, [past], {
-      git: (args) =>
-        args[0] === "diff-tree"
-          ? { ok: true, stdout: Buffer.from(stream) }
-          : fake.git(args),
-    });
-    assert.equal(out.run, true, JSON.stringify(stream));
-    assert.ok(
-      out.lines.includes(
-        `rust-gate: pass 2: ${short(past)} rejected - unreadable diff-tree output.`,
-      ),
-    );
-  }
-});
-
-test("symlink, mode-change and typechange .rs records reject (fake git)", () => {
-  for (const [opts, why] of [
-    [{ oldMode: "120000" }, "non-regular file (120000 src/lib.rs)"],
-    [{ oldMode: "160000" }, "non-regular file (160000 src/lib.rs)"],
-    [
-      { oldMode: "100644", newMode: "100755" },
-      "mode change (100644 -> 100755 src/lib.rs)",
-    ],
-    [
-      { oldMode: "120000", newMode: "100644", status: "T" },
-      "non-.rs or non-modify change (T src/lib.rs)",
-    ],
-  ]) {
-    const fake = fakeRepo();
-    const canonicalizer = stubCanonicalizer();
-    const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-    const stream = `${raw(fake.blob(SAME), fake.blob(COMMENTED), opts)}\0src/lib.rs\0`;
-    const out = onFake(fake, [past], {
-      canonicalizer,
-      git: (args) =>
-        args[0] === "diff-tree"
-          ? { ok: true, stdout: Buffer.from(stream) }
-          : fake.git(args),
-    });
+    fake.evidence(fake.tree);
+    const out = onFake(fake, { listGreens });
     assert.equal(out.run, true, why);
+    assert.equal(out.reason, NO_EVIDENCE);
     assert.ok(
       out.lines.includes(
-        `rust-gate: pass 2: ${short(past)} rejected - ${why}.`,
-      ),
-      why,
-    );
-    assert.deepEqual(canonicalizer.inputs, [], why);
-  }
-});
-
-test("blobs are read by the diff's OIDs, never by path (fake git)", () => {
-  const fake = fakeRepo();
-  const canonicalizer = stubCanonicalizer();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const out = onFake(fake, [past], { canonicalizer });
-  assert.equal(out.run, false);
-  const lookups = fake.calls
-    .filter((args) => args[0] === "rev-parse")
-    .map((args) => args[1].slice(args[1].indexOf(":") + 1));
-  assert.ok(
-    lookups.every((path) =>
-      [TREE_PATH, WORKFLOW_PATH, GATE_PATH, CANONICALIZER_PATH].includes(path),
-    ),
-    lookups.join(" "),
-  );
-  assert.deepEqual(canonicalizer.inputs.sort(), [COMMENTED, SAME].sort());
-});
-
-test("a current-side canonicalizer failure aborts pass 2 (fake git)", () => {
-  const fake = fakeRepo();
-  // Fails once, then would succeed: a retry must not be taken as evidence.
-  let failures = 1;
-  const canonicalizer = stubCanonicalizer({
-    nullWhen: (text) => text === COMMENTED && failures-- > 0,
-  });
-  const first = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const second = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const out = onFake(fake, [first, second], { canonicalizer });
-  const reason = "canonicalizer anomaly on current side (src/lib.rs)";
-  assert.equal(out.run, true, out.text);
-  assert.equal(out.reason, `pass 2 aborted: ${reason}`);
-  assert.ok(out.lines.includes(`rust-gate: pass 2 aborted: ${reason}.`));
-  // The second candidate is never reached.
-  assert.ok(out.lines.includes("rust-gate: pass 2: 1 candidates compared."));
-  assert.equal(
-    canonicalizer.inputs.filter((text) => text === COMMENTED).length,
-    1,
-  );
-});
-
-test("a past-side canonicalizer failure rejects only its candidate (fake git)", () => {
-  const fake = fakeRepo();
-  const BROKEN = "// broken\nfn a() {}\n";
-  const canonicalizer = stubCanonicalizer({
-    nullWhen: (text) => text === BROKEN,
-  });
-  const first = fake.green({ "src/lib.rs": [BROKEN, COMMENTED] });
-  const second = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const out = onFake(fake, [first, second], { canonicalizer });
-  assert.equal(out.run, false, out.text);
-  assert.equal(
-    out.reason,
-    `pass 2: comment/format-only delta vs ${short(second)} (1 .rs files)`,
-  );
-  assert.ok(
-    out.lines.includes(
-      `rust-gate: pass 2: ${short(first)} rejected - a changed .rs file is not equivalent.`,
-    ),
-  );
-  assert.ok(
-    out.lines.includes(
-      "rust-gate:   src/lib.rs: canonicalizer anomaly on past side",
-    ),
-  );
-});
-
-test("a pass-2 candidate needs the same workflow and gate blobs (fake git)", () => {
-  for (const opts of [{ wf: nextOid() }, { gate: nextOid() }]) {
-    const fake = fakeRepo();
-    const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] }, opts);
-    const out = onFake(fake, [past]);
-    assert.equal(out.run, true, Object.keys(opts)[0]);
-    assert.equal(out.reason, "no prior green run for this exact content");
-    assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
-    assert.ok(fake.calls.every((args) => args[0] !== "diff-tree"));
-  }
-});
-
-test("src-tauri must be a tree on the head and on each candidate (fake git)", () => {
-  // Head: a src-tauri blob that a green shares byte for byte.
-  const head = fakeRepo();
-  head.trees.delete(head.tree);
-  head.blobs.set(head.tree, Buffer.from("src-tauri-link"));
-  const twin = head.commit({ tree: head.tree, asBlob: true }).sha;
-  const out = onFake(head, [twin]);
-  assert.equal(out.run, true);
-  assert.equal(
-    out.reason,
-    "no src-tauri tree, workflow blob or gate script at this commit",
-  );
-  assert.match(out.lines[0], / tree=\? wf=/);
-  assert.equal(out.gh.calls, 0);
-
-  // Candidate: a src-tauri blob whose diff would read as comment-only.
-  const fake = fakeRepo();
-  const { sha: past, tree: pastTree } = fake.commit({ asBlob: true });
-  const stream = `${raw(fake.blob(SAME), fake.blob(COMMENTED))}\0src/lib.rs\0`;
-  fake.diffs.set(`${pastTree} ${fake.tree}`, Buffer.from(stream));
-  const cand = onFake(fake, [past]);
-  assert.equal(cand.run, true);
-  assert.equal(cand.reason, "no prior green run for this exact content");
-  assert.ok(cand.lines.includes("rust-gate: pass 2: 0 candidates compared."));
-});
-
-test("a canonicalizer that cannot be extracted skips pass 2 (fake git)", () => {
-  const fake = fakeRepo();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  for (const gitFn of [
-    (args) =>
-      args[0] === "cat-file" && args[1] === "blob" ? failing : fake.git(args),
-    (args) =>
-      args[0] === "cat-file" && args[2] === fake.canon
-        ? { ok: true, stdout: Buffer.alloc(0) }
-        : fake.git(args),
-  ]) {
-    const out = onFake(fake, [past], { git: gitFn });
-    assert.equal(out.run, true);
-    assert.ok(
-      out.lines.includes(
-        "rust-gate: pass 2 skipped: could not extract canonicalizer.",
-      ),
-    );
-  }
-});
-
-test("a canonicalizer that fails the known-input probe skips pass 2 (fake git)", () => {
-  // Exit 0 with empty output for everything would equate a real code change.
-  const silent = { selfTest: () => true, canonicalize: () => Buffer.alloc(0) };
-  const refusing = { selfTest: () => true, canonicalize: () => null };
-  for (const canonicalizer of [silent, refusing]) {
-    const fake = fakeRepo();
-    const past = fake.green({ "src/lib.rs": [CODE, COMMENTED] });
-    const out = onFake(fake, [past], { canonicalizer });
-    assert.equal(out.run, true, out.text);
-    assert.equal(out.reason, "no prior green run for this exact content");
-    assert.ok(
-      out.lines.includes(
-        "rust-gate: pass 2 skipped: canonicalizer anomaly on a known input.",
+        `rust-gate: could not list green runs (${why}); treating the list as empty.`,
       ),
       out.text,
     );
-    assert.ok(fake.calls.every((args) => args[0] !== "diff-tree"));
+    assert.ok(
+      out.lines.includes("rust-gate: no green runs; no evidence to read."),
+    );
+    assert.equal(out.gh.calls, 0);
   }
-  // A working canonicalizer is probed once per pass.
-  const fake = fakeRepo();
-  const stub = stubCanonicalizer();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  assert.equal(onFake(fake, [past], { canonicalizer: stub }).run, false);
-  assert.equal(stub.probes.length, 1);
 });
 
-test("a failed canonicalizer self-test skips pass 2 (fake git)", () => {
+test("malformed and duplicate green run ids are dropped and counted (fake git)", () => {
   const fake = fakeRepo();
-  const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-  const out = onFake(fake, [past], {
-    canonicalizer: stubCanonicalizer({ selfTest: false }),
-  });
-  assert.equal(out.run, true);
+  const runId = fake.evidence(fake.tree);
+  const malformed = ["0", "-1", "1e3", "abc", "9007199254740993", "", "01", 7];
+  const out = onFake(fake, { greens: [...malformed, runId, runId] });
+  assert.equal(out.run, false, out.text);
+  assert.equal(out.reason, `identical content passed in run ${runId}`);
   assert.ok(
     out.lines.includes(
-      "rust-gate: pass 2 skipped: canonicalizer self-test failed.",
+      `rust-gate: listed 1 green runs (${malformed.length} malformed dropped)`,
+    ),
+    out.text,
+  );
+  assert.ok(
+    out.lines.includes("rust-gate: dropped 1 duplicate green run ids."),
+  );
+  // Only malformed ids: nothing listed, so no artifact is read.
+  const none = fakeRepo();
+  none.evidence(none.tree);
+  const empty = onFake(none, { greens: malformed });
+  assert.equal(empty.run, true);
+  assert.ok(
+    empty.lines.includes("rust-gate: no green runs; no evidence to read."),
+  );
+  assert.deepEqual(empty.gh.names, []);
+});
+
+// ------------------------------------------------------- the exact lookup
+
+test("an exact green unexpired match skips (fake git)", () => {
+  const fake = fakeRepo();
+  const runId = fake.evidence(fake.tree);
+  const out = onFake(fake);
+  assert.equal(out.run, false);
+  assert.equal(out.reason, `identical content passed in run ${runId}`);
+  assert.equal(out.identity, fake.name);
+  assert.deepEqual(out.lines.slice(2), [
+    "rust-gate: listed 1 green runs (0 malformed dropped)",
+    `rust-gate: 1 artifacts named ${fake.name}, 1 from green runs.`,
+    `rust-gate: decision run=false (identical content passed in run ${runId})`,
+  ]);
+  assert.deepEqual(out.gh.names, [fake.name]);
+  assert.equal(out.gh.calls, 2);
+});
+
+test("a match from a green run listed 100th skips (fake git)", () => {
+  const fake = fakeRepo();
+  const runId = fake.evidence(fake.tree);
+  const greens = Array.from({ length: 99 }, (_, i) => String(5000 + i));
+  const out = onFake(fake, { greens: [...greens, runId] });
+  assert.equal(out.run, false);
+  assert.equal(out.reason, `identical content passed in run ${runId}`);
+  assert.ok(
+    out.lines.includes(
+      "rust-gate: listed 100 green runs (0 malformed dropped)",
     ),
   );
 });
 
-test("a canonicalizer anomaly on either side is not equivalent (fake git)", () => {
-  for (const [content, side, line] of [
-    [
-      COMMENTED,
-      "current",
-      "rust-gate: pass 2 aborted: canonicalizer anomaly on current side (src/lib.rs).",
-    ],
-    [
-      SAME,
-      "past",
-      "rust-gate:   src/lib.rs: canonicalizer anomaly on past side",
-    ],
+test("a non-green run or an expired artifact does not skip (fake git)", () => {
+  const fake = fakeRepo();
+  fake.evidence(fake.tree, { green: false });
+  fake.evidence(fake.tree, { expired: true });
+  const out = onFake(fake);
+  assert.equal(out.run, true);
+  assert.equal(out.reason, NO_EVIDENCE);
+  assert.deepEqual(out.lines.slice(-2), [
+    `rust-gate: 2 artifacts named ${fake.name}, 0 from green runs.`,
+    `rust-gate: decision run=true (${NO_EVIDENCE})`,
+  ]);
+});
+
+test("the lookup's answer is re-checked: only the exact name counts (fake git)", () => {
+  const fake = fakeRepo();
+  const runId = fake.evidence(fake.tree);
+  const otherTree = identityName({ tree: nextOid(), blobs: fake.blobsOf() });
+  const otherDigest = identityName({
+    tree: fake.tree,
+    blobs: fake.blobsOf({ gate: nextOid() }),
+  });
+  const names = [
+    fake.name.toUpperCase(),
+    `${fake.name}x`,
+    ` ${fake.name}`,
+    otherTree,
+    otherDigest,
+  ];
+  const out = onFake(fake, {
+    findArtifacts: () =>
+      artifactPage(names.map((name) => ({ name, expired: false, runId }))),
+  });
+  assert.equal(out.run, true, out.text);
+  assert.equal(out.reason, NO_EVIDENCE);
+  assert.ok(
+    out.lines.includes(
+      `rust-gate: 0 artifacts named ${fake.name}, 0 from green runs.`,
+    ),
+    out.text,
+  );
+});
+
+test("another member blob or another tree is another identity (fake git)", () => {
+  for (const over of [
+    { wf: nextOid() },
+    { gate: nextOid() },
+    { apt: nextOid() },
+    { tree: nextOid() },
   ]) {
     const fake = fakeRepo();
-    const past = fake.green({ "src/lib.rs": [SAME, COMMENTED] });
-    const out = onFake(fake, [past], {
-      canonicalizer: stubCanonicalizer({
-        nullWhen: (text) => text === content,
-      }),
-    });
-    assert.equal(out.run, true, side);
-    assert.ok(out.lines.includes(line), out.text);
+    const { tree = fake.tree, ...blobs } = over;
+    fake.evidence(tree, blobs);
+    const out = onFake(fake);
+    const where = Object.keys(over)[0];
+    assert.equal(out.run, true, where);
+    assert.equal(out.reason, NO_EVIDENCE, where);
+    assert.ok(
+      out.lines.includes(
+        `rust-gate: 0 artifacts named ${fake.name}, 0 from green runs.`,
+      ),
+      where,
+    );
   }
 });
 
-test("a spawn error fails the Python canonicalizer seam", () => {
-  const lines = [];
-  const python = pythonCanonicalizer("gd-rust-gate-no-such-python", (line) =>
-    lines.push(line),
+test("a failed or malformed lookup runs the matrix (fake git)", () => {
+  for (const [findArtifacts, why] of [
+    [
+      () => {
+        throw new Error("HTTP 500\noops");
+      },
+      "HTTP 500 oops",
+    ],
+    [() => ({ items: "x" }), "no artifact list"],
+    [() => ({ items: null }), "no artifact list"],
+    [() => ({}), "no artifact list"],
+    [() => [], "no artifact list"],
+    [() => null, "no artifact list"],
+    [() => "x", "no artifact list"],
+  ]) {
+    const fake = fakeRepo();
+    fake.evidence(fake.tree);
+    const out = onFake(fake, { findArtifacts });
+    assert.equal(out.run, true, why);
+    assert.equal(out.reason, "artifact lookup failed", why);
+    assert.equal(out.identity, fake.name, why);
+    assert.deepEqual(out.lines.slice(-2), [
+      `rust-gate: could not look up the artifact (${why}); running the matrix.`,
+      "rust-gate: decision run=true (artifact lookup failed)",
+    ]);
+  }
+});
+
+// ------------------------------------------------------------------ gh seams
+
+test("ghGreenRunIds asks gh for this workflow's successful run ids", () => {
+  const env = { GH_TOKEN: "t", GH_REPO: "o/r" };
+  const seen = [];
+  const spawn = (cmd, args, options) => {
+    seen.push({ cmd, args, options });
+    return { status: 0, stdout: "123\n\n  456  \n", stderr: "" };
+  };
+  assert.deepEqual(ghGreenRunIds(env, spawn), ["123", "456"]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].cmd, "gh");
+  assert.deepEqual(seen[0].args, [
+    "run",
+    "list",
+    "--workflow",
+    "rust-tests.yml",
+    "--status",
+    "success",
+    "--limit",
+    "100",
+    "--json",
+    "databaseId",
+    "--jq",
+    ".[].databaseId",
+  ]);
+  // gh alone keeps the token, untouched.
+  assert.equal(seen[0].options.env, env);
+  assert.equal(seen[0].options.timeout, 120_000);
+
+  const failed = () => ({ status: 1, stdout: "", stderr: "HTTP 502\nbad" });
+  assert.throws(
+    () => ghGreenRunIds(env, failed),
+    /^Error: gh exited 1: HTTP 502 bad$/,
   );
-  assert.equal(python.selfTest(join(root, "missing.py")), false);
-  assert.ok(lines.length > 0);
-  assert.equal(
-    python.canonicalize(join(root, "missing.py"), Buffer.from("x")),
+});
+
+test("ghArtifacts asks gh api for one page and keeps only well-formed items", () => {
+  const env = { GH_TOKEN: "t", GH_REPO: "o/r" };
+  const good = { name: "n", expired: false, workflow_run: { id: 42 } };
+  const malformed = [
+    { expired: false, workflow_run: { id: 1 } },
+    { name: 5, expired: false, workflow_run: { id: 1 } },
+    { name: "n", expired: "false", workflow_run: { id: 1 } },
+    { name: "n", workflow_run: { id: 1 } },
+    { name: "n", expired: false, workflow_run: null },
+    { name: "n", expired: false },
+    { name: "n", expired: false, workflow_run: { id: 0 } },
+    { name: "n", expired: false, workflow_run: { id: -3 } },
+    { name: "n", expired: false, workflow_run: { id: 1.5 } },
+    { name: "n", expired: false, workflow_run: { id: 2 ** 53 } },
+    { name: "n", expired: false, workflow_run: { id: "7" } },
     null,
+  ];
+  const seen = [];
+  const answering = (body) => (cmd, args, options) => {
+    seen.push({ cmd, args, options });
+    return { status: 0, stdout: body, stderr: "" };
+  };
+  const body = JSON.stringify({
+    total_count: 13,
+    artifacts: [good, ...malformed],
+  });
+  assert.deepEqual(ghArtifacts("name=n&per_page=100", env, answering(body)), {
+    items: [{ name: "n", expired: false, runId: "42" }],
+  });
+  assert.equal(seen[0].cmd, "gh");
+  assert.deepEqual(seen[0].args, [
+    "api",
+    "repos/{owner}/{repo}/actions/artifacts?name=n&per_page=100",
+  ]);
+  assert.equal(seen[0].options.env, env);
+  assert.equal(seen[0].options.timeout, 30_000);
+
+  for (const [stdout, message] of [
+    ["not json", /^Error: unparseable artifacts answer$/],
+    ["null", /^Error: the artifacts answer holds no list$/],
+    ["{}", /^Error: the artifacts answer holds no list$/],
+    ['{"artifacts":{"0":{}}}', /^Error: the artifacts answer holds no list$/],
+  ]) {
+    assert.throws(() => ghArtifacts("q", env, answering(stdout)), message);
+  }
+  const failed = () => ({ status: 1, stdout: "", stderr: "HTTP 502\nbad" });
+  assert.throws(
+    () => ghArtifacts("q", env, failed),
+    /^Error: gh exited 1: HTTP 502 bad$/,
+  );
+  const timedOut = new Error("spawnSync gh ETIMEDOUT");
+  assert.throws(
+    () => ghArtifacts("q", env, () => ({ error: timedOut })),
+    (error) => error === timedOut,
   );
 });
 
 // ---------------------------------------------------------------- real git
 
-test("pass 1 matches identical content on real git", () => {
-  const out = onRepo(sha.base, [SHA_A, sha.base]);
-  assert.equal(out.run, false);
-  assert.equal(
-    out.reason,
-    `pass 1: identical content passed in ${short(sha.base)}`,
-  );
-  assert.ok(
-    out.lines.includes(
-      "rust-gate: listed 2 green head SHAs (0 malformed dropped)",
-    ),
-  );
-});
-
-test("pass 1 outranks an earlier pass-2-equivalent green (real git)", () => {
-  const out = onRepo(sha.comment, [sha.base, sha.comment2]);
-  assert.equal(out.run, false);
-  assert.equal(
-    out.reason,
-    `pass 1: identical content passed in ${short(sha.comment2)}`,
-  );
-  assert.ok(!out.text.includes("pass 2"));
-});
-
-test("a comment-only .rs change skips by pass 2 (real git)", () => {
-  const out = onRepo(sha.comment, [sha.base]);
-  assert.equal(out.run, false);
-  assert.equal(
-    out.reason,
-    `pass 2: comment/format-only delta vs ${short(sha.base)} (1 .rs files)`,
-  );
-  assert.ok(
-    out.lines.includes("rust-gate: pass 2: canonicalizer self-test passed."),
-  );
-  assert.ok(out.lines.includes("rust-gate:   src/lib.rs: equivalent"));
-  assert.ok(out.lines.includes("rust-gate: pass 2: 1 candidates compared."));
-});
-
-test("a real code change runs the matrix (real git)", () => {
-  const out = onRepo(sha.code, [sha.base]);
-  assert.equal(out.run, true);
-  assert.equal(out.reason, "no prior green run for this exact content");
-  assert.ok(
-    out.lines.includes(
-      "rust-gate:   src/lib.rs: canonical mismatch (real code change)",
-    ),
-  );
-});
-
-test("quoted, spaced and glob .rs paths reach git intact (real git)", () => {
-  const out = onRepo(sha.paths, [sha.base]);
-  assert.equal(out.run, false);
-  assert.equal(
-    out.reason,
-    `pass 2: comment/format-only delta vs ${short(sha.base)} (${ODD_PATHS.length} .rs files)`,
-  );
-  for (const path of ODD_PATHS) {
-    assert.ok(out.lines.includes(`rust-gate:   ${path}: equivalent`), path);
-  }
-});
-
-test("non-.rs, added, deleted and renamed changes reject (real git)", () => {
-  const out = onRepo(sha.base, [
-    sha.cargo,
-    sha.added,
-    sha.deleted,
-    sha.renamed,
-  ]);
-  assert.equal(out.run, true);
-  for (const [past, change] of [
-    [sha.cargo, "M Cargo.toml"],
-    [sha.added, "D src/new.rs"],
-    [sha.deleted, "A src/del.rs"],
-    [sha.renamed, "A src/old.rs"],
-  ]) {
-    assert.ok(
-      out.lines.includes(
-        `rust-gate: pass 2: ${short(past)} rejected - non-.rs or non-modify change (${change}).`,
-      ),
-      change,
+test("a real checkout's identity signs its tree and the three blobs (real git)", () => {
+  const identity = readIdentity(atHead(realGit, sha.comment), sha.comment);
+  assert.equal(identity.tree, treeOf(sha.comment));
+  for (const path of IDENTITY_MEMBERS) {
+    assert.equal(
+      identity.blobs[path],
+      git(repo.dir, ["rev-parse", `${sha.comment}:${path}`]).trim(),
+      path,
     );
   }
-  assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
+  assert.equal(identity.name, identityName(identity));
+  assert.equal(identity.sha, sha.comment);
+  // The fixture's checkout is the base branch, which is not this commit.
+  assert.deepEqual(readIdentity(realGit, sha.comment), {
+    missing: `HEAD ${short(sha.base)} is not GITHUB_SHA ${short(sha.comment)}`,
+  });
 });
 
-test("a symlinked .rs and a mode-only change reject (real git)", () => {
-  for (const [head, why] of [
-    [sha.symlink, "non-regular file (120000 src/link.rs)"],
-    [sha.exec, "mode change (100644 -> 100755 src/lib.rs)"],
-  ]) {
-    const canonicalizer = stubCanonicalizer();
-    const out = onRepo(head, [sha.base], { canonicalizer });
-    assert.equal(out.run, true, why);
-    assert.equal(out.reason, "no prior green run for this exact content");
+test("identical content skips on real git", () => {
+  const out = onRepo(sha.base, [sha.base]);
+  assert.equal(out.run, false);
+  assert.equal(out.reason, `identical content passed in run ${runIdOf(0)}`);
+  assert.equal(out.identity, evidenceOf([sha.base]).artifacts[0].name);
+  assert.ok(
+    out.lines.includes("rust-gate: listed 1 green runs (0 malformed dropped)"),
+  );
+});
+
+// Source-reading `include_str!` tests see comments, so a comment-only edit is
+// a new identity like any other.
+test("comment-only and code .rs changes both run the matrix (real git)", () => {
+  for (const head of [sha.comment, sha.code]) {
+    const out = onRepo(head, [sha.base]);
+    assert.equal(out.run, true, head);
+    assert.equal(out.reason, NO_EVIDENCE, head);
+    assert.notEqual(out.identity, evidenceOf([sha.base]).artifacts[0].name);
     assert.ok(
       out.lines.includes(
-        `rust-gate: pass 2: ${short(sha.base)} rejected - ${why}.`,
+        `rust-gate: 0 artifacts named ${out.identity}, 0 from green runs.`,
       ),
       out.text,
     );
-    assert.deepEqual(canonicalizer.inputs, [], why);
   }
 });
 
-test("a head without the canonicalizer skips pass 2 (real git)", () => {
-  const out = onRepo(sha.nocanon, [sha.base]);
+test("a head without the apt script has no identity (real git)", () => {
+  const out = onRepo(sha.noapt, [sha.base]);
   assert.equal(out.run, true);
-  assert.match(out.lines[0], / canon=\?$/);
-  assert.ok(
-    out.lines.includes("rust-gate: pass 2 skipped: no canonicalizer blob."),
-  );
+  assert.equal(out.reason, NO_IDENTITY);
+  assert.match(out.lines[0], / gate=[0-9a-f]{40} apt=\?$/);
+  assert.equal(out.gh.calls, 0);
 });
 
-test("a green with another canonicalizer blob is no candidate (real git)", () => {
-  const out = onRepo(sha.comment, [sha.othercanon]);
-  assert.equal(out.run, true);
-  assert.ok(out.lines.includes("rust-gate: pass 2: 0 candidates compared."));
-});
-
-test("an unresolved workflow blob runs the matrix, pass 2 refuses it (real git)", () => {
+test("an unresolved workflow blob is no identity on either side (real git)", () => {
   const noWorkflow = (args) =>
     args[0] === "rev-parse" && args[1].endsWith(`:${WORKFLOW_PATH}`)
       ? failing
       : realGit(args);
-  const out = onRepo(sha.comment, [sha.base], { git: noWorkflow });
+  const out = onRepo(sha.comment, [sha.base], {
+    git: atHead(noWorkflow, sha.comment),
+  });
   assert.equal(out.run, true);
-  assert.equal(
-    out.reason,
-    "no src-tauri tree, workflow blob or gate script at this commit",
-  );
+  assert.equal(out.reason, NO_IDENTITY);
   assert.match(out.lines[0], / wf=\? /);
   assert.equal(out.gh.calls, 0);
 
-  // Row 10: the same shape fed straight to pass 2, where the candidate's
-  // workflow blob is absent too and would otherwise compare equal.
-  const lines = [];
-  const second = passTwo({
-    curTree: git(repo.dir, ["rev-parse", `${sha.comment}:${TREE_PATH}`]).trim(),
-    curWf: "",
-    curCanon: git(repo.dir, [
-      "rev-parse",
-      `${sha.comment}:${CANONICALIZER_PATH}`,
-    ]).trim(),
-    greens: [sha.base],
-    git: noWorkflow,
-    canonicalizer: stubCanonicalizer(),
-    log: (line) => lines.push(line),
+  // A holed name never matches a holed checkout: with the workflow blob absent
+  // on both sides, decide reads no identity and asks gh nothing.
+  const past = readIdentity(atHead(noWorkflow, sha.base), sha.base);
+  assert.equal(past.missing, NO_IDENTITY);
+  assert.equal(past.blobs[WORKFLOW_PATH], "");
+  const holed = identityName({ tree: treeOf(sha.base), blobs: past.blobs });
+  const fed = run({
+    env: pushEnv(sha.comment),
+    git: atHead(noWorkflow, sha.comment),
+    greens: ["1"],
+    artifacts: [{ name: holed, expired: false, runId: "1" }],
   });
-  assert.deepEqual(second, { skip: false, reason: "no workflow blob" });
-  assert.deepEqual(lines, ["rust-gate: pass 2 skipped: no workflow blob."]);
-});
-
-/** Interpreters the real-Python test may use: CI runs the production command
- *  `python3` alone, so a missing python3 there fails instead of falling back. */
-const pythonCandidates = (env) =>
-  env.CI === "true" ? ["python3"] : ["python3", "python"];
-
-test("CI discovers only python3; local runs may fall back to python", () => {
-  assert.deepEqual(pythonCandidates({ CI: "true" }), ["python3"]);
-  assert.deepEqual(pythonCandidates({}), ["python3", "python"]);
-  assert.deepEqual(pythonCandidates({ CI: "1" }), ["python3", "python"]);
-});
-
-test("the real canonicalizer decides both directions (real git, real Python)", (t) => {
-  const pythonEnv = childEnv({});
-  for (const env of [pythonEnv, gitEnv]) {
-    assert.equal(env.GITHUB_OUTPUT, undefined);
-    assert.equal(env.GH_TOKEN, undefined);
-  }
-  const python = pythonCandidates(process.env).find((cmd) => {
-    const result = spawnSync(cmd, ["--version"], {
-      encoding: "utf8",
-      env: pythonEnv,
-      timeout: 10_000,
-    });
-    return (
-      !result.error && /^Python 3\./.test(`${result.stdout}${result.stderr}`)
-    );
-  });
-  if (!python) {
-    // An absent interpreter in CI must not read as a pass.
-    assert.notEqual(process.env.CI, "true", "no python3 on PATH in CI");
-    t.skip("no Python 3 on PATH; CI's guards job runs this");
-    return;
-  }
-  const canonicalizer = pythonCanonicalizer(python, () => {}, pythonEnv);
-  const scriptCopy = join(mkdtempSync(join(root, "canon-")), "canon.py");
-  writeFileSync(scriptCopy, REAL_CANONICALIZER);
-  const probed = canonicalizer.canonicalize(scriptCopy, CANONICALIZER_PROBE);
-  assert.ok(Buffer.isBuffer(probed) && probed.length > 0, "probe output");
-  const same = onRepo(sha.comment, [sha.base], { canonicalizer });
-  assert.equal(same.run, false, same.text);
-  assert.equal(
-    same.reason,
-    `pass 2: comment/format-only delta vs ${short(sha.base)} (1 .rs files)`,
-  );
-  const changed = onRepo(sha.code, [sha.base], { canonicalizer });
-  assert.equal(changed.run, true, changed.text);
-  assert.ok(
-    changed.lines.includes(
-      "rust-gate:   src/lib.rs: canonical mismatch (real code change)",
-    ),
-  );
+  assert.equal(fed.run, true);
+  assert.equal(fed.reason, NO_IDENTITY);
+  assert.equal(fed.gh.calls, 0);
 });
 
 // ---------------------------------------------------------------- the CLI
@@ -1375,7 +962,7 @@ test("the CLI outside a repository decides run=true", () => {
   const out = cli(dir, {
     ATTEMPT: "1",
     EVENT: "push",
-    PUSH_SHA: SHA_A,
+    GITHUB_SHA: SHA_A,
     GITHUB_OUTPUT: output,
     GIT_CEILING_DIRECTORIES: root,
     GIT_CONFIG_GLOBAL: emptyConfig,
@@ -1384,9 +971,8 @@ test("the CLI outside a repository decides run=true", () => {
   assert.equal(out.code, 0, out.output);
   assert.equal(readFileSync(output, "utf8"), "run=true\n");
   assert.ok(
-    out.output.includes(
-      "decision run=true (no src-tauri tree, workflow blob or gate script at this commit)",
-    ),
+    out.output.includes("decision run=true (could not resolve HEAD)"),
+    out.output,
   );
 });
 
@@ -1395,7 +981,7 @@ test("the CLI without GITHUB_OUTPUT writes nothing and exits 1", () => {
   const out = cli(dir, {
     ATTEMPT: "1",
     EVENT: "push",
-    PUSH_SHA: SHA_A,
+    GITHUB_SHA: SHA_A,
     RUNNER_TEMP: dir,
     GIT_CEILING_DIRECTORIES: root,
   });
@@ -1418,21 +1004,22 @@ test("runCli writes nothing when decide throws, Error or not", () => {
   for (const thrown of [new Error("git exploded"), "git exploded"]) {
     const output = join(mkdtempSync(join(root, "crash-")), "output");
     writeFileSync(output, "");
+    const temp = mkdtempSync(join(root, "crash-temp-"));
     const lines = [];
     const code = runCli({
-      env: { ...pushEnv(SHA_A), GITHUB_OUTPUT: output },
+      env: { ...pushEnv(SHA_A), GITHUB_OUTPUT: output, RUNNER_TEMP: temp },
       argv: [],
       deps: {
         git: () => {
           throw thrown;
         },
         listGreens: () => [],
-        canonicalizer: stubCanonicalizer(),
         log: (line) => lines.push(line),
       },
     });
     assert.equal(code, 1);
     assert.equal(readFileSync(output, "utf8"), "");
+    assert.deepEqual(readdirSync(temp), []);
     assert.deepEqual(
       lines.filter((line) => line.startsWith("::error::")),
       [
@@ -1442,41 +1029,7 @@ test("runCli writes nothing when decide throws, Error or not", () => {
   }
 });
 
-test("the green list asks gh for this workflow's successful runs", () => {
-  const env = { GH_TOKEN: "t", GH_REPO: "o/r" };
-  const seen = [];
-  const spawn = (cmd, args, options) => {
-    seen.push({ cmd, args, options });
-    return { status: 0, stdout: `${SHA_A}\n\n  ${SHA_B}  \n`, stderr: "" };
-  };
-  assert.deepEqual(ghGreens(env, spawn), [SHA_A, SHA_B]);
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].cmd, "gh");
-  assert.deepEqual(seen[0].args, [
-    "run",
-    "list",
-    "--workflow",
-    "rust-tests.yml",
-    "--status",
-    "success",
-    "--limit",
-    "100",
-    "--json",
-    "headSha",
-    "--jq",
-    ".[].headSha",
-  ]);
-  // gh alone keeps the token, untouched.
-  assert.equal(seen[0].options.env, env);
-
-  const failed = () => ({ status: 1, stdout: "", stderr: "HTTP 502\nbad" });
-  assert.throws(
-    () => ghGreens(env, failed),
-    /^Error: gh exited 1: HTTP 502 bad$/,
-  );
-});
-
-test("git and Python children get no forge token; the token list is exact", () => {
+test("git children get no forge token; the token list is exact", () => {
   const env = {
     PATH: "/bin",
     GH_TOKEN: "t1",
@@ -1484,10 +1037,20 @@ test("git and Python children get no forge token; the token list is exact", () =
     GH_REPO: "o/r",
     gh_host: "h",
     github_token: "t3",
+    GITHUB_ENTERPRISE_TOKEN: "t4",
+    github_enterprise_token: "t5",
     GITHUB_REPOSITORY: "o/r",
+    GITHUB_ENTERPRISE_TOKENS: "kept",
+    GITHUB_TOKEN_X: "kept",
     GHOST: "kept",
   };
-  const kept = { PATH: "/bin", GITHUB_REPOSITORY: "o/r", GHOST: "kept" };
+  const kept = {
+    PATH: "/bin",
+    GITHUB_REPOSITORY: "o/r",
+    GITHUB_ENTERPRISE_TOKENS: "kept",
+    GITHUB_TOKEN_X: "kept",
+    GHOST: "kept",
+  };
   assert.deepEqual(withoutForgeTokens(env), kept);
   const seen = [];
   const spawn = (cmd, args, options) => {
@@ -1495,34 +1058,7 @@ test("git and Python children get no forge token; the token list is exact", () =
     return { status: 0, stdout: Buffer.alloc(0), stderr: "" };
   };
   gitRunner(root, env, spawn)(["rev-parse", "HEAD"]);
-  const python = pythonCanonicalizer("py", () => {}, env, spawn);
-  python.selfTest("s.py");
-  python.canonicalize("s.py", Buffer.from("x"));
-  assert.deepEqual(
-    seen.map(([cmd]) => cmd),
-    ["git", "py", "py"],
-  );
-  for (const [cmd, childEnv] of seen) assert.deepEqual(childEnv, kept, cmd);
-});
-
-test("a real Python-seam child sees no GH_TOKEN", () => {
-  const dir = mkdtempSync(join(root, "env-"));
-  const probe = join(dir, "probe.mjs");
-  writeFileSync(
-    probe,
-    "process.stdout.write(JSON.stringify(Object.keys(process.env)));\n",
-  );
-  const python = pythonCanonicalizer(
-    process.execPath,
-    () => {},
-    childEnv({ GH_TOKEN: "secret", GITHUB_TOKEN: "secret", GH_REPO: "o/r" }),
-  );
-  const names = JSON.parse(python.canonicalize(probe, Buffer.alloc(0)));
-  assert.ok(names.includes("PATH") || names.includes("Path"), names.join());
-  assert.deepEqual(
-    names.filter((name) => /^(GH_|GITHUB_TOKEN$|GITHUB_OUTPUT$)/i.test(name)),
-    [],
-  );
+  assert.deepEqual(seen, [["git", kept]]);
 });
 
 test("the CLI runs from a symlinked or junctioned entry", (t) => {
@@ -1553,38 +1089,87 @@ test("the CLI runs from a symlinked or junctioned entry", (t) => {
   assert.equal(readFileSync(output, "utf8"), "run=true\n");
 });
 
-test("runCli appends one skip decision after a pass-1 match", () => {
+/** runCli deps over a fake repo and its evidence store. */
+const fakeDeps = (fake, lines) => ({
+  git: fake.git,
+  listGreens: () => fake.greens,
+  findArtifacts: (name) =>
+    artifactPage(fake.artifacts.filter((item) => item.name === name)),
+  log: (line) => lines.push(line),
+});
+
+test("runCli writes the evidence file, then identity and run, after an exact match", () => {
   const fake = fakeRepo();
-  const exact = fake.commit({ tree: fake.tree }).sha;
-  const output = join(mkdtempSync(join(root, "skip-")), "output");
+  const runId = fake.evidence(fake.tree);
+  const dir = mkdtempSync(join(root, "skip-"));
+  const output = join(dir, "output");
   writeFileSync(output, "");
   const lines = [];
   const code = runCli({
-    env: { ...fake.env, GITHUB_OUTPUT: output },
+    env: { ...fake.env, GITHUB_OUTPUT: output, RUNNER_TEMP: dir },
     argv: [],
-    deps: {
-      git: fake.git,
-      listGreens: () => [exact],
-      canonicalizer: stubCanonicalizer(),
-      log: (line) => lines.push(line),
-    },
+    deps: fakeDeps(fake, lines),
   });
   assert.equal(code, 0);
-  assert.equal(readFileSync(output, "utf8"), "run=false\n");
+  assert.equal(
+    readFileSync(output, "utf8"),
+    `identity=${fake.name}\nrun=false\n`,
+  );
+  assert.equal(
+    readFileSync(join(dir, EVIDENCE_FILE), "utf8"),
+    `${fake.name}\n${fake.head}\n`,
+  );
   assert.equal(
     lines.at(-1),
-    `rust-gate: decision run=false (pass 1: identical content passed in ${short(exact)})`,
+    `rust-gate: decision run=false (identical content passed in run ${runId})`,
   );
 });
 
-// --- P-pins: the workflow's fail-open wiring. A reader by indentation over
-// the block subset rust-tests.yml uses; a missing or duplicated job, step id
-// or key throws, so a reshaped file reds the pins instead of skipping them.
+test("runCli records no identity without RUNNER_TEMP or a writable evidence dir", () => {
+  const dir = mkdtempSync(join(root, "norec-"));
+  const blocker = join(dir, "a-file");
+  writeFileSync(blocker, "");
+  const unset = "rust-gate: RUNNER_TEMP is not set; identity not recorded.";
+  const cases = [
+    [undefined, (line) => line === unset],
+    ["", (line) => line === unset],
+    [
+      blocker,
+      (line) =>
+        /^rust-gate: could not write the identity file \(.+\); identity not recorded\.$/.test(
+          line,
+        ),
+    ],
+  ];
+  cases.forEach(([temp, logged], i) => {
+    const fake = fakeRepo();
+    fake.evidence(fake.tree);
+    const output = join(dir, `output-${i}`);
+    writeFileSync(output, "");
+    const lines = [];
+    const env = { ...fake.env, GITHUB_OUTPUT: output, RUNNER_TEMP: temp };
+    if (temp === undefined) delete env.RUNNER_TEMP;
+    const code = runCli({ env, argv: [], deps: fakeDeps(fake, lines) });
+    assert.equal(code, 0, String(temp));
+    assert.equal(readFileSync(output, "utf8"), "run=false\n");
+    assert.equal(lines.filter(logged).length, 1, lines.join("\n"));
+  });
+  assert.equal(readFileSync(blocker, "utf8"), "");
+});
 
-const WORKFLOW = readFileSync(
-  fileURLToPath(new URL(`../${WORKFLOW_PATH}`, import.meta.url)),
-  "utf8",
-).replace(/\r\n/g, "\n");
+// --- P-pins: the workflow's fail-open wiring. They check this repository's
+// own workflows and apt script as written (block-mapping steps, plain or
+// simply quoted scalars, one `set` command per `;`/`&&`/`||`/`|` segment) as
+// drift pins, not a YAML or shell parser: a missing or duplicated job, step id
+// or key, or a shape outside that subset, fails loudly, and the remedy is the
+// house spelling.
+
+const readRepoText = (path) =>
+  readFileSync(
+    fileURLToPath(new URL(`../${path}`, import.meta.url)),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
+const WORKFLOW = readRepoText(WORKFLOW_PATH);
 const TEST_IF =
   "${{ !cancelled() && (needs.gate.result != 'success' || needs.gate.outputs.decided != 'success' || needs.gate.outputs.run != 'false') }}";
 const OLD_TEST_IF = "${{ !cancelled() && needs.gate.outputs.run != 'false' }}";
@@ -1600,16 +1185,35 @@ const REPORT_IF =
   "${{ !cancelled() && (steps.decide.outcome != 'success' || steps.decide.outputs.run == '') }}";
 const OLD_REPORT_IF =
   "steps.node.outcome != 'success' || steps.decide.outcome != 'success'";
-// The env scripts/check-rust-gate.mjs reads (gh reads the GH_ pair), by value:
-// a head SHA from the wrong context would sign another commit.
+// The env scripts/check-rust-gate.mjs reads (gh reads the GH_ pair), by value;
+// the checkout comes from the runner's own GITHUB_SHA, which no key may shadow.
 const DECIDE_ENV = [
   ["ATTEMPT", "${{ github.run_attempt }}"],
   ["EVENT", "${{ github.event_name }}"],
   ["GH_REPO", "${{ github.repository }}"],
   ["GH_TOKEN", "${{ github.token }}"],
-  ["PR_HEAD", "${{ github.event.pull_request.head.sha }}"],
-  ["PUSH_SHA", "${{ github.sha }}"],
 ];
+const RECORD_NAME = "Record the tested checkout's identity";
+const RECORD_IF = "${{ !cancelled() && steps.decide.outputs.identity != '' }}";
+const RECORD_WITH = [
+  ["if-no-files-found", "error"],
+  ["name", "${{ steps.decide.outputs.identity }}"],
+  ["overwrite", "true"],
+  ["path", `\${{ runner.temp }}/${EVIDENCE_FILE}`],
+  ["retention-days", "14"],
+];
+const REPORT_RUN =
+  'echo "::error::rust-tests gate made no decision (setup-node: $NODE, decide: $DECIDE); the test matrix runs (fail-open)."';
+// What the gate signs: a change to any of these must trigger the workflow.
+const IDENTITY_PATHS = ["src-tauri/**", WORKFLOW_PATH, GATE_PATH, APT_PATH];
+const APT_NAME = "Install Linux dependencies";
+const APT_RUN = `bash ${APT_PATH}`;
+const APT_CALLERS = [
+  [WORKFLOW_PATH, "test"],
+  [".github/workflows/release.yml", "release"],
+  [".github/workflows/appimage-check.yml", "appimage"],
+];
+const APT_SCRIPT = readRepoText(APT_PATH);
 
 const indentOf = (line) => line.length - line.trimStart().length;
 const isNoise = (line) =>
@@ -1694,16 +1298,53 @@ const runLines = (entry) =>
     ? entry.children.map((line) => line.trim()).filter((line) => line !== "")
     : [entry.value];
 
-function pathsOf(text, event) {
+/** `on.<event>.paths` items as written after `- `, quotes and any trailing
+ *  comment included. */
+function rawPathsOf(text, event) {
   const on = entries(get(topOf(text), "on", "workflow").children, "on");
   const trigger = entries(get(on, event, "on").children, `on.${event}`);
   return get(trigger, "paths", `on.${event}`)
     .children.filter((line) => !isNoise(line))
     .map((line) => {
-      const match = /^\s*- (?:"([^"]*)"|'([^']*)'|(\S.*))$/.exec(line);
+      const match = /^\s*- (\S.*)$/.exec(line);
       if (!match) throw new Error(`on.${event}.paths: unreadable ${line}`);
-      return match[1] ?? match[2] ?? match[3];
+      return match[1];
     });
+}
+
+/** A plain or simply quoted scalar's value: a comment after a space or TAB
+ *  outside the quotes dropped (YAML keeps any other blank in the value), `''`
+ *  read as one quote, and a backslash in a double-quoted one (an escape)
+ *  refused. Anything else comes back as written. */
+function scalarOf(raw, where) {
+  assert.ok(
+    !(raw.startsWith('"') && raw.includes(BACKSLASH)),
+    `${where}: escaped scalar ${raw}`,
+  );
+  const match = /^(?:"([^"]*)"|'((?:[^']|'')*)'|(.*?))(?:[ \t]+#.*)?$/.exec(
+    raw,
+  );
+  return match[1] ?? match[2]?.replace(/''/g, "'") ?? match[3];
+}
+
+/** The items decoded as scalars. */
+const pathsOf = (text, event) =>
+  rawPathsOf(text, event).map((item) => scalarOf(item, `on.${event}.paths`));
+
+/** A step's `uses:` value, decoded; "" when it has none. */
+const usesOf = (step, where) => scalarOf(step.get("uses")?.value ?? "", where);
+
+/** With no exclusion in a list, a literal item is matched as written, so no
+ *  glob engine is needed. The raw text is read because a backslash in a
+ *  double-quoted item is a YAML escape that may decode to `!`. */
+function refuseExclusions(items, where) {
+  for (const item of items) {
+    assert.ok(!/^["']?!/.test(item), `${where}: exclusion ${item}`);
+    assert.ok(
+      !(item.startsWith('"') && item.includes(BACKSLASH)),
+      `${where}: escaped item ${item}`,
+    );
+  }
 }
 
 const gateSteps = (text) => stepsOf(jobOf(text, "gate"), "job gate");
@@ -1731,7 +1372,7 @@ function pinSetupNode(text) {
   assert.equal(get(node.step, "continue-on-error", "setup-node").value, "true");
   // Any non-empty ref: Dependabot bumps the action.
   assert.match(
-    get(node.step, "uses", "setup-node").value,
+    scalarOf(get(node.step, "uses", "setup-node").value, "setup-node"),
     /^actions\/setup-node@\S+$/,
   );
   const inputs = entries(
@@ -1765,22 +1406,164 @@ function pinReport(text) {
   const report = stepWith(steps, "name", REPORT_NAME, "job gate");
   const decideStep = stepWith(steps, "id", "decide", "job gate");
   assert.equal(get(report.step, "if", "report").value, REPORT_IF);
-  // The annotation must sit in a live line, never a shell comment.
-  assert.ok(
-    runLines(get(report.step, "run", "report")).some(
-      (line) => !line.startsWith("#") && line.includes("::error::"),
-    ),
-  );
+  assert.equal(get(report.step, "shell", "report").value, "bash");
+  // The annotation is the whole run: no comment hides it, no line exits first.
+  assert.deepEqual(runLines(get(report.step, "run", "report")), [REPORT_RUN]);
   assert.ok(report.index > decideStep.index, "report must follow decide");
+}
+
+/** The upload runs only after a decision that named an identity, can never
+ *  fail the gate job, and uploads exactly the evidence file under that name. */
+function pinRecord(text) {
+  const steps = gateSteps(text);
+  const record = stepWith(steps, "name", RECORD_NAME, "job gate");
+  const decideStep = stepWith(steps, "id", "decide", "job gate");
+  const report = stepWith(steps, "name", REPORT_NAME, "job gate");
+  assert.ok(record.index > decideStep.index, "record must follow decide");
+  assert.ok(record.index < report.index, "record must precede the report");
+  assert.equal(get(record.step, "if", "record").value, RECORD_IF);
+  assert.equal(get(record.step, "continue-on-error", "record").value, "true");
+  // Decide's 8 plus this 1 leave checkout and setup-node room in the job's 10.
+  assert.equal(get(record.step, "timeout-minutes", "record").value, "1");
+  // Any non-empty ref: Dependabot bumps the action.
+  assert.match(
+    scalarOf(get(record.step, "uses", "record").value, "record"),
+    /^actions\/upload-artifact@\S+$/,
+  );
+  const inputs = entries(
+    get(record.step, "with", "record").children,
+    "record with",
+  );
+  assert.deepEqual(
+    [...inputs].map(([key, entry]) => [key, entry.value]).sort(),
+    RECORD_WITH,
+  );
+}
+
+/** The gate signs the commit the matrix tests only while both jobs check out
+ *  the default commit into the default path. */
+function pinCheckouts(text) {
+  for (const job of ["gate", "test"]) {
+    const where = `job ${job}`;
+    // GitHub resolves the action's owner/repo case-insensitively, so every
+    // spelling counts and any second checkout step is refused.
+    const checkouts = stepsOf(jobOf(text, job), where).filter((step) =>
+      /^actions\/checkout@/i.test(usesOf(step, where)),
+    );
+    assert.equal(checkouts.length, 1, `${where}: checkout steps`);
+    const inputs = checkouts[0].has("with")
+      ? entries(get(checkouts[0], "with", where).children, `${where} with`)
+      : new Map();
+    // The runner exports `with:` keys case-insensitively, as INPUT_<NAME>.
+    const names = new Set([...inputs.keys()].map((key) => key.toLowerCase()));
+    for (const key of ["ref", "repository", "path"]) {
+      assert.ok(!names.has(key), `${where}: checkout ${key}`);
+    }
+  }
 }
 
 function pinPaths(text) {
   for (const event of ["pull_request", "push"]) {
-    assert.ok(
-      pathsOf(text, event).includes("scripts/check-rust-gate.mjs"),
-      `on.${event}.paths lacks the gate script`,
-    );
+    const where = `on.${event}.paths`;
+    refuseExclusions(rawPathsOf(text, event), where);
+    const paths = pathsOf(text, event);
+    for (const path of IDENTITY_PATHS) {
+      assert.ok(paths.includes(path), `${where} lacks ${path}`);
+    }
   }
+}
+
+/** The apt step of `job`: once, 10 min, the shared script ahead of the update,
+ *  no inline copy of the rewrite, and the checkout that provides the script
+ *  ahead of it. */
+function pinApt(text, job) {
+  const where = `job ${job}`;
+  const steps = stepsOf(jobOf(text, job), where);
+  const apt = stepWith(steps, "name", APT_NAME, where);
+  assert.equal(get(apt.step, "timeout-minutes", APT_NAME).value, "10");
+  const lines = runLines(get(apt.step, "run", APT_NAME));
+  assert.deepEqual(
+    lines.filter((line) => !line.startsWith("#")).slice(0, 2),
+    [APT_RUN, "sudo apt-get update"],
+    where,
+  );
+  assert.ok(
+    lines.every((line) => !line.includes("ec2")),
+    `${where}: inline mirror rewrite`,
+  );
+  const checkout = steps.findIndex((step) =>
+    /^actions\/checkout@/i.test(usesOf(step, where)),
+  );
+  assert.ok(
+    checkout >= 0 && checkout < apt.index,
+    `${where}: no checkout first`,
+  );
+}
+
+/** appimage-check's own filter must fire on an apt-script edit. */
+function pinAptPaths(text) {
+  const where = "on.pull_request.paths";
+  refuseExclusions(rawPathsOf(text, "pull_request"), where);
+  assert.ok(pathsOf(text, "pull_request").includes(APT_PATH), where);
+}
+
+/** The rewrite is best-effort: the script always falls through to its end, so
+ *  the caller's apt-get runs whatever the mirror files hold. */
+function pinAptScript(text) {
+  const lines = text.split("\n");
+  assert.equal(lines[0], "#!/usr/bin/env bash", "shebang");
+  for (const line of lines) {
+    if (line.trimStart().startsWith("#")) continue;
+    for (const command of commandsOf(line)) {
+      const on = setOptionsOn(command);
+      assert.ok(!on.has("e") && !on.has("errexit"), `errexit: ${line}`);
+      assert.ok(!on.has("pipefail"), `pipefail: ${line}`);
+    }
+    assert.ok(!/\bexit\s+[1-9]/.test(line), `failing exit: ${line}`);
+  }
+}
+
+/** A line's commands: split at `;`, `&&`, `||` and `|` outside quotes, up to
+ *  a `#` that starts a word outside quotes. */
+function commandsOf(line) {
+  const commands = [];
+  let current = "";
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === quote) quote = "";
+    } else if (c === "'" || c === '"') {
+      quote = c;
+    } else if (c === "#" && /(?:^|\s)$/.test(current)) {
+      break;
+    } else if (c === ";" || c === "|" || (c === "&" && line[i + 1] === "&")) {
+      commands.push(current);
+      current = "";
+      if (c !== ";" && line[i + 1] === c) i++;
+      continue;
+    }
+    current += c;
+  }
+  commands.push(current);
+  return commands;
+}
+
+/** The options a `set` command turns on: each letter of a `-` group, and the
+ *  name after a group holding `o`; a `+` group turns its options off. */
+function setOptionsOn(command) {
+  const [first, ...words] = command.trim().split(/\s+/);
+  const on = new Set();
+  if (first !== "set") return on;
+  for (let i = 0; i < words.length; i++) {
+    const group = /^([-+])([A-Za-z]+)$/.exec(words[i]);
+    if (!group) continue;
+    const named = group[2].includes("o") ? words[++i] : undefined;
+    if (group[1] === "+") continue;
+    for (const letter of group[2]) on.add(letter);
+    if (named !== undefined) on.add(named);
+  }
+  return on;
 }
 
 function pinTimeouts(text) {
@@ -1807,6 +1590,44 @@ function swapRe(text, pattern, to) {
   return text.replace(pattern, () => to);
 }
 const SETUP_NODE_USES = /uses: actions\/setup-node@\S*/;
+/** `text` with `edit` applied to job `name`'s block alone. */
+function inJob(text, name, edit) {
+  const start = text.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, `job ${name}`);
+  const next = text.slice(start + 1).search(/\n {2}[A-Za-z0-9_-]+:\n/);
+  const end = next < 0 ? text.length : start + 1 + next;
+  return text.slice(0, start) + edit(text.slice(start, end)) + text.slice(end);
+}
+/** The one checkout step line of a job's block, whatever its spelling or ref. */
+function checkoutOf(body) {
+  const hits = body.match(/^ {6}- uses: actions\/checkout@\S+\n/gim) ?? [];
+  assert.equal(hits.length, 1, "one checkout line");
+  return hits[0];
+}
+/** `text` with every checkout ref rewritten to `ref`, as a Dependabot bump;
+ *  each action name keeps its spelling. */
+function withCheckoutRef(text, ref) {
+  const pattern = /(actions\/checkout@)\S+/gi;
+  assert.ok((text.match(pattern) ?? []).length > 0, "a checkout ref");
+  return text.replace(pattern, (_, name) => `${name}${ref}`);
+}
+/** `text` with every checkout spelled `Actions/Checkout`, which GitHub
+ *  resolves to the same action. */
+function respelledAll(text) {
+  const pattern = /actions\/checkout@/gi;
+  assert.ok((text.match(pattern) ?? []).length > 0, "a checkout to respell");
+  return text.replace(pattern, () => "Actions/Checkout@");
+}
+/** `text` with job `job`'s checkout value wrapped in `quote`. */
+const quotedCheckout = (text, job, quote) =>
+  inJob(text, job, (body) => {
+    const checkout = checkoutOf(body);
+    const value = checkout.trim().slice("- uses: ".length);
+    return swap(body, checkout, `      - uses: ${quote}${value}${quote}\n`);
+  });
+/** A validator for an error whose first message line is exactly `message`. */
+const firstLine = (message) => (error) =>
+  error.message.split("\n")[0] === message;
 const stepText = (text, name) => {
   const start = text.indexOf(`      - name: ${name}\n`);
   const end = text.indexOf("\n\n", start);
@@ -1908,13 +1729,13 @@ test("P4 decide runs only the script, after setup-node, continuing on error", ()
     swap(WORKFLOW, "          ATTEMPT: ${{ github.run_attempt }}\n", ""),
     swap(
       WORKFLOW,
-      "${{ github.event.pull_request.head.sha }}",
-      "${{ github.event.pull_request.base.sha }}",
+      "          ATTEMPT: ${{ github.run_attempt }}\n",
+      "          ATTEMPT: ${{ github.run_attempt }}\n          PR_HEAD: ${{ github.event.pull_request.head.sha }}\n",
     ),
     swap(
       WORKFLOW,
-      "PUSH_SHA: ${{ github.sha }}",
-      "PUSH_SHA: ${{ github.ref }}",
+      "          ATTEMPT: ${{ github.run_attempt }}\n",
+      "          ATTEMPT: ${{ github.run_attempt }}\n          GITHUB_SHA: ${{ github.event.pull_request.head.sha }}\n",
     ),
     swap(
       WORKFLOW,
@@ -1941,18 +1762,62 @@ test("P5 a gate that made no decision reports it", () => {
     swap(WORKFLOW, " || steps.decide.outputs.run == ''", ""),
     swap(WORKFLOW, "${{ !cancelled() && (steps.decide", "${{ (steps.decide"),
     swap(WORKFLOW, '          echo "::error::', '          # echo "::error::'),
+    swap(
+      WORKFLOW,
+      '          echo "::error::',
+      '          exit 0\n          echo "::error::',
+    ),
   ]) {
     assert.throws(() => pinReport(broken));
   }
 });
 
-test("P6 both path filters trigger on the gate script", () => {
+test("P6 both path filters list every identity member and no exclusion", () => {
   pinPaths(WORKFLOW);
-  const push = WORKFLOW.indexOf("\n  push:\n");
-  const broken =
-    WORKFLOW.slice(0, push) +
-    swap(WORKFLOW.slice(push), '      - "scripts/check-rust-gate.mjs"\n', "");
-  assert.throws(() => pinPaths(broken));
+  // Each entry occurs once per event, so controls edit one event's half.
+  const push = WORKFLOW.indexOf("\n  push:\n") + 1;
+  const pr = WORKFLOW.slice(0, push);
+  const rest = WORKFLOW.slice(push);
+  const gateLine = '      - "scripts/check-rust-gate.mjs"\n';
+  const afterGate = (added) => swap(pr, gateLine, gateLine + added) + rest;
+  for (const broken of [
+    pr + swap(rest, gateLine, ""),
+    pr + swap(rest, `      - "${APT_PATH}"\n`, ""),
+    swap(pr, '      - "src-tauri/**"\n', "") + rest,
+    afterGate('      - "!scripts/check-rust-gate.mjs"\n'),
+    afterGate("      - '!scripts/check-rust-gate.mjs'\n"),
+    afterGate('      - "!scripts/check-rust-gate.mjs" # why\n'),
+    afterGate(`      - "${BACKSLASH}x21scripts/check-rust-gate.mjs"\n`),
+  ]) {
+    assert.throws(() => pinPaths(broken));
+  }
+  // A trailing comment outside the quotes is no part of the item.
+  const workflowLine = `      - "${WORKFLOW_PATH}"\n`;
+  const commented = (half) =>
+    swap(
+      half,
+      workflowLine,
+      `      - "${WORKFLOW_PATH}" # matrix definition\n`,
+    );
+  pinPaths(commented(pr) + commented(rest));
+  pinPaths(
+    swap(pr, '      - "src-tauri/**"\n', "      - src-tauri/** # x\n") + rest,
+  );
+  pinPaths(
+    swap(pr, '      - "src-tauri/**"\n', "      - src-tauri/**\t# x\n") + rest,
+  );
+  // YAML ends a plain scalar only at a space or TAB before `#`; after any
+  // other blank the comment stays in the pattern.
+  const nbsp = String.fromCharCode(0xa0);
+  const glued = swap(
+    pr,
+    '      - "src-tauri/**"\n',
+    `      - src-tauri/**${nbsp}# backend\n`,
+  );
+  assert.throws(
+    () => pinPaths(glued + rest),
+    firstLine("on.pull_request.paths lacks src-tauri/**"),
+  );
 });
 
 test("P7 job timeouts: gate 10, test 45", () => {
@@ -1961,27 +1826,304 @@ test("P7 job timeouts: gate 10, test 45", () => {
   assert.throws(() => pinTimeouts(broken));
 });
 
-test("the P-pin reader throws on a missing or duplicated job, step id or key", () => {
+/** `text` with job `job`'s checkout spelled `Actions/Checkout`, which GitHub
+ *  resolves to the same action. */
+const respelled = (text, job) =>
+  inJob(text, job, (body) => {
+    const checkout = checkoutOf(body);
+    const other = checkout.replace(/actions\/checkout@/i, "Actions/Checkout@");
+    return swap(body, checkout, other);
+  });
+
+/** P8's controls over `read(path)`, each `[text, job, message]`; the moved
+ *  step finds its own job's checkout line, so a bumped ref keeps it live. */
+function aptControls(read) {
+  return APT_CALLERS.flatMap(([path, job]) => {
+    const text = read(path);
+    const step = stepText(text, APT_NAME);
+    const moved = inJob(text, job, (body) => {
+      const checkout = checkoutOf(body);
+      return swap(swap(body, step, ""), checkout, step + checkout);
+    });
+    return [
+      [
+        swap(
+          text,
+          `          ${APT_RUN}\n          sudo apt-get update\n`,
+          `          sudo apt-get update\n          ${APT_RUN}\n`,
+        ),
+        job,
+        `job ${job}`,
+      ],
+      [swap(text, `          ${APT_RUN}\n`, ""), job, `job ${job}`],
+      [
+        swap(text, step, swap(step, "        timeout-minutes: 10\n", "")),
+        job,
+        `${APT_NAME}: missing key timeout-minutes`,
+      ],
+      [moved, job, `job ${job}: no checkout first`],
+      [respelled(moved, job), job, `job ${job}: no checkout first`],
+    ];
+  });
+}
+
+test("P8 every apt step runs the shared mirror script after checkout", () => {
+  const bumped = (path) => withCheckoutRef(readRepoText(path), "v99");
+  const respelledRead = (path) => respelledAll(readRepoText(path));
+  const respelledBumped = (path) => withCheckoutRef(respelledRead(path), "v99");
+  const reads = [readRepoText, bumped, respelledRead, respelledBumped];
+  for (const [path, job] of APT_CALLERS) {
+    for (const read of reads) pinApt(read(path), job);
+    assert.ok(!bumped(path).includes("actions/checkout@v7"), path);
+    assert.ok(respelledBumped(path).includes("Actions/Checkout@v99"), path);
+    // A respelled or quoted checkout ahead of the apt step still provides it.
+    pinApt(respelled(readRepoText(path), job), job);
+    pinApt(quotedCheckout(readRepoText(path), job, "'"), job);
+    pinApt(quotedCheckout(readRepoText(path), job, '"'), job);
+  }
+  // A bumped or respelled checkout keeps every control throwing for its own
+  // reason.
+  for (const read of reads) {
+    for (const [broken, job, message] of aptControls(read)) {
+      assert.throws(() => pinApt(broken, job), firstLine(message));
+    }
+  }
+
+  const appimage = readRepoText(".github/workflows/appimage-check.yml");
+  pinAptPaths(appimage);
+  const lastLine = '      - "pnpm-lock.yaml"\n';
   for (const broken of [
-    swap(WORKFLOW, "\n  gate:\n", "\n  gatekeeper:\n"),
-    swap(WORKFLOW, "        id: node\n", "        id: decide\n"),
-    swap(WORKFLOW, "        id: decide\n", ""),
+    swap(appimage, lastLine, `${lastLine}      - "!${APT_PATH}"\n`),
+    swap(appimage, lastLine, `${lastLine}      - "!${APT_PATH}" # why\n`),
+    swap(appimage, `      - "${APT_PATH}"\n`, ""),
+  ]) {
+    assert.throws(() => pinAptPaths(broken));
+  }
+});
+
+test("P8b the apt script never stops early: no errexit, no failing exit", () => {
+  pinAptScript(APT_SCRIPT);
+  const added = (line, message) => [
+    swap(APT_SCRIPT, "set -u\n", `set -u\n${line}\n`),
+    message,
+  ];
+  // Turning an option off, or naming it in a comment, keeps the script going.
+  const allowed = [
+    "set +o errexit",
+    "set +e",
+    "set +o pipefail",
+    "# pipefail is deliberately disabled",
+    "# errexit stays off: set -e would stop the rewrite early",
+    "set -u # not -e",
+    // Only a command whose first word is `set` sets options.
+    `set -u; printf '%s${BACKSLASH}n' -e`,
+    'echo "a; set -e"',
+    "echo '-e && set -e'",
+  ].map((line) => swap(APT_SCRIPT, "set -u\n", `set -u\n${line}\n`));
+  for (const text of allowed) pinAptScript(text);
+  const controls = [
+    ...[
+      "set -e",
+      "set -Ee",
+      "set -u -e",
+      "set -euo pipefail",
+      "set -o errexit",
+      "set -o pipefail -o errexit",
+      "echo ready; set -e",
+      "true && set -e",
+      "false || set -o errexit",
+      "echo x | set -e",
+    ].map((line) => added(line, `errexit: ${line}`)),
+    added("set -o pipefail", "pipefail: set -o pipefail"),
+    added("exit 1", "failing exit: exit 1"),
+    [swap(APT_SCRIPT, "#!/usr/bin/env bash\n", "#!/bin/sh\n"), "shebang"],
+  ];
+  for (const [broken, message] of controls) {
+    assert.throws(() => pinAptScript(broken), firstLine(message));
+  }
+});
+
+test("P9 the gate records its identity after deciding, never gating the decision", () => {
+  pinRecord(WORKFLOW);
+  const record = stepText(WORKFLOW, RECORD_NAME);
+  const withoutRecord = swap(WORKFLOW, record, "");
+  const decideHead = "      - name: Decide whether the matrix must run\n";
+  const recordIf = `        if: ${RECORD_IF}\n`;
+  for (const broken of [
+    swap(WORKFLOW, `${recordIf}        continue-on-error: true\n`, recordIf),
     swap(
       WORKFLOW,
-      "\n    timeout-minutes: 10\n",
-      "\n    timeout-minutes: 10\n    timeout-minutes: 10\n",
+      "          overwrite: true\n",
+      "          overwrite: false\n",
     ),
+    swap(
+      WORKFLOW,
+      "name: ${{ steps.decide.outputs.identity }}",
+      "name: ${{ steps.decide.outputs.run }}",
+    ),
+    swap(WORKFLOW, `/${EVIDENCE_FILE}\n`, "/rust-gate-evidence/other.txt\n"),
+    swap(withoutRecord, decideHead, record + decideHead),
+    swap(
+      WORKFLOW,
+      "${{ !cancelled() && steps.decide.outputs.identity",
+      "${{ steps.decide.outputs.identity",
+    ),
+    swap(
+      WORKFLOW,
+      "          retention-days: 14\n",
+      "          retention-days: 14\n          archive: false\n",
+    ),
+    swap(
+      WORKFLOW,
+      "          retention-days: 14\n",
+      "          retention-days: 90\n",
+    ),
+    swap(
+      WORKFLOW,
+      "        timeout-minutes: 1\n",
+      "        timeout-minutes: 2\n",
+    ),
+    swap(
+      withoutRecord,
+      "\n\n  test:\n",
+      `\n\n${record.trimEnd()}\n\n  test:\n`,
+    ),
+    withoutRecord,
   ]) {
-    assert.throws(
-      () =>
-        [
-          pinGateOutput,
-          pinSetupNode,
-          pinDecide,
-          pinReport,
-          pinTimeouts,
-        ].forEach((pin) => pin(broken)),
-      /missing key|duplicate key|steps with id/,
-    );
+    assert.throws(() => pinRecord(broken));
+  }
+  pinRecord(
+    swapRe(
+      WORKFLOW,
+      /uses: actions\/upload-artifact@\S*/,
+      "uses: actions/upload-artifact@v8.0.0",
+    ),
+  );
+});
+
+/** P10's controls over `text`, each `[text, message]`, keyed on each job's own
+ *  checkout line, so a bumped ref keeps them live. */
+function checkoutControls(text) {
+  const add = (job, input) =>
+    inJob(text, job, (body) => {
+      const head = `${checkoutOf(body)}        with:\n`;
+      return swap(body, head, `${head}          ${input}\n`);
+    });
+  const extra = (job, uses = "Actions/Checkout@v7") =>
+    inJob(text, job, (body) => {
+      const checkout = checkoutOf(body);
+      const step = `      - uses: ${uses}\n        with:\n          ref: master\n\n`;
+      return swap(body, checkout, step + checkout);
+    });
+  return [
+    [
+      add("test", "ref: ${{ github.event.pull_request.head.sha }}"),
+      "job test: checkout ref",
+    ],
+    [add("test", "repository: other/repo"), "job test: checkout repository"],
+    [add("gate", "path: src"), "job gate: checkout path"],
+    [add("gate", "ref: main"), "job gate: checkout ref"],
+    // Mixed-case keys reach the action under the same input name.
+    [add("test", "Ref: master"), "job test: checkout ref"],
+    [add("gate", "Ref: master"), "job gate: checkout ref"],
+    [add("test", "REPOSITORY: other/repo"), "job test: checkout repository"],
+    [add("gate", "Path: src"), "job gate: checkout path"],
+    // GitHub resolves the action's owner/repo case-insensitively too.
+    [extra("test"), "job test: checkout steps"],
+    [extra("gate"), "job gate: checkout steps"],
+    // A quoted scalar names the same action.
+    [extra("test", "'actions/checkout@v7'"), "job test: checkout steps"],
+    [extra("test", '"actions/checkout@v7"'), "job test: checkout steps"],
+    [extra("gate", "'actions/checkout@v7'"), "job gate: checkout steps"],
+  ];
+}
+
+test("P10 both jobs test the same checkout", () => {
+  const bumped = withCheckoutRef(WORKFLOW, "v99");
+  const respelledText = respelledAll(WORKFLOW);
+  const respelledBumped = withCheckoutRef(respelledText, "v99");
+  const texts = [WORKFLOW, bumped, respelledText, respelledBumped];
+  for (const text of texts) pinCheckouts(text);
+  assert.ok(!bumped.includes("actions/checkout@v7"));
+  assert.ok(respelledBumped.includes("Actions/Checkout@v99"));
+  // A single quoted checkout per job is the same checkout.
+  pinCheckouts(
+    quotedCheckout(quotedCheckout(WORKFLOW, "test", "'"), "gate", '"'),
+  );
+  // A bumped or respelled checkout keeps every control throwing for its own
+  // reason.
+  for (const text of texts) {
+    for (const [broken, message] of checkoutControls(text)) {
+      assert.throws(() => pinCheckouts(broken), firstLine(message));
+    }
+  }
+});
+
+test("the P-pin reader throws on a missing or duplicated job, step id or key", () => {
+  const pins = {
+    pinGateOutput,
+    pinSetupNode,
+    pinDecide,
+    pinReport,
+    pinRecord,
+    pinCheckouts,
+    pinTestIf,
+    pinTimeouts,
+    pinAptTest: (text) => pinApt(text, "test"),
+  };
+  const gateJob = [
+    "pinGateOutput",
+    "pinSetupNode",
+    "pinDecide",
+    "pinReport",
+    "pinRecord",
+    "pinCheckouts",
+    "pinTimeouts",
+  ];
+  const gateIds = ["pinSetupNode", "pinDecide", "pinReport", "pinRecord"];
+  const testJob = ["pinCheckouts", "pinTestIf", "pinTimeouts", "pinAptTest"];
+  const twice = (line) => `${line}${line.slice(1)}`;
+  const controls = [
+    [
+      swap(WORKFLOW, "\n  gate:\n", "\n  gatekeeper:\n"),
+      gateJob,
+      /: missing key gate$/,
+    ],
+    [
+      swap(WORKFLOW, "        id: node\n", "        id: decide\n"),
+      gateIds,
+      /: [02] steps with id: (node|decide)$/,
+    ],
+    [
+      swap(WORKFLOW, "        id: decide\n", ""),
+      gateIds,
+      /: 0 steps with id: decide$/,
+    ],
+    [
+      swap(
+        WORKFLOW,
+        "\n    timeout-minutes: 10\n",
+        twice("\n    timeout-minutes: 10\n"),
+      ),
+      gateJob,
+      /job gate: duplicate key timeout-minutes$/,
+    ],
+    [
+      inJob(WORKFLOW, "test", (body) =>
+        swap(
+          body,
+          "\n    timeout-minutes: 45\n",
+          twice("\n    timeout-minutes: 45\n"),
+        ),
+      ),
+      testJob,
+      /job test: duplicate key timeout-minutes$/,
+    ],
+  ];
+  // One assertion per pin: a chain inside one throw passes on its first pin.
+  for (const [broken, names, pattern] of controls) {
+    for (const name of names) {
+      assert.throws(() => pins[name](broken), pattern, name);
+    }
   }
 });

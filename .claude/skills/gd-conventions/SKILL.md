@@ -1997,8 +1997,8 @@ block (`src/test/help-guide-markdown.test.tsx` fails on one).
   arms — unquoted or folded YAML scalars, binary bytes, deleted/missing
   files, empty corpora, non-string values, duplicate keys — and FAILS on
   them instead of skipping (not `scripts/check-rust-gate.mjs`: it selects the
-  rust-tests matrix and fails OPEN: an error in its own run or on the current
-  side runs the matrix, and a candidate it cannot compare is only rejected).
+  rust-tests matrix, skipping only on a valid exact identity a green run
+  recorded; a failed lookup, or no such match, runs the matrix).
   Mining minted the fail-open-checker-arm class on 12+ records across 6 PRs,
   concentrated in the guard scripts the tripwire rule itself ships: a scanner
   that exits 0 on input it could not parse approves exactly what it cannot

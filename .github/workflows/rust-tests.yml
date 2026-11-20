@@ -11,49 +11,32 @@ name: rust-tests
 # A cheap `gate` job runs first and skips the (billed 2×/10× on Windows/macOS)
 # matrix whenever the exact Rust content was ALREADY proven green — see the job
 # comment below. This kills two redundancies: the post-merge `push: master`
-# re-run of a PR that just passed (the squash commit's `src-tauri` tree is
-# byte-identical to the PR head's), and a non-Rust follow-up commit on a PR
-# re-triggering the whole matrix (the `pull_request` `paths` filter matches the
-# cumulative base…head diff, so one earlier Rust commit keeps re-arming it).
+# re-run of a PR that just passed (the squash commit's identity equals the
+# PR's last tested merge commit's when base did not move `src-tauri` or the
+# workflow, gate and apt-script blobs since), and a non-Rust follow-up commit
+# on a PR re-triggering the whole matrix (the `pull_request` `paths` filter
+# matches the cumulative base…head diff, so one earlier Rust commit keeps
+# re-arming it).
 #
-# Second tier: when NO byte-identical green tree exists, the gate also skips if
-# the delta vs a green run is comment-or-formatting-only in `.rs` files — i.e.
-# the two `src-tauri` trees differ only in files ending `.rs`, and each such
-# file is EQUIVALENT under `.github/scripts/canonicalize-rust.py` (doc comments
-# and every string/char literal are preserved byte-verbatim; ordinary comments
-# and all whitespace/reflow are dropped). Any non-`.rs` change, add/delete/
-# rename, or non-equivalent `.rs` file forces the matrix. Motivating case: a
-# comment-only follow-up commit (real example: `1eff119`, four `//` lines added
-# to `src/git/remote.rs`) that today re-runs the whole 3-OS matrix for a
-# foregone conclusion.
+# Only an exact identity may skip: source-reading `include_str!` tests see
+# comments and whitespace, so even a comment-only `.rs` edit runs the matrix.
 #
-# ACCEPTED RISK (stated honestly): this tier slightly weakens the first tier's
-# "worst case is a redundant run" guarantee, because a few lint/test signals
-# live OUTSIDE the canonicalizer's equivalence — whitespace-adjacent clippy
-# lints (e.g. `suspicious_else_formatting`, `empty_line_after_outer_attr`) and
-# panic-message line numbers. Comment-KEYED clippy lints (e.g.
-# `undocumented_unsafe_blocks`, which keys on `// SAFETY:` comments) would also
-# live outside the equivalence — none are enabled today (no `[lints]` section,
-# no clippy.toml; verified 2026-07-18), so enabling one later must re-evaluate
-# this gate. Mitigations: the repo uses no `line!()` / `include_str!()` (audited
-# 2026-07-18); doc comments are preserved because the crate's rlib target runs
-# doc tests; any canonicalizer anomaly fails OPEN (runs the matrix); and "Re-run
-# all jobs" always forces the matrix.
-#
-# Base-drift caveat (pre-existing frame, applies to BOTH passes, not new to tier
-# 2): on `pull_request` the gate signs the PR HEAD tree while the matrix builds
-# the MERGE ref, so a skip forgoes re-validating the head against a base that
-# advanced since the candidate green. The post-merge `push: master` run is the
-# backstop — it builds the true merged tree and cannot inherit such a skip,
-# because base code changes make the merged tree non-equivalent to the PR head
-# tree (a different `src-tauri` tree, hence a real matrix run).
+# Evidence: the gate signs the checkout the matrix itself tests (the merge
+# commit on `pull_request`): its `src-tauri` tree plus the workflow, gate and
+# apt-script blobs. Inputs outside those (`../package.json`, the stubbed
+# `../dist`, the root `.gitattributes`, a root `.cargo/config.toml`) can change
+# what the matrix runs without changing the identity or tripping the paths
+# filter. A base that moved `src-tauri` or any of those blobs changes the
+# identity, so the PR runs unless that exact identity already passed. Each
+# gate records its identity as an artifact name, kept 14 days, and only a
+# green run's artifact counts.
 
 on:
   pull_request:
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-tests.yml"
-      - ".github/scripts/canonicalize-rust.py"
+      - ".github/scripts/apt-prefer-canonical-mirror.sh"
       - "scripts/check-rust-gate.mjs"
   push:
     branches:
@@ -61,7 +44,7 @@ on:
     paths:
       - "src-tauri/**"
       - ".github/workflows/rust-tests.yml"
-      - ".github/scripts/canonicalize-rust.py"
+      - ".github/scripts/apt-prefer-canonical-mirror.sh"
       - "scripts/check-rust-gate.mjs"
 
 # One in-flight run per ref; a force-push cancels the superseded run instead of
@@ -72,21 +55,20 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read # gate reads this workflow's own run history
+  actions: read # gate reads this workflow's run history and artifacts by name
 
 jobs:
-  # The decision lives in scripts/check-rust-gate.mjs: pass 1 skips when an
-  # identical `src-tauri` tree already passed under the same workflow,
-  # gate-script and canonicalizer blobs, pass 2 when the delta vs a green with
-  # those same blobs is comment/format-only `.rs` (header block above). The
-  # gate and canonicalizer blobs are in the identity, so a change to either
-  # re-runs the matrix, as does a merge commit whose gate or workflow differs
-  # from the PR head's (a PR green is listed by head SHA but ran its merge
-  # commit, a limit the script header names). The wiring fails OPEN: `test`
-  # skips only on `run=false` from a decide step that succeeded in a gate job
-  # that succeeded, so a setup-node failure, a script crash or hang, a missing
-  # output or a failed gate job all still run the matrix, and the report step
-  # makes the miss visible.
+  # The decision lives in scripts/check-rust-gate.mjs: it signs the checked-out
+  # commit (the one `test` checks out too) as its `src-tauri` tree plus the
+  # workflow, gate-script and apt-script blobs, and skips only when a green run
+  # of this workflow recorded that exact identity (header block above). A
+  # change to any of those blobs re-keys all evidence.
+  # The record step uploads the identity only after the decision, so it can
+  # never turn a run into a skip; a failed upload loses a future skip at most.
+  # The wiring fails OPEN: `test` skips only on `run=false` from a decide step
+  # that succeeded in a gate job that succeeded, so a setup-node failure, a
+  # script crash or hang, a missing output or a failed gate job all still run
+  # the matrix, and the report step makes the miss visible.
   gate:
     name: gate (skip if this Rust content already passed)
     runs-on: ubuntu-26.04
@@ -95,12 +77,10 @@ jobs:
       run: ${{ steps.decide.outputs.run }}
       decided: ${{ steps.decide.outcome }}
     steps:
-      # fetch-depth: 0 pulls all branches/tags, so every past green run's commit
-      # (PR-branch heads included — branches aren't deleted on merge) is present
-      # locally for the tree lookups below.
+      # The identity reads HEAD's own tree and blobs, so the default depth-1
+      # clone suffices.
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Node
@@ -119,10 +99,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PUSH_SHA: ${{ github.sha }}
           ATTEMPT: ${{ github.run_attempt }}
         run: node scripts/check-rust-gate.mjs
+
+      - name: Record the tested checkout's identity
+        if: ${{ !cancelled() && steps.decide.outputs.identity != '' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ steps.decide.outputs.identity }}
+          path: ${{ runner.temp }}/rust-gate-evidence/identity.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
 
       - name: Report a gate that made no decision
         if: ${{ !cancelled() && (steps.decide.outcome != 'success' || steps.decide.outputs.run == '') }}
@@ -198,19 +188,7 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
-          # AWS-placed runners get a regional EC2 archive mirror that ran at 59-95 kB/s
-          # on this list (13-21 min, run 44371845274); Canonical's hosts were fast there.
-          ec2_host='[a-z0-9-]+\.ec2\.archive\.ubuntu\.com'
-          apt_files=(/etc/apt/sources.list /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources)
-          mapfile -d '' -t ec2_lists < <(sudo grep -lZE "://$ec2_host/" "${apt_files[@]}" 2>/dev/null || true)
-          if [ "${#ec2_lists[@]}" -eq 0 ]; then
-            echo "apt: no EC2 regional mirror configured"
-          elif sudo sed -i -E "s#://$ec2_host/#://archive.ubuntu.com/#g" "${ec2_lists[@]}"; then
-            printf 'apt: EC2 regional mirror replaced in:\n'
-            printf '%s\n' "${ec2_lists[@]}"
-          else
-            echo "apt: EC2 mirror rewrite failed; continuing with the files as they are"
-          fi
+          bash .github/scripts/apt-prefer-canonical-mirror.sh
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
