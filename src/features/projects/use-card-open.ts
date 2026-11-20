@@ -9,8 +9,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useRef, useState } from "react";
 import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
 import type { BoardItem, RemoteLens } from "@/lib/git/types";
-import { sameCheckout } from "@/lib/git/worktree-default-path";
-import { isWindows } from "@/lib/hotkeys/binding";
+import { sameOpenCheckout } from "@/lib/git/worktree-default-path";
 import {
   type LocalLandingTarget,
   openingStatus,
@@ -153,11 +152,7 @@ export function useCardOpen(input: CardOpenInput): {
     }
     // Recents can spell the open checkout differently, and the history tells a
     // same-repository hop by strict string equality, so the store's own path.
-    // Letter case folds on Windows only: a Mac volume can be case-sensitive, and
-    // a case-variant folder there can be another repository.
-    const here = sameCheckout(landing.path, repoPath, {
-      caseInsensitive: isWindows,
-    });
+    const here = sameOpenCheckout(landing.path, repoPath);
     const targetPath = here ? repoPath : landing.path;
     const targetName = here ? repoName : landing.name;
     const switchesToFork = here && activeIsUpstream;

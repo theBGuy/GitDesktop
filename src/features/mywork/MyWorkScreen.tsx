@@ -50,8 +50,7 @@ import {
   type MyWorkItem,
   providerLabel,
 } from "@/lib/git/types";
-import { sameCheckout } from "@/lib/git/worktree-default-path";
-import { isWindows } from "@/lib/hotkeys/binding";
+import { sameOpenCheckout } from "@/lib/git/worktree-default-path";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   hasOpenableMatch,
@@ -558,12 +557,8 @@ export function MyWorkScreen() {
     }
     // Recents can spell the open checkout differently, and the store tells a
     // same-repository landing by strict string equality, so the store's own path.
-    // Letter case folds on Windows only: a Mac volume can be case-sensitive, and
-    // a case-variant folder there can be another repository.
     const { repoPath: openPath, repoName: openName } = useUiStore.getState();
-    const here =
-      openPath !== null &&
-      sameCheckout(landing.path, openPath, { caseInsensitive: isWindows });
+    const here = openPath !== null && sameOpenCheckout(landing.path, openPath);
     const targetPath = here ? openPath : landing.path;
     const targetName = (here ? openName : null) ?? landing.name;
     // Land under the origin lens (the match keyed on the ORIGIN slug): a fork
