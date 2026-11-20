@@ -10,6 +10,8 @@
 // - WIRED anchors: no `providerLabel(` call, at least one `shownProviderLabel(`;
 //   the five views read the saved provider; RemotePrView hands the banner the
 //   shown provider on the `<PrMergeabilityBanner` element itself.
+// - RepositoryView's empty Pull Requests pane builds its message from
+//   `PR_NOUN[…]` (no jsdom test renders that view).
 //
 // Comments are masked before matching; string and template-literal content is
 // never masked (the banner's calls sit inside `${…}`). Shapes this roster
@@ -364,4 +366,50 @@ test("fixtures: what the matcher reads and skips", () => {
   // A WIRED file keeping a raw call fails its anchors.
   const fixture = "src/features/pulls/PrMergeabilityBanner.tsx";
   assert.notDeepEqual(wiredFailures(fixture, maskComments(unrolled)), []);
+});
+
+const REPO_VIEW = "src/features/repository/RepositoryView.tsx";
+
+/** The anchor failures for RepositoryView's empty Pull Requests pane: its
+ *  message names the shown provider's noun through `PR_NOUN[…]`, never a
+ *  literal. It renders under no jsdom test, so this scan is its only pin. */
+export function prPlaceholderFailures(masked) {
+  const failures = [];
+  const start = masked.indexOf("icon={GitPullRequestIcon}");
+  const end = start === -1 ? -1 : masked.indexOf("/>", start);
+  if (start === -1 || end === -1) {
+    failures.push(`${REPO_VIEW}: no GitPullRequestIcon placeholder`);
+    return failures;
+  }
+  const flat = masked.slice(start, end).replace(/\s+/g, "");
+  if (!flat.includes("message={`Select a ${prNoun}`}".replace(/\s+/g, "")))
+    failures.push(`${REPO_VIEW}: the placeholder isn't built from prNoun`);
+  if (!/\bconst prNoun = PR_NOUN\[shown \?\? "github"\]/.test(masked))
+    failures.push(
+      `${REPO_VIEW}: prNoun isn't read from PR_NOUN[shown ?? "github"]`,
+    );
+  return failures;
+}
+
+test("RepositoryView's Pull Requests placeholder names the shown provider's noun", () => {
+  assert.deepEqual(prPlaceholderFailures(readMasked(REPO_VIEW)), []);
+  const src = readFileSync(join(ROOT, REPO_VIEW), "utf8");
+  const literal = src.replace(
+    "message={`Select a ${prNoun}`}",
+    'message="Select a pull request"',
+  );
+  assert.notEqual(literal, src, "mutant changed nothing");
+  assert.notDeepEqual(prPlaceholderFailures(maskComments(literal)), []);
+  const ternary = src.replace(
+    'PR_NOUN[shown ?? "github"]',
+    'shown === "gitlab" ? "merge request" : "pull request"',
+  );
+  assert.notEqual(ternary, src, "mutant changed nothing");
+  assert.notDeepEqual(prPlaceholderFailures(maskComments(ternary)), []);
+  const fixedIndex = src.replace(
+    'PR_NOUN[shown ?? "github"]',
+    'PR_NOUN["github"]',
+  );
+  assert.notEqual(fixedIndex, src, "mutant changed nothing");
+  assert.notDeepEqual(prPlaceholderFailures(maskComments(fixedIndex)), []);
 });

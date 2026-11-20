@@ -134,7 +134,11 @@ import {
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
-import { isPrArchivedRefusal, presentError } from "@/lib/error-summary";
+import {
+  appErrorDetail,
+  isPrArchivedRefusal,
+  presentError,
+} from "@/lib/error-summary";
 import {
   gitFetch,
   type MergeStrategy,
@@ -158,6 +162,7 @@ import {
   isStackWritePendingFor,
   itemFieldValuesOptions,
   itemProjectsOptions,
+  mergeMessageDefaultsOptions,
   PIPELINE_IN_FLIGHT,
   type PrWriteKind,
   pendingWriteMatching,
@@ -190,6 +195,7 @@ import {
   useGlCancelAutoMerge,
   useGlMrMergeState,
   useGlMrTimeStats,
+  useMergeMessageDefaults,
   useMergePr,
   useMergeRemotePr,
   useMinimizeComment,
@@ -237,6 +243,7 @@ import {
   type ForgeUserRef,
   listPageRows,
   OPEN_IN_BROWSER,
+  PR_ARCHIVED_READONLY_MESSAGE,
   type PrDetails,
   type PrInfo,
   type PrListPage,
@@ -286,6 +293,17 @@ import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
+import { MergePrDialog } from "./MergePrDialog";
+import {
+  MERGE_LABEL,
+  MERGE_METHOD_RULE_REASON,
+  MERGE_METHOD_SETTINGS_REASON,
+  mergeMessageHold,
+  mergeMessagePlan,
+  mergeMessagesToSend,
+  planHeadSha,
+  useMergeMessageDraft,
+} from "./merge-message";
 import { mergeStripArm } from "./merge-strip-arm";
 import { PendingReviewBar } from "./PendingReviewBar";
 import { PendingReviewStrip } from "./PendingReviewStrip";
@@ -309,18 +327,18 @@ import {
   plainCheckoutTarget,
 } from "./PrWorktreeCheckout";
 import { prSectionAnswered } from "./pr-section-answered";
-import {
-  MergePrDialog,
-  MrTimeTracking,
-  PrFilesPane,
-} from "./RemotePrViewParts";
+import { MrTimeTracking, PrFilesPane } from "./RemotePrViewParts";
 import {
   DISCARD_RESOLVE_CONFIRM,
   ResolveRemotePrView,
 } from "./ResolveRemotePrView";
 import { ReviewComposer } from "./ReviewComposer";
 import { ReviewersPopover, userRefHint } from "./ReviewersPopover";
-import { ReviewThreadsBlock, type SuggestionApply } from "./ReviewThreads";
+import {
+  ReviewThreadsBlock,
+  type SuggestionApply,
+  ThreadReplyHoldContext,
+} from "./ReviewThreads";
 import {
   StackOffer,
   type StackOfferHandle,
@@ -360,13 +378,6 @@ function lensRemoteName(lens: RemoteLens): string {
     }
   }
 }
-
-const MERGE_LABEL: Record<MergeStrategy, string> = {
-  merge: "Create a merge commit",
-  squash: "Squash and merge",
-  rebase: "Rebase and merge",
-  fast_forward: "Fast-forward",
-};
 
 /** Each strategy's server-side repo setting. Bitbucket's fast_forward has no
  *  GitHub server toggle, so it reads `null` (unknown). */
@@ -419,6 +430,11 @@ const SECTION_LABEL: Record<PrSection, (pr: PrDetails) => string> = {
 function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
   return SERVER_MERGE_FLAG[s](pr) === false;
 }
+
+/** The Merge trigger's and the open dialog's hold while GitLab's head guard is
+ *  unknown. */
+const MERGE_GUARD_MISSING_REASON =
+  "Reload to merge — couldn't load the head commit to guard the merge";
 
 /** Defensive fallback for a `busy` hold whose term `composerReason` doesn't
  *  (yet) name — coverage holds today, but this keeps the four sites that
@@ -496,7 +512,7 @@ function PrLoadingFrame({
   return (
     <>
       <span role="status" className="sr-only">
-        {PR_SWITCH_LOADING_REASON}
+        {`Loading this ${noun}…`}
       </span>
       <header className="@container/pr-header space-y-2 border-b px-4 py-3">
         {/* A heading holding only the hidden skeleton is announced empty. */}
@@ -607,7 +623,8 @@ export type FooterFocusTarget = "close" | "reopen";
  * PR it was fired on; it lands on the counterpart button when that footer
  * mounts, only while that PR is on screen and focus still sits on <body>.
  * Change-only, so a footer swapped by a refetch with nothing armed moves
- * nothing; a PR change drops the arm unconsumed.
+ * nothing; a PR change drops the arm unconsumed. Handlers go through `run`;
+ * its tests can't see the view's painted-footer gates, refs or closures.
  */
 export function useFooterFocusSwap({
   entityKey,
@@ -646,17 +663,49 @@ export function useFooterFocusSwap({
     if (document.activeElement !== document.body) return;
     (toClose ? closeRef : reopenRef).current?.focus();
   }, [closeShown, reopenShown, entityKey, closeRef, reopenRef]);
+  /** Arms for the PR it addresses. A key that isn't the PR on screen is
+   *  refused, so a late arm never replaces the shown PR's arm. */
+  function arm(target: FooterFocusTarget, key: string) {
+    if (key !== liveKeyRef.current) return;
+    pendingRef.current = { target, key };
+  }
+  /** A failed write leaves the footer, and focus on its button, standing.
+   *  Compare-and-clear on the key it armed with: a later PR's arm survives. */
+  function disarm(key: string) {
+    if (pendingRef.current?.key === key) pendingRef.current = null;
+  }
   return {
-    /** Call right before the write starts, for the PR it addresses. A key that
-     *  isn't the PR on screen is refused, so a late arm never replaces its arm. */
-    arm(target: FooterFocusTarget, key: string) {
-      if (key !== liveKeyRef.current) return;
-      pendingRef.current = { target, key };
-    },
-    /** A failed write leaves the footer, and focus on its button, standing.
-     *  Compare-and-clear on the key it armed with: a later PR's arm survives. */
-    disarm(key: string) {
-      if (pendingRef.current?.key === key) pendingRef.current = null;
+    arm,
+    disarm,
+    /** A footer action: ownership is read before any await (a confirm takes
+     *  focus), `prepare` false bails unarmed, the arm lands right before
+     *  `write`, and a failed write disarms. A throwing `prepare` propagates. */
+    async run({
+      footer,
+      target,
+      key,
+      prepare,
+      write,
+      onWriteError,
+    }: {
+      footer: HTMLElement | null;
+      target: FooterFocusTarget;
+      key: string;
+      prepare: () => Promise<boolean>;
+      write: () => Promise<void>;
+      onWriteError: (e: unknown) => void;
+    }) {
+      const ownsFocus = !!footer?.contains(document.activeElement);
+      if (!(await prepare())) return;
+      // A footer swapped out during `prepare` has nothing left to hand focus
+      // from; an arm taken then would land on some later, unrelated swap.
+      if (ownsFocus && footer?.isConnected) arm(target, key);
+      try {
+        await write();
+      } catch (e) {
+        disarm(key);
+        onWriteError(e);
+      }
     },
   };
 }
@@ -680,6 +729,66 @@ export function useArchivedLatch(entityKey: string) {
         setArchivedFor(sentOn);
     },
   };
+}
+
+type ConversationHold = { composer: string | null; reactions: string | null };
+
+/**
+ * The conversation hold as the latest render saw it, for a handler to re-read
+ * after its awaits. `read` answers only while that render showed the PR the
+ * handler was sent on, fresh: a held or placeholder frame's hold is another PR's.
+ */
+export function useLiveConversationHold(
+  entityKey: string,
+  stale: boolean,
+  hold: ConversationHold,
+) {
+  const latestRef = useLatestRef({ entityKey, stale, hold });
+  return {
+    read(sentOn: string): ConversationHold | null {
+      const latest = latestRef.current;
+      return latest.entityKey === sentOn && !latest.stale ? latest.hold : null;
+    },
+    /** Whether the latest render still selects the PR the handler was sent on.
+     *  The key is repository, lens and number, so a refetch never changes it. */
+    isOn(sentOn: string): boolean {
+      return latestRef.current.entityKey === sentOn;
+    },
+  };
+}
+
+/** GitHub's refusal of a reaction it won't take. Its generic permission error,
+ *  so it never proves the PR archived and never latches. */
+export function isPrReactionRefusal(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { kind, message } = error as { kind?: unknown; message?: unknown };
+  if (kind !== "gh" || typeof message !== "string") return false;
+  const detail = appErrorDetail(kind, message);
+  return (
+    detail.includes(
+      "does not have the correct permissions to execute `AddReaction`",
+    ) ||
+    detail.includes(
+      "does not have the correct permissions to execute `RemoveReaction`",
+    )
+  );
+}
+
+export const PR_REACTION_REFUSED_MESSAGE =
+  "GitHub refused the reaction. This pull request may be archived, or you may not have permission to react to it.";
+
+/** A Close-with-comment whose conversation went read-only under its confirm.
+ *  An archived pull request takes no close either, so only a lock offers the
+ *  retry without the comment. */
+export function closeWithheldMessage(number: number, reason: string): string {
+  if (reason === PR_ARCHIVED_READONLY_MESSAGE)
+    return `#${number} wasn't closed. ${reason} Your draft is kept.`;
+  return `#${number} wasn't closed. ${reason} Choose Close again to close it without your comment. Your draft is kept.`;
+}
+
+/** A change request sent without the draft its held conversation won't take. */
+export function requestedWithoutCommentMessage(reason: string): string {
+  return `Requested changes without your comment. ${reason} Your draft is kept.`;
 }
 
 /** The palette's route to the comment box, offered only where there is a box to
@@ -2083,13 +2192,6 @@ export function RemotePrView({
     writeDraft: (key, update) =>
       compose.setFor(key.slice(key.indexOf("|") + 1), update),
   });
-  // Request changes posts the draft through a command that carries no images.
-  const requestHeldForImages = (requested: boolean) =>
-    !requested && referencesStaged(compose.value, attachments.images);
-  // Request changes sends the draft as it stands and then ends it, so it waits
-  // for a stage in flight whatever the text holds.
-  const requestHeldForAttaching = (requested: boolean) =>
-    !requested && attachments.attaching;
   const { archived, latchIfArchived } = useArchivedLatch(entityKey);
   // Read off the rendered PR's own details only: a placeholder is another PR's.
   // The provider only picks the hold's copy, so it names the shown one.
@@ -2097,6 +2199,23 @@ export function RemotePrView({
     detailsPlaceholder ? undefined : details.data,
     archived,
     shown,
+  );
+  // Both waits below apply only while the draft would ride: a held conversation's
+  // request goes without it.
+  // Request changes posts the draft through a command that carries no images.
+  const requestHeldForImages = (requested: boolean) =>
+    !requested &&
+    conversationHold.composer === null &&
+    referencesStaged(compose.value, attachments.images);
+  // Request changes sends the draft as it stands and then ends it, so it waits
+  // for a stage in flight whatever the text holds.
+  const requestHeldForAttaching = (requested: boolean) =>
+    !requested && conversationHold.composer === null && attachments.attaching;
+  // Writes whose body rides a confirm or an await re-read the hold at the send.
+  const liveHold = useLiveConversationHold(
+    entityKey,
+    detailsStale,
+    conversationHold,
   );
   // Quote entry points withhold over a placeholder (the quote would be another
   // PR's) and while the composer is read-only (the draft could never post).
@@ -2123,6 +2242,34 @@ export function RemotePrView({
   // Whether the open merge dialog is arming auto-merge (vs merging now) — set by
   // the dropdown item that opened it, read by confirmMerge + the dialog copy.
   const [mergeAuto, setMergeAuto] = useState(false);
+  // The message rows' defaults, read only while the dialog is open and no merge
+  // of it runs, so a merge's own settle never re-reads the PR it merged. Never its
+  // isPending/isPaused: this view is reused across PRs (record-scoped pending).
+  const mergeDefaults = useMergeMessageDefaults(
+    repoPath,
+    number,
+    mergeStrategy,
+    lens,
+    mergeOpen &&
+      hold.interactive &&
+      !(mergeAuto ? armAutoMergePending : mergePending),
+  );
+  const mergePlan = mergeMessagePlan({
+    data: mergeDefaults.data,
+    failed: mergeDefaults.error !== null,
+    paused: mergeDefaults.fetchStatus === "paused",
+    onRetry: () => void mergeDefaults.refetch(),
+  });
+  const mergeDraft = useMergeMessageDraft(mergePlan);
+  // One open request of the dialog. A failure is written only onto the session
+  // it started in, and a kept failure reopens with its text (same PR, strategy
+  // and auto flag).
+  const [mergeSession, setMergeSession] = useState<object | null>(null);
+  const mergeSessionRef = useLatestRef(mergeSession);
+  const [mergeFailure, setMergeFailure] = useState<{
+    session: object;
+    text: string;
+  } | null>(null);
   // Linked-issue chips on the EDIT path: the chips OWN the trailing ref block, so
   // on save the body is re-composed from the (stripped) text + the chips' refs —
   // never a raw body that would double the refs the chips already carry.
@@ -2461,6 +2608,10 @@ export function RemotePrView({
     if (requested && !canUnrequestChanges) return;
     if (requestHeldForImages(requested) || requestHeldForAttaching(requested))
       return;
+    const reqFor = entityKey;
+    // What the press showed wins: a draft held then stays out even if the hold
+    // lifts before the send.
+    const heldAtPress = conversationHold.composer;
     // Same as toggleApproval: mirror usePrApprovals' literal "origin" lens segment.
     const key = [
       "repo",
@@ -2473,6 +2624,19 @@ export function RemotePrView({
     // Same guard as toggleApproval: cancel an in-flight approvals refetch so it
     // can't land after the optimistic flip and revert it.
     await queryClient.cancelQueries({ queryKey: key });
+    const draft = compose.value.trim();
+    // Both writes go through the hooks' live repository and lens, so a
+    // selection moved during the cancel would send either to another PR.
+    if (!liveHold.isOn(reqFor)) {
+      toast.warning(
+        requested
+          ? `The change request on #${number} wasn't withdrawn because another ${prNoun} was opened meanwhile.`
+          : `Changes weren't requested on #${number} because another ${prNoun} was opened meanwhile.${
+              draft !== "" ? " Your draft is kept." : ""
+            }`,
+      );
+      return;
+    }
     const prev = queryClient.getQueryData<ApprovalState>(key);
     if (prev) {
       queryClient.setQueryData<ApprovalState>(key, {
@@ -2491,12 +2655,26 @@ export function RemotePrView({
       return;
     }
     const submittedFor = entityKey;
+    // A held conversation still takes the change request (a review action, not
+    // a comment), but not the draft, which stays in the box. A hold at the press
+    // or at the send withholds it; the reason is the one still in effect.
+    const live = liveHold.read(reqFor);
+    const heldNow = live ? live.composer : heldAtPress;
+    const heldReason = heldNow ?? heldAtPress;
+    const withheld = heldReason !== null && draft !== "";
     try {
       await requestChangesPr.mutateAsync({
         number,
-        body: compose.value.trim(),
+        body: withheld ? "" : draft,
       });
+      if (withheld) {
+        toast.warning(requestedWithoutCommentMessage(heldReason));
+        return;
+      }
       toast.success("Requested changes");
+      // Under a hold the box is left alone even when it read empty: an image
+      // still staging into it lands after the send, and a clear would drop it.
+      if (heldReason !== null) return;
       compose.clearFor(submittedFor);
       endDraftAttachments(draftKeyFor("pr-comment", submittedFor));
     } catch (e) {
@@ -2554,9 +2732,10 @@ export function RemotePrView({
 
   /** Posts the riding draft ahead of a state change. False means the comment
    *  failed and the state change is abandoned: the draft stays put for a retry,
-   *  so a lost note can never be the price of a failed close. */
-  async function postRidingDraft(): Promise<boolean> {
-    if (!draftRidesStateChange) return true;
+   *  so a lost note can never be the price of a failed close. The caller says
+   *  whether the draft rides. */
+  async function postRidingDraft(rides: boolean): Promise<boolean> {
+    if (!rides) return true;
     const body = compose.value.trim();
     const submittedFor = entityKey;
     const draftKey = draftKeyFor("pr-comment", submittedFor);
@@ -2590,114 +2769,166 @@ export function RemotePrView({
     // Re-checked in the handler: the footer disables on the same hold, but a
     // click can land across a selection switch before the disable repaints.
     if (busy || detailsStale || triageBlocked || rideHold !== null) return;
-    // Read at entry, before the confirm dialog takes focus: only a close fired
-    // from inside the footer may move focus when the footer swaps.
-    const ownsFocus = !!openFooterRef.current?.contains(document.activeElement);
     // `closePr` follows the live repo once the awaits below have run.
     const closeIn = repoPath;
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
-    // Ahead of the riding draft: a cancelled confirm must leave the comment
-    // unposted.
-    const ok = await useConfirm.getState().ask({
-      title: `Close ${prNoun} #${number}?`,
-      body: `Everyone watching is notified and the ${prNoun} leaves the open list. Reopening puts it back, but the notification can't be unsent.${
-        withComment ? " Your draft posts as a comment first." : ""
-      }`,
-      confirmLabel: withComment ? "Close with comment" : `Close ${prNoun}`,
-      holdOffline: true,
-    });
-    // Ahead of the riding draft too: a close refused offline posts nothing.
-    if (!ok || refuseWhileOffline()) return;
-    // The riding post follows the live repo too, so a switch under the prompt
-    // sends neither write.
-    if (
-      refuseIfSwitched(
-        closeIn,
-        withComment ? "nothing was posted or closed" : "nothing was closed",
-      )
-    )
-      return;
-    // Again below the riding post: the connection can drop while it runs, and a
-    // comment that went out is named in the refusal.
-    if (!(await postRidingDraft())) return;
-    if (refuseWhileOffline(withComment ? RIDING_COMMENT_CLOSE_HELD : undefined))
-      return;
-    if (
-      withComment &&
-      refuseIfSwitched(
-        closeIn,
-        `your comment was posted, but the ${prNoun} wasn't closed`,
-        "before the close started",
-      )
-    )
-      return;
-    if (ownsFocus) footerFocus.arm("reopen", entityKey);
-    try {
-      await closePr.mutateAsync({ number, lens });
-      // The riding comment posts without the "Comment added" toast the ordinary
-      // submit gets, so the confirmation here has to account for both writes.
-      toast.success(
-        withComment
-          ? `Closed #${number} and posted your comment`
-          : `Closed #${number}`,
-      );
-    } catch (e) {
-      footerFocus.disarm(entityKey);
-      if (withComment)
-        toastErrorWithNote(
-          e,
-          "Your comment was posted, but closing failed — try Close again.",
+    // Whether the draft actually rides, settled after the confirm: the
+    // conversation can go read-only while it is open.
+    let rides = false;
+    const closeFor = entityKey;
+    // `run` reads focus ownership before the confirm dialog takes focus: only a
+    // close fired from inside the footer may move focus when the footer swaps.
+    await footerFocus.run({
+      footer: openFooterRef.current,
+      target: "reopen",
+      key: closeFor,
+      prepare: async () => {
+        // Ahead of the riding draft: a cancelled confirm must leave the comment
+        // unposted.
+        const ok = await useConfirm.getState().ask({
+          title: `Close ${prNoun} #${number}?`,
+          body: `Everyone watching is notified and the ${prNoun} leaves the open list. Reopening puts it back, but the notification can't be unsent.${
+            withComment ? " Your draft posts as a comment first." : ""
+          }`,
+          confirmLabel: withComment ? "Close with comment" : `Close ${prNoun}`,
+          holdOffline: true,
+        });
+        // Ahead of the riding draft too: a close refused offline posts nothing.
+        if (!ok || refuseWhileOffline()) return false;
+        // The riding post follows the live repo too, so a switch under the
+        // prompt sends neither write.
+        if (
+          refuseIfSwitched(
+            closeIn,
+            withComment ? "nothing was posted or closed" : "nothing was closed",
+          )
+        )
+          return false;
+        // The riding post goes through the hook's live lens, so a selection
+        // moved under the prompt would post to another PR.
+        if (withComment && !liveHold.isOn(closeFor)) {
+          toast.warning(
+            `#${number} wasn't closed because another ${prNoun} was opened while the prompt was up. Nothing was posted. Your draft is kept.`,
+          );
+          return false;
+        }
+        // The user confirmed a close WITH the comment; closing without it is a
+        // different action, so a hold that landed under the confirm closes
+        // nothing and keeps the draft.
+        const live = liveHold.read(closeFor);
+        const heldNow = live ? live.composer : conversationHold.composer;
+        if (withComment && heldNow !== null) {
+          toast.warning(closeWithheldMessage(number, heldNow));
+          return false;
+        }
+        rides = withComment;
+        // Again below the riding post: the connection can drop while it runs,
+        // and a comment that went out is named in the refusal.
+        if (!(await postRidingDraft(rides))) return false;
+        if (refuseWhileOffline(rides ? RIDING_COMMENT_CLOSE_HELD : undefined))
+          return false;
+        if (
+          rides &&
+          refuseIfSwitched(
+            closeIn,
+            `your comment was posted, but the ${prNoun} wasn't closed`,
+            "before the close started",
+          )
+        )
+          return false;
+        return true;
+      },
+      write: async () => {
+        await closePr.mutateAsync({ number, lens });
+        // The riding comment posts without the "Comment added" toast the
+        // ordinary submit gets, so the confirmation has to account for both.
+        toast.success(
+          rides
+            ? `Closed #${number} and posted your comment`
+            : `Closed #${number}`,
         );
-      else onError(e);
-    }
+      },
+      onWriteError: (e) => {
+        if (rides)
+          toastErrorWithNote(
+            e,
+            "Your comment was posted, but closing failed — try Close again.",
+          );
+        else onError(e);
+      },
+    });
   }
 
   async function doReopen() {
     if (busy || detailsStale || triageBlocked || rideHold !== null) return;
-    const ownsFocus = !!reopenFooterRef.current?.contains(
-      document.activeElement,
-    );
     // `reopenPr` follows the live repo once the riding post has run.
     const reopenIn = repoPath;
     const withComment = draftRidesStateChange;
-    if (!(await postRidingDraft())) return;
-    if (
-      withComment &&
-      refuseIfSwitched(
-        reopenIn,
-        `your comment was posted, but the ${prNoun} wasn't reopened`,
-        "before the reopen started",
-      )
-    )
-      return;
-    if (ownsFocus) footerFocus.arm("close", entityKey);
-    try {
-      await reopenPr.mutateAsync({ number, lens });
-      toast.success(
-        withComment
-          ? `Reopened #${number} and posted your comment`
-          : `Reopened #${number}`,
-      );
-    } catch (e) {
-      footerFocus.disarm(entityKey);
-      if (withComment)
-        toastErrorWithNote(
-          e,
-          "Your comment was posted, but reopening failed — try Reopen again.",
+    await footerFocus.run({
+      footer: reopenFooterRef.current,
+      target: "close",
+      key: entityKey,
+      prepare: async () => {
+        if (!(await postRidingDraft(withComment))) return false;
+        if (
+          withComment &&
+          refuseIfSwitched(
+            reopenIn,
+            `your comment was posted, but the ${prNoun} wasn't reopened`,
+            "before the reopen started",
+          )
+        )
+          return false;
+        return true;
+      },
+      write: async () => {
+        await reopenPr.mutateAsync({ number, lens });
+        toast.success(
+          withComment
+            ? `Reopened #${number} and posted your comment`
+            : `Reopened #${number}`,
         );
-      else onError(e);
-    }
+      },
+      onWriteError: (e) => {
+        if (withComment)
+          toastErrorWithNote(
+            e,
+            "Your comment was posted, but reopening failed — try Reopen again.",
+          );
+        else onError(e);
+      },
+    });
   }
 
   async function confirmMerge() {
+    // A press on a dialog still animating out after a switch to another PR
+    // would merge that PR: only an open dialog's live session merges.
+    if (!mergeOpen || mergeSession === null) return;
     // The dialog can sit open across a disconnect; its confirm holds on the same
     // verdict, and this refuses a press that lands before the hold repaints.
     if (refuseWhileOffline()) return;
-    // GitLab stale-view guard: the head sha the user is looking at (the same oid
-    // the AI-review path uses). GitLab 409s if the head moved; GitHub ignores it.
-    const sha = pr ? prHeadSha(pr) : undefined;
+    // The dialog's holds re-read at the press, for a pull request that stopped
+    // being open, a rule or a lost head that lands before the hold repaints.
+    if (mergeNotOpen || mergeGuardMissing || mergeMethodHold !== undefined)
+      return;
+    // An emptied title holds the confirm; this refuses a press or chord that
+    // lands before the hold repaints. The message is read before any await.
+    if (mergeMessageHold(mergeDraft.rows, mergeDraft.plan) !== null) return;
+    const { squashMessage, mergeMessage } = mergeMessagesToSend(
+      mergeDraft.rows,
+      mergeDraft.plan,
+    );
+    const edited = squashMessage !== undefined || mergeMessage !== undefined;
+    const session = mergeSession;
+    setMergeFailure(null);
+    // Stale-view guard: the head sha the user is looking at (the same oid the
+    // AI-review path uses), which the forge refuses once the head moved. An
+    // edited message binds to the head its defaults were read at instead, so it
+    // never lands on commits it doesn't describe.
+    const viewSha = pr ? prHeadSha(pr) : undefined;
+    const sha = edited ? (planHeadSha(mergeDraft.plan) ?? viewSha) : viewSha;
     // The checkbox is hidden/disabled for a default or rule-protected head, but
     // force the flag false here too so a stale `true` can't reach the forge.
     const deleteHead = deleteBranch && !headIsDefault && !headDeletionBlocked;
@@ -2708,6 +2939,16 @@ export function RemotePrView({
     const closeDialogIfStillHere = () => {
       if (startedFor === entityKeyRef.current) setMergeOpen(false);
     };
+    // A failure that carried an edit keeps the text: on the session it started
+    // in, the dialog stays (or, closed mid-flight, reopens with it); a newer
+    // session gets the toast alone. An unedited failure closes as before. The
+    // defaults read pauses while the merge is pending and has no staleTime, so a
+    // kept dialog reads them again at the settle and a retry binds to that head.
+    const afterFailedMerge = (e: unknown) => {
+      if (!edited) closeDialogIfStillHere();
+      else if (session !== null && session === mergeSessionRef.current)
+        setMergeFailure({ session, text: presentError(e).summary });
+    };
     if (mergeAuto) {
       // Arm merge-when-pipeline-succeeds instead of merging now (GitLab-only).
       try {
@@ -2717,6 +2958,8 @@ export function RemotePrView({
           strategy: mergeStrategy,
           deleteBranch: deleteHead,
           sha,
+          squashMessage,
+          mergeMessage,
         });
         closeDialogIfStillHere();
         toast.success(
@@ -2724,7 +2967,7 @@ export function RemotePrView({
         );
       } catch (e) {
         onError(e);
-        closeDialogIfStillHere();
+        afterFailedMerge(e);
       }
       return;
     }
@@ -2736,6 +2979,8 @@ export function RemotePrView({
         strategy: mergeStrategy,
         deleteBranch: deleteHead,
         sha,
+        squashMessage,
+        mergeMessage,
       });
       // A queued merge was accepted but hasn't landed, so announce the state
       // once — mirroring the auto-merge arm — instead of a "Merged" success
@@ -2774,7 +3019,7 @@ export function RemotePrView({
             blockedMergeLine(blockedRequirements, blockedApprovals),
         );
       else onError(e);
-      closeDialogIfStillHere();
+      afterFailedMerge(e);
     }
   }
 
@@ -2873,6 +3118,9 @@ export function RemotePrView({
     setMergeAuto(false);
     setMergeStrategy("merge");
     setDeleteBranch(false);
+    mergeDraft.reset();
+    setMergeFailure(null);
+    setMergeSession(null);
     edit.setOpen(false);
   };
   // The tree of a takeover left by a PR switch, whose AI walk and prefilter
@@ -2910,8 +3158,71 @@ export function RemotePrView({
 
   // GitLab's merge sends a stale-view `sha` guard sourced from the forge-reported head.
   // Without one we can't guard, so GitLab disables Merge rather than merge unguarded on
-  // an irreversible op; reloading refetches the head. GitHub has no guard, so it's exempt.
+  // an irreversible op; reloading refetches the head. GitHub sends a head only
+  // beside an edited message and refuses an edited one when none is known, so this
+  // hold is GitLab's.
   const mergeGuardMissing = provider === "gitlab" && pr != null && !pr.headSha;
+  // A pull request merged or closed elsewhere holds the open dialog's confirm,
+  // outranking the guard and method holds it makes moot.
+  const mergeNotOpen = pr != null && pr.state !== "OPEN";
+  // The open dialog's method, gated as its menu item is (GitHub, merging now): a
+  // setting or branch rule that lands while it is open holds its confirm.
+  const mergeMethodHold = (() => {
+    if (
+      pr == null ||
+      mergeAuto ||
+      provider === "gitlab" ||
+      provider === "bitbucket" ||
+      mergeStrategy === "fast_forward"
+    )
+      return undefined;
+    if (isServerMergeDisabled(pr, mergeStrategy))
+      return MERGE_METHOD_SETTINGS_REASON;
+    if (!isMergeMethodAllowed(rulesConfig, pr.baseRefName, mergeStrategy))
+      return MERGE_METHOD_RULE_REASON;
+    return undefined;
+  })();
+  const mergeDialogHold = (() => {
+    switch (true) {
+      case offlineHold !== undefined:
+        return offlineHold;
+      case mergeNotOpen:
+        return `This ${prNoun} is no longer open.`;
+      case mergeGuardMissing:
+        return MERGE_GUARD_MISSING_REASON;
+      default:
+        return mergeMethodHold;
+    }
+  })();
+  // While the dialog is open, a moved head re-reads its defaults: the rows'
+  // untouched fields follow the new head's default, and an edited merge binds to
+  // it. Keyed per PR, so a switch (which closes the dialog) never counts as a move.
+  const mergeHeadSha = pr ? prHeadSha(pr) : undefined;
+  const mergeHeadSeen = useRef({ key: entityKey, sha: mergeHeadSha });
+  useEffect(() => {
+    const seen = mergeHeadSeen.current;
+    mergeHeadSeen.current = { key: entityKey, sha: mergeHeadSha };
+    if (!mergeOpen || seen.key !== entityKey || seen.sha === mergeHeadSha)
+      return;
+    void queryClient.invalidateQueries({
+      queryKey: mergeMessageDefaultsOptions(
+        repoPath,
+        number,
+        mergeStrategy,
+        lens,
+      ).queryKey,
+      exact: true,
+    });
+  }, [
+    entityKey,
+    mergeHeadSha,
+    mergeOpen,
+    queryClient,
+    repoPath,
+    number,
+    mergeStrategy,
+    lens,
+  ]);
 
   // GitHub-only: when every one of the three merge methods is disabled by the repo's
   // settings or by a GitDesktop branch rule, a menu of all-disabled items is useless
@@ -3674,6 +3985,7 @@ export function RemotePrView({
     // same flag; this arm is the belt-and-braces behind them, as it is for a
     // read-only conversation's hold.
     if (detailsStale || conversationHold.reactions !== null) return;
+    const sentOn = entityKey;
     try {
       await toggleReactionMutation.mutateAsync({
         reactionsKey: repoKeys.reactions(repoPath, ["pr", lens, number]),
@@ -3684,7 +3996,13 @@ export function RemotePrView({
         active,
       });
     } catch (e) {
-      onError(e);
+      // GitHub's raw permission refusal names a GraphQL mutation; a known hold
+      // explains it, otherwise the neutral sentence names both causes.
+      if (isPrReactionRefusal(e))
+        toast.error(
+          liveHold.read(sentOn)?.reactions ?? PR_REACTION_REFUSED_MESSAGE,
+        );
+      else onError(e);
     }
   }
 
@@ -3761,9 +4079,21 @@ export function RemotePrView({
   // the selected one, so nothing it would open lands on the PR that replaces it.
   function openMergeDialog(strategy: MergeStrategy, auto: boolean) {
     if (detailsStale) return;
-    setMergeStrategy(strategy);
-    setDeleteBranch(false);
-    setMergeAuto(auto);
+    // The last session's merge failed with an edit, and this is the same PR,
+    // strategy and auto flag: reopen it with its rows, failure and choices.
+    const kept =
+      mergeFailure !== null &&
+      mergeFailure.session === mergeSession &&
+      mergeStrategy === strategy &&
+      mergeAuto === auto;
+    if (!kept) {
+      setMergeStrategy(strategy);
+      setDeleteBranch(false);
+      setMergeAuto(auto);
+      mergeDraft.reset();
+      setMergeFailure(null);
+      setMergeSession({});
+    }
     setMergeOpen(true);
   }
   function askDeleteComment(commentId: string) {
@@ -3886,7 +4216,7 @@ export function RemotePrView({
       case pr.isDraft:
         return `Mark the ${prNoun} ready before merging`;
       case mergeGuardMissing:
-        return "Reload to merge — couldn't load the head commit to guard the merge";
+        return MERGE_GUARD_MISSING_REASON;
       case allMergeMethodsBlocked:
         return "No merge method is enabled by both this repository's settings and its branch rules";
       default:
@@ -4645,7 +4975,7 @@ export function RemotePrView({
                 className="px-0 pb-0"
               />
               {feedReady ? (
-                <>
+                <ThreadReplyHoldContext value={conversationHold.composer}>
                   <PrActivityFeed
                     pr={pr}
                     timeline={timeline}
@@ -4706,6 +5036,11 @@ export function RemotePrView({
                       detailsPlaceholder ? undefined : askDeleteComment
                     }
                     editHeld={detailsPlaceholder}
+                    // Edits hold only on a proven archive: whether a lock refuses edits to
+                    // the viewer's own comments is unverified.
+                    editHeldReason={
+                      archived ? PR_ARCHIVED_READONLY_MESSAGE : null
+                    }
                     onHideComment={hideComment}
                     onUnhideComment={unhideComment}
                     onToggleReaction={toggleReaction}
@@ -4776,6 +5111,11 @@ export function RemotePrView({
                         : undefined
                     }
                     editHeld={detailsPlaceholder}
+                    // Edits hold only on a proven archive: whether a lock refuses edits to
+                    // the viewer's own comments is unverified.
+                    editHeldReason={
+                      archived ? PR_ARCHIVED_READONLY_MESSAGE : null
+                    }
                     provider={providerKey}
                     apply={suggestionApply}
                     fileDiffLookup={fileDiffLookup}
@@ -4801,7 +5141,7 @@ export function RemotePrView({
                         No activity yet.
                       </p>
                     )}
-                </>
+                </ThreadReplyHoldContext>
               ) : (
                 <ListRowSkeletons
                   rows={3}
@@ -4981,15 +5321,20 @@ export function RemotePrView({
                           : (approval?.viewerRequestedChanges ?? false)
                       }
                       onClick={requestChanges}
-                      title={
-                        approval?.viewerRequestedChanges
-                          ? canUnrequestChanges
-                            ? "Revoke your change request"
-                            : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
-                          : compose.value.trim()
-                            ? "Request changes, posting your draft as a comment"
-                            : `Request changes on this ${prNoun} (adds you as a reviewer)`
-                      }
+                      title={(() => {
+                        switch (true) {
+                          case approval?.viewerRequestedChanges === true &&
+                            canUnrequestChanges:
+                            return "Revoke your change request";
+                          case approval?.viewerRequestedChanges === true:
+                            return "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear";
+                          case compose.value.trim() !== "" &&
+                            conversationHold.composer === null:
+                            return "Request changes, posting your draft as a comment";
+                          default:
+                            return `Request changes on this ${prNoun} (adds you as a reviewer)`;
+                        }
+                      })()}
                       className={cn(
                         approval?.viewerRequestedChanges &&
                           "border-warning/40 text-warning",
@@ -5090,57 +5435,64 @@ export function RemotePrView({
             }
           />
           {!filesMissing && (
-            <PrFilesPane
-              files={pr.files}
-              binaryPaths={binaryPaths}
-              effectivePath={effectivePath}
-              onSelectPath={pickPath}
-              fileDiff={fileDiff}
-              isPending={prDiff.isPending}
-              isError={prDiff.isError}
-              isPaused={prDiff.isPaused}
-              isFetching={prDiff.isFetching}
-              onRetry={() => void prDiff.refetch()}
-              dataIsPlaceholder={prDiff.isPlaceholderData}
-              // The same threads + handlers/gates the Conversation block uses — one
-              // filtered list off the top-level read, not a second fetch, so an
-              // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than
-              // anchoring here as ordinary Reply/Resolve threads. The app's own drafts
-              // arrive separately below, badged. Quoting from a diff card feeds the
-              // view-level composer (persists to Conversation).
-              threads={threadClaims.visibleThreads}
-              drafts={drafts.data}
-              repoPath={repoPath}
-              lens={lens}
-              number={shownNumber}
-              lineWidget={reviewLineWidget}
-              onQuote={quoteHeld ? undefined : quoteReply}
-              onReply={
-                canThreadReply
-                  ? (threadId, body) =>
-                      threadReply.mutateAsync({ number, lens, threadId, body })
-                  : undefined
-              }
-              onResolve={
-                canThreadResolve
-                  ? (threadId, resolved) =>
-                      threadResolve.mutateAsync({
-                        number,
-                        lens,
-                        threadId,
-                        resolved,
-                      })
-                  : undefined
-              }
-              pendingWrites={pendingThreadWrites}
-              provider={providerKey}
-              apply={suggestionApply}
-              fileDiffLookup={fileDiffLookup}
-              mentions={mentions}
-              // Pin the file-row Blame at the forge-reported tip: GitHub's capped
-              // commits list can end short of it.
-              blameRev={prHeadSha(pr)}
-            />
+            <ThreadReplyHoldContext value={conversationHold.composer}>
+              <PrFilesPane
+                files={pr.files}
+                binaryPaths={binaryPaths}
+                effectivePath={effectivePath}
+                onSelectPath={pickPath}
+                fileDiff={fileDiff}
+                isPending={prDiff.isPending}
+                isError={prDiff.isError}
+                isPaused={prDiff.isPaused}
+                isFetching={prDiff.isFetching}
+                onRetry={() => void prDiff.refetch()}
+                dataIsPlaceholder={prDiff.isPlaceholderData}
+                // The same threads + handlers/gates the Conversation block uses — one
+                // filtered list off the top-level read, not a second fetch, so an
+                // unsubmitted GitHub review's drafts stay out of BOTH tabs rather than
+                // anchoring here as ordinary Reply/Resolve threads. The app's own drafts
+                // arrive separately below, badged. Quoting from a diff card feeds the
+                // view-level composer (persists to Conversation).
+                threads={threadClaims.visibleThreads}
+                drafts={drafts.data}
+                repoPath={repoPath}
+                lens={lens}
+                number={shownNumber}
+                lineWidget={reviewLineWidget}
+                onQuote={quoteHeld ? undefined : quoteReply}
+                onReply={
+                  canThreadReply
+                    ? (threadId, body) =>
+                        threadReply.mutateAsync({
+                          number,
+                          lens,
+                          threadId,
+                          body,
+                        })
+                    : undefined
+                }
+                onResolve={
+                  canThreadResolve
+                    ? (threadId, resolved) =>
+                        threadResolve.mutateAsync({
+                          number,
+                          lens,
+                          threadId,
+                          resolved,
+                        })
+                    : undefined
+                }
+                pendingWrites={pendingThreadWrites}
+                provider={providerKey}
+                apply={suggestionApply}
+                fileDiffLookup={fileDiffLookup}
+                mentions={mentions}
+                // Pin the file-row Blame at the forge-reported tip: GitHub's capped
+                // commits list can end short of it.
+                blameRev={prHeadSha(pr)}
+              />
+            </ThreadReplyHoldContext>
           )}
         </div>
       )}
@@ -5347,22 +5699,28 @@ export function RemotePrView({
       <MergePrDialog
         open={mergeOpen && hold.interactive}
         onClose={() => setMergeOpen(false)}
-        number={number}
-        host={remoteLabel}
-        prNoun={prNoun}
+        target={{ kind: "remote", number, host: remoteLabel, prNoun }}
         headRefName={pr.headRefName}
         baseRefName={pr.baseRefName}
         strategyLabel={MERGE_LABEL[mergeStrategy]}
-        deleteBranch={deleteBranch}
-        onDeleteBranchChange={setDeleteBranch}
-        headIsDefault={headIsDefault}
-        deletionBlocked={headDeletionBlocked}
+        deleteBranch={{
+          checked: deleteBranch,
+          onChange: setDeleteBranch,
+          headIsDefault,
+          blocked: headDeletionBlocked,
+        }}
         pending={mergeAuto ? armAutoMergePending : mergePending}
-        heldReason={offlineHold}
+        heldReason={mergeDialogHold}
         onConfirm={confirmMerge}
         auto={mergeAuto}
         stackNotice={stackMerge?.notice}
         confirmLabel={stackMerge?.confirmLabel}
+        draft={mergeDraft}
+        failure={
+          mergeFailure !== null && mergeFailure.session === mergeSession
+            ? mergeFailure.text
+            : undefined
+        }
       />
 
       <EditTitleBodyDialog

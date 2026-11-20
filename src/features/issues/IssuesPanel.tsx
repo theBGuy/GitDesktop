@@ -39,11 +39,13 @@ import {
   repoKeys,
   useForgeStatus,
   useHoverPrefetch,
-  useIssueList,
+  useIssueListPage,
   usePrefetchIssue,
+  useRemotes,
 } from "@/lib/git/queries";
 import {
   type ForgeProvider,
+  listPageRows,
   remoteListFilterKey,
   savedProvider,
   shownProvider,
@@ -85,6 +87,11 @@ const NEW_ISSUE_LABEL: Record<ForgeProvider, string> = {
   gitlab: "Issue on GitLab…",
   bitbucket: "Issue on Bitbucket…",
 };
+
+/** Names only the forges whose issues this app reads and creates: Bitbucket's
+ *  tracker is retired, and Jira has its own New item. */
+const NO_REMOTE_ISSUE_REASON =
+  "Add a GitHub or GitLab remote to open an issue here.";
 
 /** Bitbucket has retired its native issue tracker (deleted platform-wide
  *  2026-08-20); issues moved to Jira. When the repo has no Jira link yet, invite
@@ -190,7 +197,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   // its chosen-teams list is always empty and that leg is always satisfied. The
   // shared gate is used anyway rather than the narrower one, so the panels can't
   // drift if issues ever gain an axis that needs validating.
-  const issueList = useIssueList(
+  const issueList = useIssueListPage(
     repoPath,
     ghReady && listFilter.scopeReady,
     stateFilter,
@@ -199,6 +206,16 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     listFilter.filter,
   );
   const loadMore = more.observe(issueList);
+  // Every row read below takes this one extraction, so the rows and the option
+  // source see the cached page's own `rows` reference.
+  const issueRows = listPageRows(issueList.data);
+  // Only a settled read may claim the horizon: a placeholder carries another
+  // tab's or limit's flag.
+  const capped =
+    issueList.data?.capped === true && !issueList.isPlaceholderData;
+  // Only a remotes read that answered empty: pending or failed keeps today's copy.
+  const remotes = useRemotes(repoPath);
+  const noRemote = remotes.data !== undefined && remotes.data.length === 0;
   // A fork (issues off by default on GitHub) surfaces a typed error here. It's a
   // permanent repo condition, not a transient fetch failure, so the section shows
   // an informative notice with no Retry — and issue creation is offered as
@@ -208,12 +225,16 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     isAppError(issueList.error) &&
     issueList.error.kind === "issuesDisabled";
   // Creation is possible only when the forge allows it AND the repo hasn't turned
-  // issues off — gates every path that opens the GitHub create dialog.
-  const canOpenGhCreate = canCreateGh && !issuesDisabled;
+  // issues off, and only with a remote — gates every path that opens the GitHub
+  // create dialog.
+  const canOpenGhCreate = canCreateGh && !issuesDisabled && !noRemote;
   const ghCreateReason = (() => {
     switch (true) {
       case canOpenGhCreate:
         return undefined;
+      // Ahead of the probe: a repository with no remote never has a forge.
+      case noRemote:
+        return NO_REMOTE_ISSUE_REASON;
       case probe !== null:
         return forgeProbeReason(probe, "open an issue");
       case isBitbucket:
@@ -365,7 +386,7 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
     labelCount,
   } = useLocalRemoteFilter({
     locals: localIssues.data ?? [],
-    remotes: issueList.data ?? [],
+    remotes: issueRows ?? [],
     stateFilter,
     remotesArePlaceholder: issueList.isPlaceholderData,
     authorFilter: listFilter.authorFilter,
@@ -492,13 +513,13 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
         newMenu={{
           ghLabel:
-            shown === undefined
+            shown === undefined || noRemote
               ? "Remote issue…"
               : NEW_ISSUE_LABEL[shown ?? "github"],
           // Issues disabled on the repo (a fork's default) also blocks creation, even
           // when the forge is otherwise ready — gate it with the reason so "New" isn't
           // a button that can only fail.
-          ghDisabled: !canCreateGh || issuesDisabled,
+          ghDisabled: !canOpenGhCreate,
           ghReason: ghCreateReason,
           onGh: () => setCreateOpen(true),
           localLabel: "Local issue…",
@@ -658,7 +679,8 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         // limit (compared against the raw loaded count, not the filtered view).
         // A grow in flight serves the previous page, shorter than the new limit,
         // so the row stays mounted and busy then, even while the read is parked.
-        hasMore={loadMore.growing || (issueList.data?.length ?? 0) === limit}
+        hasMore={loadMore.growing || (issueRows?.length ?? 0) === limit}
+        remoteCapped={capped}
         remoteCount={issues.length}
         loadingMore={issueList.isFetching || loadMore.growing}
         onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}

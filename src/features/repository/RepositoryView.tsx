@@ -80,6 +80,7 @@ import {
   useForgeStatus,
   useRepoStatus,
 } from "@/lib/git/queries";
+import { savedProvider, shownProvider } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
   formatBinding,
@@ -87,6 +88,7 @@ import {
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useLensGate, useSetRepoLens } from "@/lib/repo-lens/queries";
 import { useScripts, useTaskRepoKeys } from "@/lib/scripts/queries";
 import { taskInScope } from "@/lib/scripts/scope";
@@ -476,6 +478,12 @@ export function RepositoryView() {
   const saveSettings = useSaveSettings();
   const queryClient = useQueryClient();
   const sidebarCollapsed = settings.data?.sidebarCollapsed ?? false;
+  // The empty PR pane's noun names the saved provider until the probe answers.
+  const shown = shownProvider(
+    gh.data,
+    savedProvider(settings.data?.recentRepos, repoPath ?? ""),
+  );
+  const prNoun = PR_NOUN[shown ?? "github"];
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   const sidebarPanelsId = useId();
@@ -1040,7 +1048,7 @@ export function RepositoryView() {
             ) : (
               <DiffPlaceholder
                 icon={GitPullRequestIcon}
-                message="Select a pull request"
+                message={`Select a ${prNoun}`}
               />
             )}
           </TabPanel>

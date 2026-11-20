@@ -206,6 +206,8 @@ export const ALLOWLIST = [
     ],
     ["gh", "useForgeStatus", ["isPending"], QUERY],
     ["prList", "usePrListPage", ["isPending"], QUERY],
+    ["alignDetails", "useQuery", ["isPaused"], QUERY],
+    ["alignProbe", "useQuery", ["isPaused"], QUERY],
   ]),
   ...entries("src/features/history/HistoryDialogs.tsx", "ResetCommitDialog", [
     ["resetMutation", "useResetToCommit", ["isPending"], WORKING_TREE],

@@ -2,8 +2,10 @@
  * The state-tab predicates the PR and issue lists share. A remote row is filed
  * by its own `state`, never by the list read that returned it: a forge's list
  * membership can lag a merge, close or reopen the row itself already reports.
- * Every provider maps open to "OPEN" and merged to "MERGED" (a locked GitLab MR
- * arrives as "CLOSED"). "closed" means everything not open (the issue lists'
+ * Every provider maps open to "OPEN" and merged to "MERGED"; a GitLab MR that
+ * is mid-merge (`locked`) arrives as "CLOSED" in the list and details reads, and
+ * only the merge-state read says it is locked ({@link prAlignStep} holds the
+ * align on that read). "closed" means everything not open (the issue lists'
  * Closed tab and the legacy PR callers); the PR panel's tabs split that into
  * "merged" and "unmerged", where every state but OPEN and MERGED lands.
  *
@@ -52,12 +54,58 @@ export function localStateMatches(
 }
 
 /** Which PR tab a remote PR's own state lands on. Total by construction, and
- *  congruent with {@link remoteStateMatches}: the align never lands on a tab
- *  that won't list the row. */
+ *  congruent with {@link remoteStateMatches}. A GitLab MR mid-merge reports
+ *  "CLOSED" here though no tab lists it, so the align consults
+ *  {@link prAlignStep} before taking this answer for one. */
 export function prAlignTab(state: string): PrListTab {
   if (state === "OPEN") return "open";
   if (state === "MERGED") return "merged";
   return "unmerged";
+}
+
+/** The merge-state read an align of a GitLab MR consults, as the panel sees it. */
+export type PrAlignProbe =
+  | { status: "idle" | "pending" | "failed" }
+  | { status: "ok"; locked: boolean; state: string | undefined };
+
+export type PrAlignStepResult =
+  | { do: "settle"; tab: PrListTab }
+  | { do: "wait" }
+  | { do: "disarm" };
+
+/** What a pending remote align does next. Only a `lockable` provider's would-be
+ *  Closed answer consults `probe`, since a locked GitLab MR reads "CLOSED" while
+ *  its merge runs; the tab then comes from the probe's OWN state, so two reads
+ *  can't straddle the unlock. A probe that never answered falls back to `tab0`,
+ *  but once one read said locked (`sawLocked`) a failure never settles Closed:
+ *  it waits on the remaining polls and disarms when they run out. */
+export function prAlignStep(
+  detailsState: string,
+  lockable: boolean,
+  probe: PrAlignProbe,
+  pollsLeft: number,
+  sawLocked: boolean,
+): PrAlignStepResult {
+  const tab0 = prAlignTab(detailsState);
+  if (!lockable || tab0 !== "unmerged") return { do: "settle", tab: tab0 };
+  switch (probe.status) {
+    case "idle":
+    case "pending":
+      return { do: "wait" };
+    case "failed":
+      if (!sawLocked) return { do: "settle", tab: tab0 };
+      return pollsLeft > 0 ? { do: "wait" } : { do: "disarm" };
+    case "ok":
+      if (probe.locked)
+        return pollsLeft > 0 ? { do: "wait" } : { do: "disarm" };
+      return {
+        do: "settle",
+        tab:
+          typeof probe.state === "string" && probe.state !== ""
+            ? prAlignTab(probe.state)
+            : tab0,
+      };
+  }
 }
 
 /** Which PR tab a local PR's status lands on. Mirrors {@link prAlignTab} and
@@ -110,6 +158,35 @@ export function filterPlaceholderRows<R extends { state: string }>(
   const served = filed.length === 0 && rows.length > 0 ? undefined : filed;
   byFilter[filter] = served;
   return served;
+}
+
+/** The stack layers a merge at `mergedPosition` takes with it: the numbers of
+ *  members below it that are still open, the set the merge dialog discloses
+ *  (StackSection's `stackMergeBelow` keeps the same `m.position < stack.position`
+ *  predicate). `members` comes from cached forge JSON, so it never throws: a
+ *  member that is not an object with a finite `number` and `position` and a
+ *  string `state` is skipped, and anything but an array or a finite
+ *  `mergedPosition` gives `[]`. */
+export function cascadedStackNumbers(
+  members: unknown,
+  mergedPosition: unknown,
+): number[] {
+  if (!Array.isArray(members)) return [];
+  if (typeof mergedPosition !== "number" || !Number.isFinite(mergedPosition)) {
+    return [];
+  }
+  const out: number[] = [];
+  for (const m of members as unknown[]) {
+    if (typeof m !== "object" || m === null) continue;
+    const { number, position, state } = m as Record<string, unknown>;
+    if (typeof number !== "number" || !Number.isFinite(number)) continue;
+    if (typeof position !== "number" || !Number.isFinite(position)) continue;
+    if (typeof state !== "string") continue;
+    if (position < mergedPosition && state.toLowerCase() === "open") {
+      out.push(number);
+    }
+  }
+  return out;
 }
 
 /** `page` with `number`'s row re-filed under `state`. Returns the SAME array when

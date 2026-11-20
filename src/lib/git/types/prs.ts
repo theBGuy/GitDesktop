@@ -111,6 +111,43 @@ export interface GitLabMrMergeState {
   pipelineStatus: string;
   /** Head pipeline web URL; "" when no pipeline. */
   pipelineUrl: string;
+  /** GitLab holds the MR in `locked` while a merge runs. Absent from an answer
+   *  that predates the field: reads as not locked. */
+  locked?: boolean;
+  /** The MR's neutral state ("OPEN", "MERGED", "CLOSED"); "" when GitLab sent
+   *  none, absent from an older answer. */
+  state?: string;
+}
+
+/** A commit message a merge writes: one-line `title`; `body` may be "". */
+export interface MergeMessage {
+  title: string;
+  body: string;
+}
+export type MergeCommitKind = "squash" | "merge";
+/** Why a merge writes no message to edit. `alreadyMerged` comes only from the
+ *  local merge plan (a head already part of its base); the forge never sends it. */
+export type NoMergeMessageReason =
+  | "rebase"
+  | "fastForward"
+  | "stacked"
+  | "gitlabFastForward"
+  | "alreadyMerged";
+export interface MergeMessageCommit {
+  kind: MergeCommitKind;
+  /** `null` = the forge's default text is unknown. */
+  message: MergeMessage | null;
+  /** `true` = the forge's own default; `false` = a locally composed draft. */
+  exact: boolean;
+}
+/** The commits a merge writes, in the forge's order (squash, then merge);
+ *  `reason` is set exactly when `commits` is empty. */
+export interface MergeMessageDefaults {
+  commits: MergeMessageCommit[];
+  reason: NoMergeMessageReason | null;
+  /** The head commit the defaults were read at, from the same forge answer;
+   *  absent or null when unknown (Bitbucket, older backends). */
+  headSha?: string | null;
 }
 
 export interface PrRef {
@@ -230,9 +267,10 @@ export interface PrInfo {
 }
 
 /** One `forge_pr_list_page` read: the rows plus whether the read stopped at its
- *  horizon. `capped` is true when a GitLab list walk (the closed, merged,
- *  unmerged and open walks) hit its row horizon; every other provider and read
- *  says false. */
+ *  horizon. `capped` is true when the read stopped early: GitLab's closed, merged,
+ *  unmerged and open list walks when their row horizon clamped the limit, and
+ *  GitHub's unfiltered Closed list when it reached its page cap before filling the
+ *  requested limit. Every other read says false. */
 export interface PrListPage {
   rows: PrInfo[];
   capped: boolean;

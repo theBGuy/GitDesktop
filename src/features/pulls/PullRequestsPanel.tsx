@@ -52,6 +52,7 @@ import {
   forgeFeatureReady,
   forgeProbeReason,
   forgeProbeState,
+  glMrMergeStateAlignOptions,
   keepPreviousDataForKeyAxes,
   pendingWriteMatching,
   prDetailsOptions,
@@ -64,6 +65,7 @@ import {
   usePrListMergeability,
   usePrListPage,
   usePrReviewState,
+  useRemotes,
 } from "@/lib/git/queries";
 import {
   type ForgeProvider,
@@ -79,6 +81,7 @@ import {
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { reloadLocalPrs } from "@/lib/pulls/local";
+import { PR_NOUN, type PrNoun } from "@/lib/pulls/pr-state";
 import {
   LOCAL_PR_RECORD_WRITES_FAMILY,
   localPrKey,
@@ -86,7 +89,12 @@ import {
   useLocalPrs,
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
-import { localPrAlignTab, prAlignTab } from "@/lib/remote-state-filter";
+import {
+  localPrAlignTab,
+  type PrAlignProbe,
+  prAlignStep,
+  prAlignTab,
+} from "@/lib/remote-state-filter";
 import { useLensState, useRemoteSlug } from "@/lib/repo-lens/queries";
 import { useSettings } from "@/lib/settings/queries";
 import {
@@ -127,6 +135,16 @@ const REVIEW_GROUPS: {
 const HOLD_POLL_MS = 5_000;
 const HOLD_POLL_LIMIT = 8;
 
+/** How an align re-reads a GitLab MR its merge holds locked: a merge job
+ *  normally finishes within seconds, and past the bound the align disarms with
+ *  the tab untouched rather than polling forever. */
+const ALIGN_LOCK_POLL_MS = 2_000;
+const ALIGN_LOCK_POLLS = 5;
+let alignProbeArms = 0;
+/** Mints a probe arm no mount has used, so a remounted panel never shares a key
+ *  with an earlier mount's in-flight read. */
+const nextAlignProbeArm = () => ++alignProbeArms;
+
 /** Why the list is flat despite the grouping toggle being on. */
 const UNGROUPED_NOTE: Record<UngroupedReason, string> = {
   offline: offlinePendingMessage("the review grouping"),
@@ -144,6 +162,17 @@ const PR_STATE_LABELS: Record<PrStateFilter, string> = {
   unmerged: "Closed",
   closed: "Closed",
 };
+
+/** The state tab group's accessible name, in the shown provider's noun. */
+const PR_STATE_GROUP_LABEL: Record<PrNoun, string> = {
+  "pull request": "Pull request state",
+  "merge request": "Merge request state",
+};
+
+/** The New menu forge item's reason in a repository with no remote at all: it
+ *  can have no forge, so the probe has nothing to say about it. */
+const NO_REMOTE_PR_REASON =
+  "Add a GitHub, GitLab, or Bitbucket remote to open a pull request here.";
 
 /** The saved team filter couldn't be validated, so the list ran without it — a
  *  WIDER scope than the one saved, which the rows themselves can't show. */
@@ -163,11 +192,14 @@ function reviewBucket(
 }
 
 /** The New menu's forge item, named for the shown provider (unknown while the
- *  probe is pending with nothing saved). */
+ *  probe is pending with nothing saved, and in a repository with no remote,
+ *  whatever a saved provider says). */
 function newPrLabel(
   shown: ForgeProvider | null | undefined,
   hostName: ProviderName | null,
+  noRemote: boolean,
 ): string {
+  if (noRemote) return "Remote pull request…";
   if (shown === "gitlab") return "Merge request on GitLab…";
   return hostName ? `Pull request on ${hostName}…` : "Remote pull request…";
 }
@@ -197,6 +229,10 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const remoteLabel =
     lens === "upstream" ? (upstreamSlug ?? "Upstream") : (hostName ?? "Remote");
   const remoteNoun = shown === "gitlab" ? "merge requests" : "pull requests";
+  const prNoun = PR_NOUN[shown ?? "github"];
+  // Only a remotes read that answered empty: pending or failed keeps today's copy.
+  const remotes = useRemotes(repoPath);
+  const noRemote = remotes.data !== undefined && remotes.data.length === 0;
   const ghReady = forgeFeatureReady(gh.data, "pullRequests");
   // The provider's own capabilities, read separately from `forgeFeatureReady` so a
   // not-yet-connected repo never gets told its PROVIDER lacks an axis it has.
@@ -393,13 +429,15 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // Creating a remote PR/MR follows its per-action write flag — ready GitHub AND
   // GitLab repos both get the create dialog (provider-aware copy; the head branch
   // is pushed first either way). The dialog picks the head/base branches itself.
-  const canCreateGhPr = forgeFeatureReady(gh.data, "mrCreate");
+  const canCreateGhPr = forgeFeatureReady(gh.data, "mrCreate") && !noRemote;
   const ghCreateReason = (() => {
     switch (true) {
       case canCreateGhPr:
         return null;
+      case noRemote:
+        return NO_REMOTE_PR_REASON;
       case probe !== null:
-        return forgeProbeReason(probe, "open a pull request");
+        return forgeProbeReason(probe, `open a ${prNoun}`);
       case isGitLab && Boolean(gh.data?.installed):
         return "Sign in to GitLab (glab auth login) to work with merge requests here.";
       case isGitLab:
@@ -627,18 +665,29 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   });
   // Consume only once every axis of the deciding read has settled AND the state was
   // fetched after the intent armed. `isPlaceholderData` refuses the previous number's
-  // retained data (it describes another PR); `isFetching` refuses a cached pre-merge
-  // state while its refetch is in flight. A fetch failure leaves status "error", so the
-  // intent stays armed for a retry rather than consuming stale truth.
+  // retained data (it describes another PR); `isFetching` and `isPaused` refuse a cached
+  // pre-merge state while its refetch is fetching or paused. A fetch failure leaves status
+  // "error", so the intent stays armed for a retry rather than consuming stale truth.
   const alignDetailsSettled =
     alignDetails.isSuccess &&
     !alignDetails.isPlaceholderData &&
-    !alignDetails.isFetching;
+    !alignDetails.isFetching &&
+    !alignDetails.isPaused;
   const alignRemoteState = alignDetails.data?.state;
   // The `data-row` key an align still owes a scroll to, consumed once the settled
   // tab draws that row. Only `settleAlign` sets it, so plain clicks and arrow-key
   // nav (which scrolls on its own) never gain a scroll from it.
   const [alignScrollRow, setAlignScrollRow] = useState<string | null>(null);
+  // A remote request is served when `alignScrollDrawn` sees its row, and given
+  // up only by a page or an error dated after the align (0: any), or when the
+  // selection, repository or lens changes; a local cache write counts as a page.
+  const [alignScrollAfter, setAlignScrollAfter] = useState(0);
+  const afterAlign = (at: number) =>
+    alignScrollAfter === 0 || at > alignScrollAfter;
+  // The repository and lens the request was made in; any other drops it, since
+  // the panel outlives a repository switch and row keys are only `kind:id`.
+  const scrollScope = `${repoPath}\n${lens}`;
+  const [alignScrollScope, setAlignScrollScope] = useState(scrollScope);
   // The tab and the archived toggle are READ here rather than depended on: the align
   // is keyed on the PR's state landing, not on the state it is correcting.
   const settleAlign = useEffectEvent(
@@ -648,16 +697,217 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       if (target !== stateFilter) onStateFilter(target);
       if (revealArchived && !showArchived) setShowArchived(true);
       if (selectedPr) setAlignScrollRow(`${selectedPr.kind}:${selectedPr.id}`);
+      setAlignScrollAfter(0);
+      setAlignScrollScope(scrollScope);
       clearPendingPrAlign();
+      return target !== stateFilter;
     },
   );
+  // GitLab reports an MR mid-merge as CLOSED, a tab that never lists it, so a
+  // would-be Closed answer waits on the merge-state read, which says whether the
+  // MR is locked. The probe reads its own entry per arm (`staleTime: 0`), so no
+  // read requested before the arm, the view's poll or a prefetch included, can
+  // answer it; armed only once the details answered Closed, so every other align
+  // issues no extra read. The arm number is minted inside a function React
+  // calls, since the compiler may cache a zero-input call made in render.
+  const alignKey =
+    alignRemoteNumber === null
+      ? ""
+      : `${repoPath}\n${lens}\n${alignRemoteNumber}`;
+  const [probeArm, setProbeArm] = useState(() => ({
+    key: alignKey,
+    n: nextAlignProbeArm(),
+  }));
+  if (probeArm.key !== alignKey)
+    setProbeArm(() => ({ key: alignKey, n: nextAlignProbeArm() }));
+  const alignProbeOn =
+    alignRemoteNumber !== null &&
+    isGitLab &&
+    alignDetailsSettled &&
+    prAlignTab(alignRemoteState ?? "") === "unmerged";
+  // The lock poll's ladder, kept like the hold ladder: refs advanced from the
+  // effect below, `alignLockPollMs` the render-visible mirror the query reads.
+  // The timer re-reads a failed probe too, which `retry: false` never would.
+  const [alignLockPollMs, setAlignLockPollMs] = useState<number | false>(false);
+  const alignLadder = useRef({
+    key: "",
+    polls: 0,
+    sawLocked: false,
+    seen: { ok: 0, failed: 0 },
+  });
+  const alignProbe = useQuery({
+    ...glMrMergeStateAlignOptions(repoPath, alignRemoteNumber ?? 0, probeArm.n),
+    enabled: alignProbeOn,
+    staleTime: 0,
+    refetchInterval: alignLockPollMs,
+  });
+  // Only a read that is not fetching counts as an answer, success or failure; a
+  // read paused offline would otherwise answer from a stale cached entry.
+  const probeKind = ((): PrAlignProbe["status"] => {
+    switch (true) {
+      case !alignProbeOn:
+        return "idle";
+      case alignProbe.isFetching || alignProbe.isPaused:
+        return "pending";
+      case alignProbe.isSuccess:
+        return "ok";
+      case alignProbe.isError:
+        return "failed";
+      default:
+        return "pending";
+    }
+  })();
+  // An answer from before the lock fields existed reads as not locked, no state.
+  const probeLocked = alignProbe.data?.locked === true;
+  const probeState =
+    typeof alignProbe.data?.state === "string"
+      ? alignProbe.data.state
+      : undefined;
+  const probeOkAt = alignProbe.dataUpdatedAt;
+  const probeFailedAt = alignProbe.errorUpdatedAt;
   useEffect(() => {
-    if (alignRemoteNumber === null || !alignDetailsSettled) return;
-    // OPEN lands on Open, MERGED on Merged, anything else on Closed. An ERROR
-    // deliberately leaves the intent armed so a Retry still completes the align;
-    // it can't target a different PR, because any reselection clears it.
-    settleAlign(prAlignTab(alignRemoteState ?? ""), false);
-  }, [alignRemoteNumber, alignDetailsSettled, alignRemoteState]);
+    const ladder = alignLadder.current;
+    // A new armed identity (or none) starts a full budget, baselined on the
+    // probe's current stamps so no earlier answer counts as a re-read.
+    if (ladder.key !== alignKey) {
+      ladder.key = alignKey;
+      ladder.polls = 0;
+      ladder.sawLocked = false;
+      ladder.seen = { ok: probeOkAt, failed: probeFailedAt };
+    }
+    // An ERROR in the details read leaves the intent armed so a Retry still
+    // completes the align; any reselection clears it.
+    if (alignRemoteNumber === null || !alignDetailsSettled) {
+      setAlignLockPollMs(false);
+      return;
+    }
+    // Every completion after a locked answer is a re-read and spends a rung,
+    // whatever it answered.
+    const completed =
+      probeOkAt > ladder.seen.ok || probeFailedAt > ladder.seen.failed;
+    ladder.seen = { ok: probeOkAt, failed: probeFailedAt };
+    if (completed && ladder.sawLocked) ladder.polls += 1;
+    if (probeKind === "ok" && probeLocked) ladder.sawLocked = true;
+    const probe: PrAlignProbe =
+      probeKind === "ok"
+        ? { status: "ok", locked: probeLocked, state: probeState }
+        : { status: probeKind };
+    const tab0 = prAlignTab(alignRemoteState ?? "");
+    const step = prAlignStep(
+      alignRemoteState ?? "",
+      isGitLab,
+      probe,
+      ALIGN_LOCK_POLLS - ladder.polls,
+      ladder.sawLocked,
+    );
+    switch (step.do) {
+      case "wait":
+        setAlignLockPollMs(ladder.sawLocked ? ALIGN_LOCK_POLL_MS : false);
+        return;
+      case "disarm":
+        // No tab lists a locked MR, so the tab stays where it is.
+        setAlignLockPollMs(false);
+        clearPendingPrAlign();
+        return;
+      case "settle": {
+        setAlignLockPollMs(false);
+        // OPEN lands on Open, MERGED on Merged, anything else on Closed.
+        const moved = settleAlign(step.tab, false);
+        // After this refresh the landing page, the review state and (when the
+        // probe outranked the details) the details are stale and read again
+        // wherever something observes them; every other list of the lens ends
+        // stale unless a read requested after the align answered it, and the
+        // mark-only pass cancels nothing an active observer waits on (a read it
+        // leaves in flight is re-marked once it answers). Each pass marks, then
+        // cancels, then invalidates again what the cancel reverted or no read
+        // has answered since, joining a read in flight (`cancelRefetch: false`).
+        if ((moved || step.tab !== tab0) && alignRemoteNumber !== null) {
+          setAlignScrollAfter(Date.now());
+          const refresh = (
+            filters: { queryKey: readonly unknown[]; exact?: boolean },
+            refetchType?: "none",
+          ) => {
+            void queryClient.invalidateQueries({
+              ...filters,
+              refetchType: "none",
+            });
+            const cancel =
+              refetchType === "none"
+                ? { ...filters, type: "inactive" as const }
+                : filters;
+            const reverted = new Set(
+              queryClient
+                .getQueryCache()
+                .findAll(cancel)
+                .filter((q) => q.state.fetchStatus !== "idle"),
+            );
+            void queryClient
+              .cancelQueries(cancel)
+              .then(() =>
+                queryClient.invalidateQueries(
+                  {
+                    ...filters,
+                    refetchType,
+                    predicate: (q) => reverted.has(q) || q.state.isInvalidated,
+                  },
+                  { cancelRefetch: false },
+                ),
+              )
+              .catch(() => {
+                // Best-effort, as in `refreshPrList`.
+              });
+          };
+          if (step.tab !== tab0)
+            refresh({
+              queryKey: prDetailsOptions(repoPath, alignRemoteNumber, lens)
+                .queryKey,
+              exact: true,
+            });
+          const lensLists = { queryKey: [...repoKeys.prList(repoPath), lens] };
+          // `promise` is the read's own: a cancel, a superseding read or a
+          // failure rejects it, so only that read's answer re-marks.
+          const inFlight = queryClient
+            .getQueryCache()
+            .findAll(lensLists)
+            .flatMap((q) => (q.promise ? [{ q, read: q.promise }] : []));
+          refresh(lensLists, "none");
+          for (const { q, read } of inFlight)
+            void read
+              .then(() =>
+                queryClient.invalidateQueries({
+                  queryKey: q.queryKey,
+                  exact: true,
+                  refetchType: "none",
+                }),
+              )
+              .catch(() => {
+                // A cancelled, superseded or failed read answered nothing; a
+                // failed re-mark is best effort.
+              });
+          refresh({
+            queryKey: [...repoKeys.prList(repoPath), lens, step.tab],
+          });
+          // The list key's co-invalidation contract (prs.ts).
+          refresh({ queryKey: [...repoKeys.prReviewState(repoPath), lens] });
+        }
+      }
+    }
+  }, [
+    alignKey,
+    alignRemoteNumber,
+    alignDetailsSettled,
+    alignRemoteState,
+    isGitLab,
+    probeKind,
+    probeLocked,
+    probeState,
+    probeOkAt,
+    probeFailedAt,
+    clearPendingPrAlign,
+    queryClient,
+    repoPath,
+    lens,
+  ]);
   useEffect(() => {
     if (!pendingPrAlign || selectedPr?.kind !== "local") return;
     // Same hold as the remote arm, for the same reason: this query serves its cached
@@ -950,11 +1200,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       heldRows.some((c) => `remote:${c.number}` === alignScrollRow));
   const alignScrollSettled =
     selectedPr?.kind === "local" ||
-    prList.isError ||
-    (prList.isSuccess && !prList.isPlaceholderData && !prList.isFetching);
+    (prList.isError && afterAlign(prList.errorUpdatedAt)) ||
+    (prList.isSuccess &&
+      !prList.isPlaceholderData &&
+      !prList.isFetching &&
+      afterAlign(prList.dataUpdatedAt));
   useLayoutEffect(() => {
     if (alignScrollRow === null) return;
-    if (alignScrollRow !== selectedRowKey) {
+    if (alignScrollRow !== selectedRowKey || alignScrollScope !== scrollScope) {
       setAlignScrollRow(null);
       return;
     }
@@ -969,7 +1222,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     } else if (alignScrollSettled) {
       setAlignScrollRow(null);
     }
-  }, [alignScrollRow, selectedRowKey, alignScrollDrawn, alignScrollSettled]);
+  }, [
+    alignScrollRow,
+    selectedRowKey,
+    alignScrollScope,
+    scrollScope,
+    alignScrollDrawn,
+    alignScrollSettled,
+  ]);
 
   // One spelling for "this number is the selection", shared by the real rows and
   // the held rows standing in for them — the swap only carries the selection
@@ -1044,11 +1304,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         stateOptions={{
           values: PR_STATE_TABS,
           labels: PR_STATE_LABELS,
-          groupLabel: "Pull request state",
+          groupLabel: PR_STATE_GROUP_LABEL[prNoun],
         }}
         presetControl={
           <ConversationPresetSwitcher
             feature="pulls"
+            prNoun={prNoun}
             preset={listFilter.preset}
             storedPreset={listFilter.storedPreset}
             onPreset={listFilter.setPreset}
@@ -1060,7 +1321,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         }
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
         newMenu={{
-          ghLabel: newPrLabel(shown, hostName),
+          ghLabel: newPrLabel(shown, hostName, noRemote),
           ghDisabled: !canCreateGhPr,
           ghReason: ghCreateReason ?? undefined,
           onGh: () => setGhCreateOpen(true),
@@ -1133,8 +1394,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
           <Button
             variant="outline"
             size="icon-sm"
-            aria-label="Refresh pull requests"
-            title="Refresh pull requests"
+            aria-label={`Refresh ${remoteNoun}`}
+            title={`Refresh ${remoteNoun}`}
             aria-busy={prList.isFetching}
             onClick={refreshPrList}
           >

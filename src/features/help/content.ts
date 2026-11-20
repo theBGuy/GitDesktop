@@ -1676,7 +1676,8 @@ files with diffs, and CI checks. From there you can **comment** (with quote-repl
 excludes the PR author, whom GitHub won't let you request), flip a PR between
 **draft** and **ready for review** in either direction (a footer **Ready for review** /
 **Convert to draft** pair, also reachable from the command palette),
-**merge** (merge commit, squash, or rebase, with optional branch deletion), and **close**.
+**merge** (merge commit, squash, or rebase, with optional branch deletion and a commit
+message you can edit first; see *Merge commit message* below), and **close**.
 The **Assignees** and **Reviewers** pickers filter as you type and list the people
 already selected first; a list that stops at its first 1,000 people says so.
 Closing asks first: everyone watching is notified, and reopening puts the pull request
@@ -1747,11 +1748,11 @@ guessing. Type any author or label name and the funnel offers to filter by exact
 that, whether or not the list has shown it. Several picks within one group widen the
 list (any of them matches), while picks in different groups narrow it. The **Mine**
 rows are remembered per repository; author and label picks last for the session.
-**Refresh pull requests**, beside the search box, re-reads the list you're looking at
-along with its checks, conflict chips, review-state grouping and your local pull
-requests; it spins while the forge read is in flight. *Refresh pull requests* in the
-command palette does the same (palette-only by default — bind a key in
-**Settings → Keyboard**).
+**Refresh pull requests** (**Refresh merge requests** on GitLab), beside the search
+box, re-reads the list you're looking at along with its checks, conflict chips,
+review-state grouping and your local pull requests; it spins while the forge read is
+in flight. *Refresh pull requests* in the command palette does the same (palette-only
+by default — bind a key in **Settings → Keyboard**).
 While a newly created pull request is still holding its place in the list, the list chases
 the forge on its own for a short spell, so the real row usually arrives without a press.
 
@@ -1793,7 +1794,15 @@ adds that the draft is kept until you clear it.
 {{ai}}Posting an AI review is held the same way.{{/ai}} On an archived GitHub pull
 request, the first refused comment{{ai}} or AI review post{{/ai}} explains the archive,
 and the box and reactions{{ai}}, and AI review posting,{{/ai}} stay read-only until you
-leave that pull request.
+leave that pull request. Review-thread replies are held the same way: **Reply…** and
+the reply's own button say why, and a reply you had open keeps its text. On an archived
+pull request, editing your own comments is held too, and **Edit** in the comment's menu
+carries the reason. If the conversation turns read-only while you are confirming a
+close that posts your draft, the pull request isn't closed and the draft is kept; if
+a lock caused it, closing again closes it without the comment. **Request changes**
+on a read-only conversation goes ahead without your draft and keeps it. A reaction
+GitHub refuses says the pull request may be archived, or that you may not have
+permission to react.
 
 CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
 ⊖ J skipped**, each count with its own icon and word so status never rides on color
@@ -2049,6 +2058,50 @@ them — so the button stays live and the call stays yours. If the forge does re
 merge, the notice carries that same line beside the forge's own words. **Bitbucket**
 publishes no mergeability of its own, so no blocked line arms there.
 
+## Merge commit message
+
+Choosing a merge method opens the merge dialog, and for a merge commit or a squash it
+shows the message the merge will write. A **Commit message** row carries the default
+title, a count of the lines under it (such as **+3 lines**) and an **Edit** button.
+**Edit** opens **Title** and **Description** fields in place, filled with that default;
+the description scrolls once it passes about six lines. Once you change either field,
+**Reset to default** appears and puts the default back. On a hosted pull request, a
+message you leave alone, or change back to the default, isn't sent: the forge writes its
+own default or commit template at merge time, and only a message you changed replaces it
+(on a GitHub branch that requires a merge queue, the queue writes its own message).
+
+**GitHub** and **GitLab** show their own default. **Bitbucket** doesn't report one, so
+its row reads **Bitbucket's default message** and **Edit** starts from a draft in
+Bitbucket's format; leave the draft unchanged and Bitbucket writes its own. When a
+default isn't known at all (such as a Bitbucket squash with more commits than can be
+listed, or a GitLab server that doesn't report one), the row names the forge the same
+way and **Edit** opens empty fields; leave them blank and the forge writes its own. A
+**GitLab** merge that writes both a squash commit and a merge commit gets two rows,
+**Squash commit** and **Merge commit**, each with its own **Edit**: that is a squash in
+a project that also writes a merge commit, and **Create a merge commit** in a project
+that requires squashing. With **auto-merge**, GitLab keeps your message until the
+pipeline passes and the merge lands. A merge with no single commit to word says so in
+one line and offers no editor: **Rebase and merge** keeps each commit's own message, a
+Bitbucket **Fast-forward** and an unsquashed merge in a GitLab project that
+fast-forwards write no merge commit, and a stacked GitHub pull request can land several
+pull requests at once. While the default is still loading you can merge with the forge's
+own message, and if it can't be loaded the row says so and offers **Retry**.
+
+A title longer than 72 characters gets a note under the fields and still merges. An
+emptied title holds the merge button, which says why, until you type a title or reset.
+{{key:mod+enter}} merges from the **Title** or **Description** field, and plain
+{{key:enter}} in the title does nothing. If a merge fails after you edited the message,
+the dialog stays open with your text. Local pull requests merge through the same
+dialog (see *Local PRs* below).
+
+On GitHub and GitLab, an edited message is tied to the commits the dialog last
+loaded. While the dialog is open it keeps up with the pull request: when it sees new
+commits it loads the new default, a field you changed keeps what you typed and a
+field you left alone follows the new default. If commits land that the dialog hasn't
+loaded yet, **GitHub** and **GitLab** refuse the merge and nothing is merged: the
+dialog stays open with your text, loads the new default, and you can merge again.
+**Bitbucket** has no such check.
+
 ## Maintaining a pull request from a fork
 
 A fork pull request's head branch lives in the contributor's own repository, and two
@@ -2272,7 +2325,8 @@ were dropped; both pickers filter as you type and list the people already select
 first, and a list that stops at its first 1,000 people says so), track **time** on it
 (a clock summary in the
 header opens a popover to set an estimate and log spent time), and **merge**
-it — merge or squash, optionally deleting
+it — merge or squash, with a commit message you can edit first (see
+*Merge commit message* above), optionally deleting
 the source branch, guarded so it never merges a head you didn't see (GitLab applies the project's
 configured merge method, so there's no separate "rebase" option). You can also flip the MR
 between **draft** and **ready for review** in either direction — a footer **Ready for review** /
@@ -2348,7 +2402,8 @@ lands in dependency order without you walking it by hand — or, when the base b
 in place for it — a **Queued to merge** chip stays on the pull request until it lands,
 for the rest of the session. Before you confirm, the merge dialog **spells out
 the full scope of the merge** — naming each pull request it will merge, in the
-order they'll go in, whenever it has the list.
+order they'll go in, whenever it has the list. A stacked merge can land several pull
+requests, so the dialog offers no commit message to edit and says why.
 
 ## Bitbucket PRs
 
@@ -2403,7 +2458,12 @@ branch** to merge the base in; **Update pull request branch** in the command pal
 the button out. When the check failed the strip offers **Retry**; when it can't be made
 at all (for example on a Git too old to predict merges, or when a branch no longer
 exists) the strip says the conflicts can't be checked. **Approve** sits beside **Merge**
-at the bottom of every tab, and a held **Merge** says what it is waiting for.
+at the bottom of every tab, and a held **Merge** says what it is waiting for. Choosing a
+method from **Merge** opens the merge dialog (see *Merge commit message* above): its
+commit message starts from the pull request's title and description, **Edit** changes
+it, and **Rebase and merge** says there is no merge message to edit. When the pull
+request's branch is already part of its base, the dialog says so, and merging marks the
+pull request merged without writing a commit.
 
 **Resolve conflicts** needs no approval. It merges the base into the PR's branch in an
 isolated worktree and opens the conflict editor (see *Syncing & conflicts*); **Finish
@@ -2652,7 +2712,8 @@ reads **Create in \<parent\>**.
 ## GitLab issues
 
 Point the app at a **GitLab** repo and the same tab lists its **issues** (open and closed)
-next to any local issues; **Load 100 more** keeps adding issues up to 500. Open one to
+next to any local issues; **Load 100 more** keeps adding issues up to 500, where the
+list says so and points to **Filters** for older issues. Open one to
 read the description and comments — and the GitLab issue **writes**: **comment** on the issue (and **edit** or **delete** your own comments),
 **close / reopen** it (closing asks first; either way your drafted comment posts
 alongside), **edit** its title and
@@ -3633,7 +3694,9 @@ Once connected:
 - **Pull requests** — the **Pull Requests** tab lists a Bitbucket repo's PRs; open one to
   read its **diff**, **comments**, and **build statuses**, and to act on it: **comment**,
   **decline**, **merge** (merge commit, squash, or fast-forward, with an optional
-  delete-source-branch), **edit** the title/description (and **retarget** the destination
+  delete-source-branch; a merge commit or squash takes a commit message you can edit
+  first, see *Merge commit message* under *Pull requests*), **edit** the
+  title/description (and **retarget** the destination
   branch), **approve/unapprove**, **request changes** (a true toggle — click again to
   revoke; approving also clears it), pick **reviewers** from your workspace members (the
   PR author can't review their own PR, so they never appear; the picker filters as you
@@ -3959,7 +4022,10 @@ edit **project boards** (**add** this repo's issues and PRs or new drafts as car
 can set text, number, date, single-select and iteration fields, and setting **Status**
 moves a card between columns on a board grouped by Status. One caveat: **creating** a
 pull request pushes its head branch first, so it additionally needs
-\`--allow-git-write\` (below). The same flag also unlocks the
+\`--allow-git-write\` (below). A **merge** can carry its own commit message, a title and an
+optional description. On GitHub and GitLab it is sent with the head commit it was written
+for, and the merge is refused if the pull request has moved on. A GitLab squash that also
+writes a merge commit takes a second pair for that commit. The same flag also unlocks the
 linked Jira project's write \`jira_*\` tools — **comment**, **close/reopen**, **create**,
 **assign**, and **update** (due date, priority, labels) its issues. Issue writes cover
 GitHub and GitLab (not Bitbucket); discussions and project boards are GitHub-only; PR

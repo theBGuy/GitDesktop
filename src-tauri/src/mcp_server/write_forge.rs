@@ -20,7 +20,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{app_err, json_result, GitDesktopMcp, NumberArg, RunIdArg, GD_COMMENT_FOOTER};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct CreateIssueArgs {
@@ -98,13 +98,110 @@ struct CreatePullRequestArgs {
 struct MergePullRequestArgs {
     /// The pull request number.
     number: u64,
-    /// Merge strategy: "merge" (default), "squash", or "rebase" (rebase is GitHub-only;
-    /// the GitLab arm rejects it).
+    /// Merge strategy: "merge" (default), "squash", "rebase" (GitHub only), or
+    /// "fast_forward" (Bitbucket only); a forge refuses a strategy it does not support.
     #[serde(default)]
     strategy: Option<String>,
     /// Delete the head branch after merging. Defaults to false.
     #[serde(default)]
     delete_branch: bool,
+    /// The title of the commit this merge writes: the squash commit when strategy is
+    /// squash, the merge commit otherwise. Omit it and commit_body to keep the forge's
+    /// default message. A title without a body writes a title-only message (the forge's
+    /// default body is not kept). A GitHub branch that requires a merge queue ignores a
+    /// custom message. On GitLab the project's settings decide which commits
+    /// the merge writes: a squash commit when strategy is squash or the project always
+    /// squashes, unless the project never squashes (then there is no squash commit and a
+    /// message for one is refused), and a merge commit unless the project fast-forwards.
+    /// To word the squash commit of a project that always squashes, pass strategy
+    /// squash. A message for a commit the merge will not write is refused before
+    /// anything is merged.
+    /// On GitHub and GitLab it needs expected_head_sha.
+    #[serde(default)]
+    commit_title: Option<String>,
+    /// The body of that commit; needs commit_title.
+    #[serde(default)]
+    commit_body: Option<String>,
+    /// Strategy squash on GitLab only: the title of the merge commit, written on top of
+    /// the squash commit (or alone when the project never squashes). A fast-forward
+    /// project writes no merge commit, so it refuses this before anything is merged, as
+    /// GitHub and Bitbucket do. A title without a body writes a title-only message.
+    /// It needs expected_head_sha.
+    #[serde(default)]
+    merge_commit_title: Option<String>,
+    /// The body of that merge commit; needs merge_commit_title.
+    #[serde(default)]
+    merge_commit_body: Option<String>,
+    /// The head commit the merge is for: the headSha that get_pull_request returned. Required
+    /// with commit_title or merge_commit_title on GitHub and GitLab, where the merge is refused
+    /// if the pull request's head has moved. Without a message GitLab still checks it and GitHub
+    /// does not. Bitbucket ignores it.
+    #[serde(default)]
+    expected_head_sha: Option<String>,
+}
+
+/// Maps the tool's four message fields onto the merge's two slots: a squash's
+/// `commit_*` pair words the squash commit, any other strategy's the merge commit, and
+/// only a squash takes a second (merge-commit) pair. A body always needs its title.
+fn merge_messages_from(
+    strategy: &str,
+    commit_title: Option<String>,
+    commit_body: Option<String>,
+    merge_commit_title: Option<String>,
+    merge_commit_body: Option<String>,
+) -> AppResult<crate::forge::MergeMessages> {
+    const BODY_NEEDS_TITLE: &str = "commit_body needs commit_title (and merge_commit_body needs merge_commit_title): a custom commit message always carries its title.";
+    let pair = |title: Option<String>, body: Option<String>| match (title, body) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(AppError::InvalidArgument(BODY_NEEDS_TITLE.into())),
+        (Some(title), body) => Ok(Some(crate::forge::MergeMessage {
+            title,
+            body: body.unwrap_or_default(),
+        })),
+    };
+    let commit = pair(commit_title, commit_body)?;
+    let merge_commit = pair(merge_commit_title, merge_commit_body)?;
+    if strategy == "squash" {
+        return Ok(crate::forge::MergeMessages {
+            squash: commit,
+            merge: merge_commit,
+        });
+    }
+    if merge_commit.is_some() {
+        return Err(AppError::InvalidArgument(
+            "merge_commit_title and merge_commit_body apply only to a squash merge on GitLab, where a merge commit is written on top of the squash commit."
+                .into(),
+        ));
+    }
+    Ok(crate::forge::MergeMessages {
+        squash: None,
+        merge: commit,
+    })
+}
+
+/// The tool's `expected_head_sha` as the merge reads it: a blank value is no head, so
+/// whitespace never reaches GitLab as one; any other value passes unchanged.
+fn mcp_expected_head(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.trim().is_empty())
+}
+
+/// A custom message on GitHub (`provider` None) or GitLab needs `expected_head_sha`,
+/// refused here in the tool's own terms before anything is sent. The value's shape is
+/// left to `forge_pr_merge`, which refuses a GitHub head that is not a full id.
+fn mcp_merge_head_refusal(
+    provider: Option<crate::forge::model::Provider>,
+    messages: &crate::forge::MergeMessages,
+    expected_head_sha: Option<&str>,
+) -> AppResult<()> {
+    let has_message = messages.squash.is_some() || messages.merge.is_some();
+    let has_head = expected_head_sha.is_some_and(|s| !s.trim().is_empty());
+    if has_message && !has_head && provider != Some(crate::forge::model::Provider::Bitbucket) {
+        return Err(AppError::InvalidArgument(
+            "A custom commit message needs expected_head_sha on GitHub and GitLab: pass the headSha that get_pull_request returned, so the message can only land on the commits you read."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -768,14 +865,37 @@ impl GitDesktopMcp {
     #[tool(
         description = "Merge a pull request (by number) in the bound repository's forge (GitHub, \
                        GitLab, or Bitbucket, per its remote), under the authenticated forge user. \
-                       `strategy` is \"merge\" (default), \"squash\", or \"rebase\" (rebase is \
-                       GitHub-only). A merge is NOT trivially reversible. On GitHub a stack merges \
+                       `strategy` is \"merge\" (default), \"squash\", \"rebase\" (GitHub only), \
+                       or \"fast_forward\" (Bitbucket only). A merge is NOT trivially reversible. On GitHub a stack merges \
                        bottom-up: merging a stacked PR ALSO merges every still-open PR below it in \
                        its stack, in one irreversible step — read `stack` and `stackMembers` via \
                        get_pull_request first to see what would go with it. Optionally deletes the \
                        head branch. The result's `action` is \"merged\", or \"queued\" when a merge \
                        queue took the merge — queued means NOT yet merged: the head branch is left \
-                       in place and `deleted_branch` is false. Requires --allow-remote-write.",
+                       in place and `deleted_branch` is false. Optionally sets the commit \
+                       messages. A custom message on GitHub or GitLab needs \
+                       `expected_head_sha`, the `headSha` that get_pull_request returned: the \
+                       merge is refused if the pull request has moved on since, so the message \
+                       only lands on the commits it was written for; Bitbucket has no such \
+                       check. On GitLab the project's settings decide which commits a merge \
+                       writes: a squash commit when `strategy` is \"squash\" or the project \
+                       always squashes, unless the project never squashes (then there is no \
+                       squash commit and a message for one is refused), and a merge commit \
+                       unless the project fast-forwards. `commit_title` and `commit_body` word \
+                       the squash commit when `strategy` is \"squash\" and the merge commit \
+                       otherwise. `merge_commit_title` and `merge_commit_body` are for strategy \
+                       \"squash\" only and word the merge commit, written on top of the squash \
+                       commit (or alone when the project never squashes), which a fast-forward \
+                       project does not write. To word the squash commit of a project that \
+                       always squashes, pass strategy \"squash\". Omit a pair to keep the \
+                       forge's default; a title alone writes a title-only message. On a GitHub \
+                       branch that requires a merge queue, the queue writes its own message and \
+                       a custom one is ignored. A rebase, a \
+                       Bitbucket fast-forward and a GitLab fast-forward without a squash write \
+                       no commit of their own and take no message, and a GitHub stacked merge, \
+                       which can land several pull requests, takes none either. A message for a \
+                       commit the merge will not write is refused before anything is merged. \
+                       Requires --allow-remote-write.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn merge_pull_request(
@@ -784,13 +904,33 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_remote_write()?;
         let strategy = args.strategy.unwrap_or_else(|| "merge".to_string());
+        let messages = merge_messages_from(
+            &strategy,
+            args.commit_title,
+            args.commit_body,
+            args.merge_commit_title,
+            args.merge_commit_body,
+        )
+        .map_err(app_err)?;
+        // Shape before the head, as `forge_pr_merge` orders it, so a malformed message
+        // gets the same answer here as in the app whether or not a head was given.
+        for m in [&messages.squash, &messages.merge].into_iter().flatten() {
+            crate::forge::validate_merge_message(m).map_err(app_err)?;
+        }
+        let expected_head = mcp_expected_head(args.expected_head_sha);
+        let provider = crate::forge::detect_non_github(&self.repo)
+            .await
+            .map(|(p, _)| p);
+        mcp_merge_head_refusal(provider, &messages, expected_head.as_deref()).map_err(app_err)?;
         let outcome = crate::forge::forge_pr_merge(
             self.repo.clone(),
             args.number,
             strategy.clone(),
             args.delete_branch,
+            expected_head,
             None,
-            None,
+            messages.squash,
+            messages.merge,
         )
         .await
         .map_err(app_err)?;
@@ -1800,6 +1940,252 @@ mod tests {
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
+    #[test]
+    fn merge_messages_from_maps_the_four_fields_onto_the_two_slots() {
+        let s = |v: &str| Some(v.to_string());
+        let msg = |t: &str, b: &str| crate::forge::MergeMessage {
+            title: t.into(),
+            body: b.into(),
+        };
+        let none = merge_messages_from("squash", None, None, None, None).unwrap();
+        assert!(none.squash.is_none() && none.merge.is_none());
+        let squash = merge_messages_from("squash", s("t"), None, None, None).unwrap();
+        assert_eq!(squash.squash, Some(msg("t", "")));
+        assert!(squash.merge.is_none());
+        let merge = merge_messages_from("merge", s("t"), s("b"), None, None).unwrap();
+        assert_eq!(merge.merge, Some(msg("t", "b")));
+        assert!(merge.squash.is_none());
+        let both = merge_messages_from("squash", s("t"), s("b"), s("m"), s("mb")).unwrap();
+        assert_eq!(both.squash, Some(msg("t", "b")));
+        assert_eq!(both.merge, Some(msg("m", "mb")));
+        let refusal = |r: AppResult<crate::forge::MergeMessages>| match r {
+            Err(AppError::InvalidArgument(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refusal(merge_messages_from("merge", None, None, s("m"), None)),
+            "merge_commit_title and merge_commit_body apply only to a squash merge on GitLab, where a merge commit is written on top of the squash commit."
+        );
+        let v10 = "commit_body needs commit_title (and merge_commit_body needs merge_commit_title): a custom commit message always carries its title.";
+        assert_eq!(
+            refusal(merge_messages_from("merge", None, s("b"), None, None)),
+            v10
+        );
+        assert_eq!(
+            refusal(merge_messages_from("squash", None, None, None, s("b"))),
+            v10
+        );
+    }
+
+    /// The command takes its two same-typed message slots positionally, squash first.
+    #[test]
+    fn merge_pull_request_passes_each_message_to_its_own_slot() {
+        let source = include_str!("write_forge.rs").replace("\r\n", "\n");
+        let start = source.find("async fn merge_pull_request(").unwrap();
+        let body = &source[start..];
+        let raw = &body[..body.find("\n    }\n").unwrap()];
+        // Comment lines go before the join, so a comment spelling the call can't pass.
+        let joined = |text: &str| {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .flat_map(str::split_whitespace)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let body = joined(raw);
+        let slots = "expected_head, None, messages.squash, messages.merge, ) .await";
+        assert!(body.contains(slots), "{body}");
+        let swapped = body.replacen(
+            "messages.squash, messages.merge,",
+            "messages.merge, messages.squash,",
+            1,
+        );
+        assert_ne!(swapped, body);
+        assert!(!swapped.contains(slots));
+        // The head rides the sha position, normalized, never dropped or raw.
+        for to in ["None, None,", "args.expected_head_sha, None,"] {
+            let dropped = body.replacen("expected_head, None,", to, 1);
+            assert_ne!(dropped, body, "{to}");
+            assert!(!dropped.contains(slots), "{to}");
+        }
+        let commented = raw.replacen(
+            "messages.squash,\n            messages.merge,",
+            "messages.merge,\n            messages.squash,\n            \
+             // expected_head, None, messages.squash, messages.merge, ) .await",
+            1,
+        );
+        assert_ne!(commented, raw);
+        let unstripped = commented.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(unstripped.contains(slots), "a comment spells it");
+        assert!(!joined(&commented).contains(slots));
+    }
+
+    const NEEDS_HEAD: &str = "A custom commit message needs expected_head_sha on GitHub and GitLab: pass the headSha that get_pull_request returned, so the message can only land on the commits you read.";
+
+    fn head_msg(t: &str) -> crate::forge::MergeMessage {
+        crate::forge::MergeMessage {
+            title: t.into(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_expected_head_drops_a_blank_head() {
+        let full = "3b04ca7".repeat(5) + "3b04c";
+        for blank in [None, Some(""), Some("  "), Some("\t\n")] {
+            assert_eq!(
+                mcp_expected_head(blank.map(String::from)),
+                None,
+                "{blank:?}"
+            );
+        }
+        assert_eq!(
+            mcp_expected_head(Some("abc".into())).as_deref(),
+            Some("abc")
+        );
+        assert_eq!(mcp_expected_head(Some(full.clone())), Some(full));
+        // With a message, a whitespace-only head is no head at all.
+        use crate::forge::model::Provider;
+        for provider in [None, Some(Provider::GitLab)] {
+            let messages = crate::forge::MergeMessages {
+                squash: Some(head_msg("t")),
+                merge: None,
+            };
+            let head = mcp_expected_head(Some("  ".into()));
+            match mcp_merge_head_refusal(provider, &messages, head.as_deref()) {
+                Err(AppError::InvalidArgument(t)) => assert_eq!(t, NEEDS_HEAD),
+                other => panic!("{provider:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_merge_head_refusal_names_expected_head_sha() {
+        use crate::forge::model::Provider;
+        let full = "3b04ca7".repeat(5) + "3b04c";
+        let heads = [None, Some(""), Some("  "), Some("abc"), Some(full.as_str())];
+        let slots = |squash: bool, merge: bool| crate::forge::MergeMessages {
+            squash: squash.then(|| head_msg("s")),
+            merge: merge.then(|| head_msg("m")),
+        };
+        for provider in [None, Some(Provider::GitLab), Some(Provider::Bitbucket)] {
+            for (squash, merge) in [(false, false), (true, false), (false, true), (true, true)] {
+                for head in heads {
+                    let got = mcp_merge_head_refusal(provider, &slots(squash, merge), head);
+                    let at = format!("{provider:?} {squash} {merge} {head:?}");
+                    let refused = (squash || merge)
+                        && provider != Some(Provider::Bitbucket)
+                        && head.is_none_or(|h| h.trim().is_empty());
+                    match got {
+                        Err(AppError::InvalidArgument(t)) if refused => {
+                            assert_eq!(t, NEEDS_HEAD, "{at}")
+                        }
+                        Ok(()) if !refused => {}
+                        other => panic!("{at}: {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// The MCP layer asks for the head first; a rebase's no-message refusal is left to
+    /// `forge_pr_merge` once a head is given.
+    #[test]
+    fn mcp_merge_head_refusal_precedes_the_no_message_refusal() {
+        let messages = merge_messages_from("rebase", Some("t".into()), None, None, None).unwrap();
+        assert!(messages.squash.is_none() && messages.merge.is_some());
+        match mcp_merge_head_refusal(None, &messages, None) {
+            Err(AppError::InvalidArgument(t)) => assert_eq!(t, NEEDS_HEAD),
+            other => panic!("{other:?}"),
+        }
+        let full = "3b04ca7".repeat(5) + "3b04c";
+        assert!(mcp_merge_head_refusal(None, &messages, Some(&full)).is_ok());
+    }
+
+    const VALIDATE: &str = "crate::forge::validate_merge_message(m).map_err(app_err)?;";
+
+    fn refuses_before_merging(body: &str) -> bool {
+        match (
+            body.find("merge_messages_from("),
+            body.find(VALIDATE),
+            body.find("mcp_merge_head_refusal(provider, &messages, expected_head.as_deref())"),
+            body.find("forge_pr_merge("),
+        ) {
+            (Some(a), Some(v), Some(b), Some(c)) => a < v && v < b && b < c,
+            _ => false,
+        }
+    }
+
+    /// Message mapping, then the shape checks, then the head refusal over the normalized
+    /// head, then the merge; the result carries no `stacked` key.
+    #[test]
+    fn merge_pull_request_refuses_before_merging() {
+        let source = include_str!("write_forge.rs").replace("\r\n", "\n");
+        let body = method_body(&source, "merge_pull_request")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(refuses_before_merging(&body), "{body}");
+        assert!(body.contains("let expected_head = mcp_expected_head(args.expected_head_sha);"));
+        let call = "mcp_merge_head_refusal(provider, &messages, expected_head.as_deref()).map_err(app_err)?;";
+        assert!(body.contains(call), "{body}");
+        let moved = format!("{} {call}", body.replacen(call, "", 1));
+        assert!(!refuses_before_merging(&moved));
+        let raw = body.replacen(
+            "expected_head.as_deref())",
+            "args.expected_head_sha.as_deref())",
+            1,
+        );
+        assert_ne!(raw, body);
+        assert!(!refuses_before_merging(&raw));
+        let check = format!(
+            "for m in [&messages.squash, &messages.merge].into_iter().flatten() {{ {VALIDATE} }}"
+        );
+        assert!(body.contains(&check), "{body}");
+        let late = body
+            .replacen(&check, "", 1)
+            .replacen(call, &format!("{call} {check}"), 1);
+        assert!(late.contains(&format!("{call} {check}")));
+        assert!(!refuses_before_merging(&late));
+        assert!(!body.contains("stacked"), "{body}");
+    }
+
+    /// A malformed message is refused by its shape before the head is asked for, and
+    /// before the provider is detected, so nothing is spawned.
+    #[tokio::test]
+    async fn merge_pull_request_checks_the_message_before_the_head() {
+        let h = GitDesktopMcp::with_options("/tmp/x".into(), false, true, false, false);
+        let merge = |strategy: &str, title: &str, merge_title: Option<&str>| {
+            h.merge_pull_request(Parameters(MergePullRequestArgs {
+                number: 1,
+                strategy: Some(strategy.into()),
+                delete_branch: false,
+                commit_title: Some(title.into()),
+                commit_body: None,
+                merge_commit_title: merge_title.map(String::from),
+                merge_commit_body: None,
+                expected_head_sha: None,
+            }))
+        };
+        for error in [
+            merge("merge", "  ", None).await.unwrap_err(),
+            merge("squash", "t", Some("\t")).await.unwrap_err(),
+        ] {
+            assert!(
+                error.message.contains("The commit title can't be empty."),
+                "{}",
+                error.message
+            );
+            assert!(
+                !error.message.contains("expected_head_sha"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
     #[tokio::test]
     async fn create_pull_request_refuses_session_publish_before_repo_access() {
         let h = GitDesktopMcp::with_options("/tmp/x".into(), false, true, true, false);
@@ -2163,6 +2549,11 @@ mod tests {
             number: 1,
             strategy: None,
             delete_branch: false,
+            commit_title: None,
+            commit_body: None,
+            merge_commit_title: None,
+            merge_commit_body: None,
+            expected_head_sha: None,
         })));
         assert_gated!(h.update_pull_request(Parameters(UpdatePullRequestArgs {
             number: 1,

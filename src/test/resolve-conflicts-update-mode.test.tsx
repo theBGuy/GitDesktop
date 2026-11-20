@@ -34,16 +34,19 @@ import {
 import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   BRANCH_PUSH_ELSEWHERE_MESSAGE,
+  MERGE_DISCARDED_UNRECORDED_NOTE,
+  MERGE_LANDED_UNRECORDED_NOTE,
   usePush,
 } from "@/lib/git/queries";
 import { repoIdentityQueryOptions } from "@/lib/git/repo-identity-query";
 import type { RepoStatus } from "@/lib/git/types";
 import { type LocalPr, updateLocalPr } from "@/lib/pulls/local";
+import { localPrKey } from "@/lib/pulls/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { unmockedCommands } from "./setup";
 
 vi.mock("sonner", () => ({
@@ -58,6 +61,7 @@ vi.mock("sonner", () => ({
 vi.mock("@/lib/toast", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/toast")>()),
   toastError: vi.fn(),
+  toastErrorWithNote: vi.fn(),
 }));
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
@@ -566,16 +570,79 @@ describe("ResolveConflictsView, merge mode (parity)", () => {
     expect(sentence).toHaveTextContent("Resolving conflicts · feat → main");
   });
 
+  /** Presses Finish (refused, so the record stays) and then a confirmed Abort on a
+   *  paused merge stored as `merge`, and returns the journal checkout each sent. */
+  async function finishThenAbort(merge: unknown) {
+    vi.clearAllMocks();
+    const user = userEvent.setup();
+    useConfirm.setState({ ask: vi.fn(async () => true) });
+    vi.mocked(gitFinishLocalPrMerge).mockRejectedValue(new Error("refused"));
+    vi.mocked(gitAbortLocalPrMerge).mockResolvedValue({
+      removed: true,
+      closed: true,
+    });
+    const view = renderEditor({
+      mode: "merge",
+      pr: makePr({
+        pendingUpdate: undefined,
+        pendingMerge: merge as LocalPr["pendingMerge"],
+      }),
+    });
+    const done = "All conflicts resolved — Finish to complete the merge.";
+    await waitFor(() => expect(screen.getAllByText(done)).toHaveLength(2));
+    await user.click(finishButton());
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "Abort" }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Merge discarded"),
+    );
+    view.unmount();
+    expect(gitFinishLocalPrMerge).toHaveBeenCalledTimes(1);
+    expect(gitAbortLocalPrMerge).toHaveBeenCalledTimes(1);
+    const [finishArgs] = vi.mocked(gitFinishLocalPrMerge).mock.calls;
+    const [abortArgs] = vi.mocked(gitAbortLocalPrMerge).mock.calls;
+    expect(finishArgs.slice(0, -1)).toEqual([
+      REPO,
+      "main",
+      "merge",
+      "m",
+      WT,
+      "0123456789ab",
+      "op-m",
+    ]);
+    expect(abortArgs.slice(0, -1)).toEqual([REPO, WT, "op-m"]);
+    return { finish: finishArgs.at(-1), abort: abortArgs.at(-1) };
+  }
+
+  it("finishes and aborts a paused merge against its journal checkout", async () => {
+    const sent = await finishThenAbort({
+      ...MERGE,
+      journalRepo: "C:/repo-main",
+    });
+    expect(sent).toEqual({ finish: "C:/repo-main", abort: "C:/repo-main" });
+  });
+
+  it("passes null for a merge paused before the field existed", async () => {
+    for (const journalRepo of [undefined, "", 42]) {
+      const merge =
+        journalRepo === undefined ? MERGE : { ...MERGE, journalRepo };
+      const sent = await finishThenAbort(merge);
+      expect(sent).toEqual({ finish: null, abort: null });
+    }
+  });
+
   /** Confirms Abort on a paused merge whose abort command answers with `aborted`,
    *  over a fresh record that differs from the shown one by `fresh`. */
   async function abortMerge(
     aborted: { removed: boolean; closed: boolean },
     fresh: Partial<LocalPr> = {},
+    writeFails?: unknown,
   ) {
     const user = userEvent.setup();
     useConfirm.setState({ ask: vi.fn(async () => true) });
     vi.mocked(gitAbortLocalPrMerge).mockResolvedValue(aborted);
     vi.mocked(updateLocalPr).mockImplementation(async (_repo, _id, mutate) => {
+      if (writeFails !== undefined) throw writeFails;
       const next = mutate(
         makePr({ pendingUpdate: undefined, pendingMerge: MERGE, ...fresh }),
       );
@@ -630,6 +697,254 @@ describe("ResolveConflictsView, merge mode (parity)", () => {
     expect(written[0].pendingMerge).toBeUndefined();
     expect(written[0].status).toBe("merged");
     expect(written[0].mergedAt).toBe(mergedAt);
+  });
+
+  it("an abort leaves a paused merge of another worktree on the record", async () => {
+    const other = { ...MERGE, worktreeId: "fedcba987654" };
+    await abortMerge({ removed: true, closed: true }, { pendingMerge: other });
+    expect(toast.success).toHaveBeenCalledWith("Merge discarded");
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toEqual(other);
+  });
+
+  it("a finish writes the record in the repository it started in", async () => {
+    const user = userEvent.setup();
+    const answer =
+      deferred<Awaited<ReturnType<typeof gitFinishLocalPrMerge>>>();
+    vi.mocked(gitFinishLocalPrMerge).mockReturnValue(answer.promise);
+    vi.mocked(updateLocalPr).mockImplementation(async (_repo, _id, mutate) => {
+      const next = mutate(
+        makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+      );
+      written.push(next);
+      return next;
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const pr = makePr({ pendingUpdate: undefined, pendingMerge: MERGE });
+    const view = (repoPath: string) => (
+      <QueryClientProvider client={client}>
+        <ResolveConflictsView repoPath={repoPath} pr={pr} mode="merge" />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(REPO));
+    const done = "All conflicts resolved — Finish to complete the merge.";
+    await waitFor(() => expect(screen.getAllByText(done)).toHaveLength(2));
+    await user.click(finishButton());
+    await waitFor(() => expect(gitFinishLocalPrMerge).toHaveBeenCalled());
+    rerender(view("C:/other-repo"));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    await act(async () =>
+      answer.resolve({
+        status: "merged",
+        conflicts: [],
+        baseTip: "abc",
+        worktreePath: null,
+        worktreeId: null,
+        opId: null,
+        journalRepo: "C:/repo",
+      }),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Merged feat into main"),
+    );
+    expect(updateLocalPr).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(updateLocalPr).mock.calls[0]?.[0]).toBe(REPO);
+    expect(written[0].status).toBe("merged");
+    expect(written[0].pendingMerge).toBeUndefined();
+    // The list re-read is the starting repository's too, not the one on screen.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: localPrKey(REPO) });
+    expect(invalidate).not.toHaveBeenCalledWith({
+      queryKey: localPrKey("C:/other-repo"),
+    });
+  });
+
+  /** Presses Finish on the paused merge, answered with `answer`; the record write
+   *  runs over a fresh record that differs from the shown one by `fresh`, or
+   *  rejects with `writeFails`. */
+  async function finishMerge(
+    answer: Awaited<ReturnType<typeof gitFinishLocalPrMerge>>,
+    fresh: Partial<LocalPr> = {},
+    writeFails?: unknown,
+  ) {
+    const user = userEvent.setup();
+    vi.mocked(gitFinishLocalPrMerge).mockResolvedValue(answer);
+    vi.mocked(updateLocalPr).mockImplementation(async (_repo, _id, mutate) => {
+      if (writeFails !== undefined) throw writeFails;
+      const next = mutate(
+        makePr({ pendingUpdate: undefined, pendingMerge: MERGE, ...fresh }),
+      );
+      written.push(next);
+      return next;
+    });
+    renderEditor({
+      mode: "merge",
+      pr: makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+    });
+    const done = "All conflicts resolved — Finish to complete the merge.";
+    await waitFor(() => expect(screen.getAllByText(done)).toHaveLength(2));
+    await user.click(finishButton());
+    await waitFor(() => expect(gitFinishLocalPrMerge).toHaveBeenCalledTimes(1));
+    await act(async () => new Promise((r) => setTimeout(r, 20)));
+  }
+
+  const MERGED_ANSWER = {
+    status: "merged" as const,
+    conflicts: [],
+    baseTip: "abc",
+    worktreePath: null,
+    worktreeId: null,
+    opId: null,
+    journalRepo: REPO,
+  };
+  const REPAUSED_ANSWER = {
+    status: "conflicts" as const,
+    conflicts: ["a.ts"],
+    baseTip: "",
+    worktreePath: WT,
+    worktreeId: MERGE.worktreeId,
+    opId: MERGE.opId,
+    journalRepo: "C:/repo-main",
+  };
+
+  it("a landed finish whose record write fails says the merge landed", async () => {
+    const writeErr = new Error("store locked");
+    await finishMerge(MERGED_ANSWER, {}, writeErr);
+    await waitFor(() =>
+      expect(toastErrorWithNote).toHaveBeenCalledWith(
+        writeErr,
+        MERGE_LANDED_UNRECORDED_NOTE,
+      ),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("a landed finish marks the record merged but keeps another worktree's paused merge", async () => {
+    const other = { ...MERGE, worktreeId: "fedcba987654" };
+    await finishMerge(MERGED_ANSWER, { pendingMerge: other });
+    expect(toast.success).toHaveBeenCalledWith("Merged feat into main");
+    expect(written).toHaveLength(1);
+    expect(written[0].status).toBe("merged");
+    expect(written[0].pendingMerge).toEqual(other);
+  });
+
+  it("a re-paused finish leaves another worktree's paused merge unchanged", async () => {
+    const other = { ...MERGE, worktreeId: "fedcba987654" };
+    await finishMerge(REPAUSED_ANSWER, { pendingMerge: other });
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toEqual(other);
+  });
+
+  it("a re-paused finish keeps a journal checkout the record already carries", async () => {
+    const carried = { ...MERGE, journalRepo: "C:/repo-elsewhere" };
+    await finishMerge(REPAUSED_ANSWER, { pendingMerge: carried });
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toEqual(carried);
+  });
+
+  it("an abort that removed the worktree but couldn't write the record says it was discarded", async () => {
+    const writeErr = new Error("store locked");
+    await abortMerge({ removed: true, closed: true }, {}, writeErr);
+    await waitFor(() =>
+      expect(toastErrorWithNote).toHaveBeenCalledWith(
+        writeErr,
+        MERGE_DISCARDED_UNRECORDED_NOTE,
+      ),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("an unrecorded abort whose entry was already closed says that too", async () => {
+    const writeErr = new Error("store locked");
+    await abortMerge({ removed: true, closed: false }, {}, writeErr);
+    await waitFor(() =>
+      expect(toastErrorWithNote).toHaveBeenCalledWith(
+        writeErr,
+        `${MERGE_DISCARDED_UNRECORDED_NOTE} ${MERGE_ENTRY_ALREADY_CLOSED}`,
+      ),
+    );
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("an abort writes the record in the repository it started in", async () => {
+    const user = userEvent.setup();
+    useConfirm.setState({ ask: vi.fn(async () => true) });
+    const answer = deferred<Awaited<ReturnType<typeof gitAbortLocalPrMerge>>>();
+    vi.mocked(gitAbortLocalPrMerge).mockReturnValue(answer.promise);
+    vi.mocked(updateLocalPr).mockImplementation(async (_repo, _id, mutate) => {
+      const next = mutate(
+        makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+      );
+      written.push(next);
+      return next;
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const pr = makePr({ pendingUpdate: undefined, pendingMerge: MERGE });
+    const view = (repoPath: string) => (
+      <QueryClientProvider client={client}>
+        <ResolveConflictsView repoPath={repoPath} pr={pr} mode="merge" />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(REPO));
+    await screen.findByText(/^Resolving conflicts/);
+    await user.click(screen.getByRole("button", { name: "Abort" }));
+    await waitFor(() => expect(gitAbortLocalPrMerge).toHaveBeenCalled());
+    rerender(view("C:/other-repo"));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    await act(async () => answer.resolve({ removed: true, closed: true }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("Merge discarded"),
+    );
+    expect(updateLocalPr).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(updateLocalPr).mock.calls[0]?.[0]).toBe(REPO);
+    expect(written[0].pendingMerge).toBeUndefined();
+    // The list re-read is the starting repository's too, not the one on screen.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: localPrKey(REPO) });
+    expect(invalidate).not.toHaveBeenCalledWith({
+      queryKey: localPrKey("C:/other-repo"),
+    });
+  });
+
+  it("a re-paused finish saves the journal checkout an older record lacked", async () => {
+    const user = userEvent.setup();
+    vi.mocked(gitFinishLocalPrMerge).mockResolvedValue({
+      status: "conflicts",
+      conflicts: ["a.ts"],
+      baseTip: "",
+      worktreePath: WT,
+      worktreeId: MERGE.worktreeId,
+      opId: MERGE.opId,
+      journalRepo: "C:/repo-main",
+    });
+    vi.mocked(updateLocalPr).mockImplementation(async (_repo, _id, mutate) => {
+      const next = mutate(
+        makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+      );
+      written.push(next);
+      return next;
+    });
+    renderEditor({
+      mode: "merge",
+      pr: makePr({ pendingUpdate: undefined, pendingMerge: MERGE }),
+    });
+    const done = "All conflicts resolved — Finish to complete the merge.";
+    await waitFor(() => expect(screen.getAllByText(done)).toHaveLength(2));
+    await user.click(finishButton());
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith("More conflicts to resolve"),
+    );
+    expect(vi.mocked(gitFinishLocalPrMerge).mock.calls[0]?.at(-1)).toBeNull();
+    expect(written).toHaveLength(1);
+    expect(written[0].pendingMerge).toEqual({
+      ...MERGE,
+      journalRepo: "C:/repo-main",
+    });
   });
 
   it("an errored status read shows no unreadable line in merge mode", async () => {

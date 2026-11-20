@@ -1,3 +1,4 @@
+use std::ops::ControlFlow;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use crate::git::runner::{
 use crate::git::types::{
     CommitDate, FileDiff, RebaseStop, RepoOpState, RewriteStep, StashEntry, TagInfo,
 };
+use crate::oplog::{ClaimRenewal, ClaimSettle, CloseOutcome, FinishClaim};
 use crate::state::AppState;
 
 /// Refuses when the working tree has **tracked** changes (staged or unstaged).
@@ -3888,8 +3890,10 @@ pub async fn git_rebase_onto(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalPrMergeOutcome {
-    /// `"merged"` (the merge landed and `base` was advanced) or `"conflicts"`
-    /// (the merge is paused in the resolve worktree for the user to resolve).
+    /// `"merged"` (the merge landed and `base` was advanced), `"conflicts"` (the
+    /// merge is paused in the resolve worktree for the user to resolve) or
+    /// `"already-merged"` (the base already contained the head at the start, so
+    /// nothing was written and `base_tip` is the base's tip).
     pub status: String,
     /// Unmerged paths **in the resolve worktree** (empty when merged). From
     /// `diff --name-only --diff-filter=U` run with cwd = the worktree.
@@ -3905,6 +3909,9 @@ pub struct LocalPrMergeOutcome {
     pub worktree_path: Option<String>,
     /// The oplog entry id, threaded to finish/abort so they can close it.
     pub op_id: Option<String>,
+    /// The checkout path the entry is filed under, threaded to finish/abort: records are
+    /// shared by every checkout of the repository, the journal is keyed per checkout.
+    pub journal_repo: String,
 }
 
 /// The current unmerged (conflicted) paths in `repo`'s working tree, via
@@ -4240,6 +4247,19 @@ async fn finalize_base(
     current: &str,
     expected_tip: Option<&str>,
 ) -> AppResult<()> {
+    finalize_base_fenced(state, repo_path, base, new_sha, current, expected_tip, None).await
+}
+
+/// [`finalize_base`] under a finish's [`ClaimFence`], checked right before the base moves.
+async fn finalize_base_fenced(
+    state: &AppState,
+    repo_path: &str,
+    base: &str,
+    new_sha: &str,
+    current: &str,
+    expected_tip: Option<&str>,
+    fence: Option<&ClaimFence<'_>>,
+) -> AppResult<()> {
     finalize_branch(
         state,
         repo_path,
@@ -4249,8 +4269,86 @@ async fn finalize_base(
         expected_tip,
         merge_target_moved,
         "merging into",
+        fence,
     )
     .await
+}
+
+/// Whose finish a [`ClaimFence`] guards, naming the target its refusals use.
+#[derive(Clone, Copy)]
+enum FinishFlow<'a> {
+    /// A local PR's update finish, moving `head`.
+    Update { head: &'a str },
+    /// A local PR's merge finish, moving `base`.
+    Merge { base: &'a str },
+}
+
+/// A finish's claim on its journal entry (key, op id, token), re-asserted by
+/// [`finalize_branch`] immediately before each ref write, so a claim that lapsed during
+/// its cleanups and lock waits cannot move a branch an abort or discard has since closed.
+/// Its journal I/O takes no git lock, so it may run inside a working-tree hold.
+struct ClaimFence<'a> {
+    key: &'a str,
+    id: &'a str,
+    token: &'a str,
+    flow: FinishFlow<'a>,
+}
+
+impl ClaimFence<'_> {
+    /// `Ok(true)`: renewed, so write. `Ok(false)`: the entry was closed but `branch`
+    /// already holds `new_sha` (another finish landed this commit after the claim lapsed),
+    /// so write nothing and succeed. `Err`: the flow's busy or closed refusal, nothing
+    /// written. "Already holds" reads the exact ref, so neither a case twin nor a
+    /// `refs/heads/…`-named branch answers for `branch`.
+    async fn admits_write(&self, repo_path: &str, branch: &str, new_sha: &str) -> AppResult<bool> {
+        match crate::oplog::renew_finish_claim(self.key, self.id, self.token).await {
+            ClaimRenewal::Renewed => Ok(true),
+            ClaimRenewal::Closed => {
+                let landed = match self.flow {
+                    FinishFlow::Update { .. } => {
+                        existing_branch_tip(repo_path, branch).await?;
+                        let exact = crate::git::branches::exact_branch_tip(repo_path, branch);
+                        exact.await?.as_deref() == Some(new_sha)
+                    }
+                    FinishFlow::Merge { .. } => {
+                        branch_tip(repo_path, branch).await?;
+                        let exact = crate::git::branches::exact_branch_tip(repo_path, branch);
+                        match exact.await? {
+                            Some(tip) => is_ancestor(repo_path, new_sha, &tip).await?,
+                            None => false,
+                        }
+                    }
+                };
+                if landed {
+                    return Ok(false);
+                }
+                Err(AppError::Command(match self.flow {
+                    FinishFlow::Update { head } => update_closed_mid_finish(head),
+                    FinishFlow::Merge { base } => merge_closed_mid_finish(base),
+                }))
+            }
+            ClaimRenewal::LostOrUnknown => {
+                let busy = match self.flow {
+                    FinishFlow::Update { .. } => UPDATE_FINISH_BUSY,
+                    FinishFlow::Merge { .. } => MERGE_BUSY,
+                };
+                Err(AppError::Command(busy.to_string()))
+            }
+        }
+    }
+}
+
+/// [`ClaimFence::admits_write`], admitting every write when there is no fence.
+async fn fence_admits(
+    fence: Option<&ClaimFence<'_>>,
+    repo_path: &str,
+    branch: &str,
+    new_sha: &str,
+) -> AppResult<bool> {
+    match fence {
+        Some(fence) => fence.admits_write(repo_path, branch, new_sha).await,
+        None => Ok(true),
+    }
 }
 
 /// [`finalize_base`]'s refusal for a base that moved: its remedy is a re-run of the merge.
@@ -4258,6 +4356,22 @@ fn merge_target_moved(base: &str) -> String {
     format!(
         "{base} moved while this merge was being prepared, so advancing it would discard \
          that change. {base} is unchanged — re-run the merge from its current tip."
+    )
+}
+
+/// A merge finish whose entry was closed between its claim and the base move.
+fn merge_closed_mid_finish(base: &str) -> String {
+    format!(
+        "This merge was closed while it was being finished, so {base} is unchanged. Abort \
+         the merge and start it again."
+    )
+}
+
+/// A merge finish over an entry already closed as anything but done.
+fn merge_no_longer_unfinished(base: &str) -> String {
+    format!(
+        "This merge was already ended, so {base} is unchanged. Abort the merge and start it \
+         again."
     )
 }
 
@@ -4368,7 +4482,8 @@ async fn is_current_branch(repo_path: &str, current: &str, branch: &str) -> AppR
 /// its branch update advances its head. `moved` words the refusal for a target that
 /// moved, or whose checkout switched away, and `verb` ends the in-operation refusal, so
 /// each flow names its own remedy in its start gate's words. Takes the working-tree locks
-/// it needs itself, so a caller must hold none of them.
+/// it needs itself, so a caller must hold none of them. `fence` is checked after every
+/// cleanup, lock wait and preflight, right before the one git write that moves `branch`.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_branch(
     state: &AppState,
@@ -4379,6 +4494,7 @@ async fn finalize_branch(
     expected_tip: Option<&str>,
     moved: fn(&str) -> String,
     verb: &str,
+    fence: Option<&ClaimFence<'_>>,
 ) -> AppResult<()> {
     use crate::git::branches::{current_branch_name, holds_branch, spelling_reaches_branch};
     // A case variant of a stored branch acts as that branch from here on. Read before the
@@ -4451,6 +4567,9 @@ async fn finalize_branch(
             .map_err(|e| ignored_guard::check_failed("Fast-forward", e))?;
         if !paths.is_empty() {
             return Err(ignored_guard::finalize_refusal(branch, None, &paths));
+        }
+        if !fence_admits(fence, repo_path, branch, new_sha).await? {
+            return Ok(());
         }
         let out = run_git_raw_index_retry(
             repo_path,
@@ -4572,6 +4691,9 @@ async fn finalize_branch(
                 &paths,
             ));
         }
+        if !fence_admits(fence, repo_path, branch, new_sha).await? {
+            return Ok(());
+        }
         let out = run_git_raw_index_retry(
             &worktree,
             &["merge", "--ff-only", "--no-overwrite-ignore", new_sha],
@@ -4604,14 +4726,25 @@ async fn finalize_branch(
     // Not checked out anywhere — move the ref directly, no working tree touched. git's
     // own `<oldvalue>` argument refuses a move of the tip between the check above and
     // this write, but not a twin created at the same tip inside that window.
-    run_git_mutating(
-        state,
-        repo_path,
-        &["update-ref", &format!("refs/heads/{branch}"), new_sha, &tip_now],
-        DEFAULT_TIMEOUT,
-    )
-    .await
-    .map_err(|e| match e {
+    let ref_name = format!("refs/heads/{branch}");
+    let args = ["update-ref", ref_name.as_str(), new_sha, &tip_now];
+    let written = match fence {
+        None => run_git_mutating(state, repo_path, &args, DEFAULT_TIMEOUT)
+            .await
+            .map(drop),
+        // The mutating runner's own hold, taken here so the fence runs after its wait.
+        Some(fence) => {
+            let domain = state.working_tree_lock(repo_path).await;
+            let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?;
+            if !fence.admits_write(repo_path, branch, new_sha).await? {
+                return Ok(());
+            }
+            run_git_raw_index_retry(repo_path, &args, DEFAULT_TIMEOUT)
+                .await
+                .and_then(check_code)
+        }
+    };
+    written.map_err(|e| match e {
         // Only a CAS mismatch means `branch` moved — git says `is at <sha> but
         // expected <sha>` (measured, 2.51.1). "cannot lock ref" alone does NOT
         // discriminate: a stale .lock file and a permissions failure say it too,
@@ -4634,7 +4767,8 @@ async fn finalize_branch(
 /// branch and uncommitted work are NEVER touched. Clean ⇒ `base` is advanced
 /// (`finalize_base`), the worktree torn down, `status: "merged"`. Conflict ⇒ the
 /// worktree is kept and returned so the frontend drives resolution there, then
-/// calls `git_finish_local_pr_merge` / `git_abort_local_pr_merge`. A clean main
+/// calls `git_finish_local_pr_merge` / `git_abort_local_pr_merge`. A head `base`
+/// already contains ⇒ `status: "already-merged"`, with nothing written. A clean main
 /// tree is required ONLY when `base` IS the current branch (advancing it
 /// unavoidably touches the tree).
 #[tauri::command]
@@ -4689,6 +4823,31 @@ pub(crate) async fn merge_local_pr(
     // Fully-qualified: this one read anchors the journal, the resolve worktree's
     // start point, and the rebase strategy's replay range.
     let base_tip = branch_tip(repo_path, &stored_base).await?;
+    // A tip read through an unheld case twin may be the twin's, so no answer computed
+    // from it reaches the caller before that refusal.
+    refuse_unheld_twin(repo_path, &stored_base, &current).await?;
+    // A head the base already contains has nothing to merge, so it is answered before any
+    // other gate or write: no entry, worktree or commit. Both sides are read as exact refs,
+    // so neither a tag, a case twin nor a `refs/heads/…`-named branch answers; a missing
+    // ref or a failed read takes the ordinary route.
+    let exact_base = crate::git::branches::exact_branch_tip(repo_path, &stored_base).await;
+    let exact_head = crate::git::branches::exact_branch_tip(repo_path, head).await;
+    if let (Ok(Some(exact_base)), Ok(Some(exact_head))) = (exact_base, exact_head) {
+        if is_ancestor(repo_path, &exact_head, &exact_base)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(LocalPrMergeOutcome {
+                status: "already-merged".to_string(),
+                conflicts: Vec::new(),
+                base_tip: exact_base,
+                worktree_id: None,
+                worktree_path: None,
+                op_id: None,
+                journal_repo: repo_path.to_string(),
+            });
+        }
+    }
 
     // Only advancing the CURRENT branch touches the main tree — gate that one
     // case on a clean tree (finalize_base's `merge --ff-only` would otherwise
@@ -4697,7 +4856,6 @@ pub(crate) async fn merge_local_pr(
     if is_current_branch(repo_path, &current, &stored_base).await? {
         ensure_clean_tree(repo_path).await?;
     }
-    refuse_unheld_twin(repo_path, &stored_base, &current).await?;
     refuse_branch_operation(repo_path, &stored_base, "merging into").await?;
     refuse_other_spelling_checkout(repo_path, &stored_base, &current).await?;
 
@@ -4756,7 +4914,7 @@ pub(crate) async fn merge_local_pr(
             {
                 Ok(o) if o.code == 0 => run_git_raw(
                     Some(&worktree_path),
-                    &["commit", "-m", &message],
+                    &["commit", "--cleanup=whitespace", "-m", &message],
                     DEFAULT_TIMEOUT,
                 )
                 .await
@@ -4777,9 +4935,19 @@ pub(crate) async fn merge_local_pr(
         )
         .await
         .and_then(check_code),
+        // The confirmed message lands as the user saw it, whatever the repository's
+        // `commit.cleanup` or `merge.log` say; with default config this is git's own choice.
         _ => run_git_raw(
             Some(&worktree_path),
-            &["merge", "--no-ff", "-m", &message, &head_rev],
+            &[
+                "merge",
+                "--no-ff",
+                "--cleanup=whitespace",
+                "--no-log",
+                "-m",
+                &message,
+                &head_rev,
+            ],
             DEFAULT_TIMEOUT,
         )
         .await
@@ -4820,6 +4988,7 @@ pub(crate) async fn merge_local_pr(
                 worktree_id: None,
                 worktree_path: None,
                 op_id,
+                journal_repo: repo_path.to_string(),
             })
         }
         Err(err) => {
@@ -4828,10 +4997,20 @@ pub(crate) async fn merge_local_pr(
             // never writes MERGE_HEAD, so this is more reliable than op markers).
             let conflicts = unmerged_paths(&worktree_path).await;
             if !conflicts.is_empty() {
-                // Keep the worktree and pause the entry; the frontend drives resolution
-                // there, then finish/abort close it. A pending entry would be reconciled
-                // to "done" by any oplog check that finds the user on a clean base.
+                // Handed to the user under a paused entry, which finish and abort close.
+                // `pause` is best-effort and a pending entry can be reconciled to `done`,
+                // so a resolution is handed out only once the entry reads paused.
                 crate::oplog::pause(repo_path, &op_id).await;
+                let paused = match &op_id {
+                    Some(id) => entry_status(repo_path, id).await.as_deref() == Some("paused"),
+                    None => false,
+                };
+                if !paused {
+                    let error = Some(UNJOURNALED_MERGE.to_string());
+                    crate::oplog::finish(repo_path, &op_id, error).await;
+                    remove_resolve_worktree(state, repo_path, &worktree_path).await;
+                    return Err(AppError::Command(UNJOURNALED_MERGE.to_string()));
+                }
                 Ok(LocalPrMergeOutcome {
                     status: "conflicts".to_string(),
                     conflicts,
@@ -4839,6 +5018,7 @@ pub(crate) async fn merge_local_pr(
                     worktree_id: Some(worktree_id),
                     worktree_path: Some(worktree_path),
                     op_id,
+                    journal_repo: repo_path.to_string(),
                 })
             } else {
                 // Genuine (non-conflict) failure: tear the worktree down (the main
@@ -4864,7 +5044,9 @@ pub(crate) async fn merge_local_pr(
 /// while any unmerged path remains there. On success `base` is advanced to the
 /// resolved commit (`finalize_base`), the worktree is removed, and it reports
 /// `status: "merged"`. For a `rebase` strategy a *later* commit in the range can
-/// re-conflict — it then stays in the worktree and reports `status: "conflicts"`.
+/// re-conflict — it then stays in the worktree and reports `status: "conflicts"`. A
+/// merge an earlier finish already landed (its recorded commit is on `base`) reports
+/// `merged` without the gates or a commit, with or without its worktree.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
 pub async fn git_finish_local_pr_merge(
@@ -4876,6 +5058,7 @@ pub async fn git_finish_local_pr_merge(
     worktree_path: String,
     worktree_id: String,
     op_id: Option<String>,
+    journal_repo: Option<String>,
 ) -> AppResult<LocalPrMergeOutcome> {
     let roots = merge_worktree_roots(&state, &repo_path).await?;
     finish_local_pr_merge(
@@ -4888,6 +5071,7 @@ pub async fn git_finish_local_pr_merge(
         &worktree_id,
         &roots,
         op_id,
+        journal_repo.as_deref(),
     )
     .await
 }
@@ -4942,112 +5126,257 @@ pub(crate) async fn finish_local_pr_merge(
     worktree_id: &str,
     roots: &[std::path::PathBuf],
     op_id: Option<String>,
+    journal_repo: Option<&str>,
 ) -> AppResult<LocalPrMergeOutcome> {
     // Same gate as `merge_local_pr` — this path reaches the identical
     // `finalize_base` update-ref refspec.
     crate::git::branches::validate_branch_name(base)?;
-    // The record names the worktree, so the commit and the force-removal below act
-    // only on one this repository's merges minted and git still lists: an unlisted
-    // leftover directory would take the commit into whatever repository encloses it.
+    // The record names the worktree, so the commit below runs only in a leaf this
+    // repository's merges minted and git still lists: an unlisted leftover directory
+    // would take the commit into whatever repository encloses it.
     let place = check_merge_worktree(repo_path, roots, worktree_path, worktree_id).await?;
-    match place {
-        UpdateWorktree::Registered => {}
-        UpdateWorktree::Unregistered => {
+    if place == UpdateWorktree::Foreign {
+        return Err(AppError::InvalidArgument(format!(
+            "not a conflict-resolution worktree of this repository: {worktree_path}"
+        )));
+    }
+    let registered = place == UpdateWorktree::Registered;
+    let gone = || AppError::Command(MERGE_WORKTREE_GONE.to_string());
+
+    // Without its worktree only a merge that already landed finishes, so an entry that
+    // records no landing is refused before anything is written to the journal.
+    let (key, entry) = merge_journal(repo_path, journal_repo, op_id.as_deref()).await;
+    let journaled = op_id.as_deref().filter(|_| entry.is_some());
+    if !registered {
+        let recorded = match journaled {
+            Some(id) => crate::oplog::landing(&key, id).await?,
+            None => None,
+        };
+        if recorded.is_none() {
+            return Err(gone());
+        }
+    }
+
+    // A claim taken before the gates and the commit keeps an abort elsewhere from
+    // removing the worktree under them. A done entry continues unclaimed; a missing
+    // or unreadable one does only with its worktree registered, and is refused without
+    // it, since no landing can then be read from it.
+    let mut token = None;
+    if let Some(id) = journaled {
+        match crate::oplog::claim_finish(&key, id).await {
+            Ok(FinishClaim::Claimed(held)) => token = Some(held),
+            Ok(FinishClaim::Busy) => return Err(AppError::Command(MERGE_BUSY.to_string())),
+            // A done entry still finishes: reconciled beside a live worktree, or landed
+            // with its worktree already gone.
+            Ok(FinishClaim::Ended(status)) if status == "done" => {}
+            Ok(FinishClaim::Ended(_)) if registered => {
+                return Err(AppError::Command(merge_no_longer_unfinished(base)))
+            }
+            Ok(FinishClaim::Missing) | Err(_) if registered => {}
+            Ok(FinishClaim::Ended(_) | FinishClaim::Missing) | Err(_) => return Err(gone()),
+        }
+    }
+    let claim = token.as_deref().zip(op_id.as_deref());
+
+    // A merge whose recorded commit the base already holds landed in an earlier finish:
+    // it completes as merged whatever its worktree holds, skipping the gates and the
+    // commit. Without its worktree, a merge that did not land is refused.
+    let landed = match merge_landed(repo_path, base, &key, journaled).await {
+        Ok(landed) if landed.is_some() || registered => landed,
+        other => {
+            if let Some((token, id)) = claim {
+                crate::oplog::settle_finish_claim(&key, id, token, ClaimSettle::Release).await;
+            }
+            return Err(other.err().unwrap_or_else(gone));
+        }
+    };
+
+    let mut unrecorded = false;
+    let step: AppResult<ControlFlow<LocalPrMergeOutcome, String>> = async {
+        if let Some(landing) = &landed {
+            return Ok(ControlFlow::Continue(landing.clone()));
+        }
+        // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
+        // into the main tree — re-guard clean HERE, since the user may have dirtied it
+        // during resolution (after `git_merge_local_pr`'s upfront check). Otherwise base
+        // moves by `update-ref` and the main tree is never touched. Base's stored
+        // spelling, as `merge_local_pr` compared and read it.
+        let stored_base = crate::git::branches::stored_branch_spelling(repo_path, base).await?;
+        let current = current_branch_for_merge(repo_path).await?;
+        if is_current_branch(repo_path, &current, &stored_base).await? {
+            ensure_clean_tree(repo_path).await?;
+        }
+
+        // Guard: every conflict in the worktree must be resolved first.
+        let remaining = unmerged_paths(worktree_path).await;
+        if !remaining.is_empty() {
             return Err(AppError::Command(
-                "This merge's worktree no longer exists. Abort the merge and start it again."
-                    .to_string(),
-            ))
+                "Resolve every conflict first".to_string(),
+            ));
         }
-        UpdateWorktree::Foreign => {
-            return Err(AppError::InvalidArgument(format!(
-                "not a conflict-resolution worktree of this repository: {worktree_path}"
-            )))
-        }
-    }
 
-    // When `base` IS the current branch, `finalize_base` ends in a `merge --ff-only`
-    // into the main tree — re-guard clean HERE, since the user may have dirtied it
-    // during resolution (after `git_merge_local_pr`'s upfront check). Otherwise base
-    // moves by `update-ref` and the main tree is never touched. Base's stored spelling, as
-    // `merge_local_pr` compared and read it.
-    let stored_base = crate::git::branches::stored_branch_spelling(repo_path, base).await?;
-    let current = current_branch_for_merge(repo_path).await?;
-    if is_current_branch(repo_path, &current, &stored_base).await? {
-        ensure_clean_tree(repo_path).await?;
-    }
-
-    // Guard: every conflict in the worktree must be resolved first.
-    let remaining = unmerged_paths(worktree_path).await;
-    if !remaining.is_empty() {
-        return Err(AppError::Command("Resolve every conflict first".to_string()));
-    }
-
-    match strategy {
-        "rebase" => {
-            // Continue the cherry-pick in the worktree with a non-interactive
-            // editor so git never blocks (mirrors git_op_continue / git_rebase).
-            let out = run_git_raw(
-                Some(worktree_path),
-                &["-c", "core.editor=true", "cherry-pick", "--continue"],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
-            // A later commit in the range may re-conflict; if so, stay in the
-            // worktree and re-report conflicts (do NOT finalize or remove).
-            let conflicts = unmerged_paths(worktree_path).await;
-            if !conflicts.is_empty() {
-                let tip = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
-                    .await
-                    .ok()
-                    .map(|o| o.stdout_lossy().trim().to_string())
-                    .unwrap_or_default();
-                return Ok(LocalPrMergeOutcome {
-                    status: "conflicts".to_string(),
-                    conflicts,
-                    base_tip: tip,
-                    worktree_id: Some(worktree_id.to_string()),
-                    worktree_path: Some(worktree_path.to_string()),
-                    op_id,
-                });
+        // A replay this finish already completed, refused after its last continuation,
+        // goes straight on to the base move with the HEAD the marker vouched for.
+        let replayed = match strategy {
+            "rebase" => replay_completed(worktree_path).await,
+            _ => None,
+        };
+        // The rebase arms answer the one HEAD both the marker and the base move use.
+        let replayed_head = match strategy {
+            "rebase" if replayed.is_some() => replayed,
+            "rebase" => {
+                // Continue the cherry-pick in the worktree with a non-interactive
+                // editor so git never blocks (mirrors git_op_continue / git_rebase).
+                let out = run_git_raw(
+                    Some(worktree_path),
+                    &["-c", "core.editor=true", "cherry-pick", "--continue"],
+                    DEFAULT_TIMEOUT,
+                )
+                .await?;
+                // A later commit in the range may re-conflict; if so, stay in the
+                // worktree and re-report conflicts (do NOT finalize or remove).
+                let conflicts = unmerged_paths(worktree_path).await;
+                if !conflicts.is_empty() {
+                    let tip = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+                        .await
+                        .ok()
+                        .map(|o| o.stdout_lossy().trim().to_string())
+                        .unwrap_or_default();
+                    return Ok(ControlFlow::Break(LocalPrMergeOutcome {
+                        status: "conflicts".to_string(),
+                        conflicts,
+                        base_tip: tip,
+                        worktree_id: Some(worktree_id.to_string()),
+                        worktree_path: Some(worktree_path.to_string()),
+                        op_id: op_id.clone(),
+                        journal_repo: key.clone(),
+                    }));
+                }
+                // A non-conflict, non-zero exit means something genuinely
+                // failed (e.g. "no cherry-pick in progress" when nothing was
+                // staged) — surface it on the exit code ALONE, since git can
+                // refuse with stderr empty and its whole report on stdout
+                // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), which a
+                // stderr gate would report as "merged". Defensive, not behavior-changing:
+                // no `--continue` failure measured on 2.51.1 is stdout-only (3 shapes).
+                if out.code != 0 {
+                    return Err(AppError::Git {
+                        code: out.code,
+                        stderr: out.full_failure_text(),
+                    });
+                }
+                let head = worktree_head(worktree_path).await?;
+                record_replay_complete(worktree_path, &head).await;
+                Some(head)
             }
-            // A non-conflict, non-zero exit means something genuinely failed
-            // (e.g. "no cherry-pick in progress" when nothing was staged) — surface
-            // it on the exit code ALONE, since git can refuse with stderr empty and
-            // its whole report on stdout
-            // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), which a
-            // stderr gate would report as "merged". Defensive, not behavior-changing:
-            // no `--continue` failure measured on 2.51.1 is stdout-only (3 shapes).
-            if out.code != 0 {
-                return Err(AppError::Git {
-                    code: out.code,
-                    stderr: out.full_failure_text(),
-                });
+            _ => {
+                commit_resolved_merge(worktree_path, message).await?;
+                None
+            }
+        };
+
+        // Completed with no remaining conflicts: advance base.
+        // `current` was resolved up top (and re-guarded clean when it holds base).
+        let new_sha = match replayed_head {
+            Some(head) => head,
+            None => run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+                .await?
+                .stdout_lossy()
+                .trim()
+                .to_string(),
+        };
+        // The resolution session is unbounded, so the tip this merge was built on has
+        // to come from the journal `merge_local_pr` wrote before it started: the entry
+        // the lookup found, read again only when it found none.
+        let expected_tip = match &entry {
+            Some(found) => found.pre_op_tip.clone(),
+            None => crate::oplog::pre_op_tip(&key, &op_id).await,
+        };
+        // Re-asserted here as an early refusal (the gates and the commit above can
+        // outlast its limit), and again by the fence right before base moves.
+        let fence = claim.map(|(token, id)| ClaimFence {
+            key: &key,
+            id,
+            token,
+            flow: FinishFlow::Merge { base },
+        });
+        if let Some(fence) = &fence {
+            if !fence
+                .admits_write(repo_path, &stored_base, &new_sha)
+                .await?
+            {
+                return Ok(ControlFlow::Continue(new_sha));
             }
         }
-        _ => commit_resolved_merge(worktree_path, message).await?,
+        // A claimed finish that knows its start tip records a commit built past that tip
+        // before the base moves, or does not move it: a finish interrupted after the move
+        // must be completable. An unclaimed finish moves the base with no record. "Not
+        // held" goes on to the checks below, which answer it in their own words.
+        let start = expected_tip.as_deref().filter(|tip| *tip != new_sha);
+        if let (Some((token, id)), Some(start)) = (claim, start) {
+            if is_ancestor(repo_path, start, &new_sha).await? {
+                let recorded = crate::oplog::record_landing(&key, id, token, &new_sha).await;
+                if recorded.is_err() {
+                    unrecorded = true;
+                    return Err(AppError::Command(UNRECORDED_MERGE_LANDING.to_string()));
+                }
+            }
+        }
+        finalize_base_fenced(
+            state,
+            repo_path,
+            &stored_base,
+            &new_sha,
+            &current,
+            expected_tip.as_deref(),
+            fence.as_ref(),
+        )
+        .await?;
+        Ok(ControlFlow::Continue(new_sha))
     }
+    .await;
+    if !matches!(step, Ok(ControlFlow::Continue(_))) {
+        if let Some((token, id)) = claim {
+            let released =
+                crate::oplog::settle_finish_claim(&key, id, token, ClaimSettle::Release).await;
+            // A claim left behind answers busy until it expires, so "try again" would fail.
+            if unrecorded && !released {
+                return Err(AppError::Command(UNRECORDED_LANDING_CLAIM_HELD.to_string()));
+            }
+        }
+    }
+    let new_sha = match step? {
+        ControlFlow::Continue(new_sha) => new_sha,
+        ControlFlow::Break(paused) => return Ok(paused),
+    };
 
-    // Completed with no remaining conflicts: advance base, tear down, close oplog.
-    // `current` was resolved up top (and re-guarded clean when it holds base).
-    let new_sha = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
-        .await?
-        .stdout_lossy()
-        .trim()
-        .to_string();
-    // The resolution session is unbounded, so the tip this merge was built on has
-    // to come from the journal `merge_local_pr` wrote before it started.
-    let expected_tip = crate::oplog::pre_op_tip(repo_path, &op_id).await;
-    finalize_base(
-        state,
-        repo_path,
-        &stored_base,
-        &new_sha,
-        &current,
-        expected_tip.as_deref(),
-    )
-    .await?;
-    remove_resolve_worktree(state, repo_path, worktree_path).await;
-    crate::oplog::finish(repo_path, &op_id, None).await;
+    // The removal before the journal write: the abort reads a done entry beside a still
+    // registered worktree as one no finish wrote.
+    remove_merge_worktree_under_claim(&key, claim, || {
+        remove_resolve_worktree(state, repo_path, worktree_path)
+    })
+    .await;
+    // A landed merge's worktree may be half removed, which `worktree remove` refuses and
+    // the prune only unregisters; a minted leaf no registry lists is ours to delete.
+    if landed.is_some() {
+        let place = check_merge_worktree(repo_path, roots, worktree_path, worktree_id).await;
+        if matches!(place, Ok(UpdateWorktree::Unregistered)) {
+            let _ = std::fs::remove_dir_all(worktree_path);
+        }
+    }
+    match (claim, op_id.as_deref()) {
+        (Some((token, id)), _) => {
+            if !crate::oplog::settle_finish_claim(&key, id, token, ClaimSettle::Done).await {
+                // Base moved, so the journal must say so even after the claim lapsed.
+                crate::oplog::finish(&key, &op_id, None).await;
+            }
+        }
+        // A done entry keeps what it says.
+        (None, Some(id)) => {
+            crate::oplog::finish_if_unfinished(&key, id, None).await;
+        }
+        (None, None) => {}
+    }
     Ok(LocalPrMergeOutcome {
         status: "merged".to_string(),
         conflicts: Vec::new(),
@@ -5055,7 +5384,146 @@ pub(crate) async fn finish_local_pr_merge(
         worktree_id: None,
         worktree_path: None,
         op_id,
+        journal_repo: key,
     })
+}
+
+/// Removes a merge's resolve worktree through `remove`, re-asserting `claim` (token, op
+/// id) first so the removal, which can run long, starts with a full limit. Its answer is
+/// not acted on: a finish removes only after base moved, so the merge is merged whatever
+/// it says.
+async fn remove_merge_worktree_under_claim<F, Fut>(
+    key: &str,
+    claim: Option<(&str, &str)>,
+    remove: F,
+) where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if let Some((token, id)) = claim {
+        crate::oplog::renew_finish_claim(key, id, token).await;
+    }
+    remove().await;
+}
+
+/// The file in a resolve worktree's own git dir recording the HEAD its rebase replay
+/// ended at; it goes with the worktree.
+const REPLAY_COMPLETE_MARKER: &str = "gd-replay-complete";
+
+/// Records that the rebase replay in `worktree_path` completed at `head`, the HEAD the
+/// finish read once and moves base to. Best-effort: without the marker a retried finish
+/// behaves as it always did.
+async fn record_replay_complete(worktree_path: &str, head: &str) {
+    if let Some(git_dir) = absolute_git_dir(worktree_path).await {
+        let _ = std::fs::write(git_dir.join(REPLAY_COMPLETE_MARKER), head);
+    }
+}
+
+/// The HEAD `worktree_path`'s replay completed at in an earlier finish, when every probe
+/// answered: no cherry-pick in progress, no tracked change against HEAD (a staged
+/// correction would be dropped with the worktree), and the marker names HEAD. Any probe
+/// that fails reads as not completed. A hand-run `cherry-pick --quit` leaves no marker,
+/// so a partial replay never reads as complete.
+async fn replay_completed(worktree_path: &str) -> Option<String> {
+    let git_dir = absolute_git_dir(worktree_path).await?;
+    if !matches!(git_dir.join("sequencer").try_exists(), Ok(false)) {
+        return None;
+    }
+    // Asked of git: a reftable repository keeps CHERRY_PICK_HEAD out of the git dir.
+    // Only exit 1 with nothing printed means absent; a failed run answers nothing.
+    let pick = run_git_raw(
+        Some(worktree_path),
+        &["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if pick.code != 1 || !pick.stdout.is_empty() || !pick.stderr.is_empty() {
+        return None;
+    }
+    let recorded = std::fs::read_to_string(git_dir.join(REPLAY_COMPLETE_MARKER)).ok()?;
+    ensure_clean_tree(worktree_path).await.ok()?;
+    let head = worktree_head(worktree_path).await.ok()?;
+    (head == recorded.trim()).then_some(head)
+}
+
+/// What [`merge_journal`] read of the merge's entry.
+#[derive(Debug, PartialEq)]
+struct MergeEntry {
+    /// The base tip the merge was built on.
+    pre_op_tip: Option<String>,
+    /// The base, as the pull request spells it.
+    original_ref: Option<String>,
+}
+
+/// The journal key a merge's finish or abort uses, and `op_id`'s merge entry when it was
+/// found under it. Probed like [`update_journal`], the entry's anchor being its base
+/// tip. Not found: `journal_repo` when it is a non-empty checkout of this repository,
+/// else `repo_path`; a removed checkout's key is never written unless its entry passed.
+async fn merge_journal(
+    repo_path: &str,
+    journal_repo: Option<&str>,
+    op_id: Option<&str>,
+) -> (String, Option<MergeEntry>) {
+    let hint = classify_journal_hint(repo_path, journal_repo.unwrap_or_default()).await;
+    let found = match op_id {
+        Some(id) => {
+            let probe = |candidate: String| async move {
+                let entries = crate::oplog::git_oplog_list(candidate.clone()).await.ok()?;
+                let entry = entries
+                    .into_iter()
+                    .find(|e| e.id == id && e.op == MERGE_LOCAL_PR_OP)?;
+                let found = MergeEntry {
+                    pre_op_tip: entry.pre_op_tip,
+                    original_ref: entry.original_ref,
+                };
+                Some((candidate, found))
+            };
+            let anchor = |found: &(String, MergeEntry)| found.1.pre_op_tip.clone();
+            first_journal_answer(repo_path, hint, probe, anchor).await
+        }
+        None => None,
+    };
+    match (found, hint) {
+        (Some((key, entry)), _) => (key, Some(entry)),
+        (None, JournalHint::Same(same)) if !same.is_empty() => (same.to_string(), None),
+        (None, _) => (repo_path.to_string(), None),
+    }
+}
+
+/// The commit `op_id`'s entry under `key` recorded as landing, when `base` contains it:
+/// the merge landed in an earlier finish. `None` without an op id or a recorded commit.
+/// The one definition of a landed merge, for the finish and the abort alike.
+async fn merge_landed(
+    repo_path: &str,
+    base: &str,
+    key: &str,
+    op_id: Option<&str>,
+) -> AppResult<Option<String>> {
+    let Some(id) = op_id else {
+        return Ok(None);
+    };
+    let Some(landing) = crate::oplog::landing(key, id).await? else {
+        return Ok(None);
+    };
+    Ok(merge_landing_on_base(repo_path, base, &landing)
+        .await?
+        .then_some(landing))
+}
+
+/// Whether `base` (validated by the caller) contains `landing`. A `landing` that is not a
+/// commit here, or a base that no longer exists, reads false, so neither can make a
+/// record unclearable; any other failed read is the Err, never a verdict. The base is read
+/// as its exact ref, so neither a case twin nor a `refs/heads/…`-named branch answers.
+async fn merge_landing_on_base(repo_path: &str, base: &str, landing: &str) -> AppResult<bool> {
+    if !commit_here(repo_path, landing).await? {
+        return Ok(false);
+    }
+    let stored = crate::git::branches::stored_branch_spelling(repo_path, base).await?;
+    let Some(tip) = crate::git::branches::exact_branch_tip(repo_path, &stored).await? else {
+        return Ok(false);
+    };
+    is_ancestor(repo_path, landing, &tip).await
 }
 
 /// What an abort did. `removed`: nothing this repository can remove backs the record
@@ -5063,7 +5531,9 @@ pub(crate) async fn finish_local_pr_merge(
 /// not its to remove); false on a failed registry read or when a leaf of ours survived
 /// the removal. `closed`: the abort ended the merge; false when the entry was already
 /// closed as done while no registered worktree of ours backed it, and whenever
-/// `removed` is false (the entry is then left open).
+/// `removed` is false (the entry is then left open). An abort refused over another
+/// holder's claim, whose held claim the store could not re-assert, or of a merge that
+/// already landed answers an error instead, having removed nothing.
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalPrMergeAbortOutcome {
@@ -5075,18 +5545,30 @@ pub struct LocalPrMergeAbortOutcome {
 /// main tree and branch were never touched, so there is nothing else to roll back. A
 /// record is always clearable: the worktree is removed only when it is this
 /// repository's own `<root>/gd-resolve-<id>` (a relocated repository's stored path no
-/// longer is), and the oplog entry is then closed as failed ("aborted by user") unless
-/// it already ended, so an abort racing another window's finish keeps that outcome.
-/// A failed registry read or a leaf of ours it could not remove leaves the entry open.
+/// longer is), and the oplog entry, under the checkout the journal lookup finds, is then
+/// closed as failed ("aborted by user") unless it already ended, so an abort racing
+/// another window's finish keeps that outcome. It claims the entry before removing
+/// anything and refuses while a finish or another abort holds it, and for a merge that
+/// already landed, which Finish completes. A failed registry read or a leaf of ours it
+/// could not remove leaves the entry open.
 #[tauri::command]
 pub async fn git_abort_local_pr_merge(
     state: State<'_, AppState>,
     repo_path: String,
     worktree_path: String,
     op_id: Option<String>,
+    journal_repo: Option<String>,
 ) -> AppResult<LocalPrMergeAbortOutcome> {
     let roots = merge_worktree_roots(&state, &repo_path).await?;
-    Ok(abort_local_pr_merge(&state, &repo_path, &worktree_path, &roots, op_id.as_deref()).await)
+    abort_local_pr_merge(
+        &state,
+        &repo_path,
+        &worktree_path,
+        &roots,
+        op_id.as_deref(),
+        journal_repo.as_deref(),
+    )
+    .await
 }
 
 async fn abort_local_pr_merge(
@@ -5095,7 +5577,8 @@ async fn abort_local_pr_merge(
     worktree_path: &str,
     roots: &[std::path::PathBuf],
     op_id: Option<&str>,
-) -> LocalPrMergeAbortOutcome {
+    journal_repo: Option<&str>,
+) -> AppResult<LocalPrMergeAbortOutcome> {
     let kept = LocalPrMergeAbortOutcome {
         removed: false,
         closed: false,
@@ -5106,40 +5589,124 @@ async fn abort_local_pr_merge(
         .and_then(|s| s.to_str())
         .and_then(|name| name.strip_prefix("gd-resolve-"))
         .unwrap_or_default();
-    let Ok(place) = check_merge_worktree(repo_path, roots, worktree_path, id).await else {
-        return kept;
+    let Ok(mut place) = check_merge_worktree(repo_path, roots, worktree_path, id).await else {
+        return Ok(kept);
     };
+    // Claimed before any removal: closing first would come too late to keep a finish
+    // from landing over a removed worktree. An abort that cannot claim closes unclaimed.
+    let (key, entry) = merge_journal(repo_path, journal_repo, op_id).await;
+    let journaled = op_id.filter(|_| entry.is_some());
+    let mut claim: Option<(String, &str)> = None;
+    // Only an entry still open, or closed as done, can stand for a landed merge.
+    let mut may_have_landed = false;
+    if let Some(op) = journaled {
+        match crate::oplog::claim_finish(&key, op).await {
+            Ok(FinishClaim::Claimed(token)) => {
+                claim = Some((token, op));
+                may_have_landed = true;
+            }
+            Ok(FinishClaim::Busy) => return Err(AppError::Command(MERGE_BUSY.to_string())),
+            // A finish that ended the entry since the place was read may have removed
+            // the worktree too, so the place is read again.
+            Ok(FinishClaim::Ended(status)) => {
+                let fresh = check_merge_worktree(repo_path, roots, worktree_path, id).await;
+                let Ok(fresh) = fresh else {
+                    return Ok(kept);
+                };
+                place = fresh;
+                may_have_landed = status == "done";
+            }
+            Ok(FinishClaim::Missing) | Err(_) => {}
+        }
+    }
+    // A merge that already landed is Finish's to complete, so the abort removes nothing
+    // and leaves the entry as it reads. A foreign place keeps the abort's own answer.
+    let base = entry
+        .and_then(|entry| entry.original_ref)
+        .filter(|base| crate::git::branches::validate_branch_name(base).is_ok());
+    if let (Some(base), true) = (base, may_have_landed && place != UpdateWorktree::Foreign) {
+        match merge_landed(repo_path, &base, &key, journaled).await {
+            Ok(None) => {}
+            landed => {
+                release_abort_claim(&key, claim).await;
+                let refusal = || AppError::Command(merge_already_landed(&base));
+                return Err(landed.err().unwrap_or_else(refusal));
+            }
+        }
+    }
     match place {
         UpdateWorktree::Registered => {
+            renew_abort_claim(&key, &mut claim).await?;
             remove_resolve_worktree(state, repo_path, worktree_path).await;
             if std::fs::symlink_metadata(worktree_path).is_ok() {
-                return kept;
+                release_abort_claim(&key, claim).await;
+                return Ok(kept);
             }
         }
         // A minted leaf under this repository's root that no registry lists is ours to
         // delete, and `worktree remove` refuses a path it does not list. One that survives
         // the delete keeps its record, since nothing else would ever remove it.
-        UpdateWorktree::Unregistered => match std::fs::remove_dir_all(worktree_path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return kept,
-            _ => {}
-        },
+        UpdateWorktree::Unregistered => {
+            renew_abort_claim(&key, &mut claim).await?;
+            match std::fs::remove_dir_all(worktree_path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    release_abort_claim(&key, claim).await;
+                    return Ok(kept);
+                }
+                _ => {}
+            }
+        }
         UpdateWorktree::Foreign => {}
     }
     let Some(op_id) = op_id else {
-        return LocalPrMergeAbortOutcome {
+        return Ok(LocalPrMergeAbortOutcome {
             removed: true,
             closed: true,
-        };
+        });
     };
-    let aborted = Some("aborted by user".to_string());
-    // The finish removes its worktree before journaling done, so a done entry beside a
-    // leaf that was still registered was never written by a finish.
-    let closed = crate::oplog::finish_if_unfinished(repo_path, op_id, aborted).await
+    let aborted = "aborted by user".to_string();
+    let closed_now = match claim {
+        Some((token, op)) => {
+            let failed = ClaimSettle::Failed(aborted);
+            crate::oplog::settle_finish_claim(&key, op, &token, failed).await
+        }
+        None => crate::oplog::finish_if_unfinished(&key, op_id, Some(aborted)).await,
+    };
+    // A finish removes its worktree before journaling done, and `place` is read after
+    // any done the claim attempt saw, so a done entry beside a leaf registered at that
+    // read was never written by a finish.
+    let closed = closed_now
         || place == UpdateWorktree::Registered
-        || !merge_entry_is_done(repo_path, op_id).await;
-    LocalPrMergeAbortOutcome {
+        || !merge_entry_is_done(&key, op_id).await;
+    Ok(LocalPrMergeAbortOutcome {
         removed: true,
         closed,
+    })
+}
+
+/// The abort's renewal right before a removal, so the removal starts with a full limit.
+/// An entry closed meanwhile drops the claim and the abort goes on unclaimed; a claim
+/// lost or unanswered is released and refuses, with nothing removed.
+async fn renew_abort_claim(key: &str, claim: &mut Option<(String, &str)>) -> AppResult<()> {
+    let Some((token, op)) = claim.as_ref() else {
+        return Ok(());
+    };
+    match crate::oplog::renew_finish_claim(key, op, token).await {
+        ClaimRenewal::Renewed => Ok(()),
+        ClaimRenewal::Closed => {
+            *claim = None;
+            Ok(())
+        }
+        ClaimRenewal::LostOrUnknown => {
+            release_abort_claim(key, claim.take()).await;
+            Err(AppError::Command(MERGE_BUSY.to_string()))
+        }
+    }
+}
+
+async fn release_abort_claim(key: &str, claim: Option<(String, &str)>) {
+    if let Some((token, op)) = claim {
+        crate::oplog::settle_finish_claim(key, op, &token, ClaimSettle::Release).await;
     }
 }
 
@@ -5172,9 +5739,10 @@ async fn commit_resolved_merge(worktree_path: &str, message: &str) -> AppResult<
     .await?;
     // exit 0 ⇒ nothing staged ⇒ already committed (or empty) ⇒ skip commit.
     if merging || staged.code != 0 {
+        // Immune to `commit.cleanup`, which could strip `#` lines of a confirmed message.
         let commit = run_git_raw(
             Some(worktree_path),
-            &["commit", "-m", message],
+            &["commit", "--cleanup=whitespace", "-m", message],
             DEFAULT_TIMEOUT,
         )
         .await?;
@@ -5235,10 +5803,31 @@ const SAME_BRANCH_UPDATE: &str = "a branch can't be updated from itself";
 const DIRTY_HEAD_UPDATE: &str = "Commit or stash your changes to update the current branch";
 const UNJOURNALED_UPDATE: &str =
     "Couldn't record this update in the operation journal, so it wasn't started. Try again.";
+const UNJOURNALED_MERGE: &str =
+    "Couldn't record this merge in the operation journal, so it wasn't started. Try again.";
+const UNRECORDED_MERGE_LANDING: &str =
+    "Couldn't record this merge in the operation journal, so it wasn't finished. Try again.";
+/// [`UNRECORDED_MERGE_LANDING`] when the finish's claim could not be released either.
+const UNRECORDED_LANDING_CLAIM_HELD: &str = "Couldn't record this merge in the operation journal, so it wasn't finished. Try again in a couple of minutes.";
 /// The remedy of every finish refusal that a retry cannot clear.
 const UPDATE_RESTART: &str = "Discard this update, then choose Resolve conflicts to start again.";
+/// Also answers a finish whose claim was lost, or could not be re-asserted, before head
+/// moved: a retry is the remedy either way.
+const UPDATE_FINISH_BUSY: &str = "This update is already being finished. Try again in a moment.";
+const UPDATE_DISCARD_BUSY: &str =
+    "This update is being finished, so it wasn't discarded. Try again in a moment.";
 const ABANDONED_UPDATE: &str = "this update was left unfinished and its worktree was cleaned up";
 const ABANDONED_MERGE: &str = "this merge was left unfinished and its worktree was cleaned up";
+/// Also answers a finish or abort whose claim was lost or could not be re-asserted.
+const MERGE_BUSY: &str = "This merge is already being finished or aborted. Try again in a moment.";
+const MERGE_WORKTREE_GONE: &str =
+    "This merge's worktree no longer exists. Abort the merge and start it again.";
+
+/// The abort's refusal for a merge that already landed; `base` is the pull request's
+/// spelling. Finish completes it.
+fn merge_already_landed(base: &str) -> String {
+    format!("This merge already landed on {base}. Choose Finish merge to complete it.")
+}
 
 fn update_moved_at_start(head: &str) -> String {
     format!(
@@ -5256,6 +5845,14 @@ fn update_moved_at_finish(head: &str) -> String {
          started, so it can't be finished as it stands. {head} is unchanged. Try Finish \
          update again; if it is still refused, discard this update, then choose Resolve \
          conflicts to start again."
+    )
+}
+
+/// An update finish whose entry was closed between its claim and the head move.
+fn update_closed_mid_finish(head: &str) -> String {
+    format!(
+        "This update was closed while it was being finished, so {head} is unchanged. \
+         {UPDATE_RESTART}"
     )
 }
 
@@ -5336,13 +5933,14 @@ enum WorktreeStanding {
     NotThisUpdates,
     /// HEAD builds on the start tip and head does not contain it yet.
     Unlanded,
-    /// HEAD moved past the start tip and head contains it: the update landed.
-    Landed,
+    /// HEAD moved past the start tip and head, at this tip, contains it: the update landed.
+    Landed(String),
 }
 
 /// The one comparison of the start tip, the worktree's HEAD and head's tip that binds a
 /// worktree to its entry and proves a landing while the worktree is still there. A
-/// failed read is an Err, never a verdict.
+/// failed read is an Err, never a verdict. The landing reads the exact ref, so neither a
+/// case twin nor a `refs/heads/…`-named branch answers for head.
 async fn worktree_standing(
     repo_path: &str,
     head: &str,
@@ -5357,12 +5955,13 @@ async fn worktree_standing(
     if at == pre_op_tip {
         return Ok(WorktreeStanding::Unlanded);
     }
-    let tip = branch_tip(repo_path, head).await?;
-    Ok(if is_ancestor(repo_path, &at, &tip).await? {
-        WorktreeStanding::Landed
-    } else {
-        WorktreeStanding::Unlanded
-    })
+    branch_tip(repo_path, head).await?;
+    if let Some(tip) = crate::git::branches::exact_branch_tip(repo_path, head).await? {
+        if is_ancestor(repo_path, &at, &tip).await? {
+            return Ok(WorktreeStanding::Landed(tip));
+        }
+    }
+    Ok(WorktreeStanding::Unlanded)
 }
 
 /// The entry's status as the journal reads it right now; None when unreadable or gone.
@@ -5374,8 +5973,9 @@ async fn entry_status(key: &str, op_id: &str) -> Option<String> {
         .map(|e| e.status)
 }
 
-/// Closes the entry only while it is still pending or paused, checked in the same locked
-/// write, so a finish that landed meanwhile keeps its `done`. True when it closed.
+/// Closes the entry only while it is still pending or paused and no live finish claim
+/// holds it, checked in the same locked write, so a finish that landed meanwhile keeps its
+/// `done` and one still running keeps its entry. True when it closed.
 async fn close_if_unfinished(key: &str, op_id: &str, error: Option<String>) -> bool {
     crate::oplog::finish_if_unfinished(key, op_id, error).await
 }
@@ -5533,15 +6133,97 @@ fn is_unfinished(journal: &UpdateJournal) -> bool {
     matches!(journal.status.as_str(), "pending" | "paused")
 }
 
-/// The update's entry under whichever checkout filed it: `journal_repo` (what the start
-/// returned), then `repo_path`, then every checkout git lists. Records are shared by
-/// every checkout while the journal is keyed per checkout path, and its key tolerance
-/// cannot match a porcelain spelling (8.3, `/private/var`) to the one it was filed under.
+/// The update's entry under whichever checkout filed it, walked by
+/// [`first_journal_answer`] from `journal_repo` (what the start returned). Records are
+/// shared by every checkout while the journal is keyed per checkout path, and its key
+/// tolerance cannot match a porcelain spelling (8.3, `/private/var`) to the one it was
+/// filed under.
 async fn update_journal(repo_path: &str, journal_repo: &str, op_id: &str) -> Option<UpdateJournal> {
+    let hint = classify_journal_hint(repo_path, journal_repo).await;
+    let probe = |candidate| update_journal_in(candidate, op_id);
+    let anchor = |journal: &UpdateJournal| Some(journal.pre_op_tip.clone());
+    first_journal_answer(repo_path, hint, probe, anchor).await
+}
+
+/// What a `journal_repo` hint, which arrives over IPC, may be used for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum JournalHint<'a> {
+    /// A checkout of this repository, or empty: probed first.
+    Same(&'a str),
+    /// A path that no longer exists: probed last, its answer checked against this
+    /// repository's objects.
+    Gone(&'a str),
+    /// Anything else, another repository's checkout included: never probed.
+    Rejected,
+}
+
+/// Classifies `journal_repo` against `repo_path`. A checkout of this repository is
+/// [`JournalHint::Same`] by [`journal_hint`]. Once a linked checkout is removed through
+/// git its path resolves to no repository and git stops listing it, yet the journal
+/// still holds the entry it filed, so a hint whose path is not found on disk is
+/// [`JournalHint::Gone`]: such a path may have been any repository's, and its answer
+/// counts only when its anchor is a commit here. Any other hint is rejected, since the
+/// journal under another repository's checkout can hold an entry with the same op id.
+async fn classify_journal_hint<'a>(repo_path: &str, journal_repo: &'a str) -> JournalHint<'a> {
+    let same = journal_hint(repo_path, journal_repo).await;
+    if !same.is_empty() || journal_repo.is_empty() {
+        return JournalHint::Same(same);
+    }
+    match std::fs::metadata(journal_repo) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => JournalHint::Gone(journal_repo),
+        _ => JournalHint::Rejected,
+    }
+}
+
+/// `journal_repo` when it names a checkout of the same repository as `repo_path` (one
+/// common git directory), else empty: the [`JournalHint::Same`] test.
+async fn journal_hint<'a>(repo_path: &str, journal_repo: &'a str) -> &'a str {
+    if journal_repo.is_empty() || crate::oplog::same_repo(journal_repo, repo_path) {
+        return journal_repo;
+    }
+    let (hint, ours) = tokio::join!(
+        crate::git::repo::repo_identity(journal_repo),
+        crate::git::repo::repo_identity(repo_path)
+    );
+    match (hint, ours) {
+        (Ok(hint), Ok(ours)) if crate::git::worktree::same_wt_path(&hint, &ours) => journal_repo,
+        _ => "",
+    }
+}
+
+/// The first `probe` answer over a [`JournalHint::Same`] hint, `repo_path`, every
+/// checkout git lists, then a [`JournalHint::Gone`] hint, skipping an empty key and one
+/// that already resolves to a tried key. Live checkouts come first so their entries win;
+/// a gone hint's answer counts only when `anchor` names a commit in `repo_path`.
+async fn first_journal_answer<T, F, Fut, A>(
+    repo_path: &str,
+    hint: JournalHint<'_>,
+    probe: F,
+    anchor: A,
+) -> Option<T>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+    A: Fn(&T) -> Option<String>,
+{
+    let (same, gone) = match hint {
+        JournalHint::Same(same) => (same, ""),
+        JournalHint::Gone(gone) => ("", gone),
+        JournalHint::Rejected => ("", ""),
+    };
     let mut tried: Vec<String> = Vec::new();
-    for candidate in [journal_repo, repo_path] {
-        if let Some(found) = update_journal_in(candidate, op_id, &mut tried).await {
-            return Some(found);
+    let mut fresh = |candidate: &str| {
+        if candidate.is_empty() || tried.iter().any(|t| crate::oplog::same_repo(t, candidate)) {
+            return false;
+        }
+        tried.push(candidate.to_string());
+        true
+    };
+    for candidate in [same, repo_path] {
+        if fresh(candidate) {
+            if let Some(found) = probe(candidate.to_string()).await {
+                return Some(found);
+            }
         }
     }
     let listed = run_git(
@@ -5552,32 +6234,60 @@ async fn update_journal(repo_path: &str, journal_repo: &str, op_id: &str) -> Opt
     .await
     .ok()?;
     for candidate in parse_worktree_paths(&listed.stdout_lossy()) {
-        if let Some(found) = update_journal_in(&candidate, op_id, &mut tried).await {
-            return Some(found);
+        if fresh(&candidate) {
+            if let Some(found) = probe(candidate).await {
+                return Some(found);
+            }
         }
     }
-    None
-}
-
-/// One checkout's probe for [`update_journal`]; skips an empty key and one that already
-/// resolves to a tried key. Only an entry of this op kind with an anchor qualifies.
-async fn update_journal_in(
-    candidate: &str,
-    op_id: &str,
-    tried: &mut Vec<String>,
-) -> Option<UpdateJournal> {
-    if candidate.is_empty() || tried.iter().any(|t| crate::oplog::same_repo(t, candidate)) {
+    if !fresh(gone) {
         return None;
     }
-    tried.push(candidate.to_string());
-    let entries = crate::oplog::git_oplog_list(candidate.to_string())
-        .await
-        .ok()?;
+    let found = probe(gone.to_string()).await?;
+    let ours = is_commit_here(repo_path, &anchor(&found)?).await;
+    ours.then_some(found)
+}
+
+/// Whether `oid` is a full id (either case) whose object peels to a commit in
+/// `repo_path`. Only exit 0 and exit 1 (no such commit, a non-commit object included)
+/// are answers; any other exit is an error, never a verdict. `rev-parse`, since
+/// `cat-file -e` exits 128 for an absent object and a broken repository alike.
+async fn commit_here(repo_path: &str, oid: &str) -> AppResult<bool> {
+    let full = matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit());
+    if !full {
+        return Ok(false);
+    }
+    let peel = format!("{oid}^{{commit}}");
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "--quiet", &peel],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match out.code {
+        0 => Ok(true),
+        1 => Ok(false),
+        code => Err(AppError::Git {
+            code,
+            stderr: out.full_failure_text(),
+        }),
+    }
+}
+
+/// [`commit_here`] with a failed lookup read as false.
+async fn is_commit_here(repo_path: &str, oid: &str) -> bool {
+    commit_here(repo_path, oid).await.unwrap_or(false)
+}
+
+/// One checkout's probe for [`update_journal`]. Only an entry of this op kind with an
+/// anchor qualifies.
+async fn update_journal_in(candidate: String, op_id: &str) -> Option<UpdateJournal> {
+    let entries = crate::oplog::git_oplog_list(candidate.clone()).await.ok()?;
     let entry = entries
         .into_iter()
         .find(|e| e.id == op_id && e.op == UPDATE_LOCAL_PR_HEAD_OP && e.pre_op_tip.is_some())?;
     Some(UpdateJournal {
-        key: candidate.to_string(),
+        key: candidate,
         pre_op_tip: entry.pre_op_tip?,
         status: entry.status,
         error: entry.error,
@@ -5586,7 +6296,8 @@ async fn update_journal_in(
 
 /// Head's tip when the journal shows this update finished without error and head has
 /// moved on from where the update started: the finish landed even if no record says
-/// so. Every other case, a failed read included, is None.
+/// so. Every other case, a failed read included, is None. Head is the exact ref, so
+/// neither a case twin nor a `refs/heads/…`-named branch answers for it.
 async fn update_already_landed(
     repo_path: &str,
     head: &str,
@@ -5596,7 +6307,8 @@ async fn update_already_landed(
         return None;
     }
     crate::git::branches::validate_branch_name(head).ok()?;
-    let tip = branch_tip(repo_path, head).await.ok()?;
+    let exact = crate::git::branches::exact_branch_tip(repo_path, head).await;
+    let tip = exact.ok().flatten()?;
     if tip == journal.pre_op_tip {
         return None;
     }
@@ -5748,6 +6460,7 @@ pub(crate) async fn update_local_pr_head(
                 Some(&head_tip),
                 update_moved_at_start,
                 "updating",
+                None,
             )
             .await?;
             Ok::<_, AppError>(new_sha)
@@ -5796,10 +6509,12 @@ pub(crate) async fn update_local_pr_head(
 /// Completes an update [`git_update_local_pr_head`] paused on conflicts, once they are
 /// resolved and STAGED in its worktree: commits the index there and moves `head` to the
 /// result through the finalize step, anchored on the tip the journal recorded at the
-/// start. No refusal removes the worktree or closes the entry, so the update stays
-/// retryable or discardable; a refusal a retry cannot clear about the update itself (its
-/// worktree gone, its entry closed, a resolution off the start tip, nothing merged) names
-/// `UPDATE_RESTART`'s remedy. A finish found to have landed already reports `updated`.
+/// start, under a finish claim on that entry taken before its gates and re-asserted just
+/// before head moves. No refusal removes the worktree or closes the entry, so the update
+/// stays retryable or discardable; a refusal a retry cannot clear about the update itself
+/// (its worktree gone, its entry closed, a resolution off the start tip, nothing merged)
+/// names `UPDATE_RESTART`'s remedy, and one over another holder's claim asks for a
+/// retry. A finish found to have landed already reports `updated`.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
 pub async fn git_finish_local_pr_update(
@@ -5877,60 +6592,88 @@ pub(crate) async fn finish_local_pr_update(
     }
     // Without the start's own anchor a rewound head is indistinguishable from one
     // that never moved, so a missing or closed entry refuses.
+    let at = (
+        repo_path,
+        root,
+        worktree_path,
+        worktree_id,
+        op_id,
+        journal_repo,
+    );
     let Some(journal) = journal.as_ref().filter(|j| is_unfinished(j)) else {
-        // With the worktree still there the journal alone is no proof: its HEAD must be on
-        // head, or an uncommitted resolution would be deleted as landed.
-        if let (Some(tip), Some(j)) = (landed, journal.as_ref()) {
-            let standing = worktree_standing(repo_path, &stored_head, worktree_path, &j.pre_op_tip);
-            if matches!(standing.await, Ok(WorktreeStanding::Landed)) {
-                let outcome = update_landed(tip, op_id, landed_key);
-                remove_resolve_worktree(state, repo_path, worktree_path).await;
-                return Ok(outcome);
-            }
+        return update_closed_entry(state, at, head, &stored_head).await;
+    };
+    // The entry and its worktree are held together from before the gates and the
+    // commit, so a discard or abort elsewhere cannot remove the worktree under them.
+    let token = match crate::oplog::claim_finish(&journal.key, op_id).await? {
+        FinishClaim::Claimed(token) => token,
+        FinishClaim::Busy => return Err(AppError::Command(UPDATE_FINISH_BUSY.to_string())),
+        FinishClaim::Ended(_) | FinishClaim::Missing => {
+            return update_closed_entry(state, at, head, &stored_head).await;
         }
-        return Err(AppError::Command(format!(
-            "This update is no longer on record as unfinished, so GitDesktop can't confirm \
-             {head} hasn't moved. {UPDATE_RESTART}"
-        )));
     };
 
-    existing_branch_tip(repo_path, &stored_head).await?;
-    let current = current_branch_for_merge(repo_path).await?;
-    let head_is_current = is_current_branch(repo_path, &current, &stored_head).await?;
-    if head_is_current {
-        ensure_clean_head_checkout(repo_path).await?;
-    } else {
-        refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
-    }
-    if !unmerged_paths(worktree_path).await.is_empty() {
-        return Err(AppError::Command(
-            "Resolve every conflict first".to_string(),
-        ));
-    }
-    // Never commit in a worktree that does not build on this update's start tip.
-    let standing = worktree_standing(repo_path, &stored_head, worktree_path, &journal.pre_op_tip);
-    if standing.await? == WorktreeStanding::NotThisUpdates {
-        return Err(AppError::Command(format!(
-            "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
-        )));
-    }
-    commit_resolved_merge(worktree_path, &update_merge_subject(base, head)).await?;
-    let new_sha = worktree_head(worktree_path).await?;
-    if new_sha == journal.pre_op_tip {
-        return Err(AppError::Command(format!(
-            "Nothing was merged in this update's worktree. {UPDATE_RESTART}"
-        )));
-    }
-    if !is_ancestor(repo_path, &journal.pre_op_tip, &new_sha).await? {
-        return Err(AppError::Command(format!(
-            "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
-        )));
-    }
-    // Head already at the result is a finish that moved it and then lost its reply.
-    if existing_branch_tip(repo_path, &stored_head).await? != new_sha {
+    let moved: AppResult<String> = async {
+        existing_branch_tip(repo_path, &stored_head).await?;
+        let current = current_branch_for_merge(repo_path).await?;
+        let head_is_current = is_current_branch(repo_path, &current, &stored_head).await?;
+        if head_is_current {
+            ensure_clean_head_checkout(repo_path).await?;
+        } else {
+            refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
+        }
+        if !unmerged_paths(worktree_path).await.is_empty() {
+            return Err(AppError::Command(
+                "Resolve every conflict first".to_string(),
+            ));
+        }
+        // Never commit in a worktree that does not build on this update's start tip.
+        let standing =
+            worktree_standing(repo_path, &stored_head, worktree_path, &journal.pre_op_tip);
+        if standing.await? == WorktreeStanding::NotThisUpdates {
+            return Err(AppError::Command(format!(
+                "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
+            )));
+        }
+        commit_resolved_merge(worktree_path, &update_merge_subject(base, head)).await?;
+        let new_sha = worktree_head(worktree_path).await?;
+        if new_sha == journal.pre_op_tip {
+            return Err(AppError::Command(format!(
+                "Nothing was merged in this update's worktree. {UPDATE_RESTART}"
+            )));
+        }
+        if !is_ancestor(repo_path, &journal.pre_op_tip, &new_sha).await? {
+            return Err(AppError::Command(format!(
+                "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
+            )));
+        }
+        // Head at the result, or past it and holding it, is a finish that moved it and
+        // then lost its reply. Read as the exact ref, so neither a case twin nor a
+        // `refs/heads/…`-named branch answers for head.
+        existing_branch_tip(repo_path, &stored_head).await?;
+        let exact = crate::git::branches::exact_branch_tip(repo_path, &stored_head).await?;
+        if let Some(tip) = exact {
+            if tip == new_sha || is_ancestor(repo_path, &new_sha, &tip).await? {
+                return Ok(tip);
+            }
+        }
         // A session may have taken head since the check above.
         if !head_is_current {
             refuse_session_holder(repo_path, &stored_head, managed_base, session_paths).await?;
+        }
+        // Re-asserted here as an early refusal (the gates and the commit above can
+        // outlast the claim's limit), and again by the fence right before head moves.
+        let fence = ClaimFence {
+            key: &journal.key,
+            id: op_id,
+            token: &token,
+            flow: FinishFlow::Update { head },
+        };
+        if !fence
+            .admits_write(repo_path, &stored_head, &new_sha)
+            .await?
+        {
+            return Ok(new_sha);
         }
         finalize_branch(
             state,
@@ -5941,24 +6684,88 @@ pub(crate) async fn finish_local_pr_update(
             Some(&journal.pre_op_tip),
             update_moved_at_finish,
             "updating",
+            Some(&fence),
         )
         .await?;
+        Ok(new_sha)
     }
+    .await;
+    let new_sha = match moved {
+        Ok(new_sha) => new_sha,
+        Err(err) => {
+            let release = ClaimSettle::Release;
+            crate::oplog::settle_finish_claim(&journal.key, op_id, &token, release).await;
+            return Err(err);
+        }
+    };
     // The journal first: a crash before the removal leaves `done` beside a registered
-    // worktree, which the landed arm above cleans up.
-    crate::oplog::finish(&journal.key, &Some(op_id.to_string()), None).await;
+    // worktree, which the landed arm above cleans up. Head holds the commit, so the
+    // journal must say so even when the claim lapsed.
+    let done = ClaimSettle::Done;
+    if !crate::oplog::settle_finish_claim(&journal.key, op_id, &token, done).await {
+        crate::oplog::finish(&journal.key, &Some(op_id.to_string()), None).await;
+    }
     remove_resolve_worktree(state, repo_path, worktree_path).await;
     Ok(update_landed(new_sha, op_id, &journal.key))
 }
 
-/// Discards an unfinished update. Always succeeds once the repository's identity
-/// resolves, so a record is always clearable: the worktree is removed only when it
-/// is this repository's own `<root>/gd-resolve-<id>` (a relocated repository's
-/// stored path no longer is) and builds on the entry's start tip, and the entry is
-/// closed only while unfinished. Removal is best-effort: a directory that survives it
-/// is reported nowhere. An update that landed, by the journal or by the
-/// worktree's own commit, reports `updated`, so the caller clears the approval as
-/// a finish would.
+/// The update finish's answer over an entry no longer unfinished, on its OWN fresh reads
+/// of the journal and the worktree: a read taken before a claim may predate the finish
+/// that just landed it and removed its worktree.
+async fn update_closed_entry(
+    state: &AppState,
+    (repo_path, root, worktree_path, worktree_id, op_id, journal_repo): (
+        &str,
+        &Path,
+        &str,
+        &str,
+        &str,
+        &str,
+    ),
+    head: &str,
+    stored_head: &str,
+) -> AppResult<LocalPrUpdateOutcome> {
+    let journal = update_journal(repo_path, journal_repo, op_id).await;
+    let landed = match journal.as_ref() {
+        Some(j) => update_already_landed(repo_path, stored_head, j).await,
+        None => None,
+    };
+    let landed_key = journal.as_ref().map_or(journal_repo, |j| j.key.as_str());
+    // With the worktree still there the journal alone is no proof: its HEAD must be on
+    // head, or an uncommitted resolution would be deleted as landed.
+    if let (Some(tip), Some(j)) = (landed, journal.as_ref()) {
+        let standing = worktree_standing(repo_path, stored_head, worktree_path, &j.pre_op_tip);
+        // The tip the worktree proved the landing against, not the journal read's.
+        if let Ok(WorktreeStanding::Landed(proved)) = standing.await {
+            let outcome = update_landed(proved, op_id, landed_key);
+            remove_resolve_worktree(state, repo_path, worktree_path).await;
+            return Ok(outcome);
+        }
+        // No worktree left to hold an uncommitted resolution: the journal is the proof,
+        // as for a worktree already gone when the finish began.
+        let place = check_update_worktree(repo_path, root, worktree_path, worktree_id).await;
+        if let Ok(UpdateWorktree::Unregistered) = place {
+            return Ok(update_landed(tip, op_id, landed_key));
+        }
+    }
+    Err(AppError::Command(format!(
+        "This update is no longer on record as unfinished, so GitDesktop can't confirm \
+         {head} hasn't moved. {UPDATE_RESTART}"
+    )))
+}
+
+/// Discards an unfinished update. Once the repository's identity resolves, and unless the
+/// update landed (by the journal, or by an unfinished entry's worktree commit; it then
+/// answers `updated`), it refuses while a finish holds the entry, or when its close could
+/// not be saved while a fresh read still finds the entry unfinished; a retry clears the
+/// entry once the journal can be written again. A journal unreadable from the start rules
+/// nothing out: the discard then removes no registered worktree and answers
+/// discarded. A record stays clearable: the worktree is removed only when it is this
+/// repository's own `<root>/gd-resolve-<id>` (a relocated repository's stored path no
+/// longer is) and builds on the entry's start tip, and the entry is closed only while
+/// unfinished. Removal is best-effort: a directory that survives it is reported nowhere.
+/// An update that landed, by the journal or by an unfinished entry's worktree commit,
+/// reports `updated`, so the caller clears the approval as a finish would.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
 pub async fn git_discard_local_pr_update(
@@ -6008,7 +6815,7 @@ pub(crate) async fn discard_local_pr_update(
     };
     let journal = update_journal(repo_path, journal_repo, op_id).await;
     let assessed = assess_discard(&at, journal.as_ref()).await;
-    Ok(settle_discard(state, &at, journal, assessed).await)
+    settle_discard(state, &at, journal, assessed).await
 }
 
 /// One update's handles, as the discard receives them.
@@ -6024,7 +6831,11 @@ struct UpdateHandles<'a> {
 
 /// What a discard does against `journal`: (remove the worktree, the update landed).
 async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>) -> (bool, bool) {
-    let (repo_path, head, worktree_path) = (at.repo_path, at.head, at.worktree_path);
+    let (repo_path, worktree_path) = (at.repo_path, at.worktree_path);
+    // The landing reads are case-exact, so they take head's stored spelling; a failed
+    // lookup keeps the name as given, since the discard still has to discard.
+    let stored = crate::git::branches::stored_branch_spelling(repo_path, at.head).await;
+    let head = stored.as_deref().unwrap_or(at.head);
     let by_journal = match journal {
         Some(j) => update_already_landed(repo_path, head, j).await.is_some(),
         None => false,
@@ -6039,7 +6850,7 @@ async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>)
             match standing.await {
                 Ok(WorktreeStanding::NotThisUpdates) => (false, false),
                 Ok(WorktreeStanding::Unlanded) => (true, false),
-                Ok(WorktreeStanding::Landed) => (true, is_unfinished(j) || by_journal),
+                Ok(WorktreeStanding::Landed(_)) => (true, is_unfinished(j) || by_journal),
                 // A worktree deleted outside the app holds nothing left to lose.
                 Err(_) => {
                     let gone = !Path::new(worktree_path).exists();
@@ -6056,20 +6867,33 @@ async fn assess_discard(at: &UpdateHandles<'_>, journal: Option<&UpdateJournal>)
 
 /// Closes the entry and removes the worktree per `assessed`, made against `journal`. A
 /// close that loses to a concurrent finish re-reads the journal and assesses again, so
-/// an update that landed meanwhile reports `updated` rather than the stale verdict.
+/// an update that landed meanwhile reports `updated` rather than the stale verdict. Over
+/// a finish's live claim it refuses, removing and writing nothing, unless the update landed.
 async fn settle_discard(
     state: &AppState,
     at: &UpdateHandles<'_>,
     journal: Option<UpdateJournal>,
     assessed: (bool, bool),
-) -> LocalPrDiscardOutcome {
+) -> AppResult<LocalPrDiscardOutcome> {
     let (mut remove, mut landed) = assessed;
     // The journal first, as the finish does; closed only while still unfinished.
     if let Some(j) = journal.as_ref().filter(|j| is_unfinished(j)) {
         let error = (!landed).then(|| "aborted by user".to_string());
-        if !close_if_unfinished(&j.key, at.op_id, error).await {
+        let close = crate::oplog::close_unfinished(&j.key, at.op_id, error).await;
+        if close != CloseOutcome::Closed {
             let fresh = update_journal(at.repo_path, at.journal_repo, at.op_id).await;
             (remove, landed) = assess_discard(at, fresh.as_ref()).await;
+            // Nothing reopens a closed entry, so one still unfinished after a close that
+            // answered `NotUnfinished` means the close could not read or write the store,
+            // and an unread store may hide a live claim: refuse as over one.
+            let still_open = fresh.as_ref().is_some_and(is_unfinished);
+            if !landed && (close == CloseOutcome::Claimed || still_open) {
+                return Err(AppError::Command(UPDATE_DISCARD_BUSY.to_string()));
+            }
+        }
+        if close == CloseOutcome::Claimed {
+            // Head already holds the resolution, so the journal must say so.
+            crate::oplog::finish(&j.key, &Some(at.op_id.to_string()), None).await;
         }
     }
     if remove {
@@ -6083,9 +6907,9 @@ async fn settle_discard(
         }
     }
     let status = if landed { "updated" } else { "discarded" };
-    LocalPrDiscardOutcome {
+    Ok(LocalPrDiscardOutcome {
         status: status.to_string(),
-    }
+    })
 }
 
 /// Closes this checkout's unfinished update entries and paused merge entries whose op
@@ -20739,6 +21563,7 @@ detached
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -20867,6 +21692,7 @@ detached
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
             outcome.op_id.clone(),
+            None,
         )
         .await
         else {
@@ -21298,6 +22124,7 @@ detached
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
             outcome.op_id.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -21369,6 +22196,7 @@ detached
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
             outcome.op_id.clone(),
+            None,
         )
         .await;
         let Err(err) = done else {
@@ -21445,6 +22273,7 @@ detached
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
             None,
+            None,
         )
         .await;
         let Err(err) = done else {
@@ -21515,6 +22344,7 @@ detached
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
+            None,
             None,
         )
         .await
@@ -21635,6 +22465,7 @@ detached
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -21688,6 +22519,7 @@ detached
             &wt,
             &outcome.worktree_id.clone().unwrap_or_default(),
             std::slice::from_ref(&root),
+            None,
             None,
         )
         .await;
@@ -21840,7 +22672,7 @@ detached
                 &self.root(),
             )
             .await
-            .expect("a discard always succeeds")
+            .expect("the discard was not refused")
             .status
         }
 
@@ -22449,6 +23281,142 @@ detached
         assert_eq!(journal_entry(&linked, &out.op_id).await.status, "done");
     }
 
+    /// A live linked checkout of the fixture and the listed spelling of a second one,
+    /// removed through git.
+    async fn linked_and_removed(f: &UpdateFixture) -> (String, String) {
+        let mut listed = Vec::new();
+        for (name, branch) in [("linked", "side"), ("removed", "gone-side")] {
+            let created = f.outside(name);
+            let add = ["worktree", "add", "-b", branch, &created, &f.base];
+            git(&f.repo, &add).await;
+            listed.push(listed_spelling(&f.repo, &created).await);
+        }
+        git(&f.repo, &["worktree", "remove", &listed[1]]).await;
+        assert!(!Path::new(&listed[1]).exists());
+        (listed[0].clone(), listed[1].clone())
+    }
+
+    /// The candidates `first_journal_answer` probes under `hint`, in order.
+    async fn journal_walk(repo: &str, hint: JournalHint<'_>) -> Vec<String> {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let probe = |candidate: String| {
+            seen.lock().unwrap().push(candidate);
+            async { None::<()> }
+        };
+        first_journal_answer(repo, hint, probe, |_| None).await;
+        seen.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_pr_journal_hint_classes_a_removed_checkout_as_gone() {
+        let f = UpdateFixture::new("lpu-hint-class", true).await;
+        let (linked, removed) = linked_and_removed(&f).await;
+        let (_other_dir, other) = setup_repo("lpu-hint-class-other").await;
+        let plain = f.outside("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let repo = f.repo.as_str();
+        let empty = classify_journal_hint(repo, "").await;
+        assert_eq!(empty, JournalHint::Same(""));
+        let same = classify_journal_hint(repo, &linked).await;
+        assert_eq!(same, JournalHint::Same(&linked));
+        let gone = classify_journal_hint(repo, &removed).await;
+        assert_eq!(gone, JournalHint::Gone(&removed));
+        let foreign = classify_journal_hint(repo, &other).await;
+        assert_eq!(foreign, JournalHint::Rejected);
+        let not_a_checkout = classify_journal_hint(repo, &plain).await;
+        assert_eq!(not_a_checkout, JournalHint::Rejected);
+    }
+
+    #[tokio::test]
+    async fn local_pr_journal_walk_probes_a_gone_hint_after_every_live_checkout() {
+        let f = UpdateFixture::new("lpu-hint-order", true).await;
+        let (linked, removed) = linked_and_removed(&f).await;
+        let same_repo = crate::oplog::same_repo;
+
+        let same = journal_walk(&f.repo, JournalHint::Same(&linked)).await;
+        assert_eq!(same[0], linked);
+        assert!(same_repo(&same[1], &f.repo), "{same:?}");
+        assert!(!same.contains(&removed), "{same:?}");
+
+        let gone = journal_walk(&f.repo, JournalHint::Gone(&removed)).await;
+        assert!(same_repo(&gone[0], &f.repo), "{gone:?}");
+        let (last, live) = gone.split_last().unwrap();
+        assert_eq!(last, &removed);
+        assert!(live.iter().any(|c| same_repo(c, &linked)), "{gone:?}");
+
+        let rejected = journal_walk(&f.repo, JournalHint::Rejected).await;
+        assert!(!rejected.contains(&removed), "{rejected:?}");
+    }
+
+    #[tokio::test]
+    async fn local_pr_journal_takes_a_gone_hints_entry_only_with_its_anchor_here() {
+        let f = UpdateFixture::new("lpu-hint-anchor", true).await;
+        let (_linked, removed) = linked_and_removed(&f).await;
+        let tip = rev(&f.repo, "feature").await;
+        let tree = rev(&f.repo, "feature^{tree}").await;
+        let seed = |op: &'static str, anchor: String| {
+            let (removed, tip) = (removed.clone(), tip.clone());
+            async move {
+                let begun = crate::oplog::begin(&removed, op, "label", None, &tip, Some(&anchor));
+                begun.await.expect("seeded under the removed checkout")
+            }
+        };
+        let not_found = (f.repo.clone(), None);
+
+        for anchor in ["0".repeat(40), "HEAD".to_string(), tree] {
+            let id = seed(UPDATE_LOCAL_PR_HEAD_OP, anchor.clone()).await;
+            let update = update_journal(&f.repo, &removed, &id).await;
+            assert!(update.is_none(), "{anchor}");
+            let id = seed(MERGE_LOCAL_PR_OP, anchor.clone()).await;
+            let merge = merge_journal(&f.repo, Some(&removed), Some(&id)).await;
+            assert_eq!(merge, not_found, "{anchor}");
+        }
+
+        let id = seed(UPDATE_LOCAL_PR_HEAD_OP, tip.clone()).await;
+        let found = update_journal(&f.repo, &removed, &id).await;
+        assert_eq!(found.expect("the entry is this repository's").key, removed);
+        let merge = merge_journal(&f.repo, Some(&removed), Some(&id)).await;
+        assert_eq!(merge, not_found, "an update's entry is no merge's");
+
+        let id = seed(MERGE_LOCAL_PR_OP, tip.clone()).await;
+        let merge = merge_journal(&f.repo, Some(&removed), Some(&id)).await;
+        let entry = MergeEntry {
+            pre_op_tip: Some(tip.clone()),
+            original_ref: None,
+        };
+        assert_eq!(merge, (removed.clone(), Some(entry)));
+        assert!(update_journal(&f.repo, &removed, &id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_finds_its_entry_under_a_removed_checkout() {
+        let f = UpdateFixture::new("lpu-hint-gone", true).await;
+        let created = f.outside("linked");
+        let add = ["worktree", "add", "-b", "side", &created, &f.base];
+        git(&f.repo, &add).await;
+        let linked = listed_spelling(&f.repo, &created).await;
+        let state = AppState::default();
+        let out = f.start(&state, &linked, "feature").await.unwrap();
+        assert_eq!(out.journal_repo, linked);
+        resolve_update(&out).await;
+
+        // The app's journal is one file for every checkout, while the test store lives
+        // in the checkout's admin directory, which the removal deletes: the entry moves
+        // to where the removed path's store resolves now.
+        let filed = std::fs::read(crate::oplog::store_path(&linked).unwrap()).unwrap();
+        git(&f.repo, &["worktree", "remove", &linked]).await;
+        let moved = crate::oplog::store_path(&linked).unwrap();
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::write(&moved, filed).unwrap();
+
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(done.journal_repo, linked);
+        assert_eq!(journal_entry(&linked, &out.op_id).await.status, "done");
+        assert!(!Path::new(handles(&out).0).exists());
+    }
+
     #[tokio::test]
     async fn local_pr_update_discard_closes_only_an_unfinished_entry() {
         let f = UpdateFixture::new("lpu-discard", true).await;
@@ -22730,10 +23698,10 @@ detached
         assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
     }
 
-    /// Installs `body` as the fixture's `name` hook, which every checkout of it runs,
+    /// Installs `body` as `repo`'s `name` hook, which every checkout of it runs,
     /// clearing git's hook environment so the body's git calls address the path named.
-    fn install_update_hook(f: &UpdateFixture, name: &str, body: &str) {
-        let hook = Path::new(&f.repo).join(".git").join("hooks").join(name);
+    fn install_update_hook(repo: &str, name: &str, body: &str) {
+        let hook = Path::new(repo).join(".git").join("hooks").join(name);
         std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         let script = format!(
             "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n{body}\nexit 0\n"
@@ -22800,7 +23768,7 @@ detached
         let f = UpdateFixture::new("lpu-late-session", false).await;
         let start_tip = rev(&f.repo, "feature").await;
         let holder = f.managed().join("sess-late").to_string_lossy().into_owned();
-        install_update_hook(&f, "post-merge", &take_feature_at(&f, &holder));
+        install_update_hook(&f.repo, "post-merge", &take_feature_at(&f, &holder));
         let state = AppState::default();
 
         let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
@@ -22823,7 +23791,7 @@ detached
         let out = f.start(&state, &f.repo, "feature").await.unwrap();
         resolve_update(&out).await;
         let holder = f.managed().join("sess-late").to_string_lossy().into_owned();
-        install_update_hook(&f, "post-commit", &take_feature_at(&f, &holder));
+        install_update_hook(&f.repo, "post-commit", &take_feature_at(&f, &holder));
 
         let err = f.finish(&state, &out).await.unwrap_err();
         assert_session_refusal(&err, "feature", &holder);
@@ -22845,7 +23813,7 @@ detached
             sh_path(&f.repo),
             f.fork
         );
-        install_update_hook(&f, "post-merge", &rewind);
+        install_update_hook(&f.repo, "post-merge", &rewind);
         let state = AppState::default();
 
         let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
@@ -22862,7 +23830,7 @@ detached
         // Spoils the journal once the entry exists, so marking it paused fails.
         let store = crate::oplog::store_path(&f.repo).unwrap();
         let spoil = format!("printf 'x' > \"{}\"", sh_path(&store.to_string_lossy()));
-        install_update_hook(&f, "post-checkout", &spoil);
+        install_update_hook(&f.repo, "post-checkout", &spoil);
         let state = AppState::default();
 
         let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
@@ -22880,11 +23848,15 @@ detached
         let resolved = land_by_hand(&f, &out).await;
         crate::oplog::finish(&f.repo, &Some(out.op_id.clone()), None).await;
 
+        // An entry another finish already settled done: the closed-entry answer reads
+        // the journal afresh and still reports the update it landed.
         let done = f.finish(&state, &out).await.unwrap();
         assert_eq!(done.status, "updated");
         assert_eq!(done.head_tip, resolved);
         assert!(!Path::new(handles(&out).0).exists());
         assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
     }
 
     #[tokio::test]
@@ -23173,7 +24145,9 @@ detached
 
         assert_eq!(f.finish(&state, &out).await.unwrap().status, "updated");
         let landed = rev(&f.repo, "feature").await;
-        let outcome = settle_discard(&state, &at, journal, assessed).await;
+        let outcome = settle_discard(&state, &at, journal, assessed)
+            .await
+            .unwrap();
         assert_eq!(outcome.status, "updated");
         let entry = journal_entry(&f.repo, &out.op_id).await;
         assert_eq!((entry.status.as_str(), entry.error), ("done", None));
@@ -23221,7 +24195,9 @@ detached
         let paused = merge().await.unwrap();
         assert_eq!(paused.status, "conflicts");
         let (wt, op) = (paused.worktree_path.unwrap(), paused.op_id.unwrap());
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         let both = LocalPrMergeAbortOutcome {
             removed: true,
             closed: true,
@@ -23237,7 +24213,9 @@ detached
         let (wt, op) = (finished.worktree_path.unwrap(), finished.op_id.unwrap());
         remove_resolve_worktree(&state, &repo, &wt).await;
         crate::oplog::finish(&repo, &Some(op.clone()), None).await;
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         let lost = LocalPrMergeAbortOutcome {
             removed: true,
             closed: false,
@@ -23255,7 +24233,9 @@ detached
         let reconciled = merge().await.unwrap();
         let (wt, op) = (reconciled.worktree_path.unwrap(), reconciled.op_id.unwrap());
         crate::oplog::finish(&repo, &Some(op.clone()), None).await;
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!(outcome, both);
         assert!(!Path::new(&wt).exists(), "the worktree is removed");
         let entry = journal_entry(&repo, &op).await;
@@ -23296,7 +24276,9 @@ detached
         assert_eq!(journal_entry(&repo, &op).await.status, "paused");
 
         let roots = std::slice::from_ref(&root);
-        abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         let entry = journal_entry(&repo, &op).await;
         assert_eq!(entry.status, "failed");
         assert_eq!(entry.error.as_deref(), Some("aborted by user"));
@@ -23344,6 +24326,1439 @@ detached
         assert_eq!(wire, serde_json::json!({ "removed": true, "closed": false }));
     }
 
+    #[test]
+    fn local_pr_merge_outcome_serializes_exact_camel_case_keys() {
+        let wire = serde_json::to_value(LocalPrMergeOutcome {
+            status: "conflicts".to_string(),
+            conflicts: vec!["a.txt".to_string()],
+            base_tip: "abc".to_string(),
+            worktree_id: Some("0123456789ab".to_string()),
+            worktree_path: Some("/w/gd-resolve-0123456789ab".to_string()),
+            op_id: Some("op".to_string()),
+            journal_repo: "/repo".to_string(),
+        })
+        .unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = [
+            "status",
+            "conflicts",
+            "baseTip",
+            "worktreeId",
+            "worktreePath",
+            "opId",
+            "journalRepo",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+        for snake in [
+            "base_tip",
+            "worktree_id",
+            "worktree_path",
+            "op_id",
+            "journal_repo",
+        ] {
+            assert!(wire.get(snake).is_none(), "{snake}");
+        }
+        assert_eq!(wire["journalRepo"], "/repo");
+    }
+
+    fn merge_leaf_id(wt: &str) -> String {
+        Path::new(wt).file_name().unwrap().to_string_lossy()["gd-resolve-".len()..].to_string()
+    }
+
+    async fn resolve_merge(wt: &str) {
+        git(wt, &["checkout", "--ours", "a.txt"]).await;
+        git(wt, &["add", "a.txt"]).await;
+    }
+
+    /// Finishes the paused plain merge at `wt` from `repo`.
+    async fn finish_merge(
+        state: &AppState,
+        repo: &str,
+        base: &str,
+        wt: &str,
+        roots: &[std::path::PathBuf],
+        op: &str,
+        journal_repo: Option<&str>,
+    ) -> AppResult<LocalPrMergeOutcome> {
+        let id = merge_leaf_id(wt);
+        let op = Some(op.to_string());
+        finish_local_pr_merge(
+            state,
+            repo,
+            base,
+            "merge",
+            "m",
+            wt,
+            &id,
+            roots,
+            op,
+            journal_repo,
+        )
+        .await
+    }
+
+    fn merge_refusal(result: AppResult<LocalPrMergeOutcome>) -> String {
+        match result {
+            Err(err) => command_message(err),
+            Ok(outcome) => panic!("expected a refusal, got {}", outcome.status),
+        }
+    }
+
+    /// A refusal's message, which must be a plain `Command` error: other variants render
+    /// through the same Display, so the text alone cannot tell them apart.
+    fn command_message(err: AppError) -> String {
+        match err {
+            AppError::Command(message) => message,
+            other => panic!("expected a Command refusal, got {other:?}"),
+        }
+    }
+
+    /// Another holder's claim on `op`, taken `ago` seconds in the past.
+    fn seed_claim(repo: &str, op: &str, token: &str, ago: i64) {
+        let at = chrono::Utc::now() - chrono::Duration::seconds(ago);
+        let claimed = crate::oplog::claim_finish_at(repo, op, token, at).unwrap();
+        assert_eq!(claimed, FinishClaim::Claimed(token.to_string()));
+    }
+
+    async fn release_claim(repo: &str, op: &str, token: &str) -> bool {
+        crate::oplog::settle_finish_claim(repo, op, token, ClaimSettle::Release).await
+    }
+
+    /// `op`'s stored journal entry under `repo`, its claim marker included.
+    fn raw_entry(repo: &str, op: &str) -> serde_json::Value {
+        let bytes = std::fs::read(crate::oplog::store_path(repo).unwrap()).unwrap();
+        let store: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut lists = store
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|v| v.as_array());
+        lists
+            .find_map(|list| list.iter().find(|e| e["id"] == op).cloned())
+            .expect("the entry is stored")
+    }
+
+    /// `repo`'s journal file as it stands, with `op`'s entry rewritten as `case` says:
+    /// `closed` as a discard closes it, `reclaimed` under another live token, any other
+    /// case not JSON at all.
+    fn swapped_journal(repo: &str, op: &str, case: &str) -> Vec<u8> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let path = crate::oplog::store_path(repo).unwrap();
+        let mut store: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap())
+            .expect("the journal is JSON before the swap");
+        let entries = store.as_object_mut().unwrap().values_mut();
+        for entry in entries.filter_map(|v| v.as_array_mut()).flatten() {
+            if entry["id"] != op {
+                continue;
+            }
+            let obj = entry.as_object_mut().unwrap();
+            match case {
+                "closed" => {
+                    obj.insert("status".to_string(), "failed".into());
+                    obj.insert("error".to_string(), "aborted by user".into());
+                    obj.insert("finishedAt".to_string(), now.clone().into());
+                    obj.remove("finishClaim");
+                }
+                "reclaimed" => {
+                    let marker = serde_json::json!({ "token": "other", "at": now });
+                    obj.insert("finishClaim".to_string(), marker);
+                }
+                _ => return b"not json".to_vec(),
+            }
+        }
+        serde_json::to_vec_pretty(&store).unwrap()
+    }
+
+    /// A post-commit hook that copies `bytes`, kept outside the repository, over `repo`'s
+    /// journal file: it stands in for whatever happened to the entry during a finish's
+    /// gates and commit. The guard holds the replacement.
+    fn swap_journal_on_commit(repo: &str, bytes: &[u8]) -> tempfile::TempDir {
+        swap_journal_and_move_on_commit(repo, bytes, None)
+    }
+
+    /// [`swap_journal_on_commit`] whose hook also moves the full ref `reference`, when
+    /// given, to the commit just made: another finish landed the same resolution.
+    fn swap_journal_and_move_on_commit(
+        repo: &str,
+        bytes: &[u8],
+        reference: Option<&str>,
+    ) -> tempfile::TempDir {
+        let holder = tempfile::tempdir().expect("create temp dir");
+        let replacement = holder.path().join("opslog.json");
+        std::fs::write(&replacement, bytes).unwrap();
+        let store = crate::oplog::store_path(repo).unwrap();
+        let (from, to) = (replacement.to_string_lossy(), store.to_string_lossy());
+        let mut body = format!("cp \"{}\" \"{}\"", sh_path(&from), sh_path(&to));
+        if let Some(reference) = reference {
+            body = format!("{body}\ngit update-ref \"{reference}\" HEAD");
+        }
+        install_update_hook(repo, "post-commit", &body);
+        holder
+    }
+
+    /// A reference-transaction hook that copies `bytes` over `repo`'s journal file once
+    /// a move of the full ref `reference` commits: the claim was re-taken meanwhile.
+    fn swap_journal_when_ref_moves(repo: &str, bytes: &[u8], reference: &str) -> tempfile::TempDir {
+        let holder = tempfile::tempdir().expect("create temp dir");
+        let replacement = holder.path().join("opslog.json");
+        std::fs::write(&replacement, bytes).unwrap();
+        let store = crate::oplog::store_path(repo).unwrap();
+        let (from, to) = (replacement.to_string_lossy(), store.to_string_lossy());
+        let (from, to) = (sh_path(&from), sh_path(&to));
+        let body = format!(
+            "[ \"$1\" = committed ] || exit 0\n\
+             while read -r old new ref; do\n\
+             if [ \"$ref\" = \"{reference}\" ]; then cp \"{from}\" \"{to}\"; fi\n\
+             done"
+        );
+        install_update_hook(repo, "reference-transaction", &body);
+        holder
+    }
+
+    /// A claimed finish whose claim was re-taken while its branch moved: its own settle
+    /// answers false, and the entry still reads done, since the branch holds the commit.
+    #[tokio::test]
+    async fn local_pr_finishes_record_done_when_the_claim_is_lost_as_the_branch_moves() {
+        let f = UpdateFixture::new("lpu-moved-reclaimed", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let reclaimed = swapped_journal(&f.repo, &out.op_id, "reclaimed");
+        let _swap = swap_journal_when_ref_moves(&f.repo, &reclaimed, "refs/heads/feature");
+        let landed = f.finish(&state, &out).await.unwrap();
+        assert_eq!(landed.status, "updated");
+        assert_eq!(
+            raw_entry(&f.repo, &out.op_id)["finishClaim"]["token"],
+            "other"
+        );
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-moved-reclaimed").await;
+        let roots = std::slice::from_ref(&root);
+        resolve_merge(&wt).await;
+        let reclaimed = swapped_journal(&repo, &op, "reclaimed");
+        // The main checkout is on base, so HEAD names base's full ref.
+        let symbolic = git(&repo, &["symbolic-ref", "HEAD"]).await;
+        let base_ref = symbolic.trim();
+        let _swap = swap_journal_when_ref_moves(&repo, &reclaimed, base_ref);
+        let merged = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merged.map_err(command_message).unwrap().status, "merged");
+        assert_eq!(raw_entry(&repo, &op)["finishClaim"]["token"], "other");
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+    }
+
+    /// The journal is closed while a finish commits, and another finish lands the same
+    /// commit: the lapsed finish reports the landing, never "unchanged". The merge half
+    /// reaches the renewal's closed arm. In the update half the test's commit hook moves
+    /// head to the result (the update commits in a detached resolve worktree), so it
+    /// exercises the head-already-at-the-result arm instead; the update's closed arm
+    /// needs head moved between that read and the renewal, which no hook reaches.
+    #[tokio::test]
+    async fn local_pr_finishes_report_a_landing_another_finish_made_after_the_close() {
+        let f = UpdateFixture::new("lpu-closed-landed", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let closed = swapped_journal(&f.repo, &out.op_id, "closed");
+        let _swap = swap_journal_and_move_on_commit(&f.repo, &closed, Some("refs/heads/feature"));
+        let landed = f.finish(&state, &out).await.unwrap();
+        assert_eq!(landed.status, "updated");
+        assert_eq!(rev(&f.repo, "feature").await, landed.head_tip);
+        assert!(!Path::new(handles(&out).0).exists());
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-closed-landed").await;
+        let roots = std::slice::from_ref(&root);
+        resolve_merge(&wt).await;
+        let closed = swapped_journal(&repo, &op, "closed");
+        // The main checkout is on base, so HEAD names base's full ref.
+        let symbolic = git(&repo, &["symbolic-ref", "HEAD"]).await;
+        let base_ref = symbolic.trim();
+        let _swap = swap_journal_and_move_on_commit(&repo, &closed, Some(base_ref));
+        let merged = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        let merged = merged.map_err(command_message).unwrap();
+        assert_eq!(merged.status, "merged");
+        assert_eq!(rev(&repo, &base).await, merged.base_tip);
+        assert_eq!(resolve_worktree_count(&repo).await, 0);
+        assert_eq!(journal_entry(&repo, &op).await.status, "done");
+    }
+
+    /// The update finish's closed-entry answer after the finish that landed the update
+    /// removed its worktree: the worktree read before the claim is stale, so the answer
+    /// reads it again.
+    #[tokio::test]
+    async fn local_pr_update_closed_entry_reports_a_landing_whose_worktree_is_gone() {
+        let f = UpdateFixture::new("lpu-closed-gone", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, id) = handles(&out);
+        let (wt, id) = (wt.to_string(), id.to_string());
+        let landed = f.finish(&state, &out).await.unwrap();
+        assert!(!Path::new(&wt).exists());
+
+        let root = f.root();
+        let at = (
+            f.repo.as_str(),
+            root.as_path(),
+            wt.as_str(),
+            id.as_str(),
+            out.op_id.as_str(),
+            out.journal_repo.as_str(),
+        );
+        let late = update_closed_entry(&state, at, "feature", "feature").await;
+        let late = late.map_err(command_message).unwrap();
+        assert_eq!(
+            (late.status.as_str(), late.head_tip),
+            ("updated", landed.head_tip)
+        );
+    }
+
+    /// A discard whose close could not read the store, while a fresh read still finds the
+    /// entry unfinished, refuses as over a claim: the error may hide one.
+    #[tokio::test]
+    async fn local_pr_update_discard_refuses_when_its_close_cannot_read_the_store() {
+        let f = UpdateFixture::new("lpu-discard-unread", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let (wt, id) = handles(&out);
+        let root = f.root();
+        let at = UpdateHandles {
+            repo_path: &f.repo,
+            head: "feature",
+            worktree_path: wt,
+            worktree_id: id,
+            op_id: &out.op_id,
+            journal_repo: &out.journal_repo,
+            root: &root,
+        };
+        let journal = update_journal(&f.repo, &out.journal_repo, &out.op_id).await;
+        let assessed = assess_discard(&at, journal.as_ref()).await;
+        assert_eq!(assessed, (true, false));
+        // The close goes to a key whose store is not JSON; the re-read after it does not.
+        let unreadable = tempfile::tempdir().expect("create temp dir");
+        std::fs::create_dir(unreadable.path().join(".git")).unwrap();
+        let bad_key = unreadable.path().to_string_lossy().into_owned();
+        std::fs::write(crate::oplog::store_path(&bad_key).unwrap(), b"not json").unwrap();
+        let mut journal = journal.expect("the entry is filed");
+        journal.key = bad_key;
+        let before = raw_entry(&f.repo, &out.op_id);
+
+        let refused = settle_discard(&state, &at, Some(journal), assessed).await;
+        let refused = refused.map(|o| o.status).unwrap_err();
+        assert_eq!(command_message(refused), UPDATE_DISCARD_BUSY);
+        assert!(Path::new(wt).exists());
+        assert_eq!(resolve_worktree_count(&f.repo).await, 1);
+        assert_eq!(raw_entry(&f.repo, &out.op_id), before);
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    /// A rebase merge whose next commit conflicts again pauses once more, and releases
+    /// its claim on the way out so the next finish can take it.
+    #[tokio::test]
+    async fn local_pr_rebase_merge_releases_its_claim_on_a_re_conflict() {
+        let (dir, repo) = setup_repo("lpr-rebase-reconflict").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-a\n", "feat a").await;
+        commit_file(&repo, dir.path(), "b.txt", "feature-b\n", "feat b").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-a\n", "base a").await;
+        commit_file(&repo, dir.path(), "b.txt", "base-b\n", "base b").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let out = merge_local_pr(&state, &repo, &base, "feature", "", "rebase", &root)
+            .await
+            .unwrap();
+        assert_eq!(out.conflicts, vec!["a.txt".to_string()]);
+        let (wt, op) = (out.worktree_path.unwrap(), out.op_id.unwrap());
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved-a\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+
+        let id = merge_leaf_id(&wt);
+        let roots = std::slice::from_ref(&root);
+        let again = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "rebase",
+            "",
+            &wt,
+            &id,
+            roots,
+            Some(op.clone()),
+            None,
+        )
+        .await;
+        let again = again.map_err(command_message).unwrap();
+        assert_eq!(again.status, "conflicts");
+        assert_eq!(again.conflicts, vec!["b.txt".to_string()]);
+        let now = chrono::Utc::now();
+        let probe = crate::oplog::claim_finish_at(&again.journal_repo, &op, "probe", now);
+        assert_eq!(probe.unwrap(), FinishClaim::Claimed("probe".to_string()));
+    }
+
+    /// Journal hints that do not name a checkout of this repository are ignored: another
+    /// repository's journal may hold an entry under the same op id.
+    #[tokio::test]
+    async fn local_pr_journal_hints_from_another_repository_are_ignored() {
+        let (_other_dir, other, _other_holder, _other_root, _other_base, _other_wt, other_op) =
+            paused_local_merge("lpr-hint-other").await;
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-hint-ours").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        // The other repository's entry carries this merge's op id.
+        let path = crate::oplog::store_path(&other).unwrap();
+        let text = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace(&other_op, &op);
+        std::fs::write(&path, text).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        resolve_merge(&wt).await;
+        let merged = finish_merge(&state, &repo, &base, &wt, roots, &op, Some(&other)).await;
+        let merged = merged.map_err(command_message).unwrap();
+        assert_eq!(merged.status, "merged");
+        assert!(crate::oplog::same_repo(&merged.journal_repo, &repo));
+        assert_eq!(journal_entry(&repo, &op).await.status, "done");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "finish");
+
+        let (_dir2, repo2, _holder2, root2, _base2, wt2, op2) =
+            paused_local_merge("lpr-hint-ours-abort").await;
+        let text = std::fs::read_to_string(&path).unwrap().replace(&op, &op2);
+        std::fs::write(&path, text).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let roots2 = std::slice::from_ref(&root2);
+        let aborted =
+            abort_local_pr_merge(&state, &repo2, &wt2, roots2, Some(&op2), Some(&other)).await;
+        assert!(aborted.map_err(command_message).unwrap().closed);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "abort");
+        assert_eq!(journal_entry(&repo2, &op2).await.status, "failed");
+
+        // Another spelling of this repository's own checkout is still a hint.
+        let upper = repo.to_uppercase();
+        let trailing = format!("{repo}{}", std::path::MAIN_SEPARATOR);
+        assert_eq!(journal_hint(&repo, &trailing).await, trailing);
+        if cfg!(windows) {
+            assert_eq!(journal_hint(&repo, &upper).await, upper);
+        }
+        assert_eq!(journal_hint(&repo, &other).await, "");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_stops_when_its_journal_changes_during_the_commit() {
+        for case in ["closed", "reclaimed", "unreadable"] {
+            let f = UpdateFixture::new(&format!("lpu-swap-{case}"), true).await;
+            let start_tip = rev(&f.repo, "feature").await;
+            let state = AppState::default();
+            let out = f.start(&state, &f.repo, "feature").await.unwrap();
+            resolve_update(&out).await;
+            let _swap =
+                swap_journal_on_commit(&f.repo, &swapped_journal(&f.repo, &out.op_id, case));
+
+            let err = command_message(f.finish(&state, &out).await.unwrap_err());
+            assert_eq!(rev(&f.repo, "feature").await, start_tip, "{case}");
+            assert!(Path::new(handles(&out).0).exists(), "{case}");
+            match case {
+                "closed" => {
+                    assert_eq!(err, update_closed_mid_finish("feature"));
+                    let entry = journal_entry(&f.repo, &out.op_id).await;
+                    let error = entry.error.as_deref();
+                    assert_eq!(
+                        (entry.status.as_str(), error),
+                        ("failed", Some("aborted by user"))
+                    );
+                }
+                "reclaimed" => {
+                    assert_eq!(err, UPDATE_FINISH_BUSY);
+                    assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "paused");
+                    assert_eq!(
+                        raw_entry(&f.repo, &out.op_id)["finishClaim"]["token"],
+                        "other"
+                    );
+                }
+                _ => assert_eq!(err, UPDATE_FINISH_BUSY),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_finish_stops_when_its_journal_changes_during_the_commit() {
+        for case in ["closed", "reclaimed", "unreadable"] {
+            let (_dir, repo, _holder, root, base, wt, op) =
+                paused_local_merge(&format!("lpr-swap-{case}")).await;
+            let roots = std::slice::from_ref(&root);
+            let state = AppState::default();
+            let start = rev(&repo, &base).await;
+            resolve_merge(&wt).await;
+            let _swap = swap_journal_on_commit(&repo, &swapped_journal(&repo, &op, case));
+
+            let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+            let err = merge_refusal(err);
+            assert_eq!(rev(&repo, &base).await, start, "{case}");
+            assert_eq!(resolve_worktree_count(&repo).await, 1, "{case}");
+            match case {
+                "closed" => {
+                    assert_eq!(err, merge_closed_mid_finish(&base));
+                    let entry = journal_entry(&repo, &op).await;
+                    let error = entry.error.as_deref();
+                    assert_eq!(
+                        (entry.status.as_str(), error),
+                        ("failed", Some("aborted by user"))
+                    );
+                }
+                "reclaimed" => {
+                    assert_eq!(err, MERGE_BUSY);
+                    assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+                    assert_eq!(raw_entry(&repo, &op)["finishClaim"]["token"], "other");
+                }
+                _ => assert_eq!(err, MERGE_BUSY),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_discard_refuses_over_a_finish_claim() {
+        let f = UpdateFixture::new("lpu-discard-claimed", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        seed_claim(&out.journal_repo, &out.op_id, "finish", 0);
+        let (wt, id) = handles(&out);
+
+        let (op, journal_repo, root) = (&out.op_id, &out.journal_repo, f.root());
+        let refused =
+            discard_local_pr_update(&state, &f.repo, "feature", wt, id, op, journal_repo, &root)
+                .await
+                .unwrap_err();
+        assert_eq!(command_message(refused), UPDATE_DISCARD_BUSY);
+        assert!(Path::new(wt).exists());
+        assert_eq!(journal_entry(&f.repo, op).await.status, "paused");
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+
+        assert!(release_claim(journal_repo, op, "finish").await);
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        let entry = journal_entry(&f.repo, op).await;
+        let error = entry.error.as_deref();
+        assert_eq!(
+            (entry.status.as_str(), error),
+            ("failed", Some("aborted by user"))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_discard_under_a_claim_reports_a_landed_update() {
+        let f = UpdateFixture::new("lpu-discard-claimed-landed", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+        seed_claim(&out.journal_repo, &out.op_id, "finish", 0);
+
+        assert_eq!(f.discard(&state, &out).await, "updated");
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+        assert!(!Path::new(handles(&out).0).exists());
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_over_another_finish_claim() {
+        let f = UpdateFixture::new("lpu-finish-claimed", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        seed_claim(&out.journal_repo, &out.op_id, "other", 0);
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(command_message(err), UPDATE_FINISH_BUSY);
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+        assert!(Path::new(handles(&out).0).exists());
+        assert!(release_claim(&out.journal_repo, &out.op_id, "other").await);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_releases_its_claim_on_a_refusal() {
+        let f = UpdateFixture::new("lpu-finish-release", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let (key, op) = (&out.journal_repo, &out.op_id);
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(err.to_string(), "Resolve every conflict first");
+        let now = chrono::Utc::now();
+        let probe = crate::oplog::claim_finish_at(key, op, "probe", now).unwrap();
+        assert_eq!(probe, FinishClaim::Claimed("probe".to_string()));
+        assert!(release_claim(key, op, "probe").await);
+
+        resolve_update(&out).await;
+        assert_eq!(f.finish(&state, &out).await.unwrap().status, "updated");
+        let probe = crate::oplog::claim_finish_at(key, op, "probe", chrono::Utc::now()).unwrap();
+        assert_eq!(probe, FinishClaim::Ended("done".to_string()));
+        assert_eq!(journal_entry(&f.repo, op).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_close_abandoned_spares_a_claimed_entry() {
+        let f = UpdateFixture::new("lpu-sweep-claimed", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        seed_claim(&f.repo, &out.op_id, "finish", 0);
+        assert_eq!(
+            close_abandoned_local_pr_updates(&f.repo, &[])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "paused");
+        assert!(release_claim(&f.repo, &out.op_id, "finish").await);
+        assert_eq!(
+            close_abandoned_local_pr_updates(&f.repo, &[])
+                .await
+                .unwrap(),
+            1
+        );
+
+        let (_dir, repo, _holder, _root, _base, _wt, op) =
+            paused_local_merge("lpr-sweep-claimed").await;
+        seed_claim(&repo, &op, "finish", 0);
+        assert_eq!(
+            close_abandoned_local_pr_updates(&repo, &[]).await.unwrap(),
+            0
+        );
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+        assert!(release_claim(&repo, &op, "finish").await);
+        assert_eq!(
+            close_abandoned_local_pr_updates(&repo, &[]).await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_abort_and_finish_refuse_over_a_claim() {
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-claimed").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let start = rev(&repo, &base).await;
+        seed_claim(&repo, &op, "other", 0);
+
+        let abort = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None).await;
+        assert_eq!(command_message(abort.unwrap_err()), MERGE_BUSY);
+        assert_eq!(resolve_worktree_count(&repo).await, 1);
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+        let finish = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(finish), MERGE_BUSY);
+        assert_eq!(rev(&repo, &base).await, start);
+
+        assert!(release_claim(&repo, &op, "other").await);
+        let finish = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(finish), "Resolve every conflict first");
+        seed_claim(&repo, &op, "probe", 0);
+        assert!(release_claim(&repo, &op, "probe").await);
+
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None).await;
+        let both = LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: true,
+        };
+        assert_eq!(outcome.unwrap(), both);
+        let entry = journal_entry(&repo, &op).await;
+        let error = entry.error.as_deref();
+        assert_eq!(
+            (entry.status.as_str(), error),
+            ("failed", Some("aborted by user"))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_while_an_abort_holds_its_claim() {
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-abort-holds").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        seed_claim(&repo, &op, "abort", 60);
+
+        let finish = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(finish), MERGE_BUSY);
+        assert_eq!(rev(&repo, &base).await, start);
+        assert!(release_claim(&repo, &op, "abort").await);
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_removal_under_a_claim_renews_it_first() {
+        let (_dir, repo, _holder, _root, _base, wt, op) =
+            paused_local_merge("lpr-removal-renews").await;
+        let state = AppState::default();
+        seed_claim(&repo, &op, "finish", 100);
+
+        // The removal step observes the claim live before it removes anything.
+        let seen = std::cell::Cell::new(None);
+        let claim = Some(("finish", op.as_str()));
+        remove_merge_worktree_under_claim(&repo, claim, || async {
+            let later = chrono::Utc::now() + chrono::Duration::seconds(60);
+            seen.set(Some(
+                crate::oplog::claim_finish_at(&repo, &op, "probe", later).unwrap(),
+            ));
+            remove_resolve_worktree(&state, &repo, &wt).await;
+        })
+        .await;
+        assert_eq!(seen.into_inner(), Some(FinishClaim::Busy));
+        assert!(!Path::new(&wt).exists());
+        let later = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let probe = crate::oplog::claim_finish_at(&repo, &op, "probe", later).unwrap();
+        assert_eq!(probe, FinishClaim::Busy);
+    }
+
+    /// The fence runs right before the ref write: a claim that lapsed and whose entry was
+    /// closed elsewhere moves nothing, and a target already holding the result is landed.
+    #[tokio::test]
+    async fn finalize_branch_fence_refuses_a_closed_entry_and_admits_a_landed_target() {
+        let (_dir, repo, _holder, _root, base, wt, op) = paused_local_merge("lpr-fence").await;
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        git(&wt, &["commit", "-m", "m"]).await;
+        let new_sha = rev(&wt, "HEAD").await;
+        let (target, landed) = ("lpr-fence-target", "lpr-fence-landed");
+        git(&repo, &["branch", target, &start]).await;
+        git(&repo, &["branch", landed, &new_sha]).await;
+        seed_claim(&repo, &op, "finish", 200);
+        let aborted = Some("aborted by user".to_string());
+        let closed = crate::oplog::close_unfinished(&repo, &op, aborted).await;
+        assert_eq!(closed, CloseOutcome::Closed);
+        let fence = |base| merge_fence(&repo, &op, base);
+        let into = |branch| (repo.as_str(), branch, new_sha.as_str(), base.as_str());
+
+        let expected = Some(start.as_str());
+        let refused = finalize_into(into(target), expected, Some(&fence(target))).await;
+        assert_eq!(
+            command_message(refused.unwrap_err()),
+            merge_closed_mid_finish(target)
+        );
+        assert_eq!(rev(&repo, target).await, start, "nothing written");
+        let landed_fence = fence(landed);
+        finalize_into(into(landed), None, Some(&landed_fence))
+            .await
+            .unwrap();
+        assert_eq!(rev(&repo, landed).await, new_sha);
+
+        finalize_into(into(target), expected, None).await.unwrap();
+        let moved = rev(&repo, target).await;
+        assert_eq!(moved, new_sha, "unfenced, the branch moves");
+    }
+
+    /// The fence runs after the lock wait: an entry closed while the finish waits for the
+    /// working tree is refused. A fence run before the wait would renew the lapsed claim,
+    /// and the close below would then read it as claimed.
+    #[tokio::test]
+    async fn finalize_branch_fence_runs_after_the_working_tree_wait() {
+        let (_dir, repo, _holder, _root, base, wt, op) = paused_local_merge("lpr-fence-wait").await;
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        git(&wt, &["commit", "-m", "m"]).await;
+        let new_sha = rev(&wt, "HEAD").await;
+        let target = "lpr-fence-wait-target";
+        git(&repo, &["branch", target, &start]).await;
+        seed_claim(&repo, &op, "finish", 200);
+        let state = AppState::default();
+        let domain = state.working_tree_lock(&repo).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test").await;
+        let held = held.unwrap();
+        let users = || std::sync::Arc::strong_count(&domain.lock());
+        let idle = users();
+
+        let fence = merge_fence(&repo, &op, target);
+        let moved = merge_target_moved;
+        let finalize = finalize_branch(
+            &state,
+            &repo,
+            target,
+            &new_sha,
+            &base,
+            Some(&start),
+            moved,
+            "merging into",
+            Some(&fence),
+        );
+        let close_while_waiting = async {
+            // The finish holds a handle on the domain only once it reaches the wait.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while users() == idle {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never reached the wait"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let aborted = Some("aborted by user".to_string());
+            let closed = crate::oplog::close_unfinished(&repo, &op, aborted).await;
+            drop(held);
+            closed
+        };
+        let (refused, closed) = tokio::join!(finalize, close_while_waiting);
+        assert_eq!(closed, CloseOutcome::Closed);
+        assert_eq!(
+            command_message(refused.unwrap_err()),
+            merge_closed_mid_finish(target)
+        );
+        assert_eq!(rev(&repo, target).await, start, "nothing written");
+    }
+
+    /// Runs `finish` while `repo`'s working tree is held; once it waits on the lock, its
+    /// claim on `op` (journal `key`) is let lapse and the entry closed, then the lock goes.
+    async fn close_while_finish_waits<T>(
+        state: &AppState,
+        repo: &str,
+        key: &str,
+        op: &str,
+        finish: impl std::future::Future<Output = T>,
+    ) -> T {
+        let domain = state.working_tree_lock(repo).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test").await;
+        let held = held.unwrap();
+        let users = || std::sync::Arc::strong_count(&domain.lock());
+        let idle = users();
+        let close_while_waiting = async {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while users() == idle {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never reached the wait"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            // Taken past the claim's limit, so the finish's own claim reads as lapsed.
+            let later = chrono::Utc::now() + chrono::Duration::seconds(300);
+            let taken = crate::oplog::claim_finish_at(key, op, "lapsed", later).unwrap();
+            assert_eq!(taken, FinishClaim::Claimed("lapsed".to_string()));
+            let aborted = Some("aborted by user".to_string());
+            let closed = crate::oplog::close_unfinished(key, op, aborted).await;
+            assert_eq!(closed, CloseOutcome::Closed);
+            drop(held);
+        };
+        let (out, ()) = tokio::join!(finish, close_while_waiting);
+        out
+    }
+
+    /// The production merge finish hands its claim to the base write.
+    #[tokio::test]
+    async fn local_pr_merge_finish_fences_the_base_write_with_its_claim() {
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-finish-fenced").await;
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        let (state, id) = (AppState::default(), merge_leaf_id(&wt));
+        let roots = std::slice::from_ref(&root);
+        let op_id = Some(op.clone());
+        let finish = finish_local_pr_merge(
+            &state, &repo, &base, "merge", "m", &wt, &id, roots, op_id, None,
+        );
+
+        let refused = close_while_finish_waits(&state, &repo, &repo, &op, finish).await;
+        assert_eq!(
+            command_message(refused.map(|out| out.status).unwrap_err()),
+            merge_closed_mid_finish(&base)
+        );
+        assert_eq!(rev(&repo, &base).await, start, "nothing merged");
+    }
+
+    /// The production update finish hands its claim to the head write.
+    #[tokio::test]
+    async fn local_pr_update_finish_fences_the_head_write_with_its_claim() {
+        let f = UpdateFixture::new("lpu-finish-fenced", true).await;
+        let start = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let finish = f.finish(&state, &out);
+
+        let (key, op) = (out.journal_repo.as_str(), out.op_id.as_str());
+        let refused = close_while_finish_waits(&state, &f.repo, key, op, finish).await;
+        assert_eq!(
+            command_message(refused.map(|out| out.status).unwrap_err()),
+            update_closed_mid_finish("feature")
+        );
+        assert_eq!(rev(&f.repo, "feature").await, start, "nothing written");
+    }
+
+    /// The fast-forward arms are fenced too: the main checkout's current branch and a
+    /// branch a linked worktree holds stay put once the entry was closed.
+    #[tokio::test]
+    async fn finalize_branch_fence_refuses_checked_out_targets_of_a_closed_entry() {
+        let (_dir, repo, _holder, _root, base, wt, op) =
+            paused_local_merge("lpr-fence-checked-out").await;
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        git(&wt, &["commit", "-m", "m"]).await;
+        let new_sha = rev(&wt, "HEAD").await;
+        let linked_branch = "lpr-fence-linked";
+        let linked_holder = tempfile::tempdir().expect("create temp dir");
+        let linked = linked_holder.path().join("linked");
+        let linked = linked.to_string_lossy().into_owned();
+        git(
+            &repo,
+            &["worktree", "add", "-b", linked_branch, &linked, &start],
+        )
+        .await;
+        seed_claim(&repo, &op, "finish", 200);
+        let aborted = Some("aborted by user".to_string());
+        let closed = crate::oplog::close_unfinished(&repo, &op, aborted).await;
+        assert_eq!(closed, CloseOutcome::Closed);
+        let expected = Some(start.as_str());
+
+        for target in [base.as_str(), linked_branch] {
+            let fence = merge_fence(&repo, &op, target);
+            let into = (repo.as_str(), target, new_sha.as_str(), base.as_str());
+            let refused = finalize_into(into, expected, Some(&fence)).await;
+            assert_eq!(
+                command_message(refused.unwrap_err()),
+                merge_closed_mid_finish(target)
+            );
+            assert_eq!(rev(&repo, target).await, start, "{target} unchanged");
+        }
+        assert_eq!(rev(&repo, "HEAD").await, start, "the main checkout stays");
+        assert_eq!(
+            rev(&linked, "HEAD").await,
+            start,
+            "the linked checkout stays"
+        );
+        git(&repo, &["worktree", "remove", "--force", &linked]).await;
+    }
+
+    fn merge_fence<'a>(key: &'a str, id: &'a str, base: &'a str) -> ClaimFence<'a> {
+        ClaimFence {
+            key,
+            id,
+            token: "finish",
+            flow: FinishFlow::Merge { base },
+        }
+    }
+
+    /// [`finalize_branch`] moving a merge's `branch` in `repo` to `new_sha`, `current`
+    /// being the main checkout's branch.
+    async fn finalize_into(
+        (repo, branch, new_sha, current): (&str, &str, &str, &str),
+        expected: Option<&str>,
+        fence: Option<&ClaimFence<'_>>,
+    ) -> AppResult<()> {
+        let (state, moved) = (AppState::default(), merge_target_moved);
+        let verb = "merging into";
+        finalize_branch(
+            &state, repo, branch, new_sha, current, expected, moved, verb, fence,
+        )
+        .await
+    }
+
+    /// A rebase merge conflicting on its last commit, resolved in its worktree, into a
+    /// `base` checked out nowhere; `extra` puts a clean commit ahead of the conflicting one.
+    async fn paused_rebase_merge(
+        marker: &str,
+        base: &str,
+        extra: bool,
+    ) -> (
+        tempfile::TempDir,
+        String,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        String,
+        String,
+    ) {
+        let (dir, repo) = setup_repo(marker).await;
+        let home = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", base]).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        if extra {
+            commit_file(&repo, dir.path(), "c.txt", "feature-c\n", "feat c").await;
+        }
+        commit_file(&repo, dir.path(), "a.txt", "feature-a\n", "feat a").await;
+        git(&repo, &["switch", base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-a\n", "base a").await;
+        git(&repo, &["switch", &home]).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let out = merge_local_pr(&state, &repo, base, "feature", "", "rebase", &root)
+            .await
+            .unwrap();
+        assert_eq!(out.conflicts, vec!["a.txt".to_string()]);
+        let (wt, op) = (out.worktree_path.unwrap(), out.op_id.unwrap());
+        std::fs::write(Path::new(&wt).join("a.txt"), "resolved-a\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        (dir, repo, root_holder, root, wt, op)
+    }
+
+    async fn finish_rebase(
+        repo: &str,
+        base: &str,
+        wt: &str,
+        roots: &[std::path::PathBuf],
+        op: &str,
+    ) -> AppResult<LocalPrMergeOutcome> {
+        let (state, id, op) = (AppState::default(), merge_leaf_id(wt), Some(op.to_string()));
+        finish_local_pr_merge(&state, repo, base, "rebase", "", wt, &id, roots, op, None).await
+    }
+
+    /// A [`paused_rebase_merge`] whose first finish replayed every commit and was then
+    /// refused by a live update marker on base, that marker gone again. The guards keep
+    /// the process-wide marker root installed and drop first.
+    struct RefusedReplay {
+        _override: crate::git::update_marker::TestRootOverride,
+        _serialized: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        _holder: tempfile::TempDir,
+        repo: String,
+        base: String,
+        root: std::path::PathBuf,
+        wt: String,
+        op: String,
+        start: String,
+        replayed: String,
+    }
+
+    impl RefusedReplay {
+        async fn retry(&self) -> AppResult<LocalPrMergeOutcome> {
+            let roots = std::slice::from_ref(&self.root);
+            finish_rebase(&self.repo, &self.base, &self.wt, roots, &self.op).await
+        }
+
+        /// The retry refused by git with nothing merged and the worktree kept.
+        async fn assert_retry_refused(&self) {
+            let retried = self.retry().await.map(|out| out.status);
+            assert!(matches!(retried, Err(AppError::Git { .. })), "{retried:?}");
+            assert_eq!(
+                rev(&self.repo, &self.base).await,
+                self.start,
+                "nothing merged"
+            );
+            assert!(Path::new(&self.wt).exists(), "the worktree stays");
+            assert_eq!(journal_entry(&self.repo, &self.op).await.status, "paused");
+        }
+    }
+
+    // The serializing guard MUST span the awaits: it keeps the process-wide root override
+    // installed for the whole body. Its callers share the marker's branch name, each in
+    // its own repository and serialized by that guard.
+    #[allow(clippy::await_holding_lock)]
+    async fn rebase_refused_after_replay(name: &str) -> RefusedReplay {
+        use crate::git::update_marker as marker;
+        let base = "lpr-replay-refused-base";
+        let (dir, repo, holder, root, wt, op) = paused_rebase_merge(name, base, false).await;
+        let start = rev(&repo, base).await;
+        let marker_root = dir.path().join("gd-worktrees");
+        std::fs::create_dir_all(&marker_root).unwrap();
+        let serialized = marker::test_root_lock();
+        let root_override = marker::TestRootOverride::set(&marker_root);
+        let live = marker::UpdateMarker::create_for(&marker_root.join("gd-update-live"), base)
+            .expect("the marker mints");
+
+        let roots = std::slice::from_ref(&root);
+        let refused = finish_rebase(&repo, base, &wt, roots, &op).await;
+        let refusal = marker::branch_update_refusal(base).to_string();
+        assert_eq!(refused.err().map(|e| e.to_string()), Some(refusal));
+        assert_eq!(rev(&repo, base).await, start);
+        let replayed = rev(&wt, "HEAD").await;
+        assert_ne!(replayed, start);
+        drop(live);
+        RefusedReplay {
+            _override: root_override,
+            _serialized: serialized,
+            _dir: dir,
+            _holder: holder,
+            repo,
+            base: base.to_string(),
+            root,
+            wt,
+            op,
+            start,
+            replayed,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_pr_rebase_finish_refused_after_its_last_continuation_lands_on_retry() {
+        let r = rebase_refused_after_replay("lpr-replay-retry").await;
+        let merged = r.retry().await;
+        assert_eq!(merged.map_err(command_message).unwrap().status, "merged");
+        assert_eq!(rev(&r.repo, &r.base).await, r.replayed);
+        assert_eq!(journal_entry(&r.repo, &r.op).await.status, "done");
+    }
+
+    /// A pick started by hand after the replay, resolved back to HEAD's content: the tree
+    /// is clean and HEAD still matches the marker, so only the in-progress probe holds.
+    #[tokio::test]
+    async fn local_pr_rebase_retry_never_skips_a_cherry_pick_in_progress() {
+        let r = rebase_refused_after_replay("lpr-replay-picking").await;
+        let feature = rev(&r.repo, "feature").await;
+        let pick = ["cherry-pick", feature.as_str()];
+        let picked = run_git_raw(Some(&r.wt), &pick, TEST_GIT_HANG_GUARD).await;
+        assert_ne!(picked.unwrap().code, 0, "the pick conflicts");
+        std::fs::write(Path::new(&r.wt).join("a.txt"), "resolved-a\n").unwrap();
+        git(&r.wt, &["add", "a.txt"]).await;
+        let probe = ["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"];
+        let picking = run_git_raw(Some(&r.wt), &probe, TEST_GIT_HANG_GUARD).await;
+        assert_eq!(picking.unwrap().code, 0, "git reports the pick in progress");
+        assert_eq!(rev(&r.wt, "HEAD").await, r.replayed);
+        assert_eq!(git(&r.wt, &["status", "--porcelain", "-uno"]).await, "");
+
+        r.assert_retry_refused().await;
+    }
+
+    /// The reftable twin of the test above, on a hand-built worktree: reftable keeps
+    /// `CHERRY_PICK_HEAD` out of the git dir, so only git can report the pick. Returns
+    /// early when this git can't create a reftable repository.
+    #[tokio::test]
+    async fn replay_completed_never_skips_a_reftable_cherry_pick_in_progress() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let (repo_dir, repo) = (repo.clone(), repo.to_string_lossy().into_owned());
+        let init = ["init", "-q", "-b", "main", "--ref-format=reftable"];
+        let init = run_git_raw(Some(&repo), &init, TEST_GIT_HANG_GUARD).await;
+        if init.unwrap().code != 0 {
+            eprintln!("note: this git can't create a reftable repo; skipping");
+            return;
+        }
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        git(&repo, &["config", "commit.gpgsign", "false"]).await;
+        commit_file(&repo, &repo_dir, "a.txt", "seed\n", "seed").await;
+        git(&repo, &["switch", "-q", "-c", "side"]).await;
+        commit_file(&repo, &repo_dir, "a.txt", "side\n", "side").await;
+        git(&repo, &["switch", "-q", "main"]).await;
+        commit_file(&repo, &repo_dir, "a.txt", "main\n", "main").await;
+        let wt = dir.path().join("wt").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-q", "--detach", &wt, "main"]).await;
+
+        let pick = run_git_raw(Some(&wt), &["cherry-pick", "side"], TEST_GIT_HANG_GUARD).await;
+        assert_ne!(pick.unwrap().code, 0, "the pick conflicts");
+        std::fs::write(Path::new(&wt).join("a.txt"), "main\n").unwrap();
+        git(&wt, &["add", "a.txt"]).await;
+        assert_eq!(git(&wt, &["status", "--porcelain", "-uno"]).await, "");
+        let git_dir = git(&wt, &["rev-parse", "--absolute-git-dir"]).await;
+        let git_dir = Path::new(git_dir.trim_end_matches(['\r', '\n'])).to_path_buf();
+        assert!(
+            !git_dir.join("CHERRY_PICK_HEAD").exists(),
+            "no file to find"
+        );
+        let probe = ["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"];
+        let picking = run_git_raw(Some(&wt), &probe, TEST_GIT_HANG_GUARD).await;
+        assert_eq!(picking.unwrap().code, 0, "git reports the pick in progress");
+        let head = rev(&wt, "HEAD").await;
+        std::fs::write(git_dir.join(REPLAY_COMPLETE_MARKER), &head).unwrap();
+
+        assert_eq!(replay_completed(&wt).await, None);
+    }
+
+    #[tokio::test]
+    async fn local_pr_rebase_retry_never_skips_to_a_head_the_marker_did_not_name() {
+        let r = rebase_refused_after_replay("lpr-replay-moved").await;
+        git(
+            &r.wt,
+            &["commit", "--allow-empty", "-m", "after the replay"],
+        )
+        .await;
+        assert_ne!(rev(&r.wt, "HEAD").await, r.replayed);
+
+        r.assert_retry_refused().await;
+    }
+
+    #[tokio::test]
+    async fn local_pr_rebase_retry_never_lands_over_a_staged_correction() {
+        let r = rebase_refused_after_replay("lpr-replay-staged").await;
+        std::fs::write(Path::new(&r.wt).join("a.txt"), "corrected-a\n").unwrap();
+        git(&r.wt, &["add", "a.txt"]).await;
+
+        r.assert_retry_refused().await;
+        let staged = git(&r.wt, &["diff", "--cached", "--name-only"]).await;
+        assert_eq!(staged.trim(), "a.txt");
+        let kept = std::fs::read_to_string(Path::new(&r.wt).join("a.txt")).unwrap();
+        assert_eq!(kept, "corrected-a\n");
+    }
+
+    #[tokio::test]
+    async fn local_pr_rebase_retry_never_lands_over_an_unstaged_correction() {
+        let r = rebase_refused_after_replay("lpr-replay-unstaged").await;
+        std::fs::write(Path::new(&r.wt).join("a.txt"), "corrected-a\n").unwrap();
+        assert_eq!(git(&r.wt, &["diff", "--cached", "--name-only"]).await, "");
+
+        r.assert_retry_refused().await;
+        let changed = git(&r.wt, &["diff", "--name-only"]).await;
+        assert_eq!(changed.trim(), "a.txt");
+        let kept = std::fs::read_to_string(Path::new(&r.wt).join("a.txt")).unwrap();
+        assert_eq!(kept, "corrected-a\n");
+    }
+
+    /// A sequencer left in the worktree's git dir with no pick in progress still holds
+    /// the skip, though the marker names HEAD and the tree is clean.
+    #[tokio::test]
+    async fn local_pr_rebase_retry_never_skips_with_a_sequencer_present() {
+        let r = rebase_refused_after_replay("lpr-replay-sequencer").await;
+        let sequencer = git(&r.wt, &["rev-parse", "--git-path", "sequencer"]).await;
+        std::fs::create_dir_all(Path::new(&r.wt).join(sequencer.trim())).unwrap();
+        let pick = ["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"];
+        let picking = run_git_raw(Some(&r.wt), &pick, TEST_GIT_HANG_GUARD).await;
+        assert_eq!(picking.unwrap().code, 1, "no pick in progress");
+        assert_eq!(rev(&r.wt, "HEAD").await, r.replayed);
+
+        assert_eq!(replay_completed(&r.wt).await, None);
+        r.assert_retry_refused().await;
+    }
+
+    /// The verdict is the HEAD the marker named, and a failed git-dir resolve holds the
+    /// skip (the sequencer and marker probes hang off it). The cherry-pick probe asks git
+    /// separately.
+    #[tokio::test]
+    async fn replay_completed_vouches_only_when_every_probe_answers() {
+        let r = rebase_refused_after_replay("lpr-replay-probe").await;
+        assert_eq!(replay_completed(&r.wt).await, Some(r.replayed.clone()));
+        let faulted = with_git_dir_probe_fault(replay_completed(&r.wt)).await;
+        assert_eq!(faulted, None);
+        assert_eq!(replay_completed(&r.wt).await, Some(r.replayed.clone()));
+    }
+
+    #[tokio::test]
+    async fn local_pr_rebase_finish_never_lands_a_replay_quit_by_hand() {
+        let base = "lpr-replay-quit-base";
+        let (_dir, repo, _holder, root, wt, op) =
+            paused_rebase_merge("lpr-replay-quit", base, true).await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, base).await;
+        git(&wt, &["cherry-pick", "--quit"]).await;
+        let partial = rev(&wt, "HEAD").await;
+        assert_ne!(partial, start, "the first commit was replayed");
+
+        let refused = finish_rebase(&repo, base, &wt, roots, &op).await;
+        let refused = refused.err();
+        assert!(matches!(refused, Some(AppError::Git { .. })), "{refused:?}");
+        assert_eq!(rev(&repo, base).await, start);
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+    }
+
+    /// The hand quit with the tree reset to HEAD: only the missing marker stands
+    /// between the partial replay and the base move.
+    #[tokio::test]
+    async fn local_pr_rebase_finish_never_lands_a_clean_replay_quit_by_hand() {
+        let base = "lpr-replay-quit-clean-base";
+        let (_dir, repo, _holder, root, wt, op) =
+            paused_rebase_merge("lpr-replay-quit-clean", base, true).await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, base).await;
+        git(&wt, &["cherry-pick", "--quit"]).await;
+        git(&wt, &["reset", "--hard", "HEAD"]).await;
+        assert_eq!(git(&wt, &["status", "--porcelain", "-uno"]).await, "");
+        assert_ne!(
+            rev(&wt, "HEAD").await,
+            start,
+            "the first commit was replayed"
+        );
+
+        let refused = finish_rebase(&repo, base, &wt, roots, &op).await;
+        let refused = refused.err();
+        assert!(matches!(refused, Some(AppError::Git { .. })), "{refused:?}");
+        assert_eq!(rev(&repo, base).await, start, "nothing merged");
+        assert_eq!(journal_entry(&repo, &op).await.status, "paused");
+    }
+
+    /// The confirmed message lands as typed under a `commit.cleanup` that strips `#`
+    /// lines and a `merge.log` that appends a shortlog.
+    #[tokio::test]
+    async fn local_pr_merges_land_the_confirmed_message_whatever_the_message_config() {
+        const MESSAGE: &str = "T\n\n# Heading\nbody";
+        let (dir, repo) = setup_repo("lpr-message-config").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["config", "commit.cleanup", "strip"]).await;
+        git(&repo, &["config", "merge.log", "true"]).await;
+        let heads = [
+            ("feat-squash", "s.txt"),
+            ("feat-merge", "m.txt"),
+            ("feat-conflict", "a.txt"),
+        ];
+        for (head, file) in heads {
+            git(&repo, &["switch", "-c", head, &base]).await;
+            commit_file(&repo, dir.path(), file, "feature-side\n", "feat").await;
+            git(&repo, &["switch", &base]).await;
+        }
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let landed = || async { git(&repo, &["log", "-1", "--pretty=format:%B", &base]).await };
+        let expected = format!("{MESSAGE}\n");
+
+        for (head, strategy) in [("feat-squash", "squash"), ("feat-merge", "merge")] {
+            let out = merge_local_pr(&state, &repo, &base, head, MESSAGE, strategy, &root).await;
+            assert_eq!(out.unwrap().status, "merged", "{strategy}");
+            assert_eq!(landed().await, expected, "{strategy}");
+        }
+        let head = "feat-conflict";
+        let out = merge_local_pr(&state, &repo, &base, head, MESSAGE, "merge", &root);
+        let out = out.await.unwrap();
+        assert_eq!(out.status, "conflicts");
+        let (wt, op) = (out.worktree_path.unwrap(), out.op_id);
+        resolve_merge(&wt).await;
+        let (id, roots) = (merge_leaf_id(&wt), std::slice::from_ref(&root));
+        let finished = finish_local_pr_merge(
+            &state, &repo, &base, "merge", MESSAGE, &wt, &id, roots, op, None,
+        );
+        let finished = finished.await.map_err(command_message).unwrap();
+        assert_eq!(finished.status, "merged");
+        assert_eq!(landed().await, expected, "finished after a conflict");
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_an_entry_closed_as_failed_and_lands_a_done_one() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-ended-failed").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        let wt_head = rev(&wt, "HEAD").await;
+        crate::oplog::finish(&repo, &Some(op.clone()), Some("boom".to_string())).await;
+
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(err), merge_no_longer_unfinished(&base));
+        assert_eq!(rev(&repo, &base).await, start);
+        assert_eq!(resolve_worktree_count(&repo).await, 1);
+        assert_eq!(rev(&wt, "HEAD").await, wt_head, "nothing was committed");
+        let entry = journal_entry(&repo, &op).await;
+        assert_eq!(
+            (entry.status.as_str(), entry.error.as_deref()),
+            ("failed", Some("boom"))
+        );
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None).await;
+        assert_eq!(
+            outcome.unwrap(),
+            LocalPrMergeAbortOutcome {
+                removed: true,
+                closed: true
+            }
+        );
+        assert!(!Path::new(&wt).exists());
+
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-ended-done").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::finish(&repo, &Some(op.clone()), None).await;
+        let done = finish_merge(&state, &repo, &base, &wt, roots, &op, None)
+            .await
+            .unwrap();
+        assert_eq!(done.status, "merged");
+        assert_ne!(rev(&repo, &base).await, start);
+        assert_eq!(journal_entry(&repo, &op).await.status, "done");
+    }
+
+    /// A conflicting merge with two checkouts: the main one (A) on `work` and a linked one
+    /// (B) on `side`, so base is checked out nowhere. Paths are as git lists them.
+    #[allow(clippy::type_complexity)]
+    async fn two_checkout_merge(
+        marker: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        String,
+        String,
+        std::path::PathBuf,
+        String,
+    ) {
+        let (dir, repo) = setup_repo(marker).await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        git(&repo, &["switch", "-c", "work"]).await;
+        let holder = tempfile::tempdir().expect("create temp dir");
+        let created = holder.path().join("linked").to_string_lossy().into_owned();
+        git(&repo, &["worktree", "add", "-b", "side", &created, &base]).await;
+        let a = listed_spelling(&repo, &repo).await;
+        let b = listed_spelling(&repo, &created).await;
+        let root = holder.path().join("root");
+        (dir, holder, a, b, root, base)
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_finish_from_another_checkout_honours_the_starting_anchor() {
+        let (_dir, _holder, a, b, root, base) = two_checkout_merge("lpr-cross-finish").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        let paused = merge_local_pr(&state, &a, &base, "feature", "m", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(paused.status, "conflicts");
+        assert_eq!(paused.journal_repo, a);
+        let (wt, op) = (paused.worktree_path.unwrap(), paused.op_id.unwrap());
+        resolve_merge(&wt).await;
+
+        // Rewound to an ancestor: containment alone cannot see it, only the anchor can.
+        let start = rev(&a, &base).await;
+        let rewound = rev(&a, &format!("{start}~1")).await;
+        git(&a, &["branch", "-f", &base, &rewound]).await;
+        for journal_repo in [Some(a.as_str()), None] {
+            let err = finish_merge(&state, &b, &base, &wt, roots, &op, journal_repo).await;
+            assert_eq!(merge_refusal(err), merge_target_moved(&base));
+            assert_eq!(rev(&a, &base).await, rewound, "{journal_repo:?}");
+            assert!(Path::new(&wt).exists(), "{journal_repo:?}");
+        }
+
+        git(&a, &["branch", "-f", &base, &start]).await;
+        let done = finish_merge(&state, &b, &base, &wt, roots, &op, Some(&a))
+            .await
+            .unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.journal_repo.as_str()),
+            ("merged", a.as_str())
+        );
+        assert_ne!(rev(&a, &base).await, start);
+        assert_eq!(journal_entry(&a, &op).await.status, "done");
+        let in_b = crate::oplog::git_oplog_list(b.clone()).await.unwrap();
+        assert!(
+            in_b.iter().all(|e| e.id != op),
+            "B's journal holds no such entry"
+        );
+        assert_eq!(close_abandoned_local_pr_updates(&a, &[]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_abort_from_another_checkout_closes_the_starting_entry() {
+        let (_dir, _holder, a, b, root, base) = two_checkout_merge("lpr-cross-abort").await;
+        let roots = std::slice::from_ref(&root);
+        let state = AppState::default();
+        for journal_repo in [Some(a.as_str()), None] {
+            let paused = merge_local_pr(&state, &a, &base, "feature", "m", "merge", &root)
+                .await
+                .unwrap();
+            let (wt, op) = (paused.worktree_path.unwrap(), paused.op_id.unwrap());
+            let outcome = abort_local_pr_merge(&state, &b, &wt, roots, Some(&op), journal_repo);
+            let outcome = outcome.await.unwrap();
+            assert_eq!(
+                (outcome.removed, outcome.closed),
+                (true, true),
+                "{journal_repo:?}"
+            );
+            let entry = journal_entry(&a, &op).await;
+            let error = entry.error.as_deref();
+            assert_eq!(
+                (entry.status.as_str(), error),
+                ("failed", Some("aborted by user"))
+            );
+        }
+    }
+
     /// A worktree the abort could not remove stays, and so does its paused entry.
     #[tokio::test]
     async fn local_pr_merge_abort_keeps_a_worktree_it_could_not_remove() {
@@ -23352,7 +25767,9 @@ detached
         let state = AppState::default();
         // A single --force does not remove a locked worktree.
         git(&repo, &["worktree", "lock", &wt]).await;
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         let kept = LocalPrMergeAbortOutcome {
             removed: false,
             closed: false,
@@ -23363,7 +25780,9 @@ detached
 
         // Control: once removable, the same abort removes and closes.
         git(&repo, &["worktree", "unlock", &wt]).await;
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!((outcome.removed, outcome.closed), (true, true));
         assert_eq!(journal_entry(&repo, &op).await.status, "failed");
     }
@@ -23398,6 +25817,7 @@ detached
             &id,
             roots,
             Some(op.clone()),
+            None,
         )
         .await
         else {
@@ -23411,7 +25831,9 @@ detached
         // Control: the real worktree under the root is still accepted.
         let place = check_merge_worktree(&repo, roots, &wt, &id).await.unwrap();
         assert_eq!(place, UpdateWorktree::Registered);
-        let outcome = abort_local_pr_merge(&state, &repo, &victim, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &victim, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!((outcome.removed, outcome.closed), (true, true));
         assert!(
             Path::new(&victim).join("staged.txt").exists(),
@@ -23448,6 +25870,7 @@ detached
             &id,
             &moved,
             Some(op.clone()),
+            None,
         )
         .await
         else {
@@ -23456,7 +25879,9 @@ detached
         assert!(matches!(err, AppError::InvalidArgument(_)), "{err:?}");
         assert_eq!(rev(&repo, &base).await, tip, "base did not move");
 
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, &moved, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, &moved, Some(&op), None)
+            .await
+            .unwrap();
         let both = LocalPrMergeAbortOutcome {
             removed: true,
             closed: true,
@@ -23499,6 +25924,7 @@ detached
             &id,
             roots,
             Some(op.clone()),
+            None,
         )
         .await
         else {
@@ -23511,10 +25937,476 @@ detached
         assert_eq!(rev(&repo, &base).await, tip, "nothing was committed");
         assert_eq!(journal_entry(&repo, &op).await.status, "paused");
 
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!((outcome.removed, outcome.closed), (true, true));
         assert!(!Path::new(&wt).exists(), "the leftover leaf is deleted");
         assert_eq!(journal_entry(&repo, &op).await.status, "failed");
+    }
+
+    /// A paused merge whose finish committed `landing` in the worktree, recorded it and
+    /// then lost its claim to the limit. With `land`, the main checkout (on base) is
+    /// fast-forwarded to it, as that finish's base move would.
+    struct RecordedMerge {
+        _dir: tempfile::TempDir,
+        repo: String,
+        holder: tempfile::TempDir,
+        root: std::path::PathBuf,
+        base: String,
+        wt: String,
+        op: String,
+        landing: String,
+    }
+
+    async fn recorded_local_merge(marker: &str, land: bool) -> RecordedMerge {
+        let (dir, repo, holder, root, base, wt, op) = paused_local_merge(marker).await;
+        resolve_merge(&wt).await;
+        git(&wt, &["commit", "-m", "m"]).await;
+        let landing = rev(&wt, "HEAD").await;
+        seed_claim(&repo, &op, "crashed", 200);
+        let recorded = crate::oplog::record_landing(&repo, &op, "crashed", &landing).await;
+        assert!(recorded.unwrap());
+        if land {
+            git(&repo, &["merge", "--ff-only", &landing]).await;
+            assert_eq!(rev(&repo, &base).await, landing);
+        }
+        RecordedMerge {
+            _dir: dir,
+            repo,
+            holder,
+            root,
+            base,
+            wt,
+            op,
+            landing,
+        }
+    }
+
+    fn finish_recorded<'a>(
+        state: &'a AppState,
+        m: &'a RecordedMerge,
+    ) -> impl std::future::Future<Output = AppResult<LocalPrMergeOutcome>> + 'a {
+        let roots = std::slice::from_ref(&m.root);
+        finish_merge(state, &m.repo, &m.base, &m.wt, roots, &m.op, None)
+    }
+
+    fn abort_recorded<'a>(
+        state: &'a AppState,
+        m: &'a RecordedMerge,
+        roots: &'a [std::path::PathBuf],
+    ) -> impl std::future::Future<Output = AppResult<LocalPrMergeAbortOutcome>> + 'a {
+        abort_local_pr_merge(state, &m.repo, &m.wt, roots, Some(&m.op), None)
+    }
+
+    /// A landed merge's finish: merged at its recorded commit with no ref written, the
+    /// leaf gone from the registry and the disk, the entry done with no error.
+    async fn assert_finished_as_landed(state: &AppState, m: &RecordedMerge) {
+        let done = finish_recorded(state, m).await.map_err(command_message);
+        let done = done.unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.base_tip.as_str()),
+            ("merged", m.landing.as_str())
+        );
+        assert_eq!((done.worktree_id, done.worktree_path), (None, None));
+        assert_eq!(done.journal_repo, m.repo);
+        assert_eq!(rev(&m.repo, &m.base).await, m.landing, "no ref was written");
+        assert_eq!(resolve_worktree_count(&m.repo).await, 0);
+        assert!(!Path::new(&m.wt).exists(), "the leaf is deleted");
+        let entry = journal_entry(&m.repo, &m.op).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+    }
+
+    /// The crash between the base move and the done write; the gates are skipped, so a
+    /// dirty main tree and an unmerged path in the worktree do not refuse it.
+    #[tokio::test]
+    async fn local_pr_merge_finish_completes_a_landed_merge_at_its_worktree_head() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-head", true).await;
+        assert_eq!(rev(&m.wt, "HEAD").await, m.landing);
+        seed_claim(&m.repo, &m.op, "other", 0);
+        assert_eq!(merge_refusal(finish_recorded(&state, &m).await), MERGE_BUSY);
+        assert!(
+            Path::new(&m.wt).exists(),
+            "a live claim refuses with nothing removed"
+        );
+        assert!(release_claim(&m.repo, &m.op, "other").await);
+
+        std::fs::write(Path::new(&m.repo).join("a.txt"), "dirty\n").unwrap();
+        let feature = rev(&m.repo, "feature").await;
+        let pick = ["cherry-pick", &feature];
+        let picked = run_git_raw(Some(&m.wt), &pick, TEST_GIT_HANG_GUARD).await;
+        assert_ne!(picked.unwrap().code, 0);
+        assert!(!unmerged_paths(&m.wt).await.is_empty());
+        assert_eq!(rev(&m.wt, "HEAD").await, m.landing);
+        assert_finished_as_landed(&state, &m).await;
+        let main = std::fs::read_to_string(Path::new(&m.repo).join("a.txt")).unwrap();
+        assert_eq!(main, "dirty\n", "the main tree is left alone");
+    }
+
+    /// A commit made by hand in the worktree after the landing goes with the worktree.
+    #[tokio::test]
+    async fn local_pr_merge_finish_completes_a_landed_merge_past_a_later_worktree_commit() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-later", true).await;
+        commit_file(&m.wt, Path::new(&m.wt), "b.txt", "later\n", "later").await;
+        assert_ne!(rev(&m.wt, "HEAD").await, m.landing);
+        assert_finished_as_landed(&state, &m).await;
+    }
+
+    /// A removal interrupted halfway: git still lists the leaf, its git link is gone,
+    /// `worktree remove` refuses it and the prune only unregisters it.
+    #[tokio::test]
+    async fn local_pr_merge_finish_completes_a_landed_merge_whose_worktree_is_half_removed() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-half", true).await;
+        std::fs::remove_file(Path::new(&m.wt).join(".git")).unwrap();
+        let (roots, id) = (std::slice::from_ref(&m.root), merge_leaf_id(&m.wt));
+        let place = check_merge_worktree(&m.repo, roots, &m.wt, &id)
+            .await
+            .unwrap();
+        assert_eq!(place, UpdateWorktree::Registered);
+        assert!(worktree_head(&m.wt).await.is_err());
+        assert_finished_as_landed(&state, &m).await;
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_finish_completes_a_landed_merge_whose_worktree_is_gone() {
+        let state = AppState::default();
+        for leaf_left in [false, true] {
+            let m = recorded_local_merge(&format!("lpr-landed-gone-{leaf_left}"), true).await;
+            git(&m.repo, &["worktree", "remove", "--force", &m.wt]).await;
+            if leaf_left {
+                std::fs::create_dir_all(&m.wt).unwrap();
+                std::fs::write(Path::new(&m.wt).join("a.txt"), "left over\n").unwrap();
+                seed_claim(&m.repo, &m.op, "other", 0);
+                assert_eq!(merge_refusal(finish_recorded(&state, &m).await), MERGE_BUSY);
+                assert!(
+                    Path::new(&m.wt).exists(),
+                    "a live claim refuses, deleting nothing"
+                );
+                assert!(release_claim(&m.repo, &m.op, "other").await);
+            }
+            let (roots, id) = (std::slice::from_ref(&m.root), merge_leaf_id(&m.wt));
+            let place = check_merge_worktree(&m.repo, roots, &m.wt, &id)
+                .await
+                .unwrap();
+            assert_eq!(place, UpdateWorktree::Unregistered, "{leaf_left}");
+            assert_finished_as_landed(&state, &m).await;
+        }
+    }
+
+    /// The done write landed and the removal failed.
+    #[tokio::test]
+    async fn local_pr_merge_finish_completes_a_landed_merge_closed_done_beside_its_worktree() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-done", true).await;
+        crate::oplog::finish(&m.repo, &Some(m.op.clone()), None).await;
+        assert_eq!(resolve_worktree_count(&m.repo).await, 1);
+        assert_finished_as_landed(&state, &m).await;
+    }
+
+    /// The crash past the done write, before the record was marked merged.
+    #[tokio::test]
+    async fn local_pr_merge_finish_completes_a_landed_merge_closed_done_without_its_worktree() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-done-gone", true).await;
+        crate::oplog::finish(&m.repo, &Some(m.op.clone()), None).await;
+        git(&m.repo, &["worktree", "remove", "--force", &m.wt]).await;
+        assert_finished_as_landed(&state, &m).await;
+    }
+
+    /// The landed route's fixture with no commit recorded: the finish keeps its refusal.
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_a_moved_base_when_no_landing_was_recorded() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-unrecorded").await;
+        resolve_merge(&wt).await;
+        git(&wt, &["commit", "-m", "m"]).await;
+        let commit = rev(&wt, "HEAD").await;
+        seed_claim(&repo, &op, "crashed", 200);
+        git(&repo, &["merge", "--ff-only", &commit]).await;
+        let roots = std::slice::from_ref(&root);
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(err), merge_target_moved(&base));
+        assert_eq!(rev(&repo, &base).await, commit);
+        assert_eq!(resolve_worktree_count(&repo).await, 1);
+    }
+
+    /// A recorded commit the base never took is not landed: the ordinary route moves the
+    /// base, and a different commit is recorded in its place.
+    #[tokio::test]
+    async fn local_pr_merge_finish_moves_a_base_that_never_took_the_recorded_commit() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-recorded-same", false).await;
+        let start = rev(&m.repo, &m.base).await;
+        let done = finish_recorded(&state, &m).await.unwrap();
+        assert_eq!(done.status, "merged");
+        assert_ne!(rev(&m.repo, &m.base).await, start, "the base moved");
+        assert_eq!(rev(&m.repo, &m.base).await, m.landing);
+
+        // Over a base checked out nowhere, so the bare ref move lands it.
+        let m = recorded_local_merge("lpr-recorded-other", false).await;
+        git(&m.repo, &["switch", "-c", "side"]).await;
+        commit_file(&m.wt, Path::new(&m.wt), "b.txt", "later\n", "later").await;
+        let later = rev(&m.wt, "HEAD").await;
+        let done = finish_recorded(&state, &m).await.unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.base_tip.as_str()),
+            ("merged", later.as_str())
+        );
+        assert_eq!(rev(&m.repo, &m.base).await, later);
+        assert_eq!(raw_entry(&m.repo, &m.op)["landing"], later.as_str());
+    }
+
+    /// Without its worktree, a merge that did not land is refused: with no recorded
+    /// commit nothing is written, otherwise the claim it took is released.
+    #[tokio::test]
+    async fn local_pr_merge_finish_without_its_worktree_refuses_a_merge_that_did_not_land() {
+        let state = AppState::default();
+        let gone = "This merge's worktree no longer exists. Abort the merge and start it again.";
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-gone-bare").await;
+        git(&repo, &["worktree", "remove", "--force", &wt]).await;
+        // Another holder's live claim: only a claim attempt would answer busy.
+        seed_claim(&repo, &op, "other", 0);
+        let before = std::fs::read(crate::oplog::store_path(&repo).unwrap()).unwrap();
+        let roots = std::slice::from_ref(&root);
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(err), gone);
+        let after = std::fs::read(crate::oplog::store_path(&repo).unwrap()).unwrap();
+        assert_eq!(after, before, "nothing is written to the journal");
+
+        for case in ["unlanded", "not-a-commit", "base-deleted"] {
+            let m = recorded_local_merge(&format!("lpr-gone-{case}"), case != "unlanded").await;
+            match case {
+                "not-a-commit" => {
+                    let fake = "0".repeat(40);
+                    let recorded = crate::oplog::record_landing(&m.repo, &m.op, "crashed", &fake);
+                    assert!(recorded.await.unwrap());
+                }
+                "base-deleted" => {
+                    git(&m.repo, &["switch", "-c", "side"]).await;
+                    git(&m.repo, &["branch", "-D", &m.base]).await;
+                }
+                _ => {}
+            }
+            git(&m.repo, &["worktree", "remove", "--force", &m.wt]).await;
+            assert_eq!(
+                merge_refusal(finish_recorded(&state, &m).await),
+                gone,
+                "{case}"
+            );
+            assert_eq!(
+                journal_entry(&m.repo, &m.op).await.status,
+                "paused",
+                "{case}"
+            );
+            let probe = crate::oplog::claim_finish_at(&m.repo, &m.op, "probe", chrono::Utc::now());
+            let released = FinishClaim::Claimed("probe".to_string());
+            assert_eq!(probe.unwrap(), released, "{case}: the claim was released");
+        }
+    }
+
+    /// Neither a commit equal to the start tip nor one that does not build on it is
+    /// recorded: the base contains the first already, and the second is not this merge's.
+    #[tokio::test]
+    async fn local_pr_merge_finish_records_no_landing_that_proves_nothing() {
+        let state = AppState::default();
+        let (dir, repo) = setup_repo("lpr-landing-squash-ours").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let out = merge_local_pr(&state, &repo, &base, "feature", "s", "squash", &root);
+        let out = out.await.unwrap();
+        assert_eq!(out.status, "conflicts");
+        let (wt, op) = (out.worktree_path.unwrap(), out.op_id.unwrap());
+        resolve_merge(&wt).await;
+        let (id, start) = (merge_leaf_id(&wt), rev(&repo, &base).await);
+        let roots = std::slice::from_ref(&root);
+        let done = finish_local_pr_merge(
+            &state,
+            &repo,
+            &base,
+            "squash",
+            "s",
+            &wt,
+            &id,
+            roots,
+            Some(op.clone()),
+            None,
+        );
+        let done = done.await.unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.base_tip.as_str()),
+            ("merged", start.as_str())
+        );
+        assert!(raw_entry(&repo, &op).get("landing").is_none());
+
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-stray").await;
+        git(&wt, &["reset", "--hard", "feature"]).await;
+        let roots = std::slice::from_ref(&root);
+        let result = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert!(result.is_err(), "the base does not fast-forward to it");
+        assert!(raw_entry(&repo, &op).get("landing").is_none());
+    }
+
+    /// The tip the finish checks the base against is the one the lookup found, so a
+    /// journal that turns unreadable during the commit cannot drop the anchor.
+    #[tokio::test]
+    async fn local_pr_merge_finish_keeps_the_found_anchor_when_the_journal_turns_unreadable() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-anchor").await;
+        resolve_merge(&wt).await;
+        crate::oplog::finish(&repo, &Some(op.clone()), None).await;
+        git(&repo, &["reset", "--hard", "HEAD~1"]).await;
+        let rewound = rev(&repo, &base).await;
+        let _swap = swap_journal_on_commit(&repo, b"not json");
+        let roots = std::slice::from_ref(&root);
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(err), merge_target_moved(&base));
+        assert_eq!(rev(&repo, &base).await, rewound);
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_abort_refuses_a_landed_unfinished_merge_and_removes_nothing() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-abort-landed", true).await;
+        let roots = std::slice::from_ref(&m.root);
+        let Err(err) = abort_recorded(&state, &m, roots).await else {
+            panic!("the abort must refuse");
+        };
+        assert_eq!(command_message(err), merge_already_landed(&m.base));
+        assert!(Path::new(&m.wt).exists());
+        assert_eq!(resolve_worktree_count(&m.repo).await, 1);
+        assert_eq!(journal_entry(&m.repo, &m.op).await.status, "paused");
+        let probe = crate::oplog::claim_finish_at(&m.repo, &m.op, "probe", chrono::Utc::now());
+        let released = FinishClaim::Claimed("probe".to_string());
+        assert_eq!(probe.unwrap(), released, "the abort's claim was released");
+        assert!(release_claim(&m.repo, &m.op, "probe").await);
+        assert_finished_as_landed(&state, &m).await;
+    }
+
+    #[tokio::test]
+    async fn local_pr_merge_abort_refuses_a_landed_merge_closed_done_and_removes_nothing() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-abort-landed-done", true).await;
+        crate::oplog::finish(&m.repo, &Some(m.op.clone()), None).await;
+        let store = crate::oplog::store_path(&m.repo).unwrap();
+        let before = std::fs::read(&store).unwrap();
+        let roots = std::slice::from_ref(&m.root);
+        let Err(err) = abort_recorded(&state, &m, roots).await else {
+            panic!("the abort must refuse");
+        };
+        assert_eq!(command_message(err), merge_already_landed(&m.base));
+        assert!(Path::new(&m.wt).exists());
+        assert_eq!(resolve_worktree_count(&m.repo).await, 1);
+        assert_eq!(
+            std::fs::read(&store).unwrap(),
+            before,
+            "the entry is left as it reads"
+        );
+        assert_finished_as_landed(&state, &m).await;
+    }
+
+    /// The landing is on record before the base moves: a finish whose base move is refused
+    /// has already recorded the commit it was about to land.
+    #[tokio::test]
+    async fn local_pr_merge_finish_records_the_landing_before_the_base_move() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) = paused_local_merge("lpr-land-first").await;
+        resolve_merge(&wt).await;
+        let unrelated = git(&repo, &["commit-tree", "HEAD^{tree}", "-m", "unrelated"]).await;
+        git(&repo, &["reset", "--hard", unrelated.trim()]).await;
+        let moved = rev(&repo, &base).await;
+        let roots = std::slice::from_ref(&root);
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(err), merge_target_moved(&base));
+        assert_eq!(rev(&repo, &base).await, moved, "the base move was refused");
+        let committed = rev(&wt, "HEAD").await;
+        let landing = raw_entry(&repo, &op)["landing"]
+            .as_str()
+            .map(str::to_string);
+        assert_eq!(landing, Some(committed.clone()));
+        let held = is_ancestor(&repo, &committed, &moved).await.unwrap();
+        assert!(!held, "the base does not contain the recorded commit");
+    }
+
+    /// A landed merge whose base has gained a commit since still reads as landed: the
+    /// abort refuses, removing nothing, and the finish completes it without moving the base.
+    #[tokio::test]
+    async fn local_pr_merge_reads_a_landing_the_base_has_moved_past_as_landed() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-past", true).await;
+        commit_file(&m.repo, Path::new(&m.repo), "c.txt", "later\n", "later").await;
+        let newer = rev(&m.repo, &m.base).await;
+        assert_ne!(newer, m.landing);
+        let roots = std::slice::from_ref(&m.root);
+        let Err(err) = abort_recorded(&state, &m, roots).await else {
+            panic!("the abort must refuse");
+        };
+        assert_eq!(command_message(err), merge_already_landed(&m.base));
+        assert!(Path::new(&m.wt).exists(), "the abort removed nothing");
+        assert_eq!(resolve_worktree_count(&m.repo).await, 1);
+
+        let done = finish_recorded(&state, &m).await.map_err(command_message);
+        let done = done.unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.base_tip.as_str()),
+            ("merged", m.landing.as_str())
+        );
+        let tip = rev(&m.repo, &m.base).await;
+        assert_eq!(tip, newer, "the base keeps its newer tip");
+        assert_eq!(resolve_worktree_count(&m.repo).await, 0);
+        assert!(!Path::new(&m.wt).exists(), "the leaf is deleted");
+        let entry = journal_entry(&m.repo, &m.op).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+    }
+
+    /// A recorded commit the base lacks, an entry closed as failed, and a foreign place
+    /// each keep the abort's own answer.
+    #[tokio::test]
+    async fn local_pr_merge_abort_keeps_its_answer_for_a_merge_not_landed_ended_or_foreign() {
+        let state = AppState::default();
+        let both = LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: true,
+        };
+        let m = recorded_local_merge("lpr-abort-unlanded", false).await;
+        let roots = std::slice::from_ref(&m.root);
+        assert_eq!(abort_recorded(&state, &m, roots).await.unwrap(), both);
+        assert!(!Path::new(&m.wt).exists());
+        assert_eq!(journal_entry(&m.repo, &m.op).await.status, "failed");
+
+        let m = recorded_local_merge("lpr-abort-landed-failed", true).await;
+        let roots = std::slice::from_ref(&m.root);
+        crate::oplog::finish(&m.repo, &Some(m.op.clone()), Some("boom".to_string())).await;
+        let err = finish_recorded(&state, &m).await;
+        assert_eq!(merge_refusal(err), merge_no_longer_unfinished(&m.base));
+        assert_eq!(abort_recorded(&state, &m, roots).await.unwrap(), both);
+        assert!(!Path::new(&m.wt).exists());
+        let entry = journal_entry(&m.repo, &m.op).await;
+        assert_eq!(
+            (entry.status.as_str(), entry.error.as_deref()),
+            ("failed", Some("boom"))
+        );
+
+        let m = recorded_local_merge("lpr-abort-landed-foreign", true).await;
+        let moved = vec![m.holder.path().join("rehashed")];
+        assert_eq!(abort_recorded(&state, &m, &moved).await.unwrap(), both);
+        assert!(
+            Path::new(&m.wt).exists(),
+            "a leaf outside the roots is never removed"
+        );
+        let entry = journal_entry(&m.repo, &m.op).await;
+        assert_eq!(
+            (entry.status.as_str(), entry.error.as_deref()),
+            ("failed", Some("aborted by user"))
+        );
     }
 
     /// An unregistered leaf the abort could not delete keeps its record and its entry,
@@ -23543,7 +26435,9 @@ detached
         // Control: the delete the abort makes fails here, which the abort must not ignore.
         assert!(std::fs::remove_dir_all(&wt).is_err());
 
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         let kept = LocalPrMergeAbortOutcome {
             removed: false,
             closed: false,
@@ -23560,7 +26454,9 @@ detached
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!((outcome.removed, outcome.closed), (true, true));
         assert!(!Path::new(&wt).exists(), "the leaf is deleted");
         assert_eq!(journal_entry(&repo, &op).await.status, "failed");
@@ -23604,6 +26500,7 @@ detached
             &id,
             roots,
             Some(op.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -23627,7 +26524,9 @@ detached
             .unwrap();
         assert_eq!(place, UpdateWorktree::Foreign);
 
-        let outcome = abort_local_pr_merge(&state, &repo, &legacy, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &legacy, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!((outcome.removed, outcome.closed), (true, true));
         assert!(!Path::new(&legacy).exists(), "the leaf is removed");
         let listed = parse_worktree_paths(&git(&repo, &["worktree", "list", "--porcelain"]).await);
@@ -23675,6 +26574,7 @@ detached
             &id,
             roots,
             Some(op.clone()),
+            None,
         )
         .await
         else {
@@ -23684,7 +26584,9 @@ detached
         assert_eq!(rev(&victim, "HEAD").await, tip, "nothing was committed");
         let staged = git(&victim, &["diff", "--cached", "--name-only"]).await;
         assert_eq!(staged.trim(), "staged.txt", "the staged change stands");
-        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op)).await;
+        let outcome = abort_local_pr_merge(&state, &repo, &wt, roots, Some(&op), None)
+            .await
+            .unwrap();
         assert_eq!((outcome.removed, outcome.closed), (true, true));
         assert!(
             Path::new(&victim).join("staged.txt").exists(),
@@ -28301,5 +31203,668 @@ detached
             entries.iter().all(|e| e.op != UPDATE_LOCAL_PR_HEAD_OP),
             "nothing journaled"
         );
+    }
+
+    fn merge_entry_count(entries: &[crate::oplog::OpLogEntry]) -> usize {
+        entries.iter().filter(|e| e.op == MERGE_LOCAL_PR_OP).count()
+    }
+
+    async fn merge_entries_in(repo: &str) -> usize {
+        merge_entry_count(
+            &crate::oplog::git_oplog_list(repo.to_string())
+                .await
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn merge_local_pr_answers_a_head_the_base_already_holds_without_writing() {
+        let (dir, repo) = setup_repo("lpm-already-merged").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "f.txt", "feature\n", "feat").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "b.txt", "base\n", "base").await;
+        git(&repo, &["merge", "--no-ff", "-m", "by hand", "feature"]).await;
+        git(&repo, &["branch", "at-tip"]).await;
+        // A dirty main tree on the base: the answer comes before the clean-tree gate.
+        std::fs::write(dir.path().join("b.txt"), "dirty\n").unwrap();
+        let tip = rev(&repo, &base).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let cases = [
+            ("feature", "merge"),
+            ("feature", "squash"),
+            ("feature", "rebase"),
+            ("at-tip", "merge"),
+        ];
+        for (head, strategy) in cases {
+            let out = merge_local_pr(&state, &repo, &base, head, "m", strategy, &root)
+                .await
+                .unwrap_or_else(|e| panic!("{head} {strategy}: {e}"));
+            assert_eq!(out.status, "already-merged", "{head} {strategy}");
+            assert_eq!(out.base_tip, tip);
+            assert!(out.conflicts.is_empty());
+            assert_eq!((out.worktree_id, out.worktree_path), (None, None));
+            assert_eq!(out.op_id, None);
+            assert_eq!(out.journal_repo, repo);
+            assert_eq!(
+                rev(&repo, &base).await,
+                tip,
+                "{head} {strategy}: base unmoved"
+            );
+            assert_eq!(resolve_worktree_count(&repo).await, 0);
+            assert_eq!(merge_entries_in(&repo).await, 0, "nothing journaled");
+        }
+        let dirty = std::fs::read_to_string(dir.path().join("b.txt")).unwrap();
+        assert_eq!(dirty, "dirty\n", "the main tree is untouched");
+    }
+
+    /// A head branch that is gone, its name now a tag on a commit the base holds: the bare
+    /// name reads the tag, so the start takes the ordinary route instead of that answer.
+    #[tokio::test]
+    async fn merge_local_pr_answers_no_already_merged_through_a_same_named_tag() {
+        let (dir, repo) = setup_repo("lpm-tag-head").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "f.txt", "feature\n", "feat").await;
+        git(&repo, &["switch", &base]).await;
+        git(&repo, &["merge", "--no-ff", "-m", "by hand", "feature"]).await;
+        git(&repo, &["tag", "feature", "feature"]).await;
+        git(&repo, &["branch", "-D", "feature"]).await;
+        let tip = rev(&repo, &base).await;
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let result = merge_local_pr(&state, &repo, &base, "feature", "m", "squash", &root).await;
+        if let Ok(out) = result {
+            panic!("answered {}", out.status);
+        }
+        assert_eq!(rev(&repo, &base).await, tip, "the base was never touched");
+        assert_eq!(resolve_worktree_count(&repo).await, 0);
+        let leaves = std::fs::read_dir(&root).map_or(0, |dir| dir.count());
+        assert_eq!(leaves, 0, "no resolve worktree is left on disk");
+        let entries = crate::oplog::git_oplog_list(repo.clone()).await.unwrap();
+        let open = entries
+            .iter()
+            .filter(|e| e.op == MERGE_LOCAL_PR_OP)
+            .filter(|e| matches!(e.status.as_str(), "pending" | "paused"))
+            .count();
+        assert_eq!(open, 0, "no merge entry is left open");
+    }
+
+    /// A merge `a.txt` conflicts on, with `spoil` run before the start.
+    async fn unpausable_local_merge(marker: &str, spoil: impl FnOnce(&str)) {
+        let (dir, repo) = setup_repo(marker).await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+        let tip = rev(&repo, &base).await;
+        spoil(&repo);
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let result = merge_local_pr(&state, &repo, &base, "feature", "m", "merge", &root).await;
+        let err = result.err().expect("no resolution is handed out");
+        assert_eq!(err.to_string(), UNJOURNALED_MERGE);
+        assert_eq!(resolve_worktree_count(&repo).await, 0);
+        assert_eq!(rev(&repo, &base).await, tip, "the base was never touched");
+    }
+
+    #[tokio::test]
+    async fn merge_local_pr_hands_out_no_resolution_it_could_not_mark_paused() {
+        // Spoiled once the entry exists, so marking it paused fails.
+        unpausable_local_merge("lpm-unpaused", |repo| {
+            let store = crate::oplog::store_path(repo).unwrap();
+            let spoil = format!("printf 'x' > \"{}\"", sh_path(&store.to_string_lossy()));
+            install_update_hook(repo, "post-checkout", &spoil);
+        })
+        .await;
+        // Spoiled before the start, so no entry is begun at all.
+        unpausable_local_merge("lpm-unbegun", |repo| {
+            std::fs::write(crate::oplog::store_path(repo).unwrap(), b"not json").unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn merge_local_pr_lands_a_clean_merge_over_an_unreadable_journal() {
+        let (dir, repo) = setup_repo("lpm-clean-unjournaled").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "f.txt", "feature\n", "feat").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "b.txt", "base\n", "base").await;
+        let tip = rev(&repo, &base).await;
+        std::fs::write(crate::oplog::store_path(&repo).unwrap(), b"not json").unwrap();
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let out = merge_local_pr(&state, &repo, &base, "feature", "m", "merge", &root)
+            .await
+            .unwrap();
+        assert_eq!(out.status, "merged");
+        assert_eq!(out.op_id, None);
+        let landed = rev(&repo, &base).await;
+        assert_ne!(landed, tip, "the base moved");
+        assert_eq!(out.base_tip, tip);
+        assert_eq!(resolve_worktree_count(&repo).await, 0);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_reports_an_update_head_moved_past_as_updated() {
+        let f = UpdateFixture::new("lpu-landed-past", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+        git(&f.repo, &["switch", "feature"]).await;
+        commit_file(&f.repo, f.dir.path(), "later.txt", "later\n", "later").await;
+        git(&f.repo, &["switch", "work"]).await;
+        let past = rev(&f.repo, "feature").await;
+
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(done.head_tip, past);
+        assert_eq!(rev(&f.repo, "feature").await, past, "head is not moved");
+        assert!(!Path::new(handles(&out).0).exists());
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+    }
+
+    /// Only a lookup that ran answers: a commit is here, an absent full id and a blob's id
+    /// are not, a string that is not a full id is not without running git, and a folder
+    /// that is not a repository is the Err.
+    #[tokio::test]
+    async fn commit_here_answers_only_from_a_lookup_that_ran() {
+        let (_dir, repo) = setup_repo("commit-here").await;
+        let commit = rev(&repo, "HEAD").await;
+        let blob = rev(&repo, "HEAD:a.txt").await;
+        assert!(commit_here(&repo, &commit).await.unwrap());
+        assert!(commit_here(&repo, &commit.to_uppercase()).await.unwrap());
+        assert!(!commit_here(&repo, &"0".repeat(40)).await.unwrap());
+        assert!(!commit_here(&repo, &"0".repeat(64)).await.unwrap());
+        assert!(!commit_here(&repo, &blob).await.unwrap());
+
+        let plain = tempfile::tempdir().unwrap();
+        let plain = plain.path().to_string_lossy().into_owned();
+        let long = format!("{commit}0");
+        for partial in ["", "HEAD", &commit[..12], &long] {
+            assert!(!commit_here(&plain, partial).await.unwrap(), "{partial}");
+        }
+        let err = commit_here(&plain, &commit).await.unwrap_err();
+        assert!(matches!(err, AppError::Git { code: 128, .. }), "{err:?}");
+        assert!(!is_commit_here(&plain, &commit).await);
+    }
+
+    /// Makes `oid`'s loose object unreadable, so a lookup of it fails instead of answering.
+    fn corrupt_loose_object(repo: &str, oid: &str) {
+        let objects = Path::new(repo).join(".git").join("objects");
+        let path = objects.join(&oid[..2]).join(&oid[2..]);
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+        std::fs::write(&path, b"garbage").unwrap();
+    }
+
+    /// A failed lookup of the recorded commit is the Err for the finish and the abort,
+    /// never a "not landed" read: nothing is removed, the entry reads as it did, and the
+    /// claim each took is released, so a retry gets the same Err rather than busy. The
+    /// recorded commit is a stray one nothing else reads, so only the lookup fails.
+    #[tokio::test]
+    async fn local_pr_merge_finish_and_abort_return_a_failed_landing_lookup() {
+        let state = AppState::default();
+        for route in ["finish", "abort"] {
+            let m = recorded_local_merge(&format!("lpr-landing-unread-{route}"), false).await;
+            let stray = git(&m.repo, &["commit-tree", "HEAD^{tree}", "-m", "stray"]).await;
+            let stray = stray.trim();
+            let recorded = crate::oplog::record_landing(&m.repo, &m.op, "crashed", stray);
+            assert!(recorded.await.unwrap());
+            corrupt_loose_object(&m.repo, stray);
+            let start = rev(&m.repo, &m.base).await;
+            let roots = std::slice::from_ref(&m.root);
+            for attempt in 0..2 {
+                let out = match route {
+                    "finish" => finish_recorded(&state, &m).await.map(|_| ()),
+                    _ => abort_recorded(&state, &m, roots).await.map(|_| ()),
+                };
+                assert!(
+                    matches!(&out, Err(AppError::Git { .. })),
+                    "{route} {attempt}: {out:?}"
+                );
+            }
+            assert!(Path::new(&m.wt).exists(), "{route}: the worktree is kept");
+            assert_eq!(resolve_worktree_count(&m.repo).await, 1, "{route}");
+            let entry = journal_entry(&m.repo, &m.op).await;
+            assert_eq!((entry.status.as_str(), entry.error), ("paused", None));
+            assert_eq!(raw_entry(&m.repo, &m.op)["landing"], stray);
+            let base_tip = rev(&m.repo, &m.base).await;
+            assert_eq!(base_tip, start, "{route}: the base is unmoved");
+            let probe = crate::oplog::claim_finish_at(&m.repo, &m.op, "probe", chrono::Utc::now());
+            let released = FinishClaim::Claimed("probe".to_string());
+            assert_eq!(probe.unwrap(), released, "{route}: no claim is held");
+        }
+    }
+
+    /// A head the base already contains, merged into an unheld case twin: the twin refusal
+    /// answers rather than `already-merged`, since the tip it read may be the twin's.
+    /// Returns early on a case-sensitive filesystem or a non-files ref backend.
+    #[tokio::test]
+    async fn merge_local_pr_refuses_an_unheld_case_twin_before_answering_already_merged() {
+        for base in ["Feat", "FEAT"] {
+            let Some((_g, repo, _, a, b, _up)) =
+                packed_twin_finalize_fixture("twin-merged", "none").await
+            else {
+                return;
+            };
+            git(&repo, &["update-ref", "refs/heads/old", &a]).await;
+            let root_holder = tempfile::tempdir().expect("create temp dir");
+            let root = root_holder.path().join("root");
+            let state = AppState::default();
+            let err = match merge_local_pr(&state, &repo, base, "old", "m", "merge", &root).await {
+                Err(err) => err,
+                Ok(out) => panic!("{base}: answered {}", out.status),
+            };
+            assert_twin_start_refused(&repo, MERGE_LOCAL_PR_OP, &err, FEAT_TWIN_REFUSAL, &a, &b)
+                .await;
+        }
+    }
+
+    /// A landed merge whose base is gone, a branch literally named `refs/heads/<base>`
+    /// holding the landing: git's ref-search fallback would answer for the base, the exact
+    /// read does not, so the merge reads as not landed and the abort removes it.
+    #[tokio::test]
+    async fn local_pr_merge_landed_probe_never_reads_a_ref_search_fallback() {
+        let state = AppState::default();
+        let m = recorded_local_merge("lpr-landed-fallback", true).await;
+        git(&m.repo, &["switch", "--detach"]).await;
+        git(&m.repo, &["branch", "-D", &m.base]).await;
+        let fallback = match m.base.as_str() {
+            "master" => "refs/heads/refs/heads/master",
+            "main" => "refs/heads/refs/heads/main",
+            other => panic!("no fallback name for the fixture base {other}"),
+        };
+        git(&m.repo, &["update-ref", fallback, &m.landing]).await;
+        let read = branch_tip(&m.repo, &m.base).await.unwrap();
+        assert_eq!(read, m.landing, "fixture sanity: rev-parse reads it");
+
+        let landed = merge_landing_on_base(&m.repo, &m.base, &m.landing).await;
+        assert!(!landed.unwrap(), "the fallback answered for the base");
+        let roots = std::slice::from_ref(&m.root);
+        let out = abort_recorded(&state, &m, roots).await;
+        let both = LocalPrMergeAbortOutcome {
+            removed: true,
+            closed: true,
+        };
+        assert_eq!(out.map_err(command_message).unwrap(), both);
+        assert!(!Path::new(&m.wt).exists());
+    }
+
+    /// `Feat` packed without the landing, its loose case twin `feat` holding it: raw git
+    /// reads `Feat` as the twin, the exact read as the packed ref. Returns early on a
+    /// case-sensitive filesystem or a non-files ref backend.
+    #[tokio::test]
+    async fn local_pr_merge_landed_probe_never_reads_a_case_twin() {
+        let Some((_g, repo, _, a, b, _up)) =
+            packed_twin_finalize_fixture("landed-twin", "none").await
+        else {
+            return;
+        };
+        assert_eq!(rev(&repo, "refs/heads/Feat").await, b, "fixture sanity");
+        let twin = merge_landing_on_base(&repo, "Feat", &b).await.unwrap();
+        assert!(!twin, "the case twin answered for the base");
+        let packed = merge_landing_on_base(&repo, "Feat", &a).await.unwrap();
+        assert!(packed, "the exact ref still answers");
+    }
+
+    /// A base with no branch of its own, a branch literally named `refs/heads/<base>`
+    /// holding the head: the fallback never answers `already-merged` for the base.
+    #[tokio::test]
+    async fn merge_local_pr_answers_no_already_merged_through_a_ref_search_fallback() {
+        let (dir, repo) = setup_repo("lpm-fallback-base").await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "f.txt", "feature\n", "feat").await;
+        let head = rev(&repo, "feature").await;
+        git(&repo, &["switch", "-c", "work"]).await;
+        git(&repo, &["update-ref", "refs/heads/refs/heads/zbase", &head]).await;
+        let read = branch_tip(&repo, "zbase").await.unwrap();
+        assert_eq!(read, head, "fixture sanity: rev-parse reads it");
+        let root_holder = tempfile::tempdir().expect("create temp dir");
+        let root = root_holder.path().join("root");
+        let state = AppState::default();
+        let result = merge_local_pr(&state, &repo, "zbase", "feature", "m", "merge", &root).await;
+        if let Ok(out) = &result {
+            assert_ne!(out.status, "already-merged");
+        }
+    }
+
+    /// A paused update whose head is gone, a branch literally named `refs/heads/<head>`
+    /// one commit past the resolution: the finish's shortcut does not answer updated
+    /// through the fallback, so nothing is removed and the entry stays open.
+    #[tokio::test]
+    async fn local_pr_update_finish_shortcut_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-fallback-past", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+        git(&f.repo, &["switch", "feature"]).await;
+        commit_file(&f.repo, f.dir.path(), "later.txt", "later\n", "later").await;
+        git(&f.repo, &["switch", "work"]).await;
+        let past = rev(&f.repo, "feature").await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &past]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, past, "fixture sanity: rev-parse takes the fallback");
+
+        let done = f.finish(&state, &out).await;
+        assert!(done.is_err(), "answered {done:?}");
+        assert!(Path::new(handles(&out).0).exists(), "the worktree is kept");
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_ne!(entry.status, "done");
+        let exact = crate::git::branches::exact_branch_tip(&f.repo, "feature").await;
+        assert_eq!(exact.unwrap(), None, "no feature branch was written");
+    }
+
+    /// The head's rev is read after the resolve worktree exists, as the strategy's operand
+    /// only; the already-merged answer reads exact refs of its own.
+    #[test]
+    fn merge_local_pr_reads_the_head_rev_after_the_worktree_add() {
+        let source = include_str!("ops.rs").replace("\r\n", "\n");
+        let production = source.split_once("\nmod tests {").unwrap().0;
+        let tail = production.split_once("fn merge_local_pr(").unwrap().1;
+        let body = tail.split_once("\n}").unwrap().0;
+        let read = "branch_first_rev(repo_path, head)";
+        assert_eq!(body.matches(read).count(), 1);
+        let add = body.find("&[\"worktree\", \"add\"").unwrap();
+        assert!(body.find(read).unwrap() > add);
+    }
+
+    /// A landed update whose worktree is still registered: the standing carries head's
+    /// exact tip, and the closed-entry route reports that same commit.
+    #[tokio::test]
+    async fn local_pr_update_closed_entry_reports_the_tip_the_worktree_proved() {
+        let f = UpdateFixture::new("lpu-proved-tip", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        let tree = format!("{resolved}^{{tree}}");
+        let argv: [&str; 6] = ["commit-tree", "-p", &resolved, "-m", "next", &tree];
+        let next = git(&f.repo, &argv).await.trim().to_string();
+        let moved: [&str; 4] = ["update-ref", "refs/heads/feature", &next, &resolved];
+        git(&f.repo, &moved).await;
+        let (wt, _) = handles(&out);
+        let start = journal_entry(&f.repo, &out.op_id).await.pre_op_tip.unwrap();
+        let standing = worktree_standing(&f.repo, "feature", wt, &start).await;
+        let proved = WorktreeStanding::Landed(next.clone());
+        assert_eq!(standing.unwrap(), proved);
+        crate::oplog::finish(&out.journal_repo, &Some(out.op_id.clone()), None).await;
+
+        let done = f.finish(&state, &out).await;
+        let done = done.map_err(command_message).unwrap();
+        assert_eq!(
+            (done.status.as_str(), done.head_tip.as_str()),
+            ("updated", next.as_str())
+        );
+    }
+
+    /// A closed merge entry whose base is gone, a branch literally named `refs/heads/<base>`
+    /// holding the landing: the fence refuses as closed rather than reading it as landed.
+    #[tokio::test]
+    async fn merge_claim_fence_never_reads_a_ref_search_fallback() {
+        let m = recorded_local_merge("lpr-fence-fallback", true).await;
+        git(&m.repo, &["switch", "--detach"]).await;
+        git(&m.repo, &["branch", "-D", &m.base]).await;
+        let fallback = match m.base.as_str() {
+            "master" => "refs/heads/refs/heads/master",
+            "main" => "refs/heads/refs/heads/main",
+            other => panic!("no fallback name for the fixture base {other}"),
+        };
+        git(&m.repo, &["update-ref", fallback, &m.landing]).await;
+        let read = branch_tip(&m.repo, &m.base).await.unwrap();
+        assert_eq!(read, m.landing, "fixture sanity: rev-parse reads it");
+        let aborted = Some("aborted by user".to_string());
+        let closed = crate::oplog::close_unfinished(&m.repo, &m.op, aborted).await;
+        assert_eq!(closed, CloseOutcome::Closed);
+
+        let fence = merge_fence(&m.repo, &m.op, &m.base);
+        let out = fence.admits_write(&m.repo, &m.base, &m.landing).await;
+        let refused = command_message(out.unwrap_err());
+        assert_eq!(refused, merge_closed_mid_finish(&m.base));
+    }
+
+    /// A closed update entry whose head is gone, a branch literally named
+    /// `refs/heads/<head>` at the resolution: the fence refuses as closed. The fallback
+    /// answers `rev-parse`, so the no-longer-exists refusal does not come first.
+    #[tokio::test]
+    async fn update_claim_fence_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-fence-fallback", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &resolved]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, resolved, "fixture sanity: rev-parse reads it");
+        let (key, id) = (out.journal_repo.as_str(), out.op_id.as_str());
+        let aborted = Some("aborted by user".to_string());
+        assert_eq!(
+            crate::oplog::close_unfinished(key, id, aborted).await,
+            CloseOutcome::Closed
+        );
+
+        let flow = FinishFlow::Update { head: "feature" };
+        let fence = ClaimFence {
+            key,
+            id,
+            token: "finish",
+            flow,
+        };
+        let out = fence.admits_write(&f.repo, "feature", &resolved).await;
+        let refused = command_message(out.unwrap_err());
+        assert_eq!(refused, update_closed_mid_finish("feature"));
+    }
+
+    /// A paused update whose worktree committed past the start tip, head gone and a branch
+    /// literally named `refs/heads/<head>` holding that commit: the fallback answers
+    /// `rev-parse`, so the standing is a verdict, and that verdict is not a landing.
+    #[tokio::test]
+    async fn worktree_standing_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-standing-fallback", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, _) = handles(&out);
+        git(wt, &["commit", "-m", "resolved"]).await;
+        let at = rev(wt, "HEAD").await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &at]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, at, "fixture sanity: rev-parse takes the fallback");
+        let start = journal_entry(&f.repo, &out.op_id).await.pre_op_tip.unwrap();
+
+        let standing = worktree_standing(&f.repo, "feature", wt, &start).await;
+        assert_eq!(standing.unwrap(), WorktreeStanding::Unlanded);
+    }
+
+    /// A done update entry, head gone and a branch literally named `refs/heads/<head>` past
+    /// the start tip: the journal proves no landing through the fallback.
+    #[tokio::test]
+    async fn update_already_landed_never_reads_a_ref_search_fallback() {
+        let f = UpdateFixture::new("lpu-landed-fallback", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        crate::oplog::finish(&out.journal_repo, &Some(out.op_id.clone()), None).await;
+        let fallback = "refs/heads/refs/heads/feature";
+        git(&f.repo, &["update-ref", fallback, &resolved]).await;
+        git(&f.repo, &["update-ref", "-d", "refs/heads/feature"]).await;
+        let read = rev(&f.repo, "refs/heads/feature").await;
+        assert_eq!(read, resolved, "fixture sanity: rev-parse reads it");
+        let journal = update_journal(&f.repo, &out.journal_repo, &out.op_id).await;
+        let journal = journal.expect("the entry is found");
+        let read = (journal.status.as_str(), journal.error.as_deref());
+        assert_eq!(read, ("done", None));
+
+        let landed = update_already_landed(&f.repo, "feature", &journal).await;
+        assert_eq!(landed, None);
+    }
+
+    /// A landed update discarded under another case of head's loose ref: the landing reads
+    /// take head's stored spelling, so the discard still reports the landing, and a repeat
+    /// that only the done entry can prove reports it too. Returns early on a case-sensitive
+    /// filesystem, where git reads no ref by the other case.
+    #[tokio::test]
+    async fn local_pr_update_discard_reads_a_landing_under_the_stored_spelling() {
+        let f = UpdateFixture::new("lpu-discard-case", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+        if branch_tip(&f.repo, "Feature").await.is_err() {
+            return;
+        }
+        let (wt, id) = handles(&out);
+        let (op, journal_repo, root) = (&out.op_id, &out.journal_repo, f.root());
+        let discarded =
+            discard_local_pr_update(&state, &f.repo, "Feature", wt, id, op, journal_repo, &root)
+                .await;
+        let discarded = discarded.map_err(command_message).unwrap();
+        assert_eq!(discarded.status, "updated");
+        let removed = !Path::new(wt).exists();
+        assert!(removed, "the first discard removed the worktree");
+
+        let again =
+            discard_local_pr_update(&state, &f.repo, "Feature", wt, id, op, journal_repo, &root)
+                .await;
+        let again = again.map_err(command_message).unwrap();
+        assert_eq!(again.status, "updated", "the journal proves the landing");
+    }
+
+    fn failing_landing_store(_repo: &str, _id: &str) -> AppResult<()> {
+        let failure = std::io::Error::other("injected store failure");
+        Err(AppError::Io(failure))
+    }
+
+    /// Another holder takes the claim right before the landing write.
+    fn landing_claim_taken(repo: &str, id: &str) -> AppResult<()> {
+        let later = chrono::Utc::now() + chrono::Duration::days(1);
+        let taken = crate::oplog::claim_finish_at(repo, id, "other", later)?;
+        assert_eq!(taken, FinishClaim::Claimed("other".to_string()));
+        Ok(())
+    }
+
+    /// A finish whose landing record cannot be written refuses before the base moves,
+    /// keeps the worktree and frees its claim; once the journal takes it, Finish lands.
+    #[tokio::test]
+    async fn local_pr_merge_finish_refuses_when_its_landing_cannot_be_recorded() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-unwritten").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::set_landing_hook(&repo, Some(failing_landing_store));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        crate::oplog::set_landing_hook(&repo, None);
+        assert_eq!(rev(&repo, &base).await, start, "base at its start tip");
+        assert_eq!(merge_refusal(err), UNRECORDED_MERGE_LANDING);
+        assert_eq!(resolve_worktree_count(&repo).await, 1);
+        assert!(Path::new(&wt).exists());
+        let entry = raw_entry(&repo, &op);
+        assert_eq!(entry["status"], "paused");
+        assert!(entry.get("finishClaim").is_none(), "the claim was released");
+        assert!(entry.get("landing").is_none());
+
+        let done = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(done.map_err(command_message).unwrap().status, "merged");
+        let landed = rev(&repo, &base).await;
+        assert_ne!(landed, start);
+        assert_eq!(raw_entry(&repo, &op)["landing"], landed.as_str());
+        assert_eq!(journal_entry(&repo, &op).await.status, "done");
+    }
+
+    /// The landing record and the claim's release both fail: the refusal says to wait,
+    /// since a retry while the claim lives answers busy.
+    #[tokio::test]
+    async fn local_pr_merge_finish_says_to_wait_when_its_claim_outlives_the_refusal() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-held").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::set_landing_hook(&repo, Some(failing_landing_store));
+        crate::oplog::set_settle_hook(&repo, Some(failing_landing_store));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        crate::oplog::set_settle_hook(&repo, None);
+        crate::oplog::set_landing_hook(&repo, None);
+        assert_eq!(rev(&repo, &base).await, start, "base at its start tip");
+        assert_eq!(merge_refusal(err), UNRECORDED_LANDING_CLAIM_HELD);
+        assert!(Path::new(&wt).exists());
+
+        let again = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert_eq!(merge_refusal(again), MERGE_BUSY);
+        assert_eq!(rev(&repo, &base).await, start);
+    }
+
+    /// A landing write that finds the claim gone is not a failed write: the fence answers.
+    #[tokio::test]
+    async fn local_pr_merge_finish_leaves_a_lost_claim_at_the_landing_to_its_fence() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-unheld").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        crate::oplog::set_landing_hook(&repo, Some(landing_claim_taken));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        crate::oplog::set_landing_hook(&repo, None);
+        assert_eq!(merge_refusal(err), MERGE_BUSY);
+        assert_eq!(rev(&repo, &base).await, start);
+        let entry = raw_entry(&repo, &op);
+        assert_eq!(entry["finishClaim"]["token"], "other");
+        assert!(entry.get("landing").is_none());
+    }
+
+    /// A containment read that fails before the landing write is the finish's error, and
+    /// the base does not move unrecorded.
+    #[tokio::test]
+    async fn local_pr_merge_finish_returns_a_failed_landing_containment_read() {
+        let state = AppState::default();
+        let (_dir, repo, _holder, root, base, wt, op) =
+            paused_local_merge("lpr-landing-unread-start").await;
+        let roots = std::slice::from_ref(&root);
+        let start = rev(&repo, &base).await;
+        resolve_merge(&wt).await;
+        // The start commit's object goes once the merge commit exists, so only the
+        // containment read can trip over it.
+        let object = Path::new(&repo)
+            .join(".git")
+            .join("objects")
+            .join(&start[..2])
+            .join(&start[2..]);
+        assert!(object.exists(), "the start commit is a loose object");
+        let object = sh_path(&object.to_string_lossy());
+        install_update_hook(&repo, "post-commit", &format!("rm -f \"{object}\""));
+        let err = finish_merge(&state, &repo, &base, &wt, roots, &op, None).await;
+        assert!(
+            matches!(err, Err(AppError::Git { .. })),
+            "{:?}",
+            err.map(|o| o.status)
+        );
+        assert_eq!(rev(&repo, &base).await, start);
+        assert!(raw_entry(&repo, &op).get("landing").is_none());
     }
 }

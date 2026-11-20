@@ -1,9 +1,10 @@
-import { DotsThreeIcon } from "@phosphor-icons/react";
+import { DotsThreeIcon, LockIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type ReactNode, useState } from "react";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { Markdown } from "@/components/markdown/markdown";
 import { hostedImagesFor } from "@/components/markdown/markdown-images";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -94,6 +95,7 @@ export function Thread({
   onQuote,
   onSaveEdit,
   editHeld = false,
+  editHeldReason = null,
   onDelete,
   onHide,
   onUnhide,
@@ -125,6 +127,10 @@ export function Thread({
    *  opened before the caller went stale would otherwise save into nothing and
    *  close, discarding the text. */
   editHeld?: boolean;
+  /** Why the forge won't take an edit of this comment (null = it will): the
+   *  Edit row stays shown but disabled, and an open editor keeps its text while
+   *  its Save holds with this reason. */
+  editHeldReason?: string | null;
   /** Present when the viewer may delete this comment. */
   onDelete?: () => void;
   /** Hide (minimize) the comment with a reason. */
@@ -223,12 +229,15 @@ export function Thread({
                 </DropdownMenuItem>
                 {onSaveEdit && (
                   <DropdownMenuItem
+                    disabled={editHeldReason !== null}
+                    className={MENU_HELD_ROW_CLASS}
                     onClick={() => {
                       setDraft(thread.body);
                       setEditing(true);
                     }}
                   >
                     Edit
+                    {editHeldReason !== null && ` — ${editHeldReason}`}
                   </DropdownMenuItem>
                 )}
                 {onUnhide && minimized && (
@@ -273,28 +282,48 @@ export function Thread({
         )}
       </p>
       {editing ? (
-        <CommentEditor
-          ariaLabel="Edit comment"
-          value={draft}
-          onChange={setDraft}
-          canSubmit={
-            !!draft.trim() && draft.trim() !== thread.body.trim() && !editHeld
-          }
-          onSubmit={() => {
-            // Return BEFORE closing: a held save must keep the draft on screen
-            // rather than swallow it.
-            if (editHeld) return;
-            onSaveEdit?.(draft.trim());
-            setEditing(false);
-          }}
-          onCancel={() => setEditing(false)}
-          textareaClassName="max-h-48 min-h-16 resize-y font-mono"
-          mentions={mentions}
-          hostedImages={hostedImagesFor(
-            mentions?.refs?.repoPath,
-            mentions?.ghHost,
+        <>
+          {/* Not a live region: the always-mounted span below announces it. */}
+          {editHeldReason !== null && (
+            <p className="flex items-start gap-1.5 text-muted-foreground text-xs">
+              <LockIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+              <span>
+                <span className="font-medium text-foreground">
+                  {editHeldReason}
+                </span>
+                {draft.trim() && " Your edit is kept; Cancel discards it."}
+              </span>
+            </p>
           )}
-        />
+          <span aria-live="polite" className="sr-only">
+            {editHeldReason ?? ""}
+          </span>
+          <CommentEditor
+            ariaLabel="Edit comment"
+            value={draft}
+            onChange={setDraft}
+            canSubmit={
+              !!draft.trim() &&
+              draft.trim() !== thread.body.trim() &&
+              !editHeld &&
+              editHeldReason === null
+            }
+            onSubmit={() => {
+              // Return BEFORE closing: a held save must keep the draft on screen
+              // rather than swallow it.
+              if (editHeld || editHeldReason !== null) return;
+              onSaveEdit?.(draft.trim());
+              setEditing(false);
+            }}
+            onCancel={() => setEditing(false)}
+            textareaClassName="max-h-48 min-h-16 resize-y font-mono"
+            mentions={mentions}
+            hostedImages={hostedImagesFor(
+              mentions?.refs?.repoPath,
+              mentions?.ghHost,
+            )}
+          />
+        </>
       ) : minimized && !expanded ? (
         <button
           type="button"

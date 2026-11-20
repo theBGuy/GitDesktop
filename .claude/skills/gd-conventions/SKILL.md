@@ -1302,7 +1302,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
   close or reopen and an issue close or reopen arm the same re-read with
   lens-scoped list keys, since the forge's list membership lags the row's own
-  state. Its per-repo entry holds the union of the keys owed and fires ONE
+  state. A merge also owes that re-read the lens's issue lists and issue
+  detail reads, since the forge closes the issues a merge resolves after it
+  answers. Its per-repo entry holds the union of the keys owed and fires ONE
   invalidation. Guards: `scripts/push-recheck-family.test.mjs` pins the arm
   sites (the run rechecks, keyed on the api callees; the branch-delete and the
   merge, close and reopen list re-reads, which no other write schedules), and
@@ -1314,7 +1316,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   through `patchRowState` (`src/lib/remote-state-filter.ts`) via the
   module-private twins `patchPrListState` / `patchIssueListState`: it
   rewrites the row's state only, never inserting or removing a row, and an
-  untouched page bails so it keeps its identity. One deliberate non-member:
+  untouched page bails so it keeps its identity. A merge of a native GitHub
+  stack also re-files as merged the open layers below it, the set the cached
+  PR details listed when the merge started (`cascadedStackNumbers`,
+  `src/lib/remote-state-filter.ts`). One deliberate non-member:
   GitLab's arm-auto-merge (`useGlArmAutoMerge`) patches nothing even though
   arming can merge at once, because its void outcome can't tell armed from
   merged; the whole-repo invalidation covers an immediate merge. The
@@ -1714,6 +1719,43 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (cold-start test mode is the one exception: it aliases the store file and
   has no second writer). A NEW store module with more than one process
   writing adopts `store_lock` — don't assume last-writer-wins is acceptable.
+- **A journal entry a record names is finished through a claim:** a finish
+  or merge abort of an entry whose handles left its start (a local PR's
+  paused merge or branch update) takes `oplog::claim_finish` before it
+  touches the worktree and closes through `oplog::settle_finish_claim`. Each
+  path re-asserts the claim (`oplog::renew_finish_claim`) at different
+  points, and only some renewals gate anything. Both finishes renew after
+  their gates and commit and again immediately before the branch moves, and
+  both of those gate the move: `LostOrUnknown` stops with the branch unmoved,
+  and so does `Closed` unless the branch already holds the commit, when the
+  finish carries on as landed. The merge finish renews once more before it
+  removes its worktree and does not act on the answer (the base already
+  moved). The update finish settles done first and removes its worktree
+  with no renewal. The merge abort renews before its removal and that
+  renewal gates it: `LostOrUnknown` releases the claim and refuses with
+  nothing removed, and `Closed` goes on unclaimed. The update discard, the
+  abandoned-entry sweep and a merge finish or abort that holds no claim
+  close through the conditional close (`oplog::close_unfinished` /
+  `finish_if_unfinished`), which refuses over a live claim. The claim is a
+  lease (`FINISH_CLAIM_TTL`, 120 s): a liveness bound, not mutual exclusion.
+  While holders keep running, two windows or processes never both move a
+  branch for one entry, and a crashed holder blocks for at most the limit.
+  It does not cover a holder stopped for longer than the limit that then
+  resumes (process suspension), a wall-clock jump, or a journal lock that
+  could not be acquired (`store_lock` fails open). A merge finish that holds
+  a claim records the commit it is about to land (`oplog::record_landing`,
+  the entry's `landing`, never on the listing) before the base moves, and
+  only when the entry's starting tip is known and that commit builds on the
+  tip without being it. A record that cannot be written, or a containment
+  read that fails, refuses the finish before the base moves. A later
+  finish or abort reads it (`oplog::landing`) and treats the merge as
+  landed only when the base contains that commit: a finish then reports
+  merged before its gates, whatever the worktree holds, and cleans up; an
+  abort refuses and removes nothing, so Finish is always the next step. A
+  bare `oplog::finish` on such an entry is written only after the branch
+  provably holds the commit: the update discard's landed-under-claim done
+  write, and a finish's (merge or update) done write when its settle fails.
+  `reconcile` closes only `pending` entries and reads no claim.
 - **Test code runs git on `TEST_GIT_HANG_GUARD`** (`git/runner.rs`, test
   builds only): fixture helpers and direct calls to the plain spawn runners
   (`PLAIN_GIT_RUNNERS` in check L's script) in tests pass it, never

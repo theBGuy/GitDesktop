@@ -234,6 +234,7 @@ export function PrActivityFeed({
   onEditComment,
   onDeleteComment,
   editHeld,
+  editHeldReason,
   onHideComment,
   onUnhideComment,
   onToggleReaction,
@@ -295,6 +296,9 @@ export function PrActivityFeed({
   /** Holds an ALREADY-OPEN comment editor's Save: withholding the callbacks only
    *  drops the menu entries, so a stale caller sets this too. */
   editHeld?: boolean;
+  /** Why the viewer's own comments can't be edited (null = they can), forwarded
+   *  beside `editHeld` to the conversation comments and the review threads. */
+  editHeldReason?: string | null;
   onHideComment: (commentId: string, classifier: MinimizeReason) => void;
   onUnhideComment: (commentId: string) => void;
   onToggleReaction: (
@@ -459,6 +463,7 @@ export function PrActivityFeed({
                   canEditOwnThreadComments ? onDeleteThreadComment : undefined
                 }
                 editHeld={editHeld}
+                editHeldReason={editHeldReason}
                 provider={providerKey}
                 apply={suggestionApply}
                 fileDiffLookup={fileDiffLookup}
@@ -497,6 +502,7 @@ export function PrActivityFeed({
                 : undefined
             }
             editHeld={editHeld}
+            editHeldReason={editHeldReason}
             onDelete={
               onDeleteComment && canEditOwnComments && c.viewerDidAuthor
                 ? () => onDeleteComment(c.id)

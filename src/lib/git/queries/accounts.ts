@@ -368,8 +368,9 @@ const FORGE_PROBE_REASONS: Record<ForgeProbe, (action: string) => string> = {
 };
 
 /** The held-control reason for a {@link forgeProbeState} answer. `action`
- *  completes "you can't … right now" and must stay provider-neutral: with no
- *  status, the provider is unknown. A caller checks this ahead of its setup and
+ *  completes "you can't … right now". With no status the provider is unknown, so
+ *  a provider's noun in `action` comes from the shown provider (`shownProvider`),
+ *  never from the status. A caller checks this ahead of its setup and
  *  connect arms, which would misdirect here. */
 export function forgeProbeReason(probe: ForgeProbe, action: string): string {
   return FORGE_PROBE_REASONS[probe](action);

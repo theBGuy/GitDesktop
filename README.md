@@ -445,23 +445,32 @@ in one click.
 
 - **Open, edit, merge**: review, comment, approve, edit, and merge (merge &
   squash on all three; rebase on GitHub, fast-forward on Bitbucket) without
-  the browser. Labels and assignees on GitHub & GitLab (set them when you
-  open a PR/MR or any time after), request reviewers across GitHub, GitLab &
-  Bitbucket, see, link, and unlink a PR's **GitHub Projects** in its header
-  (open, closed, and merged alike) and set each board's **Status**,
-  **Priority**, **Iteration** and custom fields right there, with **Edit
-  projects…** and **Edit project fields…** in the command palette opening
-  either popup, flip a PR between **draft and ready for review**
-  either way on all three, and **create new PRs as drafts by default**
-  (Settings → General). Creating first checks the branch for an already-open
-  PR and offers the link instead of opening a duplicate. A new PR is visible
-  in the list it's headed for from the moment you start creating it: a **pending entry** holds its place with
+  the browser. The merge dialog shows the **commit message** the merge will
+  write and lets you edit it first: a summary row with the forge's default
+  title (Bitbucket doesn't report one, so its row reads **Bitbucket's
+  default message**), **Edit** for the title and description, and **Reset
+  to default** once you've changed it. A message you leave alone stays the
+  forge's own default or template; a GitLab merge that writes both a squash
+  commit and a merge commit gets a row for each, GitLab auto-merge keeps
+  your message until it lands, and a merge with no single commit to word
+  (rebase, fast-forward, a GitHub stack) says so. Labels and assignees on
+  GitHub & GitLab (set them when you open a PR/MR or any time after),
+  request reviewers across GitHub, GitLab & Bitbucket, see, link, and
+  unlink a PR's **GitHub Projects** in its header (open, closed, and merged
+  alike) and set each board's **Status**, **Priority**, **Iteration** and
+  custom fields right there, with **Edit projects…** and **Edit project
+  fields…** in the command palette opening either popup, flip a PR between
+  **draft and ready for review** either way on all three, and **create new
+  PRs as drafts by default** (Settings → General). Creating first checks
+  the branch for an already-open PR and offers the link instead of opening
+  a duplicate. A new PR is visible in the list it's headed for from the
+  moment you start creating it: a **pending entry** holds its place with
   the title, branches and draft state, picks up the number as the PR opens,
   and hands over to the real row once the list catches up. A locked
-  conversation shows a **locked** badge, and when GitHub or GitLab refuses a
-  comment, the comment box, reactions, and AI-review posting turn read-only
-  and say why, with the reason on its own line above the open comment box
-  (on an archived GitHub pull request, your draft is kept).
+  conversation shows a **locked** badge, and when GitHub or GitLab refuses
+  a comment, the comment box, reactions, and AI-review posting turn
+  read-only and say why, with the reason on its own line above the open
+  comment box (on an archived GitHub pull request, your draft is kept).
 - **Check out to review**: Checkout switches to the request's branch, and
   **Check out in a worktree…** opens it in its own folder without touching
   your branch or uncommitted files (see [Worktree manager](#branches)).
@@ -506,17 +515,19 @@ in one click.
   permission can merge anyway), and a refused merge repeats the same line
   beside the forge's own message.
 - **Local PR merges**: an open local PR keeps a merge strip like hosted
-  PRs: whether merging will **conflict** (with the files that clash),
-  how far the branch is **behind its base** (with **Update branch** beside it
-  unless a conflict is predicted), or that there are no conflicts. **Approve**
-  sits beside **Merge** on every tab. A merge that does conflict is resolved
-  in the in-app editor, in an isolated worktree that never touches your
-  working tree, then **Finish** or **Abort**. A predicted conflict can be
-  resolved before the PR is approved: **Resolve conflicts** merges the base
-  into the PR's branch in an isolated worktree, and **Finish update** moves
-  the branch while the PR stays open. Unlike the hosted strip, this one
-  keeps a failed or unavailable check, a conflict it can't resolve here, and
-  a promotion gap on more than one line instead of cutting them short.
+  PRs: whether merging will **conflict** (with the files that clash), how
+  far the branch is **behind its base** (with **Update branch** beside it
+  unless a conflict is predicted), or that there are no conflicts.
+  **Approve** sits beside **Merge** on every tab, and **Merge** opens the
+  same dialog as a hosted PR, its commit message starting from the PR's
+  title and description. A merge that does conflict is resolved in the
+  in-app editor, in an isolated worktree that never touches your working
+  tree, then **Finish** or **Abort**. A predicted conflict can be resolved
+  before the PR is approved: **Resolve conflicts** merges the base into the
+  PR's branch in an isolated worktree, and **Finish update** moves the
+  branch while the PR stays open. Unlike the hosted strip, this one keeps a
+  failed or unavailable check, a conflict it can't resolve here, and a
+  promotion gap on more than one line instead of cutting them short.
 - **Activity feed**: a PR's Conversation is a **date-sorted timeline** of
   reviews, comments, grouped **pushed commits** (each SHA clickable), and
   events, every entry carrying a relative **timestamp** (hover for the exact
@@ -1049,10 +1060,11 @@ active forks. GitHub is unchanged.
   drafted comment posted alongside, edit title and description, retarget the
   target branch, react with emoji (on descriptions and comments), edit labels
   and assignees, **approve / unapprove**, request changes, and **merge**
-  (merge/squash), including **auto-merge** when the pipeline succeeds
-  (cancelable in place). Plus **create**: push-and-open, drafts,
-  duplicate-MR detection. GitLab's own merge status drives the **conflict**
-  strip, the list's **Conflicts** chip, and in-app conflict resolution.
+  (merge/squash, with a commit message you can edit first), including
+  **auto-merge** when the pipeline succeeds (cancelable in place). Plus
+  **create**: push-and-open, drafts, duplicate-MR detection. GitLab's own
+  merge status drives the **conflict** strip, the list's **Conflicts** chip,
+  and in-app conflict resolution.
 - **Issues**: create, comment, close/reopen with a drafted comment posted
   alongside, edit labels and assignees, set **milestone**, **due date**
   (past-due cue), **confidential**, and **linked related issues**;
@@ -1081,7 +1093,8 @@ limit), and issues live in **Jira**; link a project (below).
 <summary><strong>The full Bitbucket surface</strong>: pull requests, tasks, Pipelines, repo settings</summary>
 
 - **Pull requests**: comment (edit/delete your own), decline, merge (merge /
-  squash / fast-forward, optionally deleting the source branch), edit, and
+  squash / fast-forward, optionally deleting the source branch; merge and
+  squash take a commit message you can edit first), edit, and
   **create** (drafts, reviewers pickable at create time). **Approve /
   unapprove**, **request changes** (a true toggle that revokes on every
   plan), pick reviewers from your workspace, and flip **draft ↔ ready**
@@ -1273,12 +1286,13 @@ agents read this repo through GitDesktop.
     app-data artifacts; nothing is pushed)
   - **`--allow-remote-write`**: real forge writes under your identity (`gh`
     / `glab` / Bitbucket token): create/merge/update PRs (creating a PR
-    pushes its head branch, so it also needs `--allow-git-write`),
-    create/extend/dissolve GitHub PR stacks, request reviewers, edit labels
-    and assignees, approve or resolve review threads, rerun or dispatch CI,
-    cut releases, file or comment on issues, and on GitHub project boards
-    add cards and drafts, move, archive or restore them, set their fields,
-    edit drafts and post status updates
+    pushes its head branch, so it also needs `--allow-git-write`; a merge
+    can carry its own commit message, tied on GitHub and GitLab to the head
+    commit it was written for), create/extend/dissolve GitHub PR stacks,
+    request reviewers, edit labels and assignees, approve or resolve review
+    threads, rerun or dispatch CI, cut releases, file or comment on issues,
+    and on GitHub project boards add cards and drafts, move, archive or
+    restore them, set their fields, edit drafts and post status updates
   - **`--allow-git-write`**: recoverable git ops (stage, commit, branch,
     push/pull/fetch, stash, merge, rebase, revert, cherry-pick, tags)
   - **`--allow-destructive`**: the irreversible ones (discard, reset,

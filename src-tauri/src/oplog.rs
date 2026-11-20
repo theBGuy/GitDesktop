@@ -8,7 +8,11 @@
 //!
 //! The journal NEVER performs a git mutation to "recover" — it records and surfaces,
 //! nothing more. A journal write failure must NEVER fail or alter a git op:
-//! [`begin`]/[`finish`] swallow+log every error and let the caller proceed.
+//! [`begin`]/[`finish`] swallow+log every error and let the caller proceed. The one
+//! exception is a finish claim ([`claim_finish`]) on a local PR's paused merge or branch
+//! update: it gates that entry's finish, discard and abort, which refuse rather than run
+//! while another holder has it or while a held claim cannot be re-asserted, and the
+//! update's finish also refuses when the store cannot take the claim.
 //!
 //! ## Storage-dir mirroring contract
 //!
@@ -334,7 +338,12 @@ fn existing_key(store: &Map<String, Value>, repo: &str) -> Option<String> {
 /// The current UTC timestamp in JS `Date.prototype.toISOString()` format —
 /// RFC3339 with millisecond precision and a `Z` suffix.
 fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    iso(chrono::Utc::now())
+}
+
+/// `at` in [`now_iso`]'s format.
+fn iso(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Read `repo`'s entries as a `Vec<Value>` (empty when the repo has no key), in
@@ -768,57 +777,442 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
 }
 
 /// [`finish`] for an entry that may have ended meanwhile: closes `id` only while it is
-/// still `"pending"` or `"paused"`, so a finish that landed first keeps its outcome.
-/// True only when the close was written; a failed write is logged and reads false.
+/// still `"pending"` or `"paused"` and no live finish claim holds it, so a finish that
+/// landed first keeps its outcome. True only when the close was written.
 pub(crate) async fn finish_if_unfinished(repo: &str, id: &str, error: Option<String>) -> bool {
-    let (repo, id, now) = (repo.to_string(), id.to_string(), now_iso());
+    close_unfinished(repo, id, error).await == CloseOutcome::Closed
+}
+
+/// The finish claim's lease. A liveness bound, not mutual exclusion: while holders keep
+/// running, two windows or processes never both move a branch for one entry, and a
+/// holder that crashed blocks the entry's finish, discard and abort for at most this
+/// long. Not covered: a holder stopped for longer than this that then resumes (process
+/// suspension), a wall-clock jump, and a journal lock that could not be acquired (the
+/// store lock fails open).
+const FINISH_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// The entry field holding a finish claim: `{ "token": <uuid>, "at": <iso time> }`. Not
+/// on [`OpLogEntry`], so the listing the frontend reads never carries it.
+const FINISH_CLAIM: &str = "finishClaim";
+/// The entry field holding the commit a merge finish recorded before moving its base
+/// (see [`record_landing`]); every close leaves it in place. Not on [`OpLogEntry`], so
+/// the listing the frontend reads never carries it.
+const LANDING: &str = "landing";
+
+/// What [`claim_finish`] found.
+#[derive(Debug, PartialEq)]
+pub(crate) enum FinishClaim {
+    /// The claim is held under this token.
+    Claimed(String),
+    /// Another holder's live claim is on the entry.
+    Busy,
+    /// The entry is no longer pending or paused; carries the status it reads.
+    Ended(String),
+    /// No such entry under this repository key.
+    Missing,
+}
+
+/// What re-asserting a held claim found; only `Renewed` wrote anything.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ClaimRenewal {
+    /// Still unfinished under this token; the claim's time is now.
+    Renewed,
+    /// The entry was closed, or no longer exists.
+    Closed,
+    /// Still unfinished but under no claim or another token, or the store could not
+    /// answer. An open entry without a claim was never closed, so a retry can finish it.
+    LostOrUnknown,
+}
+
+/// How a held claim ends.
+pub(crate) enum ClaimSettle {
+    Done,
+    Failed(String),
+    /// Drops the claim and leaves the entry as it reads.
+    Release,
+}
+
+/// What the conditional close found.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CloseOutcome {
+    Closed,
+    NotUnfinished,
+    /// Still unfinished under a live claim, so nothing was written.
+    Claimed,
+}
+
+/// Takes a finish claim on `id` under `repo`. `Err` only when the store cannot be read
+/// or written.
+pub(crate) async fn claim_finish(repo: &str, id: &str) -> AppResult<FinishClaim> {
+    let (repo, id, token) = (repo.to_string(), id.to_string(), uuid::Uuid::new_v4());
+    crate::store_lock::locked_store_task(move || {
+        claim_finish_with(&repo, &id, &token.to_string(), chrono::Utc::now)
+    })
+    .await
+}
+
+/// Re-asserts the claim `token` holds on `id`, restarting its limit. A store error is
+/// logged and reads `LostOrUnknown`.
+pub(crate) async fn renew_finish_claim(repo: &str, id: &str, token: &str) -> ClaimRenewal {
+    let (repo, id, token) = (repo.to_string(), id.to_string(), token.to_string());
     let result = crate::store_lock::locked_store_task(move || {
-        close_unfinished_entry(&repo, &id, error, now)
+        renew_finish_claim_in(&store_path(&repo)?, &repo, &id, &token, chrono::Utc::now)
+    })
+    .await;
+    renewal_or_lost(result)
+}
+
+/// A renewal the store could not answer reads `LostOrUnknown`, logged.
+fn renewal_or_lost(result: AppResult<ClaimRenewal>) -> ClaimRenewal {
+    result.unwrap_or_else(|e| {
+        eprintln!("gitdesktop: opslog claim renewal failed: {e}");
+        ClaimRenewal::LostOrUnknown
+    })
+}
+
+/// Ends the claim `token` holds on `id` as `how` says. True when written; false, writing
+/// nothing, once the entry no longer carries that token, or for `Done` and `Failed` once
+/// it is no longer pending or paused, so a holder never overwrites a close another
+/// finish wrote (a store error is logged).
+pub(crate) async fn settle_finish_claim(
+    repo: &str,
+    id: &str,
+    token: &str,
+    how: ClaimSettle,
+) -> bool {
+    let (repo, id, token) = (repo.to_string(), id.to_string(), token.to_string());
+    let result = crate::store_lock::locked_store_task(move || {
+        #[cfg(test)]
+        run_settle_hook(&repo, &id)?;
+        settle_finish_claim_with(&repo, &id, &token, how, chrono::Utc::now)
     })
     .await;
     result.unwrap_or_else(|e| {
-        eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
+        eprintln!("gitdesktop: opslog claim settle failed (op unaffected): {e}");
         false
     })
 }
 
-/// The status check AND the write under ONE acquisition of both locks: checked and
-/// written separately, a finish landing in between would be overwritten.
-fn close_unfinished_entry(
+/// Closes `id` as failed (`error` Some) or done while it is still pending or paused and
+/// no live claim holds it. A store error is logged and reads `NotUnfinished`.
+pub(crate) async fn close_unfinished(repo: &str, id: &str, error: Option<String>) -> CloseOutcome {
+    let (repo, id) = (repo.to_string(), id.to_string());
+    let result = crate::store_lock::locked_store_task(move || {
+        close_unfinished_with(&repo, &id, error, chrono::Utc::now)
+    })
+    .await;
+    result.unwrap_or_else(|e| {
+        eprintln!("gitdesktop: opslog close failed (op unaffected): {e}");
+        CloseOutcome::NotUnfinished
+    })
+}
+
+/// Runs `decide` over `repo`'s entry `id` (None when there is no such entry) and writes
+/// the store back when it asks to, all under ONE acquisition of both locks: decided and
+/// written separately, a close, claim or finish landing in between would be overwritten.
+/// A decision that compares or records a time reads its clock inside `decide`, so the
+/// time is never one taken before a wait for the locks.
+fn decide_on_entry<T>(
     repo: &str,
     id: &str,
-    error: Option<String>,
-    now: String,
-) -> AppResult<bool> {
-    let path = store_path(repo)?;
+    decide: impl FnOnce(Option<&mut Map<String, Value>>) -> (T, bool),
+) -> AppResult<T> {
+    decide_on_entry_in(&store_path(repo)?, repo, id, decide)
+}
+
+/// [`decide_on_entry`] over the store file at `path`.
+fn decide_on_entry_in<T>(
+    path: &Path,
+    repo: &str,
+    id: &str,
+    decide: impl FnOnce(Option<&mut Map<String, Value>>) -> (T, bool),
+) -> AppResult<T> {
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _store_lock = crate::store_lock::lock_store(&path);
-    let mut store = read_store(&path)?;
-    let Some(key) = existing_key(&store, repo) else {
-        return Ok(false);
-    };
-    let Some(obj) = store
-        .get_mut(&key)
+    let _store_lock = crate::store_lock::lock_store(path);
+    let mut store = read_store(path)?;
+    let key = existing_key(&store, repo);
+    let entry = key
+        .as_deref()
+        .and_then(|key| store.get_mut(key))
         .and_then(Value::as_array_mut)
         .and_then(|list| {
             list.iter_mut()
                 .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
         })
-        .and_then(Value::as_object_mut)
-    else {
-        return Ok(false);
-    };
-    let status = obj.get("status").and_then(Value::as_str);
-    if !matches!(status, Some("pending" | "paused")) {
-        return Ok(false);
+        .and_then(Value::as_object_mut);
+    let (answer, write) = decide(entry);
+    if write {
+        write_store(path, &store)?;
     }
-    let status = if error.is_some() { "failed" } else { "done" };
-    obj.insert("status".to_string(), Value::String(status.to_string()));
-    obj.insert("finishedAt".to_string(), Value::String(now));
-    let error = error.map_or(Value::Null, Value::String);
-    obj.insert("error".to_string(), error);
-    write_store(&path, &store)?;
-    Ok(true)
+    Ok(answer)
+}
+
+fn is_unfinished_entry(obj: &Map<String, Value>) -> bool {
+    let status = obj.get("status").and_then(Value::as_str);
+    matches!(status, Some("pending" | "paused"))
+}
+
+fn claim_token(obj: &Map<String, Value>) -> Option<&str> {
+    obj.get(FINISH_CLAIM)?.as_object()?.get("token")?.as_str()
+}
+
+/// A claim blocks while its `at` parses and lies within the limit of `now` either way;
+/// absent, malformed or out of range, there is no claim.
+fn has_live_claim(obj: &Map<String, Value>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let at = obj
+        .get(FINISH_CLAIM)
+        .and_then(Value::as_object)
+        .and_then(|claim| claim.get("at"))
+        .and_then(Value::as_str)
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok());
+    let Some(at) = at else {
+        return false;
+    };
+    let age = now.signed_duration_since(at.with_timezone(&chrono::Utc));
+    u128::from(age.num_milliseconds().unsigned_abs()) < FINISH_CLAIM_TTL.as_millis()
+}
+
+fn claim_marker(token: &str, now: chrono::DateTime<chrono::Utc>) -> Value {
+    serde_json::json!({ "token": token, "at": iso(now) })
+}
+
+/// Core of [`claim_finish`] at `now` under `token`.
+#[cfg(test)]
+pub(crate) fn claim_finish_at(
+    repo: &str,
+    id: &str,
+    token: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AppResult<FinishClaim> {
+    claim_finish_with(repo, id, token, || now)
+}
+
+/// Core of [`claim_finish`] under `token`, reading `clock` once the locks are held.
+fn claim_finish_with(
+    repo: &str,
+    id: &str,
+    token: &str,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<FinishClaim> {
+    decide_on_entry(repo, id, |entry| {
+        let now = clock();
+        let Some(obj) = entry else {
+            return (FinishClaim::Missing, false);
+        };
+        if !is_unfinished_entry(obj) {
+            let status = obj
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            return (FinishClaim::Ended(status.to_string()), false);
+        }
+        if has_live_claim(obj, now) {
+            return (FinishClaim::Busy, false);
+        }
+        obj.insert(FINISH_CLAIM.to_string(), claim_marker(token, now));
+        (FinishClaim::Claimed(token.to_string()), true)
+    })
+}
+
+/// Core of [`renew_finish_claim`] at `now`.
+#[cfg(test)]
+pub(crate) fn renew_finish_claim_at(
+    repo: &str,
+    id: &str,
+    token: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AppResult<ClaimRenewal> {
+    renew_finish_claim_in(&store_path(repo)?, repo, id, token, || now)
+}
+
+/// Core of [`renew_finish_claim`] over the store file at `path`, reading `clock` once the
+/// locks are held. A claim past its limit that still carries `token` renews: nobody took
+/// it meanwhile.
+fn renew_finish_claim_in(
+    path: &Path,
+    repo: &str,
+    id: &str,
+    token: &str,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<ClaimRenewal> {
+    decide_on_entry_in(path, repo, id, |entry| {
+        let now = clock();
+        let Some(obj) = entry.filter(|obj| is_unfinished_entry(obj)) else {
+            return (ClaimRenewal::Closed, false);
+        };
+        if claim_token(obj) != Some(token) {
+            return (ClaimRenewal::LostOrUnknown, false);
+        }
+        obj.insert(FINISH_CLAIM.to_string(), claim_marker(token, now));
+        (ClaimRenewal::Renewed, true)
+    })
+}
+
+/// Core of [`settle_finish_claim`] at `now`.
+#[cfg(test)]
+fn settle_finish_claim_at(
+    repo: &str,
+    id: &str,
+    token: &str,
+    how: ClaimSettle,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AppResult<bool> {
+    settle_finish_claim_with(repo, id, token, how, || now)
+}
+
+/// Core of [`settle_finish_claim`], reading `clock` once the locks are held.
+fn settle_finish_claim_with(
+    repo: &str,
+    id: &str,
+    token: &str,
+    how: ClaimSettle,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<bool> {
+    decide_on_entry(repo, id, |entry| {
+        let now = clock();
+        let Some(obj) = entry.filter(|obj| claim_token(obj) == Some(token)) else {
+            return (false, false);
+        };
+        let (status, error) = match how {
+            ClaimSettle::Done => ("done", Value::Null),
+            ClaimSettle::Failed(message) => ("failed", Value::String(message)),
+            ClaimSettle::Release => {
+                obj.remove(FINISH_CLAIM);
+                return (true, true);
+            }
+        };
+        if !is_unfinished_entry(obj) {
+            return (false, false);
+        }
+        obj.remove(FINISH_CLAIM);
+        obj.insert("status".to_string(), Value::String(status.to_string()));
+        obj.insert("finishedAt".to_string(), Value::String(iso(now)));
+        obj.insert("error".to_string(), error);
+        (true, true)
+    })
+}
+
+/// Core of [`close_unfinished`] at `now`.
+#[cfg(test)]
+fn close_unfinished_entry(
+    repo: &str,
+    id: &str,
+    error: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> AppResult<CloseOutcome> {
+    close_unfinished_with(repo, id, error, || now)
+}
+
+/// Core of [`close_unfinished`], reading `clock` once the locks are held; a dead claim is
+/// removed with the close.
+fn close_unfinished_with(
+    repo: &str,
+    id: &str,
+    error: Option<String>,
+    clock: impl FnOnce() -> chrono::DateTime<chrono::Utc>,
+) -> AppResult<CloseOutcome> {
+    decide_on_entry(repo, id, |entry| {
+        let now = clock();
+        let Some(obj) = entry.filter(|obj| is_unfinished_entry(obj)) else {
+            return (CloseOutcome::NotUnfinished, false);
+        };
+        if has_live_claim(obj, now) {
+            return (CloseOutcome::Claimed, false);
+        }
+        obj.remove(FINISH_CLAIM);
+        let status = if error.is_some() { "failed" } else { "done" };
+        obj.insert("status".to_string(), Value::String(status.to_string()));
+        obj.insert("finishedAt".to_string(), Value::String(iso(now)));
+        obj.insert(
+            "error".to_string(),
+            error.map_or(Value::Null, Value::String),
+        );
+        (CloseOutcome::Closed, true)
+    })
+}
+
+/// Records `sha` as the commit the finish holding `token` on `id` is about to land, while
+/// the entry is pending or paused under that token. The claim's time is left as it was.
+/// `Ok(true)` when written, `Ok(false)` when the entry is not held under `token`, and
+/// `Err` (logged) when the store could not be read or written: the finish then refuses.
+pub(crate) async fn record_landing(
+    repo: &str,
+    id: &str,
+    token: &str,
+    sha: &str,
+) -> AppResult<bool> {
+    let (repo, id) = (repo.to_string(), id.to_string());
+    let (token, sha) = (token.to_string(), sha.to_string());
+    let result =
+        crate::store_lock::locked_store_task(move || record_landing_in(&repo, &id, &token, &sha))
+            .await;
+    if let Err(e) = &result {
+        eprintln!("gitdesktop: opslog landing record failed (finish refused): {e}");
+    }
+    result
+}
+
+/// What [`record_landing`] runs first for a repository key, so a test can fail the write
+/// or change the entry right before it; keyed so parallel tests never meet.
+#[cfg(test)]
+type LandingHook = fn(&str, &str) -> AppResult<()>;
+#[cfg(test)]
+static LANDING_HOOKS: Mutex<std::collections::BTreeMap<String, LandingHook>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Sets (or, with `None`, clears) `repo`'s [`LandingHook`]; it gets the repo and the id.
+#[cfg(test)]
+pub(crate) fn set_landing_hook(repo: &str, hook: Option<LandingHook>) {
+    let mut hooks = LANDING_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    match hook {
+        Some(hook) => hooks.insert(norm_repo_key(repo), hook),
+        None => hooks.remove(&norm_repo_key(repo)),
+    };
+}
+
+/// What [`settle_finish_claim`] runs first for a repository key, so a test can fail the
+/// settle; keyed like [`set_landing_hook`].
+#[cfg(test)]
+static SETTLE_HOOKS: Mutex<std::collections::BTreeMap<String, LandingHook>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// Sets (or, with `None`, clears) `repo`'s settle hook; it gets the repo and the id.
+#[cfg(test)]
+pub(crate) fn set_settle_hook(repo: &str, hook: Option<LandingHook>) {
+    let mut hooks = SETTLE_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    match hook {
+        Some(hook) => hooks.insert(norm_repo_key(repo), hook),
+        None => hooks.remove(&norm_repo_key(repo)),
+    };
+}
+
+#[cfg(test)]
+fn run_settle_hook(repo: &str, id: &str) -> AppResult<()> {
+    let hooks = SETTLE_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+    let hook = hooks.get(&norm_repo_key(repo)).copied();
+    drop(hooks);
+    hook.map_or(Ok(()), |hook| hook(repo, id))
+}
+
+/// Core of [`record_landing`].
+fn record_landing_in(repo: &str, id: &str, token: &str, sha: &str) -> AppResult<bool> {
+    #[cfg(test)]
+    {
+        let hooks = LANDING_HOOKS.lock().unwrap_or_else(|p| p.into_inner());
+        let hook = hooks.get(&norm_repo_key(repo)).copied();
+        drop(hooks);
+        if let Some(hook) = hook {
+            hook(repo, id)?;
+        }
+    }
+    decide_on_entry(repo, id, |entry| {
+        let held =
+            |obj: &Map<String, Value>| is_unfinished_entry(obj) && claim_token(obj) == Some(token);
+        let Some(obj) = entry.filter(|obj| held(obj)) else {
+            return (false, false);
+        };
+        obj.insert(LANDING.to_string(), Value::String(sha.to_string()));
+        (true, true)
+    })
 }
 
 /// Best-effort: if `id` is `Some`, flip that entry to `"paused"` — the op did not
@@ -917,6 +1311,26 @@ pub(crate) async fn pre_op_tip(repo: &str, id: &Option<String>) -> Option<String
         .and_then(|e| e.get("preOpTip"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// The commit [`record_landing`] recorded on `id`: `Ok(None)` for a missing entry or an
+/// absent or non-string field, and the store's read error as `Err`, so an unreadable
+/// store never answers "no landing recorded".
+pub(crate) async fn landing(repo: &str, id: &str) -> AppResult<Option<String>> {
+    let (repo, id) = (repo.to_string(), id.to_string());
+    crate::store_lock::locked_store_task(move || landing_in(&store_path(&repo)?, &repo, &id)).await
+}
+
+/// [`landing`] over the store at `path`; the same lock as [`read_repo_entries`].
+fn landing_in(path: &Path, repo: &str, id: &str) -> AppResult<Option<String>> {
+    let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let store = read_store(path)?;
+    Ok(repo_entries(&store, repo)
+        .iter()
+        .find(|e| e.get("id").and_then(Value::as_str) == Some(id))
+        .and_then(|e| e.get(LANDING))
+        .and_then(Value::as_str)
+        .map(str::to_string))
 }
 
 /// `repo`'s entries in stored order, read off the async runtime. The read takes no FILE
@@ -2050,6 +2464,442 @@ mod tests {
         // Control: the unconditional finish overwrites a done entry.
         finish(&repo, &Some("control".to_string()), abandoned()).await;
         assert_eq!(stored_entry(&repo, "control")["status"], "failed");
+    }
+
+    /// Now, at the millisecond precision the store writes, so offsets land exactly.
+    fn claim_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(&now_iso())
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn secs(n: i64) -> chrono::Duration {
+        chrono::Duration::seconds(n)
+    }
+
+    fn with_marker(mut record: Value, marker: Value) -> Value {
+        let obj = record.as_object_mut().unwrap();
+        obj.insert(FINISH_CLAIM.to_string(), marker);
+        record
+    }
+
+    /// `repo`'s entries off disk, under both locks. Only these: a store `GD_OPLOG_DIR`
+    /// points every test at also holds other tests' entries, written at any time.
+    fn own_entries(repo: &str) -> Vec<Value> {
+        let path = store_path(repo).unwrap();
+        let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _store_lock = crate::store_lock::lock_store(&path);
+        repo_entries(&read_store(&path).unwrap(), repo)
+    }
+
+    #[test]
+    fn finish_claim_blocks_until_it_expires() {
+        let (_dir, repo) = scratch_repo_key("claim-expiry");
+        let now = claim_now();
+        let at = "2026-01-01T00:00:00.000Z";
+        seed_entries(
+            &repo,
+            vec![
+                pick_record("paused", at, "paused"),
+                pick_record("pending", at, "pending"),
+                with_marker(pick_record("done", at, "done"), claim_marker("x", now)),
+                pick_record("failed", at, "failed"),
+                with_marker(
+                    pick_record("failed-held", at, "failed"),
+                    claim_marker("x", now),
+                ),
+                pick_record("sibling", at, "paused"),
+            ],
+        );
+        let claim = |id: &str, token: &str| claim_finish_at(&repo, id, token, now).unwrap();
+        assert_eq!(
+            claim("paused", "t1"),
+            FinishClaim::Claimed("t1".to_string())
+        );
+        let stored = stored_entry(&repo, "paused");
+        assert_eq!(stored[FINISH_CLAIM]["token"], "t1");
+        assert_eq!(stored[FINISH_CLAIM]["at"], iso(now));
+        assert!(stored_entry(&repo, "sibling").get(FINISH_CLAIM).is_none());
+        assert_eq!(claim("paused", "t2"), FinishClaim::Busy);
+        assert_eq!(stored_entry(&repo, "paused")[FINISH_CLAIM]["token"], "t1");
+        assert_eq!(
+            claim("pending", "t3"),
+            FinishClaim::Claimed("t3".to_string())
+        );
+        assert_eq!(claim("done", "t4"), FinishClaim::Ended("done".to_string()));
+        assert_eq!(
+            claim("failed", "t5"),
+            FinishClaim::Ended("failed".to_string())
+        );
+        assert_eq!(
+            claim("failed-held", "t8"),
+            FinishClaim::Ended("failed".to_string())
+        );
+        let before = own_entries(&repo);
+        let close = close_unfinished_entry(&repo, "failed-held", Some("x".to_string()), now);
+        assert_eq!(close.unwrap(), CloseOutcome::NotUnfinished);
+        assert_eq!(own_entries(&repo), before, "a leftover marker is inert");
+        assert_eq!(claim("missing", "t6"), FinishClaim::Missing);
+        let (_other, unknown) = scratch_repo_key("claim-unknown");
+        let missing = claim_finish_at(&unknown, "paused", "t7", now).unwrap();
+        assert_eq!(missing, FinishClaim::Missing);
+
+        let ttl = chrono::Duration::from_std(FINISH_CLAIM_TTL).unwrap();
+        let ms = chrono::Duration::milliseconds(1);
+        for status in ["paused", "pending"] {
+            let check = |marker: Value| {
+                let entry = with_marker(pick_record("e", at, status), marker);
+                seed_entries(&repo, vec![entry.clone()]);
+                let claimed = claim_finish_at(&repo, "e", "new", now).unwrap();
+                seed_entries(&repo, vec![entry]);
+                let close = close_unfinished_entry(&repo, "e", Some("x".to_string()), now);
+                (claimed, close.unwrap())
+            };
+            let free = (
+                FinishClaim::Claimed("new".to_string()),
+                CloseOutcome::Closed,
+            );
+            let held = (FinishClaim::Busy, CloseOutcome::Claimed);
+            let exact = check(claim_marker("old", now - ttl));
+            assert_eq!(exact, free, "{status}: exactly the limit");
+            let past = check(claim_marker("old", now - ttl - ms));
+            assert_eq!(past, free, "{status}: past the limit");
+            let younger = check(claim_marker("old", now - ttl + ms));
+            assert_eq!(younger, held, "{status}: 1 ms younger");
+            let future = check(claim_marker("old", now + ttl));
+            assert_eq!(future, free, "{status}: future, past the limit");
+            let near = check(claim_marker("old", now + ttl - ms));
+            assert_eq!(near, held, "{status}: future, inside the limit");
+            let scalar = check(Value::String("old".to_string()));
+            assert_eq!(scalar, free, "{status}: not an object");
+            let garbled = serde_json::json!({ "token": "old", "at": "not a time" });
+            assert_eq!(check(garbled), free, "{status}: unparseable at");
+            let closed = stored_entry(&repo, "e");
+            assert_eq!(closed["status"], "failed");
+            assert!(
+                closed.get(FINISH_CLAIM).is_none(),
+                "{status}: a dead claim goes with the close"
+            );
+        }
+    }
+
+    #[test]
+    fn settle_finish_claim_writes_only_for_its_holder() {
+        let (_dir, repo) = scratch_repo_key("claim-settle");
+        let now = claim_now();
+        let at = "2026-01-01T00:00:00.000Z";
+        let ids = ["done", "failed", "released", "foreign", "reclaimed"];
+        let mut entries = ids.map(|id| pick_record(id, at, "paused")).to_vec();
+        // A done entry still carrying the holder's token: another finish's fallback
+        // closed it after this claim lapsed and was re-taken.
+        entries.push(with_marker(
+            pick_record("closed-held", at, "done"),
+            claim_marker("t", now),
+        ));
+        seed_entries(&repo, entries);
+        for id in &ids[..4] {
+            claim_finish_at(&repo, id, "t", now).unwrap();
+        }
+        let ttl = chrono::Duration::from_std(FINISH_CLAIM_TTL).unwrap();
+        claim_finish_at(&repo, "reclaimed", "t", now - ttl).unwrap();
+        claim_finish_at(&repo, "reclaimed", "u", now).unwrap();
+        let settle = |id: &str, token: &str, how| {
+            settle_finish_claim_at(&repo, id, token, how, now).unwrap()
+        };
+
+        assert!(settle("done", "t", ClaimSettle::Done));
+        let done = stored_entry(&repo, "done");
+        assert_eq!(
+            (&done["status"], &done["error"]),
+            (&json_str("done"), &Value::Null)
+        );
+        assert_eq!(done["finishedAt"], iso(now));
+        assert!(settle("failed", "t", ClaimSettle::Failed("m".to_string())));
+        let failed = stored_entry(&repo, "failed");
+        assert_eq!(
+            (&failed["status"], &failed["error"]),
+            (&json_str("failed"), &json_str("m"))
+        );
+        assert!(settle("released", "t", ClaimSettle::Release));
+        let released = stored_entry(&repo, "released");
+        assert_eq!(released["status"], "paused");
+        assert_eq!(released["finishedAt"], Value::Null);
+        for id in ["done", "failed", "released"] {
+            assert!(stored_entry(&repo, id).get(FINISH_CLAIM).is_none(), "{id}");
+        }
+
+        let before = own_entries(&repo);
+        assert!(!settle("foreign", "other", ClaimSettle::Done));
+        assert!(!settle(
+            "reclaimed",
+            "t",
+            ClaimSettle::Failed("m".to_string())
+        ));
+        assert!(
+            !settle("released", "t", ClaimSettle::Release),
+            "already settled"
+        );
+        assert!(!settle("missing", "t", ClaimSettle::Done));
+        assert_eq!(own_entries(&repo), before, "a non-holder writes nothing");
+
+        let failed = settle("closed-held", "t", ClaimSettle::Failed("m".to_string()));
+        assert!(!failed, "a failed settle never overwrites a done entry");
+        assert!(!settle("closed-held", "t", ClaimSettle::Done));
+        assert_eq!(own_entries(&repo), before, "a closed entry keeps its close");
+    }
+
+    fn json_str(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_claimed_entry_lists_without_its_marker() {
+        let (_dir, repo) = scratch_repo_key("claim-list");
+        seed_entries(
+            &repo,
+            vec![pick_record("e", "2026-01-01T00:00:00.000Z", "paused")],
+        );
+        claim_finish_at(&repo, "e", "t", claim_now()).unwrap();
+        assert_eq!(stored_entry(&repo, "e")[FINISH_CLAIM]["token"], "t");
+
+        let listed = git_oplog_list(repo.clone()).await.unwrap();
+        let entry = listed
+            .iter()
+            .find(|e| e.id == "e")
+            .expect("the entry lists");
+        let wire = serde_json::to_value(entry).unwrap();
+        assert_eq!(wire["status"], "paused");
+        assert!(wire.get(FINISH_CLAIM).is_none(), "{wire}");
+    }
+
+    #[tokio::test]
+    async fn record_landing_writes_only_for_its_holder_and_outlives_every_close() {
+        let (_dir, repo) = scratch_repo_key("landing");
+        let now = claim_now();
+        let merge = |id: &str, status: &str| {
+            let mut record = pending_record(id, "2026-01-01T00:00:00.000Z");
+            record["status"] = json_str(status);
+            record
+        };
+        let mut numeric = merge("numeric", "done");
+        numeric[LANDING] = Value::from(5);
+        seed_entries(
+            &repo,
+            vec![
+                merge("done", "paused"),
+                merge("failed", "paused"),
+                merge("released", "paused"),
+                merge("closed", "paused"),
+                merge("finished", "pending"),
+                merge("reconciled", "pending"),
+                merge("foreign", "paused"),
+                with_marker(merge("done-held", "done"), claim_marker("t", now)),
+                with_marker(merge("failed-held", "failed"), claim_marker("t", now)),
+                numeric,
+            ],
+        );
+        let held = [
+            "done",
+            "failed",
+            "released",
+            "closed",
+            "finished",
+            "reconciled",
+        ];
+        let claimed_at = now - secs(10);
+        for id in held {
+            claim_finish_at(&repo, id, "t", claimed_at).unwrap();
+        }
+        claim_finish_at(&repo, "foreign", "u", claimed_at).unwrap();
+        let record = |id: &str| record_landing_in(&repo, id, "t", "c0ffee").unwrap();
+        for id in held {
+            assert!(record(id), "{id}");
+            let stored = stored_entry(&repo, id);
+            assert_eq!(stored[LANDING], "c0ffee", "{id}");
+            assert_eq!(
+                stored[FINISH_CLAIM]["at"],
+                iso(claimed_at),
+                "{id}: lease kept"
+            );
+        }
+        let listed = git_oplog_list(repo.clone()).await.unwrap();
+        let entry = listed.iter().find(|e| e.id == "released").unwrap();
+        let wire = serde_json::to_value(entry).unwrap();
+        assert!(wire.get(LANDING).is_none(), "{wire}");
+
+        let settle = |id: &str, how| settle_finish_claim_at(&repo, id, "t", how, now).unwrap();
+        assert!(settle("done", ClaimSettle::Done));
+        assert!(settle("failed", ClaimSettle::Failed("m".to_string())));
+        assert!(settle("released", ClaimSettle::Release));
+        let ttl = chrono::Duration::from_std(FINISH_CLAIM_TTL).unwrap();
+        let close = close_unfinished_entry(&repo, "closed", None, now + ttl);
+        assert_eq!(close.unwrap(), CloseOutcome::Closed);
+        finish(&repo, &Some("finished".to_string()), None).await;
+        reconcile(&repo, false, false, "feature", &quiet_ops()).unwrap();
+        let closes = [
+            ("done", "done"),
+            ("failed", "failed"),
+            ("released", "paused"),
+            ("closed", "done"),
+            ("finished", "done"),
+            ("reconciled", "done"),
+        ];
+        for (id, status) in closes {
+            let stored = stored_entry(&repo, id);
+            assert_eq!(stored["status"], status, "{id}");
+            assert_eq!(
+                landing(&repo, id).await.unwrap().as_deref(),
+                Some("c0ffee"),
+                "{id}"
+            );
+        }
+
+        let before = own_entries(&repo);
+        for id in [
+            "foreign",
+            "released",
+            "done-held",
+            "failed-held",
+            "missing",
+            "done",
+        ] {
+            assert!(!record(id), "{id}");
+        }
+        assert_eq!(
+            own_entries(&repo),
+            before,
+            "only an unfinished entry's holder writes"
+        );
+        for id in ["foreign", "numeric", "missing"] {
+            assert_eq!(landing(&repo, id).await.unwrap(), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn landing_answers_none_only_from_a_store_it_read() {
+        let (_dir, path) = tmp_store();
+        let repo = r"C:\oplog\landing-read";
+        let at = "2026-01-01T00:00:00.000Z";
+        let mut recorded = pending_record("recorded", at);
+        recorded[LANDING] = json_str("c0ffee");
+        let mut numeric = pending_record("numeric", at);
+        numeric[LANDING] = Value::from(5);
+        let entries = vec![recorded, numeric, pending_record("bare", at)];
+        let mut store = Map::new();
+        store.insert(repo.to_string(), Value::Array(entries));
+        write_store(&path, &store).unwrap();
+        let read = |id: &str| landing_in(&path, repo, id).unwrap();
+        assert_eq!(read("recorded").as_deref(), Some("c0ffee"));
+        assert_eq!(read("bare"), None, "field absent");
+        assert_eq!(read("numeric"), None, "field not a string");
+        assert_eq!(read("missing"), None, "entry missing");
+
+        let (_corrupt_dir, corrupt) = tmp_store();
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let unreadable = landing_in(&corrupt, repo, "recorded");
+        assert!(unreadable.is_err(), "{unreadable:?}");
+    }
+
+    #[tokio::test]
+    async fn renew_finish_claim_answers_renewed_closed_or_lost() {
+        let (_dir, repo) = scratch_repo_key("claim-renew");
+        let now = claim_now();
+        let at = "2026-01-01T00:00:00.000Z";
+        let held = |status: &str, id: &str, token: &str| {
+            with_marker(
+                pick_record(id, at, status),
+                claim_marker(token, now - secs(10)),
+            )
+        };
+        seed_entries(
+            &repo,
+            vec![
+                held("paused", "fresh", "t"),
+                held("pending", "stale", "t"),
+                held("done", "done-held", "t"),
+                pick_record("failed-bare", at, "failed"),
+                held("paused", "reclaimed", "u"),
+                pick_record("released", at, "paused"),
+            ],
+        );
+        let renew = |id: &str, when| renew_finish_claim_at(&repo, id, "t", when).unwrap();
+
+        assert_eq!(renew("fresh", now), ClaimRenewal::Renewed);
+        assert_eq!(stored_entry(&repo, "fresh")[FINISH_CLAIM]["at"], iso(now));
+        let ttl = chrono::Duration::from_std(FINISH_CLAIM_TTL).unwrap();
+        let late = now + ttl + secs(80);
+        assert_eq!(
+            renew("stale", late),
+            ClaimRenewal::Renewed,
+            "past the limit"
+        );
+        assert_eq!(stored_entry(&repo, "stale")[FINISH_CLAIM]["at"], iso(late));
+        let inside = late + ttl - chrono::Duration::milliseconds(1);
+        let close = close_unfinished_entry(&repo, "stale", Some("x".to_string()), inside);
+        assert_eq!(close.unwrap(), CloseOutcome::Claimed);
+
+        let before = own_entries(&repo);
+        assert_eq!(renew("done-held", now), ClaimRenewal::Closed);
+        assert_eq!(renew("failed-bare", now), ClaimRenewal::Closed);
+        assert_eq!(renew("missing", now), ClaimRenewal::Closed);
+        assert_eq!(renew("reclaimed", now), ClaimRenewal::LostOrUnknown);
+        assert_eq!(renew("released", now), ClaimRenewal::LostOrUnknown);
+        assert_eq!(own_entries(&repo), before, "only a renewal writes");
+
+        let (_corrupt_dir, corrupt) = tmp_store();
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let unreadable = renew_finish_claim_in(&corrupt, &repo, "fresh", "t", || now);
+        assert_eq!(renewal_or_lost(unreadable), ClaimRenewal::LostOrUnknown);
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"not json");
+    }
+
+    /// Each claim core reads its clock only while both locks are held, so a time taken
+    /// before a wait for another holder's write is never recorded or compared.
+    #[test]
+    fn claim_cores_read_the_clock_under_the_locks() {
+        let (_dir, repo) = scratch_repo_key("claim-clock");
+        seed_entries(
+            &repo,
+            vec![pick_record("e", "2026-01-01T00:00:00.000Z", "paused")],
+        );
+        let locked_clock = || {
+            assert!(
+                oplog_lock().try_lock().is_err(),
+                "the clock ran before the journal lock was taken"
+            );
+            claim_now()
+        };
+        let claimed = claim_finish_with(&repo, "e", "t", locked_clock).unwrap();
+        assert_eq!(claimed, FinishClaim::Claimed("t".to_string()));
+        let path = store_path(&repo).unwrap();
+        let renewed = renew_finish_claim_in(&path, &repo, "e", "t", locked_clock).unwrap();
+        assert_eq!(renewed, ClaimRenewal::Renewed);
+        let settled = settle_finish_claim_with(&repo, "e", "t", ClaimSettle::Release, locked_clock);
+        assert!(settled.unwrap());
+        let closed = close_unfinished_with(&repo, "e", None, locked_clock).unwrap();
+        assert_eq!(closed, CloseOutcome::Closed);
+    }
+
+    #[test]
+    fn renewals_restart_the_claim_limit() {
+        let (_dir, repo) = scratch_repo_key("claim-restart");
+        let t = claim_now();
+        seed_entries(
+            &repo,
+            vec![pick_record("e", "2026-01-01T00:00:00.000Z", "paused")],
+        );
+        claim_finish_at(&repo, "e", "t", t).unwrap();
+        for after in [100, 200] {
+            let renewed = renew_finish_claim_at(&repo, "e", "t", t + secs(after)).unwrap();
+            assert_eq!(renewed, ClaimRenewal::Renewed);
+        }
+        let almost = t + secs(320) - chrono::Duration::milliseconds(1);
+        assert_eq!(
+            claim_finish_at(&repo, "e", "o", almost).unwrap(),
+            FinishClaim::Busy
+        );
+        let expired = claim_finish_at(&repo, "e", "o", t + secs(320)).unwrap();
+        assert_eq!(expired, FinishClaim::Claimed("o".to_string()));
     }
 
     /// A pick concluded OUTSIDE the app leaves its record `"paused"` — nothing in-app

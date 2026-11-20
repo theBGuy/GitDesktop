@@ -344,7 +344,8 @@ const pendingListRechecks = new Map<
 
 /** One delayed invalidation of every key prefix owed since the last fire. Armed by
  *  a remote-branch delete (unlensed PR-list prefixes) and by a PR merge, close or
- *  reopen and an issue close or reopen (lens-scoped list prefixes). The caller
+ *  reopen and an issue close or reopen (lens-scoped list prefixes); a PR merge
+ *  also hands the lens's issue list and issue detail prefixes. The caller
  *  builds the keys: this file can't import repoKeys, and the list families may be
  *  spelled only in core.ts. A PR-list caller owes the review-state map with the
  *  list (usePrReviewState's co-invalidation contract); the CI and mergeability

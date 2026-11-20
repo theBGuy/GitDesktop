@@ -6,10 +6,14 @@
 // raw readers of the prefix extract rows through `listPageRows`. Pinned here:
 // cachedRefKind, RemotePrView's cachedPrRow and useLocalRemoteFilter's
 // option-source loop. pr-create-handoff's page reads are pinned behaviourally
-// by pr-create-lane.test.mjs. Source pins over masked TypeScript (no component
-// runner exists); each carries one in-memory mutation control that must make
-// it fail.
-// Not covered: any other raw reader of the prefix, existing or added later.
+// by pr-create-lane.test.mjs. The Issues panel's twin (`useIssueListPage`'s
+// `IssueListPage` structs under the `issue-list` prefix) is pinned here too:
+// RemoteIssueView's cachedIssueRow, the panel's extraction and cap gate, the
+// hook, and patchIssueListState's struct write; insertCreatedIssue is pinned
+// behaviourally by src/test/issue-list-cap.test.tsx. Source pins over masked
+// TypeScript; each carries one in-memory mutation control that must make it
+// fail.
+// Not covered: any other raw reader of either prefix, existing or added later.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -27,6 +31,9 @@ const PR_QUERIES = "src/lib/git/queries/prs.ts";
 const PR_ACTIONS = "src/lib/git/queries/pr-actions.ts";
 const PR_VIEW = "src/features/pulls/RemotePrView.tsx";
 const LOCAL_FILTER = "src/features/conversations/useLocalRemoteFilter.ts";
+const ISSUE_PANEL = "src/features/issues/IssuesPanel.tsx";
+const ISSUE_QUERIES = "src/lib/git/queries/issues.ts";
+const ISSUE_VIEW = "src/features/issues/RemoteIssueView.tsx";
 
 const read = (rel) =>
   readFileSync(path.join(ROOT, rel), "utf8").replace(/\r\n/g, "\n");
@@ -140,6 +147,24 @@ function cachedPrRowProblems(raw) {
   return problems;
 }
 
+/** (iii-b, issues) cachedIssueRow reads either page shape through
+ *  listPageRows before its lens/rows guard. */
+function cachedIssueRowProblems(raw) {
+  const fn = fnSlice(ISSUE_VIEW, raw, "cachedIssueRow");
+  if (!fn) return ["cachedIssueRow not found"];
+  const code = squash(fn.masked);
+  const problems = [];
+  if (!code.includes("getQueriesData<IssueInfo[]|IssueListPage>("))
+    problems.push("cachedIssueRow's read is not typed IssueInfo[] | IssueListPage");
+  if (
+    !code.includes(
+      "constrows=listPageRows(page);if(key[3]!==lens||!rows)continue;",
+    )
+  )
+    problems.push("cachedIssueRow does not guard on listPageRows(page)");
+  return problems;
+}
+
 /** The masked text of the `const optionRows` IIFE's body, or null. */
 function optionRowsBody(raw) {
   const masked = maskNonCode(raw, false);
@@ -189,18 +214,53 @@ function prPanelProblems(raw) {
   return problems;
 }
 
+/** (iv, issues) The Issues panel extracts rows once and gates the cap on a
+ *  settled page. */
+function issuePanelProblems(raw) {
+  const problems = [];
+  const code = squash(maskNonCode(raw, true));
+  if (!code.includes("constissueRows=listPageRows(issueList.data);"))
+    problems.push("issueRows is not derived through listPageRows");
+  if (
+    !code.includes(
+      "constcapped=issueList.data?.capped===true&&!issueList.isPlaceholderData;",
+    )
+  )
+    problems.push("capped is not gated on !issueList.isPlaceholderData");
+  if (!code.includes("remoteCapped={capped}"))
+    problems.push("remoteCapped is not passed the gated flag");
+  if ((code.match(/issueList\.data(?![\w$])/g) ?? []).length !== 2)
+    problems.push("a row read bypasses issueRows");
+  return problems;
+}
+
 /** (v) usePrListPage: after usePrList, `usePrList`'s key plus the marker,
  *  the same-state placeholder filing over `.rows`, an inline retry. */
 function pageHookProblems(raw) {
+  return familyPageHookProblems(PR_QUERIES, raw, "usePrList", "prList");
+}
+
+/** (v, issues) useIssueListPage: the same shape over `useIssueList`'s key. */
+function issuePageHookProblems(raw) {
+  return familyPageHookProblems(
+    ISSUE_QUERIES,
+    raw,
+    "useIssueList",
+    "issueList",
+  );
+}
+
+function familyPageHookProblems(rel, raw, baseName, keyFamily) {
   const problems = [];
-  const fn = fnSlice(PR_QUERIES, raw, "usePrListPage");
-  const base = fnSlice(PR_QUERIES, raw, "usePrList");
-  if (!fn || !base) return ["usePrList or usePrListPage not found"];
-  if (fn.start < base.start) problems.push("usePrListPage precedes usePrList");
+  const name = `${baseName}Page`;
+  const fn = fnSlice(rel, raw, name);
+  const base = fnSlice(rel, raw, baseName);
+  if (!fn || !base) return [`${baseName} or ${name} not found`];
+  if (fn.start < base.start) problems.push(`${name} precedes ${baseName}`);
   const code = squash(fn.raw);
   if (
     !code.includes(
-      'queryKey:[...repoKeys.prList(repo),lens,state,limit??null,remoteListFilterKey(filter),"page"]asconst',
+      `queryKey:[...repoKeys.${keyFamily}(repo),lens,state,limit??null,remoteListFilterKey(filter),"page"]asconst`,
     )
   )
     problems.push('the key is not state at index 4 and "page" at index 7');
@@ -230,16 +290,37 @@ function pageHookProblems(raw) {
 /** (vi) patchPrListState re-files struct pages in a second, page-scoped write
  *  after the array write. */
 function patchProblems(raw) {
-  const fn = fnSlice(PR_ACTIONS, raw, "patchPrListState");
-  if (!fn) return ["patchPrListState not found"];
+  return structPatchProblems(
+    PR_ACTIONS,
+    raw,
+    "patchPrListState",
+    "PrInfo[]",
+    "PrListPage",
+  );
+}
+
+/** (vi, issues) patchIssueListState's twin of the struct write. */
+function issuePatchProblems(raw) {
+  return structPatchProblems(
+    ISSUE_QUERIES,
+    raw,
+    "patchIssueListState",
+    "IssueInfo[]",
+    "IssueListPage",
+  );
+}
+
+function structPatchProblems(rel, raw, name, rowType, pageType) {
+  const fn = fnSlice(rel, raw, name);
+  if (!fn) return [`${name} not found`];
   const code = squash(fn.raw);
   const writes = code.split("queryClient.setQueriesData<").slice(1);
-  if (writes.length !== 2 || !writes[0].startsWith("PrInfo[]>"))
+  if (writes.length !== 2 || !writes[0].startsWith(`${rowType}>`))
     return ["expected the array write, then one struct write"];
   const second = writes[1];
   const problems = [];
-  if (!second.startsWith("PrListPage>"))
-    problems.push("the second write is not typed PrListPage");
+  if (!second.startsWith(`${pageType}>`))
+    problems.push(`the second write is not typed ${pageType}`);
   if (
     !second.includes(
       'predicate:(q)=>q.queryKey[3]===lens&&q.queryKey[7]==="page"',
@@ -357,6 +438,70 @@ const PINS = [
           "prevQuery?.queryKey[4]",
           "prevQuery?.queryKey[3]",
         )
+      );
+    },
+  },
+  {
+    name: "(iii-b, issues) cachedIssueRow reads pages through listPageRows",
+    file: ISSUE_VIEW,
+    check: cachedIssueRowProblems,
+    // The base shape: an Array.isArray guard on the raw entry.
+    control: (raw) => {
+      const at = raw.indexOf("function cachedIssueRow(");
+      assert.ok(at >= 0, "cachedIssueRow present");
+      return (
+        raw.slice(0, at) +
+        mutate(
+          raw.slice(at),
+          /const rows = listPageRows\(page\);/,
+          "const rows = Array.isArray(page) ? page : undefined;",
+        )
+      );
+    },
+  },
+  {
+    name: "(iv, issues) the Issues panel derives issueRows and gates the cap",
+    file: ISSUE_PANEL,
+    check: issuePanelProblems,
+    control: (raw) =>
+      mutate(
+        raw,
+        /issueList\.data\?\.capped === true && !issueList\.isPlaceholderData/,
+        "issueList.data?.capped === true",
+      ),
+  },
+  {
+    name: "(v, issues) useIssueListPage's key and placeholder filing",
+    file: ISSUE_QUERIES,
+    check: issuePageHookProblems,
+    control: (raw) => {
+      const at = raw.indexOf("export function useIssueListPage(");
+      assert.ok(at >= 0, "useIssueListPage present");
+      return (
+        raw.slice(0, at) +
+        mutate(
+          raw.slice(at),
+          "prevQuery?.queryKey[4]",
+          "prevQuery?.queryKey[3]",
+        )
+      );
+    },
+  },
+  {
+    name: "(vi, issues) patchIssueListState's struct-scoped second write",
+    file: ISSUE_QUERIES,
+    check: issuePatchProblems,
+    control: (raw) => {
+      const fn = fnSlice(ISSUE_QUERIES, raw, "patchIssueListState");
+      assert.ok(fn, "patchIssueListState present");
+      const second = fn.raw.indexOf(
+        "queryClient.setQueriesData<IssueListPage>",
+      );
+      assert.ok(second >= 0, "the second write present");
+      const end = fn.raw.lastIndexOf("}");
+      return raw.replace(
+        fn.raw,
+        () => `${fn.raw.slice(0, second)}\n${fn.raw.slice(end)}`,
       );
     },
   },

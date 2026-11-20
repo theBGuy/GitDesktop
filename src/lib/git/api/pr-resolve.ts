@@ -5,9 +5,11 @@ export type MergeStrategy = "merge" | "squash" | "rebase" | "fast_forward";
 
 /** Outcome of starting or finishing a local-PR merge: `merged` committed; `conflicts`
  *  paused in an isolated worktree for the user to resolve, without touching their
- *  branch or working tree (the worktree fields feed finish/abort). */
+ *  branch or working tree (the worktree fields feed finish/abort). `already-merged`
+ *  answers a start only: the head was already part of the base, so nothing was
+ *  written and no worktree was made. */
 export interface LocalPrMergeOutcome {
-  status: "merged" | "conflicts";
+  status: "merged" | "conflicts" | "already-merged";
   conflicts: string[];
   /** The base tip after a successful merge (informational). */
   baseTip: string;
@@ -17,6 +19,9 @@ export interface LocalPrMergeOutcome {
   worktreeId: string | null;
   /** The oplog entry id, passed to finish/abort. */
   opId: string | null;
+  /** The checkout path that entry is filed under, passed to finish/abort: records are
+   *  shared by every checkout of the repository, the journal is keyed per checkout. */
+  journalRepo: string;
 }
 
 export const gitMergeLocalPr = (
@@ -45,6 +50,7 @@ export const gitFinishLocalPrMerge = (
   worktreePath: string,
   worktreeId: string,
   opId: string | null,
+  journalRepo: string | null,
 ) =>
   invoke<LocalPrMergeOutcome>("git_finish_local_pr_merge", {
     repoPath,
@@ -54,6 +60,7 @@ export const gitFinishLocalPrMerge = (
     worktreePath,
     worktreeId,
     opId,
+    journalRepo,
   });
 
 /** What an abort did: `removed` = nothing this repository can remove backs the
@@ -61,7 +68,9 @@ export const gitFinishLocalPrMerge = (
  *  remove, even one git still lists), false on a failed registry read or when a
  *  leaf of ours survived the removal; `closed` = the abort ended the merge, false
  *  when the entry was already closed as done while no registered worktree of ours
- *  backed it, and whenever `removed` is false (the entry is then left open). */
+ *  backed it, and whenever `removed` is false (the entry is then left open). An
+ *  abort refused while a finish or another abort holds the entry, or whose held
+ *  claim the journal could not re-assert, rejects instead, having removed nothing. */
 export interface LocalPrMergeAbortOutcome {
   removed: boolean;
   closed: boolean;
@@ -73,11 +82,13 @@ export const gitAbortLocalPrMerge = (
   repoPath: string,
   worktreePath: string,
   opId: string | null,
+  journalRepo: string | null,
 ) =>
   invoke<LocalPrMergeAbortOutcome>("git_abort_local_pr_merge", {
     repoPath,
     worktreePath,
     opId,
+    journalRepo,
   });
 
 /** Outcome of starting or finishing a local PR's branch update (its base merged INTO
@@ -140,8 +151,13 @@ export const gitFinishLocalPrUpdate = (
     journalRepo,
   });
 
-/** Throws a paused update away; succeeds once the repository resolves, so a stored
- *  record stays clearable. */
+/** Throws a paused update away. Once the repository resolves, and unless the
+ *  update landed (by the journal, or by an unfinished entry's worktree commit;
+ *  it then answers updated), it refuses while a finish holds the entry, or when
+ *  its close could not be saved while a fresh read still finds the entry
+ *  unfinished; a retry clears the entry once the journal can be written again.
+ *  A journal unreadable from the start rules nothing out: the discard then
+ *  answers discarded without removing a registered worktree. */
 export const gitDiscardLocalPrUpdate = (
   repoPath: string,
   head: string,

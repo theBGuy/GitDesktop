@@ -229,6 +229,8 @@ const NETWORK_CALLEES = [
 const NEUTRAL_CALLEES = [
   // A cached-only route read: getQueryData, no fetch, no I/O.
   "resolveCheckoutRoute",
+  // A cached-only read of the PR's stack details, taken before the forge merge.
+  "stackLayersMergedWith",
   // A local read beside the writes it gates.
   "gitMergePreview",
   "isDirtyTreeRefusal",

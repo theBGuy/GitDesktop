@@ -21,6 +21,8 @@ import {
   type LocalPrUpdateDiscardVars,
   type LocalPrUpdateFinishVars,
   type LocalPrWriteKind,
+  MERGE_DISCARDED_UNRECORDED_NOTE,
+  MERGE_LANDED_UNRECORDED_NOTE,
   pendingWriteMatching,
   refuseWhileBranchPushes,
   repoStatusOptions,
@@ -34,15 +36,19 @@ import {
 import type { FileEntry, RepoStatus } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
-import { type LocalPr, openPendingUpdate } from "@/lib/pulls/local";
-import { localPrKey, useUpdateLocalPr } from "@/lib/pulls/queries";
+import {
+  type LocalPr,
+  openPendingUpdate,
+  pendingMergeJournalRepo,
+} from "@/lib/pulls/local";
+import { localPrKey } from "@/lib/pulls/queries";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
-import { toastError } from "@/lib/toast";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 const baseName = (path: string) => path.split("/").pop() || path;
@@ -221,9 +227,8 @@ export function ResolveConflictsView({
   const worktreePath = pending?.worktreePath ?? "";
   const status = useRepoStatus(worktreePath);
   const queryClient = useQueryClient();
-  const updateRecord = useUpdateLocalPr(repoPath);
-  const finish = useFinishLocalPrMerge(repoPath);
-  const abort = useAbortLocalPrMerge(repoPath);
+  const finish = useFinishLocalPrMerge(repoPath, localPrKey(repoPath));
+  const abort = useAbortLocalPrMerge(repoPath, localPrKey(repoPath));
   const finishUpdate = useFinishLocalPrUpdate(repoPath, localPrKey(repoPath));
   const discardUpdate = useDiscardLocalPrUpdate(repoPath, localPrKey(repoPath));
   // This worktree's own finish/discard, matched on its worktree from the cache: the
@@ -387,33 +392,30 @@ export function ResolveConflictsView({
         return;
       }
       if (!merge) return;
+      // The mutation writes the record in the repository it started in, and
+      // settles that write before it resolves. A write that failed after the
+      // merge landed is reported as such, never as a failed finish or a success.
       const outcome = await finish.mutateAsync({
+        id: pr.id,
         base: pr.base,
         strategy: merge.strategy,
         message: merge.message,
         worktreePath: merge.worktreePath,
         worktreeId: merge.worktreeId,
         opId: merge.opId,
+        journalRepo: pendingMergeJournalRepo(merge),
       });
       if (outcome.status === "merged") {
-        // Awaited ahead of its toast: a store write can reject (a concurrent
-        // MCP writer, a locked store), and a `pendingMerge` left behind points
-        // this surface at a worktree the merge has already consumed.
-        await updateRecord.mutateAsync({
-          id: pr.id,
-          mutate: (cur) => ({
-            ...cur,
-            status: "merged",
-            mergedAt: new Date().toISOString(),
-            pendingMerge: undefined,
-          }),
-        });
-        toast.success(`Merged ${pr.head} into ${pr.base}`);
+        if (outcome.recordFailure !== null)
+          toastErrorWithNote(
+            outcome.recordFailure.error,
+            MERGE_LANDED_UNRECORDED_NOTE,
+          );
+        else toast.success(`Merged ${pr.head} into ${pr.base}`);
         return;
       }
       // A multi-step rebase re-paused on the next commit's conflicts, still
-      // in the same worktree. Leave `pendingMerge` untouched — the live
-      // worktree status already drives this surface.
+      // in the same worktree, which the live worktree status already drives.
       toast("More conflicts to resolve");
     } catch (e) {
       toastError(e);
@@ -453,24 +455,30 @@ export function ResolveConflictsView({
         return;
       }
       if (!merge) return;
+      // A removed worktree's record write rides the mutation, so a record
+      // still naming the worktree surfaces as an error rather than a success
+      // (or a failed abort: the worktree is gone).
       const aborted = await abort.mutateAsync({
+        record: { id: pr.id, worktreeId: merge.worktreeId },
         worktreePath: merge.worktreePath,
         opId: merge.opId,
+        journalRepo: pendingMergeJournalRepo(merge),
       });
       // A worktree the abort left in place still backs the record, so it stays.
       if (!aborted.removed) {
         toastError(new Error(MERGE_ABORT_KEPT));
         return;
       }
-      // Same ordering as Finish: nothing of this repository's backs the record
-      // now, so a record still naming the worktree must surface as an error
-      // rather than a success toast.
-      // Status stays as the fresh record has it: a finish elsewhere wrote merged
-      // itself, and a closed entry alone is no proof one ran.
-      await updateRecord.mutateAsync({
-        id: pr.id,
-        mutate: (cur) => ({ ...cur, pendingMerge: undefined }),
-      });
+      // The note keeps an already-closed entry's line, as the success toast does.
+      if (aborted.recordFailure !== null) {
+        toastErrorWithNote(
+          aborted.recordFailure.error,
+          aborted.closed
+            ? MERGE_DISCARDED_UNRECORDED_NOTE
+            : `${MERGE_DISCARDED_UNRECORDED_NOTE} ${MERGE_ENTRY_ALREADY_CLOSED}`,
+        );
+        return;
+      }
       if (aborted.closed) toast.success("Merge discarded");
       else
         toast.success("Merge discarded", {

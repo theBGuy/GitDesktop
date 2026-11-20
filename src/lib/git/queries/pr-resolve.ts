@@ -8,6 +8,7 @@ import {
   openPendingUpdate,
   type PendingMerge,
   type PendingUpdate,
+  pendingMergeJournalRepo,
   updateLocalPr,
 } from "@/lib/pulls/local";
 import { errorMessage } from "@/lib/tauri/invoke";
@@ -55,11 +56,34 @@ export type LocalPrMergeVars = {
   message: string;
   strategy: api.MergeStrategy;
 };
+/** A record write that failed after git had already acted, with its error. Git's
+ *  outcome stands, so the mutation resolves with it, never rejecting as if git
+ *  had failed. */
+export type RecordFailure = { error: unknown } | null;
+
+export const MERGE_LANDED_UNRECORDED_NOTE =
+  "The merge landed, but this pull request's record couldn't be updated.";
+/** {@link MERGE_LANDED_UNRECORDED_NOTE}'s twin for an `already-merged` start,
+ *  which wrote nothing to land. */
+export const alreadyMergedUnrecordedNote = (head: string, base: string) =>
+  `${head} is already part of ${base}, but this pull request's record couldn't be updated.`;
+export const MERGE_DISCARDED_UNRECORDED_NOTE =
+  "The merge was discarded, but this pull request's record couldn't be updated.";
+
+/** What the abort of a refused merge's worktree answered, or its error. */
+export type RefusedMergeDiscard =
+  | { aborted: api.LocalPrMergeAbortOutcome }
+  | { error: unknown };
+
 /** A merge's outcome; `refused` names why the fresh record kept a conflicted
- *  merge out, leaving its worktree for the caller to discard. */
+ *  merge out, and `discard` what the abort of its worktree did. */
 export type LocalPrMergeResult =
-  | (api.LocalPrMergeOutcome & { refused: null })
-  | (api.LocalPrMergeOutcome & { refused: MergeRefusal; worktreePath: string });
+  | (api.LocalPrMergeOutcome & { refused: null; recordFailure: RecordFailure })
+  | (api.LocalPrMergeOutcome & {
+      refused: MergeRefusal;
+      worktreePath: string;
+      discard: RefusedMergeDiscard;
+    });
 
 /** Merge a local PR in an isolated worktree. Keyed so the view's hold reads the
  *  cache, which outlives the view's own mount. The command waits out any
@@ -67,6 +91,9 @@ export type LocalPrMergeResult =
  *  mints a worktree a pass's older keep-list would remove. A conflicted merge is
  *  recorded as the PR's `pendingMerge` before the mutation settles, so the sweep's
  *  next keep-list (read once no start is pending) already names its worktree.
+ *  A landed merge marks the record merged here, in the repository the merge ran
+ *  in, so the merge stays pending (and holds the view) until the record says so.
+ *  A refused merge's worktree is aborted here too, for the same repository.
  *  With `recordKey` (the list a caller shows), the mutation then awaits its
  *  re-read, like the update start; without one there is no list to wait for. */
 export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
@@ -82,8 +109,30 @@ export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
         args.message,
         args.strategy,
       );
-      if (outcome.status === "merged") return { ...outcome, refused: null };
-      const { worktreePath, worktreeId, opId } = outcome;
+      const reread = async () => {
+        if (recordKey)
+          await queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined);
+      };
+      // A head already part of the base wrote nothing, so it lands like a merge:
+      // there is no worktree to record or abort.
+      if (outcome.status === "merged" || outcome.status === "already-merged") {
+        try {
+          const recordFailure: RecordFailure = await updateLocalPr(
+            repo,
+            args.id,
+            (cur) => setMergeFinished(cur, null),
+          ).then(
+            () => null,
+            (error: unknown) => ({ error }),
+          );
+          return { ...outcome, refused: null, recordFailure };
+        } finally {
+          await reread();
+        }
+      }
+      const { worktreePath, worktreeId, opId, journalRepo } = outcome;
       if (!worktreePath || !worktreeId)
         throw new Error("Merge paused on conflicts but returned no worktree");
       const merge: PendingMerge = {
@@ -94,13 +143,8 @@ export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
         worktreePath,
         worktreeId,
         opId,
+        journalRepo,
         startedAt: new Date().toISOString(),
-      };
-      const reread = async () => {
-        if (recordKey)
-          await queryClient
-            .invalidateQueries({ queryKey: recordKey })
-            .catch(() => undefined);
       };
       let written: LocalPr;
       try {
@@ -110,7 +154,7 @@ export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
       } catch (e) {
         // No record names the new worktree, so nothing else would ever remove it.
         await api
-          .gitAbortLocalPrMerge(repo, worktreePath, opId)
+          .gitAbortLocalPrMerge(repo, worktreePath, opId, journalRepo)
           .catch(() => undefined);
         await reread();
         throw e;
@@ -131,7 +175,16 @@ export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
             return "updating";
         }
       })();
-      return { ...outcome, worktreePath, refused };
+      if (refused === null)
+        return { ...outcome, worktreePath, refused, recordFailure: null };
+      // Nothing records the refused merge's worktree, so it is removed here.
+      const discard: RefusedMergeDiscard = await api
+        .gitAbortLocalPrMerge(repo, worktreePath, opId, journalRepo)
+        .then(
+          (aborted) => ({ aborted }),
+          (error: unknown) => ({ error }),
+        );
+      return { ...outcome, worktreePath, refused, discard };
     },
     {
       // Local merge write — never park it offline.
@@ -141,20 +194,70 @@ export function useMergeLocalPr(repo: string, recordKey?: readonly unknown[]) {
   );
 }
 
+/** `cur` marked merged. Its paused merge is cleared only while it is still
+ *  `worktreeId`'s (null: a merge that paused nowhere clears none), since a later
+ *  merge paused on the PR meanwhile is not this one's to clear. */
+function setMergeFinished(cur: LocalPr, worktreeId: string | null): LocalPr {
+  return {
+    ...cur,
+    status: "merged",
+    mergedAt: new Date().toISOString(),
+    pendingMerge:
+      cur.pendingMerge?.worktreeId === worktreeId
+        ? undefined
+        : cur.pendingMerge,
+  };
+}
+
+/** `cur` with the journal checkout a re-paused finish recovered, saved only on the
+ *  same worktree's paused merge and only where it named none (an older record). */
+function setRecoveredJournal(
+  cur: LocalPr,
+  worktreeId: string,
+  journalRepo: string,
+): LocalPr {
+  const merge = cur.pendingMerge;
+  if (
+    merge?.worktreeId !== worktreeId ||
+    pendingMergeJournalRepo(merge) !== null
+  )
+    return cur;
+  return { ...cur, pendingMerge: { ...merge, journalRepo } };
+}
+
+/** `cur` without its paused merge, when that is still `worktreeId`'s: a later merge
+ *  paused on the PR meanwhile is not this abort's to clear. */
+function setMergeAborted(cur: LocalPr, worktreeId: string): LocalPr {
+  return cur.pendingMerge?.worktreeId === worktreeId
+    ? { ...cur, pendingMerge: undefined }
+    : cur;
+}
+
 /** Commits a paused local-PR merge once its conflicts are resolved in the worktree.
- *  Keyed so the resolve view holds by the write's own `worktreePath`. */
-export function useFinishLocalPrMerge(repo: string) {
+ *  Keyed so the resolve view holds by the write's own `worktreePath`. With `id`, the
+ *  record is written here, in the repository the finish started in: a landed merge
+ *  marks it merged (a failed write rides the outcome as `recordFailure`), and a
+ *  re-pause saves a journal checkout an older record lacked (best effort: the
+ *  re-pause itself succeeded). `recordKey` is then re-read before the mutation
+ *  settles. */
+export function useFinishLocalPrMerge(
+  repo: string,
+  recordKey?: readonly unknown[],
+) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: {
+    async (args: {
+      id?: string;
       base: string;
       strategy: api.MergeStrategy;
       message: string;
       worktreePath: string;
       worktreeId: string;
       opId: string | null;
-    }) =>
-      api.gitFinishLocalPrMerge(
+      journalRepo: string | null;
+    }): Promise<api.LocalPrMergeOutcome & { recordFailure: RecordFailure }> => {
+      const outcome = await api.gitFinishLocalPrMerge(
         repo,
         args.base,
         args.strategy,
@@ -162,7 +265,34 @@ export function useFinishLocalPrMerge(repo: string) {
         args.worktreePath,
         args.worktreeId,
         args.opId,
-      ),
+        args.journalRepo,
+      );
+      const id = args.id;
+      if (id === undefined) return { ...outcome, recordFailure: null };
+      try {
+        if (outcome.status === "merged") {
+          const recordFailure: RecordFailure = await updateLocalPr(
+            repo,
+            id,
+            (cur) => setMergeFinished(cur, args.worktreeId),
+          ).then(
+            () => null,
+            (error: unknown) => ({ error }),
+          );
+          return { ...outcome, recordFailure };
+        }
+        if (args.journalRepo === null && outcome.journalRepo)
+          await updateLocalPr(repo, id, (cur) =>
+            setRecoveredJournal(cur, args.worktreeId, outcome.journalRepo),
+          ).catch(() => undefined);
+        return { ...outcome, recordFailure: null };
+      } finally {
+        if (recordKey)
+          await queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined);
+      }
+    },
     {
       // Local merge write — never park it offline.
       networkMode: "always",
@@ -172,12 +302,52 @@ export function useFinishLocalPrMerge(repo: string) {
 }
 
 /** Rolls a paused local-PR merge back by deleting its isolated worktree. Keyed like
- *  {@link useFinishLocalPrMerge}. */
-export function useAbortLocalPrMerge(repo: string) {
+ *  {@link useFinishLocalPrMerge}. With `record`, an abort that removed the worktree
+ *  clears the record's paused merge here, in the repository the abort started in,
+ *  when it still names that worktree; a failed write rides the outcome as
+ *  `recordFailure`. Status stays as the record has it: a finish elsewhere wrote
+ *  merged itself. */
+export function useAbortLocalPrMerge(
+  repo: string,
+  recordKey?: readonly unknown[],
+) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: { worktreePath: string; opId: string | null }) =>
-      api.gitAbortLocalPrMerge(repo, args.worktreePath, args.opId),
+    async (args: {
+      record?: { id: string; worktreeId: string };
+      worktreePath: string;
+      opId: string | null;
+      journalRepo: string | null;
+    }): Promise<
+      api.LocalPrMergeAbortOutcome & { recordFailure: RecordFailure }
+    > => {
+      const aborted = await api.gitAbortLocalPrMerge(
+        repo,
+        args.worktreePath,
+        args.opId,
+        args.journalRepo,
+      );
+      const record = args.record;
+      if (record === undefined || !aborted.removed)
+        return { ...aborted, recordFailure: null };
+      try {
+        const recordFailure: RecordFailure = await updateLocalPr(
+          repo,
+          record.id,
+          (cur) => setMergeAborted(cur, record.worktreeId),
+        ).then(
+          () => null,
+          (error: unknown) => ({ error }),
+        );
+        return { ...aborted, recordFailure };
+      } finally {
+        if (recordKey)
+          await queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined);
+      }
+    },
     {
       // Local merge write — never park it offline.
       networkMode: "always",

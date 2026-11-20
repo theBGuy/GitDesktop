@@ -114,6 +114,24 @@ pub async fn list_prs(
         .await
 }
 
+/// [`list_prs`] plus whether the read stopped at its page cap.
+pub async fn list_prs_page(
+    repo_path: &str,
+    state: &str,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<crate::forge::model::RemoteListFilter>,
+) -> AppResult<(Vec<crate::github::pr::PrInfo>, bool)> {
+    crate::github::pr::gh_pr_list_page(
+        repo_path.to_string(),
+        state.to_string(),
+        limit,
+        lens,
+        filter,
+    )
+    .await
+}
+
 /// The viewer's own review state across the PR list, for the review-state grouping.
 pub async fn pr_review_state(
     repo_path: &str,
@@ -289,8 +307,9 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<crate::github::pr::PrPol
 
 // ── Merge requests (write) ───────────────────────────────────────────────────
 //
-// Thin delegates to the gh-backed PR mutations. Merge has no delegate here —
-// `forge_pr_merge` dispatches straight to `gh_pr_merge`.
+// Thin delegates to the gh-backed PR mutations. Neither the merge nor its
+// default-message read has a delegate here: `forge_pr_merge` and
+// `forge_pr_merge_message_defaults` dispatch straight to `github::pr`.
 
 /// Without images the REST edit runs unchanged; with them, `gh pr edit --attach`.
 pub async fn edit_pr(

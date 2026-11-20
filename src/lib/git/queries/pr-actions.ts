@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
-import { patchRowState } from "@/lib/remote-state-filter";
+import { cascadedStackNumbers, patchRowState } from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
 import {
@@ -20,6 +20,7 @@ import type {
   ForgeProvider,
   ForgeUserRef,
   IssueDetails,
+  MergeMessage,
   PrDetails,
   PrInfo,
   PrListPage,
@@ -47,7 +48,11 @@ import {
   readPendingLocalPrWrite,
   readPendingPrWrite,
 } from "./pr-writes";
-import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
+import {
+  prBaseDivergencePrefix,
+  prDetailsOptions,
+  prReviewThreadsKey,
+} from "./prs";
 import {
   type RecheckFilter,
   recheckListsLater,
@@ -540,10 +545,67 @@ function patchPrListState(
   );
 }
 
+/** The merge dialog's default commit messages for one strategy. Under the PR
+ *  subtree so every PR settle refreshes it; no staleTime (each open re-reads, the
+ *  head may have moved) and no placeholder (another PR's default must never show). */
+export function mergeMessageDefaultsOptions(
+  repo: string,
+  number: number,
+  strategy: api.MergeStrategy,
+  lens: RemoteLens,
+) {
+  return queryOptions({
+    queryKey: [
+      "repo",
+      repo,
+      "pr",
+      lens,
+      number,
+      "merge-message-defaults",
+      strategy,
+    ] as const,
+    queryFn: () =>
+      api.forgePrMergeMessageDefaults(repo, number, strategy, lens),
+    retry: false,
+  });
+}
+
+/** Runs only while the merge dialog is open (`enabled`). */
+export function useMergeMessageDefaults(
+  repo: string,
+  number: number,
+  strategy: api.MergeStrategy,
+  lens: RemoteLens,
+  enabled: boolean,
+) {
+  return useQuery({
+    ...mergeMessageDefaultsOptions(repo, number, strategy, lens),
+    enabled,
+  });
+}
+
+/** The open stack layers below the PR a merge targets, from its cached details:
+ *  the set the merge dialog disclosed. Empty for an unstacked merge, a missing
+ *  entry, or an entry naming another stack. Runs before the merge is sent. */
+function stackLayersMergedWith(
+  queryClient: QueryClient,
+  repo: string,
+  args: { number: number; lens: RemoteLens; stack: number | null },
+): number[] {
+  if (args.stack === null) return [];
+  const details = queryClient.getQueryData<PrDetails>(
+    prDetailsOptions(repo, args.number, args.lens).queryKey,
+  );
+  if (details?.stack?.id !== String(args.stack)) return [];
+  return cascadedStackNumbers(details.stackMembers, details.stack?.position);
+}
+
 /** Merge a PR on the forge. The variables name the PR they target (`number` +
- *  `lens`), so the view can scope its busy hold to that PR. `stack` rides them only
- *  to name the native stack the merge cascades through (the forge call ignores it),
- *  so every member of that stack's view holds too while the stack lands. */
+ *  `lens`), so the view can scope its busy hold to that PR. `stack` names the
+ *  native stack the merge cascades through: every member's view holds while it
+ *  lands, and a landed (not queued) merge re-files the open layers below it as
+ *  merged (`stackLayersMergedWith`), only when the forge reports the stack path
+ *  (`stacked`). The forge call ignores it. */
 export function useMergePr(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -554,9 +616,17 @@ export function useMergePr(repo: string) {
       stack: number | null;
       strategy: api.MergeStrategy;
       deleteBranch: boolean;
-      /** GitLab stale-view guard (the MR head sha); GitHub ignores it. */
+      /** The head the merge is bound to. GitLab checks it whenever one is sent;
+       *  GitHub only beside a custom message (a full commit id); Bitbucket ignores it. */
       sha?: string;
+      /** Absent = the forge writes its own default for that commit. */
+      squashMessage?: MergeMessage;
+      mergeMessage?: MergeMessage;
     }) => {
+      // The stack layers this merge takes with it, read before it is sent: a
+      // details refetch mid-merge can already report them merged, which the
+      // open-only filter would then drop. The cache is untrusted, so no read throws.
+      const cascaded = stackLayersMergedWith(queryClient, repo, args);
       const outcome = await api.forgePrMerge(
         repo,
         args.number,
@@ -564,6 +634,8 @@ export function useMergePr(repo: string) {
         args.deleteBranch,
         args.sha,
         args.lens,
+        args.squashMessage,
+        args.mergeMessage,
       );
       // The remote advanced but the local repo is now stale (ahead/behind, history,
       // tracking refs). Kick off a background pruning fetch so they catch up —
@@ -575,7 +647,7 @@ export function useMergePr(repo: string) {
         .gitFetch(repo)
         .then(() => invalidateRepoAfterWrite(queryClient, repo))
         .catch(() => undefined);
-      return outcome;
+      return { ...outcome, cascaded: outcome.stacked ? cascaded : [] };
     },
     {
       identity: prWriteKey("merge", repo),
@@ -585,15 +657,19 @@ export function useMergePr(repo: string) {
       // are re-read too. This hook can't tell the provider, so for any other
       // merge that is a precaution of up to two reads. The run lists read
       // origin, so an upstream-lens merge arms no run recheck. A queued merge
-      // has not landed yet, so it arms neither: its row stays where it is.
+      // has not landed yet, so it arms neither: its row stays where it is. The
+      // delayed re-read also owes the lens's issue lists and issue details: the
+      // forge closes the issues a merge resolves after it answers.
       onSuccess: (data, args) => {
         if (!data.queued) {
-          recheckListsLater(
-            queryClient,
-            repo,
-            prStateRecheckKeys(repo, args.lens),
-          );
+          recheckListsLater(queryClient, repo, [
+            ...prStateRecheckKeys(repo, args.lens),
+            [...repoKeys.issueList(repo), args.lens],
+            ["repo", repo, "issue", args.lens],
+          ]);
           patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");
+          for (const n of data.cascaded)
+            patchPrListState(queryClient, repo, args.lens, n, "MERGED");
         }
         if (args.lens === "origin" && !data.queued)
           recheckRunsAfterPush(
@@ -750,6 +826,25 @@ export const glMrMergeStateOptions = (repo: string, number: number) =>
     retry: false,
   });
 
+/** The list align's mid-merge probe: the same read under its own entry per arm,
+ *  so no read requested before the arm (the view's poll, a prefetch) answers it.
+ *  `gcTime: 0` drops a retired arm's entry once it is idle and unobserved. */
+export const glMrMergeStateAlignOptions = (
+  repo: string,
+  number: number,
+  arm: number,
+) =>
+  queryOptions({
+    queryKey: [
+      ...glMrMergeStateOptions(repo, number).queryKey,
+      "align",
+      arm,
+    ] as const,
+    queryFn: () => api.forgeGlMrMergeState(repo, number),
+    retry: false,
+    gcTime: 0,
+  });
+
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the
  *  pipeline just passed, so the whole MR view must refresh, and that merge's
@@ -767,6 +862,8 @@ export function useGlArmAutoMerge(repo: string) {
       deleteBranch: boolean;
       /** Stale-view guard (the MR head sha) — GitLab 409s if the head moved. */
       sha?: string;
+      squashMessage?: MergeMessage;
+      mergeMessage?: MergeMessage;
     }) =>
       api.forgeGlMrAutoMerge(
         repo,
@@ -774,6 +871,8 @@ export function useGlArmAutoMerge(repo: string) {
         args.strategy,
         args.deleteBranch,
         args.sha,
+        args.squashMessage,
+        args.mergeMessage,
       ),
     {
       identity: prWriteKey("gl-arm-auto-merge", repo),

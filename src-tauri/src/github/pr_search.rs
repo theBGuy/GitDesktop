@@ -433,7 +433,7 @@ async fn search_nodes<T: serde::de::DeserializeOwned>(
 /// ordinary user AND round-trip into an author qualifier that silently matches
 /// nothing (`author:dependabot` → 0 hits; `author:app/dependabot` → 64, measured).
 #[derive(Deserialize)]
-struct RawSearchAuthor {
+pub(crate) struct RawSearchAuthor {
     #[serde(default)]
     login: String,
     /// Actor type. Only `Bot` takes the prefix — a `User`, `Organization`, or
@@ -443,7 +443,7 @@ struct RawSearchAuthor {
 }
 
 impl RawSearchAuthor {
-    fn into_author(self) -> PrAuthor {
+    pub(crate) fn into_author(self) -> PrAuthor {
         // Idempotent: GraphQL never sends the prefix today, so re-prefixing an
         // already-prefixed login would be a silent `app/app/x` if that ever changes.
         // An empty login passes through untouched — absence is the `Option` around

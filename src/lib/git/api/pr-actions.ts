@@ -5,6 +5,8 @@ import type {
   CommentOutcome,
   ForgeUserList,
   GitLabMrMergeState,
+  MergeMessage,
+  MergeMessageDefaults,
   PrTask,
   RemoteLens,
 } from "../types";
@@ -185,11 +187,16 @@ export const ghPrDiscardPendingReview = (repoPath: string, reviewId: string) =>
 export interface PrMergeOutcome {
   queued: boolean;
   cleanupWarning: string | null;
+  /** True only when the merge went through GitHub's stack path, which merges or
+   *  queues the open layers below it too; false on every other path and forge. */
+  stacked: boolean;
 }
 
-// MR merge is provider-neutral (GitHub via `gh pr merge`, GitLab via `glab`). `sha`
-// is GitLab's optional stale-view guard (it 409s if the head moved since the user
-// loaded the MR); GitHub has no analogue and ignores it.
+// A merge is provider-neutral (GitHub via `gh pr merge`, GitLab via `glab`, Bitbucket over its
+// API). `sha` binds it to the head the user loaded: GitLab checks it whenever one is sent, GitHub
+// only beside a custom message, and a custom message on either needs one (GitHub: a full commit
+// id); Bitbucket drops it. An absent message sends nothing, so the forge writes its own default;
+// one the merge can't use is refused.
 export const forgePrMerge = (
   repoPath: string,
   number: number,
@@ -197,6 +204,8 @@ export const forgePrMerge = (
   deleteBranch: boolean,
   sha: string | undefined,
   lens: RemoteLens,
+  squashMessage?: MergeMessage,
+  mergeMessage?: MergeMessage,
 ) =>
   invoke<PrMergeOutcome>("forge_pr_merge", {
     repoPath,
@@ -204,6 +213,24 @@ export const forgePrMerge = (
     strategy,
     deleteBranch,
     sha: sha ?? null,
+    lens,
+    squashMessage: squashMessage ?? null,
+    mergeMessage: mergeMessage ?? null,
+  });
+
+// The read behind the merge dialog's message rows: one entry per commit the merge
+// writes, with the forge's default text. An empty `commits` means the merge writes
+// no commit that takes a message, and `reason` says why.
+export const forgePrMergeMessageDefaults = (
+  repoPath: string,
+  number: number,
+  strategy: MergeStrategy,
+  lens: RemoteLens,
+) =>
+  invoke<MergeMessageDefaults>("forge_pr_merge_message_defaults", {
+    repoPath,
+    number,
+    strategy,
     lens,
   });
 
@@ -215,14 +242,17 @@ export const forgeGlMrMergeState = (repoPath: string, number: number) =>
 
 // Arm auto-merge with a strategy ("merge" | "squash"; "rebase" is rejected
 // backend-side). `sha` is the same stale-view guard as a plain merge — GitLab
-// 409s if the head moved. 405s only when no auto-merge strategy is available and
-// the head pipeline isn't passing; a passing one merges immediately instead.
+// 409s if the head moved. A custom message needs it here too. 405s only when no
+// auto-merge strategy is available and the head pipeline isn't passing; a passing
+// one merges immediately instead.
 export const forgeGlMrAutoMerge = (
   repoPath: string,
   number: number,
   strategy: MergeStrategy,
   deleteBranch: boolean,
   sha?: string,
+  squashMessage?: MergeMessage,
+  mergeMessage?: MergeMessage,
 ) =>
   invoke<void>("forge_gl_mr_auto_merge", {
     repoPath,
@@ -230,6 +260,8 @@ export const forgeGlMrAutoMerge = (
     strategy,
     deleteBranch,
     sha: sha ?? null,
+    squashMessage: squashMessage ?? null,
+    mergeMessage: mergeMessage ?? null,
   });
 
 export const forgeGlMrCancelAutoMerge = (repoPath: string, number: number) =>

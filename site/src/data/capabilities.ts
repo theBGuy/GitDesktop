@@ -276,6 +276,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Pull requests & review",
+    label:
+      "Edit the merge commit message before you merge, with Reset to default (GitHub, GitLab, Bitbucket & local PRs)",
+  },
+  {
+    group: "Pull requests & review",
     label: "Set labels & assignees when you open a PR/MR (GitHub & GitLab)",
   },
   {

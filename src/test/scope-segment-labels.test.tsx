@@ -82,3 +82,38 @@ describe("scope segment labels", () => {
     expect(needsReviewButton(container)).toBeNull();
   });
 });
+
+describe("scope segment titles", () => {
+  const allTitle = (
+    feature: "pulls" | "issues",
+    prNoun?: "pull request" | "merge request",
+  ) => {
+    const { container } = render(
+      <ConversationPresetSwitcher
+        feature={feature}
+        preset="all"
+        storedPreset="all"
+        onPreset={noop}
+        canFilterMine
+        canGroupByReview
+        probeReason={null}
+        prNoun={prNoun}
+      />,
+    );
+    return within(container)
+      .getByRole("button", { name: "All" })
+      .getAttribute("title");
+  };
+
+  it("names every pull request by default", () => {
+    expect(allTitle("pulls")).toBe("Show every pull request");
+  });
+
+  it("follows the noun it is handed", () => {
+    expect(allTitle("pulls", "merge request")).toBe("Show every merge request");
+  });
+
+  it("leaves the issues title alone", () => {
+    expect(allTitle("issues", "merge request")).toBe("Show every issue");
+  });
+});
