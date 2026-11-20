@@ -801,6 +801,12 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// A PR/MR's delete-source-branch flag, read from a field kept as raw JSON so a
+/// non-boolean value reads as unknown instead of failing the whole detail parse.
+pub(crate) fn delete_flag(raw: Option<&serde_json::Value>) -> Option<bool> {
+    raw.and_then(serde_json::Value::as_bool)
+}
+
 /// A GitLab user as embedded in MR/note payloads.
 #[derive(Deserialize)]
 struct GlabMrUser {
@@ -2249,6 +2255,10 @@ struct GlabMrChanges {
     /// The MR's conversation is locked (only project members may comment).
     #[serde(default, deserialize_with = "null_to_default")]
     discussion_locked: bool,
+    /// The MR's own "Delete source branch" choice (`should_remove_source_branch` stays
+    /// null until a merge, so it can't stand in). Raw JSON, read through `delete_flag`.
+    #[serde(default)]
+    force_remove_source_branch: Option<serde_json::Value>,
 }
 
 /// The MR's head pipeline and its owning project, which can differ from the target.
@@ -2845,6 +2855,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         viewer_can_comment,
         // GitLab has no separate emoji permission; a lock blocks both for non-members.
         viewer_can_react: viewer_can_comment,
+        delete_source_branch: delete_flag(mr.force_remove_source_branch.as_ref()),
     })
 }
 
@@ -21377,6 +21388,31 @@ mod tests {
         let missing = format!("{{ {base} }}");
         let mr: GlabMrChanges = serde_json::from_str(&missing).unwrap();
         assert!(mr.assignees.is_empty());
+    }
+
+    #[test]
+    fn mr_changes_delete_source_branch_reads_only_booleans() {
+        // A non-boolean flag reads as unknown and never fails the detail parse.
+        let base = r#""iid": 1, "web_url": "u", "title": "t", "target_branch": "main",
+            "source_branch": "f", "state": "opened""#;
+        let read = |field: &str| {
+            let mr: GlabMrChanges = serde_json::from_str(&format!("{{ {base}{field} }}"))
+                .unwrap_or_else(|e| panic!("{field}: {e}"));
+            delete_flag(mr.force_remove_source_branch.as_ref())
+        };
+        assert_eq!(read(r#", "force_remove_source_branch": true"#), Some(true));
+        assert_eq!(
+            read(r#", "force_remove_source_branch": false"#),
+            Some(false)
+        );
+        assert_eq!(read(r#", "force_remove_source_branch": null"#), None);
+        assert_eq!(read(""), None);
+        for odd in [r#""yes""#, "1", "{}"] {
+            assert_eq!(
+                read(&format!(r#", "force_remove_source_branch": {odd}"#)),
+                None
+            );
+        }
     }
 
     #[test]

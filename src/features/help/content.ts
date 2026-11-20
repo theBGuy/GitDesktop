@@ -1279,7 +1279,12 @@ to the repository's own pull requests — one from a fork keeps the update offer
 its branch shares the name. The branch switcher reads the same list: on a branch named
 there, **Update from _the default branch_** is withheld from the menus and the shortcut,
 with the reason on the label, while updating that branch from its own upstream stays
-available. (For server-side enforcement, use **Rules** in *Repository settings*.)
+available. In your **Personal** rules, **After merging** starts the merge dialog with
+**Delete _branch_ on the remote after merging** ticked in this repository. You can still
+untick it for any merge, and the setting doesn't tick it for a pull request from a fork,
+the default branch, a promotion branch, or a branch a rule blocks from deletion. Shared
+rules don't carry it. (For server-side enforcement, use **Rules** in *Repository
+settings*.)
 
 ## Worktrees
 
@@ -2115,6 +2120,15 @@ is already being merged is left as it is: check it again in a moment to see the 
 If the state read fails (the forge can't be reached, refuses the read, or sends an
 answer GitDesktop can't read), nothing is merged and you can try again.
 Merges an agent sends through GitDesktop's MCP server get the same check.
+
+The **Delete _branch_ on the remote after merging** checkbox starts ticked when **After
+merging** is on in *Branch rules*, except for a pull request from a fork, the default
+branch, a promotion branch, or a branch a rule blocks from deletion. Otherwise a
+**GitLab** merge request or **Bitbucket** pull request starts the checkbox from its own
+delete choice made on the forge, forks included, and a **GitHub** pull request starts
+unticked. A branch a rule blocks from deletion can't be deleted from the dialog, and the
+default branch gets no checkbox. The merge does what the checkbox shows. GitHub's own **Automatically delete head branches**
+repository setting still deletes the branch after a merge, whatever the checkbox says.
 
 ## Maintaining a pull request from a fork
 

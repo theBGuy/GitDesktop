@@ -127,6 +127,7 @@ import {
   isDeletionBlocked,
   isMergeMethodAllowed,
   isPromotionBranch,
+  mergeDeleteStartsTicked,
 } from "@/lib/branch-rules/match";
 import {
   useEffectiveBranchRules,
@@ -4157,7 +4158,21 @@ export function RemotePrView({
       mergeAuto === auto;
     if (!kept) {
       setMergeStrategy(strategy);
-      setDeleteBranch(false);
+      // Decided once at open: a later answer can only drop the tick, never add
+      // one, since a box that flips on while the user reaches for it gets
+      // unticked by the click.
+      setDeleteBranch(
+        mergeDeleteStartsTicked({
+          pref: rulesConfig.deleteHeadAfterMerge,
+          rulesSettled: !rulesSettling,
+          defaultBranchKnown: defaultBranch.data != null,
+          headIsDefault,
+          deletionBlocked: headDeletionBlocked,
+          promotion: promotionKind === "configured",
+          crossRepository: pr?.crossRepository,
+          forgeDeleteFlag: pr?.deleteSourceBranch,
+        }),
+      );
       setMergeAuto(auto);
       mergeDraft.reset();
       setMergeFailure(null);

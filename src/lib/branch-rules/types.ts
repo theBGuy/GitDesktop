@@ -51,10 +51,15 @@ export interface BranchRulesConfig {
    *  (a `staging` → `production` PR, say). Their head is behind its base by
    *  design, so GitDesktop never offers to update them from it. */
   promotionBranches: string[];
+  /** Personal only: start the merge dialog's delete-head checkbox ticked (never
+   *  for a fork, the default branch, a promotion branch or a head a rule blocks
+   *  from deletion). Ignored in the shared file. */
+  deleteHeadAfterMerge: boolean;
 }
 
 export const EMPTY_BRANCH_RULES: BranchRulesConfig = {
   naming: { enabled: false, pattern: "", hint: "" },
   protections: [],
   promotionBranches: [],
+  deleteHeadAfterMerge: false,
 };

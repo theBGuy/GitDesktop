@@ -310,7 +310,8 @@ arrows, and a branch marked Keep local wears a `kept local` chip.
   GitHub. A promotion-branches list marks pull requests from those branches
   as promotions: their PRs stop offering the update from the base, and the
   branch menus withhold the one-click update from the default branch, so
-  promotion flows keep their direction.
+  promotion flows keep their direction. An **After merging** option starts
+  the merge dialog with the head branch's delete ticked.
 
 ### History
 

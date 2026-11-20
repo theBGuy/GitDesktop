@@ -499,7 +499,15 @@ export function RepoList({
           className={FILTER_INPUT_CLASS}
         />
       </div>
-      <ScrollArea className={LIST_VIEWPORT_CLASS} ref={listRef}>
+      <ScrollArea
+        className={cn(
+          LIST_VIEWPORT_CLASS,
+          // The clip margin matches the vendored viewport's 3 px focus ring,
+          // so the ring still paints outside the clip.
+          "overflow-clip [overflow-clip-margin:3px]",
+        )}
+        ref={listRef}
+      >
         <ContextMenu
           onOpenChange={(isOpen) => {
             setMenuOpen(isOpen);

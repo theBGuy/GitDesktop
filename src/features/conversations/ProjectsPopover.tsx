@@ -446,7 +446,7 @@ export function ProjectsPopover({
                   // rail renders only with rows, so that padding never paints a
                   // blank band under the loading and empty notices.
                   <div
-                    className="max-h-64 overflow-y-auto py-2"
+                    className="relative max-h-64 overflow-y-auto py-2"
                     onKeyDown={nav.onRowKeyDown}
                   >
                     {rows.map((project) => {

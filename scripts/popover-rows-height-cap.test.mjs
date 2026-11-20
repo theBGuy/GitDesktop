@@ -351,7 +351,7 @@ test("mutation: removing the views list's cap in an allowlisted popup fails", ()
   const rel = "src/features/projects/ProjectsBoardPanel.tsx";
   const real = CORPUS.get(rel);
   assert.ok(real, rel);
-  const cap = 'className="max-h-56 gap-0 overflow-y-auto"';
+  const cap = 'className="max-h-56 gap-0 overflow-y-auto pb-2"';
   assert.equal(real.split(cap).length, 2, "the views list's cap, once");
   const uncapped = new Map([
     ...CORPUS,

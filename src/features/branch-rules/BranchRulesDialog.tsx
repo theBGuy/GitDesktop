@@ -34,6 +34,8 @@ import {
 import { presentError } from "@/lib/error-summary";
 import { ghBranchProtections } from "@/lib/git/api";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import { shownProviderLabel } from "@/lib/git/types";
+import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -67,6 +69,7 @@ export function BranchRulesDialog({
   const patternInputId = useId();
   const hintInputId = useId();
   const testNameInputId = useId();
+  const afterMergeHintId = useId();
   // Keyed by row position, like the list itself — Add and Remove hand focus to a
   // neighbour rather than dropping it to the body.
   const promotionRefs = useRef<(HTMLInputElement | null)[]>([]);
@@ -265,6 +268,14 @@ export function BranchRulesDialog({
   const promotionBranches = draft.promotionBranches;
   const namePattern = draft.naming.pattern.trim();
   const testMatches = namePattern !== "" && matchesGlob(namePattern, testName);
+  const provider = gh.data?.provider;
+  const prNoun = provider ? PR_NOUN[provider] : "pull request";
+  // Only GitLab and Bitbucket carry a per-MR/PR delete choice the merge dialog
+  // starts from; null while the forge probe is pending names no forge.
+  const forgeChoiceLabel =
+    provider === "gitlab" || provider === "bitbucket"
+      ? shownProviderLabel(provider)
+      : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -272,7 +283,7 @@ export function BranchRulesDialog({
         <DialogHeader>
           <DialogTitle>Branch rules</DialogTitle>
           <DialogDescription>
-            Local guardrails GitDesktop enforces in this repository. They help
+            Local guardrails and merge defaults for this repository. They help
             prevent accidents on any repo; GitHub's own protection still applies
             on push. Patterns are globs — <span className="font-mono">*</span>{" "}
             within a segment, <span className="font-mono">**</span> across{" "}
@@ -557,6 +568,38 @@ export function BranchRulesDialog({
                   </div>
                 )}
               </section>
+
+              {/* Personal only: the shared file never carries this start. */}
+              {scope === "personal" && (
+                <section className="space-y-2">
+                  <h3 className="text-xs font-medium">After merging</h3>
+                  <label className="flex cursor-pointer items-center gap-2 text-xs">
+                    <Checkbox
+                      checked={draft.deleteHeadAfterMerge}
+                      onCheckedChange={(c) =>
+                        setDraft((d) => ({
+                          ...d,
+                          deleteHeadAfterMerge: c === true,
+                        }))
+                      }
+                      aria-describedby={afterMergeHintId}
+                    />
+                    {
+                      'Start the merge dialog with "Delete branch on the remote after merging" ticked'
+                    }
+                  </label>
+                  <p
+                    id={afterMergeHintId}
+                    className="pl-6 text-xs text-muted-foreground"
+                  >
+                    You can still untick it for any merge. The setting doesn't
+                    tick it for a {prNoun} from a fork, the default branch, a
+                    promotion branch, or a branch a rule blocks from deletion.
+                    {forgeChoiceLabel &&
+                      ` When the setting doesn't tick it, a ${prNoun} starts from its own delete choice on ${forgeChoiceLabel}.`}
+                  </p>
+                </section>
+              )}
             </div>
           )}
         </div>

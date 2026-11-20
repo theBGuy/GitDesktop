@@ -68,7 +68,10 @@ export function RepoSettingsDialogFallback({
           </div>
           <div
             aria-busy
-            className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 min-w-0 flex-1")}
+            className={cn(
+              DIALOG_SCROLL_X_HIDDEN,
+              "mb-0 min-h-0 min-w-0 flex-1",
+            )}
           >
             {/* aria-busy alone has no text; role="status" gives the busy
                 region words for readers that announce it. */}

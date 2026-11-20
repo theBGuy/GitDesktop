@@ -25,7 +25,7 @@ use tauri_plugin_http::reqwest;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
-use crate::forge::gitlab::null_to_default;
+use crate::forge::gitlab::{delete_flag, null_to_default};
 use crate::forge::http::{
     self, BbCredentials, BbOpKind, BB_API_BASE, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN,
     KEY_USERNAME,
@@ -1055,6 +1055,9 @@ struct BbPr {
     /// ISO-8601 open time (`created_on`); "" when absent or null.
     #[serde(default, deserialize_with = "null_to_default")]
     created_on: String,
+    /// The PR's own "Close source branch" choice. Raw JSON, read through `delete_flag`.
+    #[serde(default)]
+    close_source_branch: Option<serde_json::Value>,
 }
 
 fn view_head_sha(pr: &BbPr) -> &str {
@@ -2021,6 +2024,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         active_lock_reason: None,
         viewer_can_comment: None,
         viewer_can_react: None,
+        delete_source_branch: delete_flag(pr.close_source_branch.as_ref()),
     })
 }
 
@@ -7141,6 +7145,27 @@ mod tests {
         assert_eq!(owner(r#","source":{"repository":null}"#), None);
         assert_eq!(owner(r#","source":{"branch":{"name":"feat"}}"#), None);
         assert_eq!(owner(""), None);
+    }
+
+    /// A non-boolean `close_source_branch` reads as unknown and never fails the parse.
+    #[test]
+    fn pr_close_source_branch_reads_only_booleans() {
+        let read = |field: &str| {
+            let pr: BbPr = serde_json::from_str(&format!(
+                r#"{{"id":7,"state":"OPEN",
+                    "source":{{"branch":{{"name":"feat"}}}},
+                    "destination":{{"branch":{{"name":"main"}}}}{field}}}"#
+            ))
+            .unwrap_or_else(|e| panic!("{field}: {e}"));
+            delete_flag(pr.close_source_branch.as_ref())
+        };
+        assert_eq!(read(r#","close_source_branch":true"#), Some(true));
+        assert_eq!(read(r#","close_source_branch":false"#), Some(false));
+        assert_eq!(read(r#","close_source_branch":null"#), None);
+        assert_eq!(read(""), None);
+        for odd in [r#""yes""#, "1", "{}"] {
+            assert_eq!(read(&format!(r#","close_source_branch":{odd}"#)), None);
+        }
     }
 
     /// A fork PR's source repo differs from its destination; an unfielded payload

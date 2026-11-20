@@ -220,13 +220,15 @@ describe("merge dialog: resting row", () => {
     const scroller = message.parentElement as HTMLElement;
     expect(scroller).toHaveClass(
       "-mx-1",
-      "-my-1",
+      "-mt-1",
+      "-mb-2",
       "min-h-0",
       "min-w-0",
       "flex-1",
       "overflow-y-auto",
       "px-1",
-      "py-1",
+      "pt-1",
+      "pb-2",
       "space-y-4",
     );
     // The message region keeps its focus host role but no longer scrolls.
@@ -771,6 +773,45 @@ describe("merge dialog: plan states", () => {
         "Edited. The host writes this message instead of its default.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("loading, offline and no-message each hold one min-h-6 row", () => {
+    const { rerender } = setup({ plan: { state: "loading" } });
+    const text = screen.getByText("Loading GitHub's default…");
+    const host = region();
+    for (
+      let el: HTMLElement | null = text;
+      el !== null && el !== host;
+      el = el.parentElement
+    ) {
+      expect(el).not.toHaveClass("sr-only");
+    }
+    const row = text.parentElement as HTMLElement;
+    expect(row).toHaveClass("flex", "min-h-6", "items-center");
+    expect(row.firstElementChild).toBe(text);
+    const bar = text.nextElementSibling;
+    expect(bar).toHaveAttribute("data-slot", "skeleton");
+    expect(bar?.nextElementSibling).toBeNull();
+    const group = screen.getByRole("group", { name: "Commit message" });
+    expect(group.children).toHaveLength(2);
+    expect(group.lastElementChild).toBe(row);
+    expect(host).toHaveAttribute("aria-busy", "true");
+    rerender({ plan: { state: "offline" } });
+    expect(screen.getByText(O1, { selector: "p" })).toHaveClass(
+      "flex",
+      "min-h-6",
+      "items-center",
+    );
+    rerender({ plan: ready([], "rebase") });
+    expect(
+      screen.getByText(/^Rebase and merge keeps/, { selector: "p" }),
+    ).toHaveClass("flex", "min-h-6", "items-center");
+    rerender({ plan: ready([]) });
+    const empty = screen.getByRole("group", {
+      name: "Commit message",
+    }).lastElementChild;
+    expect(empty?.tagName).toBe("P");
+    expect(empty).toHaveClass("flex", "min-h-6", "items-center");
   });
 });
 

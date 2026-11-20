@@ -7617,6 +7617,10 @@ pub struct PrDetails {
     /// Whether the viewer may react. GitHub: `pullRequest.viewerCanReact` verbatim;
     /// GitLab: the same value as `viewer_can_comment`; Bitbucket: `None`.
     pub viewer_can_react: Option<bool>,
+    /// The MR/PR's own delete-source-branch-on-merge choice: GitLab's
+    /// `force_remove_source_branch`, Bitbucket's `close_source_branch`. `None` when
+    /// unread or not a boolean, and always on GitHub, which has no per-PR flag.
+    pub delete_source_branch: Option<bool>,
 }
 
 /// GitHub's pull-request commits endpoint returns at most 250 commits.
@@ -8522,6 +8526,7 @@ pub async fn gh_pr_view(
         active_lock_reason: conversation.active_lock_reason,
         viewer_can_comment: conversation.viewer_can_comment,
         viewer_can_react: conversation.viewer_can_react,
+        delete_source_branch: None,
     })
 }
 
@@ -11952,7 +11957,23 @@ mod tests {
             active_lock_reason: None,
             viewer_can_comment: None,
             viewer_can_react: None,
+            delete_source_branch: None,
         }
+    }
+
+    /// `deleteSourceBranch` is read by the TS mirror verbatim; unknown is an explicit null.
+    #[test]
+    fn delete_source_branch_serializes_camel_case() {
+        let mut details = details_with_stack(None, Vec::new(), false, false);
+        details.delete_source_branch = Some(true);
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["deleteSourceBranch"], true);
+        assert!(v.get("delete_source_branch").is_none());
+
+        let v = serde_json::to_value(details_with_stack(None, Vec::new(), false, false)).unwrap();
+        assert!(v
+            .get("deleteSourceBranch")
+            .is_some_and(serde_json::Value::is_null));
     }
 
     /// The lock fields are read by the TS mirror verbatim, so their wire keys are

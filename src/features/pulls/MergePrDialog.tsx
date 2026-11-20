@@ -455,16 +455,20 @@ function MergeDialogBody({
       case "loading":
         return (
           <LabeledGroup label={ONE_ROW.caption} actions={<CaptionActions />}>
-            <Skeleton className="h-6 w-full" />
-            <p className="text-xs text-muted-foreground">
-              Loading {host}'s default…
-            </p>
+            <div className="flex min-h-6 items-center gap-2">
+              <span className="shrink-0 text-xs text-muted-foreground">
+                Loading {host}'s default…
+              </span>
+              <Skeleton className="h-3 min-w-0 flex-1" />
+            </div>
           </LabeledGroup>
         );
       case "offline":
         return (
           <LabeledGroup label={ONE_ROW.caption} actions={<CaptionActions />}>
-            <p className="text-xs text-muted-foreground">{offlineLine(host)}</p>
+            <p className="flex min-h-6 items-center text-xs text-muted-foreground">
+              {offlineLine(host)}
+            </p>
           </LabeledGroup>
         );
       case "failed":
@@ -497,7 +501,7 @@ function MergeDialogBody({
           const why = plan.defaults.reason;
           return (
             <LabeledGroup label={ONE_ROW.caption} actions={<CaptionActions />}>
-              <p className="text-xs text-muted-foreground">
+              <p className="flex min-h-6 items-center text-xs text-muted-foreground">
                 {why !== null
                   ? NO_MESSAGE_LINE[why](headRefName, baseRefName)
                   : null}
@@ -553,12 +557,12 @@ function MergeDialogBody({
           options, never only on the confirm button. */}
       {stackNotice && <p className="text-xs text-warning">{stackNotice}</p>}
       {/* The one scroller: message, delete option and failure scroll together,
-          with no nested scroller. The vertical inset keeps a focus ring flush
-          with its top or bottom edge unclipped. */}
+          with no nested scroller. The top inset keeps a focus ring flush with
+          the top edge unclipped; the bottom pair comes from DIALOG_SCROLL. */}
       <div
         className={cn(
           DIALOG_SCROLL,
-          "-my-1 min-h-0 min-w-0 flex-1 space-y-4 py-1",
+          "-mt-1 min-h-0 min-w-0 flex-1 space-y-4 pt-1",
         )}
       >
         <div
