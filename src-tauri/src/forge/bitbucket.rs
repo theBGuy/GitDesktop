@@ -3463,6 +3463,71 @@ fn merge_payload(
     payload
 }
 
+const BB_DECLINED_REFUSAL: &str =
+    "This pull request was declined on Bitbucket, so nothing was merged.";
+const BB_SUPERSEDED_REFUSAL: &str =
+    "This pull request was superseded on Bitbucket, so nothing was merged.";
+const BB_MERGED_REFUSAL: &str =
+    "This pull request was already merged on Bitbucket, so there was nothing left to merge.";
+const BB_UNREACHABLE_LEAD: &str = "Couldn't reach Bitbucket to confirm this pull request is still open, so nothing was merged. Try again.";
+const BB_UNCONFIRMED_LEAD: &str = "Couldn't confirm this pull request is still open on Bitbucket, so nothing was merged. Try again.";
+
+/// The state-only read ahead of the merge POST.
+async fn pr_merge_state_read(
+    creds: &BbCredentials,
+    base: &str,
+    number: u64,
+) -> AppResult<serde_json::Value> {
+    http::bb_get_json::<serde_json::Value>(
+        creds,
+        &format!("{base}/pullrequests/{number}?fields=state"),
+        "pull request",
+        BbOpKind::Read,
+    )
+    .await
+}
+
+/// `OPEN` or an unknown state lets the merge go; `DECLINED`, `SUPERSEDED` and `MERGED`
+/// refuse (matched exactly, as `map_bb_pr_state` does), and so does a read that failed
+/// or didn't answer with a JSON object.
+fn bb_merge_guard_outcome(read: AppResult<serde_json::Value>) -> AppResult<()> {
+    let value = read.map_err(bb_merge_guard_failed)?;
+    if !value.is_object() {
+        return Err(AppError::Bitbucket(format!(
+            "{BB_UNCONFIRMED_LEAD}\ncould not parse Bitbucket pull request: the answer was not a JSON object"
+        )));
+    }
+    let refusal = match value.get("state").and_then(serde_json::Value::as_str) {
+        Some("DECLINED") => BB_DECLINED_REFUSAL,
+        Some("SUPERSEDED") => BB_SUPERSEDED_REFUSAL,
+        Some("MERGED") => BB_MERGED_REFUSAL,
+        _ => return Ok(()),
+    };
+    Err(AppError::Bitbucket(refusal.into()))
+}
+
+/// A failed state read refuses the merge. A transport cause (the suffix
+/// `transport_failure_message` writes) leads with "Couldn't reach", which the frontend's
+/// network rewrite keeps; a missing account passes through as itself.
+fn bb_merge_guard_failed(e: AppError) -> AppError {
+    let (lead, detail) = match e {
+        AppError::BitbucketNotConfigured => return e,
+        AppError::Bitbucket(text) => {
+            let transport = [http::TRANSPORT_CONNECT_FAILED, http::TRANSPORT_TIMED_OUT]
+                .iter()
+                .any(|cause| text.ends_with(&format!(": {cause}")));
+            let lead = if transport {
+                BB_UNREACHABLE_LEAD
+            } else {
+                BB_UNCONFIRMED_LEAD
+            };
+            (lead, text)
+        }
+        other => (BB_UNCONFIRMED_LEAD, crate::forge::error_detail(other)),
+    };
+    AppError::Bitbucket(format!("{lead}\n{detail}"))
+}
+
 /// Merge a pull request (`POST …/pullrequests/{n}/merge`). Bitbucket has no
 /// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
 /// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
@@ -3484,6 +3549,7 @@ pub async fn merge_pr(
     let text = message.as_ref().map(bb_merge_message).transpose()?;
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
+    bb_merge_guard_outcome(pr_merge_state_read(&creds, &base, number).await)?;
     let path = format!("{base}/pullrequests/{number}/merge");
     let payload = merge_payload(merge_strategy, delete_branch, text.as_deref());
     let (status, location, body) =
@@ -8752,6 +8818,142 @@ mod tests {
             merge_payload("squash", true, Some("t\n\nb")),
             serde_json::json!({"type":"pullrequest","merge_strategy":"squash","close_source_branch":true,"message":"t\n\nb"})
         );
+    }
+
+    #[test]
+    fn bb_merge_guard_outcome_refuses_all_but_an_open_or_unknown_pull_request() {
+        let parse = |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap();
+        let outcome = |body: &str| bb_merge_guard_outcome(Ok(parse(body)));
+        let refused = |body: &str| match outcome(body) {
+            Err(AppError::Bitbucket(t)) => t,
+            other => panic!("{body}: {other:?}"),
+        };
+        assert!(outcome(r#"{"state":"OPEN"}"#).is_ok());
+        assert_eq!(refused(r#"{"state":"DECLINED"}"#), BB_DECLINED_REFUSAL);
+        assert_eq!(refused(r#"{"state":"SUPERSEDED"}"#), BB_SUPERSEDED_REFUSAL);
+        assert_eq!(refused(r#"{"state":"MERGED"}"#), BB_MERGED_REFUSAL);
+        for body in [
+            r#"{"state":null}"#,
+            "{}",
+            r#"{"state":5}"#,
+            r#"{"state":"Open"}"#,
+            r#"{"state":"declined"}"#,
+        ] {
+            assert!(outcome(body).is_ok(), "{body}");
+        }
+        for body in ["[]", "\"x\"", "null"] {
+            let text = refused(body);
+            assert_eq!(text.lines().next(), Some(BB_UNCONFIRMED_LEAD), "{body}");
+            assert!(text.lines().nth(1).is_some_and(|l| !l.is_empty()), "{body}");
+        }
+    }
+
+    #[test]
+    fn bb_merge_guard_outcome_splits_unreachable_from_unconfirmed() {
+        let refused = |e: AppError| match bb_merge_guard_outcome(Err(e)) {
+            Err(AppError::Bitbucket(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        for cause in [http::TRANSPORT_CONNECT_FAILED, http::TRANSPORT_TIMED_OUT] {
+            let text = format!("Bitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/repositories/w/r/pullrequests/1?fields=state): {cause}");
+            assert_eq!(
+                refused(AppError::Bitbucket(text.clone())),
+                format!("{BB_UNREACHABLE_LEAD}\n{text}")
+            );
+        }
+        // The cause must END the text, as `transport_failure_message` writes it.
+        let mid = "Bitbucket request failed: connection failed: retry";
+        assert_eq!(
+            refused(AppError::Bitbucket(mid.into())),
+            format!("{BB_UNCONFIRMED_LEAD}\n{mid}")
+        );
+        for status in [401, 404] {
+            let detail = http::bb_error_detail(status, "", BbOpKind::Read);
+            assert_eq!(
+                refused(AppError::Bitbucket(detail.clone())),
+                format!("{BB_UNCONFIRMED_LEAD}\n{detail}")
+            );
+        }
+        let unreadable = http::bb_unreadable(
+            "pull request",
+            "could not parse Bitbucket pull request: x".into(),
+        );
+        let text = refused(unreadable);
+        assert_eq!(text.lines().next(), Some(BB_UNCONFIRMED_LEAD));
+        assert!(matches!(
+            bb_merge_guard_outcome(Err(AppError::BitbucketNotConfigured)),
+            Err(AppError::BitbucketNotConfigured)
+        ));
+    }
+
+    /// The copy the help guide quotes.
+    #[test]
+    fn bb_merge_refusal_consts_keep_their_text() {
+        assert_eq!(
+            BB_DECLINED_REFUSAL,
+            "This pull request was declined on Bitbucket, so nothing was merged."
+        );
+        assert_eq!(
+            BB_SUPERSEDED_REFUSAL,
+            "This pull request was superseded on Bitbucket, so nothing was merged."
+        );
+        assert_eq!(BB_MERGED_REFUSAL, "This pull request was already merged on Bitbucket, so there was nothing left to merge.");
+        assert_eq!(BB_UNREACHABLE_LEAD, "Couldn't reach Bitbucket to confirm this pull request is still open, so nothing was merged. Try again.");
+        assert_eq!(BB_UNCONFIRMED_LEAD, "Couldn't confirm this pull request is still open on Bitbucket, so nothing was merged. Try again.");
+    }
+
+    const BB_GUARD: &str =
+        "bb_merge_guard_outcome(pr_merge_state_read(&creds, &base, number).await)?;";
+
+    /// Over a flattened merge body: the state guard follows the repo base and precedes
+    /// the payload and the POST.
+    fn merge_pr_guards_state_first(body: &str) -> bool {
+        let at = |needle: &str| body.find(needle);
+        let (Some(base), Some(guard), Some(payload), Some(send)) = (
+            at("repo_base("),
+            at(BB_GUARD),
+            at("merge_payload("),
+            at("bb_send_request_split("),
+        ) else {
+            return false;
+        };
+        body.matches(BB_GUARD).count() == 1 && base < guard && guard < payload && guard < send
+    }
+
+    #[test]
+    fn merge_pr_reads_state_before_the_merge_post() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("bitbucket.rs"),
+            "merge_pr",
+        ));
+        assert!(merge_pr_guards_state_first(&body), "{body}");
+        let removed = body.replacen(&format!("{BB_GUARD} "), "", 1);
+        let moved = {
+            let from = removed.find("bb_send_request_split(").unwrap();
+            let at = from + removed[from..].find(';').unwrap() + 1;
+            format!("{} {BB_GUARD}{}", &removed[..at], &removed[at..])
+        };
+        let mutants = [
+            ("removed", removed),
+            ("after the POST", moved),
+            (
+                "fail-open .ok()",
+                body.replacen(BB_GUARD, &BB_GUARD.replace(")?;", ").ok();"), 1),
+            ),
+            (
+                "fail-open let _",
+                body.replacen(
+                    BB_GUARD,
+                    &format!("let _ = {};", BB_GUARD.trim_end_matches("?;")),
+                    1,
+                ),
+            ),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}");
+            assert!(!merge_pr_guards_state_first(&mutant), "{what}: {mutant}");
+        }
     }
 
     #[test]

@@ -624,7 +624,7 @@ function mergeState(fields: Partial<GitLabMrMergeState>): GitLabMrMergeState {
   };
 }
 
-const LOCKED = { locked: true, state: "CLOSED" };
+const LOCKED = { locked: true, state: "MERGING" };
 
 function deferred<T>() {
   let resolve: (value: T) => void = () => undefined;
@@ -663,7 +663,7 @@ describe("PullRequestsPanel align of a GitLab MR mid-merge", () => {
     {
       forge = READY_GITLAB,
       arm = true,
-      detailsState = "CLOSED",
+      detailsState = "MERGING",
       seed,
     }: {
       forge?: ForgeStatus;

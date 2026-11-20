@@ -7085,8 +7085,9 @@ mod tests {
     }
 
     fn keep_local_git(dir: &std::path::Path, args: &[&str]) {
+        use crate::git::runner::TestGitEnv;
         let out = std::process::Command::new("git")
-            .envs(crate::git::runner::TEST_GIT_ENV)
+            .test_git_env()
             .current_dir(dir)
             .args(args)
             .output()

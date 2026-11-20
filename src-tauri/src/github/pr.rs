@@ -2851,6 +2851,11 @@ fn classify_gh_merge_refusal(stderr: &str) -> Option<String> {
     const GRAPHQL: &str = "GraphQL: ";
     for line in stderr.lines() {
         let line = line.trim();
+        // pflag's refusal of the one flag that sets the floor for an edited merge; the
+        // whole line must match, so cobra's usage echo can't.
+        if line == "unknown flag: --match-head-commit" {
+            return Some(GH_TOO_OLD_FOR_MESSAGE.to_string());
+        }
         if line.contains("is not mergeable: the base branch policy prohibits the merge") {
             return Some(
                 "GitHub is blocking this merge — branch protections aren't satisfied yet."
@@ -2907,6 +2912,7 @@ fn gh_merge_stdin(message: Option<&crate::forge::MergeMessage>) -> String {
 const HEAD_MOVED_REFUSAL: &str = "This pull request got new commits after its commit message was loaded, so nothing was merged. Check the message and merge again.";
 const ALREADY_MERGED_REFUSAL: &str =
     "This pull request was already merged, so your edited message wasn't used.";
+const GH_TOO_OLD_FOR_MESSAGE: &str = "Merging with an edited message needs GitHub CLI 2.13 or newer, so nothing was merged. Update gh, then merge again.";
 
 /// Whether an exit-0 `gh pr merge` that sent a message reported the pull request as
 /// merged before this call, which then used no message: a stderr line whose text before
@@ -2995,11 +3001,12 @@ pub async fn gh_pr_merge(
     let message = crate::forge::single_commit_message(&strategy, &["rebase"], messages)?;
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let outcome = async {
-        // A stack member rejects BOTH `gh pr merge` and the plain REST merge endpoint;
-        // GitHub requires its asynchronous merge API there. The probe is best-effort —
-        // when it can't tell, the legacy path runs and GitHub's own refusal is the
-        // backstop. Merging a member also merges every unmerged layer below it.
-        let (queued, stacked) = if gh_pr_is_stacked(&repo_path, &slug, number).await {
+        // One read decides the state guard and the stack route: a failed read refuses
+        // the merge, and an inconclusive `stack` in a readable body takes the legacy path.
+        // A stack member rejects both `gh pr merge` and the plain REST merge endpoint, and
+        // merging one also merges every unmerged layer below it.
+        let stacked_probe = gh_merge_precheck(&repo_path, &slug, number).await?;
+        let (queued, stacked) = if stacked_probe {
             stacked_message_refusal(true, message.as_ref())?;
             let queued = gh_pr_merge_async(&repo_path, &slug, number, &strategy).await?
                 == StackedMergeResult::Queued;
@@ -3065,15 +3072,88 @@ pub async fn gh_pr_merge(
     outcome
 }
 
-/// Whether the PR is a stack member — the same `pull_stack_ref` reading the detail
-/// view uses, so the merge path can never cascade a stack the detail view didn't
-/// show. `false` on ANY failure (network, a host without stacks, an unparseable or
-/// incomplete `stack` object): the legacy merge path then runs, and GitHub rejects
-/// a stacked merge there with its own actionable error.
-async fn gh_pr_is_stacked(repo_path: &str, slug: &str, number: u64) -> bool {
-    gh_pr_stack_probe(repo_path, slug, number)
-        .await
-        .unwrap_or(false)
+pub(crate) const GH_CLOSED_REFUSAL: &str = "This pull request was closed on GitHub, so nothing was merged. Reopen it if you still want to merge it.";
+const GH_MERGED_REFUSAL: &str =
+    "This pull request was already merged on GitHub, so there was nothing left to merge.";
+const GH_UNREACHABLE_LEAD: &str = "Couldn't reach GitHub to confirm this pull request is still open, so nothing was merged. Try again.";
+const GH_UNCONFIRMED_LEAD: &str =
+    "Couldn't confirm this pull request is still open on GitHub, so nothing was merged. Try again.";
+
+/// The merge's one read of the pull request, before anything is sent: `Ok(stacked)`
+/// for an open (or unknown-state) one, read through the detail view's
+/// `pull_stack_ref` so the merge never cascades a stack the view didn't show.
+async fn gh_merge_precheck(repo_path: &str, slug: &str, number: u64) -> AppResult<bool> {
+    let endpoint = format!("repos/{slug}/pulls/{number}");
+    let read = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await;
+    gh_merge_precheck_outcome(read)
+}
+
+/// Merged (`merged` or a `merged_at`) wins over `state`; `closed` refuses; any other or
+/// missing `state` lets the merge go, where GitHub decides. A failed read, or one that
+/// isn't a JSON object, refuses; an inconclusive `stack` reads as not stacked.
+fn gh_merge_precheck_outcome(read: AppResult<GhOutput>) -> AppResult<bool> {
+    let out = read.map_err(gh_merge_precheck_failed)?;
+    if out.code != 0 {
+        let raw = out.stderr.trim();
+        return Err(gh_merge_precheck_failed(AppError::Gh(if raw.is_empty() {
+            format!("gh exited with code {}", out.code)
+        } else {
+            raw.to_string()
+        })));
+    }
+    let body = out.stdout_lossy();
+    let value = match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        Ok(_) => {
+            return Err(AppError::Gh(format!(
+                "{GH_UNCONFIRMED_LEAD}\ncould not parse the pull request: the answer was not a JSON object"
+            )))
+        }
+        Err(e) => {
+            return Err(AppError::Gh(format!(
+                "{GH_UNCONFIRMED_LEAD}\ncould not parse the pull request: {e}"
+            )))
+        }
+    };
+    let merged = value.get("merged").and_then(serde_json::Value::as_bool) == Some(true)
+        || value
+            .get("merged_at")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|at| !at.trim().is_empty());
+    if merged {
+        return Err(AppError::Gh(GH_MERGED_REFUSAL.into()));
+    }
+    if value.get("state").and_then(serde_json::Value::as_str) == Some("closed") {
+        return Err(AppError::Gh(GH_CLOSED_REFUSAL.into()));
+    }
+    Ok(pull_stack_ref(&body).is_some())
+}
+
+/// A failed state read refuses the merge. A transport cause leads with "Couldn't reach",
+/// which the frontend's network rewrite keeps; a missing gh passes through as itself.
+fn gh_merge_precheck_failed(e: AppError) -> AppError {
+    let (lead, detail) = match e {
+        AppError::GhNotFound => return e,
+        AppError::Timeout(s) => (
+            GH_UNREACHABLE_LEAD,
+            format!("GitHub CLI timed out after {s}s."),
+        ),
+        AppError::Gh(text) => {
+            // gh's transport errors quote the request URL, whose `/pulls/401` must not
+            // read as an HTTP status.
+            let words = crate::forge::session::mask_host_tokens(&text);
+            let transport = !crate::forge::session::gh_error_is_rate_limit(Some(&words))
+                && crate::forge::session::gh_error_is_network(Some(&words));
+            let lead = if transport {
+                GH_UNREACHABLE_LEAD
+            } else {
+                GH_UNCONFIRMED_LEAD
+            };
+            (lead, text)
+        }
+        other => (GH_UNCONFIRMED_LEAD, crate::forge::error_detail(other)),
+    };
+    AppError::Gh(format!("{lead}\n{detail}"))
 }
 
 /// The stack-membership read: `Ok(stacked)` when GitHub answered, `Err` when the
@@ -3261,8 +3341,8 @@ async fn gh_pr_merge_async(
 /// The commit a GitHub merge with `strategy` writes and GitHub's default message for
 /// it, from the viewer-merge fields, with the head they were read under. A rebase
 /// writes no commit of its own and a stack member's merge can land several pull
-/// requests, so neither takes a message. The stack probe is the merge's, but an
-/// inconclusive one fails this read: the merge reads it as "not stacked", and an
+/// requests, so neither takes a message. An inconclusive stack probe fails this read,
+/// while the merge's own precheck (`gh_merge_precheck`) reads it as "not stacked": an
 /// editor offered on that guess could be refused at the merge.
 pub(crate) async fn gh_pr_merge_message_defaults(
     repo_path: &str,
@@ -5319,9 +5399,8 @@ pub async fn gh_stack_dissolve(
 /// view that must render regardless. Dropping a timed-out probe kills its child
 /// process: both runners set `kill_on_drop`.
 ///
-/// Deliberately NOT applied to [`gh_pr_is_stacked`]: that read is a merge-DECISION
-/// input, not a decoration. Cutting it short would silently route a stacked PR down
-/// the legacy path, so it keeps the full `GH_TIMEOUT`.
+/// Deliberately NOT applied to [`gh_merge_precheck`]: that read is a merge-DECISION
+/// input, not a decoration, so it keeps the full `GH_TIMEOUT`.
 pub(crate) const STACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,state,author,\
@@ -11375,8 +11454,9 @@ mod tests {
     }
 
     fn publish_git(dir: &std::path::Path, args: &[&str]) -> String {
+        use crate::git::runner::TestGitEnv;
         let out = std::process::Command::new("git")
-            .envs(crate::git::runner::TEST_GIT_ENV)
+            .test_git_env()
             .current_dir(dir)
             .args(args)
             .output()
@@ -17944,14 +18024,12 @@ mod merge_message_tests {
         ));
     }
 
-    /// The defaults read propagates an inconclusive probe; only the merge reads it as
-    /// "not stacked".
+    /// The defaults read propagates an inconclusive probe; the merge's own read treats an
+    /// inconclusive `stack` as not stacked.
     #[test]
     fn defaults_read_fails_on_an_inconclusive_stack_probe() {
         const PROBE: &str = "if gh_pr_stack_probe(repo_path, &slug, number).await? {";
-        let pinned = |b: &str| {
-            b.contains(PROBE) && !b.contains("gh_pr_is_stacked(") && !b.contains("unwrap_or(false)")
-        };
+        let pinned = |b: &str| b.contains(PROBE) && !b.contains("unwrap_or(false)");
         let body = flat(&crate::github::repo_meta::tests::wiring_body(
             include_str!("pr.rs"),
             "gh_pr_merge_message_defaults",
@@ -17964,27 +18042,193 @@ mod merge_message_tests {
         );
         assert_ne!(collapsed, body);
         assert!(!pinned(&collapsed));
-        let legacy = body.replacen(
-            PROBE,
-            "if gh_pr_is_stacked(repo_path, &slug, number).await {",
-            1,
-        );
-        assert!(!pinned(&legacy));
     }
 
-    /// The merge reads an inconclusive stack probe as "not stacked", so it takes the
-    /// legacy path and GitHub refuses a stacked merge there itself.
+    fn gh_read(code: i32, stdout: &str, stderr: &str) -> AppResult<GhOutput> {
+        Ok(GhOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.into(),
+            code,
+        })
+    }
+
+    /// The merge's own read: a readable object with an incomplete or positional `stack`
+    /// is not stacked, a complete one is.
     #[test]
-    fn merge_reads_an_inconclusive_stack_probe_as_not_stacked() {
-        let body = flat(&crate::github::repo_meta::tests::wiring_body(
-            include_str!("pr.rs"),
-            "gh_pr_is_stacked",
-        ));
+    fn merge_precheck_reads_an_inconclusive_stack_as_not_stacked() {
+        let stacked =
+            r#"{"number":7,"state":"open","stack":{"id":1,"number":7,"position":2,"size":3}}"#;
+        assert!(gh_merge_precheck_outcome(gh_read(0, stacked, "")).unwrap());
+        for body in [
+            r#"{"number":7,"state":"open","stack":{"id":1,"number":7,"position":2}}"#,
+            r#"{"number":7,"state":"open","stack":{}}"#,
+            r#"{"number":7,"state":"open","stack":"7"}"#,
+            r#"{"number":7,"state":"open","stack":[7,2,3]}"#,
+            r#"{"number":7,"state":"open","stack":null}"#,
+            r#"{"number":7,"state":"open"}"#,
+        ] {
+            assert!(
+                !gh_merge_precheck_outcome(gh_read(0, body, "")).unwrap(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_precheck_outcome_refuses_all_but_an_open_or_unknown_pull_request() {
+        let outcome = |body: &str| gh_merge_precheck_outcome(gh_read(0, body, ""));
+        let refused = |body: &str| match outcome(body) {
+            Err(AppError::Gh(t)) => t,
+            other => panic!("{body}: {other:?}"),
+        };
         assert!(
-            body.contains("gh_pr_stack_probe(repo_path, slug, number) .await .unwrap_or(false)"),
-            "{body}"
+            !outcome(r#"{"number":7,"state":"open","merged":false,"merged_at":null}"#).unwrap()
         );
-        assert!(!body.contains("unwrap_or(true)"), "{body}");
+        assert!(outcome(
+            r#"{"number":7,"state":"open","stack":{"id":1,"number":7,"position":2,"size":3}}"#
+        )
+        .unwrap());
+        assert_eq!(
+            refused(r#"{"state":"closed","merged":false,"merged_at":null}"#),
+            GH_CLOSED_REFUSAL
+        );
+        for merged in [
+            r#"{"state":"closed","merged":true,"merged_at":"2026-11-19T00:00:00Z"}"#,
+            r#"{"state":"closed","merged_at":"2026-11-19T00:00:00Z"}"#,
+            r#"{"state":"closed","merged":true}"#,
+            r#"{"state":"open","merged":true}"#,
+        ] {
+            assert_eq!(refused(merged), GH_MERGED_REFUSAL, "{merged}");
+        }
+        // Not merged: a false flag, a blank or non-string `merged_at`, a non-bool flag.
+        for body in [
+            r#"{"state":"closed","merged":"true","merged_at":""}"#,
+            r#"{"state":"closed","merged":false,"merged_at":" "}"#,
+            r#"{"state":"closed","merged":false,"merged_at":5}"#,
+        ] {
+            assert_eq!(refused(body), GH_CLOSED_REFUSAL, "{body}");
+        }
+        // Unknown state goes to the forge.
+        for body in [
+            r#"{"number":7}"#,
+            r#"{"state":5}"#,
+            r#"{"state":null}"#,
+            "{}",
+            r#"{"state":"Closed"}"#,
+            r#"{"state":"draft"}"#,
+        ] {
+            assert!(!outcome(body).unwrap(), "{body}");
+        }
+        // Not an object, or not JSON: the read didn't answer.
+        for body in ["[]", "\"x\"", "null", "5", "not json", ""] {
+            let text = refused(body);
+            assert_eq!(text.lines().next(), Some(GH_UNCONFIRMED_LEAD), "{body}");
+            assert!(text.lines().nth(1).is_some_and(|l| !l.is_empty()), "{body}");
+        }
+    }
+
+    #[test]
+    fn merge_precheck_outcome_splits_unreachable_from_unconfirmed() {
+        let refused = |read: AppResult<GhOutput>| match gh_merge_precheck_outcome(read) {
+            Err(AppError::Gh(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refused(Err(AppError::Timeout(30))),
+            format!("{GH_UNREACHABLE_LEAD}\nGitHub CLI timed out after 30s.")
+        );
+        let offline = "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com";
+        assert_eq!(
+            refused(gh_read(1, "", &format!("  {offline}\n"))),
+            format!("{GH_UNREACHABLE_LEAD}\n{offline}")
+        );
+        let refused_conn = r#"Get "https://api.github.com/": dial tcp 140.82.112.6:443: connect: connection refused"#;
+        assert_eq!(
+            refused(Err(AppError::Gh(refused_conn.into()))),
+            format!("{GH_UNREACHABLE_LEAD}\n{refused_conn}")
+        );
+        // A status-like number inside the quoted request URL is not an HTTP answer.
+        for number in [401, 403] {
+            let url_conn = format!(
+                r#"Get "https://api.github.com/repos/o/r/pulls/{number}": dial tcp 140.82.112.6:443: connect: connection refused"#
+            );
+            assert_eq!(
+                refused(gh_read(1, "", &url_conn)),
+                format!("{GH_UNREACHABLE_LEAD}\n{url_conn}")
+            );
+        }
+        // A real 401 answer stays unconfirmed, network words beside it or not.
+        for denied in [
+            "HTTP 401: Bad credentials (https://api.github.com/repos/o/r/pulls/7)",
+            "HTTP 401: Bad credentials (https://api.github.com/repos/o/r/pulls/7)\nerror connecting to api.github.com",
+        ] {
+            assert_eq!(
+                refused(gh_read(1, "", denied)),
+                format!("{GH_UNCONFIRMED_LEAD}\n{denied}")
+            );
+        }
+        // A rate limit that also carries network words is not a transport failure.
+        let limited = "gh: API rate limit exceeded (HTTP 403)\nerror connecting to api.github.com";
+        assert_eq!(
+            refused(gh_read(1, "", limited)),
+            format!("{GH_UNCONFIRMED_LEAD}\n{limited}")
+        );
+        assert_eq!(
+            refused(gh_read(1, "", "gh: Not Found (HTTP 404)")),
+            format!("{GH_UNCONFIRMED_LEAD}\ngh: Not Found (HTTP 404)")
+        );
+        assert_eq!(
+            refused(gh_read(1, "", " ")),
+            format!("{GH_UNCONFIRMED_LEAD}\ngh exited with code 1")
+        );
+        assert_eq!(
+            refused(Err(AppError::InvalidArgument("bad".into()))),
+            format!("{GH_UNCONFIRMED_LEAD}\nbad")
+        );
+        assert!(matches!(
+            gh_merge_precheck_outcome(Err(AppError::GhNotFound)),
+            Err(AppError::GhNotFound)
+        ));
+    }
+
+    /// The copy the help guide quotes.
+    #[test]
+    fn merge_refusal_consts_keep_their_text() {
+        assert_eq!(GH_CLOSED_REFUSAL, "This pull request was closed on GitHub, so nothing was merged. Reopen it if you still want to merge it.");
+        assert_eq!(
+            GH_MERGED_REFUSAL,
+            "This pull request was already merged on GitHub, so there was nothing left to merge."
+        );
+        assert_eq!(GH_UNREACHABLE_LEAD, "Couldn't reach GitHub to confirm this pull request is still open, so nothing was merged. Try again.");
+        assert_eq!(GH_UNCONFIRMED_LEAD, "Couldn't confirm this pull request is still open on GitHub, so nothing was merged. Try again.");
+        assert_eq!(GH_TOO_OLD_FOR_MESSAGE, "Merging with an edited message needs GitHub CLI 2.13 or newer, so nothing was merged. Update gh, then merge again.");
+    }
+
+    #[test]
+    fn merge_refusal_names_a_gh_too_old_for_match_head_commit() {
+        let too_old = Some(GH_TOO_OLD_FOR_MESSAGE.to_string());
+        assert_eq!(
+            classify_gh_merge_refusal("unknown flag: --match-head-commit"),
+            too_old
+        );
+        assert_eq!(
+            classify_gh_merge_refusal(
+                "unknown flag: --match-head-commit\n\nUsage:  gh pr merge [<number> | <url> | <branch>] [flags]\n\nFlags:\n  -d, --delete-branch   Delete the local and remote branch after merge\n"
+            ),
+            too_old
+        );
+        assert_eq!(
+            classify_gh_merge_refusal("  unknown flag: --match-head-commit \r\n"),
+            too_old
+        );
+        for other in [
+            "unknown flag: --merge",
+            "unknown flag: --subject",
+            "Usage: see unknown flag: --match-head-commit for details",
+            "unknown flag: --match-head-commits",
+        ] {
+            assert_eq!(classify_gh_merge_refusal(other), None, "{other}");
+        }
     }
 
     #[test]
@@ -18253,7 +18497,7 @@ mod merge_message_tests {
     fn stacked_refused_before_async(body: &str) -> bool {
         let f = flat(body);
         match (
-            f.find("gh_pr_is_stacked("),
+            f.find("gh_merge_precheck("),
             f.find(REFUSAL),
             f.find("gh_pr_merge_async("),
         ) {
@@ -18319,6 +18563,55 @@ mod merge_message_tests {
             .replacen("(queued, @@)", "(queued, false)", 1);
         assert_ne!(swapped, f);
         assert!(!stacked_on_its_branch(&swapped));
+    }
+
+    const PRECHECK: &str =
+        "let stacked_probe = gh_merge_precheck(&repo_path, &slug, number).await?;";
+
+    /// The state read is the first statement of the captured attempt, ahead of both
+    /// merge runs, and its verdict alone picks the stack branch.
+    fn state_read_first(f: &str) -> bool {
+        const OPEN: &str = "let outcome = async { ";
+        let (Some(open), Some(read), Some(stack), Some(plain)) = (
+            f.find(OPEN),
+            f.find(PRECHECK),
+            f.find("gh_pr_merge_async("),
+            f.find("run_gh_input_raw("),
+        ) else {
+            return false;
+        };
+        read == open + OPEN.len()
+            && read < stack
+            && read < plain
+            && f.contains("let (queued, stacked) = if stacked_probe {")
+    }
+
+    #[test]
+    fn gh_pr_merge_reads_state_before_any_merge() {
+        let f = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_merge",
+        ));
+        assert!(state_read_first(&f), "{f}");
+        let removed = f.replacen(&format!("{PRECHECK} "), "", 1);
+        let moved = {
+            let run = removed.find("run_gh_input_raw(").unwrap();
+            let at = run + removed[run..].find(';').unwrap() + 1;
+            format!("{} {PRECHECK}{}", &removed[..at], &removed[at..])
+        };
+        let fail_open = f.replacen(
+            PRECHECK,
+            "let stacked_probe = gh_merge_precheck(&repo_path, &slug, number).await.unwrap_or(false);",
+            1,
+        );
+        for (what, mutant) in [
+            ("removed", removed),
+            ("moved", moved),
+            ("fail-open", fail_open),
+        ] {
+            assert_ne!(mutant, f, "{what}");
+            assert!(!state_read_first(&mutant), "{what}");
+        }
     }
 
     fn stacked_on_its_branch(f: &str) -> bool {

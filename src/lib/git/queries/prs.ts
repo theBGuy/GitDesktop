@@ -1,5 +1,6 @@
 import {
   type MutationCache,
+  type QueryClient,
   type QueryKey,
   queryOptions,
   useQuery,
@@ -365,9 +366,101 @@ export const prDetailsOptions = (
 ) =>
   queryOptions({
     queryKey: ["repo", repo, "pr", lens, number] as const,
-    queryFn: () => api.forgePrView(repo, number, lens),
+    // The record is sampled after the await, so a read started before the merge
+    // landed resolves under it; a cancelled read (its answer discarded) never
+    // touches it. `signal` is read after the await: no unmount aborts the read.
+    queryFn: async (context) => {
+      const details = await api.forgePrView(repo, number, lens);
+      return context.signal.aborted
+        ? details
+        : overlayLandedMerge(context.client, context.queryKey, details);
+    },
     staleTime: 30_000,
   });
+
+/** How long a merge the app landed keeps its request's details reading MERGED
+ *  while the forge's own details read still lags (GitLab measured 12.5 s). */
+export const LANDED_MERGE_TTL_MS = 60_000;
+
+type LandedMark = {
+  expiresAt: number;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+/** Per QueryClient, keyed on the details query key: a client never sees another
+ *  client's record, and a sibling worktree's entry (another raw path) gets none. */
+const landedMerges = new WeakMap<QueryClient, Map<string, LandedMark>>();
+
+const landedKey = (queryKey: QueryKey) => JSON.stringify(queryKey);
+
+/** Records that the request's merge landed and patches a cached OPEN or MERGING
+ *  details entry to MERGED; never creates one. A re-mint extends the record, and
+ *  only the newest record's expiry deletes it and re-reads the details once. */
+export function markMergeLanded(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+): void {
+  const queryKey = prDetailsOptions(repo, number, lens).queryKey;
+  const key = landedKey(queryKey);
+  let marks = landedMerges.get(queryClient);
+  if (!marks) {
+    marks = new Map();
+    landedMerges.set(queryClient, marks);
+  }
+  const previous = marks.get(key);
+  if (previous) clearTimeout(previous.timer);
+  const owner = marks;
+  const mark: LandedMark = {
+    expiresAt: Date.now() + LANDED_MERGE_TTL_MS,
+    timer: setTimeout(() => {
+      if (owner.get(key) !== mark) return;
+      owner.delete(key);
+      void queryClient.invalidateQueries({ queryKey, exact: true });
+    }, LANDED_MERGE_TTL_MS),
+  };
+  marks.set(key, mark);
+  const patch = () => {
+    if (owner.get(key) !== mark) return;
+    queryClient.setQueryData<PrDetails>(queryKey, (details) =>
+      details && (details.state === "OPEN" || details.state === "MERGING")
+        ? { ...details, state: "MERGED" }
+        : undefined,
+    );
+  };
+  patch();
+  // A read whose answer the overlay saw just before this mark is stored a few
+  // microtasks later by query-core, so the patch runs again once that write lands.
+  const inFlight = queryClient
+    .getQueryCache()
+    .find({ queryKey, exact: true })?.promise;
+  if (inFlight) void inFlight.then(patch, () => undefined);
+}
+
+/** A details answer under a live record: OPEN or MERGING lags the landed merge
+ *  and reads MERGED; only CLOSED contradicts it and retires the record; anything
+ *  else (MERGED, empty, malformed) is stored as answered and keeps it. */
+function overlayLandedMerge(
+  client: QueryClient,
+  queryKey: QueryKey,
+  details: PrDetails,
+): PrDetails {
+  const marks = landedMerges.get(client);
+  const key = landedKey(queryKey);
+  const mark = marks?.get(key);
+  if (!marks || !mark || Date.now() >= mark.expiresAt) return details;
+  if (typeof details !== "object" || details === null) return details;
+  const state: unknown = details.state;
+  if (state === "CLOSED") {
+    clearTimeout(mark.timer);
+    marks.delete(key);
+    return details;
+  }
+  return state === "OPEN" || state === "MERGING"
+    ? { ...details, state: "MERGED" }
+    : details;
+}
 
 export const prDiffOptions = (repo: string, number: number, lens: RemoteLens) =>
   queryOptions({

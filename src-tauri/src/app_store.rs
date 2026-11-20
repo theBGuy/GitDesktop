@@ -48,8 +48,8 @@ pub(crate) struct AiGenSettings {
 ///    `BaseDirectory::AppData` resolution (see [`crate::local_prs::store_path`]).
 ///
 /// Arm 3 mirrors [`crate::oplog::resolve_store_base`]; the test arm deliberately
-/// diverges twice — it yields no store where the oplog needs a writable temp one
-/// (this module only READS), and it outranks the env var where the oplog's does not.
+/// diverges once: it yields no store where the oplog needs a writable temp one
+/// (this module only READS).
 fn resolve_store_dir(gd_settings_dir: Option<&str>, is_test: bool) -> Option<PathBuf> {
     match gd_settings_dir {
         _ if is_test => None,

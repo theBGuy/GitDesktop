@@ -2068,3 +2068,94 @@ for (const verb of ["created", "posted"]) {
     );
   });
 }
+
+// The merge state guard's read-failure refusals (github/pr.rs, forge/gitlab.rs,
+// forge/bitbucket.rs) lead with a sentence the summary must keep, a transport cause
+// included: read from the Rust consts, so a one-sided copy change fails here.
+const { readFileSync: readMergeGuardSource } = await import("node:fs");
+const MERGE_GUARD_SOURCES = {
+  gh: new URL("../src-tauri/src/github/pr.rs", import.meta.url),
+  glab: new URL("../src-tauri/src/forge/gitlab.rs", import.meta.url),
+  bitbucket: new URL("../src-tauri/src/forge/bitbucket.rs", import.meta.url),
+};
+
+/** One single-line Rust string const; fails closed, naming why it can't be read. */
+function mergeGuardConst(kind, name) {
+  const source = readMergeGuardSource(MERGE_GUARD_SOURCES[kind], "utf8");
+  const head = `const ${name}: &str =`;
+  const at = source.indexOf(head);
+  assert.ok(at >= 0, `${name}: missing const in the ${kind} source`);
+  const literal = new RegExp(`const ${name}: &str =\\s*"([^"\\\\]*)";`).exec(
+    source,
+  );
+  if (!literal) {
+    const rest = source.slice(at + head.length, source.indexOf(";", at));
+    assert.fail(
+      rest.includes("\\")
+        ? `${name}: the literal holds a \\ (a continuation or escape)`
+        : `${name}: not one plain string literal`,
+    );
+  }
+  return literal[1];
+}
+
+const MERGE_GUARD_CASES = [
+  {
+    kind: "gh",
+    name: "GH_UNREACHABLE_LEAD",
+    causes: [
+      "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+      'Get "https://api.github.com/": dial tcp 140.82.112.6:443: connect: connection refused',
+      'Get "https://api.github.com/repos/o/r/pulls/401": dial tcp 140.82.112.6:443: connect: connection refused',
+    ],
+  },
+  {
+    kind: "gh",
+    name: "GH_UNCONFIRMED_LEAD",
+    causes: [
+      "gh: Not Found (HTTP 404)",
+      "HTTP 401: Bad credentials (https://api.github.com/repos/o/r/pulls/7)",
+    ],
+  },
+  {
+    kind: "glab",
+    name: "GL_UNREACHABLE_LEAD",
+    causes: [
+      'Get "https://gitlab.com/api/v4/projects/1/merge_requests/1": dial tcp 140.82.112.6:443: i/o timeout',
+    ],
+  },
+  {
+    kind: "glab",
+    name: "GL_UNCONFIRMED_LEAD",
+    causes: ["glab: 404 Not Found (HTTP 404)"],
+  },
+  {
+    kind: "bitbucket",
+    name: "BB_UNREACHABLE_LEAD",
+    causes: [
+      "Bitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/repositories/w/r/pullrequests/1?fields=state): connection failed",
+      "Bitbucket request failed: error sending request for url (https://api.bitbucket.org/2.0/repositories/w/r/pullrequests/1?fields=state): request timed out",
+    ],
+  },
+  {
+    kind: "bitbucket",
+    name: "BB_UNCONFIRMED_LEAD",
+    causes: [
+      "HTTP 404",
+      "Bitbucket rejected the request (401) — your API token may be expired or revoked. Reconnect it in Settings → Accounts.",
+    ],
+  },
+];
+
+for (const { kind, name, causes } of MERGE_GUARD_CASES) {
+  for (const cause of causes) {
+    test(`a merge state guard ${name} refusal keeps its sentence as the summary: ${cause.split("\n")[0]}`, () => {
+      const lead = mergeGuardConst(kind, name);
+      assert.ok(lead.startsWith("Couldn't "), lead);
+      const message = `${lead}\n${cause}`;
+      const p = presentError(appError(kind, message));
+      assert.equal(p.summary, lead);
+      assert.equal(p.fullText, message);
+    });
+  }
+}

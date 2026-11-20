@@ -703,8 +703,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       return target !== stateFilter;
     },
   );
-  // GitLab reports an MR mid-merge as CLOSED, a tab that never lists it, so a
-  // would-be Closed answer waits on the merge-state read, which says whether the
+  // GitLab reports an MR mid-merge as MERGING, which files under the Closed
+  // tab, a tab that never lists it, so a would-be Closed answer waits on
+  // the merge-state read, which says whether the
   // MR is locked. The probe reads its own entry per arm (`staleTime: 0`), so no
   // read requested before the arm, the view's poll or a prefetch included, can
   // answer it; armed only once the details answered Closed, so every other align

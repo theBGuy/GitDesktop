@@ -516,6 +516,10 @@ and table row are the reference).
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
+- A failure line rendered in place (not a toast, not a terminal buffer) shows
+  `presentError(e).summary` from `@/lib/error-summary`, never raw
+  `errorMessage(e)`: the raw text keeps the Rust error-kind lead
+  (`invalid argument: …`) and every line of a multi-line message.
 - A caption over a GROUP of controls rides `LabeledGroup`
   (`src/components/form/labeled-group.tsx`), which ties the group to it via
   `role="group"` + `aria-labelledby` — a `<Label>` that associates with nothing
@@ -1390,6 +1394,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   src/-wide scan in `scripts/remote-row-state-wiring.test.mjs` pins every
   caller of the five forge state writes it can see; that test's header lists
   the shapes the scan can't see.
+- **Landed-merge details** — a merge that landed (not queued) also marks the
+  request's details through `markMergeLanded` (`src/lib/git/queries/prs.ts`),
+  per QueryClient and keyed on the details query key, for
+  `LANDED_MERGE_TTL_MS`: a details read answering OPEN or MERGING is stored as
+  MERGED, a CLOSED answer from a read that wasn't cancelled retires the mark,
+  and its expiry re-reads the details
+  once. The neutral PR states are OPEN, MERGED, CLOSED and MERGING (GitLab's
+  `locked`); MERGING behaves as CLOSED in every list and align predicate, and
+  its words come from `prStateWord` / `prPill` (`src/lib/pulls/pr-state.ts`).
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`
@@ -1760,11 +1773,17 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `UpdateMarker::create_for` calls in test modules, following one level of
   same-file helper delegation for the override). Production-path mints and
   the other gaps listed in check I's header comment are review-enforced.
+- **Every test-build git goes through `TestGitEnv`** (`git/runner.rs`): the
+  runner applies it, and a test that spawns git itself calls
+  `.test_git_env()` — no system, global or XDG config, and no inherited
+  repository or config redirects. The consts behind it are private,
+  so a hand-copied `.envs(…)` fails to compile.
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
-  app-data modules carry their own seams with the opposite arm order
-  (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`:
-  env override outranks the `cfg!(test)` temp arm; both ship in release) —
+  app-data modules carry their own seams in the same arm order
+  (`oplog.rs` `GD_OPLOG_DIR`, `review_notes.rs` `GD_REVIEW_NOTES_DIR`: the
+  `cfg!(test)` temp arm outranks the env override, which only non-test
+  builds read) —
   a new store module mirrors one of these, never resolves app-data bare.
   Its `cfg!(test)` temp arm calls `crate::oplog::test_fallback_dir`, never a
   hand-rolled `temp_dir()` join: the helper gives each test process its own

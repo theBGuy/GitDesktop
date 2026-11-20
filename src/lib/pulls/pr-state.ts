@@ -1,4 +1,5 @@
 import {
+  ArrowsMergeIcon,
   CircleIcon,
   FileDashedIcon,
   GitMergeIcon,
@@ -35,12 +36,33 @@ export const PR_NOUN: Record<ForgeProvider, PrNoun> = {
  * (the issue `StateIcon`), and no shape reuses an issue glyph since boards mix both.
  */
 const PR_STATE: Partial<
-  Record<string, Omit<PrStatePresentation, "word"> & { label: string }>
+  Record<
+    string,
+    Omit<PrStatePresentation, "word"> & {
+      label: string;
+      /** Overrides the `${label} ${noun}` word where that reads as an action. */
+      word?: (noun: PrNoun) => string;
+    }
+  >
 > = {
   OPEN: { Icon: GitPullRequestIcon, tone: "text-success", label: "Open" },
   MERGED: { Icon: GitMergeIcon, tone: "text-merged", label: "Merged" },
   CLOSED: { Icon: XCircleIcon, tone: "text-destructive", label: "Closed" },
+  // GitLab's mid-merge `locked`: settles into MERGED within moments, so it shares
+  // that tone, and its glyph and word carry the difference.
+  MERGING: {
+    Icon: ArrowsMergeIcon,
+    tone: "text-merged",
+    label: "Merging",
+    word: (noun) => `${noun[0].toUpperCase()}${noun.slice(1)} being merged`,
+  },
 };
+
+/** A state's badge word: a known state's label lower-cased, else the forge's own
+ *  state lower-cased. */
+export function prStateWord(state: string): string {
+  return (PR_STATE[state]?.label ?? state).toLowerCase();
+}
 
 /** Draft qualifies an OPEN pull request only, and takes `FileDashed` because the
  *  dashed circle is the open-issue glyph. A state this build doesn't know keeps a
@@ -56,14 +78,18 @@ export function prPill(
       tone: "text-muted-foreground",
       word: `Draft ${noun}`,
     };
-  const known = PR_STATE[state];
+  const known = Object.hasOwn(PR_STATE, state) ? PR_STATE[state] : undefined;
   if (known === undefined)
     return {
       Icon: CircleIcon,
       tone: "text-muted-foreground",
       word: `${state} ${noun}`,
     };
-  return { Icon: known.Icon, tone: known.tone, word: `${known.label} ${noun}` };
+  return {
+    Icon: known.Icon,
+    tone: known.tone,
+    word: known.word?.(noun) ?? `${known.label} ${noun}`,
+  };
 }
 
 /** The glyph per pull-request audit state (the branch switcher's and the
