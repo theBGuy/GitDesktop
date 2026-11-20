@@ -2814,7 +2814,7 @@ function checkoutControls(text) {
     [add("gate", "Ref: master"), "job gate: checkout ref"],
     [add("test", "REPOSITORY: other/repo"), "job test: checkout repository"],
     [add("gate", "Path: src"), "job gate: checkout path"],
-    // A partial checkout leaves the matrix without src-tauri/Cargo.toml.
+    // Sparse checkout drops src-tauri/Cargo.toml; `filter` is refused too.
     [
       add("test", "sparse-checkout: .github"),
       "job test: checkout sparse-checkout",
