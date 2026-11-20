@@ -19,8 +19,14 @@ export interface BoardReturnInput extends PanelReads {
   /** The table cursor's column as last written: a move between cells of one row
    *  changes it alone. */
   tableCursorCol: number | null;
-  /** Announced when the anchor's card is gone, in the drawn layout's words. */
+  /** Announced when the anchor's card is gone and the board has no more to load, in
+   *  the drawn layout's words. */
   goneMessage: string;
+  /** The items read has a further page: a card not found may only be unloaded. */
+  morePages: boolean;
+  /** Announced in place of `goneMessage` while `morePages`, in the drawn layout's
+   *  words. */
+  unloadedMessage: string;
   root: () => HTMLElement | null;
   /** The drawn rows layout's grid element; null on the board layout. */
   grid: () => HTMLElement | null;
@@ -292,6 +298,9 @@ export function useBoardReturn(input: BoardReturnInput): {
         ? { ...held, applied: { ...held.applied, archived: true } }
         : held;
     const target = h.claimed ?? h.anchor.itemId;
+    const notFound = input.morePages
+      ? input.unloadedMessage
+      : input.goneMessage;
     const focus = document.activeElement;
     const step = boardReturnStep({
       ...input,
@@ -337,7 +346,7 @@ export function useBoardReturn(input: BoardReturnInput): {
         });
         return;
       case "gone-notice":
-        input.announce(input.goneMessage);
+        input.announce(notFound);
         setHeld(null);
         return;
       case "claim": {
@@ -349,7 +358,7 @@ export function useBoardReturn(input: BoardReturnInput): {
           setHeld(null);
           return;
         }
-        if (step.gone) input.announce(input.goneMessage);
+        if (step.gone) input.announce(notFound);
         if (!step.recheck) {
           setHeld(null);
           return;
@@ -373,7 +382,7 @@ export function useBoardReturn(input: BoardReturnInput): {
       case "landing": {
         const verdict = focusVerdict(h, input.root());
         if (verdict === "take") input.focusLanding();
-        if (step.gone && verdict !== "user") input.announce(input.goneMessage);
+        if (step.gone && verdict !== "user") input.announce(notFound);
         setHeld(null);
         return;
       }

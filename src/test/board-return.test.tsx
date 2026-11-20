@@ -29,6 +29,13 @@ const GONE_TEXT = {
   roadmap: "gone from the roadmap",
 };
 
+/** The text announced in place of the gone text while the items read has more. */
+const UNLOADED_TEXT = {
+  board: "not among the loaded cards",
+  table: "not among the loaded table rows",
+  roadmap: "not among the loaded roadmap rows",
+};
+
 const REPO = "C:/repos/alpha";
 const OTHER = "C:/repos/beta";
 
@@ -62,6 +69,8 @@ interface PanelState {
   fields: ReadState;
   items: ReadState;
   itemsFetching: boolean;
+  /** The items read has a further page. */
+  morePages: boolean;
   archivedShown: boolean;
   seedPending: boolean;
   layoutDrawn: boolean;
@@ -102,6 +111,7 @@ function makePanel(over: Partial<PanelState> = {}) {
     fields: "ready",
     items: "ready",
     itemsFetching: false,
+    morePages: false,
     archivedShown: false,
     seedPending: false,
     layoutDrawn: true,
@@ -185,6 +195,8 @@ function makePanel(over: Partial<PanelState> = {}) {
     tableCursorKey: state.tableCursorKey,
     tableCursorCol: state.tableCursorCol,
     goneMessage: GONE_TEXT[state.rows ? state.rowsLayout : "board"],
+    morePages: state.morePages,
+    unloadedMessage: UNLOADED_TEXT[state.rows ? state.rowsLayout : "board"],
     root: () => root,
     grid: () => (state.rows ? body : null),
     gate: state.gate,
@@ -527,6 +539,76 @@ describe("the return lands on the anchor", () => {
     });
     expect(panel.calls.setArchived).not.toHaveBeenCalled();
     expect(panel.log).toEqual(['claimCard("I1", {"focus":true})']);
+  });
+});
+
+describe("a card not found while the items read has more pages", () => {
+  it("the claim site: the first drawn card, told to load more", () => {
+    const panel = makePanel({ cards: ["I2", "I3"], morePages: true });
+    mount(panel);
+    arm(anchorOf());
+    expect(panel.log).toEqual([
+      'claimCard("I2", {"focus":true})',
+      'announce("not among the loaded cards")',
+    ]);
+  });
+
+  it("the landing site: an empty board takes the body landing, told to load more", () => {
+    const panel = makePanel({ cards: [], morePages: true });
+    mount(panel);
+    act(() => landing.focus());
+    arm(anchorOf());
+    expect(panel.log).toEqual([
+      "focusLanding()",
+      'announce("not among the loaded cards")',
+    ]);
+  });
+
+  it("the claim site on rows: a fresh return's row not found, in the table's words", () => {
+    const panel = makePanel({
+      rows: true,
+      cards: ["I2", "I3"],
+      morePages: true,
+    });
+    mount(panel);
+    arm(anchorOf());
+    expect(panel.log).toEqual([
+      'claimCard("I2", {"focus":true})',
+      'announce("not among the loaded table rows")',
+    ]);
+  });
+
+  it("the gone-notice site: a row claimed under a refetch and then removed", () => {
+    const panel = makePanel({
+      rows: true,
+      rowCursor: true,
+      itemsFetching: true,
+      morePages: true,
+    });
+    const { commit } = mount(panel);
+    arm(anchorOf());
+    commit(() => {
+      panel.state.cards = ["I2", "I3"];
+    });
+    act(() => panel.spot("I2")?.focus());
+    commit(() => {
+      panel.state.itemsFetching = false;
+    });
+    expect(panel.log).toEqual([
+      'claimCard("I1", {"focus":true})',
+      'announce("not among the loaded table rows")',
+    ]);
+  });
+
+  it("the landing site with no further page keeps the gone text", () => {
+    const panel = makePanel({ cards: [] });
+    mount(panel);
+    act(() => landing.focus());
+    arm(anchorOf());
+    expect(panel.log).toEqual([
+      "focusLanding()",
+      'announce("gone from the board")',
+    ]);
   });
 });
 

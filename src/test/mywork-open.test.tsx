@@ -508,9 +508,9 @@ describe("My work open", () => {
   });
 
   describe("M1: a recents entry spelling the open checkout differently", () => {
-    // The two open-checkout cases run as Windows, where separators fold; the
-    // cases after them run with both platform flags false, where a backslash
-    // is part of the name.
+    // Each case picks its platform (the file's beforeEach clears both flags):
+    // Windows folds separators and letter case; a Mac and the rest fold neither
+    // here, so another letter case or a backslash is another folder.
     const OPEN = "C:\\src\\widgets";
     let saved: { repoPath: string | null; repoName: string | null };
     beforeEach(() => {
@@ -568,6 +568,41 @@ describe("My work open", () => {
         }),
       );
     });
+
+    it.each([
+      [
+        "on a Mac",
+        "keeps the recents' spelling and name",
+        "mac",
+        "C:/src/widgets",
+        "widgets",
+      ],
+      [
+        "on Windows",
+        "opens under the store's own path and name",
+        "windows",
+        "C:/src/Widgets",
+        "Widgets (open)",
+      ],
+    ] as const)(
+      "%s, a letter-case spelling of the open checkout %s",
+      async (_label, _outcome, platform, repoPath, repoName) => {
+        platformIs[platform] = true;
+        useUiStore.setState({
+          repoPath: "C:/src/Widgets",
+          repoName: "Widgets (open)",
+        });
+        data.items = [item("widgets", 12, true, "2026-01-02T00:00:00Z")];
+        data.recents = [recent("widgets")];
+        const input = renderScreen();
+        openNext(input);
+        await advance(0);
+        expect(openPr).toHaveBeenCalledTimes(1);
+        expect(openPr).toHaveBeenCalledWith(
+          expect.objectContaining({ repoPath, repoName }),
+        );
+      },
+    );
 
     it("another repository open keeps the recents' spelling and name", async () => {
       useUiStore.setState({

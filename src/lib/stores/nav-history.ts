@@ -486,8 +486,9 @@ function carriedHistory(
     carry.lensFrom !== null &&
     carry.lensFrom !== from.lens;
   // Any other hop reads the live lens, so a same-repository one that changes no lens
-  // leaves the stamp as recorded for the repository view's guard, which reads it against
-  // the stored choice and the remotes list. A null stamp takes the live lens too.
+  // leaves the stamp as recorded for the repository view's lens sync: its guard reads it
+  // against the stored choice and the remotes list, and its plain sync re-seeds a stamp
+  // the live lens contradicts. A null stamp takes the live lens too.
   const lensFrom = overlaid && (switching || rejoins) ? null : carry.lensFrom;
   const departure = lensFrom ?? stamp;
   if (

@@ -3081,7 +3081,8 @@ another repository opens in the app too when a clone of it is among your reposit
 GitDesktop switches to it and opens the item, a pull request in the worktree that has its
 branch checked out when there is one, an issue in the main workspace. A card with no
 clone among your repositories opens on GitHub in your browser, and so does one whose
-clone can't be confirmed in time (a folder on a drive that doesn't answer, say). If that
+clone can't be confirmed in time, or turns out not to be that repository (its folder is
+on a drive that doesn't answer, or its origin now points somewhere else, say). If that
 check takes more than a moment, the card (or its row, in a table or roadmap) dims while
 it runs and a screen reader hears that it's opening. Clicking a card or pressing
 {{key:enter}} on it, and clicking a title or pressing {{key:enter}} on it in a table or
@@ -3094,10 +3095,12 @@ repository or on the other side of the fork, Go back switches back to the board'
 repository and side first. That holds after a visit to Settings or another screen too:
 the board comes back on its view as saved, so any unsaved layout, grouping, date fields
 or zoom you had picked on the board starts over, and **Show archived cards** is put back
-as you had it, so an archived card is found again. If the card has left the board, focus
-goes to the first card instead (in a table or roadmap, to a row that is still there), and
-a screen reader is told the card is gone. Focus you have moved yourself while the board
-loaded is left where it is.
+as you had it, so an archived card is found again. If the board is still there but the
+card can't be found, focus goes to the first card instead, when there is one (in a table
+or roadmap, to a row that is still there). A screen reader is told the card is gone, or,
+on a board with more to load, to load more to look for it: there the card may only sit
+past **Load more**. Focus you have moved to another card or row while the board loaded is
+left where it is, and a screen reader may be told nothing then.
 
 {{key:space}} peeks at an issue or pull request card instead of opening it: a small panel
 with the title, what the card is, and its dates — when it was opened, when it joined this
@@ -4397,11 +4400,12 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
   again when you open another repository any other way, such as from the repository
   switcher or **My work**, and switching between **Fork** and **Upstream** yourself
   starts this repository's part of it again. If a repository on the trail can no longer
-  be opened, going back or forward to it says so once, drops every stop in it and
-  leaves you where you are; the next press goes on to the nearest stop left. If the
-  app can't check the folder (no answer within ten seconds, or the check itself
-  fails), it says so and keeps the trail, so you can try the same press again. While a
-  dialog is open, those keys and buttons do nothing.
+  be opened (its folder is missing or is no longer a Git repository, or Git refuses to
+  open it), going back or forward to it says so once, drops every stop in it and leaves
+  you where you are; the next press goes on to the nearest stop left. If the app can't
+  check the folder (no answer within ten seconds, or an error that says nothing about
+  the folder), it says so and keeps the trail, so you can try the same press again. While
+  a dialog is open, those keys and buttons do nothing.
 
 ## Doing things
 

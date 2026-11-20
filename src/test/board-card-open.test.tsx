@@ -282,6 +282,7 @@ beforeEach(() => {
     repoPath: REPO,
     repoName: "harbor",
     repoTab: "projects",
+    interactionEpoch: 0,
     openPr,
     openIssue,
     selectIssue,
@@ -320,7 +321,7 @@ describe("a card of the open repository", () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("H2: a pull request opens in place through openPr, with no carry and no re-check", async () => {
+  it("H2: a pull request opens in place through openPr, with no carry, re-checked at the landing", async () => {
     const h = renderOpen();
     open(h, HERE_PR);
     const arg = onlyArg(openPr);
@@ -331,12 +332,18 @@ describe("a card of the open repository", () => {
       ref: "8",
       section: null,
       beforeSelect: expect.any(Function),
+      stillValid: expect.any(Function),
     });
     expect("carryHistory" in arg).toBe(false);
-    expect("stillValid" in arg).toBe(false);
     expect(h.noteOpener).not.toHaveBeenCalled();
     arg.beforeSelect?.();
     expect(h.noteOpener).toHaveBeenCalledWith("PVTI_here_pr");
+    // Stands in for the navigator's own bump at its request.
+    bumpEpoch();
+    expect(arg.stillValid?.(epoch())).toBe(true);
+    expect(arg.stillValid?.(epoch() + 1)).toBe(false);
+    open(h, HERE_ISSUE);
+    expect(arg.stillValid?.(epoch())).toBe(false);
     await advance(1000);
     expect(h.result.current.openingItemId).toBeNull();
     expect(h.announce).not.toHaveBeenCalled();
@@ -375,6 +382,8 @@ describe("a card of the other fork side", () => {
       });
       expect(h.noteOpener).toHaveBeenCalledWith(item.itemId);
       expect(order(applyLens)).toBeLessThan(order(h.noteOpener));
+      // Stands in for the navigator's own bump at its request.
+      bumpEpoch();
       expect(arg.stillValid?.(epoch())).toBe(true);
       expect(arg.stillValid?.(epoch() + 1)).toBe(false);
       open(h, HERE_ISSUE);
@@ -871,7 +880,7 @@ describe("a clone landing on the open repository", () => {
   it.each([
     ["a case-sensitive platform", false, false, "C:/SRC/Harbor", "Harbor"],
     ["Windows", true, false, REPO, "harbor"],
-    ["macOS", false, true, REPO, "harbor"],
+    ["macOS", false, true, "C:/SRC/Harbor", "Harbor"],
   ] as const)(
     "H23: on %s, a proven clone whose path differs from the open checkout only by case lands in the right repository",
     async (_label, windows, mac, repoPath, repoName) => {

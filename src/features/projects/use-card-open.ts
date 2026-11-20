@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
 import type { BoardItem, RemoteLens } from "@/lib/git/types";
 import { sameCheckout } from "@/lib/git/worktree-default-path";
+import { isWindows } from "@/lib/hotkeys/binding";
 import {
   type LocalLandingTarget,
   openingStatus,
@@ -152,7 +153,11 @@ export function useCardOpen(input: CardOpenInput): {
     }
     // Recents can spell the open checkout differently, and the history tells a
     // same-repository hop by strict string equality, so the store's own path.
-    const here = sameCheckout(landing.path, repoPath);
+    // Letter case folds on Windows only: a Mac volume can be case-sensitive, and
+    // a case-variant folder there can be another repository.
+    const here = sameCheckout(landing.path, repoPath, {
+      caseInsensitive: isWindows,
+    });
     const targetPath = here ? repoPath : landing.path;
     const targetName = here ? repoName : landing.name;
     const switchesToFork = here && activeIsUpstream;
@@ -255,8 +260,12 @@ export function useCardOpen(input: CardOpenInput): {
           setRepoTab("issues");
           return;
         }
-        // The same-repository open writes no lens, changes no repository and
-        // awaits nothing before the call, so it takes no re-check.
+        // The landing can apply in a later task, so a lapsed request must not
+        // land over whatever the user moved to. It writes no lens and changes
+        // no repository, so it carries no history and takes no claim.
+        const stillValid = (epochAtRequest: number) =>
+          gen === boardOpenGen &&
+          useUiStore.getState().interactionEpoch === epochAtRequest;
         openPr({
           kind: "remote",
           repoPath,
@@ -264,6 +273,7 @@ export function useCardOpen(input: CardOpenInput): {
           ref: id,
           section: null,
           beforeSelect: () => noteOpener(item.itemId),
+          stillValid,
         });
         return;
       }

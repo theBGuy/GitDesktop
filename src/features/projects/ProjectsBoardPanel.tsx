@@ -632,11 +632,22 @@ const NO_REORDER: Record<ReorderDirection, ReorderPlan> = {
 /** Why the Position section is held when the menu's card has left the board (a
  *  refetch dropped it while the menu was open). One held row, not four "already
  *  first"/"already last" rows that would contradict each other. Also what a Back
- *  or Forward return announces when its card is gone. */
+ *  or Forward return announces when its card is gone and the board has no more to
+ *  load. */
 const CARD_GONE_REASON: Record<Surface, string> = {
   board: "This card is no longer on the board",
   table: "This row is no longer in the table",
   roadmap: "This row is no longer on the roadmap",
+};
+/** What a Back or Forward return announces when its card is not loaded while the
+ *  items read has a further page: the return never fetches more, so the card may
+ *  sit past Load more and "no longer on the board" would be a guess. */
+const CARD_UNLOADED_REASON: Record<Surface, string> = {
+  board:
+    "This card isn't among the loaded cards. Load more cards to look for it.",
+  table: "This row isn't among the loaded rows. Load more rows to look for it.",
+  roadmap:
+    "This row isn't among the loaded rows. Load more rows to look for it.",
 };
 /** One shared id for every reorder-refusal toast: key auto-repeat drives the burst
  *  (no e.repeat gate), so a held direction would otherwise mint a fresh toast per
@@ -5130,6 +5141,8 @@ export function ProjectsBoardPanel({
     tableCursorKey: tableCursor?.rowKey ?? null,
     tableCursorCol: tableCursor?.colIndex ?? null,
     goneMessage: CARD_GONE_REASON[surface],
+    morePages: items.hasNextPage,
+    unloadedMessage: CARD_UNLOADED_REASON[surface],
     root: () => rootRef.current,
     grid: () =>
       rowView === null
