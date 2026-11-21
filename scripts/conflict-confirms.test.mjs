@@ -2,7 +2,8 @@
 // route share: one file reads as Mark resolved always has, a bulk action never
 // titles itself after one file, and a file whose markers couldn't be read is
 // hedged ("possible", "any") rather than asserted, naming its refusal (binary,
-// too large) when the caller knows it.
+// too large) when the caller knows it, and a set of binary files alone asks
+// about the files as they are on disk, with no claim about markers.
 //
 // The import reaches straight into `src/` under Node's type stripping, so
 // `conflict-confirms.ts` must stay free of runtime and aliased imports.
@@ -43,13 +44,43 @@ test("an unreadable file is hedged, never asserted to hold markers", () => {
   });
 });
 
-test("a binary file says why it wasn't checked", () => {
+test("a binary file alone asks about the file, never about markers", () => {
   assert.deepEqual(markerStagePrompt([binary("logo.png")], false), {
-    title: "Stage logo.png with possible conflict markers?",
-    body: "logo.png looks like a binary file, so it wasn't checked for conflict markers. Staging it marks the conflict resolved with any markers in the file, and they'll be committed unless you remove them first.",
+    title: "Stage logo.png as it is on disk?",
+    body: "logo.png looks like a binary file, so GitDesktop can't merge it or check what it holds. Staging it marks the conflict resolved with the file exactly as it is on disk now.",
     confirmLabel: "Stage anyway",
     confirmVariant: "destructive",
   });
+});
+
+test("a bulk action with one binary file keeps a singular generic title", () => {
+  const prompt = markerStagePrompt([binary("logo.png")], true);
+  assert.equal(prompt.title, "Stage a binary file as it is on disk?");
+  assert.equal(
+    prompt.body,
+    "logo.png looks like a binary file, so GitDesktop can't merge it or check what it holds. Staging it marks the conflict resolved with the file exactly as it is on disk now.",
+  );
+});
+
+test("several binary files read as one group", () => {
+  assert.deepEqual(
+    markerStagePrompt([binary("a.png"), binary("b.png")], false),
+    {
+      title: "Stage binary files as they are on disk?",
+      body: "a.png, b.png look like binary files, so GitDesktop can't merge them or check what they hold. Staging them marks those conflicts resolved with the files exactly as they are on disk now.",
+      confirmLabel: "Stage anyway",
+      confirmVariant: "destructive",
+    },
+  );
+});
+
+test("a binary file beside a marked one keeps the marker prompt", () => {
+  const prompt = markerStagePrompt([binary("logo.png"), marked("a.ts")], true);
+  assert.equal(prompt.title, "Stage files with possible conflict markers?");
+  assert.equal(
+    prompt.body,
+    "a.ts still has conflict markers. logo.png looks like a binary file, so it wasn't checked for conflict markers. Staging them marks those conflicts resolved with any markers in the files, and they'll be committed unless you remove them first.",
+  );
 });
 
 test("a too-large file says why it wasn't checked", () => {

@@ -20,9 +20,11 @@ import * as api from "../api";
 import {
   type ConflictSides,
   checkoutConflictSide,
+  conflictMarkerScan,
   conflictSides,
   resolveConflict,
 } from "../conflict";
+import { MARKER_SCAN_TIMED_OUT } from "../conflict-prefilter";
 import { literalPathspec } from "../glob";
 import type {
   RemoteLens,
@@ -206,15 +208,35 @@ export function useOpContinue(repo: string) {
 /** How often an open conflict file re-reads from disk while its panel shows. */
 const CONFLICT_FILE_POLL_MS = 2000;
 
+/** The slower cadence for a file whose last read carried more than
+ *  {@link CONFLICT_FILE_LARGE_CHARS} across its versions: each tick re-sends
+ *  them all, hashes the working file and spawns a `git show` per stage. */
+const CONFLICT_FILE_LARGE_POLL_MS = 10_000;
+const CONFLICT_FILE_LARGE_CHARS = 256_000;
+
 /** The pause before a conflict-file read's one retry after an `io` failure. */
 const CONFLICT_FILE_RETRY_MS = 300;
+
+/** The conflict reads' retry rule: one quick retry after an `io` failure (a
+ *  read colliding with an editor's save), nothing else. */
+const retryConflictReadOnIo = (failureCount: number, error: Error) =>
+  failureCount < 1 && isAppError(error) && error.kind === "io";
+
+/** Characters across every version a sides read carried. */
+function sidesChars(sides: ConflictSides): number {
+  return [sides.working, sides.ours, sides.theirs, sides.base].reduce(
+    (sum, body) => sum + (typeof body === "string" ? body.length : 0),
+    0,
+  );
+}
 
 /**
  * The conflicted file's sides + marked working text, for the conflict editor.
  * Polls while its panel shows: the file is edited outside any app mutation (the
  * terminal, an agent, an external editor), and git status still lists an
  * on-disk resolve as unmerged. A tick costs one `git ls-files -u`, a `git show`
- * per present stage, and a whole-file read, hence the panel gate. The
+ * per present stage, and a whole-file read, hence the panel gate. A file whose
+ * last read carried a large payload polls at the slower large-file cadence. The
  * document-visibility pause applies only where the webview reports hidden; a
  * minimized Windows window does not, so it keeps polling like the status poll
  * does. An `io` failure (a read colliding with an editor's save) retries once
@@ -229,17 +251,20 @@ export function useConflictFile(repo: string, path: string) {
   return useQuery({
     queryKey: ["repo", repo, "conflict-file", path] as const,
     queryFn: () => conflictSides(repo, path, []),
-    retry: (failureCount, error) =>
-      failureCount < 1 && isAppError(error) && error.kind === "io",
+    retry: retryConflictReadOnIo,
     retryDelay: CONFLICT_FILE_RETRY_MS,
-    refetchInterval: (query) =>
-      panelActive &&
-      !(
-        isAppError(query.state.error) &&
-        query.state.error.kind === "invalidArgument"
+    refetchInterval: (query) => {
+      if (
+        !panelActive ||
+        (isAppError(query.state.error) &&
+          query.state.error.kind === "invalidArgument")
       )
-        ? CONFLICT_FILE_POLL_MS
-        : false,
+        return false;
+      const data = query.state.data;
+      return data !== undefined && sidesChars(data) > CONFLICT_FILE_LARGE_CHARS
+        ? CONFLICT_FILE_LARGE_POLL_MS
+        : CONFLICT_FILE_POLL_MS;
+    },
     refetchIntervalInBackground: false,
     networkMode: "always",
   });
@@ -306,6 +331,47 @@ export function useHeldConflictFile(
 
 const conflictFileKey = (repo: string) =>
   ["repo", repo, "conflict-file"] as const;
+
+/** Outside {@link conflictFileKey}'s prefix on purpose: the conflict writes
+ *  await that prefix's refetch, and a whole-file scan may take its full budget,
+ *  so they refresh this key fire-and-forget instead. */
+const conflictMarkerScanKey = (repo: string) =>
+  ["repo", repo, "conflict-marker-scan"] as const;
+
+/** The scan's retry rule: the conflict reads' io retry, except a scan that ran
+ *  out of its budget, which would only spend that budget again. */
+const retryMarkerScan = (failureCount: number, error: Error) =>
+  retryConflictReadOnIo(failureCount, error) &&
+  !(
+    isAppError(error) &&
+    appErrorDetail(error.kind, error.message) === MARKER_SCAN_TIMED_OUT
+  );
+
+/**
+ * The capless marker scan of a conflicted working file, for a file whose sides
+ * read refused it as too large to show. The conflict writes and
+ * {@link refreshConflictFile} re-read it without awaiting it. No poll: the
+ * refused sides read doesn't poll either, and staging re-scans at the click.
+ * Stale at once, so the window-refocus refresh re-scans after an outside edit.
+ */
+const conflictMarkerScanOptions = (repo: string, path: string) =>
+  queryOptions({
+    queryKey: [...conflictMarkerScanKey(repo), path] as const,
+    queryFn: () => conflictMarkerScan(repo, path),
+    staleTime: 0,
+    retry: retryMarkerScan,
+    retryDelay: CONFLICT_FILE_RETRY_MS,
+    networkMode: "always",
+  });
+
+/** {@link conflictMarkerScanOptions}, idle until `enabled`. */
+export function useConflictMarkerScan(
+  repo: string,
+  path: string,
+  enabled: boolean,
+) {
+  return useQuery({ ...conflictMarkerScanOptions(repo, path), enabled });
+}
 
 /** How often an open submodule conflict re-reads; useSubmoduleChanges' cadence,
  *  since each tick spawns git inside the submodule too. */
@@ -392,7 +458,7 @@ export function useAcceptSubmoduleConflictSide(repo: string) {
       ),
     {
       invalidate: [conflictFileKey(repo)],
-      invalidateAfter: workingTreeKeys(repo),
+      invalidateAfter: [...workingTreeKeys(repo), conflictMarkerScanKey(repo)],
       refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",
@@ -400,9 +466,9 @@ export function useAcceptSubmoduleConflictSide(repo: string) {
   );
 }
 
-/** Re-reads the conflict editor (awaited) and fires the working-tree keys
- *  alongside it, where the conflict mutations fire them after; shared with the
- *  view's error-path refresh so the keys stay in this package. */
+/** Re-reads the conflict editor (awaited) and fires the working-tree keys and
+ *  the marker scan alongside it, where the conflict mutations fire them after;
+ *  shared with the view's error-path refresh so the keys stay in this package. */
 export async function refreshConflictFile(
   queryClient: QueryClient,
   repo: string,
@@ -410,7 +476,10 @@ export async function refreshConflictFile(
   const refresh = queryClient.invalidateQueries({
     queryKey: conflictFileKey(repo),
   });
-  for (const queryKey of workingTreeKeys(repo))
+  for (const queryKey of [
+    ...workingTreeKeys(repo),
+    conflictMarkerScanKey(repo),
+  ])
     void queryClient.invalidateQueries({ queryKey });
   await refresh;
 }
@@ -440,10 +509,13 @@ export function useResolveConflict(repo: string) {
       ),
     {
       invalidate: [conflictFileKey(repo)],
-      invalidateAfter: workingTreeKeys(repo),
+      invalidateAfter: [...workingTreeKeys(repo), conflictMarkerScanKey(repo)],
       refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",
+      // Each accept carries the whole file in its variables; nothing reads a
+      // settled resolve back, so it leaves the cache as it settles.
+      gcTime: 0,
     },
   );
 }
@@ -456,7 +528,7 @@ export function useCheckoutConflictSide(repo: string) {
       checkoutConflictSide(repo, args.path, args.side),
     {
       invalidate: [conflictFileKey(repo)],
-      invalidateAfter: workingTreeKeys(repo),
+      invalidateAfter: [...workingTreeKeys(repo), conflictMarkerScanKey(repo)],
       refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",
@@ -472,7 +544,7 @@ export function useMarkConflictResolved(repo: string) {
     (path: string) => api.gitStage(repo, [literalPathspec(path)]),
     {
       invalidate: [conflictFileKey(repo)],
-      invalidateAfter: workingTreeKeys(repo),
+      invalidateAfter: [...workingTreeKeys(repo), conflictMarkerScanKey(repo)],
       refetchBeforeSuccess: true,
       // Local conflict write — never park it offline.
       networkMode: "always",

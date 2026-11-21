@@ -20,7 +20,11 @@ import {
   gitStatus,
   readRepoInstructions,
 } from "@/lib/git/api";
-import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import {
+  type ConflictSides,
+  conflictMarkerScan,
+  conflictSides,
+} from "@/lib/git/conflict";
 import { TOO_LARGE_REFUSAL } from "@/lib/git/conflict-prefilter";
 import type { RepoStatus } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
@@ -45,6 +49,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 vi.mock("@/lib/git/conflict", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
   conflictSides: vi.fn(),
+  conflictMarkerScan: vi.fn(),
 }));
 vi.mock("@/lib/ai/ignore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/ignore")>()),
@@ -126,6 +131,12 @@ beforeEach(() => {
     structuredClone(DEFAULT_SETTINGS),
   );
   vi.mocked(conflictSides).mockReset();
+  // The too-large strip's advisory scan; never what these cases assert.
+  vi.mocked(conflictMarkerScan).mockImplementation(async () => ({
+    exists: true,
+    markers: true,
+    binary: false,
+  }));
   vi.mocked(conflictSides).mockImplementation(async () => {
     if ("working" in disk) return disk as ConflictSides;
     throw disk;

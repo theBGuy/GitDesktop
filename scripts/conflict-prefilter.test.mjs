@@ -17,9 +17,13 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   BINARY_REFUSAL,
+  blockInputsOf,
   conflictAiBlockReason,
+  exceedsPromptSection,
   LINKED_ANCESTOR_TAIL,
+  MARKER_SCAN_TIMED_OUT,
   PREFILTER_READ_REASON,
+  PROMPT_SECTION_MAX,
   partition,
   prefilterToast,
   SIDES_READ_CHUNK,
@@ -38,33 +42,100 @@ const verdict = ({
   workingUndecodable = false,
   ignored = false,
   unreadable = false,
+  promptTooLarge = false,
   resolved = false,
 } = {}) => ({
   undecodable,
   workingUndecodable,
   aiIgnored: { ignored, unreadable },
+  promptTooLarge,
   resolved,
 });
 const ok = (value) => ({ status: "fulfilled", value });
 const failed = { status: "rejected", reason: new Error("read failed") };
 
-test("the blocked gate matches the view's old inline check on every flag row", () => {
+test("the blocked gate matches the view's old inline check plus the budget on every flag row", () => {
   for (const undecodable of [false, true])
     for (const workingUndecodable of [false, true])
       for (const ignored of [false, true])
-        for (const unreadable of [false, true]) {
-          const v = verdict({
-            undecodable,
-            workingUndecodable,
-            ignored,
-            unreadable,
-          });
-          assert.equal(
-            conflictAiBlockReason(v) !== null,
-            undecodable || ignored,
-            JSON.stringify(v),
-          );
-        }
+        for (const unreadable of [false, true])
+          for (const promptTooLarge of [false, true]) {
+            const v = verdict({
+              undecodable,
+              workingUndecodable,
+              ignored,
+              unreadable,
+              promptTooLarge,
+            });
+            assert.equal(
+              conflictAiBlockReason(v) !== null,
+              undecodable || ignored || promptTooLarge,
+              JSON.stringify(v),
+            );
+          }
+});
+
+/** A sides read's four versions; `null` is a side with no stage. */
+const sidesOf = ({ working = "", ours = "", theirs = "", base = "" } = {}) => ({
+  working,
+  ours,
+  theirs,
+  base,
+  undecodable: false,
+  workingUndecodable: false,
+  aiIgnored: { ignored: false, unreadable: false },
+});
+
+test("the prompt budget counts UTF-16 code units in every version", () => {
+  assert.equal(PROMPT_SECTION_MAX, 80_000);
+  const at = "a".repeat(80_000);
+  const over = "a".repeat(80_001);
+  assert.equal(
+    exceedsPromptSection(
+      sidesOf({ working: at, ours: at, theirs: at, base: at }),
+    ),
+    false,
+  );
+  for (const side of ["working", "ours", "theirs", "base"])
+    assert.equal(
+      exceedsPromptSection(sidesOf({ [side]: over })),
+      true,
+      `${side} at 80,001`,
+    );
+  // Null sides have no version to send.
+  assert.equal(
+    exceedsPromptSection(
+      sidesOf({ working: at, ours: null, theirs: null, base: null }),
+    ),
+    false,
+  );
+  // A modify/delete: an empty working file over a large surviving side.
+  assert.equal(
+    exceedsPromptSection(
+      sidesOf({ working: "", ours: null, theirs: "t".repeat(90_000) }),
+    ),
+    true,
+  );
+  // 40,001 astral characters are 80,002 code units.
+  const astral = "\u{1F600}".repeat(40_001);
+  assert.equal(astral.length, 80_002);
+  assert.equal(exceedsPromptSection(sidesOf({ working: astral })), true);
+  assert.equal(
+    exceedsPromptSection(sidesOf({ base: "\u{1F600}".repeat(40_000) })),
+    false,
+  );
+});
+
+test("blockInputsOf carries the gate's flags and the budget verdict", () => {
+  const s = sidesOf({ ours: "o".repeat(80_001) });
+  assert.deepEqual(blockInputsOf(s), {
+    undecodable: false,
+    workingUndecodable: false,
+    aiIgnored: { ignored: false, unreadable: false },
+    promptTooLarge: true,
+  });
+  assert.equal(conflictAiBlockReason(blockInputsOf(s)), "tooLarge");
+  assert.equal(conflictAiBlockReason(blockInputsOf(sidesOf())), null);
 });
 
 test("the blocked gate's reason priority", () => {
@@ -81,6 +152,13 @@ test("the blocked gate's reason priority", () => {
     [{ undecodable: true, ignored: true, unreadable: true }, "partUndecodable"],
     [{ ignored: true, unreadable: true }, "unreadableName"],
     [{ ignored: true }, "excluded"],
+    [{ undecodable: true, promptTooLarge: true }, "partUndecodable"],
+    [
+      { ignored: true, unreadable: true, promptTooLarge: true },
+      "unreadableName",
+    ],
+    [{ ignored: true, promptTooLarge: true }, "excluded"],
+    [{ promptTooLarge: true }, "tooLarge"],
     // Impossible in real data (unreadable implies ignored): pinned to queue.
     [{ unreadable: true }, null],
     [{ workingUndecodable: true }, null],
@@ -313,9 +391,51 @@ test("the gate keeps the view's population: a resolved-aware gate goes red", asy
   assert.notEqual(mutated.conflictAiBlockReason(v), null);
 });
 
+/** Resolve all over a small file, one past the prompt budget, one the read
+ *  refused as too large to show, and a binary one. */
+function overBudgetWalk(mod) {
+  const paths = ["small.ts", "big.json", "huge.log", "logo.png"];
+  const reads = [
+    ok(verdict()),
+    ok(verdict({ promptTooLarge: true })),
+    ok({ refused: "tooLarge" }),
+    ok({ refused: "binary" }),
+  ];
+  const split = mod.partition(paths, reads);
+  return { split, toast: mod.prefilterToast({ total: 4, ...split }) };
+}
+
+test("Resolve all skips a file past the prompt budget beside the read refusals", () => {
+  const { split, toast } = overBudgetWalk({ partition, prefilterToast });
+  assert.deepEqual(split.queued, ["small.ts"]);
+  assert.equal(
+    toast,
+    "Resolving 1 of 4 files with AI. Skipped 3 files: 1 is binary, 2 are too large for AI.",
+  );
+});
+
+test("the budget arm is the gate's: a gate without it goes red", async () => {
+  const mutated = await importMutated(
+    'if (sides.promptTooLarge) return "tooLarge";',
+    "",
+  );
+  assert.deepEqual(overBudgetWalk(mutated).split.queued, [
+    "small.ts",
+    "big.json",
+  ]);
+});
+
 /** The wiring a refactor could silently drop. */
 function pinWiring(view, store) {
-  assert.match(view, /if \(conflictAiBlockReason\(resolved\) !== null\) \{/);
+  assert.match(
+    view,
+    /if \(conflictAiBlockReason\(blockInputsOf\(resolved\)\) !== null\) \{/,
+  );
+  // The prefilter's verdict comes from the same inputs builder.
+  assert.match(
+    store,
+    /\(s\): PrefilterRead => \(\{\s*\.\.\.blockInputsOf\(s\),\s*resolved: noLongerConflicted\(s\),\s*\}\)/,
+  );
   assert.doesNotMatch(
     view,
     /resolved\.undecodable \|\| resolved\.aiIgnored\.ignored/,
@@ -340,10 +460,31 @@ test("the view swap and the store's stale re-checks are wired", () => {
     pinWiring(
       mutate(
         view,
-        "conflictAiBlockReason(resolved) !== null",
+        "conflictAiBlockReason(blockInputsOf(resolved)) !== null",
         "resolved.undecodable || resolved.aiIgnored.ignored",
       ),
       store,
+    ),
+  );
+  // A gate that reads the flags without the budget drops the shared reason.
+  assert.throws(() =>
+    pinWiring(
+      mutate(
+        view,
+        "conflictAiBlockReason(blockInputsOf(resolved)) !== null",
+        "conflictAiBlockReason({ ...resolved, promptTooLarge: false }) !== null",
+      ),
+      store,
+    ),
+  );
+  assert.throws(() =>
+    pinWiring(
+      view,
+      mutate(
+        store,
+        "...blockInputsOf(s),",
+        "undecodable: s.undecodable,\n              workingUndecodable: s.workingUndecodable,\n              aiIgnored: s.aiIgnored,\n              promptTooLarge: false,",
+      ),
     ),
   );
   assert.throws(() =>
@@ -363,7 +504,7 @@ test("the view swap and the store's stale re-checks are wired", () => {
 const RUST = "src-tauri/src/git/conflict.rs";
 const OPS = "src-tauri/src/git/ops.rs";
 const RUST_TOO_LARGE =
-  /^pub\(crate\) const RESOLVE_TOO_LARGE_REFUSAL: &str = "([^"\\]*)";$/m;
+  /^pub\(crate\) const RESOLVE_TOO_LARGE_REFUSAL: &str =\s*"([^"\\]*)";$/m;
 const RUST_BINARY =
   /^pub\(crate\) const RESOLVE_BINARY_REFUSAL: &str = "([^"\\]*)";$/m;
 const RUST_SENTENCE =
@@ -425,7 +566,7 @@ test("the refusal twins match the backend's strings", () => {
   pinRefusalStrings(rust, ops);
   assert.throws(() =>
     pinRefusalStrings(
-      mutate(rust, "file is too large for AI", "file is too big for AI"),
+      mutate(rust, "file is too large to show", "file is too big to show"),
       ops,
     ),
   );
@@ -473,6 +614,64 @@ test("the refusal twins match the backend's strings", () => {
         'InvalidArgument("submodule conflict — pick a commit to resolve it".into())',
       ),
       ops,
+    ),
+  );
+});
+
+// The marker scan's timeout sentence, which the scan's retry rule and the stage
+// gate match to tell a spent budget from any other io failure.
+const RUST_SCAN_TIMED_OUT =
+  /^const MARKER_SCAN_TIMED_OUT: &str = "([^"\\]*)";$/m;
+
+/** Throws unless the TS twin matches conflict.rs's sentence, raised once as a
+ *  TimedOut io error through the constant and surfaced as `AppError::Io`. */
+function pinMarkerScanTimeout(rust, ts = MARKER_SCAN_TIMED_OUT) {
+  const rustConst = RUST_SCAN_TIMED_OUT.exec(rust);
+  assert.ok(rustConst, "conflict.rs must declare MARKER_SCAN_TIMED_OUT");
+  assert.equal(ts, rustConst[1]);
+  assert.match(
+    rust,
+    /std::io::ErrorKind::TimedOut,\s*MARKER_SCAN_TIMED_OUT,\s*\)/,
+    "the scan must raise its timeout through MARKER_SCAN_TIMED_OUT",
+  );
+  assert.equal(rust.split(`"${rustConst[1]}"`).length - 1, 1);
+  assert.match(
+    rust,
+    /Err\(e\) => Err\(AppError::Io\(e\)\),/,
+    "the scan must surface its io error as AppError::Io",
+  );
+}
+
+test("the marker scan's timeout twin matches the backend's sentence", () => {
+  const rust = read(RUST);
+  pinMarkerScanTimeout(rust);
+  assert.throws(() =>
+    pinMarkerScanTimeout(
+      mutate(rust, "took too long to check", "took too long to scan"),
+    ),
+  );
+  assert.throws(() =>
+    pinMarkerScanTimeout(
+      rust,
+      "file took too long to scan for conflict markers",
+    ),
+  );
+  assert.throws(() =>
+    pinMarkerScanTimeout(
+      mutate(
+        rust,
+        "std::io::ErrorKind::TimedOut,\n                MARKER_SCAN_TIMED_OUT,",
+        'std::io::ErrorKind::TimedOut,\n                "file took too long to check for conflict markers",',
+      ),
+    ),
+  );
+  assert.throws(() =>
+    pinMarkerScanTimeout(
+      mutate(
+        rust,
+        "Err(e) => Err(AppError::Io(e)),",
+        "Err(e) => Err(AppError::InvalidArgument(e.to_string())),",
+      ),
     ),
   );
 });

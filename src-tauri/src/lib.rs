@@ -344,6 +344,7 @@ pub fn run() {
             git::ai_ignore::git_filter_ai_ignored,
             git::ai_ignore::git_ai_ignore_verdicts,
             git::conflict::git_conflict_sides,
+            git::conflict::git_conflict_marker_scan,
             git::conflict::git_resolve_conflict,
             git::conflict::git_checkout_conflict_side,
             git::conflict::git_diff_contents,

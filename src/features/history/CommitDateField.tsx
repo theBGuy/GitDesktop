@@ -38,6 +38,18 @@ export const nativePickers = {
   },
 };
 
+/** Opens `el`'s native picker where the engine allows it; a throw (no user
+ *  activation, a read-only input) or a missing method leaves the inputs on
+ *  screen as the fallback. */
+function showNativePicker(el: HTMLInputElement | null) {
+  if (el === null || typeof el.showPicker !== "function") return;
+  try {
+    el.showPicker();
+  } catch {
+    // The two inputs stay rendered: they are the fallback.
+  }
+}
+
 /**
  * One typed commit date: canonical text in, lenient text accepted, rewritten to
  * canonical on blur. The line under it is the error or how the text reads.
@@ -85,25 +97,30 @@ export function CommitDateField({
   const inputId = useId();
   const lineId = useId();
   const reasonId = useId();
-  const pickerId = useId();
   const [canPick] = useState(() => nativePickers.supported());
   const [pickerOpen, setPickerOpen] = useState(false);
   const dateInputRef = useRef<HTMLInputElement>(null);
   const revealPending = useRef(false);
   const held = heldReason !== null;
 
-  // Revealing the row opens the date picker where the engine allows it; a
-  // throw (no user activation) or a missing method leaves the inputs on screen.
+  // Revealing the row opens the date picker where the engine allows it, two
+  // frames later so a paint lands between: WebView2 anchors a picker opened in
+  // the commit that adds its input at the window's top-left corner. The press's
+  // user activation outlasts the wait; the pending flag clears only at the fire,
+  // so a StrictMode re-run of this effect still opens it.
   useLayoutEffect(() => {
     if (!pickerOpen || !revealPending.current) return;
-    revealPending.current = false;
-    const el = dateInputRef.current;
-    if (el === null || typeof el.showPicker !== "function") return;
-    try {
-      el.showPicker();
-    } catch {
-      // The two inputs stay rendered: they are the fallback.
-    }
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        revealPending.current = false;
+        showNativePicker(dateInputRef.current);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
   }, [pickerOpen]);
 
   const read = readCommitDate(value, original.offsetMinutes);
@@ -190,13 +207,20 @@ export function CommitDateField({
             size="icon-xs"
             className="shrink-0"
             aria-label={`Pick the ${label.toLowerCase()} with the calendar`}
-            aria-expanded={pickerOpen}
-            aria-controls={pickerOpen ? pickerId : undefined}
             disabled={held}
             reason={heldReason}
+            // Opens, never collapses, so it is a plain action with no
+            // aria-expanded: Chromium closes an open native picker on
+            // the press's mousedown and still delivers its click here, so a
+            // toggle would hide the inputs on every other click (and on the
+            // first click after a pick) instead of showing the calendar.
             onClick={() => {
-              revealPending.current = !pickerOpen;
-              setPickerOpen((o) => !o);
+              if (pickerOpen) {
+                showNativePicker(dateInputRef.current);
+                return;
+              }
+              revealPending.current = true;
+              setPickerOpen(true);
             }}
           >
             <CalendarBlankIcon />
@@ -247,7 +271,7 @@ export function CommitDateField({
         {trailing}
       </div>
       {canPick && pickerOpen && (
-        <div id={pickerId} className="flex flex-wrap items-center gap-2 pl-30">
+        <div className="flex flex-wrap items-center gap-2 pl-30">
           <Input
             ref={dateInputRef}
             type="date"

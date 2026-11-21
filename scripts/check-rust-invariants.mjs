@@ -3350,7 +3350,7 @@ export const LOCAL_BRANCH_DELETE_ALLOWLIST = [
   },
   {
     file: "git/commit.rs",
-    fn: "git_undo_commit_core",
+    fn: "undo_commit_inner",
     rationale:
       "its `update-ref -d HEAD` runs only in the unborn arm (target None), where HEAD did not resolve under the undo's hold; the attached arm goes through delete_root_ref",
   },

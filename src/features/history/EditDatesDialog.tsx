@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { failedSinceLastSuccess } from "@/features/conversations/remote-section-state";
 import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitleFromText } from "@/lib/clip-title";
@@ -29,7 +28,6 @@ import {
   useCommitRecordsParent,
   useLog,
   useOpState,
-  useUnpushedCount,
 } from "@/lib/git/queries";
 import type { CommitDate, RepoStatus } from "@/lib/git/types";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -60,7 +58,7 @@ import {
   sameCommitDate,
   sameUnreachableNote,
 } from "./commit-date";
-import { isNoUpstream, undoPushedHold } from "./editable-set";
+import { useHeadPublishedElsewhere } from "./use-head-published";
 import { useForcePushGate } from "./useAmendCommit";
 
 /** The commit an Edit dates dialog acts on, and the HEAD and branch its host
@@ -82,16 +80,10 @@ const PUBLISHED_ELSEWHERE_WARNING =
 const PUBLISHED_UNCHECKED_NOTE =
   "Couldn't check whether a remote branch has this commit.";
 
-/** Only status's HEAD, its branch pin and whether it lacks an upstream, so
- *  working-tree polls don't re-render the dialog. */
+/** Only status's HEAD and its branch pin, so working-tree polls don't
+ *  re-render the dialog. */
 const selectHeadPin = (s: RepoStatus) =>
-  s.branch
-    ? {
-        oid: s.branch.oid,
-        pin: headBranchPin(s.branch),
-        noUpstream: isNoUpstream(s.branch),
-      }
-    : null;
+  s.branch ? { oid: s.branch.oid, pin: headBranchPin(s.branch) } : null;
 
 /** Unmerged entries with no operation stopped (a stash pop that conflicted):
  *  the backend refuses the change. */
@@ -246,24 +238,7 @@ function EditDatesForm({
       select: selectUnresolved,
     }).data === true;
   const gate = useForcePushGate(repoPath);
-  // With no upstream, Undo's basis says whether a remote branch already has
-  // HEAD, believed only while it was counted from the HEAD status reports now.
-  const noUpstream = statusHead?.noUpstream === true;
-  const unpushed = useUnpushedCount(repoPath, noUpstream);
-  const publishedElsewhere = noUpstream
-    ? undoPushedHold({
-        noUpstream: true,
-        ahead: 0,
-        countLoaded: unpushed.data !== undefined,
-        countFailed: failedSinceLastSuccess(unpushed),
-        basis: unpushed.data?.basis ?? null,
-        count: unpushed.data?.count ?? 0,
-        agreed:
-          !unpushed.isError &&
-          statusHead != null &&
-          unpushed.data?.headOid === statusHead.oid,
-      })
-    : null;
+  const publishedElsewhere = useHeadPublishedElsewhere(repoPath);
   // run() reads the gate after awaiting a prompt, when the press's render is stale.
   const liveGate = useLatestRef(gate);
   const amendDates = useAmendCommitDates(repoPath);

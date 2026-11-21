@@ -320,6 +320,8 @@ const UNDO_TWINS = [
   "UNDO_MID_MERGE",
   "UNDO_DETACHED_ROOT",
   "UNDO_UNRESOLVED",
+  "UNDO_ALREADY_PUSHED",
+  "UNDO_PUSHED_UNCHECKED",
 ];
 
 function checkUndoTwin(rust, panel, name) {

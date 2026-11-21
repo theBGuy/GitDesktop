@@ -6,8 +6,9 @@
  * stripping. Prompts go through `useConfirm.getState().ask(...)`.
  */
 
-/** A conflicted file a stage would carry markers into; `unchecked` = its sides
- *  read failed, for any cause (oversize, binary, a git error). `cause` names
+/** A conflicted file a stage would carry markers into; `unchecked` = its
+ *  markers couldn't be checked, for any cause (binary, a failed scan of a file
+ *  too large to read, a git error). `cause` names
  *  the read's refusal when the caller knows it; without one the prompt says
  *  only that the file couldn't be checked. */
 export interface MarkerFlag {
@@ -40,9 +41,34 @@ const CAUSE_CLAUSE: Record<MarkerCheckCause, { one: string; many: string }> = {
 /** Caused groups in the order the prompt names them. */
 const CAUSE_ORDER: readonly MarkerCheckCause[] = ["binary", "tooLarge"];
 
+/** The binary-only prompt's title: a bulk action never titles itself after
+ *  one file, and one file's title stays singular. */
+function binaryStageTitle(flags: MarkerFlag[], bulk: boolean): string {
+  if (flags.length > 1) return "Stage binary files as they are on disk?";
+  return bulk
+    ? "Stage a binary file as it is on disk?"
+    : `Stage ${flags[0].name} as it is on disk?`;
+}
+
+/** The prompt when every flag is a binary file: it makes no claim about
+ *  markers, since a binary file's content can't be checked at all. */
+function binaryStagePrompt(flags: MarkerFlag[], bulk: boolean) {
+  const one = flags.length === 1;
+  return {
+    title: binaryStageTitle(flags, bulk),
+    body: one
+      ? `${flags[0].name} looks like a binary file, so GitDesktop can't merge it or check what it holds. Staging it marks the conflict resolved with the file exactly as it is on disk now.`
+      : `${flaggedNames(flags)} look like binary files, so GitDesktop can't merge them or check what they hold. Staging them marks those conflicts resolved with the files exactly as they are on disk now.`,
+    confirmLabel: "Stage anyway",
+    confirmVariant: "destructive" as const,
+  };
+}
+
 /** The stage-over-markers prompt for a non-empty `flags`. A `bulk` action never
  *  titles itself after one file, since it stages more. */
 export function markerStagePrompt(flags: MarkerFlag[], bulk: boolean) {
+  if (flags.every((f) => f.cause === "binary"))
+    return binaryStagePrompt(flags, bulk);
   const marked = flags.filter((f) => !f.unchecked);
   const unchecked = flags.filter((f) => f.unchecked);
   const markers =
