@@ -155,8 +155,8 @@ const ALLOWLIST = {
     rationale: IN_DIALOG,
   },
   "src/features/repository/StashesDialog.tsx": {
-    scrollArea: 3,
-    rationale: `${IN_DIALOG} (the stash list, the lost-stashes pane and the stash files rail)`,
+    scrollArea: 2,
+    rationale: `${IN_DIALOG} (the stash list and the lost-stashes pane)`,
   },
   "src/features/scripts/TasksPanel.tsx": {
     scrollArea: 1,

@@ -9,9 +9,9 @@
 // reasoned exclusions.
 //
 // It also pins the delayed list re-read (`recheckListsLater`): the
-// units in LIST_REREAD schedule it, each under its gate, and no other unit does,
-// and of the issue lifecycle writes only close and reopen pass the helper's
-// re-read flag.
+// units in LIST_REREAD schedule it, each under its gate (the merge's ahead of
+// its queued gate, for every outcome), and no other unit does, and of the issue
+// lifecycle writes only close and reopen pass the helper's re-read flag.
 //
 // The checker is a pure function over source text, so the suite feeds it the real
 // files (must pass) and in-memory mutants (must fail) without touching disk. It
@@ -168,11 +168,16 @@ const EXCLUDED = {
 /** The units that schedule the delayed list re-read, because the forge's list
  *  membership can lag the state change or deletion they make, and the condition
  *  that must guard every such call in it (null = scheduled on every success).
+ *  `before` names a gate every such call must precede: the merge arms the
+ *  re-read for a queued outcome too, so a late-reported merge corrects itself.
  *  Any other unit scheduling it fails the check; the helper's gate plus the
- *  ISSUE_REREAD flag pin keep pin, lock, transfer and delete out, and the
- *  merge's gate keeps a queued merge out. */
+ *  ISSUE_REREAD flag pin keep pin, lock, transfer and delete out. */
 const LIST_REREAD = {
-  useMergePr: { file: `${Q}pr-actions.ts`, gate: "if (!data.queued)" },
+  useMergePr: {
+    file: `${Q}pr-actions.ts`,
+    gate: null,
+    before: "if (!data.queued)",
+  },
   useClosePr: { file: `${Q}pr-actions.ts`, gate: null },
   useReopenPr: { file: `${Q}pr-actions.ts`, gate: null },
   useDeleteRemoteBranch: { file: `${Q}branches.ts`, gate: null },
@@ -422,7 +427,7 @@ function checkPushRecheckFamily(raw) {
       problems.push(`${file} ${name}: does not call ${mustCall.slice(0, -1)}`);
   }
 
-  for (const [name, { file, gate }] of Object.entries(LIST_REREAD)) {
+  for (const [name, { file, gate, before }] of Object.entries(LIST_REREAD)) {
     const hook = hooks.get(`${file}#${name}`);
     if (!hook) {
       problems.push(`${file} ${name}: list re-read unit not found`);
@@ -438,6 +443,14 @@ function checkPushRecheckFamily(raw) {
       problems.push(
         `${file} ${name}: a list re-read is not guarded by \`${gate}\``,
       );
+    if (before !== undefined) {
+      const at = hook.body.indexOf(before);
+      if (at < 0) problems.push(`${file} ${name}: \`${before}\` not found`);
+      else if (hook.body.lastIndexOf(LIST_REREAD_CALL) > at)
+        problems.push(
+          `${file} ${name}: a list re-read must arm ahead of \`${before}\`, for every outcome`,
+        );
+    }
   }
   for (const { file, name, body } of hooks.values()) {
     const isDefinition =
@@ -988,7 +1001,7 @@ test("dropping a list re-read gate fails the check", () => {
     );
   }
   const gates = Object.values(LIST_REREAD).filter((e) => e.gate !== null);
-  assert.equal(gates.length, 2);
+  assert.equal(gates.length, 1);
   const sidestep = mutateUnit(
     realSources(),
     `${Q}issues.ts`,
@@ -1003,6 +1016,37 @@ test("dropping a list re-read gate fails the check", () => {
     checkPushRecheckFamily(sidestep).some(
       (p) =>
         p.includes("useIssueLifecycleMutation") && p.includes("not guarded"),
+    ),
+  );
+});
+
+test("a merge list re-read moved under or after its queued gate fails the check", () => {
+  const file = `${Q}pr-actions.ts`;
+  const { before } = LIST_REREAD.useMergePr;
+  const first = "onSuccess: (data, args) => {\n        recheckListsLater(";
+  const problem = `${file} useMergePr: a list re-read must arm ahead of \`${before}\`, for every outcome`;
+  const regated = mutateUnit(realSources(), file, "useMergePr", (body) => {
+    assert.ok(body.includes(first), "the merge's onSuccess opens elsewhere");
+    return body.replace(
+      first,
+      "onSuccess: (data, args) => {\n        if (!data.queued) recheckListsLater(",
+    );
+  });
+  // A second call past the gate block fails even with the first still ahead.
+  const after = mutateUnit(realSources(), file, "useMergePr", (body) =>
+    body.replace(
+      'if (args.lens === "origin" && !data.queued)',
+      'recheckListsLater(queryClient, repo, []);\n        if (args.lens === "origin" && !data.queued)',
+    ),
+  );
+  for (const mutant of [regated, after])
+    assert.ok(checkPushRecheckFamily(mutant).includes(problem), problem);
+  const gone = mutateUnit(realSources(), file, "useMergePr", (body) =>
+    body.replace("if (!data.queued) {", "if (data.landed) {"),
+  );
+  assert.ok(
+    checkPushRecheckFamily(gone).includes(
+      `${file} useMergePr: \`${before}\` not found`,
     ),
   );
 });
