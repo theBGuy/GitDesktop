@@ -8,9 +8,12 @@
 //! loads after it. Two things protect the lock instead. No other document can know the
 //! per-run id, so none can attach an agent-level rule to it; and the read-back
 //! (`read_back`, over `opencode debug agents` run with the same binary, environment and
-//! directory as the run) refuses the run unless only deny rules follow a probe agent's
-//! own. The read-back checks that probe, the pin's rules under an id of its own; the lock
-//! that runs is built afterwards under a fresh id and is not read back.
+//! directory as the run) refuses the run unless every rule after a probe agent's own is a
+//! deny over every resource (`*`) or one of opencode's fixed trailing denies: a tool is
+//! hidden only while the last rule matching it denies `*`, so a narrower deny after the
+//! lock would list a tool the lock hides. The read-back checks that probe, the pin's rules
+//! under an id of its own; the lock that runs is built afterwards under a fresh id and is
+//! not read back.
 //!
 //! The rules are default-deny: `* * deny` first, then allows for the tools a pin keeps. A
 //! blocklist cannot work: several builtin tools never ask for permission and are stopped
@@ -63,9 +66,24 @@
 //!   under the same id and exits 0 (`cli/src/session-target.ts`, 2.3.2), so a resumed turn
 //!   can run without the system prompt and without its history, and nothing in the stream
 //!   shows it;
-//! - a DiffOnly read-back is proven once per binary and cached, so it does not notice a
-//!   managed-settings layer added afterwards (such a layer still cannot name the per-run
-//!   id).
+//! - a DiffOnly read-back is proven once per binary and opencode version and cached, so it
+//!   does not notice a managed-settings layer added afterwards (such a layer still cannot
+//!   name the per-run id);
+//! - the read tool follows a link inside the run directory, and the rules see only the
+//!   link's own path (as on 1.x);
+//! - after a read, opencode loads `AGENTS.md` or `CLAUDE.md` from the folders between the
+//!   file and the run directory without consulting the read rules (as on 1.x), and follows
+//!   a linked one to wherever it points;
+//! - `--session` runs in the session's own stored directory, so a session moved by the user
+//!   or another client, or a repository relocated in GitDesktop, can run under another
+//!   folder's project config than the one the read-back probed;
+//! - a rule whose action pattern is anything but the literal `read` (`*`, `r*`, `read*`)
+//!   keeps a home-spelled resource (`~`, `$HOME`) literal, while the same rule mirrored onto
+//!   `read` is expanded, so the mirrored deny covers the home path instead of the literal one;
+//! - passing servers replaces an inherited `OPENCODE_CONFIG`, so a config file named there
+//!   (its read rules included) is not loaded for that run, as on 1.x;
+//! - the version is read in GitDesktop's own directory, so a per-directory version manager
+//!   can run another opencode in the worktree than the one classified.
 
 use std::collections::BTreeMap;
 
@@ -121,14 +139,20 @@ fn version_line(text: &str) -> String {
         .to_string()
 }
 
-/// The first whitespace-separated token of the first non-empty line that reads as a
-/// version, with its index among that line's tokens; later tokens and later lines are
-/// never read.
+/// The version and its token index: the first non-empty line's token 0 when it reads as a
+/// version (1.x), else its token 1 when token 0 is exactly `opencode` (2.x); nothing else
+/// is read.
 fn parse_version(text: &str) -> Option<(usize, Version)> {
-    version_line(text)
-        .split_whitespace()
-        .enumerate()
-        .find_map(|(index, token)| Some((index, version_token(token)?)))
+    let line = version_line(text);
+    let mut tokens = line.split_whitespace();
+    let first = tokens.next()?;
+    if let Some(version) = version_token(first) {
+        return Some((0, version));
+    }
+    if first != "opencode" {
+        return None;
+    }
+    Some((1, version_token(tokens.next()?)?))
 }
 
 /// `[v|V]MAJOR.MINOR.PATCH`, optionally followed by a `-` or `+` suffix.
@@ -169,7 +193,7 @@ pub(crate) enum Cli {
 
 /// Why a binary is refused before anything else is spawned. `text` is the cleaned first
 /// line of its version output, clipped to 80 characters. `Preview` is a version below 2
-/// after a leading word: opencode 2's line shape on a preview build.
+/// after the word `opencode`: opencode 2's line shape on a preview build.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum VersionRefusal {
     Unparseable { text: String },
@@ -216,9 +240,10 @@ impl VersionRefusal {
 }
 
 /// Classifies `opencode --version` output: 1.x keeps the 1.x path, 2.x from `MIN_V2` takes
-/// this module, and anything else is refused. 1.x prints its version as the line's first
-/// token and 2.x after the word `opencode`, so a version below 2 after a leading word is a
-/// 2.x preview build (versioned `0.0.0-<channel>-<n>`), never 1.x.
+/// this module, and anything else is refused. Read is the first non-empty line's token 0
+/// when it reads as a version (1.x), else its token 1 when token 0 is exactly `opencode`
+/// (2.x); nothing else is read. A version below 2 after `opencode` is a 2.x preview build
+/// (versioned `0.0.0-<channel>-<n>`), never 1.x.
 pub(crate) fn classify_version(text: &str) -> Result<Cli, VersionRefusal> {
     let shown = || version_line(text).chars().take(80).collect::<String>();
     let Some((index, version)) = parse_version(text) else {
@@ -432,6 +457,10 @@ const DENY_TAIL: [&str; 4] = [
     "opencode_*",
     "console_watch_*",
 ];
+
+/// The denies opencode appends after every agent's own rules, as (action, resource), read
+/// back on 2.2.0, 2.2.7 and 2.3.2.
+const FIXED_TAIL_DENIES: [(&str, &str); 2] = [("browser", "*"), ("skill", "browser")];
 
 /// The JSON escape for `{`. opencode substitutes `{env:NAME}` and `{file:path}` tokens in a
 /// document's raw text before it parses the JSON, so no `{` may appear inside a string.
@@ -707,9 +736,20 @@ fn agent_rules(agent: &Value) -> Option<Vec<Rule>> {
         .collect()
 }
 
-/// The length of the rules ahead of the probe's: the smallest run of trailing denies whose
-/// preceding rules are exactly the probe's. `None` when nothing but denies cannot follow
-/// the probe's rules.
+/// Whether `rule` may follow the probe's rules: a deny over every resource, which keeps
+/// hidden every tool it matches, or one of opencode's fixed trailing denies. Exact text,
+/// since the read-back lists opencode's own spelling of each rule.
+fn may_follow(rule: &Rule) -> bool {
+    rule.effect == Effect::Deny
+        && (rule.resource == "*"
+            || FIXED_TAIL_DENIES
+                .iter()
+                .any(|(action, resource)| rule.action == *action && rule.resource == *resource))
+}
+
+/// The length of the rules ahead of the probe's: the smallest run of trailing rules
+/// `may_follow` accepts whose preceding rules are exactly the probe's; `None` when any
+/// other rule follows them.
 fn landed_last(resolved: &[Rule], probe: &[Rule]) -> Option<usize> {
     let mut end = resolved.len();
     loop {
@@ -717,7 +757,7 @@ fn landed_last(resolved: &[Rule], probe: &[Rule]) -> Option<usize> {
         if resolved[start..end] == *probe {
             return Some(start);
         }
-        if end == 0 || resolved[end - 1].effect != Effect::Deny {
+        if end == 0 || !may_follow(&resolved[end - 1]) {
             return None;
         }
         end -= 1;
@@ -757,12 +797,12 @@ fn project(source: &[Rule], case: MatchCase) -> Mirror {
 }
 
 /// Reads the stdout of `READBACK_ARGS` run under `probe`. The probe agent must be listed
-/// and end with exactly the probe's rules followed only by denies; the rules ahead of them
-/// are the builtin defaults and the user's config. The mirror comes from `plan`'s whole
-/// list when opencode lists `plan`, else from those rules ahead. Only the probe and `plan`
-/// entries are validated, `plan` before the order check, so a malformed `plan` reads as
-/// `NotJson` whatever the probe entry holds. A DiffOnly lock carries no mirror, so its
-/// read-back neither reads `plan` nor projects anything.
+/// and end with exactly the probe's rules followed only by rules `may_follow` accepts; the
+/// rules ahead of them are the builtin defaults and the user's config. The mirror comes
+/// from `plan`'s whole list when opencode lists `plan`, else from those rules ahead. Only
+/// the probe and `plan` entries are validated, `plan` before the order check, so a
+/// malformed `plan` reads as `NotJson` whatever the probe entry holds. A DiffOnly lock
+/// carries no mirror, so its read-back neither reads `plan` nor projects anything.
 pub(crate) fn read_back(
     stdout: &str,
     probe: &LockDocument,
@@ -803,10 +843,11 @@ pub(crate) const READBACK_ARGS: &[&str] = &["debug", "agents", "--standalone"];
 /// network (`main/live-findings.md` M23, v2.3.2).
 pub(crate) const CATALOG_ARGS: &[&str] = &["api", "GET", "/api/model", "--standalone"];
 
-/// `-m`'s value: the variant rides as `provider/model#variant`, which allows one `#`, so a
-/// model typed with one is passed as typed.
+/// `-m`'s value, from the trimmed model id: the variant rides as `provider/model#variant`,
+/// which allows one `#`, so a model typed with one is passed as typed.
 fn model_arg(model: &str, variant: Option<&str>) -> Option<String> {
-    if model.trim().is_empty() {
+    let model = model.trim();
+    if model.is_empty() {
         return None;
     }
     if model.contains('#') {
@@ -937,8 +978,10 @@ const LOCK_DROPPED: &str = "opencode did not load GitDesktop's read-only lock, s
 /// How many blocks a projected `text` event may skip past a message's last known block.
 const PROJECTED_GAP_LIMIT: usize = 1024;
 
-/// How many blocks projected `text` events may grow one message to in all: the gap limit
-/// alone bounds each line, not a run of lines that each step the whole gap.
+/// Projected `text` events pad a message to at most this many blocks. A projected ordinal
+/// at or past it completes its block in place when the message already holds that block;
+/// past the last block it reads as live and adds one block, as a live line does. The gap
+/// limit bounds each line, not a run of lines that each step the whole gap.
 const MESSAGE_BLOCK_CAP: usize = 4096;
 
 /// The text blocks of one assistant message, in ordinal order; `id` is `None` for a
@@ -957,23 +1000,35 @@ struct Message {
 /// Text blocks are kept per message. A `text` event whose part id has the projected shape
 /// `prt_<message id without msg_>_text-<n>` is opencode's end-of-run reconcile and lands
 /// on block `n`, completing a block already streamed when it holds only the missed tail;
-/// any other `text` event is live and starts the message's next block. ASSUMPTION: no live
+/// any other `text` event is live and starts the message's next block. A `text` or
+/// `tool_use` event for a message not seen yet opens it as `step_start` does: opencode
+/// 2.2.0's reconcile sends no `step_start` for a message the live stream missed. A tail on
+/// a block other than the latest streamed one is not streamed, and reaches `Done` only
+/// when its message is the final one or the final one has no text. ASSUMPTION: no live
 /// block of a message is skipped while a later block of that message arrives live, since
 /// live events are emitted as blocks end, in order, and opencode's own account of a miss
 /// is the session going idle before the LAST live events arrive. Were it broken, a
-/// projected tail would join the wrong block of its message; no text would be lost.
+/// projected tail would join the wrong block of its message.
+///
+/// Every `step_start` carrying the top-level `sessionID` yields a `NativeSession`, as does
+/// the first `text`, `tool_use` or `step_finish` line carrying it while none has been
+/// sent; `error`, `retry` and `background_wait` never do, so a turn that fails before any
+/// step stores no id.
 #[derive(Debug)]
 pub(crate) struct StreamParser {
     /// The lock's agent id, matched against an error line's message.
     agent: Option<String>,
     messages: Vec<Message>,
-    /// The message `Done` reports: the one the latest `step_start` opened, or the
-    /// anonymous one text before any step lands in.
+    /// The message `Done` reports: the one the latest `step_start` opened, or the one a
+    /// `text` or `tool_use` event for an unseen message opened, or the anonymous one text
+    /// before any step lands in.
     final_message: Option<usize>,
     /// (message, block) of the block the latest non-empty `Delta` came from.
     last_streamed: Option<(usize, usize)>,
-    /// Every `Delta` returned, concatenated.
-    streamed: String,
+    /// Whether a non-empty `Delta` was returned, so the next new block leads with "\n\n".
+    streamed_any: bool,
+    /// Whether a `NativeSession` was returned.
+    session_sent: bool,
     seen_event: bool,
     error: Option<String>,
     reason: Option<String>,
@@ -988,7 +1043,8 @@ impl StreamParser {
             messages: Vec::new(),
             final_message: None,
             last_streamed: None,
-            streamed: String::new(),
+            streamed_any: false,
+            session_sent: false,
             seen_event: false,
             error: None,
             reason: None,
@@ -996,20 +1052,57 @@ impl StreamParser {
         }
     }
 
-    /// One stdout line. Lines that are not a JSON object with a string `type` are skipped.
-    pub(crate) fn line(&mut self, line: &str) -> Option<crate::agent::ReviewEvent> {
+    /// One stdout line: slot 0 is the `NativeSession` the line yields (the top-level
+    /// `sessionID`, as the struct doc says), slot 1 the line's own event, never a
+    /// `NativeSession`, `Done` or `Error`. A line that is not a JSON object with a string
+    /// `type` yields neither.
+    pub(crate) fn line(&mut self, line: &str) -> [Option<crate::agent::ReviewEvent>; 2] {
         let line = line.trim();
         if line.is_empty() {
-            return None;
+            return [None, None];
         }
-        let value: Value = serde_json::from_str(line).ok()?;
-        let kind = value.as_object()?.get("type")?.as_str()?;
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return [None, None];
+        };
+        let Some(kind) = value
+            .as_object()
+            .and_then(|object| object.get("type"))
+            .and_then(Value::as_str)
+        else {
+            return [None, None];
+        };
         self.seen_event = true;
-        // Progress after a retry means the retry is over: a timeout names one only while it
-        // is the last thing opencode reported.
-        if matches!(kind, "step_start" | "text" | "tool_use" | "step_finish") {
+        // Progress, or a background wait (which starts only once the turn is idle), after a
+        // retry means the retry is over: a timeout names one only while it is the last
+        // thing opencode reported.
+        if matches!(
+            kind,
+            "step_start" | "text" | "tool_use" | "step_finish" | "background_wait"
+        ) {
             self.retry = None;
         }
+        let native = self.native_session(kind, &value);
+        [native, self.event(kind, &value)]
+    }
+
+    /// Slot 0 of `line`: every `step_start`, and a `text`, `tool_use` or `step_finish`
+    /// line only while no id has been sent. Any id sent stops the latter.
+    fn native_session(&mut self, kind: &str, value: &Value) -> Option<crate::agent::ReviewEvent> {
+        let sends = match kind {
+            "step_start" => true,
+            "text" | "tool_use" | "step_finish" => !self.session_sent,
+            _ => false,
+        };
+        if !sends {
+            return None;
+        }
+        let id = value.get("sessionID").and_then(Value::as_str)?;
+        self.session_sent = true;
+        Some(crate::agent::ReviewEvent::NativeSession { id: id.to_string() })
+    }
+
+    /// Slot 1 of `line`: the line's own event.
+    fn event(&mut self, kind: &str, value: &Value) -> Option<crate::agent::ReviewEvent> {
         let part = value.get("part");
         let field = |name: &str| part.and_then(|part| part.get(name)).and_then(Value::as_str);
         match kind {
@@ -1019,16 +1112,16 @@ impl StreamParser {
                     None => self.anonymous(),
                 };
                 self.final_message = Some(index);
-                value
-                    .get("sessionID")
-                    .and_then(Value::as_str)
-                    .map(|id| crate::agent::ReviewEvent::NativeSession { id: id.to_string() })
+                None
             }
             "text" => {
                 let text = field("text")?;
                 self.text(field("messageID"), field("id"), text)
             }
             "tool_use" => {
+                if let Some(id) = field("messageID") {
+                    self.opened(id);
+                }
                 let name = field("tool").unwrap_or("a tool");
                 let tool = if name == "subagent" {
                     "task"
@@ -1111,20 +1204,23 @@ impl StreamParser {
             return None;
         }
         if exit_code == Some(0) {
+            let joined = |messages: &[Message]| {
+                messages
+                    .iter()
+                    .flat_map(|message| &message.blocks)
+                    .filter(|block| !block.is_empty())
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            };
             let answer = self
                 .final_message
-                .map(|index| {
-                    self.messages[index]
-                        .blocks
-                        .iter()
-                        .filter(|block| !block.is_empty())
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                })
+                .map(|index| joined(&self.messages[index..=index]))
                 .unwrap_or_default();
+            // A final message without text falls back to every message's stored blocks, so
+            // a reconciled tail on an earlier block is kept.
             let text = if answer.is_empty() {
-                self.streamed
+                joined(&self.messages)
             } else {
                 answer
             };
@@ -1167,6 +1263,17 @@ impl StreamParser {
         self.messages.len() - 1
     }
 
+    /// `message`, making a message not seen yet the final one: opencode 2.2.0's reconcile
+    /// sends no `step_start` for a message the live stream missed.
+    fn opened(&mut self, id: &str) -> usize {
+        let known = self.messages.len();
+        let index = self.message(id);
+        if index == known {
+            self.final_message = Some(index);
+        }
+        index
+    }
+
     /// A fresh message for events that name none, so `Done` never carries an earlier step.
     fn anonymous(&mut self) -> usize {
         self.messages.push(Message {
@@ -1183,7 +1290,7 @@ impl StreamParser {
         text: &str,
     ) -> Option<crate::agent::ReviewEvent> {
         let index = match message_id {
-            Some(id) => self.message(id),
+            Some(id) => self.opened(id),
             None => match self.final_message {
                 Some(index) => index,
                 None => {
@@ -1194,8 +1301,9 @@ impl StreamParser {
             },
         };
         let blocks = &mut self.messages[index].blocks;
-        // A projected ordinal far past the list, or past the message's cap, is read as live:
-        // padding up to it would let malformed ids allocate without bound.
+        // A projected ordinal inside the list completes its block in place, cap or not. One
+        // far past the list, or past the last block at or past the message's cap, is read as
+        // live: padding up to it would let malformed ids allocate without bound.
         let ordinal = message_id
             .zip(part_id)
             .and_then(|(message_id, part_id)| projected_ordinal(message_id, part_id))
@@ -1214,12 +1322,12 @@ impl StreamParser {
         }
         if block.is_empty() {
             block.push_str(text);
-            let delta = if self.streamed.is_empty() {
-                text.to_string()
-            } else {
+            let delta = if self.streamed_any {
                 format!("\n\n{text}")
+            } else {
+                text.to_string()
             };
-            self.streamed.push_str(&delta);
+            self.streamed_any = true;
             self.last_streamed = Some((index, ordinal));
             return Some(crate::agent::ReviewEvent::Delta { text: delta });
         }
@@ -1227,7 +1335,6 @@ impl StreamParser {
         if self.last_streamed != Some((index, ordinal)) {
             return None;
         }
-        self.streamed.push_str(text);
         Some(crate::agent::ReviewEvent::Delta {
             text: text.to_string(),
         })
@@ -1498,7 +1605,7 @@ mod tests {
 
     #[test]
     fn versions_classify_by_generation() {
-        let cases: [(&str, Result<Cli, &str>); 24] = [
+        let cases: [(&str, Result<Cli, &str>); 28] = [
             ("1.19.6", Ok(Cli::V1(version(1, 19, 6)))),
             ("opencode v2.3.2", Ok(Cli::V2(version(2, 3, 2)))),
             ("1.19.6\n", Ok(Cli::V1(version(1, 19, 6)))),
@@ -1531,6 +1638,11 @@ mod tests {
             ("opencode v1.9.9", Err("preview")),
             // A leading `v` on the first token keeps it the first token.
             ("v1.19.6", Ok(Cli::V1(version(1, 19, 6)))),
+            // Only token 0, or token 1 after exactly `opencode`, is read.
+            ("opencode local (wrapper 2.3.2 build)", Err("unparseable")),
+            ("opencode local 2.3.2", Err("unparseable")),
+            ("build v2.3.2", Err("unparseable")),
+            ("OpenCode v2.3.2", Err("unparseable")),
         ];
         for (text, expected) in cases {
             let got = classify_version(text);
@@ -1815,9 +1927,12 @@ mod tests {
             )
         );
         let research = lock_with(Pin::Research, &["gitdesktop"], &baseline_mirror());
+        // Raw text: the crate's map sorts keys, so a parsed object cannot show their order.
+        assert!(research.json().starts_with(r#"{"agents":{"#));
+        assert!(research
+            .json()
+            .ends_with(r#"]}},"websearch":{"provider":"exa"}}"#));
         let parsed: Value = serde_json::from_str(research.json()).expect("valid JSON");
-        let object = parsed.as_object().expect("an object");
-        assert_eq!(object.keys().collect::<Vec<_>>(), ["agents", "websearch"]);
         let agent = &parsed["agents"][research.agent().as_str()];
         assert_eq!(agent["mode"], "primary");
         let read: Vec<Rule> = agent_rules(agent).expect("rules");
@@ -2613,27 +2728,42 @@ mod tests {
     }
 
     #[test]
-    fn only_denies_may_follow_the_probe() {
+    fn only_wildcard_denies_or_the_fixed_tail_follow_the_probe() {
+        assert_eq!(
+            list(FIXED_TAIL),
+            FIXED_TAIL_DENIES.map(|(action, resource)| rule(action, resource, Effect::Deny))
+        );
         let probe = probe_document(Pin::ReadOnly, &[], None).expect("probe");
         let clean = substituted(PROBE7_BASELINE, "* *=deny", &probe);
         let ok = |rules: &[Rule]| readback_of(&probe_output(&probe, rules), &probe);
-        assert!(ok(&concat(&[&clean, &list("edit *=deny")])).is_ok());
+        assert!(ok(&clean).is_ok(), "the measured tail");
         assert!(
             ok(&concat(&[&list(BASELINE_AHEAD), probe.rules()])).is_ok(),
             "0 denies"
         );
-        assert!(
-            ok(&concat(&[
-                &clean,
-                &list("edit *=deny ; shell *=deny ; x y=deny")
-            ]))
-            .is_ok(),
-            "denies after the fixed tail"
-        );
         for after in [
+            "edit *=deny",
+            "* *=deny",
+            "edit *=deny ; shell *=deny",
+            "edit *=deny ; skill browser=deny",
+        ] {
+            assert!(ok(&concat(&[&clean, &list(after)])).is_ok(), "{after}");
+        }
+        for after in [
+            "x y=deny",
+            "edit *=deny ; x y=deny",
+            "read secret/*=deny",
+            "skill other=deny",
+            "skill browser2=deny",
+            "browser x=deny",
+            "edit *=ask",
             "shell *=ask",
             "shell *=allow",
             "shell *=allow ; edit *=deny",
+            // The fixed tail follows only as a deny, and only for its own action.
+            "browser *=allow",
+            "skill browser=ask",
+            "read browser=deny",
         ] {
             assert_eq!(
                 ok(&concat(&[&clean, &list(after)])),
@@ -2653,6 +2783,16 @@ mod tests {
             let rules = concat(&[&list(BASELINE_AHEAD), &broken, &list(FIXED_TAIL)]);
             assert_eq!(ok(&rules), Err(ReadbackError::NotLast), "{}", show(&broken));
         }
+        // DiffOnly goes through the same check.
+        let probe = probe_document(Pin::DiffOnly, &[], None).expect("probe");
+        let clean = substituted(PROBE7_BASELINE, "* *=deny", &probe);
+        let diff_only =
+            |rules: &[Rule]| read_back(&probe_output(&probe, rules), &probe, Pin::DiffOnly, S);
+        assert_eq!(diff_only(&clean), Ok(Mirror::empty()));
+        assert_eq!(
+            diff_only(&concat(&[&clean, &list("x y=deny")])),
+            Err(ReadbackError::NotLast)
+        );
     }
 
     #[test]
@@ -2755,8 +2895,8 @@ mod tests {
 
     // ---- argv ----
 
-    fn argv(args: &[String]) -> String {
-        args.join(" ")
+    fn argv(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
     }
 
     fn v232() -> Version {
@@ -2815,10 +2955,15 @@ mod tests {
     fn review_args_are_exact() {
         let lock = lock_with(Pin::ReadOnly, &[], &Mirror::empty());
         let id = lock.agent().as_str();
-        assert_eq!(
-            argv(&review_args(v232(), &lock, "opencode/big-pickle", Some("high"))),
-            format!("run --standalone --format json --agent {id} --archived -m opencode/big-pickle#high")
-        );
+        let run = ["run", "--standalone", "--format", "json", "--agent", id];
+        let model = ["-m", "opencode/big-pickle#high"];
+        for typed in ["opencode/big-pickle", "  opencode/big-pickle  "] {
+            assert_eq!(
+                argv(&review_args(v232(), &lock, typed, Some("high"))),
+                [&run[..], &["--archived"], &model].concat(),
+                "{typed:?}"
+            );
+        }
         assert_eq!(
             argv(&review_args(
                 version(2, 2, 5),
@@ -2826,11 +2971,11 @@ mod tests {
                 "opencode/big-pickle",
                 Some("high")
             )),
-            format!("run --standalone --format json --agent {id} -m opencode/big-pickle#high")
+            [&run[..], &model].concat()
         );
         assert_eq!(
             argv(&review_args(version(2, 2, 6), &lock, "  ", Some("high"))),
-            format!("run --standalone --format json --agent {id} --archived")
+            [&run[..], &["--archived"]].concat()
         );
     }
 
@@ -2838,15 +2983,29 @@ mod tests {
     fn session_args_are_exact() {
         let lock = lock_with(Pin::ReadOnly, &[], &Mirror::empty());
         let id = lock.agent().as_str();
-        assert_eq!(
-            argv(&session_args(
-                SessionAgent::Locked(&lock),
-                "m/x",
-                None,
-                Some("ses_abc")
-            )),
-            format!("run --standalone --format json --agent {id} --session ses_abc -m m/x")
-        );
+        for typed in ["m/x", " m/x "] {
+            assert_eq!(
+                argv(&session_args(
+                    SessionAgent::Locked(&lock),
+                    typed,
+                    None,
+                    Some("ses_abc")
+                )),
+                [
+                    "run",
+                    "--standalone",
+                    "--format",
+                    "json",
+                    "--agent",
+                    id,
+                    "--session",
+                    "ses_abc",
+                    "-m",
+                    "m/x"
+                ],
+                "{typed:?}"
+            );
+        }
         assert_eq!(
             argv(&session_args(
                 SessionAgent::Write,
@@ -2854,12 +3013,28 @@ mod tests {
                 None,
                 Some(" ses_abc ")
             )),
-            "run --standalone --format json --auto --session ses_abc"
+            [
+                "run",
+                "--standalone",
+                "--format",
+                "json",
+                "--auto",
+                "--session",
+                "ses_abc"
+            ]
         );
         for session in [None, Some(""), Some("  ")] {
             assert_eq!(
                 argv(&session_args(SessionAgent::Write, "m/x", None, session)),
-                "run --standalone --format json --auto -m m/x",
+                [
+                    "run",
+                    "--standalone",
+                    "--format",
+                    "json",
+                    "--auto",
+                    "-m",
+                    "m/x"
+                ],
                 "{session:?}"
             );
         }
@@ -2908,6 +3083,15 @@ mod tests {
         assert_eq!(model_arg("a/b", Some("")).as_deref(), Some("a/b"));
         assert_eq!(model_arg("a/b", None).as_deref(), Some("a/b"));
         assert_eq!(model_arg(" ", Some("high")), None);
+        assert_eq!(
+            model_arg(" a/b ", Some("high")).as_deref(),
+            Some("a/b#high")
+        );
+        assert_eq!(
+            model_arg("\ta/b#c\n", Some("high")).as_deref(),
+            Some("a/b#c")
+        );
+        assert_eq!(model_arg(" a/b ", None).as_deref(), Some("a/b"));
     }
 
     #[test]
@@ -3083,22 +3267,51 @@ mod tests {
         .to_string()
     }
 
-    /// Feeds every line, asserting `line` never returns a terminal event.
+    fn background_wait() -> String {
+        json!({"type": "background_wait", "timestamp": 7, "sessionID": SESSION,
+            "jobs": [{"id": "job_1", "kind": "shell", "title": "build"}]})
+        .to_string()
+    }
+
+    /// Feeds every line and returns both slots' events in order, asserting slot 0 is only
+    /// ever a `NativeSession` and slot 1 never one, nor a terminal event.
     fn feed(parser: &mut StreamParser, lines: &[String]) -> Vec<ReviewEvent> {
-        lines
+        let mut events = Vec::new();
+        for line in lines {
+            let [native, event] = parser.line(line);
+            assert!(
+                matches!(native, None | Some(ReviewEvent::NativeSession { .. })),
+                "slot 0 from line {line}: {native:?}"
+            );
+            assert!(
+                !matches!(
+                    event,
+                    Some(
+                        ReviewEvent::NativeSession { .. }
+                            | ReviewEvent::Done { .. }
+                            | ReviewEvent::Error { .. }
+                    )
+                ),
+                "slot 1 from line {line}: {event:?}"
+            );
+            events.extend(native);
+            events.extend(event);
+        }
+        events
+    }
+
+    /// How many `NativeSession`s `events` holds, each carrying `SESSION`.
+    fn natives(events: &[ReviewEvent]) -> usize {
+        events
             .iter()
-            .filter_map(|line| {
-                let event = parser.line(line);
-                assert!(
-                    !matches!(
-                        event,
-                        Some(ReviewEvent::Done { .. } | ReviewEvent::Error { .. })
-                    ),
-                    "terminal from line {line}: {event:?}"
-                );
-                event
+            .filter(|event| match event {
+                ReviewEvent::NativeSession { id } => {
+                    assert_eq!(id, SESSION);
+                    true
+                }
+                _ => false,
             })
-            .collect()
+            .count()
     }
 
     fn streamed(events: &[ReviewEvent]) -> String {
@@ -3394,8 +3607,14 @@ mod tests {
             Some("unknown"),
             None,
         ] {
+            // A fresh parser's first `step_finish` hands back the id it carries, nothing else.
             let mut parser = StreamParser::new(None);
-            assert!(parser.line(&step_finish("msg_r", reason)).is_none());
+            let [native, event] = parser.line(&step_finish("msg_r", reason));
+            assert!(event.is_none(), "{reason:?}: {event:?}");
+            assert!(
+                matches!(&native, Some(ReviewEvent::NativeSession { id }) if id == SESSION),
+                "{reason:?}: {native:?}"
+            );
         }
     }
 
@@ -3453,7 +3672,10 @@ mod tests {
                 live(m, "Second block."),
             ],
         );
-        assert!(parser.line(&projected(m, 0, ", first tail.")).is_none());
+        assert!(matches!(
+            parser.line(&projected(m, 0, ", first tail.")),
+            [None, None]
+        ));
         assert_eq!(streamed(&events), "First block head\n\nSecond block.");
         assert_eq!(
             done_text(parser.finish(Some(0), None)),
@@ -3481,15 +3703,15 @@ mod tests {
             &mut parser,
             &[step_start(m), live(m, "A."), projected(m, 3, "D.")],
         );
-        assert!(parser.line(&live(m, "E.")).is_some());
+        assert!(parser.line(&live(m, "E."))[1].is_some());
         assert_eq!(done_text(parser.finish(Some(0), None)), "A.\n\nD.\n\nE.");
         // An ordinal far past the list is read as a live block, never padded to.
         let mut parser = StreamParser::new(None);
         feed(&mut parser, &[step_start(m), live(m, "A.")]);
         let far = text_line(m, "prt_w1_text-4294967295000", "Far.");
-        assert!(parser.line(&far).is_some());
+        assert!(parser.line(&far)[1].is_some());
         let huge = format!("prt_w1_text-{}", PROJECTED_GAP_LIMIT + 3);
-        assert!(parser.line(&text_line(m, &huge, "Huge.")).is_some());
+        assert!(parser.line(&text_line(m, &huge, "Huge."))[1].is_some());
         assert_eq!(parser.messages[0].blocks.len(), 3);
         assert_eq!(
             done_text(parser.finish(Some(0), None)),
@@ -3502,20 +3724,20 @@ mod tests {
         let m = "msg_z1";
         let mut parser = StreamParser::new(None);
         assert!(feed(&mut parser, &[step_start(m)]).len() == 1);
-        assert!(parser.line(&live(m, "")).is_none());
-        let event = parser.line(&projected(m, 1, "Block one."));
+        assert!(matches!(parser.line(&live(m, "")), [None, None]));
+        let [_, event] = parser.line(&projected(m, 1, "Block one."));
         assert!(
             matches!(&event, Some(ReviewEvent::Delta { text }) if text == "Block one."),
             "{event:?}"
         );
         // A projected empty text adds nothing to a filled block.
-        assert!(parser.line(&projected(m, 1, "")).is_none());
+        assert!(matches!(parser.line(&projected(m, 1, "")), [None, None]));
         assert_eq!(done_text(parser.finish(Some(0), None)), "Block one.");
         // The empty block keeps its ordinal, so the live text after it is block 1 and a
         // projected ordinal 1 is that block's tail.
         let mut parser = StreamParser::new(None);
         feed(&mut parser, &[step_start(m), live(m, ""), live(m, "One")]);
-        let event = parser.line(&projected(m, 1, " and its tail."));
+        let [_, event] = parser.line(&projected(m, 1, " and its tail."));
         assert!(
             matches!(&event, Some(ReviewEvent::Delta { text }) if text == " and its tail."),
             "{event:?}"
@@ -3586,9 +3808,15 @@ mod tests {
     #[test]
     fn tool_steps_map_to_timeline_categories() {
         let m = "msg_tool";
+        // A fresh parser's first tool line also hands back its top-level id, when it has one.
         let tool = |line: String| {
             let mut parser = StreamParser::new(None);
-            match parser.line(&line) {
+            let [native, event] = parser.line(&line);
+            let top_level = serde_json::from_str::<Value>(&line).expect("JSON")["sessionID"]
+                .as_str()
+                .is_some();
+            assert_eq!(native.is_some(), top_level, "{line}: {native:?}");
+            match event {
                 Some(ReviewEvent::Tool { tool, target }) => (tool, target),
                 other => panic!("expected Tool, got {other:?}"),
             }
@@ -3654,17 +3882,16 @@ mod tests {
             Some("Can't reach opencode.ai. Check the network connection. (attempt 6)")
         );
         // A retry without a readable message keeps the last one.
-        assert!(parser
-            .line(&json!({"type": "retry", "error": {"type": "x"}}).to_string())
-            .is_none());
+        assert!(matches!(
+            parser.line(&json!({"type": "retry", "error": {"type": "x"}}).to_string()),
+            [None, None]
+        ));
         assert_eq!(
             parser.last_retry(),
             Some("Can't reach opencode.ai. Check the network connection. (attempt 6)")
         );
         let others = [
-            json!({"type": "background_wait", "timestamp": 7, "sessionID": SESSION,
-                "jobs": [{"id": "job_1", "kind": "shell", "title": "build"}]})
-            .to_string(),
+            background_wait(),
             json!({"type": "reasoning", "part": {"messageID": "msg_q", "text": "hmm"}}).to_string(),
             json!({"type": "something_new"}).to_string(),
         ];
@@ -3684,6 +3911,7 @@ mod tests {
             live(m, "Back."),
             tool_use(m, "read", "completed", json!({"path": "a"})),
             step_finish(m, Some("tool-calls")),
+            background_wait(),
         ];
         for line in progress {
             let mut parser = StreamParser::new(None);
@@ -3727,6 +3955,212 @@ mod tests {
         parser.line(&projected(m, 0, "first"));
         assert_eq!(parser.messages[0].blocks.len(), len);
         assert_eq!(parser.messages[0].blocks[0], "first");
+
+        // The boundary: a message one block short of the cap.
+        let filled = || {
+            let mut parser = StreamParser::new(None);
+            feed(&mut parser, &[step_start(m)]);
+            let mut ordinals = Vec::new();
+            for _ in 0..4 {
+                let ordinal = (parser.messages[0].blocks.len() + PROJECTED_GAP_LIMIT)
+                    .min(MESSAGE_BLOCK_CAP - 2);
+                parser.line(&projected(m, ordinal, "x"));
+                ordinals.push(ordinal);
+            }
+            assert_eq!(ordinals, [1024, 2049, 3074, 4094]);
+            assert_eq!(parser.messages[0].blocks.len(), MESSAGE_BLOCK_CAP - 1);
+            parser
+        };
+        for (ordinal, text) in [(4095, "edge"), (4096, "over")] {
+            // 4095 is the last ordinal a projection pads to; 4096 reads as live, which
+            // lands on the same block.
+            let mut parser = filled();
+            parser.line(&projected(m, ordinal, text));
+            assert_eq!(parser.messages[0].blocks.len(), MESSAGE_BLOCK_CAP, "{text}");
+            assert_eq!(parser.messages[0].blocks[4095], text);
+            // Past the cap each line, projected or live, adds exactly one block.
+            parser.line(&projected(m, 5000, "far"));
+            assert_eq!(parser.messages[0].blocks.len(), 4097, "{text}");
+            parser.line(&live(m, "live"));
+            assert_eq!(parser.messages[0].blocks.len(), 4098, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_text_for_an_unseen_message_opens_it_as_the_final_one() {
+        // The reviewer's sequence: B's only line is opencode 2.2.0's reconcile.
+        let (a, b) = ("msg_a1", "msg_b1");
+        let mut parser = StreamParser::new(None);
+        let events = feed(
+            &mut parser,
+            &[
+                step_start(a),
+                live(a, "Reading files"),
+                projected(b, 0, "Final answer"),
+            ],
+        );
+        assert!(
+            matches!(&events[..], [
+                ReviewEvent::NativeSession { id },
+                ReviewEvent::Delta { text: first },
+                ReviewEvent::Delta { text: second },
+            ] if id == SESSION && first == "Reading files" && second == "\n\nFinal answer"),
+            "{events:?}"
+        );
+        assert_eq!(done_text(parser.finish(Some(0), None)), "Final answer");
+    }
+
+    #[test]
+    fn a_reconcile_only_turn_stores_one_id_and_its_final_text() {
+        let (a, b) = ("msg_a1", "msg_b1");
+        let mut parser = StreamParser::new(None);
+        let events = feed(&mut parser, &[projected(b, 0, "Answer.")]);
+        assert!(
+            matches!(&events[..], [ReviewEvent::NativeSession { id }, ReviewEvent::Delta { text }]
+                if id == SESSION && text == "Answer."),
+            "{events:?}"
+        );
+        assert_eq!(done_text(parser.finish(Some(0), None)), "Answer.");
+        // A tool-only first message, then the final one; the id comes from the tool line.
+        let mut parser = StreamParser::new(None);
+        let lines = [
+            tool_use(a, "read", "completed", json!({"path": "a"})),
+            projected(a, 0, "Narration."),
+            projected(b, 0, "Final."),
+        ];
+        let [native, _] = parser.line(&lines[0]);
+        assert!(matches!(native, Some(ReviewEvent::NativeSession { .. })));
+        let events = feed(&mut parser, &lines[1..]);
+        assert_eq!(natives(&events), 0);
+        assert_eq!(done_text(parser.finish(Some(0), None)), "Final.");
+    }
+
+    #[test]
+    fn a_tool_use_for_an_unseen_message_opens_it_as_the_final_one() {
+        let (a, b, c) = ("msg_a1", "msg_b1", "msg_c1");
+        let tool = |message: &str| tool_use(message, "read", "completed", json!({"path": "a"}));
+        let mut parser = StreamParser::new(None);
+        feed(
+            &mut parser,
+            &[
+                step_start(a),
+                live(a, "First."),
+                step_start(c),
+                live(c, "Second."),
+                tool(b),
+            ],
+        );
+        let final_id = |parser: &StreamParser| {
+            parser.messages[parser.final_message.expect("a final message")]
+                .id
+                .clone()
+        };
+        assert_eq!(final_id(&parser).as_deref(), Some(b));
+        // A known message never moves the final one.
+        feed(&mut parser, &[tool(a)]);
+        assert_eq!(final_id(&parser).as_deref(), Some(b));
+        // A fresh parser's first tool line yields the id, then the tool.
+        let mut parser = StreamParser::new(None);
+        let slots = parser.line(&tool(b));
+        assert!(
+            matches!(&slots, [
+                Some(ReviewEvent::NativeSession { id }),
+                Some(ReviewEvent::Tool { .. }),
+            ] if id == SESSION),
+            "{slots:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_failing_before_any_step_yields_no_event() {
+        let mut parser = StreamParser::new(None);
+        let lines = [
+            retry_line(2),
+            background_wait(),
+            error_line("Model not found"),
+        ];
+        let events = feed(&mut parser, &lines);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(
+            error_message(parser.finish(Some(1), None)),
+            "Model not found"
+        );
+    }
+
+    #[test]
+    fn every_step_start_and_only_a_first_other_line_hand_back_the_id() {
+        let (a, b, c) = ("msg_a1", "msg_b1", "msg_c1");
+        let count = |lines: &[String]| natives(&feed(&mut StreamParser::new(None), lines));
+        assert_eq!(count(&[step_start(a), step_start(b)]), 2, "one per step");
+        assert_eq!(
+            count(&[
+                step_start(a),
+                live(a, "x"),
+                tool_use(a, "read", "completed", json!({"path": "a"})),
+                step_finish(a, Some("stop")),
+            ]),
+            1,
+            "a step_start's id stops the other lines"
+        );
+        assert_eq!(count(&[projected(b, 0, "x"), live(b, "y")]), 1);
+        assert_eq!(count(&[projected(b, 0, "x"), step_start(c)]), 2);
+        // A step_start without an id leaves the first text line to send it.
+        let bare_step = json!({"type": "step_start", "part": {"messageID": a}}).to_string();
+        let mut parser = StreamParser::new(None);
+        let [native, _] = parser.line(&bare_step);
+        assert!(native.is_none());
+        let events = feed(&mut parser, &[live(a, "x"), live(a, "y")]);
+        assert!(
+            matches!(&events[0], ReviewEvent::NativeSession { .. }),
+            "{events:?}"
+        );
+        assert_eq!(natives(&events), 1);
+    }
+
+    #[test]
+    fn only_a_top_level_string_session_id_is_handed_back() {
+        let part = json!({"id": "prt_x", "sessionID": SESSION, "messageID": "msg_f1",
+            "type": "text", "text": "t"});
+        for line in [
+            json!({"type": "text", "part": part}),
+            json!({"type": "text", "sessionID": 7, "part": part}),
+        ] {
+            let mut parser = StreamParser::new(None);
+            let [native, event] = parser.line(&line.to_string());
+            assert!(native.is_none(), "{line}: {native:?}");
+            assert!(event.is_some(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_known_message_never_moves_the_final_one() {
+        let (a, b) = ("msg_a1", "msg_b1");
+        let lines = [
+            step_start(a),
+            step_start(b),
+            live(b, "B."),
+            projected(a, 0, "late A."),
+        ];
+        assert_eq!(done_text(outcome(&lines, Some(0))), "B.");
+    }
+
+    #[test]
+    fn a_text_less_final_message_falls_back_to_the_stored_blocks() {
+        let (a, b) = ("msg_a1", "msg_b1");
+        let mut parser = StreamParser::new(None);
+        let events = feed(
+            &mut parser,
+            &[
+                step_start(a),
+                live(a, "a1"),
+                live(a, "a2"),
+                step_start(b),
+                step_finish(b, Some("stop")),
+            ],
+        );
+        assert!(matches!(parser.line(&projected(a, 0, "T")), [None, None]));
+        assert_eq!(streamed(&events), "a1\n\na2");
+        assert_eq!(done_text(parser.finish(Some(0), None)), "a1T\n\na2");
     }
 
     #[test]

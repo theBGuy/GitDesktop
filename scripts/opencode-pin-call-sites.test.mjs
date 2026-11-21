@@ -37,19 +37,22 @@
 //
 // The N-series pins the opencode version gate in front of every opencode 2
 // path. agent_review and agent_session reach an opencode2_* entry function only
-// through one dispatch statement each, compared as whitespace-collapsed source
-// text around the entry call (its argument list is the implementer's): the
-// review's after its binary resolve and before self_mcp_wanted, the host
-// session's after mcp_names and before mcp_config_path, the container's after
-// the image_has_agent refusal and the `..` check and before seed_session_home.
+// through one dispatch statement each, compared as whitespace-collapsed code
+// (comments blanked, literals kept, so a comment inside one never fails it)
+// around the entry call (its argument list is the implementer's): the review's
+// after its binary resolve and before self_mcp_wanted, the host session's after
+// mcp_names and before mcp_config_path, the container's after the
+// image_has_agent refusal and the `..` check and before seed_session_home.
 // The two host dispatches read their Cli from opencode_cli(..).await?, whose `?`
-// is the refusal; classify_version is called once, in opencode_verdict_with; the
-// container entry's first call is its image gate; agent.rs names core items only
-// as crate::opencode2::… (no use, no alias, no other path). Only that spelling
-// (crate::opencode2::review_env) is core's and never counts as the 1.x call; any
-// other path (self::, super::) counts as the bare name. Out of reach, besides
-// the shapes above: what the opencode2_* bodies do with their inputs, which
-// N4-N11 and N13 take over.
+// is the refusal. The host session's 1.x branch runs the binary its dispatch
+// classified (agent_session resolves twice: the dispatch's lookup and the other
+// CLIs' host lookup in the `None` arm); classify_version is called once, in
+// opencode_verdict_with; the container entry's first call is its image gate;
+// agent.rs names core items only as crate::opencode2::… (no use, no alias, no
+// other path). Only that spelling (crate::opencode2::review_env) is core's and
+// never counts as the 1.x call; any other path (self::, super::) counts as the
+// bare name. Out of reach, besides the shapes above: what the opencode2_* bodies
+// do with their inputs, which N4-N11 and N13 take over.
 //
 // N4-N11 hold the lock of every wired opencode 2 run: core's three lock producers
 // (probe_document, read_back, lock_document) are called once each, in
@@ -541,7 +544,7 @@ function checkPinCallSites(text) {
       );
   }
   checkVersionGate(
-    text,
+    code,
     masked,
     inTest,
     lines,
@@ -581,8 +584,8 @@ const DISPATCHES = [
     id: "N2 host",
     fn: "agent_session",
     call: "opencode2_host_session",
-    head: 'let opencode_v1_restart = if kind == AgentKind::Opencode && !container { let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| { AppError::Command(format!("{} CLI not found. Install it or set its path in Settings.", kind.label())) })?; match opencode_cli(&binary).await? { (crate::opencode2::Cli::V2(version), identity) => { return Box::pin(opencode2_host_session(',
-    tail: ")) .await; } (crate::opencode2::Cli::V1(_), _) => { opencode1_must_restart(resume, native_session_id.as_deref()) } } } else { false };",
+    head: 'let (opencode_v1_restart, opencode_v1_binary) = if kind == AgentKind::Opencode && !container { let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| { AppError::Command(format!("{} CLI not found. Install it or set its path in Settings.", kind.label())) })?; match opencode_cli(&binary).await? { (crate::opencode2::Cli::V2(version), identity) => { return Box::pin(opencode2_host_session(',
+    tail: ")) .await; } (crate::opencode2::Cli::V1(_), _) => (opencode1_must_restart(resume, native_session_id.as_deref()), Some(binary)), } } else { (false, None) };",
     after: [["let mcp_names", /\blet\s+mcp_names\b/]],
     before: ["let mut mcp_config_path", /\blet\s+mut\s+mcp_config_path\b/],
   },
@@ -600,9 +603,15 @@ const DISPATCHES = [
   },
 ];
 
+/** The host session's own lookup: the 1.x branch takes the binary its dispatch
+ *  classified, and only the other CLIs resolve again. */
+const HOST_BINARY =
+  "let binary = match opencode_v1_binary { Some(binary) => binary, None => resolve(";
 
-/** N1, N2, N3, N12, N13: the version gate in front of every opencode 2 path. */
-function checkVersionGate(text, masked, inTest, lines, lineAt, bodies, problems) {
+
+/** N1, N2, N3, N12: the version gate in front of every opencode 2 path (N13 is
+ *  checkSignInExport). Dispatch text is read from `code`, so comments never count. */
+function checkVersionGate(code, masked, inTest, lines, lineAt, bodies, problems) {
   const production = (re) =>
     [...masked.matchAll(re)].filter(
       (m) =>
@@ -629,8 +638,8 @@ function checkVersionGate(text, masked, inTest, lines, lineAt, bodies, problems)
     }
     const open = masked.indexOf("(", at);
     const close = callClose(masked, open);
-    const head = collapse(text.slice(Math.max(body[0], at - 2000), open + 1));
-    const tail = close < 0 ? "" : collapse(text.slice(close, close + 400));
+    const head = collapse(code.slice(Math.max(body[0], at - 2000), open + 1));
+    const tail = close < 0 ? "" : collapse(code.slice(close, close + 400));
     if (!` ${head}`.endsWith(` ${d.head}`) || !tail.startsWith(d.tail))
       problems.push(
         `${d.id}: ${d.fn} must dispatch with: ${d.head}..${d.tail}`,
@@ -645,6 +654,22 @@ function checkVersionGate(text, masked, inTest, lines, lineAt, bodies, problems)
         `${d.id}: ${d.call}'s dispatch must sit after ${d.after.map(([name]) => name).join(" and ")} and before ${d.before[0]} in ${d.fn}`,
       );
   }
+  const session = bodies.agent_session;
+  const resolves = callsIn(masked, session, "resolve").length;
+  if (resolves !== 2)
+    problems.push(
+      `N2 host: agent_session must call resolve( 2 times (the dispatch's and the other CLIs' host lookup), saw ${resolves}`,
+    );
+  const binaries = [...masked.slice(...session).matchAll(/\blet\s+binary\s*=/g)];
+  const hostAt = binaries.length === 2 ? session[0] + binaries[1].index : -1;
+  const hostEnd = hostAt < 0 ? -1 : statementEnd(masked, hostAt);
+  if (
+    hostEnd < 0 ||
+    !collapse(code.slice(hostAt, hostEnd)).startsWith(HOST_BINARY)
+  )
+    problems.push(
+      `N2 host: the 1.x host branch must run its classified binary: ${HOST_BINARY}..`,
+    );
   const gate = fnBody(masked, "opencode2_container_session");
   if (!gate) problems.push("missing anchor: fn opencode2_container_session");
   else {
@@ -2071,7 +2096,11 @@ const HOST = "opencode2_host_session";
 const CONTAINER = "opencode2_container_session";
 const REVIEW_DISPATCH =
   "    if kind == AgentKind::Opencode {\n        if let (crate::opencode2::Cli::V2(version), identity) = opencode_cli(&binary).await? {\n";
-const HOST_DISPATCH = "    let opencode_v1_restart = if kind";
+const HOST_DISPATCH =
+  "    let (opencode_v1_restart, opencode_v1_binary) = if kind";
+/** The host session's own binary statement, as rustfmt lays it out. */
+const HOST_LOOKUP =
+  "    let binary = match opencode_v1_binary {\n        Some(binary) => binary,\n        None => resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {\n            AppError::Command(format!(\n                \"{} CLI not found. Install it or set its path in Settings.\",\n                kind.label()\n            ))\n        })?,\n    };\n";
 const CONTAINER_DISPATCH =
   "        if kind == AgentKind::Opencode {\n            return Box::pin(opencode2_container_session(";
 
@@ -2167,8 +2196,8 @@ test("N2: agent_session's dispatches are pinned in text and place", () => {
     [
       "host 1.x arm never restarts",
       uniqueSwap(
-        "                opencode1_must_restart(resume, native_session_id.as_deref())\n",
-        "                false\n",
+        "                opencode1_must_restart(resume, native_session_id.as_deref()),\n                Some(binary),\n",
+        "                false,\n                Some(binary),\n",
       ),
       [`N2 host: agent_session must dispatch with: ${host.head}..${host.tail}`],
     ],
@@ -2206,6 +2235,51 @@ test("N2: agent_session's dispatches are pinned in text and place", () => {
     ],
   ])
     assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N2: the 1.x host branch runs the binary it classified", () => {
+  const resolves =
+    "N2 host: agent_session must call resolve( 2 times (the dispatch's and the other CLIs' host lookup), saw 3";
+  const statement = `N2 host: the 1.x host branch must run its classified binary: ${HOST_BINARY}..`;
+  for (const [id, edit, refused] of [
+    [
+      "a second lookup",
+      uniqueSwap(
+        "Some(binary) => binary,",
+        "Some(_) => resolve(kind, None).await.unwrap(),",
+      ),
+      [resolves, statement],
+    ],
+    [
+      "the old shape",
+      uniqueSwap(
+        HOST_LOOKUP,
+        "    let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {\n        AppError::Command(format!(\n            \"{} CLI not found. Install it or set its path in Settings.\",\n            kind.label()\n        ))\n    })?;\n",
+      ),
+      [statement],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N1-N2: a comment inside a dispatch statement passes", () => {
+  for (const [id, edit] of [
+    [
+      "inside the review's head",
+      uniqueSwap(
+        "opencode_cli(&binary).await? {\n            return Box::pin(opencode2_review(",
+        "opencode_cli(&binary).await? {\n            // a note\n            return Box::pin(opencode2_review(",
+      ),
+    ],
+    [
+      "inside the host dispatch's tail",
+      uniqueSwap(
+        "                .await;\n            }\n            (crate::opencode2::Cli::V1(_), _) => (",
+        "                .await;\n                // a note\n            }\n            (crate::opencode2::Cli::V1(_), _) => (",
+      ),
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), [], id);
 });
 
 test("N3: one version classifier, and each host dispatch reads opencode_cli", () => {

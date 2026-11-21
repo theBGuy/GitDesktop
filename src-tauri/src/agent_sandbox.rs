@@ -13,7 +13,8 @@
 //! sees the host's real config. The home survives a session's turns (so
 //! `--resume` works) and is removed on discard. The image's opencode (2.x) keeps
 //! sign-ins in its own database: a 2.x host's are exported and piped into the
-//! container once, before the session's first turn; a 1.x host's `auth.json` is
+//! container on the session's first turn, unless an earlier copied `auth.json`
+//! could not be removed (it would stay the active sign-in); a 1.x host's `auth.json` is
 //! copied and imported when that database is created; without either it runs
 //! free models. Copilot has none to mount (OS keychain) and authenticates from a
 //! `COPILOT_GITHUB_TOKEN` passed by env.
@@ -1179,10 +1180,14 @@ pub(crate) fn seed_session_home(
 }
 
 /// Removes from `home` the sign-in file [`seed_session_home`] copies for `agent`, and
-/// nothing else. A missing file is not an error.
-pub(crate) fn remove_seeded_creds(home: &Path, agent: &str) {
-    if let Some(name) = host_creds(agent).as_deref().and_then(Path::file_name) {
-        let _ = std::fs::remove_file(home.join(name));
+/// nothing else. A missing file, or an agent that seeds nothing, is not an error.
+pub(crate) fn remove_seeded_creds(home: &Path, agent: &str) -> std::io::Result<()> {
+    let Some(name) = host_creds(agent).and_then(|src| src.file_name().map(|n| n.to_owned())) else {
+        return Ok(());
+    };
+    match std::fs::remove_file(home.join(name)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }
 
@@ -2473,7 +2478,41 @@ mod tests {
                     &[],
                     &inner,
                 );
-                assert_eq!(none, plain, "an empty by-name list adds nothing");
+                let mut want: Vec<&str> = vec!["run", "--rm", "-i", "--name", "n"];
+                if !env.is_empty() {
+                    want.extend([
+                        "-e",
+                        "OPENCODE_CONFIG=/x/opencode-mcp.json",
+                        "-e",
+                        "OPENCODE_DISABLE_MODELS_FETCH=1",
+                    ]);
+                }
+                if cfg!(target_os = "linux") && runtime == "podman" {
+                    want.push("--userns=keep-id");
+                }
+                want.extend([
+                    "--user",
+                    "node",
+                    "-w",
+                    "/workspace",
+                    "-v",
+                    "/repos/wt:/workspace",
+                    "-v",
+                    "/data/agent-home/s1/opencode:/home/node/.local/share/opencode",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--memory",
+                    "4g",
+                    "--pids-limit",
+                    "1024",
+                    "gitdesktop-agent:latest",
+                    "opencode",
+                    "run",
+                ]);
+                assert_eq!(plain, want, "{runtime}");
+                assert_eq!(none, want, "an empty by-name list adds nothing");
                 let a = build_run_args_full(
                     runtime,
                     "opencode",
@@ -2623,16 +2662,22 @@ mod tests {
         std::fs::create_dir(home.join("nested")).unwrap();
         std::fs::write(home.join("nested").join("auth.json"), "{}").unwrap();
         assert!(opencode_home_is_fresh(home));
-        remove_seeded_creds(home, "opencode");
+        assert!(remove_seeded_creds(home, "opencode").is_ok());
         assert!(!seeded.exists(), "the seeded file is gone");
         assert!(home.join("opencode-mcp.json").is_file());
         assert!(home.join("nested").join("auth.json").is_file());
         // A missing file is no error.
-        remove_seeded_creds(home, "opencode");
+        assert!(remove_seeded_creds(home, "opencode").is_ok());
         // Copilot seeds nothing, so nothing is removed.
         std::fs::write(&seeded, "{}").unwrap();
-        remove_seeded_creds(home, "copilot");
+        assert!(remove_seeded_creds(home, "copilot").is_ok());
         assert!(seeded.is_file());
+        // A removal that fails for another reason reports it and leaves the entry.
+        std::fs::remove_file(&seeded).unwrap();
+        std::fs::create_dir(&seeded).unwrap();
+        let err = remove_seeded_creds(home, "opencode").unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(seeded.is_dir());
     }
 
     #[test]

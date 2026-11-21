@@ -41,6 +41,7 @@ import {
 } from "@/lib/settings/mcp";
 import { useRepoKeys, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
   AgentPicker,
@@ -685,10 +686,19 @@ export function SessionComposer({
     setHistIndex(null);
   };
 
-  const dispatch = (text: string) => {
+  // A start that made no session gives back what the user typed (not the expanded
+  // command), only into an empty draft and only while the open repository is still the
+  // one it was typed in (read from the store: a hidden <Activity> runs no effects).
+  const restoreDraft = (typed: string, typedIn: string) => {
+    if (useUiStore.getState().repoPath !== typedIn) return;
+    setDraft((cur) => (cur === "" ? typed : cur));
+  };
+
+  const dispatch = (text: string, typed: string) => {
     if (session) send(session.id, text);
     else {
       startedRef.current = true;
+      const typedIn = repoPath;
       void start(
         repoPath,
         text,
@@ -705,9 +715,18 @@ export function SessionComposer({
           : undefined,
         // Absent unless explicitly picked — start() then reads the global setting.
         startIsolation ?? undefined,
-      ).then((id) => {
-        if (id === null) startedRef.current = false;
-      });
+      ).then(
+        (id) => {
+          if (id !== null) return;
+          startedRef.current = false;
+          restoreDraft(typed, typedIn);
+        },
+        (e: unknown) => {
+          startedRef.current = false;
+          restoreDraft(typed, typedIn);
+          toastError(e);
+        },
+      );
     }
   };
 
@@ -742,7 +761,8 @@ export function SessionComposer({
     if (!text || running || creating) return;
     const prompt = resolvePrompt(text);
     if (prompt === null) return;
-    dispatch(prompt);
+    const typed = draft;
+    dispatch(prompt, typed);
     clearDraft();
   };
 

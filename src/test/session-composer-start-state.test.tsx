@@ -14,8 +14,13 @@ import type { ContainerStatus } from "@/lib/ai/sandbox";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
+import { toastError } from "@/lib/toast";
 import { unmockedCommands } from "./setup";
 
+vi.mock("@/lib/toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/toast")>()),
+  toastError: vi.fn(),
+}));
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
@@ -28,6 +33,9 @@ vi.mock("@/lib/ai/sandbox-queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/sandbox-queries")>()),
   useContainerStatus: () => ({ data: probe.data, isError: false }),
 }));
+
+// jsdom implements no scrollIntoView; the composer's `/` menu calls it on its marked row.
+Element.prototype.scrollIntoView ??= () => undefined;
 
 const REPO = "C:/repos/alpha";
 const OTHER = "C:/repos/beta";
@@ -106,6 +114,32 @@ function mount(
   };
 }
 
+/** Types a task into the empty composer and presses Send. */
+async function typeAndSend(
+  user: ReturnType<typeof userEvent.setup>,
+  text: string,
+) {
+  await user.type(textarea(), text);
+  const send = screen.getByRole("button", { name: "Send" });
+  await waitFor(() => expect(send).toBeEnabled());
+  await user.click(send);
+}
+
+/** Makes the next `start` wait; the returned function settles it. */
+function deferStart() {
+  let resolve: (id: string | null) => void = () => undefined;
+  start.mockImplementationOnce(
+    () =>
+      new Promise<string | null>((r) => {
+        resolve = r;
+      }),
+  );
+  return (id: string | null) =>
+    act(async () => {
+      resolve(id);
+    });
+}
+
 /** Leave for an overlay view: App unmounts the whole repository view. */
 function leaveForSettings(update: (p: Parameters<typeof Composer>[0]) => void) {
   act(() => useUiStore.setState({ view: "settings" }));
@@ -117,6 +151,7 @@ beforeEach(() => {
     structuredClone(DEFAULT_SETTINGS),
   );
   start.mockClear();
+  vi.mocked(toastError).mockClear();
   probe.data = undefined;
   startEnsemble.mockClear();
   useUiStore.setState(useUiStore.getInitialState(), true);
@@ -274,7 +309,7 @@ describe("SessionComposer start state: jump, failed start, repo switch", () => {
     expect(pending()).toEqual(picked);
   });
 
-  it("a Send whose start made no session still leaves the picks on unmount", async () => {
+  it("a Send whose start made no session keeps the task and the picks", async () => {
     start.mockResolvedValueOnce(null);
     const user = userEvent.setup();
     setPending({ ...PICKED, isolation: "worktree", mode: "single" });
@@ -286,14 +321,89 @@ describe("SessionComposer start state: jump, failed start, repo switch", () => {
     // Lets the start's settle (its release of the submit mark) run.
     await act(() => Promise.resolve());
     expect(start).toHaveBeenCalledTimes(1);
+    expect(textarea()).toHaveValue(PICKED.prompt);
     leaveForSettings(update);
     expect(pending()).toMatchObject({
       repoPath: REPO,
-      prompt: "",
+      prompt: PICKED.prompt,
       agent: "codex",
       model: "gpt-5.5",
       effort: "high",
     });
+  });
+
+  it("a failed start leaves a draft typed meanwhile alone", async () => {
+    const settle = deferStart();
+    const user = userEvent.setup();
+    const { update } = mount();
+    await typeAndSend(user, "Fix the cache");
+    expect(textarea()).toHaveValue("");
+    await user.type(textarea(), "something else");
+    await settle(null);
+    expect(textarea()).toHaveValue("something else");
+    leaveForSettings(update);
+    expect(pending()).toMatchObject({ prompt: "something else" });
+  });
+
+  it("a failed start gives back the typed command, not its expansion", async () => {
+    start.mockResolvedValueOnce(null);
+    const user = userEvent.setup();
+    mount();
+    await typeAndSend(user, "/fix the parser");
+    await act(() => Promise.resolve());
+    expect(start).toHaveBeenCalledTimes(1);
+    // The mock takes no parameters, so its recorded call is read untyped.
+    const sent = (start.mock.calls[0] as unknown[] | undefined)?.[1];
+    expect(sent).toEqual(expect.any(String));
+    expect(sent).not.toBe("/fix the parser");
+    expect(textarea()).toHaveValue("/fix the parser");
+  });
+
+  it("a start that throws keeps the task", async () => {
+    const boom = new Error("boom");
+    start.mockRejectedValueOnce(boom);
+    const user = userEvent.setup();
+    const { update } = mount();
+    await typeAndSend(user, "Fix the cache");
+    await act(() => Promise.resolve());
+    expect(textarea()).toHaveValue("Fix the cache");
+    expect(vi.mocked(toastError).mock.calls).toEqual([[boom]]);
+    // The submit mark was released: a leave stashes the restored task.
+    leaveForSettings(update);
+    expect(pending()).toMatchObject({
+      repoPath: REPO,
+      prompt: "Fix the cache",
+    });
+  });
+
+  it("a failed start that settles after a repository switch on a hidden tab leaves the draft alone", async () => {
+    const settle = deferStart();
+    const user = userEvent.setup();
+    let hidden = false;
+    const { update } = mount({}, (n) => (
+      <TabPanel active={!hidden}>{n}</TabPanel>
+    ));
+    await typeAndSend(user, "alpha task");
+    hidden = true;
+    update({});
+    act(() => useUiStore.setState({ repoPath: OTHER }));
+    update({ repoPath: OTHER });
+    await settle(null);
+    expect(textarea()).toHaveValue("");
+    hidden = false;
+    update({ repoPath: OTHER });
+    expect(textarea()).toHaveValue("");
+  });
+
+  it("a failed start that settles after a repository switch leaves the other repository's draft alone", async () => {
+    const settle = deferStart();
+    const user = userEvent.setup();
+    const { update } = mount();
+    await typeAndSend(user, "alpha task");
+    act(() => useUiStore.setState({ repoPath: OTHER }));
+    update({ repoPath: OTHER });
+    await settle(null);
+    expect(textarea()).toHaveValue("");
   });
 
   it("a repository switch on a mounted composer consumes that repository's record over the live draft", async () => {

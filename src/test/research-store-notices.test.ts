@@ -131,6 +131,7 @@ const notice = (code: string, text: string): ReviewEvent => ({
 });
 const native = (id: string): ReviewEvent => ({ kind: "nativeSession", id });
 const notes = (id: string) => segmentsOf(id).filter((s) => s.type === "note");
+const BODY = "# Findings\n\nThe cache is per repository.";
 
 describe("research store: notices and the stored conversation id", () => {
   it("(1) a re-key replaces the stored id once and adds no note", async () => {
@@ -282,5 +283,118 @@ describe("research store: notices and the stored conversation id", () => {
     }).not.toThrow();
     await run.finish();
     expect(useResearchStore.getState().runs).toEqual([]);
+  });
+  it("(9) a cancelled armed turn's late id never replaces the next turn's", async () => {
+    useResearchStore.setState({ runs: [research("a", "oc2:w:ses_old")] });
+    const a = await startTurn("a");
+    a.emit(notice("nativeSessionReset", RESET));
+    useResearchStore.getState().cancel("a");
+    const b = await startTurn("a");
+    b.emit(notice("nativeSessionReset", RESET));
+    b.emit(native("ses_B"));
+    a.emit(native("ses_A"));
+    await b.finish();
+    await a.settleStale();
+    expect(stored("a")).toBe("ses_B");
+  });
+
+  it("(10) a cancelled turn's late output never reaches the next turn", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const a = await startTurn("a");
+    a.emit({ kind: "delta", text: "A1" });
+    useResearchStore.getState().cancel("a");
+    const b = await startTurn("a");
+    b.emit({ kind: "delta", text: "B1" });
+    a.emit({ kind: "delta", text: "A-late" });
+    a.emit({ kind: "tool", tool: "read", target: "a.ts" });
+    a.emit({ kind: "done", text: "A-late", costUsd: 9, isError: false });
+    expect(find("a")?.text).toBe("B1");
+    expect(segmentsOf("a")).toEqual([{ type: "text", text: "B1" }]);
+    expect(find("a")?.costUsd).toBeNull();
+    await a.settleStale();
+    expect(find("a")?.generating).toBe(true);
+    expect(find("a")?.error).toBeNull();
+    await b.finish();
+    expect(find("a")?.generating).toBe(false);
+  });
+
+  it("(11) a single turn is unaffected", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const a = await startTurn("a");
+    a.emit({ kind: "delta", text: BODY });
+    a.emit({ kind: "tool", tool: "read", target: "a.ts" });
+    a.emit({ kind: "done", text: BODY, costUsd: 0.5, isError: false });
+    await a.finish();
+    expect(find("a")?.text).toBe(BODY);
+    expect(segmentsOf("a")).toEqual([
+      { type: "text", text: BODY },
+      { type: "tool", tool: "read", target: "a.ts" },
+    ]);
+    expect(find("a")?.costUsd).toBe(0.5);
+    expect(find("a")?.generating).toBe(false);
+    expect(find("a")?.report).not.toBeNull();
+  });
+
+  it("(12) a run removed and re-added under its id refuses the old turn", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const a = await startTurn("a");
+    useResearchStore.getState().remove("a");
+    useResearchStore.setState({ runs: [research("a")] });
+    a.emit({ kind: "delta", text: "A-late" });
+    a.emit(notice("nativeSessionReset", RESET));
+    a.emit(native("ses_A"));
+    await a.settleStale();
+    expect(find("a")?.text).toBe("");
+    expect(find("a")?.report).toBeNull();
+    expect(stored("a")).toBeNull();
+  });
+  it("(13) a stopped turn still records its late id when no newer turn exists", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const a = await startTurn("a");
+    useResearchStore.getState().cancel("a");
+    a.emit(native("ses_late"));
+    a.emit({ kind: "delta", text: "late" });
+    await a.settleStale();
+    expect(stored("a")).toBe("ses_late");
+    expect(find("a")?.text).toBe("");
+    expect(find("a")?.generating).toBe(false);
+  });
+
+  it("(14) a stopped turn's reset still replaces the stored id, without its note", async () => {
+    useResearchStore.setState({ runs: [research("a", "oc2:w:ses_old")] });
+    const a = await startTurn("a");
+    useResearchStore.getState().cancel("a");
+    a.emit(notice("nativeSessionReset", RESET));
+    a.emit(native("ses_new"));
+    await a.settleStale();
+    expect(stored("a")).toBe("ses_new");
+    expect(notes("a")).toEqual([]);
+  });
+  it("(15) a turn a later cancelled turn replaced never overwrites its id", async () => {
+    useResearchStore.setState({ runs: [research("a", "oc2:w:ses_old")] });
+    const a = await startTurn("a");
+    a.emit(notice("nativeSessionReset", RESET));
+    useResearchStore.getState().cancel("a");
+    const b = await startTurn("a");
+    b.emit(notice("nativeSessionReset", RESET));
+    b.emit(native("ses_B"));
+    useResearchStore.getState().cancel("a");
+    a.emit(native("ses_A"));
+    await b.settleStale();
+    await a.settleStale();
+    expect(stored("a")).toBe("ses_B");
+  });
+
+  it("(16) of two cancelled turns only the last records its late id", async () => {
+    useResearchStore.setState({ runs: [research("a")] });
+    const a = await startTurn("a");
+    useResearchStore.getState().cancel("a");
+    const b = await startTurn("a");
+    useResearchStore.getState().cancel("a");
+    a.emit(native("ses_A"));
+    b.emit(native("ses_B"));
+    await b.settleStale();
+    await a.settleStale();
+    expect(stored("a")).toBe("ses_B");
   });
 });

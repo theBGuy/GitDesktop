@@ -608,15 +608,18 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         (s) => s.kept || live[s.repoPath]?.has(normPath(s.worktreePath)),
       );
       // A non-kept session whose repo WAS reachable but whose worktree is gone is confirmed
-      // dead — delete its transcript. Sessions in an unreachable repo are kept on disk and
-      // return when the repo is back, rather than being silently lost.
+      // dead — delete its transcript and a container session's sandbox. Sessions in an
+      // unreachable repo are kept on disk and return when the repo is back, rather than lost.
       for (const s of idled) {
         if (
           !s.kept &&
           live[s.repoPath] &&
           !live[s.repoPath].has(normPath(s.worktreePath))
-        )
+        ) {
           persist(removeTranscript(s.id));
+          if (s.isolation === "container")
+            persist(cleanupContainerSandbox(s.claudeSessionId));
+        }
       }
       // Merge under any sessions created before hydration finished (newest state
       // wins) — `start` isn't gated on hydration, so a replace would drop one.
@@ -898,9 +901,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     set({ busyId: id });
     // The container home holds a credentials copy and is independent of the worktree, so clean
     // it (idempotently) up front — a failed worktree removal shouldn't leave it. A running test
-    // container bind-mounts the worktree, so stop it (awaited) before removing the dir.
+    // container bind-mounts the worktree, so stop it (awaited) before removing the dir. The
+    // sandbox is keyed by the run's session id, not the record id.
     if (s.isolation === "container") {
-      persist(cleanupContainerSandbox(id));
+      persist(cleanupContainerSandbox(s.claudeSessionId));
       await stopTestContainer(s.worktreePath).catch(() => undefined);
     }
     try {
@@ -926,7 +930,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     const s = get().sessions.find((x) => x.id === id);
     if (!s || !s.kept) return;
     persist(removeTranscript(id));
-    if (s.isolation === "container") persist(cleanupContainerSandbox(id));
+    if (s.isolation === "container")
+      persist(cleanupContainerSandbox(s.claudeSessionId));
     removeSession(get, set, id);
   },
 }));

@@ -311,6 +311,52 @@ fn config_root(app: &tauri::AppHandle) -> AppResult<PathBuf> {
 /// a de-selected turn is never read — but cleanup removes all of them.
 const HOST_CONFIG_FILES: [&str; 3] = ["json", "copilot.json", "opencode.json"];
 
+/// Writes `body` to `dir/file_name`, creating `dir`. On unix the folder is owner-only (an
+/// existing wider one is tightened) and an existing file is replaced by rename with a new
+/// owner-only one, never rewritten, since it may hold resolved secrets; Windows keeps its ACL.
+fn write_private_config(dir: &Path, file_name: &str, body: &str) -> std::io::Result<PathBuf> {
+    let path = dir.join(file_name);
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            other => other?,
+        }
+        let meta = std::fs::metadata(dir)?;
+        if !meta.is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+        }
+        if meta.permissions().mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        // Every write is a new inode renamed over `path`: a descriptor opened on an older,
+        // wider file never reads a later body, and two writers never fail on each other.
+        let unique = format!("{}.{}", std::process::id(), uuid::Uuid::new_v4());
+        let tmp = dir.join(format!(".{file_name}.{unique}.tmp"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut file = options.open(&tmp)?;
+        let written = file
+            .write_all(body.as_bytes())
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(&path, body)?;
+    }
+    Ok(path)
+}
+
 /// Validate the session id + servers, serialize `config`, and write it to a stable
 /// per-session path (`<app_data>/mcp/<session_id>.<ext>`) — kept out of the
 /// repo/worktree since it may hold resolved secrets. Overwritten each turn so an
@@ -331,11 +377,9 @@ fn write_session_config(
     }
     crate::sessions::validate_id(session_id)?;
     let dir = config_root(app)?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{session_id}.{ext}"));
     let body = serde_json::to_string_pretty(config)
         .map_err(|e| AppError::Command(format!("serialize mcp config: {e}")))?;
-    std::fs::write(&path, body)?;
+    let path = write_private_config(&dir, &format!("{session_id}.{ext}"), &body)?;
     Ok(Some(path))
 }
 
@@ -474,9 +518,7 @@ fn write_session_text(
 ) -> AppResult<PathBuf> {
     crate::sessions::validate_id(session_id)?;
     let dir = config_root(app)?;
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{session_id}.{ext}"));
-    std::fs::write(&path, body)?;
+    let path = write_private_config(&dir, &format!("{session_id}.{ext}"), body)?;
     Ok(path)
 }
 
@@ -1394,6 +1436,69 @@ mod tests {
             tool_allow_patterns(std::slice::from_ref(&spec)),
             vec!["mcp__gitdesktop".to_string()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_config_writes_are_owner_only() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir().expect("create temp dir");
+        let dir = root.path().join("app").join("mcp");
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        let path = write_private_config(&dir, "s1.json", "{\"a\": 1}").expect("first write");
+        assert_eq!(path, dir.join("s1.json"));
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\": 1}");
+        // A wider folder is tightened, and a wider file is replaced by a new one.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!((mode(&dir), mode(&path)), (0o755, 0o644));
+        // A descriptor held open across the write keeps the old inode allocated, so its
+        // number cannot be reused, and it never sees the new body.
+        let mut held = std::fs::File::open(&path).expect("open the old file");
+        let old_inode = held.metadata().expect("stat").ino();
+        let again = write_private_config(&dir, "s1.json", "{\"b\": 2}").expect("second write");
+        assert_eq!(again, path);
+        assert_ne!(std::fs::metadata(&path).expect("stat").ino(), old_inode);
+        let mut seen = String::new();
+        std::io::Read::read_to_string(&mut held, &mut seen).expect("read the old file");
+        assert_eq!(seen, "{\"a\": 1}");
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"b\": 2}");
+        // No temp file is left beside it.
+        let names: Vec<std::ffi::OsString> = std::fs::read_dir(&dir)
+            .expect("list the folder")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("s1.json")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_config_write_failures_leave_nothing_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        // A failed rename removes its temp file.
+        let root = tempfile::tempdir().expect("create temp dir");
+        let dir = root.path().join("mcp");
+        std::fs::create_dir_all(dir.join("blocked.json")).unwrap();
+        assert!(write_private_config(&dir, "blocked.json", "x").is_err());
+        let temps: Vec<std::ffi::OsString> = std::fs::read_dir(&dir)
+            .expect("list the folder")
+            .map(|entry| entry.expect("an entry").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert_eq!(temps, Vec::<std::ffi::OsString>::new());
+        // Something other than a folder at `dir` is refused and left as it was.
+        let other = tempfile::tempdir().expect("create temp dir");
+        let not_dir = other.path().join("mcp");
+        std::fs::write(&not_dir, "keep").unwrap();
+        std::fs::set_permissions(&not_dir, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(write_private_config(&not_dir, "s1.json", "x").is_err());
+        let meta = std::fs::metadata(&not_dir).expect("stat");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o644);
+        assert_eq!(std::fs::read_to_string(&not_dir).unwrap(), "keep");
     }
 
     // --- mcp_json_write ------------------------------------------------------

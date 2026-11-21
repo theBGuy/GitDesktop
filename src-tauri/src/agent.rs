@@ -1648,18 +1648,24 @@ fn binary_identity(path: &Path) -> Option<BinaryIdentity> {
 /// [`forget_cli_lookups`] or a restart.
 #[derive(Default)]
 struct OpencodeFacts {
-    /// Supported verdicts, each with when it was read: reused for `OPENCODE_VERDICT_TTL`,
-    /// then kept only to tell whether the next probe changed the answer. A refusal is
-    /// never remembered, since its sentence tells the user to upgrade and try again.
-    cli: HashMap<BinaryIdentity, (crate::opencode2::Cli, Instant)>,
+    /// Supported verdicts, each with when it was read and the version text it printed:
+    /// reused for `OPENCODE_VERDICT_TTL`, then kept only to tell whether the next probe
+    /// changed the answer. A refusal is never remembered, since its sentence tells the
+    /// user to upgrade and try again.
+    cli: HashMap<BinaryIdentity, (crate::opencode2::Cli, Instant, String)>,
     /// Binaries whose DiffOnly lock a read-back confirmed, each with the version it was
     /// confirmed on; their later DiffOnly runs on that version skip the read-back. A
     /// probe answering anything but the remembered version drops the binary's entry.
     diff_only_proven: HashMap<BinaryIdentity, crate::opencode2::Version>,
-    /// The last model catalog read, with its binary and when it was read; it is read
-    /// again for another binary, after `OPENCODE2_CATALOG_TTL`, or once a probe answers
-    /// another version.
-    catalog: Option<(BinaryIdentity, Instant, Arc<crate::opencode2::ModelCatalog>)>,
+    /// The last model catalog read, with its binary, the version its reader's verdict
+    /// held and when it was read. A lookup takes it only for that binary and that
+    /// version, within `OPENCODE2_CATALOG_TTL`; a probe answering another version drops it.
+    catalog: Option<(
+        BinaryIdentity,
+        crate::opencode2::Version,
+        Instant,
+        Arc<crate::opencode2::ModelCatalog>,
+    )>,
 }
 
 impl OpencodeFacts {
@@ -1732,10 +1738,12 @@ async fn opencode_verdict_probe(binary: &Path) -> VersionProbe {
 }
 
 async fn opencode_verdict(binary: &Path) -> (OpencodeVerdict, Option<BinaryIdentity>) {
-    opencode_verdict_with(binary, opencode_facts(), Instant::now(), || {
-        opencode_verdict_probe(binary)
-    })
-    .await
+    let (verdict, identity, _) =
+        opencode_verdict_with(binary, opencode_facts(), Instant::now(), || {
+            opencode_verdict_probe(binary)
+        })
+        .await;
+    (verdict, identity)
 }
 
 fn opencode_verdict_of(
@@ -1751,12 +1759,14 @@ fn opencode_verdict_of(
 /// probe, so a file replaced mid-probe can only file a verdict no later lookup uses. Only
 /// a supported verdict is remembered; a refusal, a failed probe and an unreadable
 /// identity are asked again on every call. The facts lock is never held across an await.
+/// The third member is the trimmed text the verdict was read from (the remembered one for
+/// a remembered verdict); `None` for a failed probe or an empty print.
 async fn opencode_verdict_with<F, Fut>(
     binary: &Path,
     facts: &Mutex<OpencodeFacts>,
     now: Instant,
     probe: F,
-) -> (OpencodeVerdict, Option<BinaryIdentity>)
+) -> (OpencodeVerdict, Option<BinaryIdentity>, Option<String>)
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = VersionProbe>,
@@ -1765,26 +1775,28 @@ where
     let remembered = || {
         let id = identity.as_ref()?;
         let store = facts.lock().ok()?;
-        let (cli, read_at) = store.cli.get(id)?;
-        (now.saturating_duration_since(*read_at) < OPENCODE_VERDICT_TTL).then_some(*cli)
+        let (cli, read_at, text) = store.cli.get(id)?;
+        (now.saturating_duration_since(*read_at) < OPENCODE_VERDICT_TTL)
+            .then(|| (*cli, text.clone()))
     };
-    if let Some(cli) = remembered() {
-        return (OpencodeVerdict::Supported(cli), identity);
+    if let Some((cli, text)) = remembered() {
+        return (OpencodeVerdict::Supported(cli), identity, Some(text));
     }
     let _flight = opencode_verdict_gate().lock().await;
-    if let Some(cli) = remembered() {
-        return (OpencodeVerdict::Supported(cli), identity);
+    if let Some((cli, text)) = remembered() {
+        return (OpencodeVerdict::Supported(cli), identity, Some(text));
     }
-    let verdict = match probe().await {
-        VersionProbe::Printed(text) => {
-            opencode_verdict_of(crate::opencode2::classify_version(&text))
-        }
-        VersionProbe::Failed(clause) => OpencodeVerdict::ProbeFailed(clause),
+    let (verdict, printed) = match probe().await {
+        VersionProbe::Printed(text) => (
+            opencode_verdict_of(crate::opencode2::classify_version(&text)),
+            Some(text.trim().to_string()).filter(|text| !text.is_empty()),
+        ),
+        VersionProbe::Failed(clause) => (OpencodeVerdict::ProbeFailed(clause), None),
     };
     if let (Some(id), Ok(mut store)) = (identity.clone(), facts.lock()) {
         let unchanged = matches!(
             (store.cli.get(&id), &verdict),
-            (Some((known, _)), OpencodeVerdict::Supported(cli)) if known == cli
+            (Some((known, ..)), OpencodeVerdict::Supported(cli)) if known == cli
         );
         // A DiffOnly proof and a model catalog are facts about one version of the binary,
         // so a probe answering another version forgets both.
@@ -1800,14 +1812,15 @@ where
                     store.cli.clear();
                     store.diff_only_proven.clear();
                 }
-                store.cli.insert(id, (*cli, now));
+                let text = printed.clone().unwrap_or_default();
+                store.cli.insert(id, (*cli, now, text));
             }
             OpencodeVerdict::Refused(_) | OpencodeVerdict::ProbeFailed(_) => {
                 store.cli.remove(&id);
             }
         }
     }
-    (verdict, identity)
+    (verdict, identity, printed)
 }
 
 /// The run paths' map: a refusal, or a version check that could not run, is the run's
@@ -1847,9 +1860,30 @@ async fn opencode_cli(binary: &Path) -> AppResult<(crate::opencode2::Cli, Option
     Ok((opencode_verdict_cli(verdict)?, identity))
 }
 
-/// Detect paths: `Some(refusal.standing_message())` only for `Refused`; never an error.
-pub(crate) async fn opencode_unsupported_reason(binary: &Path) -> Option<String> {
-    opencode_verdict_unsupported(&opencode_verdict(binary).await.0)
+/// A detect row for opencode: the version text and the refusal a run would meet, both
+/// from one `--version` observation (or the remembered one).
+pub(crate) struct OpencodeDetection {
+    /// The trimmed version text; `None` when the probe failed or printed nothing.
+    pub(crate) printed: Option<String>,
+    /// `Some(refusal.standing_message())` only for a refused version; never an error.
+    pub(crate) unsupported: Option<String>,
+}
+
+/// Detect paths: never an error, and a failed probe shows neither a version nor a refusal.
+pub(crate) async fn opencode_detection(binary: &Path) -> OpencodeDetection {
+    let (verdict, _, printed) =
+        opencode_verdict_with(binary, opencode_facts(), Instant::now(), || {
+            opencode_verdict_probe(binary)
+        })
+        .await;
+    opencode_detection_of(&verdict, printed)
+}
+
+fn opencode_detection_of(verdict: &OpencodeVerdict, printed: Option<String>) -> OpencodeDetection {
+    OpencodeDetection {
+        printed,
+        unsupported: opencode_verdict_unsupported(verdict),
+    }
 }
 
 /// Whether a 1.x binary must start a new conversation instead of resuming: the stored
@@ -1878,6 +1912,8 @@ const NOTICE_NO_SIGN_INS: &str = "noSignIns";
 const SIGN_INS_COPIED: &str = "Copied your opencode sign-ins into this session's container. Sign-ins you add later reach new sessions only.";
 
 const SIGN_INS_NOT_COPIED: &str = "Your opencode sign-ins couldn't be copied into the container. This session can use opencode's free models. Start a new session to try the copy again.";
+
+const SIGN_INS_LEFTOVER_KEPT: &str = "GitDesktop couldn't replace the sign-in file copied into this session's container earlier, so this session may use those sign-ins instead of your current ones. Start a new session to try the copy again.";
 
 const SIGN_INS_RETRY_HINT: &str = "Start a new session to try the copy again.";
 
@@ -1931,6 +1967,19 @@ fn opencode2_after_copy(
     }
 }
 
+/// The notice that replaces a fresh home's export when removing the leftover sign-in
+/// file failed (`None`: removed or absent, so the export runs). A file that stays would
+/// be imported first and stay the active sign-in, so exporting would change nothing.
+fn opencode2_leftover_notice(removed: &std::io::Result<()>) -> Option<(&'static str, String)> {
+    match removed {
+        Ok(()) => None,
+        Err(_) => Some((
+            NOTICE_SIGN_INS_NOT_COPIED,
+            SIGN_INS_LEFTOVER_KEPT.to_string(),
+        )),
+    }
+}
+
 // --- opencode 2 runs ---------------------------------------------------------
 
 /// One captured command whose whole tree dies on a timeout or a cancel.
@@ -1954,6 +2003,12 @@ enum Captured {
     },
     TimedOut,
     Cancelled,
+}
+
+/// Whether a runtime client's container may outlive this capture: only a reaped exit
+/// means the client's container ended with it.
+fn container_may_remain(captured: &AppResult<Captured>) -> bool {
+    !matches!(captured, Ok(Captured::Exited { .. }))
 }
 
 /// The command `capture_tree` spawns: the base env of every agent spawn, then the
@@ -2583,11 +2638,12 @@ struct Opencode2Stream {
 }
 
 /// The events one 2.x stream line yields, in send order: slot 0 is the re-key notice, only
-/// ahead of a re-keyed turn's first `NativeSession`; slot 1 is the line's event, its
-/// session id handed back through the turn's tag. No line is terminal.
-fn opencode2_stream_event(stream: &mut Opencode2Stream, line: &str) -> [Option<ReviewEvent>; 2] {
-    let event = stream.parser.line(line);
-    match (stream.native.as_mut(), event) {
+/// ahead of a re-keyed turn's first `NativeSession`; slot 1 is the line's `NativeSession`,
+/// its id handed back through the turn's tag (raw for a review); slot 2 is the line's own
+/// event. No line is terminal.
+fn opencode2_stream_event(stream: &mut Opencode2Stream, line: &str) -> [Option<ReviewEvent>; 3] {
+    let [native, event] = stream.parser.line(line);
+    match (stream.native.as_mut(), native) {
         (Some(tag), Some(ReviewEvent::NativeSession { id })) => {
             let notice = if tag.rekey {
                 // The store drops the raw id on the notice; every later step of the turn
@@ -2602,9 +2658,9 @@ fn opencode2_stream_event(stream: &mut Opencode2Stream, line: &str) -> [Option<R
                 None
             };
             let id = tag.token_for(&id);
-            [notice, Some(ReviewEvent::NativeSession { id })]
+            [notice, Some(ReviewEvent::NativeSession { id }), event]
         }
-        (_, event) => [None, event],
+        (_, native) => [None, native, event],
     }
 }
 
@@ -2817,18 +2873,22 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
         });
     };
 
-    let version = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
-        .await
-        .ok()
-        .filter(|(code, _)| *code == 0)
-        .map(|(_, out)| out.trim().to_string())
-        .filter(|s| !s.is_empty());
-    // The refusal a run of this binary would meet, shown before the first run.
-    let unsupported = if kind == AgentKind::Opencode {
-        Box::pin(opencode_unsupported_reason(&binary)).await
+    // For opencode the row's version and the refusal a run would meet are one `--version`
+    // observation, shown before the first run.
+    let (printed, unsupported) = if kind == AgentKind::Opencode {
+        let detection = Box::pin(opencode_detection(&binary)).await;
+        (detection.printed, detection.unsupported)
     } else {
-        None
+        let printed = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
+            .await
+            .ok()
+            .filter(|(code, _)| *code == 0)
+            .map(|(_, out)| out);
+        (printed, None)
     };
+    let version = printed
+        .map(|out| out.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let authed = match kind.auth_status_args() {
         None => AuthStatus::Unknown,
@@ -3115,9 +3175,10 @@ fn opencode2_catalog_gate() -> &'static tokio::sync::Mutex<()> {
 async fn opencode2_catalog(
     binary: &Path,
     identity: Option<&BinaryIdentity>,
+    version: crate::opencode2::Version,
     cancel: Option<&Notify>,
 ) -> CatalogFetch {
-    opencode2_catalog_with(identity, opencode_facts(), || {
+    opencode2_catalog_with(identity, version, opencode_facts(), || {
         capture_tree(opencode2_read_request(
             binary,
             crate::opencode2::CATALOG_ARGS,
@@ -3127,12 +3188,14 @@ async fn opencode2_catalog(
     .await
 }
 
-/// The catalog remembered for `identity` while younger than `OPENCODE2_CATALOG_TTL`, else
-/// what `read` returns. Only a parsed catalog is remembered (one binary at a time): a
-/// failed read is advisory, so it sends no variant and is asked again. The facts lock is
-/// never held across an await.
+/// The catalog remembered for `identity` on `version` while younger than
+/// `OPENCODE2_CATALOG_TTL`, else what `read` returns, remembered under `version`, so a
+/// read that finishes after a version change is never served to the new version. Only a
+/// parsed catalog is remembered (one binary at a time): a failed read is advisory, so it
+/// sends no variant and is asked again. The facts lock is never held across an await.
 async fn opencode2_catalog_with<F, Fut>(
     identity: Option<&BinaryIdentity>,
+    version: crate::opencode2::Version,
     facts: &Mutex<OpencodeFacts>,
     read: F,
 ) -> CatalogFetch
@@ -3143,8 +3206,9 @@ where
     let remembered = || {
         let id = identity?;
         let store = facts.lock().ok()?;
-        let (known, read_at, catalog) = store.catalog.as_ref()?;
-        (known == id && read_at.elapsed() < OPENCODE2_CATALOG_TTL).then(|| Arc::clone(catalog))
+        let (known, known_version, read_at, catalog) = store.catalog.as_ref()?;
+        (known == id && *known_version == version && read_at.elapsed() < OPENCODE2_CATALOG_TTL)
+            .then(|| Arc::clone(catalog))
     };
     if let Some(catalog) = remembered() {
         return CatalogFetch::Ready(catalog);
@@ -3166,7 +3230,7 @@ where
     };
     let catalog = Arc::new(catalog);
     if let (Some(id), Ok(mut store)) = (identity, facts.lock()) {
-        store.catalog = Some((id.clone(), Instant::now(), Arc::clone(&catalog)));
+        store.catalog = Some((id.clone(), version, Instant::now(), Arc::clone(&catalog)));
     }
     CatalogFetch::Ready(catalog)
 }
@@ -3182,14 +3246,14 @@ fn opencode2_effort_applies(model: &str, effort: &str) -> bool {
 /// no opencode 2 binary to read it from). A variant is sent only when the model
 /// declares it, since an undeclared one fails the run.
 async fn opencode2_variant(
-    source: Option<(&Path, Option<&BinaryIdentity>)>,
+    source: Option<(&Path, Option<&BinaryIdentity>, crate::opencode2::Version)>,
     model: &str,
     effort: &str,
     cancel: Option<&Notify>,
 ) -> VariantPick {
     match source {
-        Some((binary, identity)) if opencode2_effort_applies(model, effort) => pick_from(
-            opencode2_catalog(binary, identity, cancel).await,
+        Some((binary, identity, version)) if opencode2_effort_applies(model, effort) => pick_from(
+            opencode2_catalog(binary, identity, version, cancel).await,
             model,
             effort,
         ),
@@ -3238,8 +3302,10 @@ const EFFORT_MODEL_HAS_VARIANT: &str = "This model name already picks a variant,
 const EFFORT_CATALOG_UNREADABLE: &str =
     "GitDesktop could not read opencode's model list, so effort is off. Try again in a moment.";
 
-/// `{model}` stands for the model's id in this sentence and the next.
+/// `{model}` stands for the model's id in this sentence and the next two.
 const EFFORT_NONE_DECLARED: &str = "{model} has no effort settings in opencode.";
+
+const EFFORT_VARIANTS_UNNAMED: &str = "{model} names its effort settings differently in opencode. Add one to the model id as #name to use it.";
 
 const EFFORT_LEVEL_UNAVAILABLE: &str = "Not offered by {model} in opencode.";
 
@@ -3296,7 +3362,12 @@ fn effort_support(model: &str, catalog: Option<&crate::opencode2::ModelCatalog>)
         .collect();
     if levels.iter().all(|level| level.variant.is_none()) {
         // Also a model the catalog does not list: it declares nothing either.
-        return effort_withheld(EFFORT_NONE_DECLARED.replace("{model}", model));
+        let reason = if declared.is_empty() {
+            EFFORT_NONE_DECLARED
+        } else {
+            EFFORT_VARIANTS_UNNAMED
+        };
+        return effort_withheld(reason.replace("{model}", model));
     }
     EffortSupport {
         per_model: true,
@@ -3319,10 +3390,12 @@ pub async fn agent_effort_levels(
         return Ok(effort_not_per_model());
     }
     let found = Box::pin(resolve(kind, bin_path.as_deref())).await;
-    let (binary, identity) = if isolation.as_deref() == Some("container") {
+    let (binary, identity, version) = if isolation.as_deref() == Some("container") {
         let host = match found {
             Some(host) => match Box::pin(opencode_cli(&host)).await {
-                Ok((crate::opencode2::Cli::V2(_), identity)) => Some((host, identity)),
+                Ok((crate::opencode2::Cli::V2(version), identity)) => {
+                    Some((host, identity, version))
+                }
                 _ => None,
             },
             None => None,
@@ -3341,10 +3414,11 @@ pub async fn agent_effort_levels(
         let (verdict, identity) = Box::pin(opencode_verdict(&binary)).await;
         match opencode_verdict_effort(verdict)? {
             crate::opencode2::Cli::V1(_) => return Ok(effort_not_per_model()),
-            crate::opencode2::Cli::V2(_) => (binary, identity),
+            crate::opencode2::Cli::V2(version) => (binary, identity, version),
         }
     };
-    let catalog = match Box::pin(opencode2_catalog(&binary, identity.as_ref(), None)).await {
+    let catalog = match Box::pin(opencode2_catalog(&binary, identity.as_ref(), version, None)).await
+    {
         CatalogFetch::Ready(catalog) => Some(catalog),
         // No cancel was passed, so there is none to tell apart.
         CatalogFetch::Unavailable | CatalogFetch::Cancelled => None,
@@ -5710,8 +5784,9 @@ async fn stream_agent(
     // only for the review flows that setting governs (see `timeout_message`).
     timeout_hint: bool,
     // When the run is wrapped in a container (`binary` = docker/podman), the
-    // `(runtime, container name)` to force-remove on cancel/timeout — killing the
-    // `run` client alone leaves the engine's container running.
+    // `(runtime, container name)` to force-remove after every forced end (cancel,
+    // timeout, expired exit grace): killing the `run` client alone leaves the engine's
+    // container running.
     container_kill: Option<(PathBuf, String)>,
     // Whether the run's whole tree dies at EVERY exit, the clean one included: true for
     // reviews. A session passes false and keeps what its turn started when the turn ends
@@ -5905,9 +5980,9 @@ async fn stream_agent(
     } else {
         tree.kill();
     }
-    // A killed `docker/podman run` client doesn't stop the container — force-
-    // remove it so a cancelled/timed-out agent isn't left running detached.
-    if cancelled || timed_out {
+    // A killed `docker/podman run` client doesn't stop its container, so every forced
+    // end (cancel, timeout, expired exit grace) force-removes it.
+    if forced {
         if let Some((runtime, name)) = &container_kill {
             let _ = run_capture(runtime, &["rm", "-f", name], DETECT_TIMEOUT).await;
         }
@@ -6288,7 +6363,7 @@ pub async fn agent_session(
     let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect();
     // A host opencode 2 turn leaves here for its own path. A 1.x binary asked to resume
     // a conversation opencode 2 created or re-keyed starts a new one, with a note.
-    let opencode_v1_restart = if kind == AgentKind::Opencode && !container {
+    let (opencode_v1_restart, opencode_v1_binary) = if kind == AgentKind::Opencode && !container {
         let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
             AppError::Command(format!(
                 "{} CLI not found. Install it or set its path in Settings.",
@@ -6318,12 +6393,13 @@ pub async fn agent_session(
                 ))
                 .await;
             }
-            (crate::opencode2::Cli::V1(_), _) => {
-                opencode1_must_restart(resume, native_session_id.as_deref())
-            }
+            (crate::opencode2::Cli::V1(_), _) => (
+                opencode1_must_restart(resume, native_session_id.as_deref()),
+                Some(binary),
+            ),
         }
     } else {
-        false
+        (false, None)
     };
     if opencode_v1_restart {
         EventSink::send(
@@ -6696,12 +6772,16 @@ pub async fn agent_session(
 
     // Host: every CLI runs worktree-confined — see each `*_session_args` doc for
     // the mechanism (Claude bypass = soft; Codex `-s workspace-write` = enforced).
-    let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
-        AppError::Command(format!(
-            "{} CLI not found. Install it or set its path in Settings.",
-            kind.label()
-        ))
-    })?;
+    // A 1.x opencode runs the binary its version check classified.
+    let binary = match opencode_v1_binary {
+        Some(binary) => binary,
+        None => resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
+            AppError::Command(format!(
+                "{} CLI not found. Install it or set its path in Settings.",
+                kind.label()
+            ))
+        })?,
+    };
     // opencode has no config-file flag: it reads `OPENCODE_CONFIG`, and merges
     // config layers, so ours adds to the user's rather than replacing it.
     let host_extra_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {
@@ -6794,7 +6874,7 @@ async fn opencode2_review(
         let notify: &Notify = &cancel;
         let variant = || {
             opencode2_variant(
-                Some((binary, identity.as_ref())),
+                Some((binary, identity.as_ref(), version)),
                 &model,
                 &effort,
                 Some(notify),
@@ -6873,8 +6953,8 @@ async fn opencode2_host_session(
     app: tauri::AppHandle,
     cancel: Arc<Notify>,
     binary: &Path,
-    // A session's argv takes no version.
-    _version: crate::opencode2::Version,
+    // The catalog of this version picks the turn's variant.
+    version: crate::opencode2::Version,
     identity: Option<BinaryIdentity>,
     model: String,
     effort: String,
@@ -6929,7 +7009,7 @@ async fn opencode2_host_session(
     let notify: &Notify = &cancel;
     let variant = || {
         opencode2_variant(
-            Some((binary, identity.as_ref())),
+            Some((binary, identity.as_ref(), version)),
             &model,
             &effort,
             Some(notify),
@@ -7071,7 +7151,11 @@ async fn opencode2_container_session(
     };
     let route = opencode2_sign_in_route(verdict.as_ref().map(|(verdict, _)| verdict), fresh);
     let export_host = match (route, host, verdict) {
-        (SignInRoute::Export, Some(host), Some((_, identity))) => Some((host, identity)),
+        (
+            SignInRoute::Export,
+            Some(host),
+            Some((OpencodeVerdict::Supported(crate::opencode2::Cli::V2(version)), identity)),
+        ) => Some((host, identity, version)),
         _ => None,
     };
     if export_host.is_none() {
@@ -7101,25 +7185,30 @@ async fn opencode2_container_session(
     let name = crate::agent_sandbox::container_name(&session_id);
     let probe_name = crate::agent_sandbox::probe_container_name(&session_id);
     let notify: &Notify = &cancel;
-    if let Some((host, _)) = export_host.as_ref().filter(|_| fresh) {
+    if let Some((host, ..)) = export_host.as_ref().filter(|_| fresh) {
         // A sign-in file an earlier copy-route turn left would be imported first and
-        // stay the active sign-in.
-        crate::agent_sandbox::remove_seeded_creds(&home, "opencode");
-        let copied = opencode2_copy_sign_ins(
-            host,
-            &runtime,
-            crate::agent_sandbox::auth_import_run_args(
-                &runtime_name,
-                &worktree_path,
-                &home,
-                &session_id,
-                &image,
-            ),
-            &crate::agent_sandbox::auth_import_container_name(&session_id),
-            &worktree_path,
-            notify,
-        )
-        .await;
+        // stay the active sign-in, so a failed removal skips the export.
+        let removed = crate::agent_sandbox::remove_seeded_creds(&home, "opencode");
+        let copied = match opencode2_leftover_notice(&removed) {
+            Some(notice) => Some(notice),
+            None => {
+                opencode2_copy_sign_ins(
+                    host,
+                    &runtime,
+                    crate::agent_sandbox::auth_import_run_args(
+                        &runtime_name,
+                        &worktree_path,
+                        &home,
+                        &session_id,
+                        &image,
+                    ),
+                    &crate::agent_sandbox::auth_import_container_name(&session_id),
+                    &worktree_path,
+                    notify,
+                )
+                .await
+            }
+        };
         let (notice, go_on) = opencode2_after_copy(copied, || {
             crate::agent_sandbox::opencode_home_is_fresh(&home)
         });
@@ -7164,7 +7253,7 @@ async fn opencode2_container_session(
         opencode2_variant(
             export_host
                 .as_ref()
-                .map(|(host, identity)| (host.as_path(), identity.as_ref())),
+                .map(|(host, identity, version)| (host.as_path(), identity.as_ref(), *version)),
             &model,
             &effort,
             Some(notify),
@@ -7198,7 +7287,7 @@ async fn opencode2_container_session(
             cancel: Some(notify),
         })
         .await;
-        if matches!(captured, Ok(Captured::TimedOut | Captured::Cancelled)) {
+        if container_may_remain(&captured) {
             let _ = run_capture(runtime_bin, &["rm", "-f", probe_container], DETECT_TIMEOUT).await;
         }
         opencode2_probe_answer(captured, OPENCODE2_CONTAINER_PROBE_TIMEOUT)
@@ -7334,7 +7423,7 @@ async fn opencode2_copy_sign_ins(
         cancel: Some(cancel),
     })
     .await;
-    if matches!(import, Ok(Captured::TimedOut | Captured::Cancelled)) {
+    if container_may_remain(&import) {
         // Killing the runtime client does not stop its container.
         let _ = run_capture(runtime, &["rm", "-f", import_container], DETECT_TIMEOUT).await;
     }
@@ -9773,7 +9862,7 @@ opencode/x-preview-f-free
         // No metadata, no identity: probed on every call, never remembered.
         let missing = dir.path().join("absent");
         for _ in 0..2 {
-            let (verdict, identity) =
+            let (verdict, identity, _) =
                 opencode_verdict_with(&missing, &facts, start, || async { printed("1.19.6") })
                     .await;
             assert!(identity.is_none());
@@ -9846,7 +9935,8 @@ opencode/x-preview-f-free
         let facts = Mutex::new(OpencodeFacts::default());
         let probes = std::sync::atomic::AtomicUsize::new(0);
         let remember = |of: &BinaryIdentity| {
-            facts.lock().unwrap().catalog = Some((of.clone(), Instant::now(), Arc::default()));
+            facts.lock().unwrap().catalog =
+                Some((of.clone(), v2_version(), Instant::now(), Arc::default()));
         };
         let remembered = || {
             let store = facts.lock().unwrap();
@@ -9867,6 +9957,61 @@ opencode/x-preview-f-free
         verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
         assert_eq!(remembered(), Some(other), "another binary's survives");
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    /// One detect row over a counting probe that answers `answer`.
+    async fn detection_probing(
+        bin: &Path,
+        facts: &Mutex<OpencodeFacts>,
+        now: Instant,
+        probes: &std::sync::atomic::AtomicUsize,
+        answer: VersionProbe,
+    ) -> OpencodeDetection {
+        let (verdict, _, printed) = opencode_verdict_with(bin, facts, now, || {
+            probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { answer }
+        })
+        .await;
+        opencode_detection_of(&verdict, printed)
+    }
+
+    /// A detect row's version and refusal are the verdict's own observation: a remembered
+    /// verdict brings the text it was read from, a refusal shows its text and sentence, and
+    /// a failed probe shows neither.
+    #[tokio::test]
+    async fn opencode_detection_reads_one_observation() {
+        let printed = |text: &str| VersionProbe::Printed(text.to_string());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("opencode");
+        let facts = Mutex::new(OpencodeFacts::default());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let count = || probes.load(std::sync::atomic::Ordering::SeqCst);
+        let start = Instant::now();
+
+        std::fs::write(&bin, b"1").unwrap();
+        let answer = printed("opencode v2.3.2\n");
+        let found = detection_probing(&bin, &facts, start, &probes, answer).await;
+        assert_eq!(found.printed.as_deref(), Some("opencode v2.3.2"));
+        assert_eq!((found.unsupported, count()), (None, 1));
+        // Within the TTL the remembered verdict answers, with the text it was read from.
+        let found = detection_probing(&bin, &facts, start, &probes, printed("banana")).await;
+        assert_eq!(found.printed.as_deref(), Some("opencode v2.3.2"));
+        assert_eq!((found.unsupported, count()), (None, 1));
+
+        // Rewritten: a refused version shows what it printed and the standing sentence.
+        std::fs::write(&bin, b"22").unwrap();
+        let Err(refusal) = crate::opencode2::classify_version("opencode v3.0.0") else {
+            panic!("3.x is refused");
+        };
+        let answer = printed("opencode v3.0.0");
+        let found = detection_probing(&bin, &facts, start, &probes, answer).await;
+        assert_eq!(found.printed.as_deref(), Some("opencode v3.0.0"));
+        assert_eq!(found.unsupported, Some(refusal.standing_message()));
+        assert_eq!(count(), 2);
+
+        let failed = VersionProbe::Failed("exited with code 1".to_string());
+        let found = detection_probing(&bin, &facts, start, &probes, failed).await;
+        assert_eq!((found.printed, found.unsupported, count()), (None, None, 3));
     }
 
     /// A proof names the version it was made on: a run on another version of the same
@@ -9927,12 +10072,13 @@ opencode/x-preview-f-free
             modified: None,
         };
         let cli = crate::opencode2::classify_version("opencode v2.3.2").expect("2.x");
-        facts.cli.insert(id.clone(), (cli, Instant::now()));
+        let text = "opencode v2.3.2".to_string();
+        facts.cli.insert(id.clone(), (cli, Instant::now(), text));
         let crate::opencode2::Cli::V2(version) = cli else {
             panic!("2.x");
         };
         facts.diff_only_proven.insert(id.clone(), version);
-        facts.catalog = Some((id, Instant::now(), Arc::default()));
+        facts.catalog = Some((id, version, Instant::now(), Arc::default()));
         facts.clear();
         assert!(facts.cli.is_empty());
         assert!(facts.diff_only_proven.is_empty());
@@ -10749,9 +10895,9 @@ opencode/x-preview-f-free
             native: None,
         };
         for line in &lines {
-            let [notice, event] = opencode2_stream_event(&mut stream, &line.to_string());
+            let [notice, native, event] = opencode2_stream_event(&mut stream, &line.to_string());
             assert!(notice.is_none(), "{line}");
-            if let Some(ev) = event {
+            for ev in [native, event].into_iter().flatten() {
                 send_noting_terminal(&sink, &mut terminal, ev);
             }
         }
@@ -10777,7 +10923,8 @@ opencode/x-preview-f-free
     // --- opencode 2 models and effort --------------------------------------------
 
     /// The measured catalog shape (`oc-bin/probe8.txt`): no variants, `low high max`,
-    /// the full set, and `none high`.
+    /// the full set, and `none high`; the last row, a user-declared model whose one
+    /// variant no level names, is not from the probe.
     const CATALOG: &str = r#"{"location": "/tmp/x", "data": [
         {"id": "big-pickle", "providerID": "opencode", "variants": []},
         {"id": "deepseek-v4.1-flash-free", "providerID": "opencode", "variants": [
@@ -10788,7 +10935,8 @@ opencode/x-preview-f-free
             {"id": "minimal"}, {"id": "low"}, {"id": "medium"}, {"id": "high"},
             {"id": "xhigh"}, {"id": "max"}]},
         {"id": "hy4-flash-free", "providerID": "opencode", "variants": [
-            {"id": "none"}, {"id": "high"}]}
+            {"id": "none"}, {"id": "high"}]},
+        {"id": "custom-deep", "providerID": "opencode", "variants": [{"id": "deep"}]}
     ]}"#;
 
     fn catalog() -> crate::opencode2::ModelCatalog {
@@ -10884,6 +11032,11 @@ opencode/x-preview-f-free
                 "openai/unlisted",
                 Some(&catalog),
                 "openai/unlisted has no effort settings in opencode.".to_string(),
+            ),
+            (
+                "opencode/custom-deep",
+                Some(&catalog),
+                "opencode/custom-deep names its effort settings differently in opencode. Add one to the model id as #name to use it.".to_string(),
             ),
         ] {
             let support = effort_support(model, catalog);
@@ -11003,11 +11156,12 @@ opencode/x-preview-f-free
     /// A catalog read that answers `captured` and counts itself.
     async fn catalog_reading(
         identity: Option<&BinaryIdentity>,
+        version: crate::opencode2::Version,
         facts: &Mutex<OpencodeFacts>,
         reads: &std::sync::atomic::AtomicUsize,
         captured: AppResult<Captured>,
     ) -> CatalogFetch {
-        opencode2_catalog_with(identity, facts, || {
+        opencode2_catalog_with(identity, version, facts, || {
             reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             async move { captured }
         })
@@ -11033,27 +11187,28 @@ opencode/x-preview-f-free
             modified: None,
         };
         let (one, two) = (binary(1), binary(2));
+        let v2 = v2_version();
         let ready = |fetch: &CatalogFetch| match fetch {
             CatalogFetch::Ready(catalog) => catalog.variants("opencode/hy4-flash-free").len(),
             other => panic!("not a catalog: {other:?}"),
         };
 
-        let first = catalog_reading(Some(&one), &facts, &reads, catalog_exit(0, CATALOG)).await;
+        let first = catalog_reading(Some(&one), v2, &facts, &reads, catalog_exit(0, CATALOG)).await;
         assert_eq!((ready(&first), count()), (2, 1));
         // Remembered: a second ask, even one whose read would fail, never reads.
-        let again = catalog_reading(Some(&one), &facts, &reads, catalog_exit(1, "")).await;
+        let again = catalog_reading(Some(&one), v2, &facts, &reads, catalog_exit(1, "")).await;
         assert_eq!((ready(&again), count()), (2, 1));
         // Another binary is read, and takes the one slot.
-        let other = catalog_reading(Some(&two), &facts, &reads, catalog_exit(0, "[]")).await;
+        let other = catalog_reading(Some(&two), v2, &facts, &reads, catalog_exit(0, "[]")).await;
         assert_eq!((ready(&other), count()), (0, 2));
-        let back = catalog_reading(Some(&one), &facts, &reads, catalog_exit(0, CATALOG)).await;
+        let back = catalog_reading(Some(&one), v2, &facts, &reads, catalog_exit(0, CATALOG)).await;
         assert_eq!((ready(&back), count()), (2, 3));
         // Past the TTL the same binary is read again.
         let aged = Instant::now()
             .checked_sub(OPENCODE2_CATALOG_TTL + Duration::from_secs(1))
             .expect("an instant older than the TTL");
-        facts.lock().unwrap().catalog.as_mut().unwrap().1 = aged;
-        let fresh = catalog_reading(Some(&one), &facts, &reads, catalog_exit(0, "[]")).await;
+        facts.lock().unwrap().catalog.as_mut().unwrap().2 = aged;
+        let fresh = catalog_reading(Some(&one), v2, &facts, &reads, catalog_exit(0, "[]")).await;
         assert_eq!((ready(&fresh), count()), (0, 4));
 
         // A failed read is advisory: no catalog, nothing remembered.
@@ -11064,23 +11219,64 @@ opencode/x-preview-f-free
             Ok(Captured::TimedOut),
             Err(AppError::Command("spawn failed".to_string())),
         ] {
-            let fetch = catalog_reading(Some(&one), &facts, &reads, failed).await;
+            let fetch = catalog_reading(Some(&one), v2, &facts, &reads, failed).await;
             assert!(matches!(fetch, CatalogFetch::Unavailable), "{fetch:?}");
             assert!(facts.lock().unwrap().catalog.is_none());
         }
         // A cancel stays a cancel and is not remembered either.
-        let cancelled = catalog_reading(Some(&one), &facts, &reads, Ok(Captured::Cancelled)).await;
+        let cancelled =
+            catalog_reading(Some(&one), v2, &facts, &reads, Ok(Captured::Cancelled)).await;
         assert!(matches!(cancelled, CatalogFetch::Cancelled));
         assert!(facts.lock().unwrap().catalog.is_none());
         assert_eq!(count(), 9);
 
         // No identity: read on every call, never remembered.
         for _ in 0..2 {
-            let fetch = catalog_reading(None, &facts, &reads, catalog_exit(0, CATALOG)).await;
+            let fetch = catalog_reading(None, v2, &facts, &reads, catalog_exit(0, CATALOG)).await;
             assert_eq!(ready(&fetch), 2);
         }
         assert_eq!(count(), 11);
         assert!(facts.lock().unwrap().catalog.is_none());
+    }
+
+    /// A catalog names the version its reader's verdict held: a read that finishes after
+    /// the binary answered another version is served only to the version it was read for.
+    #[tokio::test]
+    async fn opencode2_catalog_names_its_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("opencode");
+        std::fs::write(&bin, b"1").unwrap();
+        let id = binary_identity(&bin).expect("an identity");
+        let facts = Mutex::new(OpencodeFacts::default());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let count = || reads.load(std::sync::atomic::Ordering::SeqCst);
+        let version = |text: &str| match crate::opencode2::classify_version(text) {
+            Ok(crate::opencode2::Cli::V2(version)) => version,
+            other => panic!("{other:?}"),
+        };
+        let (old, new) = (version("opencode v2.3.2"), version("opencode v2.4.0"));
+        let ready = |fetch: &CatalogFetch| match fetch {
+            CatalogFetch::Ready(catalog) => catalog.variants("opencode/hy4-flash-free").len(),
+            other => panic!("not a catalog: {other:?}"),
+        };
+
+        // The binary answers 2.4.0 while the read for 2.3.2 is in flight.
+        let (bin, facts_ref, probes, reads_ref) = (&bin, &facts, &probes, &reads);
+        let interleaved = opencode2_catalog_with(Some(&id), old, facts_ref, move || {
+            reads_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                let newer = VersionProbe::Printed("opencode v2.4.0".to_string());
+                verdict_probing(bin, facts_ref, Instant::now(), probes, newer).await;
+                catalog_exit(0, CATALOG)
+            }
+        })
+        .await;
+        assert_eq!((ready(&interleaved), count()), (2, 1));
+        let served = catalog_reading(Some(&id), old, &facts, &reads, catalog_exit(1, "")).await;
+        assert_eq!((ready(&served), count()), (2, 1));
+        let other = catalog_reading(Some(&id), new, &facts, &reads, catalog_exit(0, "[]")).await;
+        assert_eq!((ready(&other), count()), (0, 2));
     }
 
     #[tokio::test]
@@ -11431,7 +11627,13 @@ opencode/x-preview-f-free
         };
         // A turn that fails before its first step sends neither, so the raw id stays.
         let failed = [
-            serde_json::json!({"type": "error", "timestamp": 1, "sessionID": raw,
+            serde_json::json!({"type": "retry", "timestamp": 1, "sessionID": raw,
+            "attempt": 2, "error": {"message": "Rate limited"}})
+            .to_string(),
+            serde_json::json!({"type": "background_wait", "timestamp": 2, "sessionID": raw,
+            "jobs": [{"id": "job_1", "kind": "shell", "title": "build"}]})
+            .to_string(),
+            serde_json::json!({"type": "error", "timestamp": 3, "sessionID": raw,
             "error": {"type": "unknown", "message": "Model not found"}})
             .to_string(),
         ];
@@ -11444,6 +11646,30 @@ opencode/x-preview-f-free
             text: String::new(),
         };
         assert_eq!(fold_native(stored.clone(), &[early]), stored);
+    }
+
+    #[test]
+    fn opencode2_rekeys_on_a_reconcile_only_turn() {
+        let raw = "ses_abc";
+        let tag = NativeTag {
+            kind: TurnKind::Write,
+            resumed: Some((raw.to_string(), raw.to_string())),
+            rekey: true,
+        };
+        // opencode 2.2.0 can answer with reconcile lines alone: the id rides the text line.
+        let events = session_turn_events(tag, &[session_text(raw, "msg_b1", "Answer.")]);
+        assert_eq!(
+            brief(&events),
+            [
+                format!("notice {NOTICE_SESSION_REKEY} \"\""),
+                "native oc2:w:ses_abc".to_string(),
+                "delta Answer.".to_string(),
+            ]
+        );
+        assert_eq!(
+            fold_native(Some(raw.to_string()), &events),
+            Some("oc2:w:ses_abc".to_string())
+        );
     }
 
     #[test]
@@ -11562,6 +11788,7 @@ opencode/x-preview-f-free
             ["signInsCopied", "signInsNotCopied", "noSignIns"]
         );
         assert!(SIGN_INS_NOT_COPIED.ends_with(SIGN_INS_RETRY_HINT));
+        assert!(SIGN_INS_LEFTOVER_KEPT.ends_with(SIGN_INS_RETRY_HINT));
         assert!(SIGN_INS_UNCHECKED.ends_with(SIGN_INS_RETRY_HINT));
         let notice = ReviewEvent::Notice {
             code: NOTICE_SIGN_INS_COPIED,
@@ -11627,6 +11854,49 @@ opencode/x-preview-f-free
             opencode2_after_copy(None, || false),
             (Some(not_copied), false)
         );
+    }
+
+    #[test]
+    fn opencode2_leftover_notice_skips_the_export_only_on_a_failed_removal() {
+        assert_eq!(opencode2_leftover_notice(&Ok(())), None);
+        let kept = (
+            NOTICE_SIGN_INS_NOT_COPIED,
+            SIGN_INS_LEFTOVER_KEPT.to_string(),
+        );
+        for failed in [
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            std::io::Error::other("x"),
+        ] {
+            assert_eq!(opencode2_leftover_notice(&Err(failed)), Some(kept.clone()));
+        }
+        // The notice goes out and the turn goes on, whatever the home holds.
+        assert_eq!(
+            opencode2_after_copy(Some(kept.clone()), || true),
+            (Some(kept), true)
+        );
+    }
+
+    #[test]
+    fn container_may_remain_unless_the_client_exited() {
+        let exited = |code| {
+            Ok(Captured::Exited {
+                code,
+                stdout: Vec::new(),
+                stderr: String::new(),
+            })
+        };
+        let cases: [(AppResult<Captured>, bool); 6] = [
+            (exited(0), false),
+            (exited(1), false),
+            (Ok(Captured::TimedOut), true),
+            (Ok(Captured::Cancelled), true),
+            // An output overflow.
+            (Err(AppError::Command("too much output".to_string())), true),
+            (Err(AppError::Io(std::io::Error::other("pipe"))), true),
+        ];
+        for (captured, want) in &cases {
+            assert_eq!(container_may_remain(captured), *want);
+        }
     }
 
     #[test]
@@ -14511,6 +14781,7 @@ opencode/x-preview-f-free
     const DECISION_CALL: &str = "tree_guard_disarms(cfg!(unix),reaped,kill_tree_on_exit,forced)";
     const DECISION: &str = "iftree_guard_disarms(cfg!(unix),reaped,kill_tree_on_exit,forced){tree.disarm();}else{tree.kill();}";
     const GRACE_KILL: &str = "ifgrace_expired{kill_process_tree(&mutchild,&tree);let_=tokio::time::timeout(CHILD_REAP_GRACE,child.wait()).await;}";
+    const CONTAINER_RM: &str = "ifforced{ifletSome((runtime,name))=&container_kill{let_=run_capture(runtime,&[\"rm\",\"-f\",name],DETECT_TIMEOUT).await;}}";
 
     /// Breaches of the guard decision's wiring in stream_agent's stripped body, one
     /// message per broken rule, each led by its number. No process test reaches them:
@@ -14614,6 +14885,9 @@ opencode/x-preview-f-free
         if body.matches(GRACE_KILL).count() != 1 {
             bad.push("9: an expired grace does not kill the tree, then reap".into());
         }
+        if body.matches(CONTAINER_RM).count() != 1 {
+            bad.push("10: a forced end does not remove the session container".into());
+        }
         bad
     }
 
@@ -14693,6 +14967,10 @@ opencode/x-preview-f-free
                 "ifgrace_expired{",
             ),
             "9",
+        );
+        breaks(
+            &mutate("ifforced{iflet", "ifcancelled||timed_out{iflet"),
+            "10",
         );
     }
 

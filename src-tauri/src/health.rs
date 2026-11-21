@@ -176,20 +176,24 @@ async fn detect(id: &str, names: &[&str], auth: AuthProbe) -> ToolStatus {
         return undetected(id);
     };
 
-    let version = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
-        .await
-        .ok()
-        .filter(|(code, _)| *code == 0)
+    // For opencode's row the version and the refusal a run would meet are one
+    // `--version` observation.
+    let (printed, unsupported) = if id == "opencode" {
+        let detection = Box::pin(crate::agent::opencode_detection(&binary)).await;
+        (detection.printed, detection.unsupported)
+    } else {
+        let printed = run_capture(&binary, &["--version"], DETECT_TIMEOUT)
+            .await
+            .ok()
+            .filter(|(code, _)| *code == 0)
+            .map(|(_, out)| out);
+        (printed, None)
+    };
+    let version = printed
         // `--version` is often multi-line (gh prints a release-notes URL); the
         // first line is the version we want.
-        .and_then(|(_, out)| out.lines().next().map(|l| l.trim().to_string()))
+        .and_then(|out| out.lines().next().map(|l| l.trim().to_string()))
         .filter(|s| !s.is_empty());
-    // The refusal a run of this binary would meet, for opencode's row only.
-    let unsupported = if id == "opencode" {
-        Box::pin(crate::agent::opencode_unsupported_reason(&binary)).await
-    } else {
-        None
-    };
 
     let authed = match auth {
         AuthProbe::None => AuthStatus::Unknown,
