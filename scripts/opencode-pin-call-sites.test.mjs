@@ -34,6 +34,66 @@
 // closure-parameter shadows), raw pointers and unsafe writes, non-ASCII
 // identifiers, and which branch runs (read from the order of the container_env
 // and host_extra_env lets).
+//
+// The N-series pins the opencode version gate in front of every opencode 2
+// path. agent_review and agent_session reach an opencode2_* entry function only
+// through one dispatch statement each, compared as whitespace-collapsed source
+// text around the entry call (its argument list is the implementer's): the
+// review's after its binary resolve and before self_mcp_wanted, the host
+// session's after mcp_names and before mcp_config_path, the container's after
+// the image_has_agent refusal and the `..` check and before seed_session_home.
+// The two host dispatches read their Cli from opencode_cli(..).await?, whose `?`
+// is the refusal; classify_version is called once, in opencode_verdict_with; the
+// container entry's first call is its image gate; agent.rs names core items only
+// as crate::opencode2::… (no use, no alias, no other path). A path-qualified name
+// (crate::opencode2::review_env) is another module's and never counts as the
+// 1.x call. Out of reach, besides the shapes above: what the opencode2_* bodies
+// do with their inputs, which N4-N11 and N13 take over.
+//
+// N4-N11 hold the lock of every wired opencode 2 run: core's three lock producers
+// (probe_document, read_back, lock_document) are called once each, in
+// opencode2_lock; opencode2_lock is called only from opencode2_compose, the one
+// caller of core's argv and env builders, which each wired entry function calls
+// once; review_args takes &lock and review_env compose's one config_path; the
+// session argv takes SessionAgent::Locked(&lock), or SessionAgent::Write only in
+// the arm of a pinless session turn, and the session env compose's config_path
+// as its String; each wired entry function picks its pin from its own non-mut
+// parameters (a session binds it once and hands it to its turn), destructures
+// one TurnPlan::Run, builds its stream parser from that lock and spawns
+// stream_agent with the plan's argv and env; stream_agent and Command::new are
+// called only where listed; the opencode2_* bodies name no 1.x builder and spell
+// none of the run's flags, and the 1.x literal pairs stay where they are. The
+// container entry function is the one caller of build_run_args_full, once for
+// its probe and once for its run, each with its plan's argv and the env split by
+// split_container_env, whose client half carries the lock document: the probe
+// always names that document by `-e` alone, the run only through its pinned
+// env_by_name binding. "--standalone" appears in production only in
+// OPENCODE2_AUTH_EXPORT_ARGS. The counts are the constants above checkLockGate.
+// Out of reach as well: what core does with a lock, and a pinned spawn through a
+// callee these pins do not list.
+//
+// N13 holds the sign-in export inside its three uses: export_stdout is bound
+// once, counted once by credential_export_count(&export_stdout) and handed once
+// to the import as stdin: Some(export_stdout). It is counted with string
+// literals kept, so a format string naming it is a fourth mention, and no line
+// naming it may format, log or decode it. It also holds the export arm's own
+// bindings: in opencode2_copy_sign_ins, no statement after the export's `let`, up
+// to and including export_stdout's binding, names stdout or export beside a
+// format, log, print or decode call. Out of reach: what capture_tree and
+// credential_export_count do with the bytes, which code review owns.
+//
+// N14-N17 hold what each plan carries to its spawn. Between a wired entry
+// function's TurnPlan::Run and its stream_agent( call, no `let` binds run, run_args
+// or client_env beyond the container's one run_args and one client_env, none
+// `mut`, and nothing indexes, assigns or calls through run.args, run.env, run.cwd,
+// run_args or client_env (N14). Each read-back closure builds one CaptureRequest
+// whose program, args, cwd and env are pinned per site, and each 2.x stream_agent(
+// takes &run.cwd (N15). agent_models' listing statement is pinned in text (the 2.x
+// arm reads MODELS_ARGS, the 1.x arm the args of kind.models_args()),
+// opencode2_catalog reads CATALOG_ARGS, and opencode2_read_request, the one
+// builder of both reads, sets the project-disable pair (N16). agent_session's 1.x
+// restart rebinding is pinned in text, once, before its opencode_session_args(
+// call (N17). Out of reach: a closure, macro or callee that changes them.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -182,7 +242,7 @@ function checkPinCallSites(text) {
     return [`could not read ${FILE}`];
   const v = lexRust(text);
   if (v.unterminated >= 0) return [`could not scan ${FILE}`];
-  const { masked } = v;
+  const { masked, code } = v;
   const problems = [];
   const spans = testModuleSpans(masked);
   const inTest = (index) =>
@@ -196,6 +256,8 @@ function checkPinCallSites(text) {
     const line = lineAt(m.index);
     if (/\bfn\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index)))
       continue;
+    // A path-qualified name is another module's fn (crate::opencode2::review_env).
+    if (masked.slice(Math.max(0, m.index - 2), m.index) === "::") continue;
     const rest = masked.slice(m.index + m[0].length);
     const paren = /^\s*\(/.exec(rest);
     if (!paren) {
@@ -475,7 +537,774 @@ function checkPinCallSites(text) {
         `agent_session's container branch must build config_path once: ${CONTAINER_CONFIG}`,
       );
   }
+  checkVersionGate(
+    text,
+    masked,
+    inTest,
+    lines,
+    lineAt,
+    { agent_review: review, agent_session: session },
+    problems,
+  );
+  checkLockGate(code, masked, inTest, lines, lineAt, problems);
+  checkSignInExport(code, masked, inTest, lineAt, problems);
+  checkPlanCarriage(masked, inTest, lines, lineAt, problems);
   return problems;
+}
+
+/** Index of the `)` closing the call whose `(` sits at `open`, or -1. */
+function callClose(masked, open) {
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    if ("([{".includes(masked[i])) depth++;
+    else if (")]}".includes(masked[i]) && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** The opencode 2 dispatch statements: the whitespace-collapsed source text up to
+ *  and after the entry call's argument list, and the anchors each sits between. */
+const DISPATCHES = [
+  {
+    id: "N1",
+    fn: "agent_review",
+    call: "opencode2_review",
+    head: "if kind == AgentKind::Opencode { if let (crate::opencode2::Cli::V2(version), identity) = opencode_cli(&binary).await? { return Box::pin(opencode2_review(",
+    tail: ")) .await; } }",
+    after: [["let binary = resolve(", /\blet\s+binary\s*=\s*resolve\s*\(/]],
+    before: ["let self_mcp_wanted", /\blet\s+self_mcp_wanted\b/],
+  },
+  {
+    id: "N2 host",
+    fn: "agent_session",
+    call: "opencode2_host_session",
+    head: 'let opencode_v1_restart = if kind == AgentKind::Opencode && !container { let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| { AppError::Command(format!("{} CLI not found. Install it or set its path in Settings.", kind.label())) })?; match opencode_cli(&binary).await? { (crate::opencode2::Cli::V2(version), identity) => { return Box::pin(opencode2_host_session(',
+    tail: ")) .await; } (crate::opencode2::Cli::V1(_), _) => { opencode1_must_restart(resume, native_session_id.as_deref()) } } } else { false };",
+    after: [["let mcp_names", /\blet\s+mcp_names\b/]],
+    before: ["let mut mcp_config_path", /\blet\s+mut\s+mcp_config_path\b/],
+  },
+  {
+    id: "N2 container",
+    fn: "agent_session",
+    call: "opencode2_container_session",
+    head: "if kind == AgentKind::Opencode { return Box::pin(opencode2_container_session(",
+    tail: ")) .await; }",
+    after: [
+      ["the image_has_agent refusal", /\bimage_has_agent\s*\(/],
+      ["the `..` check", /\bstd::path::Component::ParentDir\b/],
+    ],
+    before: ["seed_session_home(", /\bseed_session_home\s*\(/],
+  },
+];
+
+
+/** N1, N2, N3, N12, N13: the version gate in front of every opencode 2 path. */
+function checkVersionGate(text, masked, inTest, lines, lineAt, bodies, problems) {
+  const production = (re) =>
+    [...masked.matchAll(re)].filter(
+      (m) =>
+        !inTest(m.index) &&
+        !/\bfn\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index)),
+    );
+  const firstIn = (body, re) => {
+    const m = re.exec(masked.slice(...body));
+    return m ? body[0] + m.index : -1;
+  };
+  for (const d of DISPATCHES) {
+    const body = bodies[d.fn];
+    const calls = production(new RegExp(`\\b${d.call}\\s*\\(`, "g"));
+    if (calls.length !== 1) {
+      problems.push(
+        `${d.id}: expected 1 production ${d.call} call, saw ${calls.length}`,
+      );
+      continue;
+    }
+    const at = calls[0].index;
+    if (at < body[0] || at >= body[1]) {
+      problems.push(`${d.id}: ${d.call} called outside ${d.fn}`);
+      continue;
+    }
+    const open = masked.indexOf("(", at);
+    const close = callClose(masked, open);
+    const head = collapse(text.slice(Math.max(body[0], at - 2000), open + 1));
+    const tail = close < 0 ? "" : collapse(text.slice(close, close + 400));
+    if (!` ${head}`.endsWith(` ${d.head}`) || !tail.startsWith(d.tail))
+      problems.push(
+        `${d.id}: ${d.fn} must dispatch with: ${d.head}..${d.tail}`,
+      );
+    const limit = firstIn(body, d.before[1]);
+    const late = d.after.filter(([, re]) => {
+      const i = firstIn(body, re);
+      return i < 0 || i > at;
+    });
+    if (limit < 0 || at > limit || late.length > 0)
+      problems.push(
+        `${d.id}: ${d.call}'s dispatch must sit after ${d.after.map(([name]) => name).join(" and ")} and before ${d.before[0]} in ${d.fn}`,
+      );
+  }
+  const gate = fnBody(masked, "opencode2_container_session");
+  if (!gate) problems.push("missing anchor: fn opencode2_container_session");
+  else {
+    const first = /\b([A-Za-z_]\w*)\s*\(/.exec(masked.slice(...gate));
+    if (first?.[1] !== "image_opencode_state")
+      problems.push(
+        `N2: opencode2_container_session's first call must be image_opencode_state(, got ${first?.[1] ?? "none"}(`,
+      );
+  }
+
+  const classify = production(/\bopencode2::classify_version\s*\(/g);
+  if (
+    classify.length !== 1 ||
+    enclosingFn(lines, lineAt(classify[0].index) - 1) !==
+      "opencode_verdict_with"
+  )
+    problems.push(
+      `N3: classify_version must be called once in production, in opencode_verdict_with, saw ${classify.length}`,
+    );
+  for (const fn of ["agent_review", "agent_session"]) {
+    const n = callsIn(masked, bodies[fn], "opencode_cli").length;
+    if (n !== 1)
+      problems.push(
+        `N3: ${fn} must read its Cli from one opencode_cli( call, saw ${n}`,
+      );
+  }
+
+  for (const [re, form] of [
+    [/\buse\s+(?:crate|super|self)::opencode2\b/, "use crate::opencode2"],
+    [/\buse\s+(?:crate|super|self)::\{[^}]*\bopencode2\b/, "use crate::{opencode2}"],
+    [/\bopencode2\s+as\b/, "opencode2 as"],
+    [/\bopencode2::\{/, "opencode2::{"],
+  ])
+    if (re.test(masked)) problems.push(`N12: agent.rs must not spell ${form}`);
+  for (const m of masked.matchAll(/\bopencode2::/g))
+    if (
+      !inTest(m.index) &&
+      masked.slice(Math.max(0, m.index - 7), m.index) !== "crate::"
+    )
+      problems.push(
+        `${FILE}:${lineAt(m.index)} N12: core items are spelled crate::opencode2::`,
+      );
+}
+
+/** Production mentions of the sign-in export's stdout binding, and the three uses
+ *  they must be. */
+const EXPORT_STDOUT_MENTIONS = 3;
+const EXPORT_STDOUT_USES = [
+  /\blet\s+export_stdout\s*=/g,
+  /\bcredential_export_count\s*\(\s*&export_stdout\s*\)/g,
+  /\bstdin\s*:\s*Some\s*\(\s*export_stdout\s*\)/g,
+];
+const SECRET_SINKS =
+  /\bformat!|\blog::|\beprintln!|\bprintln!|\bdbg!|\bto_string\b|\bfrom_utf8\b/;
+/** The sinks a statement naming the export arm's stdout or export may not hold. */
+const EXPORT_SINKS =
+  /\b(?:format|format_args|print|println|eprint|eprintln|write|writeln|panic|dbg|trace|debug|info|warn|error)!|\b(?:log|tracing)::|\b(?:to_string|to_owned|into_owned|from_utf8\w*)\b/;
+
+/** Index just past the `;` that ends, at bracket depth 0, the statement opening at
+ *  `at` in the masked view, or -1. */
+function statementEnd(masked, at) {
+  let depth = 0;
+  for (let i = at; i < masked.length; i++) {
+    const c = masked[i];
+    if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (c === ";" && depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/** N13, over `code` (literals kept, comments blanked), so a format string naming
+ *  the binding counts as a mention; `masked` finds the statements. */
+function checkSignInExport(code, masked, inTest, lineAt, problems) {
+  const production = (re) =>
+    [...code.matchAll(re)].filter((m) => !inTest(m.index));
+  const mentions = production(/\bexport_stdout\b/g);
+  if (mentions.length !== EXPORT_STDOUT_MENTIONS)
+    problems.push(
+      `N13: export_stdout must appear ${EXPORT_STDOUT_MENTIONS} times in production, saw ${mentions.length}`,
+    );
+  if (EXPORT_STDOUT_USES.some((re) => production(re).length !== 1))
+    problems.push(
+      "N13: export_stdout must be bound once, counted once by credential_export_count(&export_stdout) and piped once as stdin: Some(export_stdout)",
+    );
+  const lines = code.split("\n");
+  for (const line of new Set(mentions.map((m) => lineAt(m.index))))
+    if (SECRET_SINKS.test(lines[line - 1]))
+      problems.push(
+        `${FILE}:${line} N13: a line naming export_stdout must not format, log or decode it`,
+      );
+  const copy = fnBody(masked, "opencode2_copy_sign_ins");
+  const exportLet = copy && /\blet\s+export\s*=/.exec(masked.slice(...copy));
+  const stdoutLet =
+    copy && /\blet\s+export_stdout\s*=/.exec(masked.slice(...copy));
+  let at = exportLet ? statementEnd(masked, copy[0] + exportLet.index) : -1;
+  const stop = stdoutLet ? statementEnd(masked, copy[0] + stdoutLet.index) : -1;
+  if (at < 0 || stop < 0 || at > stop) {
+    problems.push(
+      "missing anchor: opencode2_copy_sign_ins's let export, then its let export_stdout",
+    );
+    return;
+  }
+  while (at < stop) {
+    const end = statementEnd(masked, at);
+    const statement = code.slice(at, end);
+    if (/\b(?:stdout|export)\b/.test(statement) && EXPORT_SINKS.test(statement))
+      problems.push(
+        `${FILE}:${lineAt(at + statement.search(/\S/))} N13: a statement naming stdout or export before export_stdout is bound must not format, log or decode it`,
+      );
+    at = end;
+  }
+}
+
+/** N14: how many `let`s may bind each plan piece between a wired entry function's
+ *  TurnPlan::Run and its spawn. */
+const PLAN_PIECES = ["run", "run_args", "client_env"];
+const PLAN_LETS = {
+  opencode2_review: {},
+  opencode2_host_session: {},
+  opencode2_container_session: { run_args: 1, client_env: 1 },
+};
+/** An index, an assignment or a call through a plan piece; `let` heads are blanked
+ *  first, so a binding's own `=` never matches. */
+const PLAN_CHANGE =
+  /\b(?:run\.(?:args|env|cwd)|run_args|client_env)\s*(?:\.|\[|=(?![=>])|\+=)/;
+/** N15: each read-back's CaptureRequest up to its stdin field, collapsed. */
+const PROBE_REQUESTS = {
+  opencode2_review:
+    "CaptureRequest { program: binary, args: plan.args, cwd: Some(plan.cwd.as_str()), env: plan.env,",
+  opencode2_host_session:
+    "CaptureRequest { program: binary, args: plan.args, cwd: Some(plan.cwd.as_str()), env: plan.env,",
+  opencode2_container_session:
+    "CaptureRequest { program: runtime_bin, args: probe_args, cwd: Some(plan.cwd.as_str()), env: client_env,",
+};
+const SPAWN_CWD = "&run.cwd";
+/** N16: agent_models' listing statement, collapsed. */
+const MODELS_LISTING =
+  "let listed = if v2 { let captured = Box::pin(capture_tree(opencode2_read_request(&binary, crate::opencode2::MODELS_ARGS, None))) .await; opencode2_listing(captured) } else { run_capture_parts(&binary, args, MODELS_TIMEOUT).await }";
+const MODELS_ARGS_LET =
+  /\blet\s+Some\s*\(\s*args\s*\)\s*=\s*kind\s*\.\s*models_args\s*\(\s*\)\s*else\b/g;
+/** The production opencode2_read_request( calls in file order: fn, arguments. */
+const READ_REQUESTS = [
+  ["agent_models", ["&binary", "crate::opencode2::MODELS_ARGS", "None"]],
+  ["opencode2_catalog", ["binary", "crate::opencode2::CATALOG_ARGS", "cancel"]],
+];
+const READ_REQUEST_ENV = "env: crate::opencode2::project_disable_env().into(),";
+/** N17: the 1.x restart rebinding, collapsed. */
+const RESTART_REBIND =
+  "let (resume, native_session_id) = if opencode_v1_restart { (false, None) } else { (resume, native_session_id) }";
+
+/** N14-N17: what each opencode 2 plan and read carries to its spawn. */
+function checkPlanCarriage(masked, inTest, lines, lineAt, problems) {
+  const fnOf = (index) => enclosingFn(lines, lineAt(index) - 1);
+  const flat = (text) => collapse(text).trim();
+  for (const [fn, lets] of Object.entries(PLAN_LETS)) {
+    const span = fnBody(masked, fn);
+    if (!span) {
+      problems.push(`missing anchor: fn ${fn}`);
+      continue;
+    }
+    const run = /\bTurnPlan::Run\s*\{/.exec(masked.slice(...span));
+    const from = run
+      ? callClose(masked, span[0] + run.index + run[0].length - 1) + 1
+      : 0;
+    const spawn =
+      from > 0 && /\bstream_agent\s*\(/.exec(masked.slice(from, span[1]));
+    if (!spawn) {
+      problems.push(
+        `missing anchor: ${fn}'s stream_agent( after its TurnPlan::Run`,
+      );
+      continue;
+    }
+    const between = masked.slice(from, from + spawn.index);
+    const seen = Object.fromEntries(PLAN_PIECES.map((name) => [name, 0]));
+    for (const m of between.matchAll(/\blet\b([^=;]*)=/g))
+      for (const name of PLAN_PIECES) {
+        if (!new RegExp(`\\b${name}\\b`).test(m[1])) continue;
+        seen[name]++;
+        if (/\bmut\b/.test(m[1]))
+          problems.push(
+            `N14: ${fn} must not bind ${name} as mut before its spawn`,
+          );
+      }
+    for (const name of PLAN_PIECES)
+      if (seen[name] !== (lets[name] ?? 0))
+        problems.push(
+          `N14: ${fn} must bind ${name} ${lets[name] ?? 0} times between its TurnPlan::Run and its spawn, saw ${seen[name]}`,
+        );
+    const change = PLAN_CHANGE.exec(
+      between.replace(/\blet\b[^=;]*=/g, (head) => " ".repeat(head.length)),
+    );
+    if (change)
+      problems.push(
+        `N14: ${fn} must not change its plan before its spawn: ${change[0].replace(/\s+/g, "")}`,
+      );
+    const spawnOpen = from + spawn.index + spawn[0].length - 1;
+    const cwd = callArgs(masked, spawnOpen)?.[5];
+    if (cwd !== SPAWN_CWD)
+      problems.push(
+        `N15: ${fn}'s stream_agent( must take ${SPAWN_CWD} as its cwd, got ${cwd}`,
+      );
+    const compose = /\bopencode2_compose\s*\(/.exec(masked.slice(...span));
+    const open = compose ? span[0] + compose.index + compose[0].length - 1 : -1;
+    const closure = open < 0 ? "" : masked.slice(open, callClose(masked, open));
+    const requests = [...closure.matchAll(/\bCaptureRequest\s*\{/g)];
+    const stdin =
+      requests.length === 1 &&
+      /\bstdin\s*:/.exec(closure.slice(requests[0].index));
+    const asked = stdin
+      ? flat(closure.slice(requests[0].index, requests[0].index + stdin.index))
+      : `${requests.length} requests`;
+    // A missing compose call is N4's to report.
+    if (compose && asked !== PROBE_REQUESTS[fn])
+      problems.push(
+        `N15: ${fn}'s read-back must build ${PROBE_REQUESTS[fn]}.. once, got ${asked}`,
+      );
+  }
+
+  const models = fnBody(masked, "agent_models");
+  if (!models) problems.push("missing anchor: fn agent_models");
+  else {
+    const listed = letStatement(masked, models, "listed");
+    const end = listed.count === 1 ? statementEnd(masked, listed.at) : -1;
+    if (end < 0 || flat(masked.slice(listed.at, end - 1)) !== MODELS_LISTING)
+      problems.push(`N16: agent_models must list once as ${MODELS_LISTING}`);
+    const argsLets = [...masked.slice(...models).matchAll(MODELS_ARGS_LET)]
+      .length;
+    if (argsLets !== 1 || letStatement(masked, models, "args").count !== 0)
+      problems.push(
+        "N16: agent_models must bind args once, as let Some(args) = kind.models_args() else",
+      );
+  }
+  const requests = [...masked.matchAll(/\bopencode2_read_request\s*\(/g)]
+    .filter(
+      (m) =>
+        !inTest(m.index) &&
+        !/\bfn\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index)),
+    )
+    .map((m) => {
+      const args = callArgs(masked, m.index + m[0].length - 1) ?? [];
+      // A trailing comma leaves an empty last argument.
+      const kept = args.filter((arg, at) => arg !== "" || at < args.length - 1);
+      return JSON.stringify([fnOf(m.index), kept]);
+    });
+  if (
+    requests.join("\n") !==
+    READ_REQUESTS.map((r) => JSON.stringify(r)).join("\n")
+  )
+    problems.push(
+      `N16: opencode2_read_request( must be called ${READ_REQUESTS.map(([fn, args]) => `in ${fn} with ${args.join(", ")}`).join(", then ")}`,
+    );
+  const builder = fnBody(masked, "opencode2_read_request");
+  if (
+    !builder ||
+    [...masked.slice(...builder).matchAll(/\benv\s*:/g)].length !== 1 ||
+    !flat(masked.slice(...builder)).includes(READ_REQUEST_ENV)
+  )
+    problems.push(`N16: opencode2_read_request must set ${READ_REQUEST_ENV}`);
+
+  const session = fnBody(masked, "agent_session");
+  if (!session) problems.push("missing anchor: fn agent_session");
+  else {
+    const body = masked.slice(...session);
+    const rebinds = [
+      ...body.matchAll(/\blet\s*\(\s*resume\s*,\s*native_session_id\s*\)/g),
+    ];
+    const argvs = [...body.matchAll(/\bopencode_session_args\s*\(/g)];
+    const at = rebinds.length === 1 ? session[0] + rebinds[0].index : -1;
+    const end = at < 0 ? -1 : statementEnd(masked, at);
+    if (
+      end < 0 ||
+      argvs.length !== 1 ||
+      flat(masked.slice(at, end - 1)) !== RESTART_REBIND ||
+      at > session[0] + argvs[0].index
+    )
+      problems.push(
+        `N17: agent_session must rebind ${RESTART_REBIND} once, before its opencode_session_args( call`,
+      );
+  }
+}
+
+/** N4-N11 counts, with every entry function wired. */
+const LOCK_CALLS = 2;
+const COMPOSE_CALLS = {
+  opencode2_review: 1,
+  opencode2_host_session: 1,
+  opencode2_container_session: 1,
+};
+/** Each session entry function's opencode2_session_pin( calls; a wired one binds
+ *  SESSION_PIN_LET once and hands that binding to its turn as `pin`. */
+const SESSION_PIN_CALLS = {
+  opencode2_host_session: 1,
+  opencode2_container_session: 1,
+};
+const SESSION_PIN_LET = "let pin = opencode2_session_pin(read_only, web)";
+/** The first argument of each crate::opencode2::session_args( call, in file order. */
+const SESSION_AGENTS = [
+  "crate::opencode2::SessionAgent::Locked(&lock)",
+  "crate::opencode2::SessionAgent::Write",
+];
+/** The compose arm the write argv sits in. */
+const WRITE_ARM = "Opencode2Turn::Session { pin: None, session_id }";
+const SESSION_AGENT_MENTIONS = { Locked: 1, Write: 1 };
+const SESSION_ENV_CALLS = 2;
+const SESSION_ENV_CONFIG = "config_path.map(String::from)";
+/** Each wired entry function's one plan destructuring. */
+const RUN_PATTERNS = {
+  opencode2_review: "TurnPlan::Run { run, lock, read_back }",
+  opencode2_host_session: "TurnPlan::Run { run, lock, .. }",
+  opencode2_container_session: "TurnPlan::Run { run, lock, .. }",
+};
+/** Production stream_agent( calls in file order and what each passes at index 13. */
+const SPAWNS = [
+  ["agent_review", "None"],
+  ["agent_session", "None"],
+  ["agent_session", "None"],
+  ["opencode2_review", "Some"],
+  ["opencode2_host_session", "Some"],
+  ["opencode2_container_session", "Some"],
+];
+/** A 2.x spawn's argv (index 3) and env (index 11). */
+const SPAWN_INPUTS = {
+  opencode2_review: ["run.args", "&run.env"],
+  opencode2_host_session: ["run.args", "&run.env"],
+  opencode2_container_session: ["run_args", "&client_env"],
+};
+const COMMAND_FNS = [
+  "capture_command",
+  "kill_process_tree",
+  "run_capture_parts",
+  "run_login_shell",
+  "stream_agent",
+];
+/** The container argv builds, in file order (the probe's, then the run's): the
+ *  binding each opens, and its last three arguments (the `-e K=V` pairs, the names
+ *  forwarded by `-e NAME`, the plan's argv). */
+const CONTAINER_ARGVS = [
+  [
+    "let probe_args = crate::agent_sandbox::build_run_args_full(",
+    ["&container_env", "&[crate::opencode2::CONTENT_ENV]", "&plan.args"],
+  ],
+  [
+    "let run_args = crate::agent_sandbox::build_run_args_full(",
+    ["&container_env", "env_by_name", "&run.args"],
+  ],
+];
+const BUILD_RUN_ARGS_FULL_CALLS = CONTAINER_ARGVS.length;
+/** The env split each container argv is built from, in file order. */
+const CONTAINER_SPLITS = [
+  "let (container_env, client_env) = split_container_env(plan.env)",
+  "let (container_env, client_env) = split_container_env(run.env)",
+];
+/** The container run's `let env_by_name` text. */
+const ENV_BY_NAME =
+  "let env_by_name: &[&'static str] = if lock.is_some() { &[crate::opencode2::CONTENT_ENV] } else { &[] }";
+const STANDALONE_LITERALS = 1;
+const STANDALONE_HOME = "const OPENCODE2_AUTH_EXPORT_ARGS";
+const OLD_BUILDERS =
+  /\b(?:opencode_permission_json|opencode_read_mirror|opencode_review_args|opencode_session_args|opencode_session_env|opencode_variant|write_opencode_config|build_opencode_config|GD_RESEARCH_AGENT)\b/;
+const RUN_FLAGS = ['"--auto"', '"--yolo"', '"--standalone"', '"--agent"', '"run"'];
+const OLD_LITERALS = [
+  ['"OPENCODE_CONFIG_CONTENT"', ["opencode_config_sources", "opencode_read_mirror_with"]],
+  ['"--dangerously-skip-permissions"', ["opencode_session_args", "opencode_review_args"]],
+];
+
+/** N4-N11: no opencode 2 run is planned or spawned without its lock. `code` keeps
+ *  literals and blanks comments; `masked` blanks both. */
+function checkLockGate(code, masked, inTest, lines, lineAt, problems) {
+  const production = (re) =>
+    [...masked.matchAll(re)].filter(
+      (m) =>
+        !inTest(m.index) &&
+        !/\bfn\s+$/.test(masked.slice(Math.max(0, m.index - 8), m.index)),
+    );
+  const fnOf = (index) => enclosingFn(lines, lineAt(index) - 1);
+  const argsAt = (m) => callArgs(masked, m.index + m[0].length - 1);
+  const body = (name) => {
+    const span = fnBody(masked, name);
+    if (!span) problems.push(`missing anchor: fn ${name}`);
+    return span;
+  };
+
+  for (const name of ["probe_document", "read_back", "lock_document"]) {
+    const hits = production(
+      new RegExp(`\\bcrate::opencode2::${name}\\s*\\(`, "g"),
+    );
+    if (hits.length !== 1 || fnOf(hits[0].index) !== "opencode2_lock")
+      problems.push(
+        `N4: crate::opencode2::${name}( must be called once in production, in opencode2_lock, saw ${hits.length}`,
+      );
+  }
+  const locks = production(/\bopencode2_lock\s*\(/g);
+  if (
+    locks.length !== LOCK_CALLS ||
+    locks.some((m) => fnOf(m.index) !== "opencode2_compose")
+  )
+    problems.push(
+      `N4: opencode2_lock( must be called ${LOCK_CALLS} times in production, all in opencode2_compose, saw ${locks.length}`,
+    );
+  const composes = production(/\bopencode2_compose\s*\(/g);
+  for (const [fn, n] of Object.entries(COMPOSE_CALLS)) {
+    const seen = composes.filter((m) => fnOf(m.index) === fn).length;
+    if (seen !== n)
+      problems.push(`N4: ${fn} must call opencode2_compose( ${n} times, saw ${seen}`);
+  }
+  if (composes.some((m) => !Object.hasOwn(COMPOSE_CALLS, fnOf(m.index))))
+    problems.push("N4: opencode2_compose( is called outside the entry functions");
+
+  const review = body("opencode2_review");
+  if (review) {
+    pinParameter(masked, "opencode2_review", review, "repo_aware", "bool", problems);
+    const pins = production(/\bopencode2_review_pin\s*\(/g);
+    const asField = pins.filter(
+      (m) =>
+        fnOf(m.index) === "opencode2_review" &&
+        argsAt(m)?.join() === "repo_aware" &&
+        /\bOpencode2Turn::Review\s*\{\s*version\s*,\s*pin\s*:\s*$/.test(
+          masked.slice(Math.max(0, m.index - 120), m.index),
+        ),
+    );
+    if (pins.length !== 1 || asField.length !== 1)
+      problems.push(
+        "N5: opencode2_review must pass opencode2_review_pin(repo_aware) once, as its turn's pin",
+      );
+  }
+  const sessionPins = production(/\bopencode2_session_pin\s*\(/g);
+  for (const [fn, n] of Object.entries(SESSION_PIN_CALLS)) {
+    const seen = sessionPins.filter((m) => fnOf(m.index) === fn).length;
+    if (seen !== n)
+      problems.push(`N5: ${fn} must call opencode2_session_pin( ${n} times, saw ${seen}`);
+    if (n === 0) continue;
+    const span = body(fn);
+    if (!span) continue;
+    pinParameter(masked, fn, span, "read_only", "bool", problems);
+    pinParameter(masked, fn, span, "web", "bool", problems);
+    const bound = letStatement(masked, span, "pin");
+    const turns = [
+      ...masked.slice(...span).matchAll(/\bOpencode2Turn::Session\s*\{\s*pin\s*,/g),
+    ].length;
+    if (bound.count !== 1 || bound.text !== SESSION_PIN_LET || turns !== 1)
+      problems.push(
+        `N5: ${fn} must bind ${SESSION_PIN_LET} once and pass it as its turn's pin`,
+      );
+  }
+  if (sessionPins.some((m) => !Object.hasOwn(SESSION_PIN_CALLS, fnOf(m.index))))
+    problems.push("N5: opencode2_session_pin( is called outside the session entry functions");
+
+  const reviewArgs = production(/\bcrate::opencode2::review_args\s*\(/g);
+  if (
+    reviewArgs.length !== 1 ||
+    fnOf(reviewArgs[0].index) !== "opencode2_compose" ||
+    argsAt(reviewArgs[0])?.[1] !== "&lock"
+  )
+    problems.push(
+      `N6: crate::opencode2::review_args( must be called once, in opencode2_compose, with &lock second, saw ${reviewArgs.length}`,
+    );
+  const sessionArgs = production(/\bcrate::opencode2::session_args\s*\(/g);
+  const agents = sessionArgs.map((m) => argsAt(m)?.[0]);
+  if (
+    agents.join("\n") !== SESSION_AGENTS.join("\n") ||
+    sessionArgs.some((m) => fnOf(m.index) !== "opencode2_compose")
+  )
+    problems.push(
+      `N6: crate::opencode2::session_args( must be called ${SESSION_AGENTS.length} times, in opencode2_compose, first with ${SESSION_AGENTS.join(" then ")}, saw ${agents.join(", ") || "none"}`,
+    );
+  // The arm a call sits in: the last `Opencode2Turn::<arm> { .. } =>` head before it in compose.
+  const composeSpan = fnBody(masked, "opencode2_compose");
+  const armOf = (index) => {
+    if (!composeSpan) return null;
+    let arm = null;
+    for (const m of masked
+      .slice(...composeSpan)
+      .matchAll(/\bOpencode2Turn::\w+\s*\{[^{}]*\}\s*=>/g)) {
+      if (composeSpan[0] + m.index > index) break;
+      arm = collapse(m[0].replace(/\s*=>$/, "")).replace(/,\s*\}$/, " }");
+    }
+    return arm;
+  };
+  const writes = sessionArgs.filter(
+    (m) => argsAt(m)?.[0] === "crate::opencode2::SessionAgent::Write",
+  );
+  if (writes.length !== 1 || armOf(writes[0].index) !== WRITE_ARM)
+    problems.push(`N6: the write argv must sit, once, in the arm ${WRITE_ARM}`);
+  for (const [variant, n] of Object.entries(SESSION_AGENT_MENTIONS)) {
+    const seen = production(new RegExp(`\\bSessionAgent::${variant}\\b`, "g")).length;
+    if (seen !== n)
+      problems.push(
+        `N6: expected ${n} production SessionAgent::${variant} mentions, saw ${seen}`,
+      );
+  }
+
+  for (const [fn, pattern] of Object.entries(RUN_PATTERNS)) {
+    const span = body(fn);
+    if (!span) continue;
+    const runs = [...masked.slice(...span).matchAll(/\bTurnPlan::Run\s*\{/g)].map(
+      (m) => {
+        const at = span[0] + m.index;
+        const close = callClose(masked, at + m[0].length - 1);
+        return collapse(masked.slice(at, close + 1)).replace(/,\s*\}$/, " }");
+      },
+    );
+    if (runs.length !== 1 || runs[0] !== pattern)
+      problems.push(`N7: ${fn} must destructure its plan once as ${pattern}`);
+    if (letStatement(masked, span, "lock").count !== 0)
+      problems.push(`N7: ${fn} must not rebind lock`);
+    const parsers = callsIn(masked, span, "crate::opencode2::StreamParser::new");
+    if (parsers.length !== 1 || parsers[0]?.[0] !== "lock.as_ref()")
+      problems.push(`N7: ${fn} must build its stream parser once, from lock.as_ref()`);
+  }
+  const parsers = production(/\bStreamParser::new\s*\(/g).length;
+  const wired = Object.keys(RUN_PATTERNS).length;
+  if (parsers !== wired)
+    problems.push(
+      `N7: expected ${wired} production StreamParser::new( calls, saw ${parsers}`,
+    );
+
+  const reviewEnv = production(/\bcrate::opencode2::review_env\s*\(/g);
+  if (
+    reviewEnv.length !== 1 ||
+    fnOf(reviewEnv[0].index) !== "opencode2_compose" ||
+    argsAt(reviewEnv[0])?.[0] !== "config_path"
+  )
+    problems.push(
+      `N8: crate::opencode2::review_env( must be called once in production, in opencode2_compose, with config_path first, saw ${reviewEnv.length}`,
+    );
+  const sessionEnv = production(/\bcrate::opencode2::session_env\s*\(/g);
+  if (
+    sessionEnv.length !== SESSION_ENV_CALLS ||
+    sessionEnv.some(
+      (m) =>
+        fnOf(m.index) !== "opencode2_compose" ||
+        argsAt(m)?.[0] !== SESSION_ENV_CONFIG,
+    )
+  )
+    problems.push(
+      `N8: crate::opencode2::session_env( must be called ${SESSION_ENV_CALLS} times in production, in opencode2_compose, with ${SESSION_ENV_CONFIG} first, saw ${sessionEnv.length}`,
+    );
+  const compose = body("opencode2_compose");
+  if (compose) {
+    const local = letStatement(masked, compose, "config_path");
+    if (local.count !== 1 || local.text !== "let config_path = inputs.config_path")
+      problems.push(
+        "N8: opencode2_compose must bind config_path once: let config_path = inputs.config_path",
+      );
+  }
+
+  const spawns = production(/\bstream_agent\s*\(/g).map((m) => {
+    const args = argsAt(m) ?? [];
+    const stream = args[13] ?? "nothing";
+    const kind = stream.startsWith("Some(Opencode2Stream {") ? "Some" : stream;
+    return { fn: fnOf(m.index), args, kind };
+  });
+  const order = spawns.map((s) => `${s.fn}:${s.kind}`).join(", ");
+  const expected = SPAWNS.map(([fn, kind]) => `${fn}:${kind}`).join(", ");
+  if (order !== expected)
+    problems.push(`N9: the stream_agent( calls are ${order}, expected ${expected}`);
+  for (const s of spawns.filter((s) => s.kind === "Some")) {
+    const want = SPAWN_INPUTS[s.fn];
+    if (!want || s.args[3] !== want[0] || s.args[11] !== want[1])
+      problems.push(
+        `N9: ${s.fn}'s stream_agent( must pass ${want?.join(" and ")}, got ${s.args[3]} and ${s.args[11]}`,
+      );
+  }
+  const spawners = [
+    ...new Set(production(/\bCommand::new\s*\(/g).map((m) => fnOf(m.index))),
+  ].sort();
+  if (spawners.join() !== COMMAND_FNS.join())
+    problems.push(
+      `N9: Command::new( sits in ${spawners.join(", ")}, expected ${COMMAND_FNS.join(", ")}`,
+    );
+  const container = "opencode2_container_session";
+  const statementAt = (index) => {
+    const at = masked.lastIndexOf("let ", index);
+    return collapse(masked.slice(at, masked.indexOf(";", index)));
+  };
+  const full = production(/\bbuild_run_args_full\s*\(/g);
+  if (
+    full.length !== BUILD_RUN_ARGS_FULL_CALLS ||
+    full.some((m) => fnOf(m.index) !== container)
+  )
+    problems.push(
+      `N9: expected ${BUILD_RUN_ARGS_FULL_CALLS} production build_run_args_full( calls, all in ${container}, saw ${full.length}`,
+    );
+  else
+    full.forEach((m, i) => {
+      const [head, tail] = CONTAINER_ARGVS[i];
+      // A trailing comma leaves an empty last argument.
+      const args = (argsAt(m) ?? []).filter(
+        (arg, at, all) => arg !== "" || at < all.length - 1,
+      );
+      if (
+        !statementAt(m.index).startsWith(head) ||
+        args.slice(-3).join("\n") !== tail.join("\n")
+      )
+        problems.push(
+          `N9: ${container}'s argv build ${i + 1} must be ${head}.. ${tail.join(", ")})`,
+        );
+    });
+  const splits = production(/\bsplit_container_env\s*\(/g);
+  const splitTexts = splits.map((m) => statementAt(m.index));
+  if (
+    splits.some((m) => fnOf(m.index) !== container) ||
+    splitTexts.join("\n") !== CONTAINER_SPLITS.join("\n")
+  )
+    problems.push(
+      `N9: ${container} must split its env as ${CONTAINER_SPLITS.join(", then ")}`,
+    );
+  // Read from `code`: the masked view blanks the lifetime's quote.
+  const byName = letStatement(masked, [0, masked.length], "env_by_name");
+  if (
+    byName.count !== 1 ||
+    fnOf(byName.at) !== container ||
+    collapse(code.slice(byName.at, masked.indexOf(";", byName.at))) !==
+      collapse(ENV_BY_NAME)
+  )
+    problems.push(`N9: the env_by_name binding must be ${ENV_BY_NAME}`);
+
+  const entries = [...masked.matchAll(/\bfn\s+(opencode2_\w+)/g)]
+    .filter((m) => !inTest(m.index))
+    .map((m) => m[1]);
+  for (const name of entries) {
+    const span = fnBody(masked, name);
+    const old = span && OLD_BUILDERS.exec(masked.slice(...span));
+    if (old) problems.push(`N10: ${name} names the 1.x ${old[0]}`);
+    for (const flag of RUN_FLAGS)
+      if (span && code.slice(...span).includes(flag))
+        problems.push(`N11: ${name} spells ${flag}`);
+  }
+  for (const fn of ["agent_review", "agent_session"]) {
+    const span = fnBody(masked, fn);
+    if (!span) continue;
+    const seen = (masked.slice(...span).match(/\bopencode2/g) ?? []).length;
+    const allowed = DISPATCHES.filter((d) => d.fn === fn).reduce(
+      (n, d) => n + (`${d.head} ${d.tail}`.match(/\bopencode2/g) ?? []).length,
+      0,
+    );
+    if (seen !== allowed)
+      problems.push(`N10: ${fn} names opencode2 outside its dispatch statements`);
+  }
+
+  const literals = (lit) => {
+    const at = [];
+    for (let i = code.indexOf(lit); i >= 0; i = code.indexOf(lit, i + 1))
+      if (!inTest(i)) at.push(i);
+    return at;
+  };
+  const standalone = literals('"--standalone"');
+  const codeLines = code.split("\n");
+  if (
+    standalone.length !== STANDALONE_LITERALS ||
+    standalone.some((i) => !codeLines[lineAt(i) - 1].startsWith(STANDALONE_HOME))
+  )
+    problems.push(
+      `N11: "--standalone" must appear ${STANDALONE_LITERALS} times in production, in ${STANDALONE_HOME}, saw ${standalone.length}`,
+    );
+  for (const [lit, fns] of OLD_LITERALS) {
+    const where = literals(lit).map(fnOf);
+    if (where.join() !== fns.join())
+      problems.push(
+        `N11: ${lit} must appear in production only in ${fns.join(" and ")}, saw ${where.join(", ") || "none"}`,
+      );
+  }
 }
 
 function readSource() {
@@ -1148,7 +1977,7 @@ test("P15: pinned parameters, env vectors and self_names admit no ordinary edit"
     ],
     [
       "container run env &[]",
-      swap("            &container_env,\n", "            &[],\n"),
+      swap("            &container_env,\n            &inner,\n", "            &[],\n            &inner,\n"),
       [
         "agent_session's container branch must pass build_run_args &container_env once",
         twice("agent_session", "container_env", 1),
@@ -1206,4 +2035,978 @@ test("P15: pinned parameters, env vectors and self_names admit no ordinary edit"
     ],
   ])
     assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+/** `t` with the block from `opens` through the first `closes` after it moved to
+ *  just after the line holding `anchor`. */
+function moveBlock(t, opens, closes, anchor) {
+  assert.equal(t.split(opens).length, 2, `not unique: ${opens}`);
+  const start = t.indexOf(opens);
+  const end = t.indexOf(closes, start) + closes.length;
+  const rest = t.slice(0, start) + t.slice(end);
+  assert.ok(rest.includes(anchor), `no ${anchor}`);
+  const at = rest.indexOf("\n", rest.indexOf(anchor)) + 1;
+  return rest.slice(0, at) + t.slice(start, end) + rest.slice(at);
+}
+
+const strip = (problems) => problems.map((p) => p.replace(/^[^ ]+ /, ""));
+const uniqueSwap = (from, to) => (t) => {
+  assert.equal(t.split(from).length, 2, `not unique: ${from}`);
+  return t.replace(from, () => to);
+};
+const plant = (body) => (t) => `${t}\n${body}\n`;
+/** uniqueSwap inside `fn name` only: the session entry functions share text. */
+const fnSwap = (name, from, to) => (t) => {
+  const head = t.indexOf(`\nasync fn ${name}(`);
+  assert.ok(head >= 0, `no fn ${name}`);
+  const end = t.indexOf("\n}\n", head) + 3;
+  const body = t.slice(head, end);
+  assert.equal(body.split(from).length, 2, `not unique in ${name}: ${from}`);
+  return t.slice(0, head) + body.replace(from, () => to) + t.slice(end);
+};
+const HOST = "opencode2_host_session";
+const CONTAINER = "opencode2_container_session";
+const REVIEW_DISPATCH =
+  "    if kind == AgentKind::Opencode {\n        if let (crate::opencode2::Cli::V2(version), identity) = opencode_cli(&binary).await? {\n";
+const HOST_DISPATCH = "    let opencode_v1_restart = if kind";
+const CONTAINER_DISPATCH =
+  "        if kind == AgentKind::Opencode {\n            return Box::pin(opencode2_container_session(";
+
+test("N0: a path-qualified review_env is another module's, never the 1.x call", () => {
+  assert.deepEqual(
+    checkPinCallSites(
+      mutate(
+        (t) =>
+          `${t}\nfn planted(doc: &str) { let _ = crate::opencode2::review_env(None, doc); }\n`,
+      ),
+    ),
+    [
+      "N8: crate::opencode2::review_env( must be called once in production, in opencode2_compose, with config_path first, saw 2",
+    ],
+  );
+});
+
+test("N1: agent_review's dispatch is pinned in text and place", () => {
+  const shape = `N1: agent_review must dispatch with: ${DISPATCHES[0].head}..${DISPATCHES[0].tail}`;
+  for (const [id, edit, refused] of [
+    [
+      "moved below self_mcp_wanted",
+      (t) => moveBlock(t, REVIEW_DISPATCH, "\n    }\n", "let self_mcp_wanted"),
+      [
+        "N1: opencode2_review's dispatch must sit after let binary = resolve( and before let self_mcp_wanted in agent_review",
+      ],
+    ],
+    [
+      "refusal unwrapped",
+      uniqueSwap(
+        "opencode_cli(&binary).await? {\n            return Box::pin(opencode2_review(",
+        "opencode_cli(&binary).await.unwrap() {\n            return Box::pin(opencode2_review(",
+      ),
+      [shape],
+    ],
+    [
+      "version check dropped",
+      uniqueSwap(
+        "if let (crate::opencode2::Cli::V2(version), identity) = opencode_cli(&binary).await? {\n            return Box::pin(opencode2_review(",
+        "if let (crate::opencode2::Cli::V2(version), identity) = (V2, None) {\n            return Box::pin(opencode2_review(",
+      ),
+      [shape, "N3: agent_review must read its Cli from one opencode_cli( call, saw 0"],
+    ],
+    [
+      "a second call",
+      (t) => `${t}\nfn planted() { opencode2_review(); }\n`,
+      ["N1: expected 1 production opencode2_review call, saw 2"],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N2: agent_session's dispatches are pinned in text and place", () => {
+  const host = DISPATCHES[1];
+  for (const [id, edit, refused] of [
+    [
+      "host moved below mcp_config_path",
+      (t) =>
+        moveBlock(
+          t,
+          HOST_DISPATCH,
+          "\n    };\n",
+          "let mut mcp_config_path: Option<String> = None;",
+        ),
+      [
+        "N2 host: opencode2_host_session's dispatch must sit after let mcp_names and before let mut mcp_config_path in agent_session",
+      ],
+    ],
+    [
+      "host 1.x arm never restarts",
+      uniqueSwap(
+        "                opencode1_must_restart(resume, native_session_id.as_deref())\n",
+        "                false\n",
+      ),
+      [`N2 host: agent_session must dispatch with: ${host.head}..${host.tail}`],
+    ],
+    [
+      "container moved below seed_session_home",
+      (t) =>
+        moveBlock(
+          t,
+          CONTAINER_DISPATCH,
+          "\n        }\n",
+          "let home = crate::agent_sandbox::seed_session_home(",
+        ),
+      [
+        "N2 container: opencode2_container_session's dispatch must sit after the image_has_agent refusal and the `..` check and before seed_session_home( in agent_session",
+      ],
+    ],
+    [
+      "image gate not first",
+      uniqueSwap(
+        "    match crate::agent_sandbox::image_opencode_state(&runtime).await {",
+        "    let _ = binary_identity(&runtime);\n    match crate::agent_sandbox::image_opencode_state(&runtime).await {",
+      ),
+      [
+        "N2: opencode2_container_session's first call must be image_opencode_state(, got binary_identity(",
+      ],
+    ],
+    [
+      "second calls",
+      (t) =>
+        `${t}\nfn planted() { opencode2_host_session(); opencode2_container_session(); }\n`,
+      [
+        "N2 host: expected 1 production opencode2_host_session call, saw 2",
+        "N2 container: expected 1 production opencode2_container_session call, saw 2",
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N3: one version classifier, and each host dispatch reads opencode_cli", () => {
+  for (const [id, edit, refused] of [
+    [
+      "a second classifier call",
+      (t) =>
+        `${t}\nfn planted() { let _ = crate::opencode2::classify_version(""); }\n`,
+      [
+        "N3: classify_version must be called once in production, in opencode_verdict_with, saw 2",
+      ],
+    ],
+    [
+      "a second opencode_cli in agent_review",
+      uniqueSwap(
+        "    let self_mcp_wanted",
+        "    let _ = opencode_cli(&binary).await;\n    let self_mcp_wanted",
+      ),
+      ["N3: agent_review must read its Cli from one opencode_cli( call, saw 2"],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N12: core items are named only as crate::opencode2::…", () => {
+  for (const [id, edit, refused] of [
+    [
+      "use import",
+      (t) => `use crate::opencode2::Cli;\n${t}`,
+      ["N12: agent.rs must not spell use crate::opencode2"],
+    ],
+    [
+      "grouped import",
+      (t) => `use crate::{error, opencode2};\n${t}`,
+      ["N12: agent.rs must not spell use crate::{opencode2}"],
+    ],
+    [
+      "alias",
+      (t) => `use crate::opencode2 as oc2;\n${t}`,
+      [
+        "N12: agent.rs must not spell use crate::opencode2",
+        "N12: agent.rs must not spell opencode2 as",
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+  assert.deepEqual(
+    strip(
+      checkPinCallSites(
+        mutate(
+          uniqueSwap(
+            "crate::opencode2::classify_version(&text)",
+            "super::opencode2::classify_version(&text)",
+          ),
+        ),
+      ),
+    ),
+    ["N12: core items are spelled crate::opencode2::"],
+  );
+});
+
+test("N13: the sign-in export never leaves its three uses", () => {
+  const uses =
+    "N13: export_stdout must be bound once, counted once by credential_export_count(&export_stdout) and piped once as stdin: Some(export_stdout)";
+  const sink = `${FILE}:? N13: a line naming export_stdout must not format, log or decode it`;
+  for (const [id, edit, refused] of [
+    [
+      "logged through a format string",
+      uniqueSwap(
+        "    let _ = run_capture(runtime, &[\"rm\", \"-f\", import_container], DETECT_TIMEOUT).await;\n    let import",
+        "    log::debug!(\"{export_stdout:?}\");\n    let _ = run_capture(runtime, &[\"rm\", \"-f\", import_container], DETECT_TIMEOUT).await;\n    let import",
+      ),
+      ["N13: export_stdout must appear 3 times in production, saw 4", sink],
+    ],
+    [
+      "decoded on its way to the import",
+      uniqueSwap(
+        "stdin: Some(export_stdout),",
+        "stdin: Some(String::from_utf8_lossy(&export_stdout).to_string().into_bytes()),",
+      ),
+      [uses, sink],
+    ],
+    [
+      "a second binding",
+      uniqueSwap(
+        "    match crate::agent_sandbox::credential_export_count(&export_stdout) {",
+        "    let kept = export_stdout.clone();\n    match crate::agent_sandbox::credential_export_count(&export_stdout) {",
+      ),
+      ["N13: export_stdout must appear 3 times in production, saw 4"],
+    ],
+    [
+      "never counted",
+      uniqueSwap(
+        "credential_export_count(&export_stdout)",
+        "credential_export_count(&[])",
+      ),
+      ["N13: export_stdout must appear 3 times in production, saw 2", uses],
+    ],
+  ])
+    assert.deepEqual(strip(checkPinCallSites(mutate(edit))), strip(refused), id);
+  // A comment naming it is no mention.
+  assert.deepEqual(
+    checkPinCallSites(mutate(plant("// println!(\"{export_stdout:?}\")"))),
+    [],
+  );
+});
+
+test("N13: the export arm's own bindings never reach a sink", () => {
+  const sink = `${FILE}:? N13: a statement naming stdout or export before export_stdout is bound must not format, log or decode it`;
+  const COPY = "opencode2_copy_sign_ins";
+  for (const [id, edit] of [
+    [
+      "the arm's stdout logged",
+      fnSwap(
+        COPY,
+        "        }) => stdout,\n",
+        '        }) => {\n            log::debug!("{stdout:?}");\n            stdout\n        }\n',
+      ),
+    ],
+    [
+      "the arm's stdout decoded",
+      fnSwap(
+        COPY,
+        "        }) => stdout,\n",
+        "        }) => String::from_utf8_lossy(&stdout).into_owned().into_bytes(),\n",
+      ),
+    ],
+    [
+      "the export formatted before the binding",
+      fnSwap(
+        COPY,
+        "    let export_stdout = match export {",
+        '    let _ = format!("{}", export.is_ok());\n    let export_stdout = match export {',
+      ),
+    ],
+  ])
+    assert.deepEqual(strip(checkPinCallSites(mutate(edit))), strip([sink]), id);
+  // A statement naming neither may format; one naming them without a sink is free.
+  assert.deepEqual(
+    checkPinCallSites(
+      mutate(
+        fnSwap(
+          COPY,
+          "    let export_stdout = match export {",
+          '    let _ = format!("{}", 1);\n    let _ = export.is_ok();\n    let export_stdout = match export {',
+        ),
+      ),
+    ),
+    [],
+  );
+});
+
+test("N14: nothing changes a plan between its TurnPlan::Run and its spawn", () => {
+  for (const [id, edit, refused] of [
+    [
+      "a mut rebinding that truncates the argv",
+      fnSwap(
+        HOST,
+        "    let tag = NativeTag {",
+        "    let mut run = run;\n    run.args.truncate(4);\n    let tag = NativeTag {",
+      ),
+      [
+        "N14: opencode2_host_session must not bind run as mut before its spawn",
+        "N14: opencode2_host_session must bind run 0 times between its TurnPlan::Run and its spawn, saw 1",
+        "N14: opencode2_host_session must not change its plan before its spawn: run.args.",
+      ],
+    ],
+    [
+      "a struct-update rebinding that narrows the argv",
+      fnSwap(
+        CONTAINER,
+        "    let (container_env, client_env) = split_container_env(run.env);",
+        "    let run = SpawnPlan { args: run.args[..4].to_vec(), ..run };\n    let (container_env, client_env) = split_container_env(run.env);",
+      ),
+      [
+        "N14: opencode2_container_session must bind run 0 times between its TurnPlan::Run and its spawn, saw 1",
+        "N14: opencode2_container_session must not change its plan before its spawn: run.args[",
+      ],
+    ],
+    [
+      "a second client env",
+      fnSwap(
+        CONTAINER,
+        "    let run_args = crate::agent_sandbox::build_run_args_full(",
+        "    let client_env = Vec::new();\n    let run_args = crate::agent_sandbox::build_run_args_full(",
+      ),
+      [
+        "N14: opencode2_container_session must bind client_env 1 times between its TurnPlan::Run and its spawn, saw 2",
+      ],
+    ],
+    [
+      "the review's env emptied",
+      fnSwap(
+        "opencode2_review",
+        "        if opencode2_cancel_fired(&cancel) {",
+        "        run.env.clear();\n        if opencode2_cancel_fired(&cancel) {",
+      ),
+      [
+        "N14: opencode2_review must not change its plan before its spawn: run.env.",
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N15: each read-back and spawn runs on its plan's own inputs", () => {
+  const refusal = (fn, got) =>
+    `N15: ${fn}'s read-back must build ${PROBE_REQUESTS[fn]}.. once, got ${got}`;
+  const NO_CWD = "cwd: Some(plan.cwd.as_str()),";
+  for (const [id, edit, refused] of [
+    [
+      "the host read-back without a cwd",
+      fnSwap(HOST, NO_CWD, "cwd: None,"),
+      [
+        refusal(
+          HOST,
+          "CaptureRequest { program: binary, args: plan.args, cwd: None, env: plan.env,",
+        ),
+      ],
+    ],
+    [
+      "the container read-back without a cwd",
+      fnSwap(CONTAINER, NO_CWD, "cwd: None,"),
+      [
+        refusal(
+          CONTAINER,
+          "CaptureRequest { program: runtime_bin, args: probe_args, cwd: None, env: client_env,",
+        ),
+      ],
+    ],
+    [
+      "the review read-back on another env",
+      fnSwap("opencode2_review", "env: plan.env,", "env: Vec::new(),"),
+      [
+        refusal(
+          "opencode2_review",
+          "CaptureRequest { program: binary, args: plan.args, cwd: Some(plan.cwd.as_str()), env: Vec::new(),",
+        ),
+      ],
+    ],
+    [
+      "the container run in another cwd",
+      fnSwap(CONTAINER, "        &run.cwd,\n", "        &worktree_path,\n"),
+      [
+        `N15: ${CONTAINER}'s stream_agent( must take &run.cwd as its cwd, got &worktree_path`,
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N16: each 2.x model read keeps its argv and the project-disable pair", () => {
+  const swapArms = (t) => {
+    const head = "    let listed = if v2 {\n";
+    const split = "\n    } else {\n";
+    const start = t.indexOf(head) + head.length;
+    const mid = t.indexOf(split, start);
+    const end = t.indexOf("\n    };\n", mid);
+    assert.ok(start >= head.length && mid > start && end > mid, "no listing");
+    return (
+      t.slice(0, start) +
+      t.slice(mid + split.length, end) +
+      split +
+      t.slice(start, mid) +
+      t.slice(end)
+    );
+  };
+  const calls = `N16: opencode2_read_request( must be called ${READ_REQUESTS.map(([fn, args]) => `in ${fn} with ${args.join(", ")}`).join(", then ")}`;
+  for (const [id, edit, refused] of [
+    [
+      "swapped arms",
+      swapArms,
+      [`N16: agent_models must list once as ${MODELS_LISTING}`],
+    ],
+    [
+      "the catalog reading the models argv",
+      fnSwap(
+        "opencode2_catalog",
+        "crate::opencode2::CATALOG_ARGS",
+        "crate::opencode2::MODELS_ARGS",
+      ),
+      [calls],
+    ],
+    [
+      "the 1.x arm on another argv",
+      uniqueSwap(
+        "    let Some(args) = kind.models_args() else {",
+        '    let Some(args) = Some(&["x"][..]) else {',
+      ),
+      [
+        "N16: agent_models must bind args once, as let Some(args) = kind.models_args() else",
+      ],
+    ],
+    [
+      "the project-disable pair dropped",
+      uniqueSwap(READ_REQUEST_ENV, "env: Vec::new(),"),
+      [`N16: opencode2_read_request must set ${READ_REQUEST_ENV}`],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N17: the 1.x restart rebinding precedes the 1.x session argv", () => {
+  const refused = [
+    `N17: agent_session must rebind ${RESTART_REBIND} once, before its opencode_session_args( call`,
+  ];
+  const REBIND =
+    "    let (resume, native_session_id) = if opencode_v1_restart {\n        (false, None)\n    } else {\n        (resume, native_session_id)\n    };\n";
+  for (const [id, edit] of [
+    ["deleted", uniqueSwap(REBIND, "")],
+    [
+      "moved below the session argv",
+      (t) =>
+        moveBlock(
+          t,
+          "    let (resume, native_session_id) = if opencode_v1_restart {",
+          "\n    };\n",
+          "Container isolation: wrap the same invocation",
+        ),
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N4: the lock is produced in opencode2_lock, which only compose calls", () => {
+  for (const [id, edit, refused] of [
+    [
+      "a second read-back",
+      plant('fn planted() { let _ = crate::opencode2::read_back("", a, b); }'),
+      [
+        "N4: crate::opencode2::read_back( must be called once in production, in opencode2_lock, saw 2",
+      ],
+    ],
+    [
+      "a second lock document",
+      plant("fn planted() { let _ = crate::opencode2::lock_document(a, b); }"),
+      [
+        "N4: crate::opencode2::lock_document( must be called once in production, in opencode2_lock, saw 2",
+      ],
+    ],
+    [
+      "a lock outside compose",
+      plant("fn planted() { opencode2_lock(); }"),
+      [
+        "N4: opencode2_lock( must be called 2 times in production, all in opencode2_compose, saw 3",
+      ],
+    ],
+    [
+      "a review that skips compose",
+      uniqueSwap(
+        "\n        let plan = opencode2_compose(&inputs,",
+        "\n        let plan = opencode2_plan(&inputs,",
+      ),
+      ["N4: opencode2_review must call opencode2_compose( 1 times, saw 0"],
+    ],
+    [
+      "a host session that skips compose",
+      fnSwap(
+        HOST,
+        "\n    let plan = opencode2_compose(&inputs,",
+        "\n    let plan = opencode2_plan(&inputs,",
+      ),
+      ["N4: opencode2_host_session must call opencode2_compose( 1 times, saw 0"],
+    ],
+    [
+      "a container session that skips compose",
+      fnSwap(
+        CONTAINER,
+        "\n    let plan = opencode2_compose(&inputs,",
+        "\n    let plan = opencode2_plan(&inputs,",
+      ),
+      ["N4: opencode2_container_session must call opencode2_compose( 1 times, saw 0"],
+    ],
+    [
+      "compose from elsewhere",
+      plant("fn planted() { opencode2_compose(); }"),
+      ["N4: opencode2_compose( is called outside the entry functions"],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N5: each pin comes from its own entry function's parameters", () => {
+  const hostPin = `N5: opencode2_host_session must bind ${SESSION_PIN_LET} once and pass it as its turn's pin`;
+  const containerPin = `N5: opencode2_container_session must bind ${SESSION_PIN_LET} once and pass it as its turn's pin`;
+  for (const [id, edit, refused] of [
+    [
+      "a hard-coded pin",
+      uniqueSwap(
+        "version,\n                pin: opencode2_review_pin(repo_aware),",
+        "version,\n                pin: opencode2_review_pin(true),",
+      ),
+      [
+        "N5: opencode2_review must pass opencode2_review_pin(repo_aware) once, as its turn's pin",
+      ],
+    ],
+    [
+      "a mut parameter",
+      uniqueSwap(
+        "    repo_aware: bool,\n    mcp_self: bool,\n    timeout_secs: Option<u64>,\n    timeout_configurable: Option<bool>,\n    review_id: String,\n    on_event: Channel<ReviewEvent>,\n) -> AppResult<Option<ReviewEvent>> {\n    let self_specs",
+        "    mut repo_aware: bool,\n    mcp_self: bool,\n    timeout_secs: Option<u64>,\n    timeout_configurable: Option<bool>,\n    review_id: String,\n    on_event: Channel<ReviewEvent>,\n) -> AppResult<Option<ReviewEvent>> {\n    let self_specs",
+      ),
+      ["opencode2_review must declare repo_aware without mut"],
+    ],
+    [
+      "a hard-coded session pin",
+      fnSwap(
+        HOST,
+        "let pin = opencode2_session_pin(read_only, web);",
+        "let pin = opencode2_session_pin(true, web);",
+      ),
+      [hostPin],
+    ],
+    [
+      "a write turn whatever the pin",
+      fnSwap(
+        HOST,
+        "        turn: Opencode2Turn::Session {\n            pin,\n",
+        "        turn: Opencode2Turn::Session {\n            pin: None,\n",
+      ),
+      [hostPin],
+    ],
+    [
+      "a mut pin",
+      fnSwap(
+        HOST,
+        "let pin = opencode2_session_pin(read_only, web);",
+        "let mut pin = opencode2_session_pin(read_only, web);",
+      ),
+      [hostPin],
+    ],
+    [
+      "a hard-coded container pin",
+      fnSwap(
+        CONTAINER,
+        "let pin = opencode2_session_pin(read_only, web);",
+        "let pin = opencode2_session_pin(read_only, false);",
+      ),
+      [containerPin],
+    ],
+    [
+      "a container write turn whatever the pin",
+      fnSwap(
+        CONTAINER,
+        "        turn: Opencode2Turn::Session {\n            pin,\n",
+        "        turn: Opencode2Turn::Session {\n            pin: None,\n",
+      ),
+      [containerPin],
+    ],
+    [
+      "a mut container read_only",
+      fnSwap(CONTAINER, "    read_only: bool,\n", "    mut read_only: bool,\n"),
+      ["opencode2_container_session must declare read_only without mut"],
+    ],
+    [
+      "a rebound container web",
+      fnSwap(
+        CONTAINER,
+        "    let pin = opencode2_session_pin(read_only, web);",
+        "    let web = false;\n    let pin = opencode2_session_pin(read_only, web);",
+      ),
+      ["opencode2_container_session must not rebind web"],
+    ],
+    [
+      "a mut read_only",
+      uniqueSwap(
+        "    read_only: bool,\n    web: bool,\n    native_session_id: Option<String>,\n    mcp_specs: &[crate::mcp::McpServerSpec],\n    on_event: Channel<ReviewEvent>,\n) -> AppResult<Option<ReviewEvent>> {\n    let pin",
+        "    mut read_only: bool,\n    web: bool,\n    native_session_id: Option<String>,\n    mcp_specs: &[crate::mcp::McpServerSpec],\n    on_event: Channel<ReviewEvent>,\n) -> AppResult<Option<ReviewEvent>> {\n    let pin",
+      ),
+      ["opencode2_host_session must declare read_only without mut"],
+    ],
+    [
+      "a rebound web",
+      fnSwap(
+        HOST,
+        "    let pin = opencode2_session_pin(read_only, web);",
+        "    let web = true;\n    let pin = opencode2_session_pin(read_only, web);",
+      ),
+      ["opencode2_host_session must not rebind web"],
+    ],
+    [
+      "a second container pin",
+      fnSwap(
+        CONTAINER,
+        "    let stored = parse_native_ref(",
+        "    let _ = opencode2_session_pin(true, true);\n    let stored = parse_native_ref(",
+      ),
+      ["N5: opencode2_container_session must call opencode2_session_pin( 1 times, saw 2"],
+    ],
+    [
+      "a session pin elsewhere",
+      plant("fn planted() { opencode2_session_pin(a, b); }"),
+      ["N5: opencode2_session_pin( is called outside the session entry functions"],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N6: each argv takes the lock, and the write argv sits in the write arm", () => {
+  const argv = (saw) =>
+    `N6: crate::opencode2::session_args( must be called 2 times, in opencode2_compose, first with ${SESSION_AGENTS.join(" then ")}, saw ${saw}`;
+  const arm = `N6: the write argv must sit, once, in the arm ${WRITE_ARM}`;
+  const write = "crate::opencode2::SessionAgent::Write";
+  for (const [id, edit, refused] of [
+    [
+      "another document",
+      uniqueSwap(
+        "review_args(version, &lock, inputs.model, variant)",
+        "review_args(version, &other, inputs.model, variant)",
+      ),
+      [
+        "N6: crate::opencode2::review_args( must be called once, in opencode2_compose, with &lock second, saw 1",
+      ],
+    ],
+    [
+      "a pinned turn's argv without its lock",
+      uniqueSwap("crate::opencode2::SessionAgent::Locked(&lock),", `${write},`),
+      [
+        argv(`${write}, ${write}`),
+        arm,
+        "N6: expected 1 production SessionAgent::Locked mentions, saw 0",
+        "N6: expected 1 production SessionAgent::Write mentions, saw 2",
+      ],
+    ],
+    [
+      "the write argv under another arm",
+      uniqueSwap(
+        "            pin: None,\n            session_id,\n        } => Ok(TurnPlan::Run {",
+        "            pin: _,\n            session_id,\n        } => Ok(TurnPlan::Run {",
+      ),
+      [arm],
+    ],
+    [
+      "another session argv",
+      plant(
+        `fn planted() { let _ = crate::opencode2::session_args(${write}, a, b, c); }`,
+      ),
+      [
+        argv(`${SESSION_AGENTS[0]}, ${write}, ${write}`),
+        arm,
+        "N6: expected 1 production SessionAgent::Write mentions, saw 2",
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N7: the run's parser knows the lock its plan carries", () => {
+  for (const [id, edit, refused] of [
+    [
+      "a review parser without the lock",
+      uniqueSwap(
+        "StreamParser::new(lock.as_ref()),\n                native: None,",
+        "StreamParser::new(None),\n                native: None,",
+      ),
+      ["N7: opencode2_review must build its stream parser once, from lock.as_ref()"],
+    ],
+    [
+      "a session parser without the lock",
+      fnSwap(
+        HOST,
+        "StreamParser::new(lock.as_ref()),\n            native: Some(tag),",
+        "StreamParser::new(None),\n            native: Some(tag),",
+      ),
+      [
+        "N7: opencode2_host_session must build its stream parser once, from lock.as_ref()",
+      ],
+    ],
+    [
+      "a mut session destructuring",
+      fnSwap(
+        HOST,
+        "let TurnPlan::Run { run, lock, .. } = plan else {",
+        "let TurnPlan::Run { run, mut lock, .. } = plan else {",
+      ),
+      [
+        "N7: opencode2_host_session must destructure its plan once as TurnPlan::Run { run, lock, .. }",
+      ],
+    ],
+    [
+      "a container parser without the lock",
+      fnSwap(
+        CONTAINER,
+        "StreamParser::new(lock.as_ref()),\n            native: Some(tag),",
+        "StreamParser::new(None),\n            native: Some(tag),",
+      ),
+      [
+        "N7: opencode2_container_session must build its stream parser once, from lock.as_ref()",
+      ],
+    ],
+    [
+      "a rebound container lock",
+      fnSwap(
+        CONTAINER,
+        "    let tag = NativeTag {",
+        "    let lock = None;\n    let tag = NativeTag {",
+      ),
+      ["N7: opencode2_container_session must not rebind lock"],
+    ],
+    [
+      "a rebound lock",
+      uniqueSwap(
+        "        let diff_only = matches!(",
+        "        let lock = None;\n        let diff_only = matches!(",
+      ),
+      ["N7: opencode2_review must not rebind lock"],
+    ],
+    [
+      "a mut destructuring",
+      uniqueSwap("            run,\n            lock,\n            read_back,\n", "            run,\n            mut lock,\n            read_back,\n"),
+      [
+        "N7: opencode2_review must destructure its plan once as TurnPlan::Run { run, lock, read_back }",
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N8: each env reads compose's one config_path", () => {
+  const sessionEnv = (saw) =>
+    `N8: crate::opencode2::session_env( must be called 2 times in production, in opencode2_compose, with ${SESSION_ENV_CONFIG} first, saw ${saw}`;
+  for (const [id, edit, refused] of [
+    [
+      "no config",
+      uniqueSwap(
+        "crate::opencode2::review_env(config_path, doc)",
+        "crate::opencode2::review_env(None, doc)",
+      ),
+      [
+        "N8: crate::opencode2::review_env( must be called once in production, in opencode2_compose, with config_path first, saw 1",
+      ],
+    ],
+    [
+      "a mut local",
+      uniqueSwap(
+        "let config_path = inputs.config_path;",
+        "let mut config_path = inputs.config_path;",
+      ),
+      [
+        "N8: opencode2_compose must bind config_path once: let config_path = inputs.config_path",
+      ],
+    ],
+    [
+      "a write env without the config",
+      uniqueSwap(
+        "crate::opencode2::session_env(config_path.map(String::from), None)",
+        "crate::opencode2::session_env(None, None)",
+      ),
+      [sessionEnv(2)],
+    ],
+    [
+      "a pinned env from another binding",
+      uniqueSwap(
+        "crate::opencode2::session_env(config_path.map(String::from), Some(doc))",
+        "crate::opencode2::session_env(inputs.config_path.map(String::from), Some(doc))",
+      ),
+      [sessionEnv(2)],
+    ],
+    [
+      "another session env",
+      plant(
+        "fn planted() { let _ = crate::opencode2::session_env(config_path.map(String::from), None); }",
+      ),
+      [sessionEnv(3)],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N9: every spawn is a listed one, with the plan's argv and env", () => {
+  const spawners = (extra) =>
+    `N9: Command::new( sits in ${[...COMMAND_FNS, extra].sort().join(", ")}, expected ${COMMAND_FNS.join(", ")}`;
+  for (const [id, edit, refused] of [
+    [
+      "another env",
+      uniqueSwap("            &run.env,\n", "            &[],\n"),
+      ["N9: opencode2_review's stream_agent( must pass run.args and &run.env, got run.args and &[]"],
+    ],
+    [
+      "another session env",
+      uniqueSwap("\n        &run.env,\n", "\n        &[],\n"),
+      [
+        "N9: opencode2_host_session's stream_agent( must pass run.args and &run.env, got run.args and &[]",
+      ],
+    ],
+    [
+      "a 2.x run on the 1.x parser",
+      uniqueSwap(
+        "            Some(Opencode2Stream {\n                parser: crate::opencode2::StreamParser::new(lock.as_ref()),\n                native: None,\n            }),\n",
+        "            None,\n",
+      ),
+      [
+        "N7: opencode2_review must build its stream parser once, from lock.as_ref()",
+        "N7: expected 3 production StreamParser::new( calls, saw 2",
+        "N9: the stream_agent( calls are agent_review:None, agent_session:None, agent_session:None, opencode2_review:None, opencode2_host_session:Some, opencode2_container_session:Some, expected agent_review:None, agent_session:None, agent_session:None, opencode2_review:Some, opencode2_host_session:Some, opencode2_container_session:Some",
+      ],
+    ],
+    [
+      "a raw spawn",
+      plant('fn planted() { let _ = std::process::Command::new("x"); }'),
+      [spawners("planted")],
+    ],
+    [
+      "a container argv builder elsewhere",
+      plant("fn planted() { let _ = crate::agent_sandbox::build_run_args_full(a); }"),
+      [
+        "N9: expected 2 production build_run_args_full( calls, all in opencode2_container_session, saw 3",
+      ],
+    ],
+    [
+      "the container run's document in argv",
+      fnSwap(CONTAINER, "        &client_env,\n", "        &[],\n"),
+      [
+        "N9: opencode2_container_session's stream_agent( must pass run_args and &client_env, got run_args and &[]",
+      ],
+    ],
+    [
+      "a container run that never names its document",
+      fnSwap(CONTAINER, "if lock.is_some() {", "if lock.is_none() {"),
+      [`N9: the env_by_name binding must be ${ENV_BY_NAME}`],
+    ],
+    [
+      "a probe that never names its document",
+      fnSwap(
+        CONTAINER,
+        "            &[crate::opencode2::CONTENT_ENV],\n            &plan.args,\n",
+        "            &[],\n            &plan.args,\n",
+      ),
+      [
+        `N9: opencode2_container_session's argv build 1 must be ${CONTAINER_ARGVS[0][0]}.. ${CONTAINER_ARGVS[0][1].join(", ")})`,
+      ],
+    ],
+    [
+      "a container run on another argv",
+      fnSwap(CONTAINER, "        &run.args,\n    );", "        &inner,\n    );"),
+      [
+        `N9: opencode2_container_session's argv build 2 must be ${CONTAINER_ARGVS[1][0]}.. ${CONTAINER_ARGVS[1][1].join(", ")})`,
+      ],
+    ],
+    [
+      "an unsplit container env",
+      fnSwap(
+        CONTAINER,
+        "let (container_env, client_env) = split_container_env(run.env);",
+        "let (container_env, client_env) = (run.env, Vec::new());",
+      ),
+      [`N9: opencode2_container_session must split its env as ${CONTAINER_SPLITS.join(", then ")}`],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N10: no 1.x builder in an opencode2 body, no opencode2 outside a dispatch", () => {
+  for (const [id, edit, refused] of [
+    [
+      "a 1.x mirror in the review",
+      uniqueSwap(
+        "    let self_specs = if mcp_self {",
+        "    let _ = opencode_read_mirror;\n    let self_specs = if mcp_self {",
+      ),
+      ["N10: opencode2_review names the 1.x opencode_read_mirror"],
+    ],
+    [
+      "a 1.x env in the host session",
+      fnSwap(
+        HOST,
+        "    let pin = opencode2_session_pin(read_only, web);",
+        "    let _ = opencode_variant;\n    let pin = opencode2_session_pin(read_only, web);",
+      ),
+      ["N10: opencode2_host_session names the 1.x opencode_variant"],
+    ],
+    [
+      "opencode2 in agent_review",
+      uniqueSwap(
+        "    let self_mcp_wanted = ",
+        "    let _ = opencode2_review_pin;\n    let self_mcp_wanted = ",
+      ),
+      ["N10: agent_review names opencode2 outside its dispatch statements"],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+});
+
+test("N11: run flags stay in core, and the literal counts hold", () => {
+  for (const [id, edit, refused] of [
+    [
+      "a flag in an opencode2 body",
+      plant('fn opencode2_planted() { let _ = "--auto"; }'),
+      ['N11: opencode2_planted spells "--auto"'],
+    ],
+    [
+      "a standalone spelling",
+      plant('fn planted() { let _ = "--standalone"; }'),
+      [
+        'N11: "--standalone" must appear 1 times in production, in const OPENCODE2_AUTH_EXPORT_ARGS, saw 2',
+      ],
+    ],
+    [
+      "the export flag moved out of its const",
+      (t) =>
+        plant('fn planted() { let _ = "--standalone"; }')(
+          uniqueSwap('&["auth", "export", "--standalone"];', '&["auth", "export"];')(t),
+        ),
+      [
+        'N11: "--standalone" must appear 1 times in production, in const OPENCODE2_AUTH_EXPORT_ARGS, saw 1',
+      ],
+    ],
+    [
+      "a flag in the sign-in copy",
+      fnSwap(
+        "opencode2_copy_sign_ins",
+        "        cwd: None,\n",
+        '        cwd: Some("--yolo"),\n',
+      ),
+      ['N11: opencode2_copy_sign_ins spells "--yolo"'],
+    ],
+    [
+      "a third CONTENT spelling",
+      plant('fn planted() { let _ = "OPENCODE_CONFIG_CONTENT"; }'),
+      [
+        'N11: "OPENCODE_CONFIG_CONTENT" must appear in production only in opencode_config_sources and opencode_read_mirror_with, saw opencode_config_sources, opencode_read_mirror_with, planted',
+      ],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
+  // A comment is not a literal.
+  assert.deepEqual(
+    checkPinCallSites(mutate(plant('// fn opencode2_planted() { "--auto" }'))),
+    [],
+  );
 });

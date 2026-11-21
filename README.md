@@ -696,7 +696,9 @@ close the window.
 - **Dial the review effort**: a **Review effort** setting picks how hard an
   agent-CLI reviewer thinks, from a lighter, quicker pass to deepest
   reasoning — for reviews and security audits alike, on Claude Code, GitHub
-  Copilot, and opencode. Default keeps each CLI's own setting.
+  Copilot, and opencode. Default keeps each CLI's own setting. On opencode 2
+  the levels follow the reviewing model, and a level that model lacks shows
+  as unavailable with the reason.
 - **Timeboxed on your terms**: agent-CLI reviews are timeboxed. Agentic ones
   get 20 minutes before they're stopped (plain 5; Codex reviews are always
   agentic), and a **Review timeout** setting pins a fixed limit when your
@@ -1192,7 +1194,8 @@ instead of expiring.
 Hand a coding task to a **Claude Code**, **Codex**, **GitHub Copilot**, or
 **opencode** agent (the CLI you already have; opencode's hosted models are
 free, no extra subscription). It works in an isolated worktree that never
-touches your checkout.
+touches your checkout. GitDesktop runs opencode 1.x and 2.x (2.x from 2.2.0,
+tested with opencode 2.2.0 to 2.3.2).
 
 - **Watch it work**: follow every file it reads and edits and command it
   runs, expand any edit to its diff inline, then keep the result as a
@@ -1204,11 +1207,17 @@ touches your checkout.
   container **per session** from the composer's **Options** (with an inline
   readiness check before it starts), and add per-repo tools (e.g.
   Playwright) via a committed `.gitdesktop/agent.Dockerfile` that GitDesktop
-  builds into a per-repo image after you confirm it.
+  builds into a per-repo image after you confirm it. The agent image installs
+  opencode 2, and an image built earlier asks for a rebuild (about 1 GB more
+  to download). When this computer runs opencode 2, a container session
+  copies its opencode sign-ins in at the start, and the timeline says so
+  when the copy couldn't be made or there was nothing to copy.
 - **Drive each turn**: **slash commands and skills** (built-in starters,
   custom commands, and the agent's own commands and **Agent Skills**,
   project *and* global, incl. the shared `.agents/skills`), `@file`
-  mentions, a model/effort picker, and terminal-style prompt history.
+  mentions, a model/effort picker (on opencode 2 the effort levels follow the
+  chosen model, and levels it lacks show as unavailable with the reason), and
+  terminal-style prompt history.
 - **An integrated terminal**: every agent session gets a real shell in a
   resizable bottom dock, toggled with `Ctrl`/`⌘`+`J`. For a container
   session it runs *inside* the session's container; you pick which
@@ -1219,11 +1228,12 @@ touches your checkout.
 - **Run a task several ways and keep the best**: fan one task out across 2–5
   arms (best-of-N), **each with its own agent, model, and effort**, so
   different providers (Claude, Codex, Copilot, opencode) attack it
-  differently. Each runs in its own worktree; compare them and keep the
-  winner with a single **keep this, discard the rest**. Because fanning out
-  costs more, a confirmation first shows an **upfront estimate** drawn from
-  your own recent sessions, and the ensemble's **running total** as it
-  works. Opt-in, never the default.
+  differently. On opencode 2 an arm's effort levels follow its model. Each
+  runs in its own worktree; compare them and keep the winner with a single
+  **keep this, discard the rest**. Because fanning out costs more, a
+  confirmation first shows an **upfront estimate** drawn from your own
+  recent sessions, and the ensemble's **running total** as it works.
+  Opt-in, never the default.
 - **Research before you plan**: a read-only, **web-enabled Research** mode
   that sits upstream of Plan. **Brainstorm** surveys the web and your code
   for several distinct directions with prior art; **Deep research**

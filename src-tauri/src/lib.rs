@@ -29,6 +29,7 @@ mod mcp;
 mod mcp_launcher;
 mod mcp_server;
 mod nav_guard;
+mod opencode2;
 mod oplog;
 mod path_launcher;
 mod proc_tree;
@@ -812,6 +813,7 @@ pub fn run() {
             hooks::git_keep_local_hook_remove,
             agent::agent_detect,
             agent::agent_models,
+            agent::agent_effort_levels,
             health::system_health,
             agent::agent_review,
             agent::agent_review_cancel,

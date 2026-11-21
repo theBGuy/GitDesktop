@@ -1,5 +1,5 @@
 import { PlusIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   ignoreHeldEnter,
   markSwapStop,
@@ -16,9 +16,12 @@ import {
 } from "@/components/ui/dialog";
 import type { AgentKind } from "@/lib/ai/agent";
 import { formatUsd, type RunCostEstimate } from "@/lib/ai/cost";
+import { useEffortControl } from "@/lib/ai/effort-levels";
 import {
   AgentPicker,
+  EffortNote,
   EffortPicker,
+  type Isolation,
   imageMissingAgentText,
   ModelPicker,
 } from "./AgentPickers";
@@ -50,6 +53,7 @@ export function EnsembleRunDialog({
   seed,
   estimate,
   imageAgents,
+  isolation,
   onRun,
 }: {
   open: boolean;
@@ -61,6 +65,9 @@ export function EnsembleRunDialog({
    *  containerized AND settings resolved; `undefined` (worktree isolation, or an
    *  unknown config) means no arm can be judged, so none warns. */
   imageAgents?: readonly AgentKind[];
+  /** The isolation every arm runs under, for the effort pickers; null while
+   *  it isn't known yet (settings unresolved, no Options override). */
+  isolation: Isolation | null;
   onRun: (arms: EnsembleArm[]) => void;
 }) {
   return (
@@ -80,6 +87,7 @@ export function EnsembleRunDialog({
             seed={seed}
             estimate={estimate}
             imageAgents={imageAgents}
+            isolation={isolation}
             onCancel={() => onOpenChange(false)}
             onRun={(arms) => {
               onOpenChange(false);
@@ -96,12 +104,14 @@ function EnsembleArms({
   seed,
   estimate,
   imageAgents,
+  isolation,
   onCancel,
   onRun,
 }: {
   seed: EnsembleArm;
   estimate: RunCostEstimate;
   imageAgents?: readonly AgentKind[];
+  isolation: Isolation | null;
   onCancel: () => void;
   onRun: (arms: EnsembleArm[]) => void;
 }) {
@@ -158,56 +168,17 @@ function EnsembleArms({
       </p>
       <div className="space-y-1.5">
         {arms.map((arm, i) => (
-          <div
+          <EnsembleArmRow
             key={arm.key}
-            ref={markSwapStop('[aria-label="Agent"]')}
-            data-confirm-row
-            className="flex flex-wrap items-center gap-1.5 border bg-muted/30 px-2 py-1.5"
-          >
-            <span className="w-4 shrink-0 text-center text-[11px] text-muted-foreground tabular-nums">
-              {i + 1}
-            </span>
-            <AgentPicker
-              value={arm.agent}
-              // Re-picking the same agent (a held Enter landing here after a
-              // removal) keeps the arm's model.
-              onChange={(agent) => {
-                if (agent !== arm.agent) patchArm(i, { agent, model: "" });
-              }}
-            />
-            <ModelPicker
-              value={arm.model}
-              onChange={(model) => patchArm(i, { model })}
-              agent={arm.agent}
-            />
-            <EffortPicker
-              value={arm.effort}
-              onChange={(effort) => patchArm(i, { effort })}
-            />
-            <Button
-              ref={swapFocus(arm.key)}
-              size="icon-xs"
-              variant="ghost"
-              className="ml-auto text-muted-foreground"
-              disabled={arms.length <= MIN_ARMS}
-              onClick={() => removeArm(i)}
-              aria-label={`Remove arm ${i + 1}`}
-            >
-              <XIcon />
-            </Button>
-            {missingFromImage(arm.agent) && (
-              // `basis-full` wraps the line under the row's controls; the text
-              // carries the meaning, the token only tones it.
-              <p className="flex basis-full items-center gap-1.5 text-[11px] text-warning">
-                <WarningIcon
-                  weight="fill"
-                  className="size-3.5 shrink-0"
-                  aria-hidden
-                />
-                {imageMissingAgentText(arm.agent)}
-              </p>
-            )}
-          </div>
+            arm={arm}
+            index={i}
+            isolation={isolation}
+            canRemove={arms.length > MIN_ARMS}
+            removeRef={swapFocus(arm.key)}
+            missingFromImage={missingFromImage(arm.agent)}
+            onPatch={(patch) => patchArm(i, patch)}
+            onRemove={() => removeArm(i)}
+          />
         ))}
       </div>
 
@@ -259,5 +230,94 @@ function EnsembleArms({
         </Button>
       </DialogFooter>
     </>
+  );
+}
+
+/** One arm's row, its own component so the effort query runs per arm (arms
+ *  with the same agent and model share one answer). `isolation` null = not
+ *  known yet, so nothing is asked. */
+function EnsembleArmRow({
+  arm,
+  index,
+  isolation,
+  canRemove,
+  removeRef,
+  missingFromImage,
+  onPatch,
+  onRemove,
+}: {
+  arm: EnsembleArm;
+  index: number;
+  isolation: Isolation | null;
+  canRemove: boolean;
+  removeRef: ReturnType<ReturnType<typeof useConfirmSwapFocus>>;
+  missingFromImage: boolean;
+  onPatch: (patch: Partial<EnsembleArm>) => void;
+  onRemove: () => void;
+}) {
+  const control = useEffortControl(
+    isolation === null
+      ? null
+      : { kind: arm.agent, binPath: null, model: arm.model, isolation },
+    arm.effort,
+  );
+  const noteId = useId();
+  return (
+    <div
+      ref={markSwapStop('[aria-label="Agent"]')}
+      data-confirm-row
+      className="flex flex-wrap items-center gap-1.5 border bg-muted/30 px-2 py-1.5"
+    >
+      <span className="w-4 shrink-0 text-center text-[11px] text-muted-foreground tabular-nums">
+        {index + 1}
+      </span>
+      <AgentPicker
+        value={arm.agent}
+        // Re-picking the same agent (a held Enter landing here after a
+        // removal) keeps the arm's model.
+        onChange={(agent) => {
+          if (agent !== arm.agent) onPatch({ agent, model: "" });
+        }}
+      />
+      <ModelPicker
+        value={arm.model}
+        onChange={(model) => onPatch({ model })}
+        agent={arm.agent}
+      />
+      <EffortPicker
+        value={arm.effort}
+        onChange={(effort) => onPatch({ effort })}
+        control={control}
+        describedBy={control.line ? noteId : undefined}
+      />
+      <Button
+        ref={removeRef}
+        size="icon-xs"
+        variant="ghost"
+        className="ml-auto text-muted-foreground"
+        disabled={!canRemove}
+        onClick={onRemove}
+        aria-label={`Remove arm ${index + 1}`}
+      >
+        <XIcon />
+      </Button>
+      {missingFromImage && (
+        // `basis-full` wraps the line under the row's controls; the text
+        // carries the meaning, the token only tones it.
+        <p className="flex basis-full items-center gap-1.5 text-[11px] text-warning">
+          <WarningIcon
+            weight="fill"
+            className="size-3.5 shrink-0"
+            aria-hidden
+          />
+          {imageMissingAgentText(arm.agent)}
+        </p>
+      )}
+      {control.line && (
+        <div className="basis-full">
+          <EffortNote id={noteId} line={control.line} />
+        </div>
+      )}
+    </div>
   );
 }

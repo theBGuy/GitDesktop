@@ -167,6 +167,10 @@ pub struct AgentInfo {
     pub path: Option<String>,
     pub version: Option<String>,
     pub authed: AuthStatus,
+    /// Why GitDesktop will not run this binary, as the sentence a run would be refused
+    /// with. `None` when it is supported, is not opencode, or the `--version` check could
+    /// not run.
+    pub unsupported: Option<String>,
 }
 
 /// Streaming events sent to the frontend over the review channel.
@@ -216,13 +220,19 @@ pub enum ReviewEvent {
     /// **host** session resumes the *right* conversation (Codex `exec resume <id>`,
     /// opencode `--session <id>`) instead of "continue last", which could grab a
     /// concurrent session sharing the CLI's home. Ignored for reviews / Claude / container.
+    /// For opencode the id is an opaque token: it is passed back verbatim, and nothing but
+    /// `parse_native_ref` and `opencode1_must_restart` may parse, trim, compare, display or
+    /// put it in a command.
     NativeSession { id: String },
+    /// A one-line note for the turn's timeline that is not the agent's output. `code` lets a
+    /// consumer act on it; `text` is the finished sentence.
+    Notice { code: &'static str, text: String },
 }
 
 impl ReviewEvent {
     /// A failure carrying nothing but its reason — every source except the deadline
     /// kill, whose partial output is the whole point of the two fields above.
-    fn error(message: impl Into<String>) -> Self {
+    pub(crate) fn error(message: impl Into<String>) -> Self {
         ReviewEvent::Error {
             message: message.into(),
             partial_text: None,
@@ -1595,17 +1605,1038 @@ async fn resolve(kind: AgentKind, bin_path: Option<&str>) -> Option<PathBuf> {
 }
 
 /// Forgets every cached lookup that can read "not installed" (About > Re-check): the
-/// remembered login-shell misses, then the per-kind resolutions, then the
-/// container-runtime slots. The misses go first, so a COLD lookup that starts
-/// afterwards asks a resolver that has already forgotten. A lookup already in flight
-/// may still store its answer, and one queued behind it takes that answer; either is
-/// held for at most one [`crate::agent_sandbox::CANDIDATE_TTL`].
+/// remembered login-shell misses, then the per-kind resolutions and the facts remembered
+/// about each opencode binary, then the container-runtime slots. The misses go first, so
+/// a COLD lookup that starts afterwards asks a resolver that has already forgotten. A
+/// lookup already in flight may still store its answer, and one queued behind it takes
+/// that answer: a resolution is held for at most one
+/// [`crate::agent_sandbox::CANDIDATE_TTL`], an opencode fact until the next forget.
 pub(crate) fn forget_cli_lookups() {
     clear_login_shell_misses();
     if let Ok(mut c) = resolve_cache().lock() {
         c.fill(None);
     }
+    if let Ok(mut facts) = opencode_facts().lock() {
+        facts.clear();
+    }
     crate::agent_sandbox::forget_runtime_candidates();
+}
+
+// --- opencode version ------------------------------------------------------
+
+/// The file an opencode fact was learned from. `metadata` follows links, so an npm shim
+/// is the identity, not the executable behind it; a fact changes only when this file
+/// does.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BinaryIdentity {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// `None` when the metadata can't be read: such a binary is probed on every call.
+fn binary_identity(path: &Path) -> Option<BinaryIdentity> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(BinaryIdentity {
+        path: path.to_path_buf(),
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
+}
+
+/// What GitDesktop remembers about opencode binaries, per identity, until the next
+/// [`forget_cli_lookups`] or a restart.
+#[derive(Default)]
+struct OpencodeFacts {
+    /// Supported verdicts, each with when it was read: reused for `OPENCODE_VERDICT_TTL`,
+    /// then kept only to tell whether the next probe changed the answer. A refusal is
+    /// never remembered, since its sentence tells the user to upgrade and try again.
+    cli: HashMap<BinaryIdentity, (crate::opencode2::Cli, Instant)>,
+    /// Binaries whose DiffOnly lock a read-back confirmed; their later DiffOnly runs
+    /// skip the read-back. A probe answering anything but the remembered version drops
+    /// the binary's entry.
+    diff_only_proven: HashSet<BinaryIdentity>,
+    /// The last model catalog read, with its binary and when it was read; it is read
+    /// again for another binary or after `OPENCODE2_CATALOG_TTL`.
+    catalog: Option<(BinaryIdentity, Instant, Arc<crate::opencode2::ModelCatalog>)>,
+}
+
+impl OpencodeFacts {
+    fn clear(&mut self) {
+        self.cli.clear();
+        self.diff_only_proven.clear();
+        self.catalog = None;
+    }
+}
+
+/// Remembered binaries are forgotten before an insert past this many.
+const OPENCODE_FACTS_MAX: usize = 16;
+
+/// How long a supported verdict is reused before the binary is asked again. An unchanging
+/// shim (npm's `.cmd`, mise, volta, scoop) hides an upgrade from the identity, and a
+/// `--version` answers before any command handler, so asking again is cheap.
+const OPENCODE_VERDICT_TTL: Duration = Duration::from_secs(60);
+
+fn opencode_facts() -> &'static Mutex<OpencodeFacts> {
+    static FACTS: OnceLock<Mutex<OpencodeFacts>> = OnceLock::new();
+    FACTS.get_or_init(Mutex::default)
+}
+
+/// Single-flight gate for version probes: racing callers spend one `--version` spawn.
+fn opencode_verdict_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// What one `--version` probe produced; the seam tests drive without a process.
+enum VersionProbe {
+    /// Exit 0, with its stdout.
+    Printed(String),
+    /// Why no version was read: the clause that follows `"opencode --version"`.
+    Failed(String),
+}
+
+/// One binary's answer to "which opencode is this".
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OpencodeVerdict {
+    Supported(crate::opencode2::Cli),
+    Refused(crate::opencode2::VersionRefusal),
+    /// The probe could not run, which says nothing about the version.
+    ProbeFailed(String),
+}
+
+/// A bare `opencode --version`: 1.x rejects `--standalone`, and on 2.x `--version`
+/// answers before any command handler, so no server starts. Only stdout is read: every
+/// measured release prints its version there, with exit 0.
+async fn opencode_verdict_probe(binary: &Path) -> VersionProbe {
+    // A child started before the login-shell PATH lands finds no `node`. Nothing cancels a
+    // version probe, so the wait watches a cancel that never fires.
+    let _ = wait_for_executing_capture(&Notify::new()).await;
+    match run_capture_parts(binary, &["--version"], DETECT_TIMEOUT).await {
+        Ok((0, stdout, _)) => VersionProbe::Printed(stdout),
+        Ok((code, _, _)) => VersionProbe::Failed(format!("exited with code {code}")),
+        Err(AppError::Timeout(secs)) => VersionProbe::Failed(format!("timed out after {secs}s")),
+        Err(_) => VersionProbe::Failed("could not be started".to_string()),
+    }
+}
+
+async fn opencode_verdict(binary: &Path) -> (OpencodeVerdict, Option<BinaryIdentity>) {
+    opencode_verdict_with(binary, opencode_facts(), Instant::now(), || {
+        opencode_verdict_probe(binary)
+    })
+    .await
+}
+
+fn opencode_verdict_of(
+    known: Result<crate::opencode2::Cli, crate::opencode2::VersionRefusal>,
+) -> OpencodeVerdict {
+    match known {
+        Ok(cli) => OpencodeVerdict::Supported(cli),
+        Err(refusal) => OpencodeVerdict::Refused(refusal),
+    }
+}
+
+/// The verdict for `binary` at `now`, remembered under the identity read BEFORE the
+/// probe, so a file replaced mid-probe can only file a verdict no later lookup uses. Only
+/// a supported verdict is remembered; a refusal, a failed probe and an unreadable
+/// identity are asked again on every call. The facts lock is never held across an await.
+async fn opencode_verdict_with<F, Fut>(
+    binary: &Path,
+    facts: &Mutex<OpencodeFacts>,
+    now: Instant,
+    probe: F,
+) -> (OpencodeVerdict, Option<BinaryIdentity>)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = VersionProbe>,
+{
+    let identity = binary_identity(binary);
+    let remembered = || {
+        let id = identity.as_ref()?;
+        let store = facts.lock().ok()?;
+        let (cli, read_at) = store.cli.get(id)?;
+        (now.saturating_duration_since(*read_at) < OPENCODE_VERDICT_TTL).then_some(*cli)
+    };
+    if let Some(cli) = remembered() {
+        return (OpencodeVerdict::Supported(cli), identity);
+    }
+    let _flight = opencode_verdict_gate().lock().await;
+    if let Some(cli) = remembered() {
+        return (OpencodeVerdict::Supported(cli), identity);
+    }
+    let verdict = match probe().await {
+        VersionProbe::Printed(text) => {
+            opencode_verdict_of(crate::opencode2::classify_version(&text))
+        }
+        VersionProbe::Failed(clause) => OpencodeVerdict::ProbeFailed(clause),
+    };
+    if let (Some(id), Ok(mut store)) = (identity.clone(), facts.lock()) {
+        let unchanged = matches!(
+            (store.cli.get(&id), &verdict),
+            (Some((known, _)), OpencodeVerdict::Supported(cli)) if known == cli
+        );
+        // A DiffOnly proof holds only for the version it was made on.
+        if !unchanged {
+            store.diff_only_proven.remove(&id);
+        }
+        match &verdict {
+            OpencodeVerdict::Supported(cli) => {
+                if store.cli.len() >= OPENCODE_FACTS_MAX && !store.cli.contains_key(&id) {
+                    store.cli.clear();
+                    store.diff_only_proven.clear();
+                }
+                store.cli.insert(id, (*cli, now));
+            }
+            OpencodeVerdict::Refused(_) | OpencodeVerdict::ProbeFailed(_) => {
+                store.cli.remove(&id);
+            }
+        }
+    }
+    (verdict, identity)
+}
+
+/// The run paths' map: a refusal, or a version check that could not run, is the run's
+/// error.
+fn opencode_verdict_cli(verdict: OpencodeVerdict) -> AppResult<crate::opencode2::Cli> {
+    match verdict {
+        OpencodeVerdict::Supported(cli) => Ok(cli),
+        OpencodeVerdict::Refused(refusal) => Err(AppError::Command(refusal.message())),
+        OpencodeVerdict::ProbeFailed(clause) => Err(AppError::Command(format!(
+            "GitDesktop could not check which opencode this is (\"opencode --version\" {clause}). Try again, or pick another binary in Settings."
+        ))),
+    }
+}
+
+/// The detect paths' map: only a verdict about the version is reported, as a standing
+/// state rather than a failed run's sentence.
+fn opencode_verdict_unsupported(verdict: &OpencodeVerdict) -> Option<String> {
+    match verdict {
+        OpencodeVerdict::Refused(refusal) => Some(refusal.standing_message()),
+        OpencodeVerdict::Supported(_) | OpencodeVerdict::ProbeFailed(_) => None,
+    }
+}
+
+/// `agent_effort_levels`' map: its answer is a line that stays under the effort control,
+/// so a refusal reads as a standing state; a probe that could not run keeps the run
+/// paths' sentence.
+fn opencode_verdict_effort(verdict: OpencodeVerdict) -> AppResult<crate::opencode2::Cli> {
+    match verdict {
+        OpencodeVerdict::Refused(refusal) => Err(AppError::Command(refusal.standing_message())),
+        other => opencode_verdict_cli(other),
+    }
+}
+
+/// Run paths: `Refused` and `ProbeFailed` become the `AppError::Command` sentence.
+async fn opencode_cli(binary: &Path) -> AppResult<(crate::opencode2::Cli, Option<BinaryIdentity>)> {
+    let (verdict, identity) = opencode_verdict(binary).await;
+    Ok((opencode_verdict_cli(verdict)?, identity))
+}
+
+/// Detect paths: `Some(refusal.standing_message())` only for `Refused`; never an error.
+pub(crate) async fn opencode_unsupported_reason(binary: &Path) -> Option<String> {
+    opencode_verdict_unsupported(&opencode_verdict(binary).await.0)
+}
+
+/// Whether a 1.x binary must start a new conversation instead of resuming: the stored
+/// id is an `oc2:` token, which only an opencode 2 turn hands out.
+fn opencode1_must_restart(resume: bool, raw: Option<&str>) -> bool {
+    resume && raw.is_some_and(|id| id.trim().starts_with("oc2:"))
+}
+
+/// Code of the notice that the turn's conversation was restarted.
+const NOTICE_SESSION_RESET: &str = "nativeSessionReset";
+
+const NOTICE_RESET_V1: &str = "This conversation has turns from opencode 2, and the opencode installed now is 1.x, which cannot continue it. This turn started a new opencode conversation, so the agent does not remember the earlier turns.";
+
+const NOTICE_RESET_GENERIC: &str = "GitDesktop could not continue the earlier opencode conversation, so this turn started a new one. The agent does not remember the earlier turns.";
+
+/// Code of the notice sent right before a re-keyed turn's first `NativeSession`; its
+/// text is empty.
+const NOTICE_SESSION_REKEY: &str = "nativeSessionRekey";
+
+/// Codes of the notices on whether the host's opencode sign-ins reached a container
+/// session's home.
+const NOTICE_SIGN_INS_COPIED: &str = "signInsCopied";
+const NOTICE_SIGN_INS_NOT_COPIED: &str = "signInsNotCopied";
+const NOTICE_NO_SIGN_INS: &str = "noSignIns";
+
+const SIGN_INS_COPIED: &str = "Copied your opencode sign-ins into this session's container. Sign-ins you add later reach new sessions only.";
+
+const SIGN_INS_NOT_COPIED: &str = "Your opencode sign-ins couldn't be copied into the container. This session can use opencode's free models. Start a new session to try the copy again.";
+
+const SIGN_INS_RETRY_HINT: &str = "Start a new session to try the copy again.";
+
+const NO_SIGN_INS: &str = "This computer's opencode has no sign-ins to copy into the container. The session can use opencode's free models.";
+
+const SIGN_INS_UNCHECKED: &str = "GitDesktop could not check this computer's opencode version, so this session has only the sign-ins from opencode 1.x's sign-in file, if there is one. Start a new session to try the copy again.";
+
+/// How a container turn brings the host's sign-ins into its home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignInRoute {
+    /// The host's opencode 2 exports them into an import container.
+    Export,
+    /// The legacy `auth.json` is copied, with the notice the turn sends first, if any.
+    Copy(Option<&'static str>),
+}
+
+/// Only an opencode 2 host exports; any other verdict, or no host binary, copies. A
+/// version check that could not run also copies, and says so on a fresh home: that
+/// turn's database fixes the session's sign-ins, so no later turn exports.
+fn opencode2_sign_in_route(verdict: Option<&OpencodeVerdict>, fresh: bool) -> SignInRoute {
+    match verdict {
+        Some(OpencodeVerdict::Supported(crate::opencode2::Cli::V2(_))) => SignInRoute::Export,
+        Some(OpencodeVerdict::ProbeFailed(_)) if fresh => {
+            SignInRoute::Copy(Some(SIGN_INS_UNCHECKED))
+        }
+        _ => SignInRoute::Copy(None),
+    }
+}
+
+/// The notice a container turn sends after its sign-in copy answered `copied` (`None`:
+/// cancelled), and whether the turn goes on. A cancelled import can leave a database
+/// behind, and no later turn copies into a home that is no longer fresh, so that case
+/// still reports the copy as failed; a still-fresh home stays silent for the next turn.
+fn opencode2_after_copy(
+    copied: Option<(&'static str, String)>,
+    fresh_after: impl FnOnce() -> bool,
+) -> (Option<(&'static str, String)>, bool) {
+    match copied {
+        Some(notice) => (Some(notice), true),
+        None if fresh_after() => (None, false),
+        None => (
+            Some((NOTICE_SIGN_INS_NOT_COPIED, SIGN_INS_NOT_COPIED.to_string())),
+            false,
+        ),
+    }
+}
+
+// --- opencode 2 runs ---------------------------------------------------------
+
+/// One captured command whose whole tree dies on a timeout or a cancel.
+struct CaptureRequest<'a> {
+    program: &'a Path,
+    args: Vec<String>,
+    cwd: Option<&'a str>,
+    env: Vec<(&'static str, String)>,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    cancel: Option<&'a Notify>,
+}
+
+/// How a captured command ended. stdout stays raw bytes: the sign-in export is handed
+/// on undecoded.
+enum Captured {
+    Exited {
+        code: i32,
+        stdout: Vec<u8>,
+        stderr: String,
+    },
+    TimedOut,
+    Cancelled,
+}
+
+/// The command `capture_tree` spawns: the base env of every agent spawn, then the
+/// request's pairs. stdin is piped only when there are bytes to write.
+fn capture_command(req: &CaptureRequest<'_>) -> Command {
+    let mut cmd = Command::new(req.program);
+    sanitize_child_env(&mut cmd);
+    cmd.env("NO_COLOR", "1")
+        .env("CLICOLOR", "0")
+        .envs(req.env.iter().map(|(k, v)| (*k, v.as_str())))
+        .args(&req.args)
+        .stdin(if req.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = req.cwd {
+        cmd.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    crate::proc_tree::TreeGuard::prepare(&mut cmd);
+    cmd.kill_on_drop(true);
+    cmd
+}
+
+/// Runs `req` to its exit, its timeout or its cancel. A timeout, a cancel, a failed read
+/// and output past `MAX_CAPTURE_BYTES` kill the whole tree and leave the guard armed;
+/// only an exit reaped by `child.wait()` disarms it. Neither stream reaches an error.
+async fn capture_tree(req: CaptureRequest<'_>) -> AppResult<Captured> {
+    // The run that follows sanitizes against the same landed shell PATH; a request without
+    // a cancel waits watching one that never fires.
+    let never = Notify::new();
+    let cancel = req.cancel.unwrap_or(&never);
+    if wait_for_executing_capture(cancel).await {
+        return Ok(Captured::Cancelled);
+    }
+    // Armed before the spawn and awaited in the select below, so a cancel landing between
+    // this check and the select still ends the run; one already fired spawns nothing.
+    let cancelled = cancel.notified();
+    tokio::pin!(cancelled);
+    if cancelled.as_mut().enable() {
+        return Ok(Captured::Cancelled);
+    }
+    let mut cmd = capture_command(&req);
+    let mut child = cmd.spawn().map_err(AppError::Io)?;
+    // Declared right after `child` so it drops first: on unix an unreaped leader pins the
+    // group id the guard's kill names.
+    let tree = crate::proc_tree::TreeGuard::arm(&child);
+    if let (Some(mut pipe), Some(bytes)) = (child.stdin.take(), req.stdin) {
+        // Dropping the pipe once written closes the child's stdin.
+        tokio::spawn(async move {
+            let _ = pipe.write_all(&bytes).await;
+        });
+    }
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let ended = {
+        let run = async {
+            let (out, err, overflowed) =
+                capture_capped(&mut stdout, &mut stderr, MAX_CAPTURE_BYTES).await?;
+            if overflowed {
+                return Ok(None);
+            }
+            let status = child.wait().await.map_err(AppError::Io)?;
+            Ok::<_, AppError>(Some((status, out, err)))
+        };
+        tokio::select! {
+            ended = run => Ok(ended),
+            _ = tokio::time::sleep(req.timeout) => Err(Captured::TimedOut),
+            () = &mut cancelled => Err(Captured::Cancelled),
+        }
+    };
+    let failed = match ended {
+        Ok(Ok(Some((status, stdout, stderr)))) => {
+            tree.disarm();
+            return Ok(Captured::Exited {
+                code: status.code().unwrap_or(-1),
+                stdout,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
+        }
+        Ok(Ok(None)) => Err(AppError::Command(format!(
+            "{} produced more than {MAX_CAPTURE_BYTES} bytes on stdout or stderr",
+            req.program.display()
+        ))),
+        Ok(Err(error)) => Err(error),
+        Err(forced) => Ok(forced),
+    };
+    kill_process_tree(&mut child, &tree);
+    let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
+    failed
+}
+
+/// Whether the turn's cancel already fired, checked right before a 2.x turn spawns its
+/// run. A fired permit is spent here, so the caller ends the turn; a cancel that lands
+/// after the check stays stored for the run's own wait.
+fn opencode2_cancel_fired(cancel: &Notify) -> bool {
+    std::pin::pin!(cancel.notified()).enable()
+}
+
+/// Bound on one host read-back; measured read-backs take 2 to 3 s.
+const OPENCODE2_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on one container read-back; one on a fresh session home measured 6.8 s.
+const OPENCODE2_CONTAINER_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bounds on the host's sign-in export and on the container's import of it.
+const OPENCODE2_AUTH_EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
+const OPENCODE2_AUTH_IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The host command whose stdout carries the user's opencode sign-ins.
+const OPENCODE2_AUTH_EXPORT_ARGS: &[&str] = &["auth", "export", "--standalone"];
+
+/// What one read-back spawn produced, as the lock protocol reads it.
+enum ProbeAnswer {
+    /// Exit 0, with its stdout.
+    Stdout(String),
+    Exit {
+        code: i32,
+        stderr_line: Option<String>,
+    },
+    TimedOut {
+        secs: u64,
+    },
+    /// The spawn itself failed; the text says why.
+    Failed(String),
+    Cancelled,
+}
+
+/// A read-back capture as the lock protocol reads it; `timeout` is the bound it ran
+/// under. Only the first non-blank stderr line is kept, for the refusal sentence.
+fn opencode2_probe_answer(captured: AppResult<Captured>, timeout: Duration) -> ProbeAnswer {
+    match captured {
+        Ok(Captured::Exited {
+            code: 0, stdout, ..
+        }) => ProbeAnswer::Stdout(String::from_utf8_lossy(&stdout).into_owned()),
+        Ok(Captured::Exited { code, stderr, .. }) => ProbeAnswer::Exit {
+            code,
+            stderr_line: stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(String::from),
+        },
+        Ok(Captured::TimedOut) => ProbeAnswer::TimedOut {
+            secs: timeout.as_secs(),
+        },
+        Ok(Captured::Cancelled) => ProbeAnswer::Cancelled,
+        Err(error) => ProbeAnswer::Failed(error.to_string()),
+    }
+}
+
+/// The longest stretch of opencode's own text a GitDesktop sentence quotes.
+fn opencode2_clip(text: &str) -> String {
+    text.chars().take(200).collect()
+}
+
+/// Why a 2.x run was refused before it started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LockRefusal {
+    Lock(crate::opencode2::LockError),
+    Readback(crate::opencode2::ReadbackError),
+    ProbeExit {
+        code: i32,
+        stderr_line: Option<String>,
+    },
+    ProbeTimedOut {
+        secs: u64,
+    },
+    ProbeFailed(String),
+}
+
+impl LockRefusal {
+    fn message(&self) -> String {
+        let lead = crate::opencode2::READBACK_REFUSAL_LEAD;
+        match self {
+            Self::Lock(error) => error.message(),
+            Self::Readback(error) => error.message(),
+            Self::ProbeExit { code, stderr_line } => {
+                let line = stderr_line
+                    .as_deref()
+                    .map(|line| format!(": {}", opencode2_clip(line)))
+                    .unwrap_or_default();
+                format!(
+                    "{lead} opencode's check command failed (exit code {code}{line}). Check your opencode config with \"opencode debug config\", or update opencode, then try again."
+                )
+            }
+            Self::ProbeTimedOut { secs } => format!(
+                "{lead} opencode did not answer the check within {secs} seconds. Try again; if it keeps happening, run \"opencode debug agents --standalone\" in a terminal to see what it is waiting for."
+            ),
+            Self::ProbeFailed(text) => {
+                format!("{lead} opencode's check command could not be started ({text}).")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LockOutcome {
+    Locked {
+        lock: crate::opencode2::LockDocument,
+        /// Whether a read-back confirmed this lock's rules land last.
+        read_back: bool,
+    },
+    Cancelled,
+}
+
+/// The read-only lock protocol, the only producer of a lock that reaches a run. Each
+/// read-back runs `probe` under a freshly minted probe document and must find that
+/// document's rules last; a miss that came back is retried once with a new document,
+/// while a timeout or a failed spawn refuses at once. Only a DiffOnly lock already
+/// confirmed for this binary (`diff_only_proven`) skips the read-back: ReadOnly and
+/// Research mirror the user's current rules, so they read back every run.
+async fn opencode2_lock<F, Fut>(
+    pin: crate::opencode2::Pin,
+    servers: &[&str],
+    inherited_content: Option<&str>,
+    case: crate::opencode2::MatchCase,
+    diff_only_proven: bool,
+    mut probe: F,
+) -> Result<LockOutcome, LockRefusal>
+where
+    F: FnMut(crate::opencode2::LockDocument) -> Fut,
+    Fut: std::future::Future<Output = ProbeAnswer>,
+{
+    let mirror = if pin == crate::opencode2::Pin::DiffOnly && diff_only_proven {
+        None
+    } else {
+        let mut attempt = 0;
+        Some(loop {
+            attempt += 1;
+            let document = crate::opencode2::probe_document(pin, servers, inherited_content)
+                .map_err(LockRefusal::Lock)?;
+            let miss = match probe(document.clone()).await {
+                ProbeAnswer::Stdout(stdout) => {
+                    match crate::opencode2::read_back(&stdout, &document, pin, case) {
+                        Ok(mirror) => break mirror,
+                        Err(error) => LockRefusal::Readback(error),
+                    }
+                }
+                ProbeAnswer::Exit { code, stderr_line } => {
+                    LockRefusal::ProbeExit { code, stderr_line }
+                }
+                ProbeAnswer::TimedOut { secs } => return Err(LockRefusal::ProbeTimedOut { secs }),
+                ProbeAnswer::Failed(text) => return Err(LockRefusal::ProbeFailed(text)),
+                ProbeAnswer::Cancelled => return Ok(LockOutcome::Cancelled),
+            };
+            if attempt == 2 {
+                return Err(miss);
+            }
+        })
+    };
+    let access = match (pin, mirror.as_ref()) {
+        (crate::opencode2::Pin::ReadOnly, Some(mirror)) => {
+            crate::opencode2::Access::ReadOnly(mirror)
+        }
+        (crate::opencode2::Pin::Research, Some(mirror)) => {
+            crate::opencode2::Access::Research(mirror)
+        }
+        // The tightest lock; a proven DiffOnly is the only pin that arrives without a mirror.
+        _ => crate::opencode2::Access::DiffOnly,
+    };
+    let lock = crate::opencode2::lock_document(access, servers).map_err(LockRefusal::Lock)?;
+    Ok(LockOutcome::Locked {
+        lock,
+        read_back: mirror.is_some(),
+    })
+}
+
+/// A review's lock: a repo-aware review reads the repository, any other sees the diff
+/// it was handed and nothing else.
+fn opencode2_review_pin(repo_aware: bool) -> crate::opencode2::Pin {
+    if repo_aware {
+        crate::opencode2::Pin::ReadOnly
+    } else {
+        crate::opencode2::Pin::DiffOnly
+    }
+}
+
+/// A session turn's lock: none for a write turn; a Plan turn reads the repository, and a
+/// Research turn the web too.
+fn opencode2_session_pin(read_only: bool, web: bool) -> Option<crate::opencode2::Pin> {
+    match (read_only, web) {
+        (false, _) => None,
+        (true, false) => Some(crate::opencode2::Pin::ReadOnly),
+        (true, true) => Some(crate::opencode2::Pin::Research),
+    }
+}
+
+/// The `OPENCODE_CONFIG_CONTENT` a host spawn would inherit, read through the same
+/// child-env view as the 1.x read mirror (the spawn's own edits over the app's env).
+fn opencode2_inherited_content(config_path: Option<&str>) -> Option<String> {
+    // `std::env::var_os` may panic on an empty key or one holding `=` or NUL.
+    let inherited = |key: &str| {
+        (!key.is_empty() && !key.contains(['=', '\0']))
+            .then(|| std::env::var_os(key))
+            .flatten()
+    };
+    let env = opencode_child_env(
+        config_path,
+        child_env_overrides(),
+        merged_shell_path().as_deref(),
+        cfg!(windows),
+        &inherited,
+    );
+    env(crate::opencode2::CONTENT_ENV)
+}
+
+/// One spawn as data: what to run, where, and with which extra environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SpawnPlan {
+    args: Vec<String>,
+    cwd: String,
+    env: Vec<(&'static str, String)>,
+}
+
+/// What a 2.x turn is. A review cannot be described without a pin; a session's `None`
+/// pin is a write turn.
+enum Opencode2Turn<'a> {
+    Review {
+        version: crate::opencode2::Version,
+        pin: crate::opencode2::Pin,
+    },
+    Session {
+        pin: Option<crate::opencode2::Pin>,
+        /// `Some` only when the turn resumes a conversation.
+        session_id: Option<&'a str>,
+    },
+}
+
+struct Opencode2Inputs<'a> {
+    turn: Opencode2Turn<'a>,
+    servers: &'a [&'a str],
+    config_path: Option<&'a str>,
+    cwd: &'a str,
+    model: &'a str,
+    inherited_content: Option<&'a str>,
+    case: crate::opencode2::MatchCase,
+    diff_only_proven: bool,
+}
+
+#[derive(Debug)]
+enum TurnPlan {
+    Run {
+        run: SpawnPlan,
+        lock: Option<crate::opencode2::LockDocument>,
+        read_back: bool,
+    },
+    Cancelled,
+}
+
+/// Plans one 2.x turn. The only caller of `opencode2_lock` and of core's argv and env
+/// builders, so no plan for a pinned run exists without its lock; a pinned turn's
+/// read-back and run share one working directory and one env builder, with only the
+/// document swapped. The variant is read first, so a cancel during its catalog read
+/// spawns nothing further. Residual: rules another client attached to a resumed
+/// opencode session apply after the lock's, out of the read-back's sight.
+async fn opencode2_compose<V, VFut, P, PFut>(
+    inputs: &Opencode2Inputs<'_>,
+    variant: V,
+    mut probe: P,
+) -> Result<TurnPlan, LockRefusal>
+where
+    V: FnOnce() -> VFut,
+    VFut: std::future::Future<Output = VariantPick>,
+    P: FnMut(SpawnPlan) -> PFut,
+    PFut: std::future::Future<Output = ProbeAnswer>,
+{
+    let config_path = inputs.config_path;
+    let VariantPick::Send(picked) = variant().await else {
+        return Ok(TurnPlan::Cancelled);
+    };
+    let variant = picked.as_deref();
+    match inputs.turn {
+        Opencode2Turn::Review { version, pin } => {
+            let env_for = |doc: &crate::opencode2::LockDocument| {
+                crate::opencode2::review_env(config_path, doc)
+            };
+            let outcome = opencode2_lock(
+                pin,
+                inputs.servers,
+                inputs.inherited_content,
+                inputs.case,
+                inputs.diff_only_proven,
+                |doc| {
+                    probe(SpawnPlan {
+                        args: crate::opencode2::READBACK_ARGS
+                            .iter()
+                            .map(|arg| arg.to_string())
+                            .collect(),
+                        cwd: inputs.cwd.to_string(),
+                        env: env_for(&doc),
+                    })
+                },
+            )
+            .await?;
+            let LockOutcome::Locked { lock, read_back } = outcome else {
+                return Ok(TurnPlan::Cancelled);
+            };
+            let run = SpawnPlan {
+                args: crate::opencode2::review_args(version, &lock, inputs.model, variant),
+                cwd: inputs.cwd.to_string(),
+                env: env_for(&lock),
+            };
+            Ok(TurnPlan::Run {
+                run,
+                lock: Some(lock),
+                read_back,
+            })
+        }
+        Opencode2Turn::Session {
+            pin: Some(pin),
+            session_id,
+        } => {
+            let env_for = |doc: &crate::opencode2::LockDocument| {
+                crate::opencode2::session_env(config_path.map(String::from), Some(doc))
+            };
+            let outcome = opencode2_lock(
+                pin,
+                inputs.servers,
+                inputs.inherited_content,
+                inputs.case,
+                inputs.diff_only_proven,
+                |doc| {
+                    probe(SpawnPlan {
+                        args: crate::opencode2::READBACK_ARGS
+                            .iter()
+                            .map(|arg| arg.to_string())
+                            .collect(),
+                        cwd: inputs.cwd.to_string(),
+                        env: env_for(&doc),
+                    })
+                },
+            )
+            .await?;
+            let LockOutcome::Locked { lock, read_back } = outcome else {
+                return Ok(TurnPlan::Cancelled);
+            };
+            let run = SpawnPlan {
+                args: crate::opencode2::session_args(
+                    crate::opencode2::SessionAgent::Locked(&lock),
+                    inputs.model,
+                    variant,
+                    session_id,
+                ),
+                cwd: inputs.cwd.to_string(),
+                env: env_for(&lock),
+            };
+            Ok(TurnPlan::Run {
+                run,
+                lock: Some(lock),
+                read_back,
+            })
+        }
+        Opencode2Turn::Session {
+            pin: None,
+            session_id,
+        } => Ok(TurnPlan::Run {
+            run: SpawnPlan {
+                args: crate::opencode2::session_args(
+                    crate::opencode2::SessionAgent::Write,
+                    inputs.model,
+                    variant,
+                    session_id,
+                ),
+                cwd: inputs.cwd.to_string(),
+                env: crate::opencode2::session_env(config_path.map(String::from), None),
+            },
+            lock: None,
+            read_back: false,
+        }),
+    }
+}
+
+/// Extra env pairs of one spawn, in the order they are set.
+type EnvPairs = Vec<(&'static str, String)>;
+
+/// A container turn's env, split for the runtime client: every pair rides its argv as
+/// `-e K=V` except the lock document, which stays in the client's own env and is
+/// forwarded by name. argv shows in `docker inspect`, and Windows caps a command line
+/// near 32,767 characters. Returns the `-e` pairs, then the client's env.
+fn split_container_env(pairs: EnvPairs) -> (EnvPairs, EnvPairs) {
+    pairs
+        .into_iter()
+        .partition(|(key, _)| *key != crate::opencode2::CONTENT_ENV)
+}
+
+/// The kind of turn that created or last continued a 2.x conversation. One opencode
+/// session never serves both kinds: an agent named with `--agent` sticks to the session,
+/// so a write turn resumed into a pinned one would stay locked, and fail once the lock's
+/// id is gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnKind {
+    Write,
+    Pinned,
+}
+
+/// A stored opencode conversation id as the 2.x path reads it: a token (`oc2:w:<id>`,
+/// `oc2:p:<id>`) was handed out by an opencode 2 turn of that kind, a raw id was created
+/// by opencode 1.x.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NativeRef {
+    Absent,
+    V1 { id: String },
+    V2 { id: String, kind: TurnKind },
+    Unusable,
+}
+
+/// Whether a conversation id may become the value of `--session`: it was read from a
+/// CLI's stream.
+fn native_id_ok(id: &str) -> bool {
+    id.len() <= 128
+        && id.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The token's one parser, beside `opencode1_must_restart`.
+fn parse_native_ref(raw: Option<&str>) -> NativeRef {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return NativeRef::Absent;
+    };
+    let Some(token) = raw.strip_prefix("oc2:") else {
+        return if native_id_ok(raw) {
+            NativeRef::V1 {
+                id: raw.to_string(),
+            }
+        } else {
+            NativeRef::Unusable
+        };
+    };
+    let (kind, id) = if let Some(id) = token.strip_prefix("w:") {
+        (TurnKind::Write, id)
+    } else if let Some(id) = token.strip_prefix("p:") {
+        (TurnKind::Pinned, id)
+    } else {
+        return NativeRef::Unusable;
+    };
+    if native_id_ok(id) {
+        NativeRef::V2 {
+            id: id.to_string(),
+            kind,
+        }
+    } else {
+        NativeRef::Unusable
+    }
+}
+
+fn native_token(kind: TurnKind, id: &str) -> String {
+    let tag = match kind {
+        TurnKind::Write => "w",
+        TurnKind::Pinned => "p",
+    };
+    format!("oc2:{tag}:{id}")
+}
+
+/// How a 2.x turn continues its conversation: `session_id` is empty unless `resumed`,
+/// and `reset` asks for the note that the stored conversation could not be continued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResumePlan {
+    session_id: String,
+    resumed: bool,
+    reset: bool,
+}
+
+/// A resume with no stored id starts a new conversation, since 2.x is never asked for
+/// "the latest" one, which can be another conversation. A raw id is resumed as it is; a
+/// token of the other turn kind, or one that does not parse, starts a new conversation
+/// with a note.
+fn opencode2_resume_plan(resume: bool, native: &NativeRef, turn: TurnKind) -> ResumePlan {
+    let fresh = |reset| ResumePlan {
+        session_id: String::new(),
+        resumed: false,
+        reset,
+    };
+    let resumed = |id: &str| ResumePlan {
+        session_id: id.to_string(),
+        resumed: true,
+        reset: false,
+    };
+    if !resume {
+        return fresh(false);
+    }
+    match native {
+        NativeRef::Absent => fresh(false),
+        NativeRef::V1 { id } => resumed(id),
+        NativeRef::V2 { id, kind } if *kind == turn => resumed(id),
+        NativeRef::V2 { .. } | NativeRef::Unusable => fresh(true),
+    }
+}
+
+/// How a session turn hands its conversation id back to the store.
+#[derive(Clone, Debug)]
+struct NativeTag {
+    kind: TurnKind,
+    /// The id the turn resumed, and the stored value (trimmed) it was read from.
+    resumed: Option<(String, String)>,
+    /// The turn resumed an id opencode 1.x created. Its first `NativeSession` follows the
+    /// re-key notice and carries a token, so a later 1.x binary starts a new conversation
+    /// instead of resuming one that silently lacks this turn. Cleared once sent.
+    rekey: bool,
+}
+
+impl NativeTag {
+    /// The stored value goes back unchanged for the id it named, unless that id is being
+    /// re-keyed; any other id goes back as this turn's token.
+    fn token_for(&self, id: &str) -> String {
+        match &self.resumed {
+            Some((resumed, stored)) if resumed == id && !self.rekey => stored.clone(),
+            _ => native_token(self.kind, id),
+        }
+    }
+}
+
+/// The stream state of an opencode 2 run.
+struct Opencode2Stream {
+    parser: crate::opencode2::StreamParser,
+    /// A session turn's id hand-back; `None` for a review, whose id nothing reads.
+    native: Option<NativeTag>,
+}
+
+/// The events one 2.x stream line yields, in send order: slot 0 is the re-key notice, only
+/// ahead of a re-keyed turn's first `NativeSession`; slot 1 is the line's event, its
+/// session id handed back through the turn's tag. No line is terminal.
+fn opencode2_stream_event(stream: &mut Opencode2Stream, line: &str) -> [Option<ReviewEvent>; 2] {
+    let event = stream.parser.line(line);
+    match (stream.native.as_mut(), event) {
+        (Some(tag), Some(ReviewEvent::NativeSession { id })) => {
+            let notice = if tag.rekey {
+                // The store drops the raw id on the notice; every later step of the turn
+                // carries the token too.
+                tag.rekey = false;
+                tag.resumed = None;
+                Some(ReviewEvent::Notice {
+                    code: NOTICE_SESSION_REKEY,
+                    text: String::new(),
+                })
+            } else {
+                None
+            };
+            let id = tag.token_for(&id);
+            [notice, Some(ReviewEvent::NativeSession { id })]
+        }
+        (_, event) => [None, event],
+    }
+}
+
+/// The exit code a 2.x run's end is read from: none for a run GitDesktop killed (a
+/// cancel, a timeout, an expired exit grace), so a kill never reads as success.
+fn opencode2_exit_code(forced: bool, status: Option<i32>) -> Option<i32> {
+    if forced {
+        None
+    } else {
+        status
+    }
+}
+
+/// A timeout's message. On a 2.x run (`parser` set) opencode's recorded error replaces the
+/// deadline sentence, mapped as at EOF; with none, the sentence names the retry opencode was
+/// still making when it recorded one.
+fn opencode2_timeout_message(
+    message: String,
+    parser: Option<&crate::opencode2::StreamParser>,
+) -> String {
+    let Some(parser) = parser else {
+        return message;
+    };
+    if let Some(error) = parser.last_error() {
+        return error;
+    }
+    match parser.last_retry() {
+        Some(retry) => format!(
+            "{message} opencode was still retrying: {}",
+            opencode2_clip(retry)
+        ),
+        None => message,
+    }
+}
+
+/// What a 2.x run reports when reading its stdout failed.
+const OPENCODE2_OUTPUT_LOST: &str = "GitDesktop lost opencode's output before the run finished.";
+
+/// A 2.x run's terminal event when its stream ended uncancelled and in time. A read error
+/// fails the run whatever the exit, since the text read before it may be cut short; else
+/// the parser concludes from the exit code and stderr's first non-empty line, clipped.
+fn opencode2_conclusion(
+    parser: crate::opencode2::StreamParser,
+    read_failed: bool,
+    code: Option<i32>,
+    stderr: &str,
+) -> Option<ReviewEvent> {
+    if read_failed {
+        return Some(ReviewEvent::error(OPENCODE2_OUTPUT_LOST));
+    }
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(opencode2_clip);
+    parser.finish(code, line.as_deref())
 }
 
 // --- detection -------------------------------------------------------------
@@ -1758,6 +2789,7 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
             path: None,
             version: None,
             authed: AuthStatus::Unknown,
+            unsupported: None,
         });
     };
 
@@ -1767,6 +2799,12 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
         .filter(|(code, _)| *code == 0)
         .map(|(_, out)| out.trim().to_string())
         .filter(|s| !s.is_empty());
+    // The refusal a run of this binary would meet, shown before the first run.
+    let unsupported = if kind == AgentKind::Opencode {
+        Box::pin(opencode_unsupported_reason(&binary)).await
+    } else {
+        None
+    };
 
     let authed = match kind.auth_status_args() {
         None => AuthStatus::Unknown,
@@ -1778,6 +2816,7 @@ pub async fn agent_detect(kind: AgentKind, bin_path: Option<String>) -> AppResul
         path: Some(binary.to_string_lossy().into_owned()),
         version,
         authed,
+        unsupported,
     })
 }
 
@@ -1950,9 +2989,24 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
             kind.label()
         ))
     })?;
-    let (code, stdout, stderr) = run_capture_parts(&binary, args, MODELS_TIMEOUT)
-        .await
-        .map_err(|e| catalog_listing_error(kind, e))?;
+    let v2 = kind == AgentKind::Opencode
+        && matches!(
+            Box::pin(opencode_cli(&binary)).await?,
+            (crate::opencode2::Cli::V2(_), _)
+        );
+    // A 2.x listing runs standalone, so it leaves no background server behind.
+    let listed = if v2 {
+        let captured = Box::pin(capture_tree(opencode2_read_request(
+            &binary,
+            crate::opencode2::MODELS_ARGS,
+            None,
+        )))
+        .await;
+        opencode2_listing(captured)
+    } else {
+        run_capture_parts(&binary, args, MODELS_TIMEOUT).await
+    };
+    let (code, stdout, stderr) = listed.map_err(|e| catalog_listing_error(kind, e))?;
     if code != 0 {
         let reason = stderr
             .lines()
@@ -1969,6 +3023,309 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
         AgentKind::Copilot => parse_copilot_models(&stdout),
         AgentKind::Claude | AgentKind::Opencode => parse_models_output(&stdout),
     })
+}
+
+// --- opencode 2 models and effort ------------------------------------------------
+
+/// A 2.x model listing in `run_capture_parts`' shape. It runs with no cancel, so only its
+/// timeout ends it early.
+fn opencode2_listing(captured: AppResult<Captured>) -> AppResult<(i32, String, String)> {
+    match captured? {
+        Captured::Exited {
+            code,
+            stdout,
+            stderr,
+        } => Ok((code, String::from_utf8_lossy(&stdout).into_owned(), stderr)),
+        Captured::TimedOut | Captured::Cancelled => {
+            Err(AppError::Timeout(MODELS_TIMEOUT.as_secs()))
+        }
+    }
+}
+
+/// A standalone 2.x read of `program`'s models: no cwd, and no env of ours but the
+/// project-disable pair, so a repository's own opencode config never applies to it.
+fn opencode2_read_request<'a>(
+    program: &'a Path,
+    args: &[&str],
+    cancel: Option<&'a Notify>,
+) -> CaptureRequest<'a> {
+    CaptureRequest {
+        program,
+        args: args.iter().map(|arg| arg.to_string()).collect(),
+        cwd: None,
+        env: crate::opencode2::project_disable_env().into(),
+        stdin: None,
+        timeout: MODELS_TIMEOUT,
+        cancel,
+    }
+}
+
+/// How long one binary's model catalog is reused: variants are model metadata, and a
+/// sign-in changes which models exist.
+const OPENCODE2_CATALOG_TTL: Duration = Duration::from_secs(600);
+
+/// A catalog read's outcome. A cancel stays apart from "no catalog": the read consumed
+/// the run's single cancel permit, so nothing later would see it.
+#[derive(Debug)]
+enum CatalogFetch {
+    Ready(Arc<crate::opencode2::ModelCatalog>),
+    Unavailable,
+    Cancelled,
+}
+
+/// The variant a 2.x run sends, or the turn's cancel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VariantPick {
+    Send(Option<String>),
+    Cancelled,
+}
+
+/// Single-flight gate for catalog reads: racing callers spend one spawn.
+fn opencode2_catalog_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// The model catalog of `binary`, read as `opencode2_read_request` builds it, so a
+/// repository's own opencode config never applies to it.
+async fn opencode2_catalog(
+    binary: &Path,
+    identity: Option<&BinaryIdentity>,
+    cancel: Option<&Notify>,
+) -> CatalogFetch {
+    opencode2_catalog_with(identity, opencode_facts(), || {
+        capture_tree(opencode2_read_request(
+            binary,
+            crate::opencode2::CATALOG_ARGS,
+            cancel,
+        ))
+    })
+    .await
+}
+
+/// The catalog remembered for `identity` while younger than `OPENCODE2_CATALOG_TTL`, else
+/// what `read` returns. Only a parsed catalog is remembered (one binary at a time): a
+/// failed read is advisory, so it sends no variant and is asked again. The facts lock is
+/// never held across an await.
+async fn opencode2_catalog_with<F, Fut>(
+    identity: Option<&BinaryIdentity>,
+    facts: &Mutex<OpencodeFacts>,
+    read: F,
+) -> CatalogFetch
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = AppResult<Captured>>,
+{
+    let remembered = || {
+        let id = identity?;
+        let store = facts.lock().ok()?;
+        let (known, read_at, catalog) = store.catalog.as_ref()?;
+        (known == id && read_at.elapsed() < OPENCODE2_CATALOG_TTL).then(|| Arc::clone(catalog))
+    };
+    if let Some(catalog) = remembered() {
+        return CatalogFetch::Ready(catalog);
+    }
+    let _flight = opencode2_catalog_gate().lock().await;
+    if let Some(catalog) = remembered() {
+        return CatalogFetch::Ready(catalog);
+    }
+    let stdout = match read().await {
+        Ok(Captured::Exited {
+            code: 0, stdout, ..
+        }) => stdout,
+        Ok(Captured::Cancelled) => return CatalogFetch::Cancelled,
+        _ => return CatalogFetch::Unavailable,
+    };
+    let Ok(catalog) = crate::opencode2::parse_model_catalog(&String::from_utf8_lossy(&stdout))
+    else {
+        return CatalogFetch::Unavailable;
+    };
+    let catalog = Arc::new(catalog);
+    if let (Some(id), Ok(mut store)) = (identity, facts.lock()) {
+        store.catalog = Some((id.clone(), Instant::now(), Arc::clone(&catalog)));
+    }
+    CatalogFetch::Ready(catalog)
+}
+
+/// Whether an effort level can become a variant of `model`: not without a level or a
+/// model, and not for a model typed with its own `#variant`, which `-m` passes as typed.
+fn opencode2_effort_applies(model: &str, effort: &str) -> bool {
+    let model = model.trim();
+    !effort.is_empty() && !model.is_empty() && !model.contains('#')
+}
+
+/// The variant a 2.x run sends for `effort`, read from the catalog of `source` (`None`:
+/// no opencode 2 binary to read it from). A variant is sent only when the model
+/// declares it, since an undeclared one fails the run.
+async fn opencode2_variant(
+    source: Option<(&Path, Option<&BinaryIdentity>)>,
+    model: &str,
+    effort: &str,
+    cancel: Option<&Notify>,
+) -> VariantPick {
+    match source {
+        Some((binary, identity)) if opencode2_effort_applies(model, effort) => pick_from(
+            opencode2_catalog(binary, identity, cancel).await,
+            model,
+            effort,
+        ),
+        _ => VariantPick::Send(None),
+    }
+}
+
+/// The pure half of `opencode2_variant`, over an already fetched catalog.
+fn pick_from(fetch: CatalogFetch, model: &str, effort: &str) -> VariantPick {
+    match fetch {
+        CatalogFetch::Ready(catalog) => VariantPick::Send(
+            crate::opencode2::pick_variant(effort, catalog.variants(model.trim()))
+                .map(String::from),
+        ),
+        CatalogFetch::Unavailable => VariantPick::Send(None),
+        CatalogFetch::Cancelled => VariantPick::Cancelled,
+    }
+}
+
+/// One effort level of a model: selectable exactly when `variant` is set, which is the
+/// variant a run sends for it; otherwise `reason` says why not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortLevel {
+    pub level: String,
+    pub variant: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// The effort control for one model. `per_model` false leaves the control as every other
+/// CLI has it (no levels, no reason); true offers each level only with a variant, and
+/// `reason` is set exactly when no level has one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortSupport {
+    pub per_model: bool,
+    pub levels: Vec<EffortLevel>,
+    pub reason: Option<String>,
+}
+
+const EFFORT_NO_MODEL: &str =
+    "Pick a model to set effort. opencode 2 offers effort settings per model.";
+
+const EFFORT_MODEL_HAS_VARIANT: &str = "This model name already picks a variant, so effort is off.";
+
+const EFFORT_CATALOG_UNREADABLE: &str =
+    "GitDesktop could not read opencode's model list, so effort is off. Try again in a moment.";
+
+/// `{model}` stands for the model's id in this sentence and the next.
+const EFFORT_NONE_DECLARED: &str = "{model} has no effort settings in opencode.";
+
+const EFFORT_LEVEL_UNAVAILABLE: &str = "Not offered by {model} in opencode.";
+
+const EFFORT_CONTAINER_NEEDS_HOST: &str = "Effort isn't available for this container session. GitDesktop reads each model's effort settings from the opencode installed on this computer, and that needs opencode 2.2 or later here.";
+
+/// The control every CLI but opencode 2 has: one set of levels for all models.
+fn effort_not_per_model() -> EffortSupport {
+    EffortSupport {
+        per_model: false,
+        levels: Vec::new(),
+        reason: None,
+    }
+}
+
+/// Every level unavailable, each for the one reason the whole control is off.
+fn effort_withheld(reason: String) -> EffortSupport {
+    EffortSupport {
+        per_model: true,
+        levels: crate::opencode2::EFFORT_LEVELS
+            .iter()
+            .map(|level| EffortLevel {
+                level: level.to_string(),
+                variant: None,
+                reason: Some(reason.clone()),
+            })
+            .collect(),
+        reason: Some(reason),
+    }
+}
+
+/// The effort control for `model` under an opencode 2 catalog (`None`: it could not be
+/// read). Each level offers the variant `opencode2_variant` sends for it.
+fn effort_support(model: &str, catalog: Option<&crate::opencode2::ModelCatalog>) -> EffortSupport {
+    let model = model.trim();
+    let catalog = match catalog {
+        _ if model.is_empty() => return effort_withheld(EFFORT_NO_MODEL.to_string()),
+        _ if model.contains('#') => return effort_withheld(EFFORT_MODEL_HAS_VARIANT.to_string()),
+        None => return effort_withheld(EFFORT_CATALOG_UNREADABLE.to_string()),
+        Some(catalog) => catalog,
+    };
+    let declared = catalog.variants(model);
+    let levels: Vec<EffortLevel> = crate::opencode2::EFFORT_LEVELS
+        .iter()
+        .map(|level| {
+            let variant = crate::opencode2::pick_variant(level, declared).map(String::from);
+            EffortLevel {
+                level: level.to_string(),
+                reason: variant
+                    .is_none()
+                    .then(|| EFFORT_LEVEL_UNAVAILABLE.replace("{model}", model)),
+                variant,
+            }
+        })
+        .collect();
+    if levels.iter().all(|level| level.variant.is_none()) {
+        // Also a model the catalog does not list: it declares nothing either.
+        return effort_withheld(EFFORT_NONE_DECLARED.replace("{model}", model));
+    }
+    EffortSupport {
+        per_model: true,
+        levels,
+        reason: None,
+    }
+}
+
+/// Which effort levels `model` offers. Only opencode 2 has per-model levels, read from
+/// the model catalog of the opencode on this computer; a container session's are read
+/// there too, so a host without opencode 2 leaves a container session without effort.
+#[tauri::command]
+pub async fn agent_effort_levels(
+    kind: AgentKind,
+    bin_path: Option<String>,
+    model: String,
+    isolation: Option<String>,
+) -> AppResult<EffortSupport> {
+    if kind != AgentKind::Opencode {
+        return Ok(effort_not_per_model());
+    }
+    let found = Box::pin(resolve(kind, bin_path.as_deref())).await;
+    let (binary, identity) = if isolation.as_deref() == Some("container") {
+        let host = match found {
+            Some(host) => match Box::pin(opencode_cli(&host)).await {
+                Ok((crate::opencode2::Cli::V2(_), identity)) => Some((host, identity)),
+                _ => None,
+            },
+            None => None,
+        };
+        let Some(host) = host else {
+            return Ok(effort_withheld(EFFORT_CONTAINER_NEEDS_HOST.to_string()));
+        };
+        host
+    } else {
+        let binary = found.ok_or_else(|| {
+            AppError::Command(format!(
+                "{} CLI not found. Install it or set its path in Settings.",
+                kind.label()
+            ))
+        })?;
+        let (verdict, identity) = Box::pin(opencode_verdict(&binary)).await;
+        match opencode_verdict_effort(verdict)? {
+            crate::opencode2::Cli::V1(_) => return Ok(effort_not_per_model()),
+            crate::opencode2::Cli::V2(_) => (binary, identity),
+        }
+    };
+    let catalog = match Box::pin(opencode2_catalog(&binary, identity.as_ref(), None)).await {
+        CatalogFetch::Ready(catalog) => Some(catalog),
+        // No cancel was passed, so there is none to tell apart.
+        CatalogFetch::Unavailable | CatalogFetch::Cancelled => None,
+    };
+    Ok(effort_support(&model, catalog.as_deref()))
 }
 
 // --- review ----------------------------------------------------------------
@@ -3587,7 +4944,7 @@ fn opencode_variant(level: &str) -> Option<&'static str> {
 /// Normalize a Claude/opencode-style tool NAME to a timeline category. Unknown
 /// names fall through to "other" so the step still shows (just generically). The
 /// frontend maps each category to an icon + verb.
-fn normalize_tool(name: &str) -> &'static str {
+pub(crate) fn normalize_tool(name: &str) -> &'static str {
     match name.to_ascii_lowercase().as_str() {
         "read" => "read",
         "grep" | "search" => "search",
@@ -3604,7 +4961,7 @@ fn normalize_tool(name: &str) -> &'static str {
 
 /// Pull the most useful "target" out of a tool-call input object: the file path,
 /// command, URL, or query — whatever the tool acted on. None when nothing fits.
-fn tool_target(input: &serde_json::Value) -> Option<String> {
+pub(crate) fn tool_target(input: &serde_json::Value) -> Option<String> {
     // Path keys first. The FULL path is kept un-clipped: the UI uses it as a git
     // pathspec for the inline edit-step diff, so any clipping would corrupt it.
     // Display shortening happens via relativize + CSS.
@@ -4342,6 +5699,8 @@ async fn stream_agent(
     // never appears in argv / `docker inspect`).
     extra_env: &[(&str, String)],
     on_event: &dyn EventSink,
+    // An opencode 2 run's parser state; `None` for every other run.
+    mut opencode2: Option<Opencode2Stream>,
 ) -> AppResult<Option<ReviewEvent>> {
     // Before the sanitize below, which reads whatever that capture landed.
     if wait_for_executing_capture(&cancel).await {
@@ -4414,6 +5773,8 @@ async fn stream_agent(
     let mut copilot_error: Option<String> = None;
     let mut cancelled = false;
     let mut timed_out = false;
+    // Only an opencode 2 run reads it: the other parsers keep a read error as EOF.
+    let mut read_failed = false;
     let mut terminal: Option<ReviewEvent> = None;
 
     let deadline = tokio::time::sleep(timeout);
@@ -4450,16 +5811,30 @@ async fn stream_agent(
                                 &mut pending_sep,
                                 &mut copilot_error,
                             ),
-                            AgentKind::Opencode => {
-                                parse_opencode_line(&l, &mut last_message, &mut opencode_step_text)
-                            }
+                            AgentKind::Opencode => match opencode2.as_mut() {
+                                Some(stream) => {
+                                    let events = opencode2_stream_event(stream, &l);
+                                    for ev in events.into_iter().flatten() {
+                                        send_noting_terminal(on_event, &mut terminal, ev);
+                                    }
+                                    None
+                                }
+                                None => parse_opencode_line(
+                                    &l,
+                                    &mut last_message,
+                                    &mut opencode_step_text,
+                                ),
+                            },
                         };
                         if let Some(ev) = ev {
                             send_noting_terminal(on_event, &mut terminal, ev);
                         }
                     }
                     Ok(None) => break, // EOF: process closed stdout
-                    Err(_) => break,
+                    Err(_) => {
+                        read_failed = true;
+                        break;
+                    }
                 }
             }
         }
@@ -4541,12 +5916,29 @@ async fn stream_agent(
             on_event,
             &mut terminal,
             ReviewEvent::Error {
-                message: timeout_message(noun, timeout, timeout_hint),
+                message: opencode2_timeout_message(
+                    timeout_message(noun, timeout, timeout_hint),
+                    opencode2.as_ref().map(|stream| &stream.parser),
+                ),
                 partial_text,
                 timed_out: true,
             },
         );
         return Ok(terminal);
+    }
+    // An opencode 2 run concludes only here, at EOF, from its exit code.
+    if let Some(stream) = opencode2 {
+        let code = opencode2_exit_code(
+            forced,
+            child
+                .try_wait()
+                .ok()
+                .flatten()
+                .and_then(|status| status.code()),
+        );
+        if let Some(ev) = opencode2_conclusion(stream.parser, read_failed, code, &stderr_text) {
+            send_noting_terminal(on_event, &mut terminal, ev);
+        }
     }
     if terminal.is_none() {
         // No terminal result event — surface stderr. Covers auth/quota
@@ -4610,6 +6002,29 @@ pub async fn agent_review(
             kind.label()
         ))
     })?;
+    if kind == AgentKind::Opencode {
+        if let (crate::opencode2::Cli::V2(version), identity) = opencode_cli(&binary).await? {
+            return Box::pin(opencode2_review(
+                app,
+                cancel.notify.clone(),
+                &binary,
+                version,
+                identity,
+                model,
+                effort,
+                system_prompt,
+                user_prompt,
+                repo_path,
+                repo_aware,
+                mcp_self,
+                timeout_secs,
+                timeout_configurable,
+                review_id,
+                on_event,
+            ))
+            .await;
+        }
+    }
 
     // Per-review MCP config exposing EXACTLY one server — GitDesktop itself,
     // read-only against `repo_path`. Written under `<app_data>/mcp` keyed by
@@ -4726,6 +6141,7 @@ pub async fn agent_review(
         true,
         &extra_env,
         &on_event,
+        None,
     )
     .await;
     // Remove the generated config on EVERY path, mirroring the session lifecycle.
@@ -4795,7 +6211,8 @@ pub async fn agent_session(
     isolation: Option<String>,
     // The CLI's native resume id captured from turn 1 (Codex thread / opencode
     // sessionID), so a *host* session resumes the right conversation; None on turn
-    // 1 / Claude / Copilot / container.
+    // 1 / Claude / Copilot / container. For opencode an opaque token, read only by
+    // `parse_native_ref` and `opencode1_must_restart`.
     native_session_id: Option<String>,
     // The session's opted-in MCP servers (resolved from the settings registry by
     // the frontend). None/empty = MCP stays off. Honored for host Claude/Copilot/
@@ -4845,6 +6262,59 @@ pub async fn agent_session(
     let mcp_tools = crate::mcp::tool_allow_patterns(&mcp_specs);
     // opencode's read-only pin admits each opted-in server's `<name>_*` tools.
     let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect();
+    // A host opencode 2 turn leaves here for its own path. A 1.x binary asked to resume
+    // a conversation opencode 2 created or re-keyed starts a new one, with a note.
+    let opencode_v1_restart = if kind == AgentKind::Opencode && !container {
+        let binary = resolve(kind, bin_path.as_deref()).await.ok_or_else(|| {
+            AppError::Command(format!(
+                "{} CLI not found. Install it or set its path in Settings.",
+                kind.label()
+            ))
+        })?;
+        match opencode_cli(&binary).await? {
+            (crate::opencode2::Cli::V2(version), identity) => {
+                return Box::pin(opencode2_host_session(
+                    app,
+                    cancel.notify.clone(),
+                    &binary,
+                    version,
+                    identity,
+                    model,
+                    effort,
+                    system_prompt,
+                    user_prompt,
+                    worktree_path,
+                    session_id,
+                    resume,
+                    read_only,
+                    web,
+                    native_session_id,
+                    &mcp_specs,
+                    on_event,
+                ))
+                .await;
+            }
+            (crate::opencode2::Cli::V1(_), _) => {
+                opencode1_must_restart(resume, native_session_id.as_deref())
+            }
+        }
+    } else {
+        false
+    };
+    if opencode_v1_restart {
+        EventSink::send(
+            &on_event,
+            ReviewEvent::Notice {
+                code: NOTICE_SESSION_RESET,
+                text: NOTICE_RESET_V1.to_string(),
+            },
+        );
+    }
+    let (resume, native_session_id) = if opencode_v1_restart {
+        (false, None)
+    } else {
+        (resume, native_session_id)
+    };
     // Per-CLI MCP config plumbing (`mcp_config_path` holds whatever this CLI needs):
     //  - Claude: JSON via `--mcp-config` (strict) + a `mcp__<server>` allowlist;
     //    host = a host path, container = the mounted `/home/node/.claude/mcp.json`.
@@ -5095,6 +6565,31 @@ pub async fn agent_session(
                 "worktree path must not contain '..'".to_string(),
             ));
         }
+        // A container opencode turn always leaves here: the image gate admits only an
+        // image labelled for opencode 2, so the opencode arms further down this branch are
+        // never reached.
+        if kind == AgentKind::Opencode {
+            return Box::pin(opencode2_container_session(
+                app,
+                cancel.notify.clone(),
+                runtime,
+                runtime_name,
+                bin_path,
+                model,
+                effort,
+                &system_prompt,
+                stdin_text,
+                worktree_path,
+                session_id,
+                resume,
+                read_only,
+                web,
+                native_session_id,
+                &mcp_specs,
+                on_event,
+            ))
+            .await;
+        }
         let home = crate::agent_sandbox::seed_session_home(&app, &session_id, agent_name)?;
         // Write the opted-in MCP servers into the mounted home — the seeded home is
         // clean, so this file is the ONLY MCP source (secrets resolved into the file,
@@ -5170,6 +6665,7 @@ pub async fn agent_session(
             false,
             &extra_env,
             &on_event,
+            None,
         )
         .await;
     }
@@ -5214,8 +6710,619 @@ pub async fn agent_session(
         false,
         &host_extra_env,
         &on_event,
+        None,
     )
     .await
+}
+
+/// An opencode 2 review or generation run, entered from `agent_review`'s dispatch. It
+/// runs only under its lock, and its generated MCP file is removed on every path out,
+/// a refusal and a cancel included.
+#[allow(clippy::too_many_arguments)]
+async fn opencode2_review(
+    app: tauri::AppHandle,
+    cancel: Arc<Notify>,
+    binary: &Path,
+    version: crate::opencode2::Version,
+    identity: Option<BinaryIdentity>,
+    model: String,
+    effort: String,
+    system_prompt: String,
+    user_prompt: String,
+    repo_path: String,
+    repo_aware: bool,
+    mcp_self: bool,
+    timeout_secs: Option<u64>,
+    timeout_configurable: Option<bool>,
+    review_id: String,
+    on_event: Channel<ReviewEvent>,
+) -> AppResult<Option<ReviewEvent>> {
+    let self_specs = if mcp_self {
+        vec![crate::mcp::self_server_spec(&repo_path)?]
+    } else {
+        Vec::new()
+    };
+    let mcp_config_path = crate::mcp::write_opencode2_config(&app, &review_id, &self_specs)?
+        .map(|path| path.to_string_lossy().into_owned());
+    let result = async {
+        let servers: Vec<&str> = self_specs.iter().map(|s| s.name.as_str()).collect();
+        let inherited_content = opencode2_inherited_content(mcp_config_path.as_deref());
+        let diff_only_proven = identity.as_ref().is_some_and(|id| {
+            opencode_facts()
+                .lock()
+                .is_ok_and(|facts| facts.diff_only_proven.contains(id))
+        });
+        let inputs = Opencode2Inputs {
+            turn: Opencode2Turn::Review {
+                version,
+                pin: opencode2_review_pin(repo_aware),
+            },
+            servers: &servers,
+            config_path: mcp_config_path.as_deref(),
+            cwd: &repo_path,
+            model: &model,
+            inherited_content: inherited_content.as_deref(),
+            case: if cfg!(windows) {
+                crate::opencode2::MatchCase::Insensitive
+            } else {
+                crate::opencode2::MatchCase::Sensitive
+            },
+            diff_only_proven,
+        };
+        let notify: &Notify = &cancel;
+        let variant = || {
+            opencode2_variant(
+                Some((binary, identity.as_ref())),
+                &model,
+                &effort,
+                Some(notify),
+            )
+        };
+        let plan = opencode2_compose(&inputs, variant, |plan: SpawnPlan| async move {
+            let captured = capture_tree(CaptureRequest {
+                program: binary,
+                args: plan.args,
+                cwd: Some(plan.cwd.as_str()),
+                env: plan.env,
+                stdin: None,
+                timeout: OPENCODE2_PROBE_TIMEOUT,
+                cancel: Some(notify),
+            })
+            .await;
+            opencode2_probe_answer(captured, OPENCODE2_PROBE_TIMEOUT)
+        })
+        .await
+        .map_err(|refusal| AppError::Command(refusal.message()))?;
+        let TurnPlan::Run {
+            run,
+            lock,
+            read_back,
+        } = plan
+        else {
+            return Ok(None);
+        };
+        let diff_only = matches!(
+            inputs.turn,
+            Opencode2Turn::Review {
+                pin: crate::opencode2::Pin::DiffOnly,
+                ..
+            }
+        );
+        if read_back && diff_only {
+            if let (Some(id), Ok(mut facts)) = (identity, opencode_facts().lock()) {
+                facts.diff_only_proven.insert(id);
+            }
+        }
+        if opencode2_cancel_fired(&cancel) {
+            return Ok(None);
+        }
+        stream_agent(
+            cancel.clone(),
+            AgentKind::Opencode,
+            binary,
+            run.args,
+            format!("{system_prompt}\n\n{user_prompt}"),
+            &run.cwd,
+            review_timeout(repo_aware || mcp_self, timeout_secs),
+            "review",
+            timeout_configurable.unwrap_or(false),
+            None,
+            true,
+            &run.env,
+            &on_event,
+            Some(Opencode2Stream {
+                parser: crate::opencode2::StreamParser::new(lock.as_ref()),
+                native: None,
+            }),
+        )
+        .await
+    }
+    .await;
+    if mcp_config_path.is_some() {
+        crate::mcp::cleanup_host_config(&app, &review_id);
+    }
+    result
+}
+
+/// One host turn of an opencode 2 session, entered from `agent_session`'s host dispatch.
+/// A write turn names no agent; a Plan or Research turn runs only under its lock.
+#[allow(clippy::too_many_arguments)]
+async fn opencode2_host_session(
+    app: tauri::AppHandle,
+    cancel: Arc<Notify>,
+    binary: &Path,
+    // A session's argv takes no version.
+    _version: crate::opencode2::Version,
+    identity: Option<BinaryIdentity>,
+    model: String,
+    effort: String,
+    system_prompt: String,
+    user_prompt: String,
+    worktree_path: String,
+    session_id: String,
+    resume: bool,
+    read_only: bool,
+    web: bool,
+    native_session_id: Option<String>,
+    mcp_specs: &[crate::mcp::McpServerSpec],
+    on_event: Channel<ReviewEvent>,
+) -> AppResult<Option<ReviewEvent>> {
+    let pin = opencode2_session_pin(read_only, web);
+    let turn = if pin.is_some() {
+        TurnKind::Pinned
+    } else {
+        TurnKind::Write
+    };
+    let stored = parse_native_ref(native_session_id.as_deref());
+    let resume_plan = opencode2_resume_plan(resume, &stored, turn);
+    let mcp_config_path = crate::mcp::write_opencode2_config(&app, &session_id, mcp_specs)?
+        .map(|path| path.to_string_lossy().into_owned());
+    // A new conversation has no context yet.
+    let stdin_text = if resume_plan.resumed {
+        user_prompt
+    } else {
+        format!("{system_prompt}\n\n{user_prompt}")
+    };
+    let servers: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect();
+    let inherited_content = opencode2_inherited_content(mcp_config_path.as_deref());
+    let inputs = Opencode2Inputs {
+        turn: Opencode2Turn::Session {
+            pin,
+            session_id: resume_plan
+                .resumed
+                .then_some(resume_plan.session_id.as_str()),
+        },
+        servers: &servers,
+        config_path: mcp_config_path.as_deref(),
+        cwd: &worktree_path,
+        model: &model,
+        inherited_content: inherited_content.as_deref(),
+        case: if cfg!(windows) {
+            crate::opencode2::MatchCase::Insensitive
+        } else {
+            crate::opencode2::MatchCase::Sensitive
+        },
+        diff_only_proven: false,
+    };
+    let notify: &Notify = &cancel;
+    let variant = || {
+        opencode2_variant(
+            Some((binary, identity.as_ref())),
+            &model,
+            &effort,
+            Some(notify),
+        )
+    };
+    let plan = opencode2_compose(&inputs, variant, |plan: SpawnPlan| async move {
+        let captured = capture_tree(CaptureRequest {
+            program: binary,
+            args: plan.args,
+            cwd: Some(plan.cwd.as_str()),
+            env: plan.env,
+            stdin: None,
+            timeout: OPENCODE2_PROBE_TIMEOUT,
+            cancel: Some(notify),
+        })
+        .await;
+        opencode2_probe_answer(captured, OPENCODE2_PROBE_TIMEOUT)
+    })
+    .await
+    .map_err(|refusal| AppError::Command(refusal.message()))?;
+    let TurnPlan::Run { run, lock, .. } = plan else {
+        return Ok(None);
+    };
+    let tag = NativeTag {
+        kind: turn,
+        resumed: resume_plan.resumed.then(|| {
+            let given = native_session_id.as_deref().unwrap_or_default().trim();
+            (resume_plan.session_id.clone(), given.to_string())
+        }),
+        rekey: resume_plan.resumed && matches!(stored, NativeRef::V1 { .. }),
+    };
+    if opencode2_cancel_fired(&cancel) {
+        return Ok(None);
+    }
+    // Only a turn about to spawn tells of the reset: a refused or cancelled one changed
+    // nothing.
+    if resume_plan.reset {
+        EventSink::send(
+            &on_event,
+            ReviewEvent::Notice {
+                code: NOTICE_SESSION_RESET,
+                text: NOTICE_RESET_GENERIC.to_string(),
+            },
+        );
+    }
+    stream_agent(
+        cancel.clone(),
+        AgentKind::Opencode,
+        binary,
+        run.args,
+        stdin_text,
+        &run.cwd,
+        SESSION_TIMEOUT,
+        "session",
+        false,
+        None,
+        false,
+        &run.env,
+        &on_event,
+        Some(Opencode2Stream {
+            parser: crate::opencode2::StreamParser::new(lock.as_ref()),
+            native: Some(tag),
+        }),
+    )
+    .await
+}
+
+/// One container turn of an opencode session, entered from `agent_session`'s container
+/// dispatch. Only an image labelled for opencode 2 passes its gate; the gate reads the
+/// base image's label, so a repository's derived image (`.gitdesktop/agent.Dockerfile`)
+/// can still replace the opencode binary after it passed. A home opencode has never run in
+/// first receives the host's opencode 2 sign-ins, one attempt per home. A Plan or
+/// Research turn is read back in its own probe container, with the run's mounts, env and
+/// working directory, and the lock document reaches both containers by name.
+/// `stdin_text` is the 1.x arm's prompt, the system prompt already prepended unless the
+/// turn asked to resume.
+#[allow(clippy::too_many_arguments)]
+async fn opencode2_container_session(
+    app: tauri::AppHandle,
+    cancel: Arc<Notify>,
+    runtime: PathBuf,
+    runtime_name: String,
+    bin_path: Option<String>,
+    model: String,
+    effort: String,
+    system_prompt: &str,
+    stdin_text: String,
+    worktree_path: String,
+    session_id: String,
+    resume: bool,
+    read_only: bool,
+    web: bool,
+    native_session_id: Option<String>,
+    mcp_specs: &[crate::mcp::McpServerSpec],
+    on_event: Channel<ReviewEvent>,
+) -> AppResult<Option<ReviewEvent>> {
+    match crate::agent_sandbox::image_opencode_state(&runtime).await {
+        crate::agent_sandbox::OpencodeImage::Current => {}
+        crate::agent_sandbox::OpencodeImage::Outdated => {
+            return Err(AppError::Command(
+                "The agent image has an older opencode. Open Settings → AI and rebuild the image, then try again.".into(),
+            ));
+        }
+        crate::agent_sandbox::OpencodeImage::Unreadable => {
+            return Err(AppError::Command(
+                "Couldn't read the agent image's details. Try again; if it keeps failing, rebuild the image in Settings → AI.".into(),
+            ));
+        }
+    }
+    if !mcp_specs.is_empty() {
+        crate::mcp::validate_specs(mcp_specs)?;
+    }
+    let pin = opencode2_session_pin(read_only, web);
+    let turn = if pin.is_some() {
+        TurnKind::Pinned
+    } else {
+        TurnKind::Write
+    };
+    let stored = parse_native_ref(native_session_id.as_deref());
+    let resume_plan = opencode2_resume_plan(resume, &stored, turn);
+    // A new conversation has no context yet; the 1.x arm left it out of a turn that
+    // asked to resume.
+    let stdin_text = if resume && !resume_plan.resumed {
+        format!("{system_prompt}\n\n{stdin_text}")
+    } else {
+        stdin_text
+    };
+    let home = crate::agent_sandbox::prepare_session_home(&app, &session_id, "opencode")?;
+    // Read before any container command of the turn: the sign-ins are copied once per
+    // home, on the turn that finds no opencode database in it.
+    let fresh = crate::agent_sandbox::opencode_home_is_fresh(&home);
+    // Only an opencode 2 host can export its sign-ins, and only its model catalog gives
+    // the turn's effort a variant. Any other host gets the copied auth.json, which the
+    // image's opencode imports when it creates its database.
+    let host = resolve(AgentKind::Opencode, bin_path.as_deref()).await;
+    let verdict = match host.as_deref() {
+        Some(host) => Some(opencode_verdict(host).await),
+        None => None,
+    };
+    let route = opencode2_sign_in_route(verdict.as_ref().map(|(verdict, _)| verdict), fresh);
+    let export_host = match (route, host, verdict) {
+        (SignInRoute::Export, Some(host), Some((_, identity))) => Some((host, identity)),
+        _ => None,
+    };
+    if export_host.is_none() {
+        if let SignInRoute::Copy(Some(text)) = route {
+            EventSink::send(
+                &on_event,
+                ReviewEvent::Notice {
+                    code: NOTICE_SIGN_INS_NOT_COPIED,
+                    text: text.to_string(),
+                },
+            );
+        }
+        crate::agent_sandbox::seed_session_home(&app, &session_id, "opencode")?;
+    }
+    // opencode reads a leftover file too, so a turn with no servers removes it.
+    if let Some((filename, _)) = crate::agent_sandbox::container_mcp_config("opencode") {
+        let config_file = home.join(filename);
+        if mcp_specs.is_empty() {
+            let _ = std::fs::remove_file(&config_file);
+        } else {
+            std::fs::write(&config_file, crate::mcp::build_opencode2_config(mcp_specs)?)?;
+        }
+    }
+    let image = crate::agent_sandbox::resolve_session_image(&runtime, &worktree_path).await;
+    let skills = crate::agent_sandbox::global_skills_dir();
+    let npm_cache = crate::agent_sandbox::npm_cache_dir(&app);
+    let name = crate::agent_sandbox::container_name(&session_id);
+    let probe_name = crate::agent_sandbox::probe_container_name(&session_id);
+    let notify: &Notify = &cancel;
+    if let Some((host, _)) = export_host.as_ref().filter(|_| fresh) {
+        // A sign-in file an earlier copy-route turn left would be imported first and
+        // stay the active sign-in.
+        crate::agent_sandbox::remove_seeded_creds(&home, "opencode");
+        let copied = opencode2_copy_sign_ins(
+            host,
+            &runtime,
+            crate::agent_sandbox::auth_import_run_args(
+                &runtime_name,
+                &worktree_path,
+                &home,
+                &session_id,
+                &image,
+            ),
+            &crate::agent_sandbox::auth_import_container_name(&session_id),
+            &worktree_path,
+            notify,
+        )
+        .await;
+        let (notice, go_on) = opencode2_after_copy(copied, || {
+            crate::agent_sandbox::opencode_home_is_fresh(&home)
+        });
+        if let Some((code, text)) = notice {
+            EventSink::send(&on_event, ReviewEvent::Notice { code, text });
+        }
+        if !go_on {
+            return Ok(None);
+        }
+    }
+    // The mounted path of the file written above.
+    let config_path = crate::agent_sandbox::container_mcp_config("opencode")
+        .map(|(_, path)| path)
+        .filter(|_| !mcp_specs.is_empty());
+    let servers: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect();
+    let inputs = Opencode2Inputs {
+        turn: Opencode2Turn::Session {
+            pin,
+            session_id: resume_plan
+                .resumed
+                .then_some(resume_plan.session_id.as_str()),
+        },
+        servers: &servers,
+        config_path: config_path.as_deref(),
+        cwd: &worktree_path,
+        model: &model,
+        // The container's opencode never sees the host's variable: it is forwarded by
+        // name, carrying GitDesktop's document.
+        inherited_content: None,
+        case: crate::opencode2::MatchCase::Sensitive,
+        diff_only_proven: false,
+    };
+    let runtime_bin: &Path = &runtime;
+    let runtime_kind: &str = &runtime_name;
+    let worktree: &str = &worktree_path;
+    let home_dir: &Path = &home;
+    let image_tag: &str = &image;
+    let probe_container: &str = &probe_name;
+    let skills_src = skills.as_deref().and_then(Path::to_str);
+    let npm_cache_src = npm_cache.as_deref().and_then(Path::to_str);
+    let variant = || {
+        opencode2_variant(
+            export_host
+                .as_ref()
+                .map(|(host, identity)| (host.as_path(), identity.as_ref())),
+            &model,
+            &effort,
+            Some(notify),
+        )
+    };
+    let plan = opencode2_compose(&inputs, variant, |plan: SpawnPlan| async move {
+        // Killing the runtime client does not stop its container, and every attempt
+        // reuses the name.
+        let _ = run_capture(runtime_bin, &["rm", "-f", probe_container], DETECT_TIMEOUT).await;
+        let (container_env, client_env) = split_container_env(plan.env);
+        let probe_args = crate::agent_sandbox::build_run_args_full(
+            runtime_kind,
+            "opencode",
+            worktree,
+            home_dir,
+            probe_container,
+            image_tag,
+            skills_src,
+            npm_cache_src,
+            &container_env,
+            &[crate::opencode2::CONTENT_ENV],
+            &plan.args,
+        );
+        let captured = capture_tree(CaptureRequest {
+            program: runtime_bin,
+            args: probe_args,
+            cwd: Some(plan.cwd.as_str()),
+            env: client_env,
+            stdin: None,
+            timeout: OPENCODE2_CONTAINER_PROBE_TIMEOUT,
+            cancel: Some(notify),
+        })
+        .await;
+        if matches!(captured, Ok(Captured::TimedOut | Captured::Cancelled)) {
+            let _ = run_capture(runtime_bin, &["rm", "-f", probe_container], DETECT_TIMEOUT).await;
+        }
+        opencode2_probe_answer(captured, OPENCODE2_CONTAINER_PROBE_TIMEOUT)
+    })
+    .await
+    .map_err(|refusal| AppError::Command(refusal.message()))?;
+    let TurnPlan::Run { run, lock, .. } = plan else {
+        return Ok(None);
+    };
+    let tag = NativeTag {
+        kind: turn,
+        resumed: resume_plan.resumed.then(|| {
+            let given = native_session_id.as_deref().unwrap_or_default().trim();
+            (resume_plan.session_id.clone(), given.to_string())
+        }),
+        rekey: resume_plan.resumed && matches!(stored, NativeRef::V1 { .. }),
+    };
+    let (container_env, client_env) = split_container_env(run.env);
+    let env_by_name: &[&'static str] = if lock.is_some() {
+        &[crate::opencode2::CONTENT_ENV]
+    } else {
+        &[]
+    };
+    let run_args = crate::agent_sandbox::build_run_args_full(
+        &runtime_name,
+        "opencode",
+        &worktree_path,
+        &home,
+        &name,
+        &image,
+        skills_src,
+        npm_cache_src,
+        &container_env,
+        env_by_name,
+        &run.args,
+    );
+    if opencode2_cancel_fired(&cancel) {
+        return Ok(None);
+    }
+    // Only a turn about to spawn tells of the reset: a refused or cancelled one changed
+    // nothing.
+    if resume_plan.reset {
+        EventSink::send(
+            &on_event,
+            ReviewEvent::Notice {
+                code: NOTICE_SESSION_RESET,
+                text: NOTICE_RESET_GENERIC.to_string(),
+            },
+        );
+    }
+    stream_agent(
+        cancel.clone(),
+        AgentKind::Opencode,
+        &runtime,
+        run_args,
+        stdin_text,
+        &run.cwd,
+        SESSION_TIMEOUT,
+        "session",
+        false,
+        Some((runtime.clone(), name)),
+        false,
+        &client_env,
+        &on_event,
+        Some(Opencode2Stream {
+            parser: crate::opencode2::StreamParser::new(lock.as_ref()),
+            native: Some(tag),
+        }),
+    )
+    .await
+}
+
+/// Copies the host's opencode sign-ins into a fresh container home: the host's export is
+/// piped on stdin into a one-shot import container. The export holds secrets, so it
+/// stays in memory, moved from the export into the import's stdin, and never reaches a
+/// log, a file, argv, an env var, a notice or an error. Both commands' stderr is dropped
+/// unread, and of the import only its exit code is read. Returns the notice for the
+/// turn's timeline, or `None` for a cancelled turn.
+async fn opencode2_copy_sign_ins(
+    host: &Path,
+    runtime: &Path,
+    import_args: Vec<String>,
+    import_container: &str,
+    worktree_path: &str,
+    cancel: &Notify,
+) -> Option<(&'static str, String)> {
+    let not_copied = || Some((NOTICE_SIGN_INS_NOT_COPIED, SIGN_INS_NOT_COPIED.to_string()));
+    // No cwd and no project config: the process holding the secrets loads no
+    // repository's plugins.
+    let export = capture_tree(CaptureRequest {
+        program: host,
+        args: OPENCODE2_AUTH_EXPORT_ARGS
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect(),
+        cwd: None,
+        env: crate::opencode2::project_disable_env()
+            .into_iter()
+            .chain([("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string())])
+            .collect(),
+        stdin: None,
+        timeout: OPENCODE2_AUTH_EXPORT_TIMEOUT,
+        cancel: Some(cancel),
+    })
+    .await;
+    let export_stdout = match export {
+        Ok(Captured::Exited {
+            code: 0, stdout, ..
+        }) => stdout,
+        Ok(Captured::Cancelled) => return None,
+        _ => return not_copied(),
+    };
+    match crate::agent_sandbox::credential_export_count(&export_stdout) {
+        Ok(0) => return Some((NOTICE_NO_SIGN_INS, NO_SIGN_INS.to_string())),
+        Ok(_) => {}
+        // The error is fixed text that never quotes the export.
+        Err(error) => {
+            return Some((
+                NOTICE_SIGN_INS_NOT_COPIED,
+                format!("{error} {SIGN_INS_RETRY_HINT}"),
+            ))
+        }
+    }
+    // A container left by an earlier, killed attempt would fail the import on its name.
+    let _ = run_capture(runtime, &["rm", "-f", import_container], DETECT_TIMEOUT).await;
+    let import = capture_tree(CaptureRequest {
+        program: runtime,
+        args: import_args,
+        cwd: Some(worktree_path),
+        env: Vec::new(),
+        stdin: Some(export_stdout),
+        timeout: OPENCODE2_AUTH_IMPORT_TIMEOUT,
+        cancel: Some(cancel),
+    })
+    .await;
+    if matches!(import, Ok(Captured::TimedOut | Captured::Cancelled)) {
+        // Killing the runtime client does not stop its container.
+        let _ = run_capture(runtime, &["rm", "-f", import_container], DETECT_TIMEOUT).await;
+    }
+    match import {
+        Ok(Captured::Exited { code: 0, .. }) => {
+            Some((NOTICE_SIGN_INS_COPIED, SIGN_INS_COPIED.to_string()))
+        }
+        Ok(Captured::Cancelled) => None,
+        _ => not_copied(),
+    }
 }
 
 #[cfg(test)]
@@ -7410,6 +9517,2177 @@ opencode/x-preview-f-free
         .expect("NativeSession serializes");
         assert_eq!(native["kind"], "nativeSession");
         assert_eq!(native["id"], "ses_1");
+        let notice = serde_json::to_value(ReviewEvent::Notice {
+            code: NOTICE_SESSION_RESET,
+            text: "note".to_string(),
+        })
+        .expect("Notice serializes");
+        let notice_obj = notice.as_object().expect("Notice is a JSON object");
+        let mut notice_keys: Vec<&str> = notice_obj.keys().map(String::as_str).collect();
+        notice_keys.sort_unstable();
+        assert_eq!(notice_keys, ["code", "kind", "text"]);
+        assert_eq!(notice_obj["kind"], "notice");
+        assert_eq!(notice_obj["code"], "nativeSessionReset");
+        assert_eq!(notice_obj["text"], "note");
+    }
+
+    #[test]
+    fn agent_info_wire_shape_carries_unsupported() {
+        let info = |unsupported: Option<String>| {
+            serde_json::to_value(AgentInfo {
+                found: true,
+                path: Some("/bin/opencode".to_string()),
+                version: Some("opencode v3.0.0".to_string()),
+                authed: AuthStatus::Unknown,
+                unsupported,
+            })
+            .expect("AgentInfo serializes")
+        };
+        let absent = info(None);
+        let obj = absent.as_object().expect("AgentInfo is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["authed", "found", "path", "unsupported", "version"]);
+        assert_eq!(obj["unsupported"], serde_json::Value::Null);
+        assert_eq!(info(Some("refused".to_string()))["unsupported"], "refused");
+    }
+
+    /// Both maps over every verdict row: a run is refused with the version text, a detect
+    /// reports only a verdict about the version.
+    #[test]
+    fn opencode_verdict_maps_split_runs_from_detection() {
+        let supported = |text: &str| crate::opencode2::classify_version(text).expect(text);
+        let refused = |text: &str| match crate::opencode2::classify_version(text) {
+            Err(refusal) => refusal,
+            Ok(cli) => panic!("{text} classified as {cli:?}"),
+        };
+        let v1 = supported("1.19.6");
+        let v2 = supported("opencode v2.3.2");
+        assert!(matches!(v1, crate::opencode2::Cli::V1(_)));
+        assert!(matches!(v2, crate::opencode2::Cli::V2(_)));
+        for cli in [v1, v2] {
+            let verdict = OpencodeVerdict::Supported(cli);
+            assert_eq!(opencode_verdict_cli(verdict.clone()).expect("runs"), cli);
+            assert_eq!(opencode_verdict_unsupported(&verdict), None);
+        }
+        assert!(matches!(
+            refused("banana"),
+            crate::opencode2::VersionRefusal::Unparseable { .. }
+        ));
+        assert!(matches!(
+            refused("opencode v2.1.9"),
+            crate::opencode2::VersionRefusal::TooOld { .. }
+        ));
+        assert!(matches!(
+            refused("opencode v3.0.0"),
+            crate::opencode2::VersionRefusal::TooNew { .. }
+        ));
+        assert!(matches!(
+            refused("opencode v0.0.0-beta-12"),
+            crate::opencode2::VersionRefusal::Preview { .. }
+        ));
+        for text in [
+            "banana",
+            "opencode v2.1.9",
+            "opencode v3.0.0",
+            "opencode v0.0.0-beta-12",
+        ] {
+            let refusal = refused(text);
+            let verdict = OpencodeVerdict::Refused(refusal.clone());
+            match opencode_verdict_cli(verdict.clone()) {
+                Err(AppError::Command(message)) => {
+                    assert_eq!(message, refusal.message());
+                    assert!(message.contains(text), "{message}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+            assert_eq!(
+                opencode_verdict_unsupported(&verdict),
+                Some(refusal.standing_message())
+            );
+        }
+        // A run is told to try again; a standing detect state is not.
+        let old = OpencodeVerdict::Refused(refused("opencode v2.1.9"));
+        let Err(AppError::Command(run)) = opencode_verdict_cli(old.clone()) else {
+            panic!("refused");
+        };
+        assert!(run.ends_with(", then try again."), "{run}");
+        let standing = opencode_verdict_unsupported(&old).expect("unsupported");
+        assert!(!standing.contains("try again"), "{standing}");
+        assert!(
+            standing.ends_with("(run \"opencode upgrade\")."),
+            "{standing}"
+        );
+        let failed = OpencodeVerdict::ProbeFailed("timed out after 20s".to_string());
+        match opencode_verdict_cli(failed.clone()) {
+            Err(AppError::Command(message)) => assert_eq!(
+                message,
+                "GitDesktop could not check which opencode this is (\"opencode --version\" timed out after 20s). Try again, or pick another binary in Settings."
+            ),
+            other => panic!("probe failure: {other:?}"),
+        }
+        assert_eq!(opencode_verdict_unsupported(&failed), None);
+    }
+
+    /// The effort control's map: a version refusal is a standing line under the control,
+    /// while a probe that could not run keeps the run paths' sentence.
+    #[test]
+    fn opencode_verdict_effort_reports_a_standing_refusal() {
+        for text in [
+            "opencode v2.1.9",
+            "opencode v3.0.0",
+            "opencode v0.0.0-beta-12",
+            "banana",
+        ] {
+            let Err(refusal) = crate::opencode2::classify_version(text) else {
+                panic!("{text} was not refused");
+            };
+            match opencode_verdict_effort(OpencodeVerdict::Refused(refusal.clone())) {
+                Err(AppError::Command(line)) => {
+                    assert_eq!(line, refusal.standing_message(), "{text}");
+                    assert!(!line.ends_with(", then try again."), "{line}");
+                }
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        let failed = OpencodeVerdict::ProbeFailed("timed out after 20s".to_string());
+        match (
+            opencode_verdict_effort(failed.clone()),
+            opencode_verdict_cli(failed),
+        ) {
+            (Err(AppError::Command(effort)), Err(AppError::Command(run))) => {
+                assert_eq!(effort, run)
+            }
+            other => panic!("probe failure: {other:?}"),
+        }
+        let v2 = crate::opencode2::classify_version("opencode v2.3.2").expect("2.x");
+        let supported = opencode_verdict_effort(OpencodeVerdict::Supported(v2));
+        assert_eq!(supported.expect("supported"), v2);
+    }
+
+    /// One `opencode_verdict_with` call at `now` over a counting probe that answers
+    /// `answer`.
+    async fn verdict_probing(
+        bin: &Path,
+        facts: &Mutex<OpencodeFacts>,
+        now: Instant,
+        probes: &std::sync::atomic::AtomicUsize,
+        answer: VersionProbe,
+    ) -> OpencodeVerdict {
+        opencode_verdict_with(bin, facts, now, || {
+            probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { answer }
+        })
+        .await
+        .0
+    }
+
+    /// A supported verdict is remembered per binary identity for `OPENCODE_VERDICT_TTL`
+    /// and asked again once it lapses; a refusal, a failed probe and an unreadable
+    /// identity are asked again on every call.
+    #[tokio::test]
+    async fn opencode_verdict_is_remembered_per_binary_identity() {
+        let printed = |text: &str| VersionProbe::Printed(text.to_string());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("opencode");
+        let facts = Mutex::new(OpencodeFacts::default());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let count = || probes.load(std::sync::atomic::Ordering::SeqCst);
+        let start = Instant::now();
+        let lapsed = start + OPENCODE_VERDICT_TTL;
+
+        std::fs::write(&bin, b"1").unwrap();
+        let v1 = verdict_probing(&bin, &facts, start, &probes, printed("1.19.6")).await;
+        assert!(matches!(
+            v1,
+            OpencodeVerdict::Supported(crate::opencode2::Cli::V1(_))
+        ));
+        assert_eq!(count(), 1);
+        // Within the TTL the second ask never reaches the probe.
+        let within = lapsed - Duration::from_millis(1);
+        let again = verdict_probing(&bin, &facts, within, &probes, printed("banana")).await;
+        assert_eq!((again, count()), (v1, 1));
+        // Once it lapses the binary is asked again, and the new answer is remembered.
+        let v2 = verdict_probing(&bin, &facts, lapsed, &probes, printed("opencode v2.3.2")).await;
+        assert!(matches!(
+            v2,
+            OpencodeVerdict::Supported(crate::opencode2::Cli::V2(_))
+        ));
+        let again = verdict_probing(&bin, &facts, lapsed, &probes, printed("1.19.6")).await;
+        assert_eq!((again, count()), (v2, 2));
+
+        // Rewritten with another length: another binary, probed afresh.
+        std::fs::write(&bin, b"22").unwrap();
+        let other = verdict_probing(&bin, &facts, start, &probes, printed("1.19.6")).await;
+        assert!(matches!(other, OpencodeVerdict::Supported(_)));
+        assert_eq!(count(), 3);
+
+        // No refusal is remembered: the user told to upgrade is asked again next call.
+        std::fs::write(&bin, b"333").unwrap();
+        for text in [
+            "opencode v2.1.9",
+            "opencode v3.0.0",
+            "opencode v0.0.0-beta-12",
+            "banana",
+        ] {
+            for _ in 0..2 {
+                let before = count();
+                let verdict = verdict_probing(&bin, &facts, start, &probes, printed(text)).await;
+                assert!(matches!(verdict, OpencodeVerdict::Refused(_)), "{text}");
+                assert_eq!(count(), before + 1, "{text}");
+            }
+        }
+        assert_eq!(count(), 11);
+        for _ in 0..2 {
+            let failed = VersionProbe::Failed("exited with code 1".to_string());
+            let verdict = verdict_probing(&bin, &facts, start, &probes, failed).await;
+            assert_eq!(
+                verdict,
+                OpencodeVerdict::ProbeFailed("exited with code 1".to_string())
+            );
+        }
+        assert_eq!(count(), 13);
+
+        // No metadata, no identity: probed on every call, never remembered.
+        let missing = dir.path().join("absent");
+        for _ in 0..2 {
+            let (verdict, identity) =
+                opencode_verdict_with(&missing, &facts, start, || async { printed("1.19.6") })
+                    .await;
+            assert!(identity.is_none());
+            assert!(matches!(verdict, OpencodeVerdict::Supported(_)));
+        }
+        let remembered = facts.lock().unwrap().cli.len();
+        assert_eq!(remembered, 2, "the two supported binaries");
+
+        facts.lock().unwrap().clear();
+        assert!(facts.lock().unwrap().cli.is_empty());
+    }
+
+    /// A DiffOnly proof lives only as long as the answer it was made on: a re-probe
+    /// answering the same version keeps it; another version, a refusal or a failed probe
+    /// drops it.
+    #[tokio::test]
+    async fn opencode_verdict_change_drops_the_diff_only_proof() {
+        let printed = |text: &str| VersionProbe::Printed(text.to_string());
+        let dir = tempfile::tempdir().expect("temp dir");
+        let bin = dir.path().join("opencode");
+        std::fs::write(&bin, b"1").unwrap();
+        let id = binary_identity(&bin).expect("an identity");
+        let facts = Mutex::new(OpencodeFacts::default());
+        let probes = std::sync::atomic::AtomicUsize::new(0);
+        let proven = || facts.lock().unwrap().diff_only_proven.contains(&id);
+        let prove = || facts.lock().unwrap().diff_only_proven.insert(id.clone());
+
+        let mut now = Instant::now();
+        verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
+        prove();
+        now += OPENCODE_VERDICT_TTL;
+        verdict_probing(&bin, &facts, now, &probes, printed("opencode v2.3.2")).await;
+        assert!(proven(), "the same version keeps the proof");
+        for answer in [
+            printed("opencode v2.4.0"),
+            printed("opencode v2.1.9"),
+            VersionProbe::Failed("exited with code 1".to_string()),
+        ] {
+            prove();
+            now += OPENCODE_VERDICT_TTL;
+            let verdict = verdict_probing(&bin, &facts, now, &probes, answer).await;
+            assert!(!proven(), "{verdict:?} kept the proof");
+        }
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn opencode1_restarts_only_a_resumed_opencode2_token() {
+        for (resume, raw, restart) in [
+            (true, Some("oc2:w:ses_abc"), true),
+            (true, Some("  oc2:p:ses_abc "), true),
+            (true, Some("oc2:"), true),
+            (true, Some("ses_abc"), false),
+            (true, Some("   "), false),
+            (true, None, false),
+            (false, Some("oc2:w:ses_abc"), false),
+            (false, None, false),
+        ] {
+            assert_eq!(
+                opencode1_must_restart(resume, raw),
+                restart,
+                "{resume} {raw:?}"
+            );
+        }
+    }
+
+    // --- opencode 2 lock and reviews ------------------------------------------------
+
+    #[test]
+    fn opencode_facts_clear_forgets_every_member() {
+        let mut facts = OpencodeFacts::default();
+        let id = BinaryIdentity {
+            path: PathBuf::from("opencode"),
+            len: 1,
+            modified: None,
+        };
+        let cli = crate::opencode2::classify_version("opencode v2.3.2").expect("2.x");
+        facts.cli.insert(id.clone(), (cli, Instant::now()));
+        facts.diff_only_proven.insert(id.clone());
+        facts.catalog = Some((id, Instant::now(), Arc::default()));
+        facts.clear();
+        assert!(facts.cli.is_empty());
+        assert!(facts.diff_only_proven.is_empty());
+        assert!(facts.catalog.is_none());
+    }
+
+    /// opencode's own trailing denies, which a read-back lists after the lock's rules.
+    const TRAILING_DENIES: &[(&str, &str, &str)] =
+        &[("browser", "*", "deny"), ("skill", "browser", "deny")];
+
+    /// A `debug agents` answer listing the one agent `document` defines: its rules, then
+    /// `extra`.
+    fn readback_listing(document: &str, extra: &[(&str, &str, &str)]) -> String {
+        let doc: serde_json::Value = serde_json::from_str(document).expect("a lock document");
+        let (id, agent) = doc["agents"]
+            .as_object()
+            .and_then(|agents| agents.iter().next())
+            .expect("one agent");
+        let mut permissions = agent["permissions"].as_array().expect("its rules").clone();
+        for (action, resource, effect) in extra {
+            permissions.push(serde_json::json!({
+                "action": action, "resource": resource, "effect": effect
+            }));
+        }
+        serde_json::json!([{ "id": id, "permissions": permissions }]).to_string()
+    }
+
+    fn v2_version() -> crate::opencode2::Version {
+        match crate::opencode2::classify_version("opencode v2.3.2") {
+            Ok(crate::opencode2::Cli::V2(version)) => version,
+            other => panic!("not a 2.x verdict: {other:?}"),
+        }
+    }
+
+    type Answer = fn(&crate::opencode2::LockDocument) -> ProbeAnswer;
+
+    fn answer_listed(doc: &crate::opencode2::LockDocument) -> ProbeAnswer {
+        ProbeAnswer::Stdout(readback_listing(doc.json(), TRAILING_DENIES))
+    }
+
+    fn answer_absent(_: &crate::opencode2::LockDocument) -> ProbeAnswer {
+        ProbeAnswer::Stdout("[]".to_string())
+    }
+
+    fn answer_exit(_: &crate::opencode2::LockDocument) -> ProbeAnswer {
+        ProbeAnswer::Exit {
+            code: 1,
+            stderr_line: None,
+        }
+    }
+
+    fn answer_timed_out(_: &crate::opencode2::LockDocument) -> ProbeAnswer {
+        ProbeAnswer::TimedOut { secs: 30 }
+    }
+
+    fn answer_failed(_: &crate::opencode2::LockDocument) -> ProbeAnswer {
+        ProbeAnswer::Failed("no such file".to_string())
+    }
+
+    fn answer_cancelled(_: &crate::opencode2::LockDocument) -> ProbeAnswer {
+        ProbeAnswer::Cancelled
+    }
+
+    /// `opencode2_lock` over scripted answers, one per probe: its result and the probe
+    /// documents it was handed.
+    async fn lock_with(
+        pin: crate::opencode2::Pin,
+        inherited: Option<&str>,
+        proven: bool,
+        answers: &[Answer],
+    ) -> (
+        Result<LockOutcome, LockRefusal>,
+        Vec<crate::opencode2::LockDocument>,
+    ) {
+        let probed = std::cell::RefCell::new(Vec::new());
+        let result = opencode2_lock(
+            pin,
+            &["gitdesktop"],
+            inherited,
+            crate::opencode2::MatchCase::Sensitive,
+            proven,
+            |doc| {
+                let answer = answers[probed.borrow().len()](&doc);
+                probed.borrow_mut().push(doc);
+                async move { answer }
+            },
+        )
+        .await;
+        (result, probed.into_inner())
+    }
+
+    /// `Some(read_back)` for a lock, `None` for anything else.
+    fn locked(result: &Result<LockOutcome, LockRefusal>) -> Option<bool> {
+        match result {
+            Ok(LockOutcome::Locked { read_back, .. }) => Some(*read_back),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode2_lock_retries_a_returned_miss_once() {
+        let read_only = crate::opencode2::Pin::ReadOnly;
+        let diff_only = crate::opencode2::Pin::DiffOnly;
+        // A miss that came back is retried once, under a freshly minted probe.
+        for first in [answer_exit as Answer, answer_absent] {
+            let (result, probed) = lock_with(read_only, None, false, &[first, answer_listed]).await;
+            assert_eq!(locked(&result), Some(true));
+            assert_eq!(probed.len(), 2);
+            assert_ne!(probed[0].agent(), probed[1].agent(), "one id per probe");
+        }
+        // Two misses refuse with the second.
+        let (result, probed) = lock_with(diff_only, None, false, &[answer_exit, answer_exit]).await;
+        assert_eq!(
+            result.unwrap_err(),
+            LockRefusal::ProbeExit {
+                code: 1,
+                stderr_line: None
+            }
+        );
+        assert_eq!(probed.len(), 2);
+        let (result, _) = lock_with(read_only, None, false, &[answer_exit, answer_absent]).await;
+        assert_eq!(
+            result.unwrap_err(),
+            LockRefusal::Readback(crate::opencode2::ReadbackError::AgentAbsent)
+        );
+        // A timeout or a failed spawn refuses at once.
+        let (result, probed) = lock_with(read_only, None, false, &[answer_timed_out]).await;
+        assert_eq!(result.unwrap_err(), LockRefusal::ProbeTimedOut { secs: 30 });
+        assert_eq!(probed.len(), 1);
+        let (result, probed) = lock_with(read_only, None, false, &[answer_failed]).await;
+        assert_eq!(
+            result.unwrap_err(),
+            LockRefusal::ProbeFailed("no such file".to_string())
+        );
+        assert_eq!(probed.len(), 1);
+        // A cancel on either attempt ends the turn.
+        let cancels: [&[Answer]; 2] = [&[answer_cancelled], &[answer_exit, answer_cancelled]];
+        for answers in cancels {
+            let (result, probed) = lock_with(read_only, None, false, answers).await;
+            assert!(matches!(result, Ok(LockOutcome::Cancelled)));
+            assert_eq!(probed.len(), answers.len());
+        }
+        // Only a proven DiffOnly skips the read-back.
+        let (result, probed) = lock_with(diff_only, None, true, &[]).await;
+        assert_eq!(locked(&result), Some(false));
+        assert!(probed.is_empty());
+        for pin in [read_only, crate::opencode2::Pin::Research] {
+            let (result, probed) = lock_with(pin, None, true, &[answer_listed]).await;
+            assert_eq!(locked(&result), Some(true), "{pin:?}");
+            assert_eq!(probed.len(), 1, "{pin:?}");
+        }
+        // An inherited document refuses ReadOnly and Research before any probe.
+        for pin in [read_only, crate::opencode2::Pin::Research] {
+            let (result, probed) = lock_with(pin, Some("{}"), false, &[]).await;
+            assert_eq!(
+                result.unwrap_err(),
+                LockRefusal::Lock(crate::opencode2::LockError::InheritedContent),
+                "{pin:?}"
+            );
+            assert!(probed.is_empty(), "{pin:?}");
+        }
+        let (result, probed) = lock_with(diff_only, Some("{}"), false, &[answer_listed]).await;
+        assert_eq!(locked(&result), Some(true));
+        assert_eq!(probed.len(), 1);
+        let (result, _) = lock_with(read_only, Some(""), false, &[answer_listed]).await;
+        assert_eq!(locked(&result), Some(true), "an empty value is no document");
+    }
+
+    fn env_value<'p>(plan: &'p SpawnPlan, key: &str) -> Option<&'p str> {
+        plan.env
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// A plan's env with the lock document's value masked, so a probe and its run compare.
+    fn masked_env(plan: &SpawnPlan) -> Vec<(&'static str, String)> {
+        plan.env
+            .iter()
+            .map(|(name, value)| {
+                let shown = if *name == crate::opencode2::CONTENT_ENV {
+                    "<document>".to_string()
+                } else {
+                    value.clone()
+                };
+                (*name, shown)
+            })
+            .collect()
+    }
+
+    /// `opencode2_compose` over a fake read-back that gets the attempt number and the
+    /// document in the probe plan's env, sending no variant: the result and every plan
+    /// the probe was handed.
+    async fn compose_with(
+        inputs: &Opencode2Inputs<'_>,
+        answer: impl Fn(usize, &str) -> ProbeAnswer,
+    ) -> (Result<TurnPlan, LockRefusal>, Vec<SpawnPlan>) {
+        compose_picking(inputs, VariantPick::Send(None), answer).await
+    }
+
+    /// `compose_with` under a variant runner that answers `pick`.
+    async fn compose_picking(
+        inputs: &Opencode2Inputs<'_>,
+        pick: VariantPick,
+        answer: impl Fn(usize, &str) -> ProbeAnswer,
+    ) -> (Result<TurnPlan, LockRefusal>, Vec<SpawnPlan>) {
+        let plans = std::cell::RefCell::new(Vec::new());
+        let result = opencode2_compose(
+            inputs,
+            || async move { pick },
+            |plan: SpawnPlan| {
+                let document = env_value(&plan, crate::opencode2::CONTENT_ENV).unwrap_or_default();
+                let reply = answer(plans.borrow().len(), document);
+                plans.borrow_mut().push(plan);
+                async move { reply }
+            },
+        )
+        .await;
+        (result, plans.into_inner())
+    }
+
+    /// A review's inputs, its turn built as `opencode2_review` builds it.
+    fn review_inputs<'a>(
+        repo_aware: bool,
+        servers: &'a [&'a str],
+        config_path: Option<&'a str>,
+    ) -> Opencode2Inputs<'a> {
+        Opencode2Inputs {
+            turn: Opencode2Turn::Review {
+                version: v2_version(),
+                pin: opencode2_review_pin(repo_aware),
+            },
+            servers,
+            config_path,
+            cwd: "/repo",
+            model: "openai/gpt-5",
+            inherited_content: None,
+            case: crate::opencode2::MatchCase::Sensitive,
+            diff_only_proven: false,
+        }
+    }
+
+    /// A session turn's inputs, its turn built as `opencode2_host_session` builds it.
+    fn session_inputs<'a>(
+        read_only: bool,
+        web: bool,
+        servers: &'a [&'a str],
+        config_path: Option<&'a str>,
+        session_id: Option<&'a str>,
+    ) -> Opencode2Inputs<'a> {
+        Opencode2Inputs {
+            turn: Opencode2Turn::Session {
+                pin: opencode2_session_pin(read_only, web),
+                session_id,
+            },
+            servers,
+            config_path,
+            cwd: "/worktree",
+            model: "openai/gpt-5",
+            inherited_content: None,
+            case: crate::opencode2::MatchCase::Sensitive,
+            diff_only_proven: false,
+        }
+    }
+
+    #[test]
+    fn opencode2_model_reads_load_no_project_config() {
+        let binary = Path::new("opencode");
+        for args in [
+            crate::opencode2::MODELS_ARGS,
+            crate::opencode2::CATALOG_ARGS,
+        ] {
+            let request = opencode2_read_request(binary, args, None);
+            assert_eq!(request.args, args);
+            assert_eq!(request.cwd, None);
+            assert_eq!(request.env, crate::opencode2::project_disable_env());
+            assert!(request.stdin.is_none());
+            assert_eq!(request.timeout, MODELS_TIMEOUT);
+        }
+    }
+
+    #[test]
+    fn opencode2_review_pin_is_diff_only_unless_repo_aware() {
+        assert_eq!(opencode2_review_pin(false), crate::opencode2::Pin::DiffOnly);
+        assert_eq!(opencode2_review_pin(true), crate::opencode2::Pin::ReadOnly);
+    }
+
+    /// The user's rules a `plan` agent lists, worth mirroring: a deny, an `ask` the lock
+    /// reads as a deny, and a web rule only Research keeps.
+    const PLAN_RULES: &[(&str, &str, &str)] = &[
+        ("read", "*.env", "deny"),
+        ("read", "*.key", "ask"),
+        ("webfetch", "*.internal/*", "ask"),
+    ];
+
+    /// `readback_listing` with a `plan` agent listing `PLAN_RULES` after the probe's.
+    fn readback_listing_with_plan(document: &str) -> String {
+        let listed = readback_listing(document, TRAILING_DENIES);
+        let mut agents: Vec<serde_json::Value> = serde_json::from_str(&listed).expect("a listing");
+        let rules: Vec<serde_json::Value> = PLAN_RULES
+            .iter()
+            .map(|(action, resource, effect)| {
+                serde_json::json!({ "action": action, "resource": resource, "effect": effect })
+            })
+            .collect();
+        agents.push(serde_json::json!({ "id": "plan", "permissions": rules }));
+        serde_json::Value::Array(agents).to_string()
+    }
+
+    /// The lock a composed turn carries, read back under `readback_listing_with_plan`,
+    /// with its rules as `action resource effect` lines.
+    async fn composed_lock(
+        inputs: &Opencode2Inputs<'_>,
+    ) -> (crate::opencode2::LockDocument, Vec<String>) {
+        let listed = |_: usize, doc: &str| ProbeAnswer::Stdout(readback_listing_with_plan(doc));
+        let lock = match compose_with(inputs, listed).await.0 {
+            Ok(TurnPlan::Run {
+                lock: Some(lock), ..
+            }) => lock,
+            other => panic!("no lock: {other:?}"),
+        };
+        let lines = lock
+            .rules()
+            .iter()
+            .map(|rule| format!("{} {} {:?}", rule.action, rule.resource, rule.effect))
+            .collect();
+        (lock, lines)
+    }
+
+    /// Each turn's lock is the one its own pin names, with the user's mirrored rules in
+    /// place: ReadOnly reads without the web, Research adds it, DiffOnly reads nothing.
+    #[tokio::test]
+    async fn opencode2_compose_locks_each_turn_by_its_own_pin() {
+        let read_only = [
+            ("repo-aware review", review_inputs(true, &[], None)),
+            ("Plan turn", session_inputs(true, false, &[], None, None)),
+        ];
+        for (row, inputs) in read_only {
+            let (lock, lines) = composed_lock(&inputs).await;
+            for web in ["webfetch * Allow", "websearch * Allow"] {
+                assert!(!lines.iter().any(|line| line == web), "{row}: {lines:?}");
+            }
+            assert!(!lock.json().contains("websearch"), "{row}");
+            let read_all = lines.iter().position(|line| line == "read * Allow");
+            let read_all = read_all.unwrap_or_else(|| panic!("{row}: {lines:?}"));
+            for mirrored in ["read *.env Deny", "read *.key Deny"] {
+                let at = lines.iter().position(|line| line == mirrored);
+                assert!(at > Some(read_all), "{row}: {mirrored} in {lines:?}");
+            }
+        }
+        let (research, lines) = composed_lock(&session_inputs(true, true, &[], None, None)).await;
+        for rule in [
+            "webfetch * Allow",
+            "websearch * Allow",
+            "webfetch *.internal/* Deny",
+            "read *.env Deny",
+        ] {
+            assert!(
+                lines.iter().any(|line| line == rule),
+                "Research: {rule} in {lines:?}"
+            );
+        }
+        assert!(
+            research
+                .json()
+                .ends_with(r#","websearch":{"provider":"exa"}}"#),
+            "{}",
+            research.json()
+        );
+        let (_, lines) = composed_lock(&review_inputs(false, &[], None)).await;
+        assert_eq!(lines, ["* * Deny", "read * Deny", "read ?* Deny"]);
+    }
+
+    #[test]
+    fn opencode2_session_pin_locks_every_read_only_turn() {
+        for (read_only, web, pin) in [
+            (false, false, None),
+            (false, true, None),
+            (true, false, Some(crate::opencode2::Pin::ReadOnly)),
+            (true, true, Some(crate::opencode2::Pin::Research)),
+        ] {
+            assert_eq!(
+                opencode2_session_pin(read_only, web),
+                pin,
+                "{read_only} {web}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode2_pinned_turns_always_carry_the_lock() {
+        let content = crate::opencode2::CONTENT_ENV;
+        let listed =
+            |_: usize, doc: &str| ProbeAnswer::Stdout(readback_listing(doc, TRAILING_DENIES));
+        let rows: [(&[&str], Option<&str>); 2] = [
+            (&[], None),
+            (&["gitdesktop"], Some("/data/mcp/review.opencode.json")),
+        ];
+        for repo_aware in [false, true] {
+            for (servers, config_path) in rows {
+                let row = format!("repo_aware {repo_aware}, servers {servers:?}");
+                let inputs = review_inputs(repo_aware, servers, config_path);
+                let (result, plans) = compose_with(&inputs, listed).await;
+                let (run, lock) = match result {
+                    Ok(TurnPlan::Run {
+                        run,
+                        lock: Some(lock),
+                        read_back: true,
+                    }) => (run, lock),
+                    other => panic!("{row}: {other:?}"),
+                };
+                let [probe] = &plans[..] else {
+                    panic!("{row}: {} plans", plans.len());
+                };
+                let agent = lock.agent().as_str();
+                let at = run.args.iter().position(|arg| arg == "--agent");
+                assert_eq!(at.map(|at| run.args[at + 1].as_str()), Some(agent), "{row}");
+                assert!(!run.args.iter().any(|arg| arg == "--auto"), "{row}");
+                assert_eq!(env_value(&run, content), Some(lock.json()), "{row}");
+                let first = &lock.rules()[0];
+                assert_eq!(
+                    (first.action.as_str(), first.resource.as_str(), first.effect),
+                    ("*", "*", crate::opencode2::Effect::Deny),
+                    "{row}"
+                );
+                assert_eq!(env_value(&run, "OPENCODE_CONFIG"), config_path, "{row}");
+                // The read-back runs where and as the run does, under another id.
+                assert_eq!(probe.args, crate::opencode2::READBACK_ARGS, "{row}");
+                assert_eq!(probe.cwd, run.cwd, "{row}");
+                assert_eq!(masked_env(probe), masked_env(&run), "{row}");
+                let probe_document = env_value(probe, content).expect("the probe's document");
+                assert!(!probe_document.contains(agent), "{row}");
+            }
+        }
+        // Session turns: Plan and Research are pinned, a write turn is not.
+        let flags = [(true, false), (true, true), (false, false), (false, true)];
+        for (read_only, web) in flags {
+            for (servers, config_path) in rows {
+                for session_id in [None, Some("ses_abc")] {
+                    let row = format!(
+                        "session ({read_only}, {web}), servers {servers:?}, {session_id:?}"
+                    );
+                    let inputs = session_inputs(read_only, web, servers, config_path, session_id);
+                    let (result, plans) = compose_with(&inputs, listed).await;
+                    let (run, lock, read_back) = match result {
+                        Ok(TurnPlan::Run {
+                            run,
+                            lock,
+                            read_back,
+                        }) => (run, lock, read_back),
+                        other => panic!("{row}: {other:?}"),
+                    };
+                    let at = run.args.iter().position(|arg| arg == "--session");
+                    let resumed = at.map(|at| run.args[at + 1].as_str());
+                    assert_eq!(resumed, session_id, "{row}");
+                    assert_eq!(env_value(&run, "OPENCODE_CONFIG"), config_path, "{row}");
+                    // A session keeps the repository's own opencode config.
+                    assert_eq!(
+                        env_value(&run, "OPENCODE_DISABLE_PROJECT_CONFIG"),
+                        None,
+                        "{row}"
+                    );
+                    if !read_only {
+                        assert!(plans.is_empty(), "{row}: a write turn reads nothing back");
+                        assert!(lock.is_none() && !read_back, "{row}");
+                        assert!(run.args.iter().any(|arg| arg == "--auto"), "{row}");
+                        assert!(!run.args.iter().any(|arg| arg == "--agent"), "{row}");
+                        assert_eq!(env_value(&run, content), None, "{row}");
+                        continue;
+                    }
+                    let lock = lock.unwrap_or_else(|| panic!("{row}: no lock"));
+                    assert!(read_back, "{row}");
+                    let [probe] = &plans[..] else {
+                        panic!("{row}: {} plans", plans.len());
+                    };
+                    let agent = lock.agent().as_str();
+                    let at = run.args.iter().position(|arg| arg == "--agent");
+                    assert_eq!(at.map(|at| run.args[at + 1].as_str()), Some(agent), "{row}");
+                    assert!(!run.args.iter().any(|arg| arg == "--auto"), "{row}");
+                    assert_eq!(env_value(&run, content), Some(lock.json()), "{row}");
+                    let first = &lock.rules()[0];
+                    assert_eq!(
+                        (first.action.as_str(), first.resource.as_str(), first.effect),
+                        ("*", "*", crate::opencode2::Effect::Deny),
+                        "{row}"
+                    );
+                    assert_eq!(probe.args, crate::opencode2::READBACK_ARGS, "{row}");
+                    assert_eq!(probe.cwd, run.cwd, "{row}");
+                    assert_eq!(masked_env(probe), masked_env(&run), "{row}");
+                    let probe_document = env_value(probe, content).expect("the probe's document");
+                    assert!(!probe_document.contains(agent), "{row}");
+                }
+            }
+        }
+        // A pinned session refuses a miss the way a review does.
+        let inputs = session_inputs(true, true, &["gitdesktop"], None, Some("ses_abc"));
+        let (result, plans) =
+            compose_with(&inputs, |_, _| ProbeAnswer::Stdout("[]".to_string())).await;
+        assert_eq!(
+            result.unwrap_err(),
+            LockRefusal::Readback(crate::opencode2::ReadbackError::AgentAbsent)
+        );
+        assert_eq!(plans.len(), 2);
+        // Controls, on a repo-aware review with a server.
+        let inputs = review_inputs(
+            true,
+            &["gitdesktop"],
+            Some("/data/mcp/review.opencode.json"),
+        );
+        let (result, plans) =
+            compose_with(&inputs, |_, _| ProbeAnswer::Stdout("[]".to_string())).await;
+        assert_eq!(
+            result.unwrap_err(),
+            LockRefusal::Readback(crate::opencode2::ReadbackError::AgentAbsent)
+        );
+        assert_eq!(plans.len(), 2);
+        let (result, plans) = compose_with(&inputs, |_, doc| {
+            ProbeAnswer::Stdout(readback_listing(doc, &[("shell", "*", "allow")]))
+        })
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            LockRefusal::Readback(crate::opencode2::ReadbackError::NotLast)
+        );
+        assert_eq!(plans.len(), 2);
+        let (result, plans) = compose_with(&inputs, |attempt, doc| {
+            if attempt == 0 {
+                ProbeAnswer::Exit {
+                    code: 1,
+                    stderr_line: None,
+                }
+            } else {
+                listed(attempt, doc)
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Ok(TurnPlan::Run {
+                lock: Some(_),
+                read_back: true,
+                ..
+            })
+        ));
+        let [first, second] = &plans[..] else {
+            panic!("{} plans", plans.len());
+        };
+        assert_ne!(env_value(first, content), env_value(second, content));
+        assert_eq!(first.cwd, second.cwd);
+        assert_eq!(masked_env(first), masked_env(second));
+    }
+
+    #[test]
+    fn opencode2_probe_answer_reads_a_capture() {
+        let exited = |code: i32, stdout: &str, stderr: &str| {
+            Ok::<_, AppError>(Captured::Exited {
+                code,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.to_string(),
+            })
+        };
+        let bound = OPENCODE2_PROBE_TIMEOUT;
+        assert!(matches!(
+            opencode2_probe_answer(exited(0, "[]", "a warning"), bound),
+            ProbeAnswer::Stdout(stdout) if stdout == "[]"
+        ));
+        assert!(matches!(
+            opencode2_probe_answer(exited(1, "", "\n  Agent not found: gd1 \nmore"), bound),
+            ProbeAnswer::Exit { code: 1, stderr_line: Some(line) } if line == "Agent not found: gd1"
+        ));
+        assert!(matches!(
+            opencode2_probe_answer(exited(2, "[]", " \n"), bound),
+            ProbeAnswer::Exit {
+                code: 2,
+                stderr_line: None
+            }
+        ));
+        assert!(matches!(
+            opencode2_probe_answer(Ok(Captured::TimedOut), bound),
+            ProbeAnswer::TimedOut { secs: 30 }
+        ));
+        assert!(matches!(
+            opencode2_probe_answer(Ok(Captured::Cancelled), bound),
+            ProbeAnswer::Cancelled
+        ));
+        assert!(matches!(
+            opencode2_probe_answer(Err(AppError::Command("gone".into())), bound),
+            ProbeAnswer::Failed(text) if text.contains("gone")
+        ));
+    }
+
+    #[test]
+    fn lock_refusal_sentences_start_with_the_core_lead() {
+        let lead = crate::opencode2::READBACK_REFUSAL_LEAD;
+        let tail = "Check your opencode config with \"opencode debug config\", or update opencode, then try again.";
+        let long = LockRefusal::ProbeExit {
+            code: 1,
+            stderr_line: Some("y".repeat(300)),
+        };
+        assert_eq!(
+            long.message(),
+            format!(
+                "{lead} opencode's check command failed (exit code 1: {}). {tail}",
+                "y".repeat(200)
+            )
+        );
+        let bare = LockRefusal::ProbeExit {
+            code: 3,
+            stderr_line: None,
+        };
+        assert_eq!(
+            bare.message(),
+            format!("{lead} opencode's check command failed (exit code 3). {tail}")
+        );
+        assert!(LockRefusal::ProbeTimedOut { secs: 30 }
+            .message()
+            .starts_with(&format!(
+                "{lead} opencode did not answer the check within 30 seconds."
+            )));
+        assert_eq!(
+            LockRefusal::ProbeFailed("denied".to_string()).message(),
+            format!("{lead} opencode's check command could not be started (denied).")
+        );
+        let inherited = crate::opencode2::LockError::InheritedContent;
+        assert_eq!(
+            LockRefusal::Lock(inherited.clone()).message(),
+            inherited.message()
+        );
+        let absent = crate::opencode2::ReadbackError::AgentAbsent;
+        assert_eq!(
+            LockRefusal::Readback(absent.clone()).message(),
+            absent.message()
+        );
+    }
+
+    #[test]
+    fn opencode2_exit_code_is_none_whenever_forced() {
+        for (forced, status, code) in [
+            (false, Some(0), Some(0)),
+            (false, Some(1), Some(1)),
+            (false, None, None),
+            (true, Some(0), None),
+            (true, Some(1), None),
+            (true, None, None),
+        ] {
+            assert_eq!(
+                opencode2_exit_code(forced, status),
+                code,
+                "{forced} {status:?}"
+            );
+        }
+    }
+
+    /// A 2.x stream fed `lines` through the stream wiring, as a run's loop feeds it.
+    fn opencode2_streamed(lines: &[serde_json::Value]) -> Opencode2Stream {
+        let mut stream = Opencode2Stream {
+            parser: crate::opencode2::StreamParser::new(None),
+            native: None,
+        };
+        for line in lines {
+            opencode2_stream_event(&mut stream, &line.to_string());
+        }
+        stream
+    }
+
+    fn opencode2_retry(message: &str) -> serde_json::Value {
+        serde_json::json!({"type": "retry", "attempt": 2, "error": {"message": message}})
+    }
+
+    fn opencode2_text(text: &str) -> serde_json::Value {
+        serde_json::json!({"type": "text", "part": {"id": "prt_t1", "messageID": "msg_t1",
+            "text": text}})
+    }
+
+    #[test]
+    fn opencode2_timeout_names_a_recorded_retry_only() {
+        let base = || "The review timed out.".to_string();
+        let parser = |lines: &[serde_json::Value]| opencode2_streamed(lines).parser;
+        assert_eq!(opencode2_timeout_message(base(), None), base());
+        assert_eq!(
+            opencode2_timeout_message(base(), Some(&parser(&[]))),
+            base()
+        );
+        assert_eq!(
+            opencode2_timeout_message(base(), Some(&parser(&[opencode2_retry("Rate limited")]))),
+            "The review timed out. opencode was still retrying: Rate limited"
+        );
+        assert_eq!(
+            opencode2_timeout_message(base(), Some(&parser(&[opencode2_retry(&"x".repeat(300))]))),
+            format!(
+                "The review timed out. opencode was still retrying: {}",
+                "x".repeat(200)
+            )
+        );
+        // A retry opencode recovered from is not named.
+        assert_eq!(
+            opencode2_timeout_message(
+                base(),
+                Some(&parser(&[
+                    opencode2_retry("Rate limited"),
+                    opencode2_text("Back.")
+                ]))
+            ),
+            base()
+        );
+    }
+
+    #[test]
+    fn opencode2_timeout_reports_a_recorded_error_first() {
+        let base = || "The review timed out.".to_string();
+        let error = serde_json::json!({"type": "error", "error": {"message": "Model not found"}});
+        let stream = opencode2_streamed(&[opencode2_retry("Rate limited"), error]);
+        assert_eq!(
+            opencode2_timeout_message(base(), Some(&stream.parser)),
+            "Model not found"
+        );
+        // The lock-dropped mapping applies at the deadline too.
+        let lock =
+            crate::opencode2::lock_document(crate::opencode2::Access::DiffOnly, &[]).expect("lock");
+        let mut stream = Opencode2Stream {
+            parser: crate::opencode2::StreamParser::new(Some(&lock)),
+            native: None,
+        };
+        let dropped = serde_json::json!({"type": "error", "error": {"message":
+            format!("Agent not found: \"{}\"", lock.agent().as_str())}});
+        opencode2_stream_event(&mut stream, &dropped.to_string());
+        let message = opencode2_timeout_message(base(), Some(&stream.parser));
+        assert!(
+            message.starts_with("opencode did not load GitDesktop's read-only lock"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn opencode2_failed_exit_quotes_stderr_only_without_an_error_line() {
+        let text = || opencode2_text("Partial.");
+        let stderr = "\n  \nfatal: socket closed\nsecond line\n";
+        let event =
+            opencode2_conclusion(opencode2_streamed(&[text()]).parser, false, Some(1), stderr);
+        assert!(
+            matches!(&event, Some(ReviewEvent::Error { message, .. })
+                if message == "opencode exited with code 1 before it finished. opencode printed: fatal: socket closed"),
+            "{event:?}"
+        );
+        let long = format!("{}\n", "y".repeat(300));
+        let event = opencode2_conclusion(opencode2_streamed(&[text()]).parser, false, None, &long);
+        assert!(
+            matches!(&event, Some(ReviewEvent::Error { message, .. })
+                if *message == format!("opencode stopped before it finished. opencode printed: {}", "y".repeat(200))),
+            "{event:?}"
+        );
+        let error = serde_json::json!({"type": "error", "error": {"message": "boom"}});
+        let event = opencode2_conclusion(
+            opencode2_streamed(&[text(), error]).parser,
+            false,
+            Some(1),
+            stderr,
+        );
+        assert!(
+            matches!(&event, Some(ReviewEvent::Error { message, .. }) if message == "boom"),
+            "{event:?}"
+        );
+        // No stderr: the exit sentence alone.
+        let event =
+            opencode2_conclusion(opencode2_streamed(&[text()]).parser, false, Some(1), " \n");
+        assert!(
+            matches!(&event, Some(ReviewEvent::Error { message, .. })
+                if message == "opencode exited with code 1 before it finished."),
+            "{event:?}"
+        );
+    }
+
+    #[test]
+    fn opencode2_lost_output_fails_even_on_exit_zero() {
+        let lines = [opencode2_text("Half an answer")];
+        let event = opencode2_conclusion(opencode2_streamed(&lines).parser, true, Some(0), "");
+        assert!(
+            matches!(&event, Some(ReviewEvent::Error { message, timed_out: false, .. })
+                if message == OPENCODE2_OUTPUT_LOST),
+            "{event:?}"
+        );
+        assert_eq!(
+            OPENCODE2_OUTPUT_LOST,
+            "GitDesktop lost opencode's output before the run finished."
+        );
+        // The same stream read to its end succeeds.
+        let event = opencode2_conclusion(opencode2_streamed(&lines).parser, false, Some(0), "");
+        assert!(
+            matches!(&event, Some(ReviewEvent::Done { text, .. }) if text == "Half an answer"),
+            "{event:?}"
+        );
+    }
+
+    #[test]
+    fn opencode2_stream_lines_never_end_the_run() {
+        let session = "ses_2f7a1c";
+        let lines = [
+            serde_json::json!({"type": "step_start", "timestamp": 1, "sessionID": session,
+                "part": {"id": "prt_a1", "sessionID": session, "messageID": "msg_a1",
+                "type": "step-start"}}),
+            serde_json::json!({"type": "text", "timestamp": 2, "sessionID": session,
+                "part": {"id": "prt_a2", "sessionID": session, "messageID": "msg_a1",
+                "type": "text", "text": "Looks fine.", "time": {"start": 1, "end": 2}}}),
+            serde_json::json!({"type": "step_finish", "timestamp": 3, "sessionID": session,
+                "part": {"id": "prt_a3", "sessionID": session, "messageID": "msg_a1",
+                "type": "step-finish", "reason": "stop"}}),
+            serde_json::json!({"type": "error", "timestamp": 4, "sessionID": session,
+                "error": {"type": "unknown", "message": "boom"}}),
+        ];
+        let sink = collector();
+        let mut terminal = None;
+        let mut stream = Opencode2Stream {
+            parser: crate::opencode2::StreamParser::new(None),
+            native: None,
+        };
+        for line in &lines {
+            let [notice, event] = opencode2_stream_event(&mut stream, &line.to_string());
+            assert!(notice.is_none(), "{line}");
+            if let Some(ev) = event {
+                send_noting_terminal(&sink, &mut terminal, ev);
+            }
+        }
+        assert!(terminal.is_none(), "no stream line is terminal");
+        let events = sink.events.into_inner().unwrap();
+        assert!(
+            matches!(events.first(), Some(ReviewEvent::NativeSession { id }) if id == session),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ReviewEvent::Delta { text } if text == "Looks fine.")),
+            "{events:?}"
+        );
+        // The error line after a `stop` is the run's outcome, read at the end.
+        assert!(matches!(
+            stream.parser.finish(Some(1), None),
+            Some(ReviewEvent::Error { message, .. }) if message == "boom"
+        ));
+    }
+
+    // --- opencode 2 models and effort --------------------------------------------
+
+    /// The measured catalog shape (`oc-bin/probe8.txt`): no variants, `low high max`,
+    /// the full set, and `none high`.
+    const CATALOG: &str = r#"{"location": "/tmp/x", "data": [
+        {"id": "big-pickle", "providerID": "opencode", "variants": []},
+        {"id": "deepseek-v4.1-flash-free", "providerID": "opencode", "variants": [
+            {"id": "low", "settings": {"reasoningEffort": "low"}},
+            {"id": "high", "settings": {"reasoningEffort": "high"}},
+            {"id": "max", "settings": {"reasoningEffort": "max"}}]},
+        {"id": "tidepool-alpha-free", "providerID": "opencode", "variants": [
+            {"id": "minimal"}, {"id": "low"}, {"id": "medium"}, {"id": "high"},
+            {"id": "xhigh"}, {"id": "max"}]},
+        {"id": "hy4-flash-free", "providerID": "opencode", "variants": [
+            {"id": "none"}, {"id": "high"}]}
+    ]}"#;
+
+    fn catalog() -> crate::opencode2::ModelCatalog {
+        crate::opencode2::parse_model_catalog(CATALOG).expect("fixture catalog")
+    }
+
+    fn effort_reasons(support: &EffortSupport) -> Vec<Option<&str>> {
+        support
+            .levels
+            .iter()
+            .map(|level| level.reason.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn effort_support_offers_only_declared_variants() {
+        let catalog = catalog();
+        let variants = |support: &EffortSupport| -> Vec<Option<String>> {
+            support
+                .levels
+                .iter()
+                .map(|level| level.variant.clone())
+                .collect()
+        };
+        let some = |name: &str| Some(name.to_string());
+        let nothing: Vec<Option<String>> = vec![None; 4];
+
+        let none = effort_support("opencode/big-pickle", Some(&catalog));
+        assert!(none.per_model);
+        assert_eq!(variants(&none), nothing);
+        let sentence = "opencode/big-pickle has no effort settings in opencode.";
+        assert_eq!(none.reason.as_deref(), Some(sentence));
+        assert_eq!(effort_reasons(&none), [Some(sentence); 4]);
+
+        let three = effort_support(" opencode/deepseek-v4.1-flash-free ", Some(&catalog));
+        assert!(three.per_model);
+        let levels: Vec<&str> = three.levels.iter().map(|l| l.level.as_str()).collect();
+        assert_eq!(levels, ["low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            variants(&three),
+            [some("low"), None, some("high"), some("max")]
+        );
+        assert_eq!(three.reason, None);
+        assert_eq!(
+            effort_reasons(&three),
+            [
+                None,
+                Some("Not offered by opencode/deepseek-v4.1-flash-free in opencode."),
+                None,
+                None
+            ]
+        );
+
+        let full = effort_support("opencode/tidepool-alpha-free", Some(&catalog));
+        assert_eq!(
+            variants(&full),
+            [some("low"), some("medium"), some("high"), some("xhigh")]
+        );
+        // `none` switches reasoning off, so no level picks it.
+        let off = effort_support("opencode/hy4-flash-free", Some(&catalog));
+        assert_eq!(variants(&off), [None, None, some("high"), some("high")]);
+
+        // Every variant offered is one the model declares.
+        for model in [
+            "opencode/big-pickle",
+            "opencode/deepseek-v4.1-flash-free",
+            "opencode/tidepool-alpha-free",
+            "opencode/hy4-flash-free",
+        ] {
+            let declared = catalog.variants(model);
+            for level in effort_support(model, Some(&catalog)).levels {
+                if let Some(variant) = level.variant {
+                    assert!(declared.contains(&variant), "{model} {variant}");
+                }
+            }
+        }
+
+        // When nothing is selectable, the whole control and each level say why.
+        for (model, catalog, reason) in [
+            ("", Some(&catalog), EFFORT_NO_MODEL.to_string()),
+            ("  ", Some(&catalog), EFFORT_NO_MODEL.to_string()),
+            (
+                "a/b#c",
+                Some(&catalog),
+                EFFORT_MODEL_HAS_VARIANT.to_string(),
+            ),
+            (
+                "opencode/deepseek-v4.1-flash-free",
+                None,
+                EFFORT_CATALOG_UNREADABLE.to_string(),
+            ),
+            (
+                "openai/unlisted",
+                Some(&catalog),
+                "openai/unlisted has no effort settings in opencode.".to_string(),
+            ),
+        ] {
+            let support = effort_support(model, catalog);
+            assert!(support.per_model, "{model:?}");
+            assert_eq!(variants(&support), nothing, "{model:?}");
+            assert_eq!(
+                support.reason.as_deref(),
+                Some(reason.as_str()),
+                "{model:?}"
+            );
+            assert_eq!(
+                effort_reasons(&support),
+                [Some(reason.as_str()); 4],
+                "{model:?}"
+            );
+        }
+        let container = effort_withheld(EFFORT_CONTAINER_NEEDS_HOST.to_string());
+        assert_eq!(variants(&container), nothing);
+        assert_eq!(
+            container.reason.as_deref(),
+            Some(EFFORT_CONTAINER_NEEDS_HOST)
+        );
+    }
+
+    #[test]
+    fn effort_support_wire_shape_is_camel_case() {
+        let value = serde_json::to_value(effort_support(
+            "opencode/deepseek-v4.1-flash-free",
+            Some(&catalog()),
+        ))
+        .expect("EffortSupport serializes");
+        let obj = value.as_object().expect("EffortSupport is a JSON object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["levels", "perModel", "reason"]);
+        assert!(
+            obj.get("per_model").is_none(),
+            "snake_case field must not ship"
+        );
+        assert_eq!(obj["perModel"], true);
+        assert_eq!(obj["reason"], serde_json::Value::Null);
+        let medium = obj["levels"][1]
+            .as_object()
+            .expect("a level is a JSON object");
+        let mut level_keys: Vec<&str> = medium.keys().map(String::as_str).collect();
+        level_keys.sort_unstable();
+        assert_eq!(level_keys, ["level", "reason", "variant"]);
+        assert_eq!(medium["level"], "medium");
+        assert_eq!(medium["variant"], serde_json::Value::Null);
+        assert_eq!(obj["levels"][0]["variant"], "low");
+        assert_eq!(obj["levels"][0]["reason"], serde_json::Value::Null);
+
+        let fixed = serde_json::to_value(effort_not_per_model()).expect("serializes");
+        assert_eq!(
+            fixed,
+            serde_json::json!({"perModel": false, "levels": [], "reason": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_effort_levels_is_per_model_for_opencode_only() {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Copilot] {
+            for isolation in [None, Some("container".to_string())] {
+                let support = agent_effort_levels(kind, None, "a/b".to_string(), isolation).await;
+                assert_eq!(support.unwrap(), effort_not_per_model(), "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn opencode2_effort_applies_only_to_a_level_on_a_plain_model() {
+        for (model, effort, applies) in [
+            ("openai/gpt-5", "high", true),
+            ("  openai/gpt-5 ", "low", true),
+            ("openai/gpt-5", "", false),
+            ("", "high", false),
+            ("   ", "high", false),
+            ("openai/gpt-5#max", "high", false),
+        ] {
+            assert_eq!(
+                opencode2_effort_applies(model, effort),
+                applies,
+                "{model:?} {effort:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode2_variant_without_a_source_sends_none() {
+        let pick = opencode2_variant(None, "opencode/deepseek-v4.1-flash-free", "high", None).await;
+        assert_eq!(pick, VariantPick::Send(None));
+    }
+
+    #[test]
+    fn pick_from_keeps_a_cancel_apart_from_no_catalog() {
+        let model = "opencode/deepseek-v4.1-flash-free";
+        let ready = || CatalogFetch::Ready(Arc::new(catalog()));
+        assert_eq!(
+            pick_from(CatalogFetch::Cancelled, model, "high"),
+            VariantPick::Cancelled
+        );
+        assert_eq!(
+            pick_from(CatalogFetch::Unavailable, model, "high"),
+            VariantPick::Send(None)
+        );
+        assert_eq!(
+            pick_from(ready(), &format!(" {model} "), "xhigh"),
+            VariantPick::Send(Some("max".to_string()))
+        );
+        assert_eq!(pick_from(ready(), model, "medium"), VariantPick::Send(None));
+        assert_eq!(
+            pick_from(ready(), "openai/unlisted", "high"),
+            VariantPick::Send(None)
+        );
+    }
+
+    /// A catalog read that answers `captured` and counts itself.
+    async fn catalog_reading(
+        identity: Option<&BinaryIdentity>,
+        facts: &Mutex<OpencodeFacts>,
+        reads: &std::sync::atomic::AtomicUsize,
+        captured: AppResult<Captured>,
+    ) -> CatalogFetch {
+        opencode2_catalog_with(identity, facts, || {
+            reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { captured }
+        })
+        .await
+    }
+
+    fn catalog_exit(code: i32, stdout: &str) -> AppResult<Captured> {
+        Ok(Captured::Exited {
+            code,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: String::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn opencode2_catalog_is_remembered_per_binary_for_its_ttl() {
+        let facts = Mutex::new(OpencodeFacts::default());
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let count = || reads.load(std::sync::atomic::Ordering::SeqCst);
+        let binary = |len| BinaryIdentity {
+            path: PathBuf::from("opencode"),
+            len,
+            modified: None,
+        };
+        let (one, two) = (binary(1), binary(2));
+        let ready = |fetch: &CatalogFetch| match fetch {
+            CatalogFetch::Ready(catalog) => catalog.variants("opencode/hy4-flash-free").len(),
+            other => panic!("not a catalog: {other:?}"),
+        };
+
+        let first = catalog_reading(Some(&one), &facts, &reads, catalog_exit(0, CATALOG)).await;
+        assert_eq!((ready(&first), count()), (2, 1));
+        // Remembered: a second ask, even one whose read would fail, never reads.
+        let again = catalog_reading(Some(&one), &facts, &reads, catalog_exit(1, "")).await;
+        assert_eq!((ready(&again), count()), (2, 1));
+        // Another binary is read, and takes the one slot.
+        let other = catalog_reading(Some(&two), &facts, &reads, catalog_exit(0, "[]")).await;
+        assert_eq!((ready(&other), count()), (0, 2));
+        let back = catalog_reading(Some(&one), &facts, &reads, catalog_exit(0, CATALOG)).await;
+        assert_eq!((ready(&back), count()), (2, 3));
+        // Past the TTL the same binary is read again.
+        let aged = Instant::now()
+            .checked_sub(OPENCODE2_CATALOG_TTL + Duration::from_secs(1))
+            .expect("an instant older than the TTL");
+        facts.lock().unwrap().catalog.as_mut().unwrap().1 = aged;
+        let fresh = catalog_reading(Some(&one), &facts, &reads, catalog_exit(0, "[]")).await;
+        assert_eq!((ready(&fresh), count()), (0, 4));
+
+        // A failed read is advisory: no catalog, nothing remembered.
+        facts.lock().unwrap().clear();
+        for failed in [
+            catalog_exit(1, CATALOG),
+            catalog_exit(0, "not json"),
+            Ok(Captured::TimedOut),
+            Err(AppError::Command("spawn failed".to_string())),
+        ] {
+            let fetch = catalog_reading(Some(&one), &facts, &reads, failed).await;
+            assert!(matches!(fetch, CatalogFetch::Unavailable), "{fetch:?}");
+            assert!(facts.lock().unwrap().catalog.is_none());
+        }
+        // A cancel stays a cancel and is not remembered either.
+        let cancelled = catalog_reading(Some(&one), &facts, &reads, Ok(Captured::Cancelled)).await;
+        assert!(matches!(cancelled, CatalogFetch::Cancelled));
+        assert!(facts.lock().unwrap().catalog.is_none());
+        assert_eq!(count(), 9);
+
+        // No identity: read on every call, never remembered.
+        for _ in 0..2 {
+            let fetch = catalog_reading(None, &facts, &reads, catalog_exit(0, CATALOG)).await;
+            assert_eq!(ready(&fetch), 2);
+        }
+        assert_eq!(count(), 11);
+        assert!(facts.lock().unwrap().catalog.is_none());
+    }
+
+    #[tokio::test]
+    async fn opencode2_compose_reads_the_variant_before_any_probe() {
+        let listed =
+            |_: usize, doc: &str| ProbeAnswer::Stdout(readback_listing(doc, TRAILING_DENIES));
+        let turns = [
+            ("review", review_inputs(false, &[], None)),
+            ("pinned", session_inputs(true, false, &[], None, None)),
+            ("write", session_inputs(false, false, &[], None, None)),
+        ];
+        for (row, inputs) in &turns {
+            // A cancel during the catalog read spawns nothing further.
+            let (result, plans) = compose_picking(inputs, VariantPick::Cancelled, listed).await;
+            assert!(
+                matches!(result, Ok(TurnPlan::Cancelled)),
+                "{row}: {result:?}"
+            );
+            assert!(plans.is_empty(), "{row}");
+
+            // A picked variant rides `-m`; the read-back's argv is untouched.
+            let pick = VariantPick::Send(Some("high".to_string()));
+            let (result, plans) = compose_picking(inputs, pick, listed).await;
+            let Ok(TurnPlan::Run { run, .. }) = result else {
+                panic!("{row}: {result:?}");
+            };
+            let model = run.args.iter().position(|arg| arg == "-m").expect(row);
+            assert_eq!(run.args[model + 1], "openai/gpt-5#high", "{row}");
+            for probe in &plans {
+                assert_eq!(probe.args, crate::opencode2::READBACK_ARGS, "{row}");
+            }
+            let (result, _) = compose_with(inputs, listed).await;
+            let Ok(TurnPlan::Run { run, .. }) = result else {
+                panic!("{row}: {result:?}");
+            };
+            assert!(run.args.iter().any(|arg| arg == "openai/gpt-5"), "{row}");
+        }
+        // A cancel during the read-back ends the turn there, with no run.
+        for (row, inputs) in &turns[..2] {
+            let (result, plans) = compose_with(inputs, |_, _| ProbeAnswer::Cancelled).await;
+            assert!(
+                matches!(result, Ok(TurnPlan::Cancelled)),
+                "{row}: {result:?}"
+            );
+            assert_eq!(plans.len(), 1, "{row}");
+        }
+    }
+
+    #[test]
+    fn opencode2_listing_reads_like_the_1x_capture() {
+        let listed = opencode2_listing(catalog_exit(0, "opencode/big-pickle\n")).unwrap();
+        assert_eq!(
+            listed,
+            (0, "opencode/big-pickle\n".to_string(), String::new())
+        );
+        let timed_out = opencode2_listing(Ok(Captured::TimedOut)).unwrap_err();
+        assert_eq!(
+            catalog_listing_error(AgentKind::Opencode, timed_out).to_string(),
+            AppError::Command("opencode model catalog timed out after 20s".to_string()).to_string()
+        );
+        let failed = opencode2_listing(Err(AppError::Command("no such file".to_string())));
+        assert!(matches!(failed, Err(AppError::Command(text)) if text == "no such file"));
+    }
+
+    // --- opencode 2 sessions ------------------------------------------------------
+
+    #[test]
+    fn parse_native_ref_reads_each_stored_shape() {
+        let v1 = |id: &str| NativeRef::V1 { id: id.to_string() };
+        let v2 = |id: &str, kind| NativeRef::V2 {
+            id: id.to_string(),
+            kind,
+        };
+        let longest = "a".repeat(128);
+        let too_long = "a".repeat(129);
+        let cases = [
+            (None, NativeRef::Absent),
+            (Some(""), NativeRef::Absent),
+            (Some("  "), NativeRef::Absent),
+            (Some("ses_abc"), v1("ses_abc")),
+            (Some(" ses_abc "), v1("ses_abc")),
+            (Some("ses-1_x"), v1("ses-1_x")),
+            (Some(longest.as_str()), v1(&longest)),
+            (Some("oc2:w:ses_abc"), v2("ses_abc", TurnKind::Write)),
+            (Some(" oc2:p:ses_abc "), v2("ses_abc", TurnKind::Pinned)),
+            (Some("oc2:x:ses_abc"), NativeRef::Unusable),
+            (Some("oc2:w:"), NativeRef::Unusable),
+            (Some("oc2:ses_abc"), NativeRef::Unusable),
+            (Some("oc2:w:--auto"), NativeRef::Unusable),
+            (Some("oc2:p:ses abc"), NativeRef::Unusable),
+            (Some("--auto"), NativeRef::Unusable),
+            (Some("_ses"), NativeRef::Unusable),
+            (Some("ses abc"), NativeRef::Unusable),
+            (Some(too_long.as_str()), NativeRef::Unusable),
+        ];
+        for (raw, parsed) in cases {
+            assert_eq!(parse_native_ref(raw), parsed, "{raw:?}");
+        }
+        for kind in [TurnKind::Write, TurnKind::Pinned] {
+            let token = native_token(kind, "ses_abc");
+            assert_eq!(parse_native_ref(Some(&token)), v2("ses_abc", kind));
+        }
+        assert_eq!(native_token(TurnKind::Write, "ses_abc"), "oc2:w:ses_abc");
+        assert_eq!(native_token(TurnKind::Pinned, "ses_abc"), "oc2:p:ses_abc");
+    }
+
+    #[test]
+    fn opencode2_resume_plan_never_crosses_turn_kinds() {
+        let fresh = |reset| ResumePlan {
+            session_id: String::new(),
+            resumed: false,
+            reset,
+        };
+        let resumed = || ResumePlan {
+            session_id: "ses_abc".to_string(),
+            resumed: true,
+            reset: false,
+        };
+        let (write, pinned) = (TurnKind::Write, TurnKind::Pinned);
+        // What a resumed turn does with each stored value; a turn that does not resume is
+        // always fresh.
+        let cases = [
+            (None, write, fresh(false)),
+            (None, pinned, fresh(false)),
+            (Some(""), write, fresh(false)),
+            (Some(""), pinned, fresh(false)),
+            (Some("ses_abc"), write, resumed()),
+            (Some("ses_abc"), pinned, resumed()),
+            (Some("oc2:w:ses_abc"), write, resumed()),
+            (Some("oc2:w:ses_abc"), pinned, fresh(true)),
+            (Some("oc2:p:ses_abc"), write, fresh(true)),
+            (Some("oc2:p:ses_abc"), pinned, resumed()),
+            (Some("oc2:x:ses_abc"), write, fresh(true)),
+            (Some("oc2:x:ses_abc"), pinned, fresh(true)),
+        ];
+        for (raw, turn, plan) in cases {
+            let native = parse_native_ref(raw);
+            assert_eq!(
+                opencode2_resume_plan(true, &native, turn),
+                plan,
+                "{raw:?} {turn:?}"
+            );
+            assert_eq!(
+                opencode2_resume_plan(false, &native, turn),
+                fresh(false),
+                "{raw:?} {turn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_tag_hands_back_a_token() {
+        let tag = |kind, resumed: Option<(&str, &str)>, rekey| NativeTag {
+            kind,
+            resumed: resumed.map(|(id, stored)| (id.to_string(), stored.to_string())),
+            rekey,
+        };
+        let (write, pinned) = (TurnKind::Write, TurnKind::Pinned);
+        // A resumed id goes back as the value it was read from.
+        let token = tag(pinned, Some(("ses_abc", "oc2:p:ses_abc")), false);
+        assert_eq!(token.token_for("ses_abc"), "oc2:p:ses_abc");
+        let raw = tag(write, Some(("ses_abc", "ses_abc")), false);
+        assert_eq!(raw.token_for("ses_abc"), "ses_abc");
+        // A re-keyed id, and any other id, go back as this turn's token.
+        let rekeyed = tag(write, Some(("ses_abc", "ses_abc")), true);
+        assert_eq!(rekeyed.token_for("ses_abc"), "oc2:w:ses_abc");
+        let rekeyed = tag(pinned, Some(("ses_abc", "ses_abc")), true);
+        assert_eq!(rekeyed.token_for("ses_abc"), "oc2:p:ses_abc");
+        assert_eq!(token.token_for("ses_new"), "oc2:p:ses_new");
+        assert_eq!(
+            tag(write, None, false).token_for("ses_new"),
+            "oc2:w:ses_new"
+        );
+    }
+
+    /// The stores' side of the id contract, folding one turn's events: a reset or re-key
+    /// notice arms the turn, so its next `NativeSession` replaces the stored id; a turn with
+    /// no `NativeSession` leaves the stored id as it was; without a notice a
+    /// `NativeSession` id is kept only while none is held.
+    fn fold_native(mut stored: Option<String>, events: &[ReviewEvent]) -> Option<String> {
+        let mut armed = false;
+        for event in events {
+            match event {
+                ReviewEvent::Notice { code, .. }
+                    if *code == NOTICE_SESSION_RESET || *code == NOTICE_SESSION_REKEY =>
+                {
+                    armed = true;
+                }
+                ReviewEvent::NativeSession { id } if armed || stored.is_none() => {
+                    stored = Some(id.clone());
+                    armed = false;
+                }
+                _ => {}
+            }
+        }
+        stored
+    }
+
+    /// The events a 2.x session turn sends for `lines`, through the collector; none is
+    /// terminal.
+    fn session_turn_events(tag: NativeTag, lines: &[String]) -> Vec<ReviewEvent> {
+        let sink = collector();
+        let mut terminal = None;
+        let mut stream = Opencode2Stream {
+            parser: crate::opencode2::StreamParser::new(None),
+            native: Some(tag),
+        };
+        for line in lines {
+            for ev in opencode2_stream_event(&mut stream, line)
+                .into_iter()
+                .flatten()
+            {
+                send_noting_terminal(&sink, &mut terminal, ev);
+            }
+        }
+        assert!(terminal.is_none(), "no stream line is terminal");
+        sink.events.into_inner().unwrap()
+    }
+
+    /// One line per event, for comparing whole turns.
+    fn brief(events: &[ReviewEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| match event {
+                ReviewEvent::Notice { code, text } => format!("notice {code} {text:?}"),
+                ReviewEvent::NativeSession { id } => format!("native {id}"),
+                ReviewEvent::Delta { text } => format!("delta {text}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn session_step(session: &str, message: &str) -> String {
+        serde_json::json!({"type": "step_start", "timestamp": 1, "sessionID": session,
+            "part": {"id": format!("prt_{message}"), "sessionID": session,
+            "messageID": message, "type": "step-start"}})
+        .to_string()
+    }
+
+    fn session_text(session: &str, message: &str, text: &str) -> String {
+        serde_json::json!({"type": "text", "timestamp": 2, "sessionID": session,
+            "part": {"id": format!("prt_{message}_t"), "sessionID": session,
+            "messageID": message, "type": "text", "text": text,
+            "time": {"start": 1, "end": 2}}})
+        .to_string()
+    }
+
+    #[test]
+    fn opencode2_rekeys_a_resumed_raw_id_at_its_first_step() {
+        let raw = "ses_abc";
+        let stored = Some(raw.to_string());
+        let lines = [
+            session_step(raw, "msg_a1"),
+            session_text(raw, "msg_a1", "Looks fine."),
+            session_step(raw, "msg_a2"),
+        ];
+        let rekey_tag = |kind, rekey| NativeTag {
+            kind,
+            resumed: Some((raw.to_string(), raw.to_string())),
+            rekey,
+        };
+        // A raw id resumed under opencode 2: one notice, right before the first id.
+        for (kind, token) in [
+            (TurnKind::Write, "oc2:w:ses_abc"),
+            (TurnKind::Pinned, "oc2:p:ses_abc"),
+        ] {
+            let events = session_turn_events(rekey_tag(kind, true), &lines);
+            assert_eq!(
+                brief(&events),
+                [
+                    format!("notice {NOTICE_SESSION_REKEY} \"\""),
+                    format!("native {token}"),
+                    "delta Looks fine.".to_string(),
+                    format!("native {token}"),
+                ],
+                "{kind:?}"
+            );
+            assert_eq!(
+                fold_native(stored.clone(), &events),
+                Some(token.to_string())
+            );
+            // The token it ends with sends a later 1.x binary to a new conversation.
+            assert!(opencode1_must_restart(true, Some(token)));
+        }
+        // Control: without the re-key the store keeps the raw id.
+        let events = session_turn_events(rekey_tag(TurnKind::Write, false), &lines);
+        assert_eq!(fold_native(stored.clone(), &events), stored);
+
+        // A resumed token is never re-keyed and goes back unchanged.
+        let token = "oc2:p:ses_abc";
+        let resumed_token = NativeTag {
+            kind: TurnKind::Pinned,
+            resumed: Some((raw.to_string(), token.to_string())),
+            rekey: false,
+        };
+        let events = session_turn_events(resumed_token, &lines);
+        assert_eq!(
+            brief(&events),
+            [
+                format!("native {token}"),
+                "delta Looks fine.".to_string(),
+                format!("native {token}"),
+            ]
+        );
+        assert_eq!(
+            fold_native(Some(token.to_string()), &events),
+            Some(token.to_string())
+        );
+
+        // A new conversation: no notice, and the store takes the minted token.
+        let fresh = NativeTag {
+            kind: TurnKind::Write,
+            resumed: None,
+            rekey: false,
+        };
+        let new_lines = [session_step("ses_new", "msg_b1")];
+        let events = session_turn_events(fresh.clone(), &new_lines);
+        assert_eq!(brief(&events), ["native oc2:w:ses_new"]);
+        assert_eq!(
+            fold_native(None, &events),
+            Some("oc2:w:ses_new".to_string())
+        );
+
+        // A reset, sent ahead of the spawn, then a new id: no re-key notice in the turn.
+        let reset = ReviewEvent::Notice {
+            code: NOTICE_SESSION_RESET,
+            text: NOTICE_RESET_GENERIC.to_string(),
+        };
+        let mut turn = vec![reset];
+        turn.extend(session_turn_events(fresh, &new_lines));
+        assert_eq!(
+            fold_native(Some("oc2:p:ses_abc".to_string()), &turn),
+            Some("oc2:w:ses_new".to_string())
+        );
+        assert!(!brief(&turn)
+            .iter()
+            .any(|e| e.contains(NOTICE_SESSION_REKEY)));
+    }
+
+    #[test]
+    fn opencode2_rekey_waits_for_the_new_id() {
+        let raw = "ses_abc";
+        let stored = Some(raw.to_string());
+        let tag = NativeTag {
+            kind: TurnKind::Write,
+            resumed: Some((raw.to_string(), raw.to_string())),
+            rekey: true,
+        };
+        // A turn that fails before its first step sends neither, so the raw id stays.
+        let failed = [
+            serde_json::json!({"type": "error", "timestamp": 1, "sessionID": raw,
+            "error": {"type": "unknown", "message": "Model not found"}})
+            .to_string(),
+        ];
+        let events = session_turn_events(tag, &failed);
+        assert!(events.is_empty(), "{:?}", brief(&events));
+        assert_eq!(fold_native(stored.clone(), &events), stored);
+        // A lone notice only arms its turn: with no id to replace it, the raw id stays.
+        let early = ReviewEvent::Notice {
+            code: NOTICE_SESSION_REKEY,
+            text: String::new(),
+        };
+        assert_eq!(fold_native(stored.clone(), &[early]), stored);
+    }
+
+    #[test]
+    fn opencode2_store_fold_arms_per_turn() {
+        let stored = Some("oc2:w:ses_old".to_string());
+        let reset = ReviewEvent::Notice {
+            code: NOTICE_SESSION_RESET,
+            text: NOTICE_RESET_GENERIC.to_string(),
+        };
+        let native = |id: &str| ReviewEvent::NativeSession { id: id.to_string() };
+        // A reset turn that failed before its first step keeps the stored id.
+        let after_failed = fold_native(stored.clone(), std::slice::from_ref(&reset));
+        assert_eq!(after_failed, stored);
+        // The next reset turn's id replaces it, and a repeat of that id changes nothing.
+        let second = [reset, native("oc2:w:ses_new"), native("oc2:w:ses_new")];
+        assert_eq!(
+            fold_native(after_failed, &second),
+            Some("oc2:w:ses_new".to_string())
+        );
+        // Without a notice a held id stays.
+        assert_eq!(
+            fold_native(stored.clone(), &[native("oc2:w:ses_other")]),
+            stored
+        );
+    }
+
+    // --- opencode 2 container sessions
+
+    #[tokio::test]
+    async fn split_container_env_forwards_only_the_lock_document_by_name() {
+        let content = crate::opencode2::CONTENT_ENV;
+        let listed =
+            |_: usize, doc: &str| ProbeAnswer::Stdout(readback_listing(doc, TRAILING_DENIES));
+        let config = "/home/node/.local/share/opencode/opencode-mcp.json";
+        let argv = |env: &[(&'static str, String)], by_name: &[&'static str], inner: &[String]| {
+            crate::agent_sandbox::build_run_args_full(
+                "docker",
+                "opencode",
+                "/worktree",
+                Path::new("/data/agent-home/s1/opencode"),
+                "gd-agent-s1",
+                "gitdesktop-agent:test",
+                None,
+                None,
+                env,
+                by_name,
+                inner,
+            )
+        };
+        // Plan and Research: the probe and the run each carry their document by name only.
+        for web in [false, true] {
+            let inputs = session_inputs(true, web, &["gitdesktop"], Some(config), None);
+            let (result, plans) = compose_with(&inputs, listed).await;
+            let (run, lock) = match result {
+                Ok(TurnPlan::Run {
+                    run,
+                    lock: Some(lock),
+                    ..
+                }) => (run, lock),
+                other => panic!("web {web}: {other:?}"),
+            };
+            let [probe] = &plans[..] else {
+                panic!("web {web}: {} plans", plans.len());
+            };
+            let probe_document = env_value(probe, content).expect("the probe's document");
+            for (plan, document) in [(probe, probe_document), (&run, lock.json())] {
+                let (container_env, client_env) = split_container_env(plan.env.clone());
+                assert_eq!(client_env, [(content, document.to_string())], "web {web}");
+                let rest: Vec<_> = plan
+                    .env
+                    .iter()
+                    .filter(|(key, _)| *key != content)
+                    .cloned()
+                    .collect();
+                assert_eq!(container_env, rest, "web {web}");
+                let args = argv(&container_env, &[content], &plan.args);
+                assert!(
+                    !args.iter().any(|arg| arg.contains(&format!("{content}="))),
+                    "web {web}: {args:?}"
+                );
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "-e" && pair[1] == content),
+                    "web {web}: {args:?}"
+                );
+                assert!(
+                    args.contains(&format!("OPENCODE_CONFIG={config}")),
+                    "web {web}: {args:?}"
+                );
+            }
+        }
+        // A write turn has no document: nothing stays with the client, nothing goes by name.
+        let inputs = session_inputs(false, false, &["gitdesktop"], Some(config), None);
+        let run = match compose_with(&inputs, listed).await.0 {
+            Ok(TurnPlan::Run {
+                run, lock: None, ..
+            }) => run,
+            other => panic!("write: {other:?}"),
+        };
+        let (container_env, client_env) = split_container_env(run.env.clone());
+        assert!(client_env.is_empty());
+        assert_eq!(container_env, run.env);
+        let args = argv(&container_env, &[], &run.args);
+        assert!(!args.iter().any(|arg| arg.contains(content)), "{args:?}");
+    }
+
+    #[test]
+    fn sign_in_notices_carry_the_wire_codes() {
+        // The frontend compares these codes as literals.
+        assert_eq!(
+            [
+                NOTICE_SIGN_INS_COPIED,
+                NOTICE_SIGN_INS_NOT_COPIED,
+                NOTICE_NO_SIGN_INS
+            ],
+            ["signInsCopied", "signInsNotCopied", "noSignIns"]
+        );
+        assert!(SIGN_INS_NOT_COPIED.ends_with(SIGN_INS_RETRY_HINT));
+        assert!(SIGN_INS_UNCHECKED.ends_with(SIGN_INS_RETRY_HINT));
+        let notice = ReviewEvent::Notice {
+            code: NOTICE_SIGN_INS_COPIED,
+            text: SIGN_INS_COPIED.to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&notice).expect("a notice serializes"),
+            serde_json::json!({
+                "kind": "notice",
+                "code": "signInsCopied",
+                "text": SIGN_INS_COPIED,
+            })
+        );
+    }
+
+    #[test]
+    fn opencode2_sign_in_route_exports_only_from_opencode_2() {
+        let v2 = crate::opencode2::classify_version("opencode v2.3.2").expect("2.x");
+        let v1 = crate::opencode2::classify_version("1.19.6").expect("1.x");
+        let refusal =
+            crate::opencode2::classify_version("opencode v0.0.0-dev").expect_err("a preview build");
+        let failed = OpencodeVerdict::ProbeFailed("timed out after 20s".to_string());
+        for fresh in [true, false] {
+            let route = |verdict: Option<&OpencodeVerdict>| opencode2_sign_in_route(verdict, fresh);
+            assert_eq!(
+                route(Some(&OpencodeVerdict::Supported(v2))),
+                SignInRoute::Export
+            );
+            assert_eq!(
+                route(Some(&OpencodeVerdict::Supported(v1))),
+                SignInRoute::Copy(None)
+            );
+            assert_eq!(
+                route(Some(&OpencodeVerdict::Refused(refusal.clone()))),
+                SignInRoute::Copy(None)
+            );
+            assert_eq!(route(None), SignInRoute::Copy(None));
+            // A probe that could not run copies, and tells only a fresh home why.
+            let unchecked = fresh.then_some(SIGN_INS_UNCHECKED);
+            assert_eq!(
+                route(Some(&failed)),
+                SignInRoute::Copy(unchecked),
+                "{fresh}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode2_after_copy_reports_a_cancel_that_spent_the_home() {
+        let copied = (NOTICE_SIGN_INS_COPIED, SIGN_INS_COPIED.to_string());
+        let not_copied = (NOTICE_SIGN_INS_NOT_COPIED, SIGN_INS_NOT_COPIED.to_string());
+        // An answered copy goes on with its own notice, whatever the home holds now.
+        assert_eq!(
+            opencode2_after_copy(Some(copied.clone()), || panic!("not read")),
+            (Some(copied), true)
+        );
+        // A cancel ends the turn: silent while the home is still fresh, so the next turn
+        // copies again, and with the not-copied notice once it is not.
+        assert_eq!(opencode2_after_copy(None, || true), (None, false));
+        assert_eq!(
+            opencode2_after_copy(None, || false),
+            (Some(not_copied), false)
+        );
+    }
+
+    #[test]
+    fn capture_command_carries_the_base_env_then_the_request() {
+        let req = CaptureRequest {
+            program: Path::new("opencode"),
+            args: vec!["debug".to_string(), "agents".to_string()],
+            cwd: Some("/repo"),
+            env: vec![
+                ("OC_PAIR_ONE", "1".to_string()),
+                ("OC_PAIR_TWO", "two".to_string()),
+            ],
+            stdin: None,
+            timeout: Duration::from_secs(1),
+            cancel: None,
+        };
+        let cmd = capture_command(&req);
+        let std_cmd = cmd.as_std();
+        let envs: Vec<(String, Option<String>)> = std_cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for (key, value) in [
+            ("PWD", None),
+            ("NO_COLOR", Some("1")),
+            ("CLICOLOR", Some("0")),
+            ("OC_PAIR_ONE", Some("1")),
+            ("OC_PAIR_TWO", Some("two")),
+        ] {
+            assert!(
+                envs.contains(&(key.to_string(), value.map(String::from))),
+                "{key}: {envs:?}"
+            );
+        }
+        assert_eq!(std_cmd.get_current_dir(), Some(Path::new("/repo")));
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["debug", "agents"]);
+    }
+
+    #[tokio::test]
+    async fn capture_tree_reports_an_exit_and_kills_a_forced_run() {
+        let request = |program: &'static str, args: &[&str], timeout: Duration| CaptureRequest {
+            program: Path::new(program),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            cwd: None,
+            env: Vec::new(),
+            stdin: None,
+            timeout,
+            cancel: None,
+        };
+        let echo = if cfg!(windows) {
+            request("cmd", &["/C", "echo", "captured"], Duration::from_secs(60))
+        } else {
+            request("sh", &["-c", "echo captured"], Duration::from_secs(60))
+        };
+        match capture_tree(echo).await {
+            Ok(Captured::Exited {
+                code: 0, stdout, ..
+            }) => assert_eq!(String::from_utf8_lossy(&stdout).trim(), "captured"),
+            Ok(Captured::Exited { code, .. }) => panic!("exit {code}"),
+            Ok(_) => panic!("the echo did not exit"),
+            Err(error) => panic!("{error}"),
+        }
+        let long = |timeout: Duration| {
+            if cfg!(windows) {
+                request("ping", &["-n", "30", "127.0.0.1"], timeout)
+            } else {
+                request("sleep", &["30"], timeout)
+            }
+        };
+        let started = Instant::now();
+        let timed_out = capture_tree(long(Duration::from_millis(500))).await;
+        assert!(matches!(timed_out, Ok(Captured::TimedOut)));
+        // Fired once the run is waiting: `biased` polls the capture to its select first.
+        let cancel = Notify::new();
+        let (cancelled, ()) = tokio::join!(
+            biased;
+            capture_tree(CaptureRequest {
+                cancel: Some(&cancel),
+                ..long(Duration::from_secs(60))
+            }),
+            async { cancel.notify_one() },
+        );
+        assert!(matches!(cancelled, Ok(Captured::Cancelled)));
+        assert!(
+            started.elapsed() < Duration::from_secs(25),
+            "the forced runs were killed, not waited out"
+        );
+    }
+
+    /// A request whose cancel already fired answers `Cancelled` without spawning, stdin
+    /// or not: its program does not exist, so a spawn would answer the spawn error.
+    #[tokio::test]
+    async fn capture_tree_spawns_nothing_after_a_fired_cancel() {
+        fn missing(cancel: Option<&Notify>, stdin: Option<Vec<u8>>) -> CaptureRequest<'_> {
+            CaptureRequest {
+                program: Path::new("gd-test-no-such-program"),
+                args: Vec::new(),
+                cwd: None,
+                env: Vec::new(),
+                stdin,
+                timeout: Duration::from_secs(60),
+                cancel,
+            }
+        }
+        let idle = Notify::new();
+        for cancel in [None, Some(&idle)] {
+            let spawned = capture_tree(missing(cancel, None)).await;
+            assert!(matches!(spawned, Err(AppError::Io(_))), "{cancel:?}");
+        }
+        for stdin in [None, Some(b"GD-SENTINEL-NOT-A-KEY\n".to_vec())] {
+            let cancel = Notify::new();
+            cancel.notify_one();
+            let captured = capture_tree(missing(Some(&cancel), stdin)).await;
+            assert!(matches!(captured, Ok(Captured::Cancelled)));
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode2_cancel_fired_spends_only_a_fired_permit() {
+        let cancel = Notify::new();
+        assert!(!opencode2_cancel_fired(&cancel));
+        cancel.notify_one();
+        assert!(opencode2_cancel_fired(&cancel));
+        assert!(!opencode2_cancel_fired(&cancel), "the permit was spent");
+        // A cancel after an unfired check stays stored for the run's own wait.
+        cancel.notify_one();
+        let kept = tokio::time::timeout(Duration::from_secs(5), cancel.notified()).await;
+        assert!(kept.is_ok());
+    }
+
+    #[tokio::test]
+    async fn capture_tree_writes_its_stdin_to_the_child() {
+        // `sort` echoes its one input line on both platforms.
+        let program = if cfg!(windows) { "sort" } else { "cat" };
+        let captured = capture_tree(CaptureRequest {
+            program: Path::new(program),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            stdin: Some(b"GD-SENTINEL-NOT-A-KEY\n".to_vec()),
+            timeout: Duration::from_secs(60),
+            cancel: None,
+        })
+        .await;
+        match captured {
+            Ok(Captured::Exited {
+                code: 0, stdout, ..
+            }) => assert_eq!(
+                String::from_utf8_lossy(&stdout).trim(),
+                "GD-SENTINEL-NOT-A-KEY"
+            ),
+            Ok(Captured::Exited { code, .. }) => panic!("exit {code}"),
+            Ok(_) => panic!("{program} did not exit"),
+            Err(error) => panic!("{error}"),
+        }
     }
 
     #[test]
@@ -9585,6 +13863,7 @@ opencode/x-preview-f-free
             true,
             &[],
             &sink,
+            None,
         )
         .await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -9648,6 +13927,7 @@ opencode/x-preview-f-free
             true,
             &[],
             &sink,
+            None,
         )
         .await;
         assert!(
@@ -9777,6 +14057,7 @@ opencode/x-preview-f-free
             kill_tree_on_exit,
             &[],
             sink,
+            None,
         )
     }
 
@@ -10422,6 +14703,9 @@ opencode/x-preview-f-free
             "agent_review:true",
             "agent_session:false",
             "agent_session:false",
+            "opencode2_review:true",
+            "opencode2_host_session:false",
+            "opencode2_container_session:false",
         ];
         if found != expected {
             bad.push(format!(
@@ -10464,15 +14748,15 @@ opencode/x-preview-f-free
             assert_eq!(bad.len(), 1, "flipping call {n} in {caller}: {bad:?}");
         }
         // An added or dropped call also moves the name count.
-        let fourth = format!("{text}\nfn extra() {{\n    stream_agent(a, b, c, d, e, f, g, h, i, None, false, j, k);\n}}\n");
-        assert_eq!(run_kind_violations(&fourth).len(), 2, "a fourth call");
+        let extra = format!("{text}\nfn extra() {{\n    stream_agent(a, b, c, d, e, f, g, h, i, None, false, j, k);\n}}\n");
+        assert_eq!(run_kind_violations(&extra).len(), 2, "an extra call");
         let missing = text.replacen("return stream_agent(", "return other_agent(", 1);
         assert_ne!(missing, text);
         assert_eq!(run_kind_violations(&missing).len(), 2, "a missing call");
         let alias = format!("{text}\nfn extra() {{\n    let run = stream_agent;\n}}\n");
         let bad = run_kind_violations(&alias);
         assert!(
-            bad.len() == 1 && bad[0].starts_with("`stream_agent` is named 5 times"),
+            bad.len() == 1 && bad[0].starts_with("`stream_agent` is named 8 times"),
             "an alias: {bad:?}"
         );
     }

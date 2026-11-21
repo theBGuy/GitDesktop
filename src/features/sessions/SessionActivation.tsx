@@ -55,10 +55,12 @@ export function SessionActivation({ repoPath }: { repoPath: string }) {
     (s) => s.setPendingResearchSeed,
   );
 
-  // A handoff ("Implement this issue") seeds the Delegate composer.
+  // A handoff ("Implement this issue") seeds the Delegate composer. Repo-gated
+  // like the seeds below: another repo's record (a start state the composer left
+  // there) must not force Delegate over this repo's Plan or Research draft.
   useEffect(() => {
-    if (pendingTask) setMode("delegate");
-  }, [pendingTask]);
+    if (pendingTask?.repoPath === repoPath) setMode("delegate");
+  }, [pendingTask, repoPath]);
 
   // The agent-plan hotkey, an issue's Plan button, or "Turn into a Plan" from a
   // research run switches to (and seeds) the Plan composer. Snapshot the seed

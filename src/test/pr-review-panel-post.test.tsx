@@ -20,6 +20,7 @@ import { create } from "zustand";
 import { PR_SWITCH_LOADING_REASON } from "@/features/pulls/PrMergeabilityBanner";
 import { PrReviewPanel } from "@/features/pulls/PrReviewPanel";
 import { useArchivedLatch } from "@/features/pulls/RemotePrView";
+import type { AgentInfo } from "@/lib/ai/agent";
 import type { ReviewMode } from "@/lib/ai/types";
 import {
   PR_ARCHIVED_READONLY_MESSAGE,
@@ -37,6 +38,7 @@ import {
   type PersistedReview,
   reviewHistoryKey,
 } from "@/lib/pulls/reviews-history";
+import type { AppSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
 import {
@@ -62,6 +64,9 @@ const stored = vi.hoisted(() => ({
   /** While set, list reads wait on it before answering. */
   gate: null as Promise<void> | null,
 }));
+/** A per-test settings answer; null = DEFAULT_SETTINGS. */
+const settingsMock = vi.hoisted(() => ({ value: null as AppSettings | null }));
+const detectByPath = vi.hoisted(() => new Map<string, Partial<AgentInfo>>());
 const reset = vi.hoisted(() => vi.fn());
 const generate = vi.hoisted(() => vi.fn());
 
@@ -71,7 +76,7 @@ vi.mock("@/lib/stores/reviews", () => ({
 }));
 vi.mock("@/lib/settings/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/queries")>()),
-  useSettings: () => ({ data: DEFAULT_SETTINGS }),
+  useSettings: () => ({ data: settingsMock.value ?? DEFAULT_SETTINGS }),
   useSecretPreview: () => ({ data: { length: 8, masked: "sk…0000" } }),
 }));
 vi.mock("@/lib/pulls/queries", async (importOriginal) => {
@@ -128,7 +133,11 @@ vi.mock("@/lib/ai/models", async (importOriginal) => ({
 }));
 vi.mock("@/lib/ai/agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/ai/agent")>()),
-  detectAgentCli: vi.fn(async () => ({ found: true, authed: "authed" })),
+  // Answers by binary path, so two reviewers on one CLI can differ.
+  detectAgentCli: vi.fn(
+    async (_kind: unknown, path?: string) =>
+      detectByPath.get(path ?? "") ?? { found: true, authed: "authed" },
+  ),
 }));
 vi.mock("@/lib/pulls/reviews-history", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/pulls/reviews-history")>()),
@@ -185,6 +194,8 @@ function rec(id: string, extra: Partial<PersistedReview> = {}) {
 }
 
 beforeEach(() => {
+  settingsMock.value = null;
+  detectByPath.clear();
   run.recordId = "rec-1";
   run.timedOut = false;
   run.generating = false;
@@ -907,5 +918,57 @@ describe("live Post confirm continuation", () => {
       await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
       user.unmount();
     }
+  });
+});
+describe("unsupported opencode", () => {
+  /** Ends with the clause the backend drops, to prove nothing is stripped. */
+  const SENTENCE =
+    "This opencode (3.0.0) is newer than GitDesktop supports. Update GitDesktop, then try again.";
+  const SUFFIX = " Security audits use this opencode.";
+  const opencode = (cliPath: string) => ({
+    ...DEFAULT_SETTINGS.reviewAi,
+    provider: "opencode-cli" as const,
+    model: "opencode/big-pickle",
+    cliPath,
+  });
+
+  it("shows the reviewer's sentence verbatim, with no security suffix", async () => {
+    settingsMock.value = { ...DEFAULT_SETTINGS, reviewAi: opencode("/a/oc") };
+    detectByPath.set("/a/oc", { found: true, unsupported: SENTENCE });
+    renderPanel();
+    const line = await screen.findByText(SENTENCE);
+    expect(line.textContent).toBe(SENTENCE);
+  });
+
+  it("names the security reviewer's opencode after its sentence, once", async () => {
+    settingsMock.value = {
+      ...DEFAULT_SETTINGS,
+      reviewAi: opencode("/a/oc"),
+      securityReviewAi: opencode("/b/oc"),
+    };
+    detectByPath.set("/b/oc", { found: true, unsupported: SENTENCE });
+    renderPanel();
+    const line = await screen.findByText(SENTENCE + SUFFIX);
+    expect(line.textContent).toBe(SENTENCE + SUFFIX);
+    expect(
+      screen.getAllByText(/Security audits use this opencode\./),
+    ).toHaveLength(1);
+  });
+
+  it("shows no sentence for a security binary that isn't found", async () => {
+    settingsMock.value = {
+      ...DEFAULT_SETTINGS,
+      reviewAi: opencode("/a/oc"),
+      securityReviewAi: opencode("/b/oc"),
+    };
+    detectByPath.set("/b/oc", { found: false, unsupported: SENTENCE });
+    renderPanel();
+    expect(
+      await screen.findByText(
+        "not found — install it or set its path in Settings; security audits use it.",
+        { exact: false },
+      ),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(SENTENCE);
   });
 });

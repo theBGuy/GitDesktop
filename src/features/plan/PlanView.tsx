@@ -208,7 +208,12 @@ export function PlanComposer({
               }}
               agent={agent}
             />
-            <ComposerOptions effort={effort} onEffort={setEffort} />
+            <ComposerOptions
+              effort={effort}
+              onEffort={setEffort}
+              // The run hard-codes its isolation and resolves its own binary.
+              effortFor={{ agent, model: modelForAgent, isolation: "worktree" }}
+            />
             <div className="ml-auto flex items-center gap-2">
               <span className="hidden truncate text-[11px] text-muted-foreground sm:inline">
                 {formatBinding("mod+enter")} to plan

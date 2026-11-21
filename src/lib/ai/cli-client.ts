@@ -185,6 +185,11 @@ export function createCliClient(settings: AiSettings): AiClient {
             message: `${label} CLI not found — install it or set its path in Settings.`,
           } as const;
         }
+        // A binary GitDesktop won't run fails every request whatever its sign-in
+        // state; the backend's sentence goes out as sent (presence test only).
+        if (info.unsupported?.trim()) {
+          return { ok: false, message: info.unsupported } as const;
+        }
         if (info.authed === "notAuthed") {
           return {
             ok: false,

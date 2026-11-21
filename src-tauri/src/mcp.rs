@@ -395,6 +395,108 @@ pub fn write_opencode_config(
     )
 }
 
+/// The JSON escape for `{` inside a 2.x config string. Built with `concat!` so no tool
+/// that carries this source can turn the escape into the literal character.
+const LEFT_BRACE_ESCAPE: &str = concat!('\\', "u007b");
+
+/// Rewrite every `{` inside a JSON string (keys and values) of serde_json output as
+/// `LEFT_BRACE_ESCAPE`, leaving structural braces alone. opencode 2.x substitutes
+/// `{env:NAME}` and `{file:path}` over the RAW config text before parsing, so a user
+/// string must carry no `{`; JSON parsing restores it. Deliberately independent of the
+/// `opencode2` module's twin so the two compile separately.
+fn escape_config_braces(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in json.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            } else if c == '{' {
+                out.push_str(LEFT_BRACE_ESCAPE);
+                continue;
+            }
+        } else if c == '"' {
+            in_string = true;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Build opencode 2.x's per-run MCP file TEXT in its native `{"mcp":{"servers":{…}}}`
+/// shape: MCP servers only (the Research agent and the permission lock ride in
+/// `OPENCODE_CONFIG_CONTENT`, built elsewhere). `disabled: false` is 2.x's spelling of
+/// 1.x's `enabled: true`; `codemode: false` keeps server tools as direct `<server>_<tool>`
+/// calls instead of routing them through the `execute` tool. Every in-string `{` is
+/// escaped (`escape_config_braces`), so the text must be written as returned.
+pub fn build_opencode2_config(specs: &[McpServerSpec]) -> AppResult<String> {
+    let mut servers = Map::new();
+    for spec in specs {
+        let entry = if spec.is_stdio() {
+            let mut command = vec![Value::String(spec.command.clone())];
+            command.extend(spec.args.iter().map(|a| Value::String(a.clone())));
+            json!({
+                "type": "local",
+                "command": command,
+                "environment": resolve_entries(spec)?,
+                "disabled": false,
+                "codemode": false,
+            })
+        } else {
+            json!({
+                "type": "remote",
+                "url": spec.url,
+                "headers": resolve_entries(spec)?,
+                "disabled": false,
+                "codemode": false,
+            })
+        };
+        servers.insert(spec.name.clone(), entry);
+    }
+    let doc = json!({ "mcp": { "servers": servers } });
+    let text = serde_json::to_string_pretty(&doc)
+        .map_err(|e| AppError::Command(format!("serialize mcp config: {e}")))?;
+    Ok(escape_config_braces(&text))
+}
+
+/// Write already-serialized config `body` to `<app_data>/mcp/<session_id>.<ext>` (kept
+/// out of the repo/worktree since it may hold resolved secrets) and return its path.
+fn write_session_text(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    ext: &str,
+    body: &str,
+) -> AppResult<PathBuf> {
+    crate::sessions::validate_id(session_id)?;
+    let dir = config_root(app)?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{session_id}.{ext}"));
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+/// Generate + write the opencode 2.x config for a HOST session, returning its path for
+/// the `OPENCODE_CONFIG` env var. `Ok(None)` when there are no servers: 2.x never needs
+/// a server-less file. Shares the 1.x file name, so a session that changes major between
+/// turns overwrites one file and `cleanup_host_config` removes it.
+pub fn write_opencode2_config(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    specs: &[McpServerSpec],
+) -> AppResult<Option<PathBuf>> {
+    validate_specs(specs)?;
+    if specs.is_empty() {
+        return Ok(None);
+    }
+    let body = build_opencode2_config(specs)?;
+    write_session_text(app, session_id, "opencode.json", &body).map(Some)
+}
+
 /// Remove a session's generated host configs (best-effort, every CLI shape),
 /// called on cleanup so resolved-secret files don't linger after a session is
 /// discarded.
@@ -1066,6 +1168,205 @@ mod tests {
         assert_eq!(srv["url"], "https://mcp.example.com/mcp");
         assert_eq!(srv["headers"]["Authorization"], "Bearer x");
         assert_eq!(srv["enabled"], true);
+    }
+
+    // --- opencode 2.x config -------------------------------------------------
+
+    fn parse2(specs: &[McpServerSpec]) -> (String, Value) {
+        let text = build_opencode2_config(specs).unwrap();
+        let value = serde_json::from_str(&text).unwrap();
+        (text, value)
+    }
+
+    /// Every JSON object in `v`, nested ones included.
+    fn count_objects(v: &Value) -> usize {
+        match v {
+            Value::Object(m) => 1 + m.values().map(count_objects).sum::<usize>(),
+            Value::Array(a) => a.iter().map(count_objects).sum(),
+            _ => 0,
+        }
+    }
+
+    /// Every `{` inside a string of `v`, object keys included.
+    fn count_string_braces(v: &Value) -> usize {
+        match v {
+            Value::String(s) => s.matches('{').count(),
+            Value::Object(m) => m
+                .iter()
+                .map(|(k, v)| k.matches('{').count() + count_string_braces(v))
+                .sum(),
+            Value::Array(a) => a.iter().map(count_string_braces).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn left_brace_escape_is_the_six_ascii_bytes() {
+        assert_eq!(
+            LEFT_BRACE_ESCAPE.as_bytes(),
+            [b'\\', b'u', b'0', b'0', b'7', b'b']
+        );
+    }
+
+    #[test]
+    fn opencode2_stdio_uses_native_local_entry() {
+        let (_, cfg) = parse2(&[stdio("everything")]);
+        assert_eq!(
+            cfg["mcp"]["servers"]["everything"],
+            json!({
+                "type": "local",
+                "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+                "environment": { "TOKEN": "plain" },
+                "disabled": false,
+                "codemode": false,
+            })
+        );
+        assert!(cfg["mcp"]["servers"]["everything"].get("enabled").is_none());
+    }
+
+    #[test]
+    fn opencode2_http_uses_native_remote_entry() {
+        let (_, cfg) = parse2(&[http("remote")]);
+        assert_eq!(
+            cfg["mcp"]["servers"]["remote"],
+            json!({
+                "type": "remote",
+                "url": "https://mcp.example.com/mcp",
+                "headers": { "Authorization": "Bearer x" },
+                "disabled": false,
+                "codemode": false,
+            })
+        );
+        assert!(cfg["mcp"]["servers"]["remote"].get("enabled").is_none());
+    }
+
+    #[test]
+    fn opencode2_document_holds_only_mcp_servers() {
+        let (_, cfg) = parse2(&[stdio("everything"), http("remote")]);
+        let top = cfg.as_object().unwrap();
+        assert_eq!(top.keys().collect::<Vec<_>>(), vec!["mcp"]);
+        let mcp = cfg["mcp"].as_object().unwrap();
+        assert_eq!(mcp.keys().collect::<Vec<_>>(), vec!["servers"]);
+        assert!(cfg.get("agent").is_none() && cfg.get("agents").is_none());
+        assert_eq!(cfg["mcp"]["servers"].as_object().unwrap().len(), 2);
+
+        let (_, empty) = parse2(&[]);
+        assert_eq!(empty, json!({ "mcp": { "servers": {} } }));
+    }
+
+    #[test]
+    fn opencode2_names_that_collide_with_schema_words_get_their_own_entries() {
+        let names = ["servers", "timeout", "type", "enabled"];
+        let specs: Vec<_> = names.iter().map(|n| stdio(n)).collect();
+        let (_, cfg) = parse2(&specs);
+        let servers = cfg["mcp"]["servers"].as_object().unwrap();
+        assert_eq!(servers.len(), names.len());
+        for n in names {
+            assert_eq!(servers[n]["type"], "local", "{n}");
+            assert_eq!(servers[n]["disabled"], false, "{n}");
+        }
+    }
+
+    fn hostile_stdio() -> McpServerSpec {
+        McpServerSpec {
+            command: "{env:HOME}".into(),
+            args: vec!["{file:/etc/passwd}".into(), "{file:~/.ssh/id_rsa}".into()],
+            env: vec![KeyValue {
+                key: "{env:HOME}".into(),
+                value: "{file:/etc/passwd}".into(),
+            }],
+            ..stdio("hostile-stdio")
+        }
+    }
+
+    fn hostile_http() -> McpServerSpec {
+        McpServerSpec {
+            url: "https://h.example/{env:HOME}/{file:/etc/passwd}".into(),
+            headers: vec![KeyValue {
+                key: "{file:~/.ssh/id_rsa}".into(),
+                value: "{env:HOME}".into(),
+            }],
+            ..http("hostile-http")
+        }
+    }
+
+    #[test]
+    fn opencode2_escapes_every_user_brace_and_round_trips() {
+        let (text, cfg) = parse2(&[hostile_stdio(), hostile_http()]);
+        assert!(!text.contains("{env:"), "{text}");
+        assert!(!text.contains("{file:"), "{text}");
+        assert!(text.contains(LEFT_BRACE_ESCAPE));
+        let expected = json!({ "mcp": { "servers": {
+            "hostile-stdio": {
+                "type": "local",
+                "command": ["{env:HOME}", "{file:/etc/passwd}", "{file:~/.ssh/id_rsa}"],
+                "environment": { "{env:HOME}": "{file:/etc/passwd}" },
+                "disabled": false,
+                "codemode": false,
+            },
+            "hostile-http": {
+                "type": "remote",
+                "url": "https://h.example/{env:HOME}/{file:/etc/passwd}",
+                "headers": { "{file:~/.ssh/id_rsa}": "{env:HOME}" },
+                "disabled": false,
+                "codemode": false,
+            },
+        } } });
+        assert_eq!(cfg, expected);
+        assert_eq!(text.matches('{').count(), count_objects(&cfg));
+        assert_eq!(
+            text.matches(LEFT_BRACE_ESCAPE).count(),
+            count_string_braces(&cfg)
+        );
+        // Control: the same document without the escape pass carries the tokens.
+        let raw = serde_json::to_string_pretty(&expected).unwrap();
+        assert!(raw.contains("{env:HOME}") && raw.contains("{file:"));
+    }
+
+    #[test]
+    fn opencode2_escape_is_per_string_across_many_servers() {
+        let specs: Vec<_> = (0..20)
+            .map(|i| McpServerSpec {
+                args: vec![format!("{{env:VAR{i}}}")],
+                ..stdio(&format!("s{i}"))
+            })
+            .collect();
+        let (text, cfg) = parse2(&specs);
+        assert!(!text.contains("{env:"));
+        assert_eq!(text.matches(LEFT_BRACE_ESCAPE).count(), 20);
+        assert_eq!(text.matches('{').count(), count_objects(&cfg));
+        for i in 0..20 {
+            assert_eq!(
+                cfg["mcp"]["servers"][format!("s{i}")]["command"][1],
+                format!("{{env:VAR{i}}}")
+            );
+        }
+    }
+
+    #[test]
+    fn escape_config_braces_edge_rows() {
+        let rows = [
+            json!({ "a": "\"{b" }),
+            json!({ "a": ["x\\", "{y"] }),
+            json!({ "a": "é{file:x}" }),
+            json!({ "": "", "e": {} }),
+            json!({ "{k}": { "v": 1 } }),
+        ];
+        for v in rows {
+            for raw in [
+                serde_json::to_string(&v).unwrap(),
+                serde_json::to_string_pretty(&v).unwrap(),
+            ] {
+                let out = escape_config_braces(&raw);
+                assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), v, "{raw}");
+                assert_eq!(out.matches('{').count(), count_objects(&v), "{raw}");
+                assert_eq!(
+                    out.matches(LEFT_BRACE_ESCAPE).count(),
+                    count_string_braces(&v),
+                    "{raw}"
+                );
+            }
+        }
     }
 
     // --- self_server_spec ----------------------------------------------------

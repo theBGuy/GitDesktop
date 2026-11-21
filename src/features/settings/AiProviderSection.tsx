@@ -1,6 +1,7 @@
 import {
   CheckCircleIcon,
   PlusIcon,
+  WarningCircleIcon,
   XCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
@@ -8,7 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReactNode } from "react";
-import { useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { CopyIconButton } from "@/components/CopyIconButton";
 import { Button } from "@/components/ui/button";
@@ -47,6 +48,7 @@ import {
 } from "@/lib/ai/allowed-hosts";
 import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import { createAiClient } from "@/lib/ai/client";
+import { reviewEffortTargets } from "@/lib/ai/effort-levels";
 import { modelPickerEmptyText, useAvailableModels } from "@/lib/ai/models";
 import {
   ALL_PROVIDER_IDS,
@@ -62,12 +64,7 @@ import {
   REVIEW_CONTEXT_SIZES,
   type ReviewContextSize,
 } from "@/lib/ai/review-context-size";
-import {
-  EFFORT_LEVEL_LABELS,
-  REVIEW_EFFORTS,
-  type ReviewEffort,
-  reviewEffortCapable,
-} from "@/lib/ai/review-effort";
+import { reviewEffortCapable } from "@/lib/ai/review-effort";
 import { REVIEW_TIMEOUTS, type ReviewTimeout } from "@/lib/ai/review-timeout";
 import type { AiProviderId, AiSettings } from "@/lib/ai/types";
 import { presentError } from "@/lib/error-summary";
@@ -80,6 +77,7 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { AgentSandboxField } from "./AgentSandboxField";
 import { HostAllowNote } from "./HostAllowNote";
+import { ReviewEffortField } from "./ReviewEffortField";
 import { settingsFormOpts } from "./settings-form";
 
 /** Typical key shapes per provider; used for a soft warning, never to block. */
@@ -268,7 +266,7 @@ function ModelPicker({
  * (duplicate DOM ids), so never default or remove it; `description` carries the
  * surface-specific footer copy.
  */
-function CliProviderConfig({
+export function CliProviderConfig({
   idPrefix,
   value,
   onChange,
@@ -290,6 +288,9 @@ function CliProviderConfig({
   });
   const info = detect.data;
   const version = info?.version ? ` (${info.version})` : "";
+  // The backend's sentence for a binary it won't run, shown as sent (presence test only).
+  const unsupported =
+    info?.found && info.unsupported?.trim() ? info.unsupported : null;
 
   return (
     <div className="space-y-2">
@@ -309,6 +310,10 @@ function CliProviderConfig({
           <span className="text-muted-foreground">
             Checking for {PROVIDER_LABELS[value.provider]}…
           </span>
+        ) : unsupported ? (
+          // A binary GitDesktop won't run gets no success mark or sign-in
+          // steer: the row below says why.
+          <span className="text-muted-foreground">Found{version}</span>
         ) : info?.found && info.authed === "notAuthed" ? (
           <span className="flex items-center gap-1 text-warning">
             <XCircleIcon className="size-4 shrink-0" />
@@ -329,6 +334,16 @@ function CliProviderConfig({
           </span>
         )}
       </div>
+      {unsupported ? (
+        <p className="flex items-start gap-1 text-xs text-foreground">
+          <WarningCircleIcon
+            weight="fill"
+            className="size-4 shrink-0 text-warning"
+            aria-hidden
+          />
+          <span>{unsupported}</span>
+        </p>
+      ) : null}
       <p className="text-xs text-muted-foreground">{description}</p>
     </div>
   );
@@ -361,13 +376,6 @@ const REVIEW_TIMEOUT_ITEMS: Record<ReviewTimeout, string> = {
   "30": "30 minutes",
   "45": "45 minutes",
   "60": "60 minutes",
-};
-
-/** Review-effort labels — same `items` contract as the maps above. Only the
- *  "no level" row is local: this picker spells it as the CLI's own default. */
-const REVIEW_EFFORT_ITEMS: Record<ReviewEffort, string> = {
-  auto: "Default — the CLI's own setting",
-  ...EFFORT_LEVEL_LABELS,
 };
 
 type DefaultAgentId = (typeof DEFAULT_AGENT_IDS)[number];
@@ -683,7 +691,9 @@ function AllowedHostsField({
 
 export const AiProviderSection = withForm({
   ...settingsFormOpts,
-  render: function AiProviderSectionRender({ form }) {
+  // Whether the form holds the saved settings yet (it opens on the defaults).
+  props: { seeded: false },
+  render: function AiProviderSectionRender({ form, seeded }) {
     const queryClient = useQueryClient();
     const ai = useSelector(form.store, (s) => s.values.ai);
     const reviewAi = useSelector(form.store, (s) => s.values.reviewAi);
@@ -720,6 +730,26 @@ export const AiProviderSection = withForm({
       (s) => s.values.agentImageProviders,
     );
     const repoPath = useUiStore((s) => s.repoPath);
+    const settingsAnchor = useUiStore((s) => s.settingsAnchor);
+    const clearSettingsAnchor = useUiStore((s) => s.clearSettingsAnchor);
+    const isolationRef = useRef<HTMLDivElement>(null);
+    const isolationHeadingId = useId();
+    // A deep link to the sandbox field lands here once, in the commit that shows
+    // the saved values (the defaults lay out the blocks above it differently):
+    // the region scrolls to the top of the panel's scroller with no animation,
+    // takes focus (a group, so a stray Enter starts nothing), and is consumed.
+    useLayoutEffect(() => {
+      if (!seeded || settingsAnchor !== "agent-sandbox") return;
+      const el = isolationRef.current;
+      if (!el) return;
+      el.scrollIntoView({ block: "start", behavior: "instant" });
+      // A script focus after a mouse click wouldn't match :focus-visible, so
+      // the landing draws its own ring until focus moves off the region (a window
+      // deactivation blurs it but leaves it the active element).
+      el.setAttribute("data-anchor-landed", "");
+      el.focus({ preventScroll: true });
+      clearSettingsAnchor();
+    }, [seeded, settingsAnchor, clearSettingsAnchor]);
     const allowedHosts = useSelector(
       form.store,
       (s) => s.values.aiAllowedHosts,
@@ -1143,32 +1173,11 @@ export const AiProviderSection = withForm({
           {(reviewEffortCapable(reviewAi.provider) ||
             (securityReviewAi &&
               reviewEffortCapable(securityReviewAi.provider))) && (
-            <div className="space-y-2">
-              <Label htmlFor="review-effort">Review effort</Label>
-              <Select
-                items={REVIEW_EFFORT_ITEMS}
-                value={reviewEffort}
-                onValueChange={(v) => {
-                  if (v) form.setFieldValue("reviewEffort", v as ReviewEffort);
-                }}
-              >
-                <SelectTrigger id="review-effort" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {REVIEW_EFFORTS.map((id) => (
-                    <SelectItem key={id} value={id}>
-                      {REVIEW_EFFORT_ITEMS[id]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                How hard the reviewing agent thinks, for reviews and security
-                audits alike. Lower is a quicker, lighter pass; Codex and the
-                API providers always run at their own defaults.
-              </p>
-            </div>
+            <ReviewEffortField
+              value={reviewEffort}
+              onChange={(v) => form.setFieldValue("reviewEffort", v)}
+              targets={reviewEffortTargets(reviewAi, securityReviewAi)}
+            />
           )}
           {/* Only the agent-CLI providers run under a kill timeout, so the row
               shows when a CLI drives reviews or security audits. */}
@@ -1254,10 +1263,25 @@ export const AiProviderSection = withForm({
                 : `New Session, Plan, and Research runs follow the AI provider above when it's an agent CLI — right now they start on ${DEFAULT_AGENT_ITEMS[providerKind(ai.provider) ?? "claude"]}.`}
             </p>
           </div>
-          <div className="space-y-2">
+          <div
+            ref={isolationRef}
+            role="group"
+            aria-labelledby={isolationHeadingId}
+            tabIndex={-1}
+            onBlur={(e) => {
+              if (
+                e.target === e.currentTarget &&
+                document.activeElement !== e.currentTarget
+              )
+                e.currentTarget.removeAttribute("data-anchor-landed");
+            }}
+            className="scroll-mt-6 space-y-2 rounded-md outline-none data-anchor-landed:ring-2 data-anchor-landed:ring-ring data-anchor-landed:ring-offset-4 data-anchor-landed:ring-offset-background"
+          >
             {/* Sized below the section h3 so the sandbox controls read as its
                 subordinate group, not a second section. */}
-            <h4 className="text-xs font-medium">Isolation</h4>
+            <h4 id={isolationHeadingId} className="text-xs font-medium">
+              Isolation
+            </h4>
             <AgentSandboxField
               value={agentIsolation}
               onChange={(v) => form.setFieldValue("agentIsolation", v)}

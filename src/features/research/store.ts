@@ -3,12 +3,14 @@ import { bumpNavVersion } from "@/features/sessions/navVersion";
 import { isWatchingAgentSurface } from "@/features/sessions/watching";
 import {
   type AgentKind,
+  appendTranscriptNote,
   appendTranscriptText,
   appendTranscriptTool,
   type ContextPack,
   cancelAgentSession,
   ensureTranscriptText,
   extractContextPack,
+  noticeEffect,
   runAgentSession,
   type TranscriptSegment,
 } from "@/lib/ai/agent";
@@ -302,6 +304,10 @@ export const useResearchStore = create<ResearchState>((set, get) => {
     };
     let finalText = "";
     let errored = false;
+    // Set by a reset/re-key notice: this run's next `nativeSession` replaces the
+    // stored id. Run-local on purpose: a failed reset turn must not leave it armed
+    // for the next run, and another run's notice must never arm this one.
+    let replaceArmed = false;
     // Announce a finished run (success OR failure), but stay quiet when the user is looking
     // at this run (focused + Agent tab + selected); another tab still gets it.
     const notifyDone = (failed: boolean) => {
@@ -347,9 +353,26 @@ export const useResearchStore = create<ResearchState>((set, get) => {
         nativeSessionId: run0.nativeSessionId,
         onEvent: (ev) => {
           if (ev.kind === "nativeSession") {
+            // Capture once (turn 1, or the turn after a reset/re-key notice). Pinned
+            // to this turn's session id: a run a Restart replaced must not rebind the
+            // new conversation.
             const cur = get().runs.find((r) => r.id === id);
-            if (cur && !cur.nativeSessionId)
+            if (
+              cur &&
+              cur.sessionId === run0.sessionId &&
+              (replaceArmed || !cur.nativeSessionId)
+            ) {
+              replaceArmed = false;
               patch(id, { nativeSessionId: ev.id });
+            }
+          } else if (ev.kind === "notice") {
+            const effect = noticeEffect(ev);
+            if (effect.replaceNativeSession) replaceArmed = true;
+            const cur = get().runs.find((r) => r.id === id);
+            if (effect.note && cur && cur.sessionId === run0.sessionId)
+              patch(id, {
+                segments: appendTranscriptNote(cur.segments ?? [], effect.note),
+              });
           } else if (ev.kind === "delta") {
             finalText += ev.text;
             const cur = get().runs.find((r) => r.id === id);

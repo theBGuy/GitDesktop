@@ -11,7 +11,19 @@ export interface ContainerStatus {
   /** The built image matches the current Node version + providers; `false` while
    *  `imagePresent` is true means a rebuild is needed to apply the change. */
   imageMatches: boolean;
+  /** The built image holds an opencode older than this build installs (a rebuild
+   *  is needed to run opencode in a container); `false` when the label is unread. */
+  opencodeOutdated: boolean;
 }
+
+/** The composer's isolation caveat when `opencodeOutdated` and the session runs opencode. */
+export const OPENCODE_IMAGE_OUTDATED_NOTE =
+  "The agent image holds an older opencode. Rebuild it in Settings to run opencode in a container (about 1 GB more to download).";
+
+/** Settings' image row when `opencodeOutdated` and opencode is among the image agents;
+ *  it replaces the generic "doesn't match" row, since one rebuild fixes both. */
+export const OPENCODE_IMAGE_OUTDATED_DETAIL =
+  "The built image holds an older opencode. Rebuild to run opencode sessions in a container; the rebuild downloads about 1 GB more.";
 
 /** Detects Docker/Podman availability + whether the agent image (for this Node
  *  version + provider set) needs building or rebuilding. */

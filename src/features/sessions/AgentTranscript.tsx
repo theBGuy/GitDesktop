@@ -4,6 +4,7 @@ import {
   FileTextIcon,
   FolderOpenIcon,
   GlobeIcon,
+  InfoIcon,
   MagnifyingGlassIcon,
   PencilSimpleIcon,
   SparkleIcon,
@@ -88,6 +89,23 @@ function relativize(target: string, baseDir?: string): string {
   }
   if (t.startsWith(CONTAINER_MOUNT)) return t.slice(CONTAINER_MOUNT.length);
   return target;
+}
+
+/** A note from GitDesktop in the timeline (never the agent's output), in the tool
+ *  step's calm treatment but wrapping. Not a live region: the turn's status line is
+ *  the only one. `text` may come back from disk, so anything but a non-blank string
+ *  renders nothing, and it is only ever a text node. */
+function TranscriptNote({ text }: { text: unknown }) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  return (
+    <div className="flex items-start gap-1.5 bg-muted/40 px-2 py-1 text-[11px] leading-relaxed">
+      <InfoIcon
+        aria-hidden
+        className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+      />
+      <span className="min-w-0 break-words text-muted-foreground">{text}</span>
+    </div>
+  );
 }
 
 /** One inline tool step in the transcript — a calm row (icon + verb + target)
@@ -424,6 +442,8 @@ export function AgentTranscript({
             <Markdown key={i}>{seg.text}</Markdown>
           );
         }
+        if (seg.type === "note")
+          return <TranscriptNote key={i} text={seg.text} />;
         // A file edit in a write session expands to its inline diff; everything
         // else (and read-only surfaces) stays a calm static row.
         if (
