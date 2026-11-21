@@ -37,6 +37,7 @@ import { Spinner } from "@/components/ui/spinner";
 import {
   FILE_FILTER_SURFACES,
   type FileFilterSurface,
+  type FileListFilter,
   useFileFilterStore,
   useFileListFilter,
 } from "@/components/use-file-list-filter";
@@ -109,7 +110,7 @@ import {
   useStashApply,
   useStashList,
 } from "@/lib/git/queries";
-import type { StashEntry } from "@/lib/git/types";
+import type { StashEntry, StashFile } from "@/lib/git/types";
 import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
@@ -244,13 +245,21 @@ export function StashesDialog({
     };
   }, []);
 
+  // Per instance: a dialog left open in a hidden panel stays open beside another
+  // instance's, and a filter scope admits one rail at a time.
+  const filterId = useId();
+  const stashScope = stashFilterScope("stash", filterId);
+  const recoverableScope = stashFilterScope("stash-recoverable", filterId);
+  const clearFilters = () =>
+    clearStashFilters([stashScope.scope, recoverableScope.scope]);
+
   // The dialog can be opened straight to either view; seed `view` from the
   // caller's intent each time it opens (mirrors the seed-on-open idiom).
   // The stash filters clear when the close completes (onOpenChangeComplete);
   // this covers a reopen mid-close, which announces the cleared count once.
   const seedOnOpen = useEffectEvent(() => {
     setView(initialView);
-    clearStashFilters();
+    clearFilters();
   });
   useSeedOnOpen(open, seedOnOpen);
 
@@ -385,7 +394,7 @@ export function StashesDialog({
       // Fires once the close transition ends and the popup unmounts, so a
       // reopen's first render lists every file. A hidden panel never closes it.
       onOpenChangeComplete={(isOpen) => {
-        if (!isOpen) clearStashFilters();
+        if (!isOpen) clearFilters();
       }}
     >
       <DialogContent className="flex h-[70vh] flex-col sm:max-w-5xl">
@@ -419,99 +428,117 @@ export function StashesDialog({
         </div>
 
         {view === "recoverable" ? (
-          <RecoverableView repoPath={repoPath} open={open} />
-        ) : list.length === 0 ? (
-          <p className="flex-1 py-8 text-center text-xs text-muted-foreground">
-            No stashes. "Stash all changes" in the branch menu sets the working
-            tree aside here.
-          </p>
+          <RecoverableView
+            repoPath={repoPath}
+            open={open}
+            filterScope={recoverableScope}
+          />
         ) : (
-          <div className="flex min-h-0 flex-1 border">
-            <aside className="flex w-56 shrink-0 flex-col border-r">
-              <ScrollArea className="min-h-0 flex-1">
-                <div onKeyDown={onStashesKeyDown}>
-                  {list.map((stash, i) => (
-                    <button
-                      type="button"
-                      key={rowReactKeys[i]}
-                      data-stash={stashRowKey(stash)}
-                      aria-current={
-                        effectiveKey === stashRowKey(stash) || undefined
-                      }
-                      className={cn(
-                        "block w-full border-b px-3 py-2 text-left",
-                        effectiveKey === stashRowKey(stash)
-                          ? "bg-accent text-accent-foreground"
-                          : "hover:bg-muted/60",
-                      )}
-                      onClick={() =>
-                        setSelected({ sha: stash.sha, index: stash.index })
-                      }
-                    >
-                      <p className="truncate text-xs font-medium">
-                        {stash.message}
-                      </p>
-                      <p className="mt-0.5 text-[11px] text-muted-foreground">
-                        stash@{"{"}
-                        {stash.index}
-                        {"}"} · <RelativeTime date={stash.date} />
-                      </p>
-                    </button>
-                  ))}
+          <StashFilesFilterFrame
+            repoPath={repoPath}
+            sha={effective?.sha ?? null}
+            filterScope={stashScope}
+            blank={false}
+          >
+            {(files) =>
+              list.length === 0 ? (
+                <p className="flex-1 py-8 text-center text-xs text-muted-foreground">
+                  No stashes. "Stash all changes" in the branch menu sets the
+                  working tree aside here.
+                </p>
+              ) : (
+                <div className="flex min-h-0 flex-1 border">
+                  <aside className="flex w-56 shrink-0 flex-col border-r">
+                    <ScrollArea className="min-h-0 flex-1">
+                      <div onKeyDown={onStashesKeyDown}>
+                        {list.map((stash, i) => (
+                          <button
+                            type="button"
+                            key={rowReactKeys[i]}
+                            data-stash={stashRowKey(stash)}
+                            aria-current={
+                              effectiveKey === stashRowKey(stash) || undefined
+                            }
+                            className={cn(
+                              "block w-full border-b px-3 py-2 text-left",
+                              effectiveKey === stashRowKey(stash)
+                                ? "bg-accent text-accent-foreground"
+                                : "hover:bg-muted/60",
+                            )}
+                            onClick={() =>
+                              setSelected({
+                                sha: stash.sha,
+                                index: stash.index,
+                              })
+                            }
+                          >
+                            <p className="truncate text-xs font-medium">
+                              {stash.message}
+                            </p>
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">
+                              stash@{"{"}
+                              {stash.index}
+                              {"}"} · <RelativeTime date={stash.date} />
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                    {effective !== null && (
+                      <div className="flex items-center gap-1.5 border-t p-2">
+                        {busy && <Spinner className="size-3" />}
+                        <span className="flex-1" />
+                        {/* Held, not natively disabled, so focus stays through the
+                            write; a held Enter then repeats onto them. */}
+                        <DisabledReasonButton
+                          variant="ghost"
+                          size="xs"
+                          className="text-destructive"
+                          aria-label={`Drop stash@{${effective.index}}`}
+                          disabled={busy}
+                          reason={busyReason}
+                          onKeyDown={ignoreHeldEnter}
+                          onClick={() => askDrop(effective)}
+                        >
+                          <TrashIcon data-icon="inline-start" />
+                          Drop…
+                        </DisabledReasonButton>
+                        <DisabledReasonButton
+                          variant="outline"
+                          size="xs"
+                          aria-label={`Apply stash@{${effective.index}}`}
+                          disabled={busy}
+                          reason={busyReason}
+                          onKeyDown={ignoreHeldEnter}
+                          onClick={() => askApply(effective.index, false)}
+                        >
+                          Apply
+                        </DisabledReasonButton>
+                        <DisabledReasonButton
+                          size="xs"
+                          aria-label={`Pop stash@{${effective.index}}`}
+                          disabled={busy}
+                          reason={busyReason}
+                          onKeyDown={ignoreHeldEnter}
+                          onClick={() => askApply(effective.index, true)}
+                        >
+                          Pop
+                        </DisabledReasonButton>
+                      </div>
+                    )}
+                  </aside>
+                  {effective !== null ? (
+                    <StashFiles
+                      key={effective.sha}
+                      repoPath={repoPath}
+                      source={{ kind: "stash", sha: effective.sha }}
+                      {...files}
+                    />
+                  ) : null}
                 </div>
-              </ScrollArea>
-              {effective !== null && (
-                <div className="flex items-center gap-1.5 border-t p-2">
-                  {busy && <Spinner className="size-3" />}
-                  <span className="flex-1" />
-                  {/* Held, not natively disabled, so focus stays through the
-                      write; a held Enter then repeats onto them. */}
-                  <DisabledReasonButton
-                    variant="ghost"
-                    size="xs"
-                    className="text-destructive"
-                    aria-label={`Drop stash@{${effective.index}}`}
-                    disabled={busy}
-                    reason={busyReason}
-                    onKeyDown={ignoreHeldEnter}
-                    onClick={() => askDrop(effective)}
-                  >
-                    <TrashIcon data-icon="inline-start" />
-                    Drop…
-                  </DisabledReasonButton>
-                  <DisabledReasonButton
-                    variant="outline"
-                    size="xs"
-                    aria-label={`Apply stash@{${effective.index}}`}
-                    disabled={busy}
-                    reason={busyReason}
-                    onKeyDown={ignoreHeldEnter}
-                    onClick={() => askApply(effective.index, false)}
-                  >
-                    Apply
-                  </DisabledReasonButton>
-                  <DisabledReasonButton
-                    size="xs"
-                    aria-label={`Pop stash@{${effective.index}}`}
-                    disabled={busy}
-                    reason={busyReason}
-                    onKeyDown={ignoreHeldEnter}
-                    onClick={() => askApply(effective.index, true)}
-                  >
-                    Pop
-                  </DisabledReasonButton>
-                </div>
-              )}
-            </aside>
-            {effective !== null ? (
-              <StashFiles
-                key={effective.sha}
-                repoPath={repoPath}
-                source={{ kind: "stash", sha: effective.sha }}
-                filterSurface="stash"
-              />
-            ) : null}
-          </div>
+              )
+            }
+          </StashFilesFilterFrame>
         )}
 
         {applyPrompt && (
@@ -570,9 +597,11 @@ export function StashesDialog({
 function RecoverableView({
   repoPath,
   open,
+  filterScope,
 }: {
   repoPath: string;
   open: boolean;
+  filterScope: StashFilterScope;
 }) {
   const stashesCaption = useId();
   return (
@@ -588,7 +617,11 @@ function RecoverableView({
         >
           {LOST_STASHES_CAPTION}
         </h3>
-        <LostStashesPane repoPath={repoPath} open={open} />
+        <LostStashesPane
+          repoPath={repoPath}
+          open={open}
+          filterScope={filterScope}
+        />
       </section>
     </div>
   );
@@ -962,9 +995,11 @@ const RESTORE_ORPHANED_HELD = "Restoring a stash…";
 function LostStashesPane({
   repoPath,
   open,
+  filterScope,
 }: {
   repoPath: string;
   open: boolean;
+  filterScope: StashFilterScope;
 }) {
   // Auto-scan whenever this view is shown; `enabled` gates the slow fsck so it
   // never runs on the Stashes view.
@@ -1056,109 +1091,204 @@ function LostStashesPane({
       tabIndex={-1}
       className="flex min-h-0 flex-1 flex-col outline-none"
     >
-      {arm === "box" ? (
-        <div className="flex flex-col items-start gap-1.5 border px-3 py-2 text-xs">
-          <p className="flex items-center gap-2 text-muted-foreground">
-            {scanning ? (
-              <>
-                <Spinner className="size-4" />
-                Scanning for lost stashes…
-              </>
-            ) : (
-              "No lost stashes found."
-            )}
-          </p>
-          <DisabledReasonButton
-            ref={rescanRef}
-            variant="outline"
-            size="xs"
-            disabled={scanning}
-            reason={scanning ? SCAN_RUNNING_HELD : null}
-            onKeyDown={ignoreHeldEnter}
-            onClick={() => void orphaned.refetch()}
-          >
-            Rescan
-          </DisabledReasonButton>
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 border">
-          <aside className="flex w-56 shrink-0 flex-col border-r">
-            <ScrollArea className="min-h-0 flex-1">
-              <div onKeyDown={onListKeyDown}>
-                {list.map((o) => (
-                  <button
-                    type="button"
-                    key={o.sha}
-                    data-orphaned={o.sha}
-                    aria-current={effectiveSha === o.sha || undefined}
-                    className={cn(
-                      "block w-full border-b px-3 py-2 text-left",
-                      effectiveSha === o.sha
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-muted/60",
-                    )}
-                    onClick={() => setSelectedSha(o.sha)}
-                  >
-                    <p className="truncate text-xs font-medium">{o.message}</p>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      <RelativeTime date={o.date} /> · {o.fileCount} file
-                      {o.fileCount === 1 ? "" : "s"}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </ScrollArea>
-            {effectiveSha !== null && (
-              <div className="flex items-center gap-1.5 border-t p-2">
-                {restore.isPending && <Spinner className="size-3" />}
-                <span className="flex-1" />
-                <DisabledReasonButton
-                  size="xs"
-                  aria-label={`Restore to working tree: ${selectedMessage ?? ""}`}
-                  disabled={restore.isPending}
-                  reason={RESTORE_ORPHANED_HELD}
-                  onKeyDown={ignoreHeldEnter}
-                  onClick={() => onRestoreClick(effectiveSha)}
-                >
-                  Restore to working tree
-                </DisabledReasonButton>
-              </div>
-            )}
-          </aside>
-          {effectiveSha !== null ? (
-            <StashFiles
-              key={effectiveSha}
-              repoPath={repoPath}
-              source={{ kind: "orphaned", sha: effectiveSha }}
-              filterSurface="stash-recoverable"
-            />
-          ) : null}
+      <StashFilesFilterFrame
+        repoPath={repoPath}
+        sha={effectiveSha}
+        filterScope={filterScope}
+        blank={arm === "box"}
+      >
+        {(files) =>
+          arm === "box" ? (
+            <div className="flex flex-col items-start gap-1.5 border px-3 py-2 text-xs">
+              <p className="flex items-center gap-2 text-muted-foreground">
+                {scanning ? (
+                  <>
+                    <Spinner className="size-4" />
+                    Scanning for lost stashes…
+                  </>
+                ) : (
+                  "No lost stashes found."
+                )}
+              </p>
+              <DisabledReasonButton
+                ref={rescanRef}
+                variant="outline"
+                size="xs"
+                disabled={scanning}
+                reason={scanning ? SCAN_RUNNING_HELD : null}
+                onKeyDown={ignoreHeldEnter}
+                onClick={() => void orphaned.refetch()}
+              >
+                Rescan
+              </DisabledReasonButton>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 border">
+              <aside className="flex w-56 shrink-0 flex-col border-r">
+                <ScrollArea className="min-h-0 flex-1">
+                  <div onKeyDown={onListKeyDown}>
+                    {list.map((o) => (
+                      <button
+                        type="button"
+                        key={o.sha}
+                        data-orphaned={o.sha}
+                        aria-current={effectiveSha === o.sha || undefined}
+                        className={cn(
+                          "block w-full border-b px-3 py-2 text-left",
+                          effectiveSha === o.sha
+                            ? "bg-accent text-accent-foreground"
+                            : "hover:bg-muted/60",
+                        )}
+                        onClick={() => setSelectedSha(o.sha)}
+                      >
+                        <p className="truncate text-xs font-medium">
+                          {o.message}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          <RelativeTime date={o.date} /> · {o.fileCount} file
+                          {o.fileCount === 1 ? "" : "s"}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </ScrollArea>
+                {effectiveSha !== null && (
+                  <div className="flex items-center gap-1.5 border-t p-2">
+                    {restore.isPending && <Spinner className="size-3" />}
+                    <span className="flex-1" />
+                    <DisabledReasonButton
+                      size="xs"
+                      aria-label={`Restore to working tree: ${selectedMessage ?? ""}`}
+                      disabled={restore.isPending}
+                      reason={RESTORE_ORPHANED_HELD}
+                      onKeyDown={ignoreHeldEnter}
+                      onClick={() => onRestoreClick(effectiveSha)}
+                    >
+                      Restore to working tree
+                    </DisabledReasonButton>
+                  </div>
+                )}
+              </aside>
+              {effectiveSha !== null ? (
+                <StashFiles
+                  key={effectiveSha}
+                  repoPath={repoPath}
+                  source={{ kind: "orphaned", sha: effectiveSha }}
+                  {...files}
+                />
+              ) : null}
 
-          <ConfirmDialog
-            open={confirmRestore !== null}
-            onCancel={() => setConfirmRestore(null)}
-            title="Restore over your changes?"
-            body="You have uncommitted changes — restoring may conflict. Continue?"
-            confirmLabel="Restore"
-            pending={restore.isPending}
-            onConfirm={() => {
-              if (confirmRestore === null) return;
-              const sha = confirmRestore;
-              setConfirmRestore(null);
-              void restoreSha(sha);
-            }}
-          />
-        </div>
-      )}
+              <ConfirmDialog
+                open={confirmRestore !== null}
+                onCancel={() => setConfirmRestore(null)}
+                title="Restore over your changes?"
+                body="You have uncommitted changes — restoring may conflict. Continue?"
+                confirmLabel="Restore"
+                pending={restore.isPending}
+                onConfirm={() => {
+                  if (confirmRestore === null) return;
+                  const sha = confirmRestore;
+                  setConfirmRestore(null);
+                  void restoreSha(sha);
+                }}
+              />
+            </div>
+          )
+        }
+      </StashFilesFilterFrame>
     </div>
   );
 }
 
-/** Empties both stash file filters; a no-op when they are already empty. */
-function clearStashFilters() {
-  const { setText } = useFileFilterStore.getState();
-  setText(FILE_FILTER_SURFACES.stash.scope, "");
-  setText(FILE_FILTER_SURFACES["stash-recoverable"].scope, "");
+type StashFilterScope = { scope: string; claimFocusFilter: boolean };
+
+/** One dialog instance's filter scope over a stash surface. */
+function stashFilterScope(
+  surface: Extract<FileFilterSurface, "stash" | "stash-recoverable">,
+  id: string,
+): StashFilterScope {
+  const base = FILE_FILTER_SURFACES[surface];
+  return {
+    scope: `${base.scope}:${id}`,
+    claimFocusFilter: base.claimFocusFilter,
+  };
+}
+
+/** Removes these scopes' texts from the store; a no-op when none is stored. */
+function clearStashFilters(scopes: readonly string[]) {
+  const { texts } = useFileFilterStore.getState();
+  if (!scopes.some((scope) => Object.hasOwn(texts, scope))) return;
+  useFileFilterStore.setState({
+    texts: Object.fromEntries(
+      Object.entries(texts).filter(([scope]) => !scopes.includes(scope)),
+    ),
+  });
+}
+
+/** What a stash view hands its keyed `StashFiles`. */
+type StashFilesFilter = {
+  filter: FileListFilter<StashFile>;
+  onSelectPath: (path: string) => void;
+};
+
+/** A stash view's filter over the selected stash's files, and its one status.
+ *  It wraps every arm of the view, so a stash switch, a rescan or an emptied
+ *  list updates the mounted live region instead of mounting one that already
+ *  holds text; the keyed rows and diff below it remount per stash. */
+function StashFilesFilterFrame({
+  repoPath,
+  sha,
+  filterScope,
+  blank,
+  children,
+}: {
+  repoPath: string;
+  /** The selected stash; null while none is (an empty list included). */
+  sha: string | null;
+  /** Required: each view keeps its own filter text, and a default would let a
+   *  new mount silently share another view's. */
+  filterScope: StashFilterScope;
+  /** The view shows no file rail for a reason of its own (a scan's box). */
+  blank: boolean;
+  children: (files: StashFilesFilter) => ReactNode;
+}) {
+  const files = useOrphanedStashFiles(repoPath, sha);
+  // The user's pick, else the first match under a filter, else the first file.
+  // The pick belongs to one stash, so it resets in the render that switches;
+  // the text persists in its store.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [pickedIn, setPickedIn] = useState(sha);
+  if (pickedIn !== sha) {
+    setPickedIn(sha);
+    setSelectedPath(null);
+  }
+  // Another stash's rows never reach the filter: their first path would open
+  // as this stash's file, and its diff would be read under this stash's sha.
+  const filter = useFileListFilter({
+    ...filterScope,
+    files: files.isPlaceholderData ? [] : (files.data ?? []),
+    settled: files.data !== undefined && !files.isPlaceholderData,
+    picked: selectedPath,
+    onPick: setSelectedPath,
+  });
+  const pane = resolveDetailPane({
+    pending: files.isPending,
+    error: files.isError,
+    hasData: files.data !== undefined,
+    paused: files.isPaused,
+    fetching: files.isFetching,
+  });
+  // Blank wherever no file rail shows: no stash, the view's own box, the
+  // files read's error arm.
+  return (
+    <>
+      <DetailRailFilterStatus
+        filter={filter.rail}
+        blank={blank || sha === null || pane === "error"}
+      />
+      {children({ filter, onSelectPath: setSelectedPath })}
+    </>
+  );
 }
 
 /** File list + selected file diff for one stash (live or orphaned), both read
@@ -1166,29 +1296,19 @@ function clearStashFilters() {
 function StashFiles({
   repoPath,
   source,
-  filterSurface,
+  filter,
+  onSelectPath,
 }: {
   repoPath: string;
   source: FileSource;
-  /** Required: each view keeps its own filter text, and a default would let a
-   *  new mount silently share another view's. */
-  filterSurface: Extract<FileFilterSurface, "stash" | "stash-recoverable">;
+  /** The view's filter over this stash's files (`StashFilesFilterFrame`). */
+  filter: FileListFilter<StashFile>;
+  onSelectPath: (path: string) => void;
 }) {
   // The commit-ish the file lives under.
   const base = source.sha;
 
   const files = useOrphanedStashFiles(repoPath, base);
-
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  // The user's pick, else the first match under a filter, else the first file.
-  // The pick resets with the per-stash remount; the text persists in its store.
-  const filter = useFileListFilter({
-    ...FILE_FILTER_SURFACES[filterSurface],
-    files: files.data ?? [],
-    settled: files.data !== undefined && !files.isPlaceholderData,
-    picked: selectedPath,
-    onPick: setSelectedPath,
-  });
   const effectivePath = filter.openPath;
   // Diff off a deferred path so rapid file arrowing only fetches the landed-on
   // file; the highlight stays on effectivePath.
@@ -1239,7 +1359,6 @@ function StashFiles({
       tabIndex={-1}
       className="flex min-w-0 flex-1 flex-col outline-none"
     >
-      <DetailRailFilterStatus filter={filter.rail} blank={pane === "error"} />
       <DegradedListNotice
         noun="this stash"
         degraded={pane === "content-degraded"}
@@ -1292,7 +1411,7 @@ function StashFiles({
   const onFilesKeyDown = listKeyboardNav({
     items: filter.visible,
     activeIndex: filter.activeIndex,
-    onActivate: (file) => setSelectedPath(file.path),
+    onActivate: (file) => onSelectPath(file.path),
     rowKey: (file) => file.path,
     rowAttr: "data-path",
   });
@@ -1316,7 +1435,7 @@ function StashFiles({
                     ? "bg-accent text-accent-foreground"
                     : "hover:bg-muted/60",
                 )}
-                onClick={() => setSelectedPath(file.path)}
+                onClick={() => onSelectPath(file.path)}
               >
                 <PathText path={file.path} className="flex-1 font-mono" />
                 <DiffStat

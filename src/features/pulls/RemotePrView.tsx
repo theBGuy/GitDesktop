@@ -3595,8 +3595,8 @@ export function RemotePrView({
       className="flex h-full flex-col outline-none"
       {...heldParentProps(hold.holding)}
     >
-      {/* Busy only during a hold, whose inert frame keeps this text from changing;
-          the flag drops in the commit that swaps PRs. */}
+      {/* Busy only during a hold, whose inert frame blocks edits through the field;
+          a refresh of the held PR can still change the count. */}
       <DetailRailFilterStatus
         filter={fileFilter.rail}
         blank={!filesRailShown}
@@ -4256,6 +4256,9 @@ export function RemotePrView({
         tabIndex={-1}
         className="flex h-full flex-col outline-none"
       >
+        {/* The framed arms' first child too, so leaving this view keeps the
+            status node rather than mounting one that already holds text. */}
+        <DetailRailFilterStatus filter={fileFilter.rail} blank />
         <header className="space-y-2 border-b px-4 py-3">
           <DetailTitleRow
             heading={

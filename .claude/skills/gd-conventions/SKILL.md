@@ -700,19 +700,23 @@ and table row are the reference).
   `listKeyboardNav` items and its open path from the hook (`visible`,
   `activeIndex`, `openPath`), never from the full list, and renders
   `DetailRailFilterStatus` outside its own `aria-busy` wrapper. The pull
-  request view's is the one sanctioned exception: it sits in its hold
-  frame's host, which is `aria-busy` only during a hold, while the inert
-  frame holds the field. A rail without a filter takes no header line and
-  never a first-child band inside `children`: the strip is already a bordered
-  row, so a band under it stacks a second border and spends vertical space
-  the list wants. When a whole rail goes away with its field focused, a
-  same-scope rail mounting in that commit takes focus over by itself, onto
-  its field, or onto its caret when it mounts collapsed (the module's
-  `fieldHandoff`, cleared by a microtask; only while focus fell to
-  `<body>`); a host that swaps views of different types lands the rest with
-  `useRetryFocusRescue`, one instance per view on a keyed `contents` wrapper,
-  so focus moves only when it was inside the view that left (`SessionChanges`
-  in `src/features/sessions/SessionView.tsx`).
+  request view is the sanctioned exception, with three placements: the Files
+  status renders in its hold frame's host (`aria-busy` only during a hold)
+  before `<HeldFrame>`, outside the inert frame that holds the field; the
+  Commits drill-in's renders inside the frame, first in `PrCommitDetail`'s own
+  host above its arms; and the conflict-resolve takeover's host renders an
+  always-blank status as its first child, so the same node survives leaving
+  the takeover. A rail without a filter takes no header line and never a
+  first-child band inside `children`: the strip is already a bordered row, so
+  a band under it stacks a second border and spends vertical space the list
+  wants. When a whole rail goes away with its field focused, a same-scope rail
+  mounting in that commit takes focus over by itself, onto its field, or onto
+  its caret when it mounts collapsed (the module's `fieldHandoff`, cleared by
+  a microtask; only while focus fell to `<body>`); a host that swaps views of
+  different types lands the rest with `useRetryFocusRescue`, one instance per
+  view on a keyed `contents` wrapper, so focus moves only when it was inside
+  the view that left (`SessionChanges` in
+  `src/features/sessions/SessionView.tsx`).
 - Avatars: vendored `Avatar`/`AvatarImage`/`AvatarFallback` (canonical:
   `AuthorAvatar` in `src/features/conversations/Thread.tsx`) — never
   hand-rolled `<img>`/background divs. Biome-ignore comments use `/*`, not `/**`.

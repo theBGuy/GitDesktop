@@ -705,10 +705,10 @@ the last list up, with a line above it saying it couldn't refresh.
   and from anywhere on the **Compare** tab while it lists files; it expands a collapsed
   list first. {{key:escape}} or the field's clear button empties it. Your text stays as
   you move from one commit, comparison or pull request to the next (from stash to
-  stash while **View stashes** is open), and a collapsed list shows a funnel while a
+  stash while the stashes dialog is open), and a collapsed list shows a funnel while a
   filter is applied. The filter is on a commit's files, in **Compare**, on local pull
-  requests, on a pull request's **Files** and **Commits** tabs and in
-  **View stashes**{{ai}}, plus an agent session's changes{{/ai}}.
+  requests, on a pull request's **Files** and **Commits** tabs, in **View stashes**
+  and in **Recover lost work**{{ai}}, plus an agent session's changes{{/ai}}.
 
 ## Committing
 

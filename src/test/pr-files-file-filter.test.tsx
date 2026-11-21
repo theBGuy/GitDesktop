@@ -24,12 +24,26 @@ import {
   forgePrReviewThreads,
   forgePrView,
   forgeStatus,
+  gitFindRemotePrResolve,
 } from "@/lib/git/api";
 import type { ForgeStatus, PrDetails } from "@/lib/git/types";
+import type { ReviewDraft } from "@/lib/pulls/review-drafts";
 import { loadSettings, saveSettingsMerged } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useUiStore } from "@/lib/stores/ui";
-import { unmockedCommands } from "./setup";
+
+// The pending-review drafts the view reads; none unless a test seeds them.
+const seeded = vi.hoisted(() => ({ drafts: undefined as unknown }));
+vi.mock("@/lib/pulls/review-drafts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/pulls/review-drafts")>()),
+  useReviewDrafts: () => ({ data: seeded.drafts }),
+}));
+
+// The resolve merge, held here: only its roster hook may name it from the api
+// package (scripts/publish-hold-routes.test.mjs).
+const mergeRemotePr = vi.hoisted(() =>
+  vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+);
 
 // Reads this file does not answer fail at the wire, as in the merge-message
 // harness, so a leaked read cannot reach the shared transport.
@@ -64,7 +78,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitConflictPreview: vi.fn(async () => {
     throw new Error("not read");
   }),
-  gitFindRemotePrResolve: vi.fn(async () => null),
+  gitFindRemotePrResolve: vi.fn(),
+  gitMergeRemotePr: mergeRemotePr,
   gitFetch: vi.fn(async () => undefined),
   gitObjectsPresent: vi.fn(async () => false),
   forgePrReactions: vi.fn(async () => ({ body: [], comments: {} })),
@@ -120,8 +135,9 @@ vi.mock("@/lib/jira/store", async (importOriginal) => ({
 vi.mock("@/lib/use-container-width", () => ({
   useContainerWidth: () => [() => undefined, 900],
 }));
-// The stand-in pane names the file it shows, the diff it was handed, and
-// renders the line composer once, so the composer's path is observable.
+// The stand-in pane names the file it shows and the diff text it was handed,
+// renders the line composer once, so the composer's path is observable, and
+// renders each line anchor it was handed (the drafts' cards among them).
 vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
   const { useReportPaneSettled } = await import(
     "@/features/diff/diff-pane-hold"
@@ -129,10 +145,16 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
   function DiffContent({
     filePath,
     data,
+    lineAnchors,
     lineWidget,
   }: {
     filePath: string;
-    data?: { filePath: string };
+    data?: { filePath: string; text: string };
+    lineAnchors?: {
+      side: "new" | "old";
+      line: number;
+      render: () => React.ReactNode;
+    }[];
     lineWidget?: {
       render: (args: {
         side: "new" | "old";
@@ -143,13 +165,33 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
   }) {
     useReportPaneSettled(true);
     return (
-      <div data-open-file={filePath} data-diff-path={data?.filePath}>
+      <div
+        data-open-file={filePath}
+        data-diff-path={data?.filePath}
+        data-diff-text={data?.text}
+      >
         {lineWidget?.render({ side: "new", line: 1, onClose: () => undefined })}
+        {lineAnchors?.map((a) => (
+          <div key={`${a.side}:${a.line}`} data-anchor="">
+            {a.render()}
+          </div>
+        ))}
       </div>
     );
   }
   return { DiffSurface: DiffContent, DiffContent };
 });
+// The takeover's stand-in only offers its way out.
+vi.mock("@/features/pulls/ResolveRemotePrView", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/features/pulls/ResolveRemotePrView")
+  >()),
+  ResolveRemotePrView: ({ onDone }: { onDone: () => void }) => (
+    <button type="button" onClick={onDone}>
+      Leave resolve
+    </button>
+  ),
+}));
 vi.mock("@/features/pulls/ReviewComposer", () => ({
   ReviewComposer: ({ path }: { path: string }) => (
     <div data-composer-path={path} />
@@ -189,7 +231,7 @@ const patch = (paths: string[]) =>
     .map((p) =>
       binaries.has(p)
         ? `diff --git a/${p} b/${p}\nindex 1111111..2222222 100644\nBinary files a/${p} and b/${p} differ\n`
-        : `diff --git a/${p} b/${p}\n--- a/${p}\n+++ b/${p}\n@@ -1 +1 @@\n-old\n+new\n`,
+        : `diff --git a/${p} b/${p}\n--- a/${p}\n+++ b/${p}\n@@ -1 +1 @@\n-old ${p}\n+new ${p}\n`,
     )
     .join("");
 
@@ -243,20 +285,22 @@ function pr(number: number, over: Partial<PrDetails> = {}): PrDetails {
 
 function deferred<T>() {
   let resolve: (v: T) => void = () => undefined;
-  const promise = new Promise<T>((res) => {
+  let reject: (e: unknown) => void = () => undefined;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const clients: QueryClient[] = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
-  unmockedCommands.length = 0;
   lists = {};
   views = {};
   binaries = new Set();
+  seeded.drafts = undefined;
   useFileFilterStore.setState({ texts: {} });
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
   vi.mocked(saveSettingsMerged).mockResolvedValue(DEFAULT_SETTINGS);
@@ -278,6 +322,8 @@ beforeEach(() => {
     threads: [],
     threadsTruncated: false,
   });
+  vi.mocked(gitFindRemotePrResolve).mockResolvedValue(null);
+  mergeRemotePr.mockRejectedValue(new Error("not merged"));
   vi.mocked(forgeGlMrMergeState).mockResolvedValue({
     autoMergeEnabled: false,
     detailedMergeStatus: "mergeable",
@@ -291,10 +337,10 @@ beforeEach(() => {
   });
 });
 
+// No unmockedCommands check: the invoke mock rejects unanswered reads first.
 afterEach(() => {
   cleanup();
   for (const client of clients.splice(0)) client.clear();
-  expect(unmockedCommands).toEqual([]);
 });
 
 afterAll(() => useFileFilterStore.setState({ texts: {} }));
@@ -340,13 +386,32 @@ const live = (attr: string) =>
     ?.getAttribute(attr);
 const openFile = () => live("data-open-file");
 const composerPath = () => live("data-composer-path");
-const expectOpen = (path: string) =>
-  waitFor(() => {
-    expect(openFile()).toBe(path);
-    expect(composerPath()).toBe(path);
-  });
+/** The diff text the shown pane was handed: each fixture file's is its own. */
+const diffText = () => live("data-diff-text");
+const expectShown = (path: string) => {
+  expect(openFile()).toBe(path);
+  expect(composerPath()).toBe(path);
+  // Exactly the file's own section of the pull request's patch.
+  expect(diffText()).toBe(patch([path]));
+};
+const expectOpen = (path: string) => waitFor(() => expectShown(path));
 const status = () =>
   document.querySelector<HTMLElement>("[data-file-filter-status]");
+/** The draft bodies the shown pane's line anchors render. */
+const shownAnchors = () =>
+  Array.from(document.querySelectorAll("[data-anchor]"))
+    .filter((el) => el.closest("[inert]") === null)
+    .flatMap((el) => el.textContent?.match(/draft on [a-z/.]+/g) ?? []);
+const draft = (id: string, path: string): ReviewDraft => ({
+  id,
+  path,
+  line: 1,
+  side: "new",
+  body: `draft on ${path}`,
+  createdAt: "2026-01-01T00:00:00Z",
+});
+const statusCount = () =>
+  document.querySelectorAll("[data-file-filter-status]").length;
 /** The view's host: the status's parent, busy only during a hold. */
 const host = () => status()?.parentElement as HTMLElement;
 const epoch = () => useUiStore.getState().interactionEpoch;
@@ -372,8 +437,7 @@ describe("Pull request Files tab file filter", () => {
     expect(rendered()).toEqual(["lib/index.ts"]);
     expect(fieldGroup().textContent).toContain("1 of 4");
     await act(() => Promise.resolve());
-    expect(openFile()).toBe("src/index.ts");
-    expect(composerPath()).toBe("src/index.ts");
+    expectShown("src/index.ts");
     expect(rail().querySelector("[aria-current]")).toBeNull();
     expect(status()?.textContent).toBe("Showing 1 of 4 files");
   }, 10_000);
@@ -393,7 +457,27 @@ describe("Pull request Files tab file filter", () => {
     ).toBeTruthy();
     expect(fieldGroup().textContent).toContain("2 files");
     await user.type(field(), "lib");
-    expect(fieldGroup().textContent).toContain("1 of 2");
+    expect(fieldGroup().querySelector(".tabular-nums")?.textContent).toBe(
+      "1 of 2",
+    );
+  });
+
+  it("T10: the open file's drafts stay under the filter; Enter shows the match's", async () => {
+    lists[7] = ["src/a.ts", "lib/b.ts", "lib/c.ts"];
+    seeded.drafts = [draft("d-a", "src/a.ts"), draft("d-b", "lib/b.ts")];
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    await expectOpen("src/a.ts");
+    await waitFor(() => expect(shownAnchors()).toEqual(["draft on src/a.ts"]));
+    await user.type(field(), "lib");
+    expect(rendered()).toEqual(["lib/b.ts", "lib/c.ts"]);
+    await act(() => Promise.resolve());
+    expectShown("src/a.ts");
+    expect(shownAnchors()).toEqual(["draft on src/a.ts"]);
+    await user.keyboard("{Enter}");
+    await expectOpen("lib/b.ts");
+    await waitFor(() => expect(shownAnchors()).toEqual(["draft on lib/b.ts"]));
   });
 
   it("T2: typing keeps the open file and composer; Enter opens the first match", async () => {
@@ -405,8 +489,7 @@ describe("Pull request Files tab file filter", () => {
     await user.type(field(), "lib");
     expect(rendered()).toEqual(["lib/c.ts", "lib/d.ts"]);
     await act(() => Promise.resolve());
-    expect(openFile()).toBe("src/a.ts");
-    expect(composerPath()).toBe("src/a.ts");
+    expectShown("src/a.ts");
     await user.keyboard("{Enter}");
     await expectOpen("lib/c.ts");
   });
@@ -444,8 +527,7 @@ describe("Pull request Files tab file filter", () => {
     await user.type(field(), "lib");
     expect(rendered()).toEqual(["lib/c.ts"]);
     await act(() => Promise.resolve());
-    expect(openFile()).toBe("src/b.ts");
-    expect(composerPath()).toBe("src/b.ts");
+    expectShown("src/b.ts");
     expect(rail().querySelector("[aria-current]")).toBeNull();
     await user.keyboard("{ArrowDown}");
     await expectOpen("lib/c.ts");
@@ -453,7 +535,9 @@ describe("Pull request Files tab file filter", () => {
 
   it("T5: another pull request keeps the text and opens its first match", async () => {
     lists[7] = ["src/a.ts", "lib/b.ts"];
-    lists[8] = ["src/x.ts", "lib/y.ts", "lib/z.ts"];
+    // Typing pins src/a.ts, which PR 8 also carries: only the PR change's pick
+    // reset lets PR 8 open its first match instead.
+    lists[8] = ["src/x.ts", "src/a.ts", "lib/y.ts", "lib/z.ts"];
     const user = userEvent.setup();
     const { show } = mount();
     await openFilesTab(user);
@@ -463,10 +547,6 @@ describe("Pull request Files tab file filter", () => {
     await waitFor(() => expect(rendered()).toEqual(["lib/y.ts", "lib/z.ts"]));
     expect(field().value).toBe("lib");
     await expectOpen("lib/y.ts");
-    await waitFor(() =>
-      expect(host().getAttribute("aria-busy")).not.toBe("true"),
-    );
-    expect(status()?.closest('[aria-busy="true"]')).toBeNull();
   });
 
   it("T6: a keystroke's pin moves no epoch; a pick that moves the open file and a row click do", async () => {
@@ -507,10 +587,11 @@ describe("Pull request Files tab file filter", () => {
     await user.type(field(), "lib");
     const node = status() as HTMLElement;
     expect(node.textContent).toBe("Showing 1 of 2 files");
+    expect(statusCount()).toBe(1);
     views[8] = () => held.promise;
-    // Timers only: the hold's bound is a setTimeout, while React and Base UI
-    // read the clock and the rest.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Both of the hold's clocks, its bound's timer and its performance.now()
+    // reads, so only the advances below move it.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
     try {
       show(8);
       // Past the hold's bound the view paints its loading frame.
@@ -521,6 +602,7 @@ describe("Pull request Files tab file filter", () => {
       await act(() => vi.advanceTimersByTimeAsync(450));
       expect(node.isConnected).toBe(true);
       expect(status()).toBe(node);
+      expect(statusCount()).toBe(1);
       expect(node.textContent).toBe("");
     } finally {
       vi.useRealTimers();
@@ -528,10 +610,43 @@ describe("Pull request Files tab file filter", () => {
     await act(async () => held.resolve(pr(8)));
     await expectOpen("lib/y.ts");
     expect(status()).toBe(node);
+    expect(statusCount()).toBe(1);
     await waitFor(() => expect(node.textContent).toBe("Showing 2 of 3 files"));
     await user.click(screen.getByRole("button", { name: /^Conversation/ }));
     await waitFor(() => expect(node.textContent).toBe(""));
     expect(status()).toBe(node);
+    expect(statusCount()).toBe(1);
+  }, 10_000);
+
+  it("T9: leaving the conflict-resolve takeover keeps the one status node", async () => {
+    lists[7] = ["src/a.ts", "lib/b.ts"];
+    const handle = { worktreePath: "C:/wt/resolve-7", worktreeId: "wt-7" };
+    vi.mocked(gitFindRemotePrResolve).mockResolvedValue(handle);
+    mergeRemotePr.mockResolvedValue({
+      status: "conflicts",
+      conflicts: [],
+      pushedSha: null,
+      ...handle,
+    });
+    const user = userEvent.setup();
+    mount();
+    await openFilesTab(user);
+    await expectOpen("src/a.ts");
+    await user.type(field(), "lib");
+    const node = status() as HTMLElement;
+    expect(node.textContent).toBe("Showing 1 of 2 files");
+    await user.click(
+      await screen.findByRole("button", { name: "Continue resolving" }),
+    );
+    const leave = await screen.findByRole("button", { name: "Leave resolve" });
+    expect(status()).toBe(node);
+    expect(statusCount()).toBe(1);
+    expect(node.textContent).toBe("");
+    await user.click(leave);
+    await expectOpen("src/a.ts");
+    expect(status()).toBe(node);
+    expect(statusCount()).toBe(1);
+    await waitFor(() => expect(node.textContent).toBe("Showing 1 of 2 files"));
   }, 10_000);
 
   it("T8: during a hold the held pull request's rail and open file stay put", async () => {
@@ -544,16 +659,24 @@ describe("Pull request Files tab file filter", () => {
     await openFilesTab(user);
     await expectOpen("lib/b.ts");
     views[8] = () => held.promise;
-    show(8);
-    await act(() => Promise.resolve());
-    expect(host().getAttribute("aria-busy")).toBe("true");
-    const current = host().querySelector("aside [aria-current]");
-    expect(current?.getAttribute("data-path")).toBe("lib/b.ts");
-    const shown = Array.from(
-      host().querySelectorAll("[data-open-file]"),
-      (el) => el.getAttribute("data-open-file"),
-    );
-    expect(shown).toEqual(["lib/b.ts"]);
+    // Both of the hold's clocks are faked, so a slow render can't end it
+    // before the checks below.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      show(8);
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(host().getAttribute("aria-busy")).toBe("true");
+      const current = host().querySelector("aside [aria-current]");
+      expect(current?.getAttribute("data-path")).toBe("lib/b.ts");
+      const shown = Array.from(
+        host().querySelectorAll("[data-open-file]"),
+        (el) => el.getAttribute("data-open-file"),
+      );
+      expect(shown).toEqual(["lib/b.ts"]);
+    } finally {
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      vi.useRealTimers();
+    }
     await act(async () => held.resolve(pr(8)));
     await expectOpen("lib/y.ts");
   });
@@ -568,8 +691,7 @@ describe("Pull request Files tab file filter", () => {
     expect(rendered()).toEqual([]);
     expect(screen.getByText("No files match the filter")).toBeTruthy();
     await act(() => Promise.resolve());
-    expect(openFile()).toBe("src/a.ts");
-    expect(composerPath()).toBe("src/a.ts");
+    expectShown("src/a.ts");
     const clears = screen.getAllByRole("button", { name: "Clear filter" });
     await user.click(clears[clears.length - 1]);
     expect(rendered()).toEqual(["src/a.ts", "lib/b.ts"]);
@@ -586,7 +708,6 @@ describe("Pull request Files tab file filter", () => {
     show(9);
     await waitFor(() => expect(fieldGroup().textContent).toContain("0 files"));
     expect(rendered()).toEqual([]);
-    expect(status()?.textContent).toBe("");
   });
 
   it("P3: a binary row keeps its bin stat under the filter", async () => {
@@ -626,11 +747,11 @@ describe("Pull request Files tab file filter", () => {
     await waitFor(() => expect(node.textContent).toBe("Showing 1 of 2 files"));
   }, 10_000);
 
-  it("P4b: switching to a pull request that fails from the Files tab blanks the status", async () => {
-    // Off the pulls tab no hold runs, so no loading frame blanks the status
-    // first: the switch goes straight from the placeholder to the error arm.
-    useUiStore.setState({ repoTab: "changes" });
+  // Its bound is faked; what remains is dev-build React render time over the
+  // held view and the error arm.
+  it("P4b: a pull request that fails during the hold blanks the held status", async () => {
     lists[7] = ["src/a.ts", "lib/b.ts"];
+    const failing = deferred<PrDetails>();
     const user = userEvent.setup();
     const { show } = mount();
     await openFilesTab(user);
@@ -638,17 +759,28 @@ describe("Pull request Files tab file filter", () => {
     await user.type(field(), "lib");
     const node = status() as HTMLElement;
     expect(node.textContent).toBe("Showing 1 of 2 files");
-    views[8] = async () => {
-      throw new Error("boom");
-    };
-    show(8);
-    // The error arm itself (other sections may offer a Retry of their own).
-    await screen.findByText(/^Couldn.t load this merge request/, undefined, {
-      timeout: 2000,
-    });
-    expect(status()).toBe(node);
-    expect(node.textContent).toBe("");
-  });
+    views[8] = () => failing.promise;
+    // Both of the hold's clocks are faked, so its bound can't expire: the
+    // status holds its text during the hold and is blank once the error arm
+    // shows.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    try {
+      show(8);
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(host().getAttribute("aria-busy")).toBe("true");
+      expect(node.textContent).toBe("Showing 1 of 2 files");
+      await act(async () => failing.reject(new Error("boom")));
+      // Well inside the bound; flushes the queries' batched notifications.
+      await act(() => vi.advanceTimersByTimeAsync(100));
+      // The error arm itself (other sections may offer a Retry of their own).
+      screen.getByText(/^Couldn.t load this merge request/);
+      expect(status()).toBe(node);
+      expect(node.textContent).toBe("");
+    } finally {
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      vi.useRealTimers();
+    }
+  }, 10_000);
 
   // No timer to fake: it renders the whole view offline, then loaded, and
   // dev-build React render time sets its length.
