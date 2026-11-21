@@ -2144,13 +2144,9 @@ mod tests {
         let outside = outside.to_string_lossy().into_owned();
         git(&outside, &["init", "-q", "-b", "main", "."]).await;
         std::fs::write(Path::new(&outside).join("target-only.txt"), "x\n").unwrap();
-        // A junction on Windows: mklink /J needs no privilege, unlike a symlink.
-        // It reads a `/` in a path as a switch, so both go backslashed.
+        // A junction on Windows: a junction needs no privilege, unlike a symlink.
         #[cfg(windows)]
-        crate::test_junction::make_junction(
-            Path::new(&sub.replace('/', "\\")),
-            Path::new(&outside.replace('/', "\\")),
-        );
+        crate::test_junction::make_junction(Path::new(&sub), Path::new(&outside));
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, &sub).unwrap();
         let through = git(&sub, &["status", "--porcelain"]).await;

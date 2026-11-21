@@ -1694,7 +1694,7 @@ pub(crate) mod tests {
         assert!(!dir.exists(), "a dir past max_age survived");
     }
 
-    /// A directory link: a junction on Windows (`mklink /J` needs no privilege), a
+    /// A directory link: a junction on Windows (a junction needs no privilege), a
     /// symlink on unix.
     fn dir_link(target: &Path, link: &Path) {
         #[cfg(windows)]

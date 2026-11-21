@@ -1774,7 +1774,7 @@ mod tests {
     }
 
     /// Tested set: missing (bare, and under a file), file, dir, a final-component
-    /// link (a junction on Windows: mklink /J needs no privilege), and refusals.
+    /// link (a junction on Windows: a junction needs no privilege), and refusals.
     #[test]
     fn path_kind_reads_missing_file_dir_and_link_without_following_it() {
         let root = tempfile::tempdir().unwrap();
@@ -1782,7 +1782,6 @@ mod tests {
         let repo = root.path().to_str().unwrap();
         std::fs::write(root.path().join("a.txt"), b"x").unwrap();
         std::fs::create_dir_all(root.path().join("sub/inner")).unwrap();
-        // mklink reads a `/` as a switch, so the link path is joined per segment.
         let link = root.path().join("sub").join("link");
         #[cfg(windows)]
         crate::test_junction::make_junction(&link, outside.path());

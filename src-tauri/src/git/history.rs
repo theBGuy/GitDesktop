@@ -1591,7 +1591,7 @@ mod tests {
         assert_eq!(files_stamp(&repo).await, before);
     }
 
-    /// A junction under refs/heads (mklink /J needs no privilege, unlike the symlinks
+    /// A junction under refs/heads (a junction needs no privilege, unlike the symlinks
     /// above) is never walked into either, while a loose-ref write beside it still moves
     /// the stamp.
     #[cfg(windows)]
@@ -1600,7 +1600,6 @@ mod tests {
         let (dir, repo) = stamp_repo("refs-stamp-junction").await;
         let outside = dir.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
-        // mklink reads a `/` as a switch, so the link path is joined per segment.
         let link = dir
             .path()
             .join(".git")

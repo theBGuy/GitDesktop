@@ -1737,7 +1737,7 @@ pub(crate) mod tests {
         assert!(clean.failed_attachments.is_empty());
     }
 
-    /// A directory link at `link`: a junction on Windows (mklink /J needs no privilege).
+    /// A directory link at `link`: a junction on Windows (a junction needs no privilege).
     fn dir_link(target: &Path, link: &Path) {
         #[cfg(windows)]
         crate::test_junction::make_junction(link, target);

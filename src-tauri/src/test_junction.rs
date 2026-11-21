@@ -3,18 +3,21 @@
 use std::path::Path;
 
 /// Makes `link` a junction to `target`, panicking with PowerShell's output on failure.
-/// Never through cmd, which expands `%VAR%` even inside quotes: PowerShell's New-Item
-/// takes each path in a single-quoted string, which is literal (no `$`, no `%`) once
-/// any `'` is doubled, and CreateProcess itself expands nothing.
+/// The paths reach New-Item through the child's environment, never the script text, so
+/// no quote or `%` in them needs escaping (cmd would expand `%VAR%` even when quoted).
+/// `-Target` resolves wildcards (measured, PowerShell 5.1) and is escaped in the script;
+/// `-Path` is literal, and escaping it would put the backticks in the link's name.
 pub(crate) fn make_junction(link: &Path, target: &Path) {
-    let quoted = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "''"));
     let made = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(format!(
-            "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path {} -Target {} | Out-Null",
-            quoted(link),
-            quoted(target)
-        ))
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:JUNCTION_LINK \
+             -Target ([WildcardPattern]::Escape($env:JUNCTION_TARGET)) | Out-Null",
+        ])
+        .env("JUNCTION_LINK", link)
+        .env("JUNCTION_TARGET", target)
         .output()
         .expect("run powershell");
     assert!(
@@ -29,12 +32,18 @@ pub(crate) fn make_junction(link: &Path, target: &Path) {
 mod tests {
     use super::make_junction;
 
-    /// Paths holding cmd's metacharacters, a defined `%VAR%` and a quote stay literal:
-    /// each junction exists and resolves to its own target.
+    /// Paths holding cmd's metacharacters, a defined `%VAR%`, straight and curly quotes and
+    /// wildcard brackets stay literal: each junction resolves to its own target.
     #[test]
     fn make_junction_takes_paths_with_shell_metacharacters() {
         let root = tempfile::tempdir().unwrap();
-        for (name, content) in [("a&b", "amp"), ("p%PATH%q", "percent"), ("it's", "quote")] {
+        for (name, content) in [
+            ("a&b", "amp"),
+            ("p%PATH%q", "percent"),
+            ("it's", "quote"),
+            ("it\u{2019}s", "curly"),
+            ("b[1]", "brackets"),
+        ] {
             let target = root.path().join(format!("{name}-target"));
             std::fs::create_dir(&target).unwrap();
             std::fs::write(target.join("inside.txt"), content).unwrap();
