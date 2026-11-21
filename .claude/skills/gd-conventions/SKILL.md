@@ -316,19 +316,19 @@ one leaves the press to the focused control. An Enter/Space handler that
 activates a focused row, card or chip, or a list's marked row from its filter
 input, returns on `hasChordModifier(e)` (binding.ts) before any preventDefault,
 so bound chords reach the window listener, except inside a modal that owns no
-chord of its own, where letting one through would fire app bindings behind the
-dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
-`scripts/activation-key-chords.test.mjs` scan is the ratchet.
+chord of its own, whose sites keep their swallow under an `OWNS_CHORD` entry
+(app chords are inert under a modal anyway).
+The `scripts/activation-key-chords.test.mjs` scan is the ratchet.
 A handler that acts on a bare ArrowLeft or ArrowRight and can run outside
 a modal dialog returns on `hasChordModifier(e)` first, so Go back's
 Alt+arrow reaches the window listener. One that renders only inside a modal
-keeps its swallow under an allowlist entry: Go back stands down there,
-and a chord let through would fire app bindings behind the dialog (guard
-`chorded-arrow-handler`; its message names what it can't see, such as a second
-handler in a file that already holds a guard token). A surface that swallows
-chords it does not own lets the effective `go-back` and `go-forward` bindings
-through after its own chords, without preventing them (the Projects board card
-and table row are the reference).
+keeps its swallow under an allowlist entry: under a modal, Go back and every
+other app chord are inert anyway (guard `chorded-arrow-handler`; its message
+names what it can't see, such as a second handler in a file that already holds
+a guard token). A surface that swallows chords it does not own lets the
+effective `go-back` and `go-forward` bindings through after its own chords,
+without preventing them (the Projects board card and table row are the
+reference).
 
 **Patterns the user has ruled on:**
 - No hover-revealed per-row buttons — contextual actions are always-visible,
@@ -446,9 +446,11 @@ and table row are the reference).
   (`src/lib/hotkeys/useGenerateChord.ts`) — never a hand-rolled handler. Its
   invariants: effective-binding read (null = fully inert), `eventToBinding`
   match, `preventDefault` whatever `enabled` says on any surface WITH a generator
-  (bare Space excepted: consumed only when Generate runs, otherwise it only
-  stops propagation, so the focused control's native press still happens),
-  run only under the visible button's gate, swallow-don't-cancel while
+  while `generate-commit-message` is the chord's first holder (`useOwnsChord`; a
+  chord an earlier action also holds falls through untouched, neither run nor
+  swallowed), bare Space excepted (consumed only when Generate runs, otherwise
+  it only stops propagation, so the focused control's native press still
+  happens), run only under the visible button's gate, swallow-don't-cancel while
   generating, handler mounted on `DialogContent` (the X close is a form
   sibling). The hook returns the `hint` string so buttons can't forget it.
   `enabled` may be a function read at keydown: a shell whose sections come and
@@ -969,6 +971,30 @@ Wiring a NEW call site onto one of these surfaces means the governing idiom
 applies — cite it in the spec or record "none applies"; the canonical site is
 one grep away on the named symbol. Grows via Conventions-sync.
 
+- **Hotkey dispatch: who answers a key** — every route that is not a press on
+  a visible control (the window listener, a palette pick, the macOS menu, the
+  mouse side buttons) calls `dispatchShortcut`
+  (`src/lib/hotkeys/dispatch-shortcut.ts`); a control's own press calls raw
+  `dispatchAction`. Under any open, rendered modal (dialog, sheet, drawer,
+  confirm prompt) `dispatchShortcut` reaches only registrations made inside the
+  topmost modal's content (app zoom excepted), so a dialog's own shortcuts
+  register from inside its `DialogContent` / `SheetContent`, whose
+  `PanelPortalReset` gives `useHotkeyAction` its modal scope; an owner
+  that would register from its body behind an open-state gate renders
+  `<HotkeyAction>` (`src/lib/hotkeys/HotkeyAction.tsx`) inside the content
+  instead (CommitDialog is the reference; T1 in
+  `scripts/hotkey-registry.test.mjs` is the tripwire, and T2 there fails a
+  `keepMounted` dialog outside the vendored primitives, whose mounted scope
+  would outrank the dialog actually open). A drawer opens no scope, so under
+  one every entry is inert, its own included. Precedence is a tier per entry: an
+  app-level fallback takes `tier: "fallback"` (AppCreateHotkeys, RepositoryView's
+  create-issue pair), a popup's content takes `tier: "popup"` (RepoList), and
+  registration order decides only inside one tier
+  (`scripts/app-create-hotkeys-mount.test.mjs` pins the tiers). A local matcher
+  comparing `eventToBinding` against an effective binding swallows only a chord
+  its action owns, asked through `useOwnsChord` (the listener's first-holder map,
+  from `chordOwners` in binding.ts); the roster in
+  `scripts/activation-key-chords.test.mjs` fails a new matcher that skips it.
 - **Back/Forward history** — the recorder (the ui store subscriber at the
   end of `src/lib/stores/ui.ts`, whose rules are `recordNavigation` in
   `src/lib/stores/nav-history.ts`) observes committed location changes,

@@ -24,7 +24,6 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { useRepoIdentity } from "@/lib/git/queries";
-import { useModalGateRegistration } from "@/lib/hotkeys/modal-gate";
 import {
   AUTOMATION_KIND_FILTER_LABELS,
   CHANNEL_LABELS,
@@ -357,11 +356,6 @@ export function RepoNotificationsDialogHost() {
   // Retained so the body keeps its repo through the close fade instead of
   // blanking the dialog as it animates out.
   const shownRepo = useRetained(repoPath);
-  // App's repo/settings actions stay reachable from the macOS menu bar, which
-  // sits outside this dialog's modal overlay — register so they refuse while it
-  // owns the screen. Keyed on the live flag, not the retained one, so the close
-  // fade releases the gate.
-  useModalGateRegistration(repoPath !== null);
 
   return (
     <Dialog

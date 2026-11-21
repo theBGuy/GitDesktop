@@ -36,7 +36,6 @@ import {
   usePrefetchMyWorkSources,
 } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
-import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
 import { useNavHistoryActions } from "@/lib/hotkeys/nav-history-actions";
 import { useSideButtonNavigation } from "@/lib/hotkeys/side-buttons";
 import "@/lib/last-checkout/subscribe";
@@ -84,9 +83,6 @@ function App() {
   const pickAndOpen = usePickAndOpenRepo();
   const [cloneOpen, setCloneOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  // Screens with their own modals (e.g. Explore's clone dialog) register there.
-  const screenModalOpen = useModalGateOpen();
-  const dialogOpen = cloneOpen || createOpen || screenModalOpen;
 
   // SettingsScreen publishes its notifications draft while it is up, and the
   // verdict is screen-scoped: App owns the screen's lifetime, so leaving
@@ -196,7 +192,7 @@ function App() {
 
   // The app-wide hotkey dispatcher plus the always-available actions.
   useHotkeysListener();
-  useNavHistoryActions(dialogOpen);
+  useNavHistoryActions();
   useSideButtonNavigation();
   // The same read as RepositoryView's gate on the Agent panel; empty while
   // settings load, when that panel renders too.
@@ -211,32 +207,24 @@ function App() {
   // Settings… is exposed in the macOS menu bar, which stays clickable on the
   // git-missing screen — without the gate it would flip the view to a Settings
   // screen that never renders, surfacing only after Retry.
-  useHotkeyAction(
-    "open-settings",
-    openSettings,
-    gitInstalled.isSuccess && !dialogOpen,
-  );
+  useHotkeyAction("open-settings", openSettings, gitInstalled.isSuccess);
   // App owns the three repo actions outright: they must work on every screen
   // (Settings/Help/Explore mount neither the welcome list nor the repo
   // switcher), and duplicate registrations would shadow by mount order.
   // Disabled until git resolves — the dialogs render below the early returns,
-  // so a click before then would stash a stale `open` that pops later. Any open
-  // dialog suppresses all four: the native menu bar sits outside the webview's
-  // modal overlay, so a menu click there would stack a second.
-  useHotkeyAction(
-    "add-local-repository",
-    pickAndOpen,
-    gitInstalled.isSuccess && !dialogOpen,
-  );
+  // so a click before then would stash a stale `open` that pops later. Under an
+  // open dialog every non-control route (keys, palette, native menu) is inert
+  // through dispatchShortcut, so none of these can stack a second.
+  useHotkeyAction("add-local-repository", pickAndOpen, gitInstalled.isSuccess);
   useHotkeyAction(
     "clone-repository",
     () => setCloneOpen(true),
-    gitInstalled.isSuccess && !dialogOpen,
+    gitInstalled.isSuccess,
   );
   useHotkeyAction(
     "new-repository",
     () => setCreateOpen(true),
-    gitInstalled.isSuccess && !dialogOpen,
+    gitInstalled.isSuccess,
   );
   // Palette-only deep link; hidden alongside the panel when AI features are off.
   useHotkeyAction(
@@ -248,7 +236,7 @@ function App() {
   useHotkeyAction(
     "open-notifications-settings",
     () => openSettings("notifications"),
-    gitInstalled.isSuccess && !dialogOpen,
+    gitInstalled.isSuccess,
   );
   // The palette closes before it dispatches, so both the repo and the settings
   // draft are re-read at fire time rather than captured — the dialog's
@@ -268,7 +256,7 @@ function App() {
         return;
       openRepoNotifications(path);
     },
-    Boolean(repoPath) && !notificationsDraftHeld && !dialogOpen,
+    Boolean(repoPath) && !notificationsDraftHeld,
   );
   useHotkeyAction("show-help", openHelp);
   useHotkeyAction("open-explore", openExplore);

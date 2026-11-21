@@ -38,8 +38,11 @@ import {
   isTypeaheadKey,
   isTypeaheadTarget,
 } from "@/lib/hotkeys/binding";
-import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { focusInOpenModal } from "@/lib/hotkeys/open-modal";
+import {
+  useEffectiveBindings,
+  useHotkeyAction,
+  useOwnsChord,
+} from "@/lib/hotkeys/hotkeys";
 import type { AppSettings } from "@/lib/settings/api";
 import {
   settingsKeys,
@@ -96,11 +99,12 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
   const [focusFilter, setFocusFilter] = useState<(() => void) | null>(null);
   const bindings = useEffectiveBindings();
   const binding = bindings.get("focus-filter") ?? null;
+  const ownsChord = useOwnsChord();
   // Focus anywhere in the row (rail or diff) sends the filter shortcut to this
   // rail's field, under the global listener's guards (a subset of what it would
   // dispatch, so a key a child already consumed stays that child's); the
   // listener then skips the prevented event. A chord several actions share
-  // belongs to the first holder in the bindings map, as in the listener.
+  // belongs to its first holder, as in the listener.
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (focusFilter === null || binding === null || e.repeat) return;
     if (e.defaultPrevented) return;
@@ -108,11 +112,7 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
     if (!(e.target instanceof Node) || !e.currentTarget.contains(e.target))
       return;
     if (eventToBinding(e) !== binding) return;
-    for (const [id, held] of bindings) {
-      if (held !== binding) continue;
-      if (id !== "focus-filter") return;
-      break;
-    }
+    if (!ownsChord("focus-filter", binding)) return;
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
     if (
       !hasModifier(binding) &&
@@ -142,14 +142,11 @@ export function DetailRailRow({ children }: { children: ReactNode }) {
 }
 
 // The tab-wide `focus-filter` answer. Mounted only when claimed: a registered
-// but disabled handler still makes the window listener swallow the chord.
+// but disabled handler still makes the window listener swallow the chord. Under
+// an open modal it answers only from inside that modal (dispatchShortcut), so a
+// rail behind one never expands or takes focus.
 function FocusFilterClaim({ run }: { run: () => void }) {
-  // Inert under an open modal: the field sits behind it, aria-hidden there,
-  // and a collapsed rail's expand would write the preference for nothing.
-  const answer = () => {
-    if (!focusInOpenModal()) run();
-  };
-  useHotkeyAction("focus-filter", answer, usePanelActive());
+  useHotkeyAction("focus-filter", run, usePanelActive());
   return null;
 }
 

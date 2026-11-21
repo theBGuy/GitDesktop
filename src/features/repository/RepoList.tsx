@@ -195,11 +195,18 @@ export function RepoList({
   const listRef = useRef<HTMLDivElement>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
 
-  // On the welcome screen "show repositories" means "jump to the filter";
-  // inside the switcher popover this list is only mounted while open, so
-  // its registration simply outranks the trigger's while visible.
-  useHotkeyAction("show-repositories", () => filterInputRef.current?.focus());
-  useHotkeyAction("focus-filter", () => filterInputRef.current?.focus());
+  // On the welcome screen "show repositories" means "jump to the filter".
+  // Popup tier: inside the switcher popover (mounted only while open) these
+  // outrank every surface entry, including one that re-registers later.
+  useHotkeyAction(
+    "show-repositories",
+    () => filterInputRef.current?.focus(),
+    true,
+    { tier: "popup" },
+  );
+  useHotkeyAction("focus-filter", () => filterInputRef.current?.focus(), true, {
+    tier: "popup",
+  });
 
   const ownerByPath = new Map(
     (owners.data ?? []).map((o) => [o.path, o.owner]),

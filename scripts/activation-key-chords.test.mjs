@@ -244,7 +244,7 @@ function unguardedActivationHandlers(raw) {
 /** Deliberately unguarded sites, by line-independent identity: `count` sites
  *  with that identity, no more and no fewer, each with its reason. */
 const MODAL_NO_OWNER =
-  "modal list with no chord owner of its own; a chord must not reach app bindings behind the dialog";
+  "modal list with no chord owner of its own; it keeps its swallow (app chords are inert under a modal), and converting it to a guarded handler is a follow-up";
 const OWNS_CHORD = [
   {
     file: "src/features/conversations/ConversationFilterPopover.tsx",
@@ -578,8 +578,8 @@ function rowSpaceProblems(raw) {
 /** Problems with the listener's consume gate; empty when pinned. */
 function listenerProblems(raw) {
   const masked = maskNonCode(raw, true);
-  const ran = /\bconst\s+([\w$]+)\s*=\s*dispatchAction\(id\);/.exec(masked);
-  if (!ran) return ["the listener ignores dispatchAction's result"];
+  const ran = /\bconst\s+([\w$]+)\s*=\s*dispatchShortcut\(id\);/.exec(masked);
+  if (!ran) return ["the listener ignores dispatchShortcut's result"];
   const gate = new RegExp(
     `if \\(${escapeRe(ran[1])} \\|\\| !consumeRequiresDispatch\\(binding\\)\\) e\\.preventDefault\\(\\);`,
   );
@@ -631,8 +631,8 @@ test("listener pin control goes red", () => {
   const text = read(HOTKEYS);
   const preFix = mutate(
     text,
-    "const ran = dispatchAction(id);\n      if (ran || !consumeRequiresDispatch(binding)) e.preventDefault();",
-    "dispatchAction(id);\n      e.preventDefault();",
+    "const ran = dispatchShortcut(id);\n      if (ran || !consumeRequiresDispatch(binding)) e.preventDefault();",
+    "dispatchShortcut(id);\n      e.preventDefault();",
   );
   assert.notDeepEqual(listenerProblems(preFix), []);
 });
@@ -745,4 +745,120 @@ test("generate chord pin controls go red", () => {
     ),
     [],
   );
+});
+
+// --- chord ownership --------------------------------------------------------
+
+// Every module that matches a key event against an effective binding asks who
+// owns the chord through the one first-holder function (`chordOwners`, or
+// `useOwnsChord` over it), so a local matcher and the window listener agree on
+// a chord several actions share. The roster is every .ts/.tsx under src/
+// (src/test/ excluded) whose code calls `eventToBinding(` and reads effective
+// bindings (`useEffectiveBindings(` or `effectiveBindings(`); each member
+// references `useOwnsChord` or `chordOwners`, or sits in OWNER_EXEMPT with its
+// reason. Not seen: a binding read through another module's helper, or a
+// matcher that compares `eventToBinding` output without reading effective
+// bindings itself.
+const OWNER_ADOPTERS = [
+  "src/components/detail-rail.tsx",
+  "src/lib/hotkeys/hotkeys.tsx",
+  "src/lib/hotkeys/useGenerateChord.ts",
+];
+const OWNER_EXEMPT = new Map([
+  [
+    "src/features/settings/KeyboardSection.tsx",
+    "the binding recorder: it reads keys to record them, never to run an action",
+  ],
+  [
+    "src/features/projects/ProjectsBoardPanel.tsx",
+    "compares the Back/Forward bindings only to leave them unprevented for the listener",
+  ],
+  [
+    "src/lib/zoom/zoom.ts",
+    "the zoom alias keys follow a rule of their own beside the app zoom bindings",
+  ],
+]);
+const OWNER_REF_RE = /\b(?:useOwnsChord|chordOwners)\b/;
+
+/** Every .ts/.tsx under src/ outside src/test/, as repo-relative path →
+ *  masked code. */
+function maskedSources() {
+  const out = new Map();
+  for (const full of sourceFiles(
+    fileURLToPath(new URL("../src", import.meta.url)),
+  )) {
+    const rel = relative(ROOT, full).replace(/\\/g, "/");
+    if (!/\.tsx?$/.test(rel) || rel.startsWith("src/test/")) continue;
+    let raw;
+    try {
+      raw = readFileSync(full, "utf8").replace(/\r\n/g, "\n");
+    } catch (e) {
+      throw new Error(`unreadable source ${rel}: ${e.message}`);
+    }
+    try {
+      out.set(rel, maskNonCode(raw, rel.endsWith(".tsx")));
+    } catch (e) {
+      if (e instanceof ScanError)
+        throw new Error(`could not scan ${rel}: ${e.message}`);
+      throw e;
+    }
+  }
+  return out;
+}
+
+/** Problems with the chord-owner roster over `sources` (path → masked code);
+ *  empty when every matcher adopts or is exempt, and each listed file still
+ *  matches. */
+function ownerProblems(sources) {
+  if (sources.size === 0) return ["zero source files read: the scan is inert"];
+  const problems = [];
+  const roster = [...sources]
+    .filter(
+      ([, code]) =>
+        /(?<![\w$.])eventToBinding\s*\(/.test(code) &&
+        /(?<![\w$.])(?:useEffectiveBindings|effectiveBindings)\s*\(/.test(code),
+    )
+    .map(([rel]) => rel)
+    .sort();
+  for (const rel of roster) {
+    if (OWNER_EXEMPT.has(rel)) continue;
+    if (!OWNER_REF_RE.test(sources.get(rel)))
+      problems.push(`${rel} matches a binding without asking who owns it`);
+  }
+  for (const rel of [...OWNER_ADOPTERS, ...OWNER_EXEMPT.keys()])
+    if (!roster.includes(rel))
+      problems.push(
+        `${rel} is listed but no longer matches effective bindings`,
+      );
+  for (const rel of OWNER_ADOPTERS)
+    if (!OWNER_REF_RE.test(sources.get(rel) ?? ""))
+      problems.push(`${rel} no longer asks who owns its chord`);
+  return problems;
+}
+
+const ownerSources = maskedSources();
+
+test("every effective-binding matcher asks who owns the chord", () => {
+  assert.deepEqual(ownerProblems(ownerSources), []);
+});
+
+test("chord-owner roster controls go red", () => {
+  const extra = "src/features/x/Matcher.tsx";
+  const matcher = maskNonCode(
+    'export function Matcher() {\n  const bindings = useEffectiveBindings();\n  return (e) => eventToBinding(e) === bindings.get("commit");\n}\n',
+    true,
+  );
+  assert.deepEqual(
+    ownerProblems(new Map([...ownerSources, [extra, matcher]])),
+    [`${extra} matches a binding without asking who owns it`],
+  );
+  const rail = "src/components/detail-rail.tsx";
+  const dropped = ownerSources
+    .get(rail)
+    .replace(/\b(?:useOwnsChord|chordOwners)\b/g, "useOwnsChrd");
+  assert.notDeepEqual(
+    ownerProblems(new Map([...ownerSources, [rail, dropped]])),
+    [],
+  );
+  assert.notDeepEqual(ownerProblems(new Map()), []);
 });

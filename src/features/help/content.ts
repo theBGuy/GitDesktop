@@ -103,7 +103,7 @@ GitHub remote; **Findings** works on a GitHub remote with \`gh\`, a GitLab one w
 \`glab\`, or a Bitbucket one with an Atlassian API token{{ai}}; the **Agent** tab appears
 only when AI features are enabled{{/ai}}.
 
-> Tip: press {{kbd:command-palette}} anytime for the command palette — the fastest way
+> Tip: press {{kbd:command-palette}} for the command palette — the fastest way
 > to find a feature when you don't know where it lives — or {{kbd:show-help}} to reopen
 > this guide.`,
   },
@@ -4468,7 +4468,10 @@ GitDesktop is built to be driven from the keyboard. The shortcuts below show you
 bindings (formatted for your platform) — rebind any of them in **Settings → Keyboard**.
 
 - **Command palette — {{kbd:command-palette}}.** Search and run any action available right
-  now. The fastest way to find a feature when you don't know where it lives.
+  now. The fastest way to find a feature when you don't know where it lives. While a dialog
+  or a confirmation prompt is open, only that dialog's own shortcuts respond (zooming the
+  app still works); the rest, the palette and the repository switcher included, respond
+  again once it closes.
 - **Keyboard shortcuts — {{kbd:show-shortcuts}}.** A cheat sheet of every shortcut, always
   reflecting your customizations.
 

@@ -226,6 +226,19 @@ export function consumeRequiresDispatch(binding: string): boolean {
   return binding === "space";
 }
 
+/** Which action owns each chord: the first holder in the map's order, null
+ *  bindings skipped. The one place first-holder is computed, shared by the
+ *  listener and the local chord matchers so they can't disagree. */
+export function chordOwners<Id extends string>(
+  bindings: ReadonlyMap<Id, string | null>,
+): Map<string, Id> {
+  const owners = new Map<string, Id>();
+  for (const [id, binding] of bindings) {
+    if (binding !== null && !owners.has(binding)) owners.set(binding, id);
+  }
+  return owners;
+}
+
 /** The key token of a canonical binding — whatever follows the fixed
  *  mod → alt → shift prefix, so the `+` key survives (`shift++` → `+`). */
 export function bindingKey(binding: string): string {

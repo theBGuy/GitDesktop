@@ -768,22 +768,12 @@ export const EditTitleBodyDialog = withForm({
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent
           className={contentClassName}
-          // mod+enter submits from anywhere in the dialog, and (when the consumer
-          // has a Generate surface) the generate-commit-message chord runs its
-          // Generate — parity with the create dialogs (CreateLocalPrDialog). It's
-          // captured on DialogContent (the Popup), not the <form>: the X close
-          // button renders as a form SIBLING inside the Popup, so a form-level
-          // handler misses a chord pressed with focus on the X, which would then
-          // leak to the global commit / generate-commit-message actions behind the
-          // dialog. Capturing on the Popup covers the X and every field, so the
-          // preventDefault here is what actually contains each chord: mod+enter
-          // unconditionally, and the generate chord whenever it may fire for as
-          // long as the consumer HAS a Generate (the hook mirrors the global
-          // listener's own guards). A consumer that passes no `onGenerate`
-          // (the issue views) lets it fall through untouched, which is safe:
-          // the only global handler is CommitBox's, and it runs nothing unless
-          // it is both mounted (Changes tab only) and enabled (never under
-          // Hide-AI) — the listener runs the newest ENABLED handler or none.
+          // Captured on DialogContent (the Popup), not the <form>: the X close is
+          // a form SIBLING, so only a Popup-level handler lets mod+enter submit
+          // and, when the consumer has a Generate, the generate chord run from
+          // every field and the X (parity with CreateLocalPrDialog). A consumer
+          // without `onGenerate` (the issue views) lets the generate chord through;
+          // under this modal the listener reaches only the modal's own entries.
           onKeyDown={(e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
               e.preventDefault();

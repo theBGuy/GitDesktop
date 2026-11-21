@@ -574,10 +574,10 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const mainArmShown = !armLoading && !armDetached && !emptyCandidate;
 
   // While Create is held or hidden, or its main arm is swapped out, these two
-  // are disabled, and dispatch runs the newest ENABLED entry, so the action
-  // belongs to whichever app-level entry is enabled: `create-local-pr` always,
-  // `create-pr` only while the forge can create one. Each opens the Pull
-  // requests tab's own create dialog, with none of Compare's base or preset.
+  // are disabled, so the action falls to the app-level fallback entries:
+  // `create-local-pr` always, `create-pr` only while the forge can create one.
+  // Each opens the Pull requests tab's own create dialog, with none of
+  // Compare's base or preset.
   useHotkeyAction(
     "create-pr",
     openCreatePr,

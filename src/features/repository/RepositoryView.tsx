@@ -605,14 +605,20 @@ export function RepositoryView() {
 
   // Create actions registered here (always mounted) so the command palette can
   // reach them from any tab: each switches to the owning tab and flags its panel
-  // to open its dialog. The panels also register these while visible (newest
-  // wins), so on-tab the panel's own handler opens directly with full context.
+  // to open its dialog. The fallback tier lets the Issues panel's own enabled
+  // entry answer on its tab, though this component registers after its panels.
   useHotkeyAction("create-local-issue", () => requestCreate("local-issue"));
-  useHotkeyAction("create-issue", () => requestCreate("issue"), canCreateIssue);
+  useHotkeyAction(
+    "create-issue",
+    () => requestCreate("issue"),
+    canCreateIssue,
+    { tier: "fallback" },
+  );
   useHotkeyAction(
     "create-jira-issue",
     () => requestCreate("jira-issue"),
     canCreateJira,
+    { tier: "fallback" },
   );
   useHotkeyAction(
     "create-discussion",
@@ -788,8 +794,9 @@ export function RepositoryView() {
       {/* Outside every TabPanel: a hidden tab's <Activity> pauses effects, and
           the log must follow HEAD for readers on whichever tab is shown. */}
       <StatusLogSync key={repoPath} repoPath={repoPath} />
-      {/* Before the tab panels: in a shared commit its entries register first,
-          so a panel's own enabled entry is the newest and takes the action. */}
+      {/* Outside every TabPanel, so a hidden tab never drops the app-level
+          create entries; their fallback tier, not this position, lets a
+          panel's own enabled entry take the action. */}
       <AppCreateHotkeys repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
         {/* The sidebar shares the window's shrink with the content pane: it

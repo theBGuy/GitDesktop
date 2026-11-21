@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 import {
   afterAll,
@@ -60,15 +61,9 @@ const st = () => useUiStore.getState();
 
 const showBranches = vi.fn();
 
-function Host({
-  dialogOpen = false,
-  withShowBranches = false,
-}: {
-  dialogOpen?: boolean;
-  withShowBranches?: boolean;
-}) {
+function Host({ withShowBranches = false }: { withShowBranches?: boolean }) {
   useHotkeysListener();
-  useNavHistoryActions(dialogOpen);
+  useNavHistoryActions();
   useSideButtonNavigation();
   const available = useAvailableActions();
   const navRows = (["go-back", "go-forward"] as const).filter((id) =>
@@ -90,7 +85,8 @@ function ShowBranches() {
   return null;
 }
 
-/** A Base UI-shaped open modal holding a focusable button. */
+/** A Base UI-shaped open modal holding a focusable button. No modal scope, so
+ *  every registration is inert under it. */
 function OpenModal() {
   return (
     <div data-slot="dialog-content" data-open="">
@@ -99,9 +95,7 @@ function OpenModal() {
   );
 }
 
-function renderHost(
-  props: { dialogOpen?: boolean; withShowBranches?: boolean } = {},
-) {
+function renderHost(props: { withShowBranches?: boolean } = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -230,12 +224,32 @@ describe("Go back / Go forward keys", () => {
     expect(st()).toBe(before);
   });
 
-  it("an open App dialog consumes the chord without stepping", async () => {
-    const { findByText } = renderHost({ dialogOpen: true });
+  it("an open modal with focus on <body> consumes the chords and runs nothing", async () => {
+    const { findByText } = renderHost({ withShowBranches: true });
     await findByText("alt+left");
     enterRepoWithBack();
+    const modal = render(<OpenModal />);
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
     expect(press("ArrowLeft").defaultPrevented).toBe(true);
     expect(st().repoTab).toBe("history");
+    let branchesPrevented: boolean | undefined;
+    const spy = (e: KeyboardEvent) => {
+      if (e.key === "b") branchesPrevented = e.defaultPrevented;
+    };
+    window.addEventListener("keydown", spy);
+    try {
+      await userEvent.setup().keyboard("{Control>}b{/Control}");
+    } finally {
+      window.removeEventListener("keydown", spy);
+    }
+    expect(branchesPrevented).toBe(true);
+    expect(showBranches).not.toHaveBeenCalled();
+    modal.unmount();
+    press("ArrowLeft");
+    expect(st().repoTab).toBe("changes");
   });
 
   it("focus inside an open modal stands both directions down", async () => {
@@ -259,7 +273,7 @@ describe("Go back / Go forward keys", () => {
   });
 
   it("the palette lists each direction only while it can run", async () => {
-    const { findByText, getByTestId, rerenderHost } = renderHost();
+    const { findByText, getByTestId } = renderHost();
     await findByText("alt+left");
     const palette = () => getByTestId("palette").textContent;
     expect(palette()).toBe("");
@@ -267,8 +281,6 @@ describe("Go back / Go forward keys", () => {
     expect(palette()).toBe("go-back");
     act(() => st().goBack());
     expect(palette()).toBe("go-forward");
-    rerenderHost({ dialogOpen: true });
-    expect(palette()).toBe("");
   });
 });
 
@@ -364,19 +376,22 @@ describe("mouse side buttons", () => {
     expect(st().repoTab).toBe("changes");
   });
 
-  it("an App dialog and a focused modal stand the buttons down", async () => {
-    const { findByText, rerenderHost } = renderHost({ dialogOpen: true });
+  it("an open modal stands the buttons down, focus inside and on <body>", async () => {
+    const { findByText } = renderHost();
     await findByText("alt+left");
     enterRepoWithBack();
-    click(3);
-    expect(st().repoTab).toBe("history");
-    rerenderHost({ dialogOpen: false });
     const modal = render(<OpenModal />);
     const inside = modal.getByRole("button", { name: "inside" });
     inside.focus();
     const [down, up] = click(3, inside);
     expect(down.defaultPrevented).toBe(true);
     expect(up.defaultPrevented).toBe(true);
+    expect(st().repoTab).toBe("history");
+    act(() => inside.blur());
+    expect(document.activeElement).toBe(document.body);
+    const [bodyDown, bodyUp] = click(3);
+    expect(bodyDown.defaultPrevented).toBe(true);
+    expect(bodyUp.defaultPrevented).toBe(true);
     expect(st().repoTab).toBe("history");
     modal.unmount();
     click(3);

@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import {
-  dispatchAction,
+  dispatchShortcut,
   useAvailableActions,
   useEffectiveBindings,
 } from "@/lib/hotkeys/hotkeys";
@@ -60,8 +60,10 @@ export function CommandPalette({
   function run(id: ActionId) {
     onOpenChange(false);
     // Let the dialog finish closing first so focus restoration can't fight
-    // with whatever the action opens (popovers, dialogs, focused inputs).
-    setTimeout(() => dispatchAction(id), 0);
+    // with whatever the action opens (popovers, dialogs, focused inputs). The
+    // modal rule is read when the timeout fires, so a prompt that opened after
+    // the pick refuses it.
+    setTimeout(() => dispatchShortcut(id), 0);
   }
 
   function onKeyDown(e: React.KeyboardEvent) {

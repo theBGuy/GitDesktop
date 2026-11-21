@@ -23,8 +23,12 @@ import {
   useFileListFilter,
 } from "@/components/use-file-list-filter";
 import { getAvailableSnapshot } from "@/lib/hotkeys/handler-registry";
-import { dispatchAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
-import { focusInOpenModal } from "@/lib/hotkeys/open-modal";
+import {
+  dispatchAction,
+  dispatchShortcut,
+  useHotkeysListener,
+} from "@/lib/hotkeys/hotkeys";
+import { anyOpenModal } from "@/lib/hotkeys/open-modal";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   type AppSettings,
@@ -922,11 +926,13 @@ describe("the focus-filter shortcut", () => {
   });
 
   it.each([
-    ["expanded", "Collapse file list", false],
-    ["collapsed", "Expand file list", true],
+    ["expanded", "inside", "Collapse file list", false],
+    ["collapsed", "inside", "Expand file list", true],
+    ["expanded", "blurred", "Collapse file list", false],
+    ["collapsed", "blurred", "Expand file list", true],
   ] as const)(
-    "R12b a claiming mount stands down while focus is in an open modal, %s",
-    async (_, caretLabel, collapsed) => {
+    "R12b a claiming mount stands down under an open modal, %s, focus %s",
+    async (_, focusAt, caretLabel, collapsed) => {
       stored = { ...DEFAULT_SETTINGS, diffFileListCollapsed: collapsed };
       // The modal marks the tab aria-hidden, out of reach of role queries.
       const byLabel = () =>
@@ -936,15 +942,23 @@ describe("the focus-filter shortcut", () => {
         name: "Dialog button",
       });
       await focusOn(inDialog);
-      expect(focusInOpenModal()).toBe(true);
+      // jsdom: Base UI's focus guard re-homes a blur (on its own schedule), so
+      // "blurred" means only that focus left the dialog's button.
+      if (focusAt === "blurred") act(() => inDialog.blur());
+      expect(document.activeElement === inDialog).toBe(focusAt === "inside");
+      expect(anyOpenModal()).toBe(true);
       expect(byLabel()).not.toBeNull();
+      let ran = true;
       act(() => {
-        dispatchAction("focus-filter");
+        ran = dispatchShortcut("focus-filter");
       });
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       });
-      expect(document.activeElement).toBe(inDialog);
+      expect(ran).toBe(false);
+      if (focusAt === "inside") expect(document.activeElement).toBe(inDialog);
+      // The claim's run would focus the rail's filter field.
+      expect(document.activeElement?.tagName).not.toBe("INPUT");
       expect(byLabel()).not.toBeNull();
       expect(saveSettingsMerged).not.toHaveBeenCalled();
     },

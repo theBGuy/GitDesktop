@@ -366,8 +366,8 @@ export function CreateIssueDialog({
           : undefined;
         const action = view && { label: view.label, onClick: view.onClick };
         /** Open the new issue — but only if the app is still where it was created.
-         *  Every path below sits after at least one await, and this dialog doesn't
-         *  register the modal gate, so a chord can switch repos inside that window.
+         *  Every path below sits after at least one await, which can outlive this
+         *  dialog (closed mid-create), so a chord can switch repos inside that window.
          *  `selectIssue` carries NO repo identity, so it would select this NUMBER in
          *  whatever repo is active now — somewhere else that is an unrelated issue,
          *  or a missing-issue view. The guard is the continuation rule's own shape,

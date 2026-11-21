@@ -5691,8 +5691,6 @@ export const CHECKS = [
       // And the open list's order-freeze seed on the rows' first arrival,
       // idempotent behind its no-snapshot-yet gate.
       "src/features/repository/BranchSwitcher.tsx",
-      // Registers the open dialog with the native-menu gate; add/remove pair.
-      "src/lib/hotkeys/modal-gate.ts",
       // Scroll/resize-close listeners for the open hovercard; add/remove pair,
       // and re-subscribing after an Activity re-show is the wanted behavior.
       "src/features/repository/insights/DependenciesCard.tsx",
@@ -6051,9 +6049,9 @@ export const CHECKS = [
     allowlist: [
       // Its arrow arm runs only on a `plain` key: no Alt, Ctrl, Meta or Shift.
       "src/features/activity/ActivityDock.tsx",
-      // The next three render only inside a modal dialog: Go back stands down
-      // under a modal, and a chord let through would reach the app bindings
-      // behind the dialog. The image viewer's own DialogContent handler.
+      // The next three render only inside a modal dialog, where Go back and
+      // every page binding are inert (dispatchShortcut), so a swallowed chord
+      // costs nothing. The image viewer's own DialogContent handler.
       "src/components/image-lightbox.tsx",
       // The create-issue dialog's Projects chips.
       "src/features/issues/CreateIssueDialog.tsx",
@@ -6063,7 +6061,7 @@ export const CHECKS = [
     ],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "Go back and Go forward default to Alt+Left and Alt+Right, and the window listener skips an event a component already consumed, so a handler that takes every ArrowLeft/ArrowRight as its own swallows the chord: return on `hasChordModifier(e)` (src/lib/hotkeys/binding.ts) before acting on or preventing a horizontal arrow. A handler that renders only inside a modal dialog may keep swallowing chords (Go back stands down there, and a chord let through would reach app bindings behind the dialog) with an allowlist entry giving that reason. The check is per file and reads only that the file names the key, consumes some event (`preventDefault` or `stopPropagation`) and calls neither `hasChordModifier(` nor `eventToBinding(`. It cannot see: a second, unguarded handler in a file that already holds a guard token (LinkedIssuesField.tsx's modal-only Jira chip handler), or the loss of a guarded handler's bail in such a file (ChangesPanel.tsx's tree handler, which scripts/changes-tree-chord-bail.test.mjs pins instead), or an arm of a guarded handler that swallows chords on purpose (ProjectsBoardPanel.tsx's roadmap rows keep the Alt arrows for their own reorder and date-shift chords); files that pass only because they call `eventToBinding(` for another purpose (mention-autocomplete.tsx); arrow keys matched other than by name (`e.keyCode`, a key read from a table built elsewhere); a consume spelled as an optional call (`e.preventDefault?.()`) or as a keymap entry that returns true; a guard token that appears only inside a string literal; and handlers in vendored UI or inside libraries. Those stay review concerns",
+      "Go back and Go forward default to Alt+Left and Alt+Right, and the window listener skips an event a component already consumed, so a handler that takes every ArrowLeft/ArrowRight as its own swallows the chord: return on `hasChordModifier(e)` (src/lib/hotkeys/binding.ts) before acting on or preventing a horizontal arrow. A handler that renders only inside a modal dialog may keep swallowing chords (Go back and every page binding are inert under a modal, so a swallowed chord costs nothing there) with an allowlist entry giving that reason. The check is per file and reads only that the file names the key, consumes some event (`preventDefault` or `stopPropagation`) and calls neither `hasChordModifier(` nor `eventToBinding(`. It cannot see: a second, unguarded handler in a file that already holds a guard token (LinkedIssuesField.tsx's modal-only Jira chip handler), or the loss of a guarded handler's bail in such a file (ChangesPanel.tsx's tree handler, which scripts/changes-tree-chord-bail.test.mjs pins instead), or an arm of a guarded handler that swallows chords on purpose (ProjectsBoardPanel.tsx's roadmap rows keep the Alt arrows for their own reorder and date-shift chords); files that pass only because they call `eventToBinding(` for another purpose (mention-autocomplete.tsx); arrow keys matched other than by name (`e.keyCode`, a key read from a table built elsewhere); a consume spelled as an optional call (`e.preventDefault?.()`) or as a keymap entry that returns true; a guard token that appears only inside a string literal; and handlers in vendored UI or inside libraries. Those stay review concerns",
   },
   {
     name: "titled-disabled-trigger",

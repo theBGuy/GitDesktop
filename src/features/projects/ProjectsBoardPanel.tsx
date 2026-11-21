@@ -5996,8 +5996,8 @@ export function ProjectsBoardPanel({
   );
   // Gated on the project's write permission alone, where the menu row it mirrors
   // also waits out a page fetch: a post touches no board read. Dead while the
-  // editor is open — the palette reaches over its modal, and swapping an open edit
-  // for a post would carry the edit's draft into it.
+  // editor is open, beside the modal rule that keeps the palette off it: swapping
+  // an open edit for a post would carry the edit's draft into it.
   useHotkeyAction(
     "post-project-status-update",
     openStatusPost,
@@ -6008,8 +6008,8 @@ export function ProjectsBoardPanel({
   );
   // The project verbs, palette-only like the menu rows they mirror, and under the
   // same holds. New project is live without a board too (the empty state offers
-  // it); every one is dead while a project or view dialog is open, since the
-  // palette reaches over its modal and swapping the run would carry its draft.
+  // it); every one is dead while a project or view dialog is open, beside the
+  // modal rule that keeps the palette off it: swapping the run would carry its draft.
   const lifecycleIdle = active && !lifecycleOpen;
   useHotkeyAction(
     "new-project",

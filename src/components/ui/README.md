@@ -24,7 +24,11 @@ grep -l "@/components/panel-portal" src/components/ui/<file>.tsx
 No match means the customization is gone. Restore it from git history
 rather than rewriting it from scratch. The marker imports are
 `usePanelPortalContainer`, `usePanelActive`, `isUserDismissal`, and
-`PanelPortalReset`.
+`PanelPortalReset`. The hotkey modal scope (`src/lib/hotkeys/modal-scope.ts`)
+also depends on `DialogContent` and `SheetContent` rendering
+`PanelPortalReset`: a re-vendor that drops it leaves every dialog's own
+shortcuts inert. `drawer.tsx` renders no `PanelPortalReset`, so under an
+open drawer every shortcut is inert, the drawer's own included.
 
 Coverage is partial and indirect. `pnpm run checks` runs
 `lone-activity-boundary`, which pins the `<Activity>` side of the contract

@@ -1,5 +1,5 @@
 // Pins App.tsx's Back/Forward wiring, which no component test mounts: App calls
-// `useNavHistoryActions(dialogOpen)` and `useSideButtonNavigation()` in its own
+// `useNavHistoryActions()` and `useSideButtonNavigation()` in its own
 // body ahead of its first early return (hooks after one would run conditionally),
 // and keeps an effect that calls `setNavHiddenTabs` keyed on the Hide AI setting.
 // Not covered: what the hooks do (src/test/go-back-forward.test.tsx and
@@ -64,10 +64,7 @@ function wiringProblems(text) {
   const problems = [];
   const early = firstEarlyReturn(masked, body);
   for (const [name, re] of [
-    [
-      "useNavHistoryActions(dialogOpen)",
-      /useNavHistoryActions\(\s*dialogOpen\s*\)/y,
-    ],
+    ["useNavHistoryActions()", /useNavHistoryActions\(\s*\)/y],
     ["useSideButtonNavigation()", /useSideButtonNavigation\(\s*\)/y],
   ]) {
     const calls = topLevel(masked, body, re);
@@ -108,7 +105,7 @@ const mutate = (from, to) => {
   assert.equal(real.split(from).length - 1, 1, from);
   return real.split(from).join(to);
 };
-const NAV = "  useNavHistoryActions(dialogOpen);\n";
+const NAV = "  useNavHistoryActions();\n";
 const SIDE = "  useSideButtonNavigation();\n";
 const withoutHiddenTabsEffect = () => {
   const start = real.indexOf(
@@ -125,17 +122,17 @@ test("each wiring loss fails the pin", () => {
     [
       "the actions hook removed",
       mutate(NAV, ""),
-      /calls useNavHistoryActions\(dialogOpen\) 0 times/,
+      /calls useNavHistoryActions\(\) 0 times/,
     ],
     [
       "the actions hook commented out",
       mutate(NAV, `  // ${NAV.trimStart()}`),
-      /calls useNavHistoryActions\(dialogOpen\) 0 times/,
+      /calls useNavHistoryActions\(\) 0 times/,
     ],
     [
-      "the dialog flag not passed",
+      "an argument passed to the parameterless hook",
       mutate(NAV, "  useNavHistoryActions(false);\n"),
-      /calls useNavHistoryActions\(dialogOpen\) 0 times/,
+      /calls useNavHistoryActions\(\) 0 times/,
     ],
     [
       "the side-button hook removed",
@@ -144,16 +141,13 @@ test("each wiring loss fails the pin", () => {
     ],
     [
       "the side-button hook under a condition",
-      mutate(
-        SIDE,
-        "  if (dialogOpen) {\n    useSideButtonNavigation();\n  }\n",
-      ),
+      mutate(SIDE, "  if (repoPath) {\n    useSideButtonNavigation();\n  }\n"),
       /calls useSideButtonNavigation\(\) 0 times/,
     ],
     [
       "an early return ahead of both hooks",
       mutate(NAV, `  if (gitInstalled.isPending) return null;\n${NAV}`),
-      /useNavHistoryActions\(dialogOpen\) comes after App's first early return/,
+      /useNavHistoryActions\(\) comes after App's first early return/,
     ],
     [
       "the effect keyed on nothing",
