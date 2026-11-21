@@ -845,6 +845,11 @@ test("G4: an aliased toggle import fails closed", () => {
   const out = [];
   referenceProblems(REL, text, mask(REL, text), out);
   assert.match(out.join("\n"), /G4 aliased import of Checkbox/);
+  const commented = text.replace("Checkbox as", "Checkbox /* x */ as");
+  assert.notEqual(commented, text);
+  const commentedOut = [];
+  referenceProblems(REL, commented, mask(REL, commented), commentedOut);
+  assert.deepEqual(commentedOut, out);
   const ns = `import * as T from "@/components/ui/switch";\n`;
   const nsOut = [];
   referenceProblems(REL, ns, mask(REL, ns), nsOut);

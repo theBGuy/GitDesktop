@@ -321,17 +321,22 @@ function classValue(text, masked, s, e) {
 const classTokens = (text, masked, s, e) =>
   classValue(text, masked, s, e).tokens;
 
-const IMPORT =
-  /\bimport\s+(type\s+)?([\w$\s,{}*]*?)\s*from\s*(["'])([^"']+)\3/g;
+const IMPORT = /\bimport\s+(type\s+)?([\w$\s,{}*]*?)\s*from\s*(["'])/g;
 
 /** Per file, the roster names its imports add (`<Alias>.Popup`) and the
- *  import forms the scan can't follow. */
+ *  import forms the scan can't follow. The statement is matched on the masked
+ *  source, so a comment inside the clause reads as blanks, and the specifier
+ *  is read from the raw text between the matched quotes. */
 function importsOf(rel, text, masked) {
   const roster = new Set();
   const hard = [];
-  for (const m of text.matchAll(IMPORT)) {
-    if (!masked.startsWith("import", m.index) || m[1]) continue;
-    const [, , clause, , from] = m;
+  for (const m of masked.matchAll(IMPORT)) {
+    if (m[1]) continue;
+    const clause = m[2];
+    const q = m.index + m[0].length - 1;
+    const end = masked.indexOf(m[3], q + 1);
+    if (end < 0) throw new ScanError(`${rel}: an import specifier never ends`);
+    const from = text.slice(q + 1, end);
     const line = lineOf(text, m.index);
     const shared = /^@base-ui\/react(?:\/|$)|^@\/components\/ui\//.test(from);
     if (/\*\s*as\s/.test(clause) && shared) {
@@ -767,12 +772,21 @@ test("G3: a raw part imported under an alias joins the roster", () => {
     "P.Popup",
   )}`;
   onlyProblem(withFile(text), /Synthetic\.tsx:5: 1 uncontained popupScroller/);
+  const commented = text.replace("Popover as P", "Popover /* popup */ as P");
+  assert.notEqual(commented, text);
+  assert.deepEqual(check(withFile(commented)), check(withFile(text)));
 });
 
 test("G4: an aliased ScrollArea or roster wrapper, or a namespace import, fails", () => {
   onlyProblem(
     withFile(
       'import { ScrollArea as SA } from "@/components/ui/scroll-area";\n',
+    ),
+    /Synthetic\.tsx:1: ScrollArea imported as SA/,
+  );
+  onlyProblem(
+    withFile(
+      'import { ScrollArea /* x */ as SA } from "@/components/ui/scroll-area";\n',
     ),
     /Synthetic\.tsx:1: ScrollArea imported as SA/,
   );
@@ -790,6 +804,14 @@ test("G4: an aliased ScrollArea or roster wrapper, or a namespace import, fails"
     check(
       withFile(
         'import type { ScrollArea as SA } from "@/components/ui/scroll-area";\n',
+      ),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    check(
+      withFile(
+        '// import { ScrollArea as SA } from "@/components/ui/scroll-area";\n',
       ),
     ),
     [],

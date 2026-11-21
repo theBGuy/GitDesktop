@@ -1284,8 +1284,8 @@ available. In your **Personal** rules, **After merging** starts the merge dialog
 **Delete _branch_ on the remote after merging** ticked in this repository. You can still
 untick it for any merge, and the setting doesn't tick it for a pull request from a fork,
 the default branch, a promotion branch, an agent session's branch, or a branch a rule
-blocks from deletion. Shared rules don't carry it. (For server-side enforcement, use **Rules** in *Repository
-settings*.)
+blocks from deletion. Shared rules don't carry it. (For server-side enforcement, use
+**Rules** in *Repository settings*.)
 
 ## Worktrees
 
