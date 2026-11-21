@@ -124,6 +124,10 @@ import {
   paintedAfter,
 } from "./file-content-gate";
 import { HUNK_SCOPED_MAX_LINES, hunkScopedProcessAST } from "./gap-isolation";
+import {
+  HIGHLIGHT_MAX_CHARS_HLJS,
+  HIGHLIGHT_MAX_CHARS_SHIKI,
+} from "./highlight-budget";
 import { djb2 } from "./highlight-worker-shared";
 import {
   hunkScopedHljsHighlighter,
@@ -394,15 +398,6 @@ export function GitDiffView({
     </>
   );
 }
-
-// Char budgets bounding the ONE-TIME synchronous tokenization on first paint.
-// Measured warm cost on unique real content: highlight.js ≈0.37ms/KB (~150ms at
-// the 400KB budget), Shiki ≈1ms/KB rust to ≈3.2ms/KB tsx (~150–480ms at the
-// 150KB budget) — ~8× hljs, hence the tighter budget. Over budget, a Shiki
-// language tokenizes off-thread ({@link useWorkerHighlight}); an hljs one keeps
-// the view's own whole-buffer pass (plain past SYNTAX_LINE_CAP lines).
-const HIGHLIGHT_MAX_CHARS_HLJS = 400_000;
-const HIGHLIGHT_MAX_CHARS_SHIKI = 150_000;
 
 /**
  * Whether a diff of `textLength` chars is over the synchronous-tokenize budget

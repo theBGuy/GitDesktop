@@ -824,15 +824,7 @@ mod lock_key_tests {
         let dot_git = std::path::Path::new(&repo).join(".git");
         std::fs::rename(&dot_git, &real_git).unwrap();
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(&dot_git)
-                .arg(&real_git)
-                .output()
-                .expect("spawn mklink");
-            assert!(made.status.success(), "mklink /J failed: {made:?}");
-        }
+        crate::test_junction::make_junction(&dot_git, &real_git);
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_git, &dot_git).unwrap();
         // A second spelling of the same checkout, so the transient read below can't

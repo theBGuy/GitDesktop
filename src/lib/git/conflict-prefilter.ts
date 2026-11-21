@@ -14,10 +14,11 @@ export type ConflictBlockReason =
   | "undecodable"
   | "partUndecodable"
   | "unreadableName"
-  | "excluded";
+  | "excluded"
+  | "tooLarge";
 
 /** A sides read the backend refuses on every retry: the file is binary, past
- *  the AI size cap, a submodule conflict (no text to merge), a symbolic link
+ *  the display cap, a submodule conflict (no text to merge), a symbolic link
  *  itself, or reached through a link. */
 export type ConflictRefusal =
   | "binary"
@@ -36,7 +37,8 @@ export type ConflictSkipReason =
 // Twins of conflict.rs's RESOLVE_TOO_LARGE_REFUSAL and RESOLVE_BINARY_REFUSAL,
 // and of the path-gate sentence closing on ops.rs's DISCARD_LINKED;
 // scripts/conflict-prefilter.test.mjs pins each congruent.
-export const TOO_LARGE_REFUSAL = "file is too large for AI conflict resolution";
+export const TOO_LARGE_REFUSAL =
+  "file is too large to show for conflict resolution";
 export const BINARY_REFUSAL = "binary file — resolve this conflict by hand";
 // Twin of conflict.rs's SUBMODULE_REFUSAL (and api/submodules.ts's
 // SUBMODULE_CONFLICT_REFUSAL, which this module can't import);
@@ -45,6 +47,10 @@ export const SUBMODULE_REFUSAL =
   "submodule conflict — pick a commit to resolve it";
 export const LINKED_ANCESTOR_TAIL =
   " — it's reached through a symbolic link or junction. Nothing was changed.";
+// Twin of conflict.rs's MARKER_SCAN_TIMED_OUT, raised as an `io` error;
+// scripts/conflict-prefilter.test.mjs pins it congruent.
+export const MARKER_SCAN_TIMED_OUT =
+  "file took too long to check for conflict markers";
 
 /** Classifies a rejected sides read, or null when a retry could still succeed.
  *  `detail` is the invalid-argument message without its Rust lead; `pathRefusal`
@@ -64,14 +70,40 @@ export function sidesRefusal(
   return null;
 }
 
-type BlockInputs = Pick<
+/** The AI prompt's per-version budget, in UTF-16 code units (what `.length`
+ *  counts). A file goes to the model whole or not at all: a cut copy would come
+ *  back as a short proposal that the accept writes and stages. */
+export const PROMPT_SECTION_MAX = 80_000;
+
+/** Whether any version of the file is past the prompt budget; an absent side
+ *  (null) has no version to send. */
+export function exceedsPromptSection(
+  sides: Pick<ConflictSides, "working" | "ours" | "theirs" | "base">,
+): boolean {
+  return [sides.working, sides.ours, sides.theirs, sides.base].some(
+    (body) => typeof body === "string" && body.length > PROMPT_SECTION_MAX,
+  );
+}
+
+export type BlockInputs = Pick<
   ConflictSides,
   "undecodable" | "workingUndecodable" | "aiIgnored"
->;
+> & { promptTooLarge: boolean };
+
+/** The blocked gate's inputs from one sides read. */
+export function blockInputsOf(sides: ConflictSides): BlockInputs {
+  return {
+    undecodable: sides.undecodable,
+    workingUndecodable: sides.workingUndecodable,
+    aiIgnored: sides.aiIgnored,
+    promptTooLarge: exceedsPromptSection(sides),
+  };
+}
 
 /** ConflictResolveView's blocked gate, with its reason: non-null exactly when
- *  `undecodable || aiIgnored.ignored`. Byte safety outranks the ignore verdict,
- *  and a working file that isn't UTF-8 outranks a stage blob that isn't. */
+ *  `undecodable || aiIgnored.ignored || promptTooLarge`. Byte safety outranks
+ *  the ignore verdict, which outranks size, and a working file that isn't
+ *  UTF-8 outranks a stage blob that isn't. */
 export function conflictAiBlockReason(
   sides: BlockInputs,
 ): ConflictBlockReason | null {
@@ -81,6 +113,7 @@ export function conflictAiBlockReason(
   if (sides.aiIgnored.ignored) {
     return sides.aiIgnored.unreadable ? "unreadableName" : "excluded";
   }
+  if (sides.promptTooLarge) return "tooLarge";
   return null;
 }
 

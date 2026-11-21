@@ -1591,6 +1591,41 @@ mod tests {
         assert_eq!(files_stamp(&repo).await, before);
     }
 
+    /// A junction under refs/heads (a junction needs no privilege, unlike the symlinks
+    /// above) is never walked into either, while a loose-ref write beside it still moves
+    /// the stamp.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn refs_stamp_skips_a_junction_under_refs() {
+        let (dir, repo) = stamp_repo("refs-stamp-junction").await;
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let link = dir
+            .path()
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join("junction");
+        crate::test_junction::make_junction(&link, &outside);
+        let oid = git_out(&repo, &["rev-parse", "HEAD"]).await;
+        let before = files_stamp(&repo).await;
+        std::fs::write(outside.join("behind"), format!("{}\n", oid.trim())).unwrap();
+        assert_eq!(
+            files_stamp(&repo).await,
+            before,
+            "the junction is not walked"
+        );
+
+        let spare = spare_commit(&repo).await;
+        let beside = link.with_file_name("beside");
+        std::fs::write(beside, format!("{}\n", spare.trim())).unwrap();
+        assert_ne!(
+            files_stamp(&repo).await,
+            before,
+            "a loose ref beside it counts"
+        );
+    }
+
     #[test]
     fn log_format_field_order() {
         assert_eq!(

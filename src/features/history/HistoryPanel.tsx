@@ -109,8 +109,9 @@ import {
 } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
-import { useUiStore } from "@/lib/stores/ui";
+import { type HistoryDatesHold, useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
@@ -226,9 +227,26 @@ const UNDO_UNRESOLVED = "Resolve the conflicts first; nothing was undone.";
 const UNDO_PUSHED_REFRESHING =
   "Still checking which commits are pushed — try again in a moment.";
 /** Why the shortcut undid nothing while the pushed-commit check has failed.
- *  Fixed copy: a failed count refetching with no data carries no error. */
+ *  Fixed copy: a failed count refetching with no data carries no error. KEEP
+ *  IN STEP: commit.rs's `UNDO_PUSHED_UNCHECKED` is the backend's copy of this
+ *  exact sentence, for a check it failed to read itself. */
 const UNDO_PUSHED_UNCHECKED =
   "Couldn't check which commits are pushed; nothing was undone.";
+/** The backend's refusal of an undo whose commit is already pushed. KEEP IN
+ *  STEP: commit.rs's `UNDO_ALREADY_PUSHED` is the backend's copy of this exact
+ *  sentence. */
+const UNDO_ALREADY_PUSHED =
+  "The latest commit is already pushed — nothing was undone.";
+
+/** The backend's pushed-commit refusals, read off a git-kind AppError's
+ *  `stderr` (it carries no Display lead). */
+function undoPushedRefusal(error: unknown): string | null {
+  if (!isAppError(error) || error.kind !== "git") return null;
+  const { stderr } = error;
+  return stderr === UNDO_ALREADY_PUSHED || stderr === UNDO_PUSHED_UNCHECKED
+    ? stderr
+    : null;
+}
 
 /** Why undo is withheld at the oldest commit a depth-limited clone holds: its
  *  parent was never fetched, so there is nothing to soft-reset to. KEEP IN
@@ -626,6 +644,22 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   const searchActive = searchMode && filterText.trim().length > 0;
+  // The commit detail's Edit dates holds on what this panel offers: no single
+  // commit while several are selected or Search all history is searching, with
+  // or without results. A plain filter over the loaded pages isn't held: its
+  // rows keep real-log positions, so the row menu keeps Edit dates there too.
+  // Owned here, so no repo switch resets it; the cleanup clears it while
+  // History is hidden.
+  const datesHold = ((): HistoryDatesHold | null => {
+    if (selected.size > 1) return "multi-select";
+    if (searchActive) return "search";
+    return null;
+  })();
+  const setHistoryDatesHold = useUiStore((s) => s.setHistoryDatesHold);
+  useEffect(() => {
+    setHistoryDatesHold(datesHold);
+    return () => setHistoryDatesHold(null);
+  }, [datesHold, setHistoryDatesHold]);
   const search = useCommitSearch(repoPath, searchActive ? debouncedQuery : "");
   const shaLookup = useCommitPrefixLookup(
     repoPath,
@@ -1073,7 +1107,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       if (selectedCommitHash !== null) openEditDates(selectedCommitHash);
     },
     (paletteDatesRoute === "head" || paletteDatesRoute === "history") &&
-      selected.size <= 1,
+      selected.size <= 1 &&
+      !searchActive,
   );
 
   // GitHub Desktop-style undo: offered while the latest commit hasn't been
@@ -1234,7 +1269,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         expectedBranch: headBranchPin(head),
       });
     } catch (e) {
-      onError(e);
+      // A pushed commit is a refusal like the gate's own, not a failure.
+      const refusal = undoPushedRefusal(e);
+      if (refusal !== null) toast.info(refusal);
+      else onError(e);
       return;
     }
     // The draft restore, tab flip and selection prune write the LIVE repo's

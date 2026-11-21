@@ -1290,3 +1290,39 @@ describe("Undo over unresolved conflicts", () => {
     expect(item).toHaveAttribute("aria-disabled", "true");
   });
 });
+
+// Control (run once, reverted): drop undoLast's pushed-refusal arm in
+// HistoryPanel and both refusals reach the error toast instead.
+describe("Undo the backend refuses as already pushed", () => {
+  const UNDO_ALREADY_PUSHED =
+    "The latest commit is already pushed — nothing was undone.";
+  const UNDO_PUSHED_UNCHECKED =
+    "Couldn't check which commits are pushed; nothing was undone.";
+
+  it.each([
+    ["already pushed", UNDO_ALREADY_PUSHED],
+    ["unchecked", UNDO_PUSHED_UNCHECKED],
+  ])("the %s refusal toasts as info", async (_name, sentence) => {
+    vi.mocked(gitUndoCommit).mockRejectedValue({
+      kind: "git",
+      message: "git reset failed",
+      stderr: sentence,
+    });
+    await renderPanel({});
+    dispatchAction("undo-commit");
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith(sentence));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("another git failure keeps the error toast", async () => {
+    vi.mocked(gitUndoCommit).mockRejectedValue({
+      kind: "git",
+      message: "git reset failed",
+      stderr: "fatal: something else",
+    });
+    await renderPanel({});
+    dispatchAction("undo-commit");
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.info).not.toHaveBeenCalledWith(UNDO_ALREADY_PUSHED);
+  });
+});

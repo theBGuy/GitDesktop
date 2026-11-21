@@ -4348,16 +4348,22 @@ async fn verify_pin_and_merge(
 }
 
 /// Whether a commit is reachable from any remote-tracking ref (`refs/remotes/*`) —
-/// i.e. it has been pushed. Gates the History-tab commit-comment surface, which can
-/// only anchor a comment on a commit the forge already knows about. The sha is
-/// validated (hex) BEFORE spawning git. `Ok(false)` comes only from a read that
-/// succeeded and matched no ref; any failed run is an Err, since the UI would read
-/// a defaulted false as "not pushed". git exits nonzero for a well-formed sha the
-/// repo lacks (pinned by `commit_on_remote_errs_for_an_unknown_oid`), so an empty
-/// answer from exit 0 is a real "not on a remote".
+/// i.e. it has been pushed. Gates the History-tab comment surface and GUI Undo's
+/// no-upstream check, so a failed run is an Err, never a defaulted "not pushed". The
+/// sha is validated (hex) BEFORE spawning git. `--contains` exits 0 while skipping a
+/// ref whose tip object is missing, so an empty answer stands only once a plain
+/// listing exits 0 (nonzero on a missing tip object). Out of reach here (git 2.51.1):
+/// both skip an unparseable ref file with only a warning, and a missing ANCESTOR
+/// object makes `--contains` over-report, which errs toward "pushed".
 #[tauri::command]
 pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool> {
     crate::git::history::validate_hash(&sha)?;
+    let failed = |out: &crate::git::runner::GitOutput| {
+        AppError::Command(format!(
+            "couldn't check whether {sha} is on a remote.\n{}",
+            out.full_failure_text()
+        ))
+    };
     let out = run_git_raw(
         Some(&repo_path),
         &[
@@ -4371,12 +4377,21 @@ pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool>
     )
     .await?;
     if out.code != 0 {
-        return Err(AppError::Command(format!(
-            "couldn't check whether {sha} is on a remote.\n{}",
-            out.full_failure_text()
-        )));
+        return Err(failed(&out));
     }
-    Ok(!out.stdout_lossy().trim().is_empty())
+    if !out.stdout_lossy().trim().is_empty() {
+        return Ok(true);
+    }
+    let tips = run_git_raw(
+        Some(&repo_path),
+        &["for-each-ref", "refs/remotes", "--format=%(objecttype)"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if tips.code != 0 {
+        return Err(failed(&tips));
+    }
+    Ok(false)
 }
 
 /// What git_unpushed_count counted against.
@@ -14796,6 +14811,49 @@ pub(crate) mod tests {
         run(&repo, &["commit", "-q", "--allow-empty", "-m", "local"]).await;
         let local = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
         assert!(super::commit_on_remote(repo.clone(), pushed).await.unwrap());
+        assert!(!super::commit_on_remote(repo.clone(), local).await.unwrap());
+    }
+
+    /// `--contains` skips a remote-tracking ref whose tip object is missing and still
+    /// exits 0, so the empty answer must not read as "not on a remote".
+    #[tokio::test]
+    async fn commit_on_remote_errs_when_a_remote_tip_is_missing() {
+        let (_base, base) = temp_base("on-remote-missing-tip");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        let local = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        // update-ref refuses a missing object, so the loose ref is written directly.
+        let refs = base
+            .join(".git")
+            .join("refs")
+            .join("remotes")
+            .join("origin");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(
+            refs.join("main"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        let result = super::commit_on_remote(repo.clone(), local).await;
+        assert!(matches!(result, Err(AppError::Command(_))), "{result:?}");
+    }
+
+    /// A stale `origin/HEAD` symref to a deleted branch is common and names no tip, so
+    /// it leaves an empty answer standing.
+    #[tokio::test]
+    async fn commit_on_remote_reads_past_a_dangling_remote_head_symref() {
+        let (_base, base) = temp_base("on-remote-dangling-head");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "local"]).await;
+        let local = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let refs = base
+            .join(".git")
+            .join("refs")
+            .join("remotes")
+            .join("origin");
+        std::fs::write(refs.join("HEAD"), "ref: refs/remotes/origin/gone\n").unwrap();
         assert!(!super::commit_on_remote(repo.clone(), local).await.unwrap());
     }
 

@@ -118,6 +118,7 @@ import {
   untrackedPathsOf,
 } from "./changes-confirm-copy";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
+import { refusedReadFlag } from "./conflict-read-refusal";
 import { FileRow, MARKER_CHECK_PENDING } from "./FileRow";
 import {
   entriesUnderFolder,
@@ -196,9 +197,11 @@ function canStash(
 
 /** Whether a stage of `conflicted` may go ahead: true when no file still holds
  *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
- *  cached read can predate the markers; a failed read asks rather than staging
- *  silently or refusing. Refuses (resolving false, with a notice) without
- *  asking if the active repo changed during the reads. Never rejects. */
+ *  cached read can predate the markers. A read refused as too large falls back
+ *  to the capless marker scan; any other failed read asks rather than staging
+ *  silently or refusing (`refusedReadFlag`). Refuses (resolving false, with a
+ *  notice) without asking if the active repo changed during the reads. Never
+ *  rejects. */
 async function confirmMarkerStage(
   repoPath: string,
   conflicted: FileEntry[],
@@ -214,12 +217,31 @@ async function confirmMarkerStage(
       )),
     );
   }
-  const flags = conflicted.flatMap((e, i): MarkerFlag[] => {
+  // Index-aligned too; a rejected read's flag comes from `refusedReadFlag`,
+  // whose scans run in the reads' chunks (each one reads a whole file).
+  const flagged: (MarkerFlag | null)[] = conflicted.map((_, i) => {
     const read = reads[i];
-    const name = pathBasename(e.path);
-    if (read.status === "rejected") return [{ name, unchecked: true }];
-    return markNeedsConfirm(read.value) ? [{ name, unchecked: false }] : [];
+    if (read.status === "rejected") return null;
+    return markNeedsConfirm(read.value)
+      ? { name: pathBasename(conflicted[i].path), unchecked: false }
+      : null;
   });
+  const refused = conflicted.flatMap((e, i) => {
+    const read = reads[i];
+    return read.status === "rejected" ? [{ e, i, error: read.reason }] : [];
+  });
+  for (let c = 0; c < refused.length; c += SIDES_READ_CHUNK) {
+    const chunk = refused.slice(c, c + SIDES_READ_CHUNK);
+    const answers = await Promise.all(
+      chunk.map(({ e, error }) =>
+        refusedReadFlag(repoPath, e.path, pathBasename(e.path), error),
+      ),
+    );
+    chunk.forEach(({ i }, k) => {
+      flagged[i] = answers[k];
+    });
+  }
+  const flags = flagged.filter((f): f is MarkerFlag => f !== null);
   if (flags.length === 0) return true;
   if (
     refuseIfSwitched(

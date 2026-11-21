@@ -1510,25 +1510,19 @@ mod tests {
         }
         assert!(hooks.starts_with(base), "{hooks:?} under {base:?}");
         assert!(outside.starts_with(base), "{outside:?} under {base:?}");
-        for path in [hooks, outside] {
-            let shown = path.to_string_lossy();
-            if shown.contains(['&', '|', '<', '>', '^', '%', '!', '(', ')', '"']) {
-                eprintln!("skipped: temp path carries a cmd metacharacter: {shown}");
-                return None;
-            }
-        }
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(hooks)
-            .arg(outside)
-            .output()
-            .expect("spawn cmd mklink /J");
-        assert!(
-            made.status.success(),
-            "mklink /J failed: {}",
-            String::from_utf8_lossy(&made.stderr)
-        );
+        make_hooks_junction(hooks, outside)
+    }
+
+    #[cfg(windows)]
+    fn make_hooks_junction(hooks: &Path, outside: &Path) -> Option<()> {
+        crate::test_junction::make_junction(hooks, outside);
         Some(())
+    }
+
+    /// Only the Windows tests ask for a junction.
+    #[cfg(not(windows))]
+    fn make_hooks_junction(_hooks: &Path, _outside: &Path) -> Option<()> {
+        unreachable!("junctions are made only on Windows")
     }
 
     /// Installs, then moves `.git/hooks` (hook and all) to `<base>/outside` and links

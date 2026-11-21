@@ -73,7 +73,9 @@ function isAnyMarker(line: string): boolean {
  *  and pipe markers count, since a bare `=======` can be a markdown underline
  *  and staging must not refuse on one. Wider on run length:
  *  7 or more, because a `conflict-marker-size` attribute lengthens git's
- *  markers and the exactly-7 parser never reads those as regions. */
+ *  markers and the exactly-7 parser never reads those as regions.
+ *  Rust twin: conflict.rs's `scan_markers`, both run over the shared table
+ *  src-tauri/src/git/conflict-marker-cases.json. */
 export function hasConflictMarkers(text: string): boolean {
   return (
     /^<{7,}( |\t|$)/m.test(text) ||

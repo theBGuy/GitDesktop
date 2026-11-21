@@ -731,19 +731,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
         #[cfg(windows)]
-        {
-            let made = std::process::Command::new("cmd")
-                .args([
-                    "/C",
-                    "mklink",
-                    "/J",
-                    &link.to_string_lossy(),
-                    &target.to_string_lossy(),
-                ])
-                .output()
-                .expect("run mklink");
-            assert!(made.status.success(), "{made:?}");
-        }
+        crate::test_junction::make_junction(link, target);
     }
 
     #[cfg(any(windows, unix))]
