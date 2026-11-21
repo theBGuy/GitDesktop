@@ -731,6 +731,10 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Admin & settings",
+    label: "Per-repo merge default — start with the head-branch delete ticked",
+  },
+  {
+    group: "Admin & settings",
     label: "Git hooks manager — husky / pre-commit / lefthook aware",
   },
   {

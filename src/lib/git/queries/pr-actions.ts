@@ -658,17 +658,24 @@ export function useMergePr(repo: string) {
       // base, and Bitbucket's checks read that sha's statuses, so the PR's checks
       // are re-read too. This hook can't tell the provider, so for any other
       // merge that is a precaution of up to two reads. The run lists read
-      // origin, so an upstream-lens merge arms no run recheck. A queued merge
-      // has not landed yet, so it arms neither: its row stays where it is. The
-      // delayed re-read also owes the lens's issue lists and issue details: the
-      // forge closes the issues a merge resolves after it answers.
+      // origin, so an upstream-lens merge arms no run recheck. A queued outcome
+      // is not confirmed landed (a queue holds it, or GitHub hadn't reported it
+      // merged yet), so nothing is patched as merged and no run recheck is
+      // armed, but every outcome owes the one delayed re-read, the queued one
+      // with the PR's own details, so a late-reported merge corrects itself. The
+      // re-read also owes the lens's issue lists and issue details: the forge
+      // closes the issues a merge resolves after it answers.
       onSuccess: (data, args) => {
+        recheckListsLater(queryClient, repo, [
+          ...prStateRecheckKeys(repo, args.lens),
+          [...repoKeys.issueList(repo), args.lens],
+          ["repo", repo, "issue", args.lens],
+          // A landed merge's details are held by markMergeLanded instead.
+          ...(data.queued
+            ? [prDetailsOptions(repo, args.number, args.lens).queryKey]
+            : []),
+        ]);
         if (!data.queued) {
-          recheckListsLater(queryClient, repo, [
-            ...prStateRecheckKeys(repo, args.lens),
-            [...repoKeys.issueList(repo), args.lens],
-            ["repo", repo, "issue", args.lens],
-          ]);
           // The details twin of the re-file below, for the merged request only:
           // the cascaded layers come from cached stack membership, so they keep
           // just the row re-file and its delayed re-read.

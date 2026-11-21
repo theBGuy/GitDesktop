@@ -6352,7 +6352,7 @@ export function ProjectsBoardPanel({
                           <RadioGroup
                             // Scrolls at its own edge: the server offers up to 50
                             // views, and a popup that tall would run off screen.
-                            className="max-h-56 gap-0 overflow-y-auto"
+                            className="max-h-56 gap-0 overflow-y-auto pb-2"
                             aria-labelledby={viewLabelId}
                             value={view?.id ?? NO_VIEW_ROW_ID}
                             onValueChange={(next) => {

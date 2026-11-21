@@ -45,6 +45,7 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
     naming?: Partial<NamingPolicy>;
     protections?: Partial<BranchProtection>[];
     promotionBranches?: unknown;
+    deleteHeadAfterMerge?: unknown;
   };
   return {
     naming: { ...EMPTY_BRANCH_RULES.naming, ...obj.naming },
@@ -62,6 +63,9 @@ export function normalizeBranchRules(saved: unknown): BranchRulesConfig {
     promotionBranches: Array.isArray(obj.promotionBranches)
       ? obj.promotionBranches.filter((p): p is string => typeof p === "string")
       : [],
+    // Anything but a literal true reads as off: a malformed value fails toward
+    // the merge dialog's non-destructive start.
+    deleteHeadAfterMerge: obj.deleteHeadAfterMerge === true,
   };
 }
 
@@ -129,7 +133,12 @@ export async function loadSharedBranchRules(
   const raw = await readRepoBranchRules(repo);
   if (!raw) return EMPTY_BRANCH_RULES;
   try {
-    return normalizeBranchRules(JSON.parse(raw));
+    // The delete-after-merge start is personal only, so a hand-edited shared
+    // value never reaches the Shared draft.
+    return {
+      ...normalizeBranchRules(JSON.parse(raw)),
+      deleteHeadAfterMerge: false,
+    };
   } catch {
     // A malformed committed file shouldn't break the app — ignore it.
     return EMPTY_BRANCH_RULES;
@@ -140,6 +149,12 @@ export async function saveSharedBranchRules(
   repo: string,
   config: BranchRulesConfig,
 ): Promise<void> {
-  // Pretty-printed so the committed file stays diff-friendly.
-  await writeRepoBranchRules(repo, `${JSON.stringify(config, null, 2)}\n`);
+  // Pretty-printed so the committed file stays diff-friendly; the personal-only
+  // delete-after-merge start never reaches the committed file.
+  const json = JSON.stringify(
+    config,
+    (key, v) => (key === "deleteHeadAfterMerge" ? undefined : v),
+    2,
+  );
+  await writeRepoBranchRules(repo, `${json}\n`);
 }

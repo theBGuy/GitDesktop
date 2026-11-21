@@ -9,7 +9,8 @@ import {
  * Combines the repo's shared rules with the user's personal rules into the
  * single config that's actually enforced. Protections and promotion branches
  * are the union of both; the shared team naming policy wins when present, else
- * the personal one applies.
+ * the personal one applies; the delete-after-merge start is personal only, so
+ * the shared file's value is ignored.
  */
 export function mergeBranchRules(
   shared: BranchRulesConfig,
@@ -22,7 +23,43 @@ export function mergeBranchRules(
       ...shared.promotionBranches,
       ...personal.promotionBranches,
     ],
+    deleteHeadAfterMerge: personal.deleteHeadAfterMerge,
   };
+}
+
+/**
+ * Whether the merge dialog's delete-head checkbox starts ticked. A head KNOWN to
+ * be the default branch or KNOWN to be deletion-blocked never starts ticked (both
+ * inputs read false while their own reads are pending). The personal setting
+ * ticks only a known same-repository head that is not a configured promotion
+ * branch (a long-lived branch), and only once the rules and the default-branch
+ * name have answered; otherwise the MR/PR's own forge-side delete choice
+ * decides, without waiting on those reads.
+ */
+export function mergeDeleteStartsTicked(i: {
+  /** The effective (= personal) `deleteHeadAfterMerge`. */
+  pref: boolean;
+  rulesSettled: boolean;
+  defaultBranchKnown: boolean;
+  headIsDefault: boolean;
+  deletionBlocked: boolean;
+  /** The head matches a configured promotion branch; refuses the setting only. */
+  promotion: boolean;
+  crossRepository: boolean | undefined;
+  /** `PrDetails.deleteSourceBranch`; absent and null mean no per-PR flag. */
+  forgeDeleteFlag: boolean | null | undefined;
+}): boolean {
+  if (i.headIsDefault || i.deletionBlocked) return false;
+  if (
+    i.pref &&
+    i.crossRepository === false &&
+    !i.promotion &&
+    i.rulesSettled &&
+    i.defaultBranchKnown
+  ) {
+    return true;
+  }
+  return i.forgeDeleteFlag === true;
 }
 
 function escapeLiteral(s: string): string {

@@ -1280,7 +1280,12 @@ to the repository's own pull requests — one from a fork keeps the update offer
 its branch shares the name. The branch switcher reads the same list: on a branch named
 there, **Update from _the default branch_** is withheld from the menus and the shortcut,
 with the reason on the label, while updating that branch from its own upstream stays
-available. (For server-side enforcement, use **Rules** in *Repository settings*.)
+available. In your **Personal** rules, **After merging** starts the merge dialog with
+**Delete _branch_ on the remote after merging** ticked in this repository. You can still
+untick it for any merge, and the setting doesn't tick it for a pull request from a fork,
+the default branch, a promotion branch, an agent session's branch, or a branch a rule
+blocks from deletion. Shared rules don't carry it. (For server-side enforcement, use
+**Rules** in *Repository settings*.)
 
 ## Worktrees
 
@@ -2116,6 +2121,23 @@ is already being merged is left as it is: check it again in a moment to see the 
 If the state read fails (the forge can't be reached, refuses the read, or sends an
 answer GitDesktop can't read), nothing is merged and you can try again.
 Merges an agent sends through GitDesktop's MCP server get the same check.
+
+The **Delete _branch_ on the remote after merging** checkbox starts ticked when **After
+merging** is on in *Branch rules*, except for a pull request from a fork, the default
+branch, a promotion branch, an agent session's branch, or a branch a rule blocks from
+deletion; if the merge dialog opens while GitDesktop is still loading the branch rules,
+or when it can't tell which branch is the default, the setting doesn't tick it.
+Otherwise a **GitLab** merge request or **Bitbucket** pull request starts the checkbox
+from its own delete choice made on the forge, forks included, and a **GitHub** pull
+request starts unticked. An agent session's branch and a branch a rule blocks from
+deletion can't be deleted from the dialog, and the default branch gets no checkbox.
+GitDesktop asks the forge to delete the branch only when the checkbox is ticked.
+On **GitHub** it deletes the branch only once GitHub reports the pull request merged, so
+a pull request a merge queue takes, one GitHub merges once its requirements pass, or one
+GitHub hasn't reported merged yet keeps its branch and shows **Queued to merge** until
+GitDesktop sees it merged. GitHub's own **Automatically delete head branches**
+repository setting can still delete the branch after a merge, whatever the checkbox
+says.
 
 ## Maintaining a pull request from a fork
 

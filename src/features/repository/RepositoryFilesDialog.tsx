@@ -1266,7 +1266,7 @@ function FileList({
   return (
     <div
       ref={parentRef}
-      className="h-full overflow-y-auto"
+      className="h-full overflow-y-auto pb-2"
       onKeyDown={onKeyDown}
       tabIndex={-1}
     >

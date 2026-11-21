@@ -23,8 +23,9 @@ use crate::github::repo_meta::{
     invalidate_all_repo_meta_after, invalidate_repo_meta_after, write_was_attempted,
 };
 use crate::github::runner::{
-    gh_auth_epoch_counter, gh_output_ok, run_gh, run_gh_input, run_gh_input_raw, run_gh_raw,
-    run_gh_raw_in_dir, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+    gh_auth_epoch_counter, gh_output_ok, run_gh, run_gh_input, run_gh_input_raw_on_host,
+    run_gh_on_host, run_gh_raw, run_gh_raw_in_dir, run_gh_raw_on_host, GhOutput,
+    GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 use crate::github::{gh_failure_reason, gh_unreadable};
 use crate::state::AppState;
@@ -2785,9 +2786,9 @@ mod attach_tests {
 /// carries a human-readable caveat about what did NOT happen afterwards. Two
 /// causes, both GitHub-only by construction (GitLab and Bitbucket fold deletion
 /// into the atomic merge server-side): the post-merge remote head-branch cleanup
-/// failed, or a stacked merge was handed to a merge QUEUE, where the PR hasn't
-/// landed yet and cleanup is deliberately skipped. A merge *failure* is still an
-/// `Err`, never an outcome with a warning.
+/// failed, or the merge was handed to a merge QUEUE (or, with cleanup asked for, GitHub
+/// didn't report it merged in time), where cleanup is deliberately skipped. A merge
+/// *failure* is still an `Err`, never an outcome with a warning.
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PrMergeOutcome {
@@ -2795,7 +2796,8 @@ pub struct PrMergeOutcome {
     /// or the merge is queued and the branch was left alone); `msg` always states
     /// what did happen. `None` — merged and cleaned up cleanly.
     pub cleanup_warning: Option<String>,
-    /// The merge was handed to a merge QUEUE and has not landed yet. State, not
+    /// The merge was handed to a merge QUEUE, or GitHub hadn't reported it merged
+    /// when the head-branch cleanup gave up waiting, so it can't count as landed. State, not
     /// prose: `cleanup_warning` carries the human detail, but a programmatic caller
     /// (the MCP merge tool, the frontend) must branch on this rather than parse a
     /// message — and must not treat the PR as merged or its branch as deleted.
@@ -2975,9 +2977,10 @@ fn gh_merge_request(
 ///
 /// Merge failure = `Err`. A successful [`PrMergeOutcome`] covers two non-clean
 /// endings, both carrying `cleanup_warning` and neither an error: the merge landed
-/// but branch cleanup failed, or a stacked merge was handed to a merge QUEUE and
-/// hasn't landed (`queued`), in which case cleanup is deliberately skipped —
-/// deleting the head branch would break the merge the queue still holds.
+/// but branch cleanup failed, or the merge isn't confirmed landed (`queued`), in which
+/// case cleanup is deliberately skipped — deleting the head branch of an open pull
+/// request closes it and drops it from the queue. A plain `gh pr merge` exits 0 after
+/// only enqueuing, so the plain path deletes only once GitHub reports the PR merged.
 pub async fn gh_pr_merge(
     repo_path: String,
     number: u64,
@@ -2999,17 +3002,40 @@ pub async fn gh_pr_merge(
         }
     };
     let message = crate::forge::single_commit_message(&strategy, &["rebase"], messages)?;
-    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    // Every gh call of the merge, its confirm read and its cleanup runs on this one target,
+    // built from one read of each remote URL, so an origin edit mid-merge can't pair a slug
+    // with another URL's host. The upstream lens rides the origin host (see
+    // `gh_host_for_repo`).
+    let remote = crate::github::lens_remote(lens.as_deref())?;
+    let url = crate::git::remote::git_remote_url(repo_path.clone(), remote.to_string()).await?;
+    let slug = crate::github::slug_from_remote_url(remote, &url)?;
+    let origin_url = if remote == "origin" {
+        Some(url)
+    } else {
+        crate::git::remote::git_remote_url(repo_path.clone(), "origin".to_string())
+            .await
+            .ok()
+    };
+    let target = GhTarget {
+        host: match origin_url {
+            Some(origin_url) => crate::github::runner::gh_host_for_url(&origin_url).await,
+            None => None,
+        },
+        slug: slug.clone(),
+    };
     let outcome = async {
         // One read decides the state guard and the stack route: a failed read refuses
         // the merge, and an inconclusive `stack` in a readable body takes the legacy path.
         // A stack member rejects both `gh pr merge` and the plain REST merge endpoint, and
         // merging one also merges every unmerged layer below it.
-        let stacked_probe = gh_merge_precheck(&repo_path, &slug, number).await?;
+        let stacked_probe = gh_merge_precheck(&repo_path, &target, number).await?;
+        let mut queue_named = false;
+        let mut stack_merged = None;
         let (queued, stacked) = if stacked_probe {
             stacked_message_refusal(true, message.as_ref())?;
-            let queued = gh_pr_merge_async(&repo_path, &slug, number, &strategy).await?
-                == StackedMergeResult::Queued;
+            let result = gh_pr_merge_async(&repo_path, &target, number, &strategy).await?;
+            let queued = result == StackedMergeResult::Queued;
+            stack_merged = MergedPull::from_stack_merged(&target, number, result);
             (queued, true)
         } else {
             let (argv, stdin) = gh_merge_request(
@@ -3018,7 +3044,10 @@ pub async fn gh_pr_merge(
                 sha.as_deref(),
             )?;
             let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let result = run_gh_input_raw(Some(&repo_path), &argv, &stdin, GH_NETWORK_TIMEOUT).await;
+            let host = target.host.as_deref();
+            let result =
+                run_gh_input_raw_on_host(Some(&repo_path), host, &argv, &stdin, GH_NETWORK_TIMEOUT)
+                    .await;
             invalidate_repo_meta_after(&slug, &result);
             invalidate_stack_memo_after(&slug, &result);
             let result = result.map_err(|e| {
@@ -3041,28 +3070,46 @@ pub async fn gh_pr_merge(
             if merged_before_with_message(message.is_some(), number, &out.stderr) {
                 return Err(AppError::Gh(ALREADY_MERGED_REFUSAL.to_string()));
             }
+            queue_named = gh_names_merge_queue(number, &out.stderr);
             (false, false)
         };
         // Merge accepted: from here a cleanup failure is a warning on success, never an error.
-        let cleanup_warning = if queued {
-            // A queued merge has NOT landed — deleting the head branch now would break
-            // the merge the queue is still holding. Skip cleanup and disclose it.
-            Some(if delete_branch {
-                format!("Merging #{number} was queued on GitHub and will land when the queue completes. The remote branch was left in place for the queue.")
-            } else {
-                format!("Merging #{number} was queued on GitHub and will land when the queue completes.")
-            })
-        } else if delete_branch {
-            gh_delete_remote_head_branch(&repo_path, number, lens.as_deref())
-                .await
-                .err()
-                .map(|e| e.to_string())
-        } else {
-            None
+        // Only a merged witness reaches the delete; without one the branch stays and the
+        // merge reads as not landed.
+        let delete_head = async |merged: Option<MergedPull>| match merged {
+            Some(merged) => {
+                let deleted = gh_delete_remote_head_branch(&repo_path, &merged).await;
+                (deleted.err().map(|e| e.to_string()), false)
+            }
+            None => (Some(format!("GitHub accepted the merge of #{number} but hasn't reported it merged yet, so the remote branch was left in place. It may be waiting in a merge queue.")), true),
         };
+        let (cleanup_warning, not_landed) =
+            match merge_cleanup(queued, queue_named, stacked, delete_branch) {
+                MergeCleanup::Nothing => (None, false),
+                MergeCleanup::Notice(notice) => {
+                    let warning = match (notice, delete_branch) {
+                        // gh's queue lines also cover auto-merge armed while checks are
+                        // pending, so this can't claim the PR is in the queue yet.
+                        (QueueNotice::QueueNamed, true) => format!("GitHub took the merge of #{number} for its merge queue or will merge it once its requirements pass, so the remote branch was left in place."),
+                        (QueueNotice::QueueNamed, false) => format!("GitHub took the merge of #{number} for its merge queue or will merge it once its requirements pass."),
+                        // A queued merge has NOT landed — deleting the head branch now would
+                        // break the merge the queue is still holding.
+                        (QueueNotice::StackQueued, true) => format!("Merging #{number} was queued on GitHub and will land when the queue completes. The remote branch was left in place for the queue."),
+                        (QueueNotice::StackQueued, false) => format!("Merging #{number} was queued on GitHub and will land when the queue completes."),
+                    };
+                    (Some(warning), true)
+                }
+                MergeCleanup::DeleteConfirmed => delete_head(stack_merged).await,
+                MergeCleanup::ConfirmThenDelete => {
+                    let merged =
+                        gh_reports_merged_within(&repo_path, &target, number, &MERGE_CONFIRM_DELAYS)
+                            .await;
+                    delete_head(merged).await
+                }
+            };
         Ok(PrMergeOutcome {
             cleanup_warning,
-            queued,
+            queued: not_landed,
             stacked,
         })
     }
@@ -3070,6 +3117,201 @@ pub async fn gh_pr_merge(
     invalidate_repo_meta_after(&slug, &outcome);
     invalidate_stack_memo_after(&slug, &outcome);
     outcome
+}
+
+/// The repository one merge's gh calls target: `host` is the `GH_HOST` pin (`None` sends
+/// none) and `slug` the base repository, both resolved once by [`gh_pr_merge`].
+#[derive(Clone, Debug, PartialEq)]
+struct GhTarget {
+    host: Option<String>,
+    slug: String,
+}
+
+/// What a merge does after GitHub accepted it, decided before any confirm read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MergeCleanup {
+    Nothing,
+    /// The merge hasn't landed: the branch stays and a notice says why.
+    Notice(QueueNotice),
+    /// Delete the head once GitHub reports the pull request merged.
+    ConfirmThenDelete,
+    /// Delete the head now: a stack `Merged` result already confirmed the merge.
+    DeleteConfirmed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum QueueNotice {
+    /// gh named a merge queue (or auto-merge armed) on the plain path.
+    QueueNamed,
+    /// GitHub's async merge answered `enqueued`.
+    StackQueued,
+}
+
+/// Total over every input: a queue flag wins over all else, since deleting the head of an
+/// open pull request closes it and drops it from the queue. A plain `gh pr merge` exits 0
+/// after only enqueuing, so its exit alone never proves the merge landed.
+fn merge_cleanup(
+    queued: bool,
+    queue_named: bool,
+    stacked: bool,
+    delete_branch: bool,
+) -> MergeCleanup {
+    if queue_named {
+        MergeCleanup::Notice(QueueNotice::QueueNamed)
+    } else if queued {
+        MergeCleanup::Notice(QueueNotice::StackQueued)
+    } else if !delete_branch {
+        MergeCleanup::Nothing
+    } else if stacked {
+        MergeCleanup::DeleteConfirmed
+    } else {
+        MergeCleanup::ConfirmThenDelete
+    }
+}
+
+/// The witness the head delete takes: its fields are private to this module, so only a
+/// read GitHub answered merged or a stack `Merged` result can mint one.
+mod merged_pull {
+    use super::{pull_reports_merged, GhTarget, StackedMergeResult};
+
+    #[derive(Debug)]
+    pub(super) struct MergedPull {
+        target: GhTarget,
+        number: u64,
+    }
+
+    impl MergedPull {
+        pub(super) fn from_merged_read(
+            target: &GhTarget,
+            number: u64,
+            body: &[u8],
+        ) -> Option<Self> {
+            (pull_reports_merged(body) == Some(true)).then(|| Self {
+                target: target.clone(),
+                number,
+            })
+        }
+
+        pub(super) fn from_stack_merged(
+            target: &GhTarget,
+            number: u64,
+            result: StackedMergeResult,
+        ) -> Option<Self> {
+            (result == StackedMergeResult::Merged).then(|| Self {
+                target: target.clone(),
+                number,
+            })
+        }
+
+        pub(super) fn target(&self) -> &GhTarget {
+            &self.target
+        }
+
+        pub(super) fn number(&self) -> u64 {
+            self.number
+        }
+    }
+}
+use merged_pull::MergedPull;
+
+/// The waits before each read of [`gh_reports_merged_within`]: GitHub was measured
+/// reporting a pull request merged about 3 s after its merge call returned, so the
+/// reads land at roughly 0, 1, 3 and 6 s.
+const MERGE_CONFIRM_DELAYS: [std::time::Duration; 4] = [
+    std::time::Duration::ZERO,
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(3),
+];
+/// Each confirm read's own budget, short so a hung read can't hold the merge's answer.
+const MERGE_CONFIRM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether gh's stderr says the merge went to a merge queue (gh 2.103.3,
+/// `pkg/cmd/pr/merge/merge.go`): `warnf` prints, terminal or not, `! The merge strategy
+/// for <base> is set by the merge queue` whenever a strategy flag meets a queue, and
+/// `! Pull request <slug>#<n> is already queued to merge` before exiting 0. Its
+/// "will be added to the merge queue" line goes through `infof`, which is silent
+/// without a terminal, so it is never matched.
+fn gh_names_merge_queue(number: u64, stderr: &str) -> bool {
+    let already = format!("#{number} is already queued to merge");
+    let bare_lead = |lead: &str| !lead.chars().any(char::is_alphanumeric);
+    stderr.lines().any(|line| {
+        let line = line.trim_end();
+        let led = |anchor: &str| {
+            line.split_once(anchor)
+                .is_some_and(|(lead, _)| bare_lead(lead))
+        };
+        (led("The merge strategy for ") && line.ends_with(" is set by the merge queue"))
+            || (led("Pull request ") && line.ends_with(&already))
+    })
+}
+
+/// Reads the pull request on `target` after each wait in `delays` until GitHub reports it
+/// merged. `None` when no read did: a failed or unreadable read counts as not merged, so
+/// the caller leaves the head branch alone.
+async fn gh_reports_merged_within(
+    repo_path: &str,
+    target: &GhTarget,
+    number: u64,
+    delays: &[std::time::Duration],
+) -> Option<MergedPull> {
+    let endpoint = format!("repos/{}/pulls/{number}", target.slug);
+    let endpoint = endpoint.as_str();
+    let host = target.host.as_deref();
+    merged_within(target, number, delays, move || async move {
+        run_gh_raw_on_host(
+            Some(repo_path),
+            host,
+            &["api", endpoint],
+            MERGE_CONFIRM_READ_TIMEOUT,
+        )
+        .await
+    })
+    .await
+}
+
+async fn merged_within<F, Fut>(
+    target: &GhTarget,
+    number: u64,
+    delays: &[std::time::Duration],
+    mut read: F,
+) -> Option<MergedPull>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = AppResult<GhOutput>>,
+{
+    for delay in delays {
+        if !delay.is_zero() {
+            tokio::time::sleep(*delay).await;
+        }
+        let merged = read()
+            .await
+            .ok()
+            .filter(|out| out.code == 0)
+            .and_then(|out| MergedPull::from_merged_read(target, number, &out.stdout));
+        if merged.is_some() {
+            return merged;
+        }
+    }
+    None
+}
+
+/// Whether a `repos/{slug}/pulls/{n}` body reports the pull request merged; `None` when
+/// it isn't a JSON object (strict UTF-8, like the merge's precheck).
+fn pull_reports_merged(body: &[u8]) -> Option<bool> {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(value) if value.is_object() => Some(pull_value_reports_merged(&value)),
+        _ => None,
+    }
+}
+
+/// A true `merged` or a non-blank `merged_at` string means merged, whatever `state` says.
+fn pull_value_reports_merged(value: &serde_json::Value) -> bool {
+    value.get("merged").and_then(serde_json::Value::as_bool) == Some(true)
+        || value
+            .get("merged_at")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|at| !at.trim().is_empty())
 }
 
 pub(crate) const GH_CLOSED_REFUSAL: &str = "This pull request was closed on GitHub, so nothing was merged. Reopen it if you still want to merge it.";
@@ -3082,9 +3324,10 @@ const GH_UNCONFIRMED_LEAD: &str =
 /// The merge's one read of the pull request, before anything is sent: `Ok(stacked)`
 /// for an open (or unknown-state) one. Stack membership is read at merge time through
 /// `pull_stack_ref_value`, the same parser the detail view uses.
-async fn gh_merge_precheck(repo_path: &str, slug: &str, number: u64) -> AppResult<bool> {
-    let endpoint = format!("repos/{slug}/pulls/{number}");
-    let read = run_gh_raw(Some(repo_path), &["api", &endpoint], GH_TIMEOUT).await;
+async fn gh_merge_precheck(repo_path: &str, target: &GhTarget, number: u64) -> AppResult<bool> {
+    let endpoint = format!("repos/{}/pulls/{number}", target.slug);
+    let host = target.host.as_deref();
+    let read = run_gh_raw_on_host(Some(repo_path), host, &["api", &endpoint], GH_TIMEOUT).await;
     gh_merge_precheck_outcome(read)
 }
 
@@ -3116,12 +3359,7 @@ fn gh_merge_precheck_outcome(read: AppResult<GhOutput>) -> AppResult<bool> {
             )))
         }
     };
-    let merged = value.get("merged").and_then(serde_json::Value::as_bool) == Some(true)
-        || value
-            .get("merged_at")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|at| !at.trim().is_empty());
-    if merged {
+    if pull_value_reports_merged(&value) {
         return Err(AppError::Gh(GH_MERGED_REFUSAL.into()));
     }
     if value.get("state").and_then(serde_json::Value::as_str) == Some("closed") {
@@ -3268,14 +3506,17 @@ const MERGE_ASYNC_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 /// deadline for a merge that is progressing fine.
 async fn gh_pr_merge_async(
     repo_path: &str,
-    slug: &str,
+    target: &GhTarget,
     number: u64,
     strategy: &str,
 ) -> AppResult<StackedMergeResult> {
+    let slug = target.slug.as_str();
+    let host = target.host.as_deref();
     let endpoint = format!("repos/{slug}/pulls/{number}/merge-async");
     let method_arg = format!("merge_method={strategy}");
-    let result = run_gh(
+    let result = run_gh_on_host(
         Some(repo_path),
+        host,
         &["api", "--method", "PUT", &endpoint, "-f", &method_arg],
         GH_NETWORK_TIMEOUT,
     )
@@ -3331,11 +3572,16 @@ async fn gh_pr_merge_async(
         tokio::time::sleep(MERGE_ASYNC_POLL).await;
         // A transient poll failure must never read as a failed merge — stay pending
         // and let the deadline (whose message is honest about the uncertainty) end it.
-        current = run_gh(Some(repo_path), &["api", &poll_endpoint], GH_NETWORK_TIMEOUT)
-            .await
-            .ok()
-            .and_then(|o| serde_json::from_str::<MergeAsyncStatus>(&o.stdout_lossy()).ok())
-            .unwrap_or_default();
+        current = run_gh_on_host(
+            Some(repo_path),
+            host,
+            &["api", &poll_endpoint],
+            GH_NETWORK_TIMEOUT,
+        )
+        .await
+        .ok()
+        .and_then(|o| serde_json::from_str::<MergeAsyncStatus>(&o.stdout_lossy()).ok())
+        .unwrap_or_default();
     }
 }
 
@@ -3520,26 +3766,22 @@ fn escape_head_branch_path(branch: &str) -> Option<String> {
 /// Best-effort and disclosing: every failure here becomes a "Merged #N, but …"
 /// message folded into a successful outcome's `cleanup_warning`. An
 /// already-gone branch (repo auto-deletes head branches) counts as success.
-async fn gh_delete_remote_head_branch(
-    repo_path: &str,
-    number: u64,
-    lens: Option<&str>,
-) -> AppResult<()> {
-    // Resolve the lens slug for the READ so the PR resolves against the chosen repo
-    // (the DELETE below then targets the PR's OWN head repository — see its note).
-    let slug = crate::github::gh_lens_slug(repo_path, lens).await.map_err(|e| {
-        AppError::Gh(format!(
-            "Merged #{number}, but couldn't clean up the remote head branch.\n{e}"
-        ))
-    })?;
-    let out = run_gh(
+///
+/// Host and slug are the target the merge resolved once, carried by its witness and never
+/// re-resolved: a lens or origin change during the wait would otherwise read another
+/// repository's PR. The DELETE below targets that PR's OWN head repository (see its note).
+async fn gh_delete_remote_head_branch(repo_path: &str, merged: &MergedPull) -> AppResult<()> {
+    let number = merged.number();
+    let host = merged.target().host.as_deref();
+    let out = run_gh_on_host(
         Some(repo_path),
+        host,
         &[
             "pr",
             "view",
             &number.to_string(),
             "--repo",
-            &slug,
+            &merged.target().slug,
             "--json",
             "headRefName,isCrossRepository,headRepositoryOwner,headRepository",
         ],
@@ -3602,8 +3844,9 @@ async fn gh_delete_remote_head_branch(
     // exactly where the branch to delete lives. Substituting the origin slug here
     // would delete refs on the wrong repo for a cross-repository PR.
     let endpoint = format!("repos/{owner}/{repo}/git/refs/heads/{branch_path}");
-    match run_gh(
+    match run_gh_on_host(
         Some(repo_path),
+        host,
         &["api", "--method", "DELETE", &endpoint],
         GH_NETWORK_TIMEOUT,
     )
@@ -7617,6 +7860,10 @@ pub struct PrDetails {
     /// Whether the viewer may react. GitHub: `pullRequest.viewerCanReact` verbatim;
     /// GitLab: the same value as `viewer_can_comment`; Bitbucket: `None`.
     pub viewer_can_react: Option<bool>,
+    /// The MR/PR's own delete-source-branch-on-merge choice: GitLab's
+    /// `force_remove_source_branch`, Bitbucket's `close_source_branch`. `None` when
+    /// unread or not a boolean, and always on GitHub, which has no per-PR flag.
+    pub delete_source_branch: Option<bool>,
 }
 
 /// GitHub's pull-request commits endpoint returns at most 250 commits.
@@ -8522,6 +8769,7 @@ pub async fn gh_pr_view(
         active_lock_reason: conversation.active_lock_reason,
         viewer_can_comment: conversation.viewer_can_comment,
         viewer_can_react: conversation.viewer_can_react,
+        delete_source_branch: None,
     })
 }
 
@@ -11952,7 +12200,23 @@ mod tests {
             active_lock_reason: None,
             viewer_can_comment: None,
             viewer_can_react: None,
+            delete_source_branch: None,
         }
+    }
+
+    /// `deleteSourceBranch` is read by the TS mirror verbatim; unknown is an explicit null.
+    #[test]
+    fn delete_source_branch_serializes_camel_case() {
+        let mut details = details_with_stack(None, Vec::new(), false, false);
+        details.delete_source_branch = Some(true);
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["deleteSourceBranch"], true);
+        assert!(v.get("delete_source_branch").is_none());
+
+        let v = serde_json::to_value(details_with_stack(None, Vec::new(), false, false)).unwrap();
+        assert!(v
+            .get("deleteSourceBranch")
+            .is_some_and(serde_json::Value::is_null));
     }
 
     /// The lock fields are read by the TS mirror verbatim, so their wire keys are
@@ -17943,7 +18207,7 @@ mod merge_message_tests {
     /// cleanup that would delete the head branch.
     fn already_merged_before_cleanup(f: &str) -> bool {
         match (
-            f.find("run_gh_input_raw("),
+            f.find("run_gh_input_raw_on_host("),
             f.find(ALREADY_MERGED),
             f.find("(false, false)"),
             f.find("gh_delete_remote_head_branch("),
@@ -17968,6 +18232,217 @@ mod merge_message_tests {
         );
         assert!(late.contains(ALREADY_MERGED), "{late}");
         assert!(!already_merged_before_cleanup(&late));
+    }
+
+    /// All 16 input rows. A delete is decided only for a ticked delete with no queue flag,
+    /// and only the plain path waits for a merged read first.
+    #[test]
+    fn merge_cleanup_deletes_only_a_ticked_unqueued_merge() {
+        use MergeCleanup::{ConfirmThenDelete, DeleteConfirmed, Nothing, Notice};
+        use QueueNotice::{QueueNamed, StackQueued};
+        // (queued, queue_named, stacked, delete_branch) -> cleanup
+        let rows = [
+            (false, false, false, false, Nothing),
+            (false, false, false, true, ConfirmThenDelete),
+            (false, false, true, false, Nothing),
+            (false, false, true, true, DeleteConfirmed),
+            (false, true, false, false, Notice(QueueNamed)),
+            (false, true, false, true, Notice(QueueNamed)),
+            (false, true, true, false, Notice(QueueNamed)),
+            (false, true, true, true, Notice(QueueNamed)),
+            (true, false, false, false, Notice(StackQueued)),
+            (true, false, false, true, Notice(StackQueued)),
+            (true, false, true, false, Notice(StackQueued)),
+            (true, false, true, true, Notice(StackQueued)),
+            (true, true, false, false, Notice(QueueNamed)),
+            (true, true, false, true, Notice(QueueNamed)),
+            (true, true, true, false, Notice(QueueNamed)),
+            (true, true, true, true, Notice(QueueNamed)),
+        ];
+        let inputs: std::collections::HashSet<_> =
+            rows.iter().map(|&(a, b, c, d, _)| (a, b, c, d)).collect();
+        assert_eq!(inputs.len(), 16);
+        for (queued, queue_named, stacked, delete_branch, expected) in rows {
+            let row = format!(
+                "queued={queued} named={queue_named} stacked={stacked} delete={delete_branch}"
+            );
+            let cleanup = merge_cleanup(queued, queue_named, stacked, delete_branch);
+            assert_eq!(cleanup, expected, "{row}");
+            let deletes = matches!(cleanup, ConfirmThenDelete | DeleteConfirmed);
+            assert_eq!(deletes, delete_branch && !queued && !queue_named, "{row}");
+        }
+    }
+
+    /// Only a body GitHub answered merged, or a stack `Merged`, mints the witness, and it
+    /// carries the target and number it was read under.
+    #[test]
+    fn merged_pull_mints_only_from_merged_evidence() {
+        for target in [
+            GhTarget {
+                host: Some("ghe.example.com".into()),
+                slug: "o/r".into(),
+            },
+            GhTarget {
+                host: None,
+                slug: "o/r".into(),
+            },
+        ] {
+            let carries = |merged: MergedPull| merged.target() == &target && merged.number() == 7;
+            for body in [
+                r#"{"state":"closed","merged":true,"merged_at":null}"#,
+                r#"{"state":"open","merged":false,"merged_at":"2026-11-19T00:00:00Z"}"#,
+            ] {
+                let merged = MergedPull::from_merged_read(&target, 7, body.as_bytes());
+                assert!(merged.is_some_and(carries), "{body}");
+            }
+            for body in [
+                OPEN_PULL,
+                r#"{"state":"closed","merged":false,"merged_at":null}"#,
+                r#"{"state":"closed","merged":"true","merged_at":" "}"#,
+                r#"{"state":"open""#,
+                "not json",
+                "",
+                "[]",
+                "null",
+                r#""merged""#,
+                &format!("[{MERGED_PULL}]"),
+            ] {
+                assert!(
+                    MergedPull::from_merged_read(&target, 7, body.as_bytes()).is_none(),
+                    "{body}"
+                );
+            }
+            let stacked = MergedPull::from_stack_merged(&target, 7, StackedMergeResult::Merged);
+            assert!(stacked.is_some_and(carries));
+            assert!(
+                MergedPull::from_stack_merged(&target, 7, StackedMergeResult::Queued).is_none()
+            );
+        }
+    }
+
+    /// Every gh call of the merge flow runs on the target `gh_pr_merge` built from one read
+    /// of each remote URL: no runner that resolves `GH_HOST` per call, no second URL, slug
+    /// or host resolve, and every pinned call passes the target's host.
+    #[test]
+    fn merge_flow_runs_every_gh_call_on_its_one_target() {
+        // runner.rs's runners that resolve the host from the repo on every call.
+        const PER_CALL: [&str; 7] = [
+            "run_gh(",
+            "run_gh_raw(",
+            "run_gh_input(",
+            "run_gh_input_raw(",
+            "run_gh_raw_in_dir(",
+            "run_gh_cached_get(",
+            "run_gh_cached_get_raw(",
+        ];
+        // Whatever re-reads a remote or re-derives a slug or host.
+        const RESOLVERS: [&str; 6] = [
+            "git_remote_url(",
+            "slug_from_remote_url(",
+            "gh_host_for_url(",
+            "gh_host_for_repo(",
+            "gh_lens_slug(",
+            "gh_origin_slug(",
+        ];
+        // gh_pr_merge's one read of the lens remote's URL, and of origin's only for upstream.
+        const LENS_READ: &str = "let url = crate::git::remote::git_remote_url(repo_path.clone(), remote.to_string()).await?;";
+        const ORIGIN_READ: &str = "let origin_url = if remote == \"origin\" { Some(url) } else { crate::git::remote::git_remote_url(repo_path.clone(), \"origin\".to_string()) .await .ok() };";
+        const MERGE_RESOLVES: [(&str, usize); 6] = [
+            ("git_remote_url(", 2),
+            ("slug_from_remote_url(remote, &url)?", 1),
+            ("gh_host_for_url(&origin_url)", 1),
+            ("gh_host_for_repo(", 0),
+            ("gh_lens_slug(", 0),
+            ("gh_origin_slug(", 0),
+        ];
+        let resolves_once = |name: &str, body: &str| {
+            if name == "gh_pr_merge" {
+                body.matches(LENS_READ).count() == 1
+                    && body.matches(ORIGIN_READ).count() == 1
+                    && MERGE_RESOLVES
+                        .iter()
+                        .all(|&(call, n)| body.matches(call).count() == n)
+            } else {
+                RESOLVERS.iter().all(|call| !body.contains(call))
+            }
+        };
+        // Each `_on_host(` call's host argument is `host`, bound once from the target.
+        let passes_target_host = |name: &str, body: &str| {
+            let binding = if name == "gh_delete_remote_head_branch" {
+                "let host = merged.target().host.as_deref();"
+            } else {
+                "let host = target.host.as_deref();"
+            };
+            body.matches("let host = ").count() == 1
+                && body.contains(binding)
+                && body.match_indices("_on_host(").all(|(at, call)| {
+                    let args = body[at + call.len()..].trim_start();
+                    args.starts_with("Some(repo_path), host,")
+                        || args.starts_with("Some(&repo_path), host,")
+                })
+        };
+        let pinned = |name: &str, body: &str| {
+            let runs_on_host = body.match_indices("run_gh").all(|(at, _)| {
+                let ident: String = body[at..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                ident.ends_with("_on_host")
+            });
+            runs_on_host
+                && body.contains("_on_host(")
+                && !PER_CALL.iter().any(|runner| body.contains(runner))
+                && resolves_once(name, body)
+                && passes_target_host(name, body)
+        };
+        let source = include_str!("pr.rs");
+        for name in [
+            "gh_pr_merge",
+            "gh_merge_precheck",
+            "gh_pr_merge_async",
+            "gh_reports_merged_within",
+            "gh_delete_remote_head_branch",
+        ] {
+            let body = flat(&crate::github::repo_meta::tests::wiring_body(source, name));
+            assert!(pinned(name, &body), "{name}: {body}");
+            let per_call = body.replacen("_on_host(", "(", 1);
+            assert_ne!(per_call, body, "{name}");
+            assert!(!pinned(name, &per_call), "{name}: per-call runner");
+            for resolve in [
+                "gh_host_for_repo(repo_path)",
+                "gh_lens_slug(repo_path, None)",
+                "crate::git::remote::git_remote_url(repo_path.clone(), remote.to_string())",
+            ] {
+                let again = format!("{body} {resolve}");
+                assert!(!pinned(name, &again), "{name}: second resolve {resolve}");
+            }
+            // The last pinned call (the ref DELETE in the cleanup) loses the target's host.
+            let last = body.rfind("_on_host(").unwrap();
+            let unpinned = format!(
+                "{}{}",
+                &body[..last],
+                body[last..].replacen(", host,", ", None,", 1)
+            );
+            assert_ne!(unpinned, body, "{name}");
+            assert!(!pinned(name, &unpinned), "{name}: host dropped");
+        }
+        let runner = include_str!("runner.rs");
+        for (name, call) in [
+            (
+                "run_gh_raw_on_host",
+                "run_gh_raw_resolved(&gh, repo_path, host, args, timeout)",
+            ),
+            (
+                "run_gh_input_raw_on_host",
+                "run_gh_gated(&gh, host, args, rate_gate(), epoch,",
+            ),
+        ] {
+            let body = flat(&crate::github::repo_meta::tests::wiring_body(runner, name));
+            assert!(
+                body.contains(call) && !body.contains("gh_host_for_repo("),
+                "{name}: {body}"
+            );
+        }
     }
 
     #[test]
@@ -18076,6 +18551,132 @@ mod merge_message_tests {
                 !gh_merge_precheck_outcome(gh_read(0, body, "")).unwrap(),
                 "{body}"
             );
+        }
+    }
+
+    #[test]
+    fn pull_reports_merged_reads_the_flag_or_a_merge_time() {
+        for (body, expected) in [
+            (
+                r#"{"state":"closed","merged":true,"merged_at":null}"#,
+                Some(true),
+            ),
+            (
+                r#"{"state":"open","merged_at":"2026-11-19T00:00:00Z"}"#,
+                Some(true),
+            ),
+            (
+                r#"{"state":"open","merged":false,"merged_at":null}"#,
+                Some(false),
+            ),
+            (
+                r#"{"state":"closed","merged":false,"merged_at":null}"#,
+                Some(false),
+            ),
+            (
+                r#"{"state":"closed","merged":"true","merged_at":" "}"#,
+                Some(false),
+            ),
+            (r#"{"state":"open""#, None),
+            ("", None),
+            ("[]", None),
+            ("null", None),
+            (r#""merged""#, None),
+        ] {
+            assert_eq!(pull_reports_merged(body.as_bytes()), expected, "{body}");
+        }
+        assert_eq!(
+            pull_reports_merged(b"{\"merged\":true,\"x\":\"\xff\"}"),
+            None
+        );
+    }
+
+    /// Runs the confirm wait over scripted reads with no real delay; returns its verdict
+    /// and how many reads it took.
+    fn confirm_over(reads: Vec<AppResult<GhOutput>>) -> (bool, usize) {
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let reads = std::sync::Mutex::new(std::collections::VecDeque::from(reads));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let target = GhTarget {
+            host: Some("github.com".into()),
+            slug: "o/r".into(),
+        };
+        let delays = [std::time::Duration::ZERO; 4];
+        let merged = rt.block_on(merged_within(&target, 7, &delays, || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let next = reads.lock().unwrap().pop_front();
+            async move { next.expect("read past the script") }
+        }));
+        let carries = |m: &MergedPull| m.target() == &target && m.number() == 7;
+        assert!(merged.as_ref().is_none_or(carries));
+        (merged.is_some(), count.into_inner())
+    }
+
+    const OPEN_PULL: &str = r#"{"state":"open","merged":false,"merged_at":null}"#;
+    const MERGED_PULL: &str =
+        r#"{"state":"closed","merged":true,"merged_at":"2026-11-19T00:00:00Z"}"#;
+
+    #[test]
+    fn merge_confirm_deletes_once_github_reports_merged() {
+        assert_eq!(confirm_over(vec![gh_read(0, MERGED_PULL, "")]), (true, 1));
+        assert_eq!(
+            confirm_over(vec![
+                gh_read(0, OPEN_PULL, ""),
+                Err(AppError::Timeout(5)),
+                gh_read(0, MERGED_PULL, ""),
+            ]),
+            (true, 3)
+        );
+    }
+
+    #[test]
+    fn merge_confirm_leaves_the_branch_when_never_reported_merged() {
+        assert_eq!(
+            confirm_over((0..4).map(|_| gh_read(0, OPEN_PULL, "")).collect()),
+            (false, 4)
+        );
+    }
+
+    #[test]
+    fn merge_confirm_leaves_the_branch_when_every_read_fails() {
+        let failed = || -> Vec<AppResult<GhOutput>> {
+            vec![
+                Err(AppError::Gh("HTTP 502".into())),
+                gh_read(1, MERGED_PULL, "gh: rate limit"),
+                gh_read(0, "not json", ""),
+                Err(AppError::GhNotFound),
+            ]
+        };
+        assert_eq!(confirm_over(failed()), (false, 4));
+    }
+
+    #[test]
+    fn gh_names_merge_queue_matches_only_gh_queue_lines() {
+        for (stderr, expected) in [
+            (
+                "! The merge strategy for main is set by the merge queue\n",
+                true,
+            ),
+            (
+                "! The merge strategy for release/1.x is set by the merge queue\r\n",
+                true,
+            ),
+            ("! Pull request o/r#5 is already queued to merge\n", true),
+            ("! Pull request o/r#55 is already queued to merge\n", false),
+            ("! Pull request o/r#5 was already merged\n", false),
+            (
+                "--subject=The merge strategy for main is set by the merge queue\n",
+                false,
+            ),
+            (
+                "✓ Pull request o/r#5 will be added to the merge queue for main when ready\n",
+                false,
+            ),
+            ("", false),
+        ] {
+            assert_eq!(gh_names_merge_queue(5, stderr), expected, "{stderr:?}");
         }
     }
 
@@ -18484,21 +19085,22 @@ mod merge_message_tests {
         body.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    const RUN: &str = "run_gh_input_raw(Some(&repo_path), &argv, &stdin, GH_NETWORK_TIMEOUT)";
+    const RUN: &str =
+        "run_gh_input_raw_on_host(Some(&repo_path), host, &argv, &stdin, GH_NETWORK_TIMEOUT)";
 
     /// The run is the one stdin runner, fed both halves of the built request.
     fn run_takes_the_request(body: &str) -> bool {
         let f = flat(body);
         let (Some(req), Some(run)) = (
             f.find("let (argv, stdin) = gh_merge_request("),
-            f.find("run_gh_input_raw("),
+            f.find("run_gh_input_raw_on_host("),
         ) else {
             return false;
         };
         !f.contains("\"--body\"")
             && !f.contains("\"-b\"")
             && !f.contains("\"--delete-branch\"")
-            && f.matches("run_gh_input_raw(").count() == 1
+            && f.matches("run_gh_input_raw_on_host(").count() == 1
             && !f.contains("run_gh_raw(")
             && req < run
             && f.contains(RUN)
@@ -18512,7 +19114,7 @@ mod merge_message_tests {
         match (
             f.find("\"--rebase\""),
             f.find("single_commit_message(&strategy, &[\"rebase\"], messages)?"),
-            f.find("gh_lens_slug("),
+            f.find("lens_remote("),
         ) {
             (Some(a), Some(b), Some(c)) => a < b && b < c,
             _ => false,
@@ -18542,12 +19144,12 @@ mod merge_message_tests {
         assert!(stacked_refused_before_async(&body), "{body}");
 
         let f = flat(&body);
-        let at = f.find("run_gh_input_raw(").unwrap();
+        let at = f.find("run_gh_input_raw_on_host(").unwrap();
         let leaked = format!("{}\"--body\", &body, {}", &f[..at], &f[at..]);
         assert!(!run_takes_the_request(&leaked));
         assert!(!run_takes_the_request(&f.replacen(
-            "run_gh_input_raw(",
-            "run_gh_raw(",
+            "run_gh_input_raw_on_host(",
+            "run_gh_raw_on_host(",
             1
         )));
         assert!(!run_takes_the_request(&f.replacen(
@@ -18593,7 +19195,7 @@ mod merge_message_tests {
     }
 
     const PRECHECK: &str =
-        "let stacked_probe = gh_merge_precheck(&repo_path, &slug, number).await?;";
+        "let stacked_probe = gh_merge_precheck(&repo_path, &target, number).await?;";
 
     /// The state read is the first statement of the captured attempt, ahead of both
     /// merge runs, and its verdict alone picks the stack branch.
@@ -18603,7 +19205,7 @@ mod merge_message_tests {
             f.find(OPEN),
             f.find(PRECHECK),
             f.find("gh_pr_merge_async("),
-            f.find("run_gh_input_raw("),
+            f.find("run_gh_input_raw_on_host("),
         ) else {
             return false;
         };
@@ -18622,13 +19224,13 @@ mod merge_message_tests {
         assert!(state_read_first(&f), "{f}");
         let removed = f.replacen(&format!("{PRECHECK} "), "", 1);
         let moved = {
-            let run = removed.find("run_gh_input_raw(").unwrap();
+            let run = removed.find("run_gh_input_raw_on_host(").unwrap();
             let at = run + removed[run..].find(';').unwrap() + 1;
             format!("{} {PRECHECK}{}", &removed[..at], &removed[at..])
         };
         let fail_open = f.replacen(
             PRECHECK,
-            "let stacked_probe = gh_merge_precheck(&repo_path, &slug, number).await.unwrap_or(false);",
+            "let stacked_probe = gh_merge_precheck(&repo_path, &target, number).await.unwrap_or(false);",
             1,
         );
         for (what, mutant) in [

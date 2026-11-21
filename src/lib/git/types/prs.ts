@@ -529,6 +529,11 @@ export interface PrDetails {
    *  turns reactions off for everyone); GitLab mirrors `viewerCanComment`;
    *  always null on Bitbucket. Absent/null = unknown. */
   viewerCanReact?: boolean | null;
+  /** The MR/PR's own delete-source-branch-on-merge choice, set on the forge's
+   *  website: GitLab's `force_remove_source_branch`, Bitbucket's
+   *  `close_source_branch`. Absent/null on GitHub (no per-PR flag) and when unread
+   *  or not a boolean. */
+  deleteSourceBranch?: boolean | null;
 }
 
 /** Copy of GitHub's refusal to comment on an ARCHIVED pull request (a per-PR

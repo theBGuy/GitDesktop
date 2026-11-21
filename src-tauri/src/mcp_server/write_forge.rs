@@ -880,7 +880,9 @@ impl GitDesktopMcp {
                        its stack, in one irreversible step — read `stack` and `stackMembers` via \
                        get_pull_request first to see what would go with it. Optionally deletes the \
                        head branch. The result's `action` is \"merged\", or \"queued\" when a merge \
-                       queue took the merge — queued means NOT yet merged: the head branch is left \
+                       queue took the merge, GitHub will merge it once its requirements pass, or \
+                       GitHub hadn't reported it merged yet — queued \
+                       means NOT confirmed merged: the head branch is left \
                        in place and `deleted_branch` is false. Optionally sets the commit \
                        messages. A custom message on GitHub or GitLab needs \
                        `expected_head_sha`, the `headSha` that get_pull_request returned: the \

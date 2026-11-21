@@ -1264,7 +1264,7 @@ function ProjectsField({
                 )}
                 {notice ?? (
                   <div
-                    className="max-h-64 overflow-y-auto"
+                    className="relative max-h-64 overflow-y-auto"
                     onKeyDown={onRowsKeyDown}
                   >
                     {rows.map((project) => (

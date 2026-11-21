@@ -132,6 +132,7 @@ import {
   isDeletionBlocked,
   isMergeMethodAllowed,
   isPromotionBranch,
+  mergeDeleteStartsTicked,
 } from "@/lib/branch-rules/match";
 import {
   useEffectiveBranchRules,
@@ -238,6 +239,7 @@ import {
   useUnrequestChangesPr,
   writeAccessReason,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import {
   detectStackOffer,
   isNativeStack,
@@ -300,7 +302,11 @@ import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
-import { MergePrDialog, mergeDialogFinalFocus } from "./MergePrDialog";
+import {
+  type DeleteBranchBlock,
+  MergePrDialog,
+  mergeDialogFinalFocus,
+} from "./MergePrDialog";
 import {
   MERGE_LABEL,
   MERGE_METHOD_RULE_REASON,
@@ -2270,8 +2276,8 @@ export function RemotePrView({
     string | null
   >(null);
   const [mergeOpen, setMergeOpen] = useState(false);
-  // The cleanup note a queued merge came back with (a head-branch deletion that
-  // failed), carried on the chip's tooltip. Keyed so it can never paint onto
+  // The note a queued merge came back with (why it isn't confirmed merged yet),
+  // carried on the chip's tooltip. Keyed so it can never paint onto
   // another pull request; the queue record itself lives in the store, which is
   // why the chip survives a switch away and back while this detail doesn't.
   const [queuedWarning, setQueuedWarning] = useState<{
@@ -3114,15 +3120,19 @@ export function RemotePrView({
     pr != null &&
     defaultBranch.data != null &&
     pr.headRefName === defaultBranch.data;
-  const headDeletionBlocked =
-    pr != null && isDeletionBlocked(rulesConfig, pr.headRefName);
-  // Branch rules load async, so `headDeletionBlocked` can flip true after the user
-  // already ticked "delete branch" — drop the choice then. The dialog's own `checked`
-  // override already keeps the render correct; this keeps the underlying state honest
-  // (it can't linger stale-true behind the now-disabled checkbox).
+  // An agent-session head is never deleted (Resume needs it), whatever the rules say.
+  const headDeletionBlock = ((): DeleteBranchBlock | null => {
+    if (pr == null) return null;
+    if (isSessionBranchName(pr.headRefName)) return "session";
+    return isDeletionBlocked(rulesConfig, pr.headRefName) ? "rule" : null;
+  })();
+  const headDeletionBlocked = headDeletionBlock !== null;
+  // Rules and the default branch answer after the open, so either guard can turn on
+  // over a tick: drop it then, so no stale true lingers behind a disabled or hidden
+  // box and a later answer that lifts the guard finds it unticked.
   useEffect(() => {
-    if (headDeletionBlocked) setDeleteBranch(false);
-  }, [headDeletionBlocked]);
+    if (headDeletionBlocked || headIsDefault) setDeleteBranch(false);
+  }, [headDeletionBlocked, headIsDefault]);
   const fileSections = useMemo(
     () => splitUnifiedDiff(prDiff.data ?? ""),
     [prDiff.data],
@@ -4190,7 +4200,21 @@ export function RemotePrView({
       mergeAuto === auto;
     if (!kept) {
       setMergeStrategy(strategy);
-      setDeleteBranch(false);
+      // Decided once at open: a later answer can only drop the tick, never add
+      // one, since a box that flips on while the user reaches for it gets
+      // unticked by the click.
+      setDeleteBranch(
+        mergeDeleteStartsTicked({
+          pref: rulesConfig.deleteHeadAfterMerge,
+          rulesSettled: !rulesSettling,
+          defaultBranchKnown: defaultBranch.data != null,
+          headIsDefault,
+          deletionBlocked: headDeletionBlocked,
+          promotion: promotionKind === "configured",
+          crossRepository: pr?.crossRepository,
+          forgeDeleteFlag: pr?.deleteSourceBranch,
+        }),
+      );
       setMergeAuto(auto);
       mergeDraft.reset();
       setMergeFailure(null);
@@ -5652,7 +5676,7 @@ export function RemotePrView({
               title={
                 queuedWarning?.key === queuedKey
                   ? queuedWarning.text
-                  : "Merges when the queue reaches it"
+                  : "GitHub accepted the merge but hasn't reported it merged yet"
               }
             >
               <ClockCountdownIcon className="size-3.5 shrink-0" />
@@ -5815,7 +5839,7 @@ export function RemotePrView({
           checked: deleteBranch,
           onChange: setDeleteBranch,
           headIsDefault,
-          blocked: headDeletionBlocked,
+          blocked: headDeletionBlock,
         }}
         pending={mergeAuto ? armAutoMergePending : mergePending}
         heldReason={mergeDialogHold}

@@ -435,7 +435,12 @@ export function RepoSettingsDialog({
             onSelect={(id) => setSection(id as SectionId)}
             className="w-40 overflow-y-auto"
           />
-          <div className={cn(DIALOG_SCROLL_X_HIDDEN, "min-h-0 min-w-0 flex-1")}>
+          <div
+            className={cn(
+              DIALOG_SCROLL_X_HIDDEN,
+              "mb-0 min-h-0 min-w-0 flex-1",
+            )}
+          >
             {/* Crossfade the body on section change so the swap reads as one
                 quiet refresh, not a hard cut. Opacity only (content is tall and
                 scrolls); instant under reduced motion. */}
