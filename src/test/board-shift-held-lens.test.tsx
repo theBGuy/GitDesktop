@@ -90,6 +90,8 @@ const OTHER_VIEW = "status:Done";
 type Dates = { start: string; target: string };
 const OLD: Dates = { start: "2026-11-02", target: "2026-11-13" };
 const PRESS: Dates = { start: "2026-11-09", target: "2026-11-20" };
+/** A second, newer press folded into the first one's burst. */
+const PRESS2: Dates = { start: "2026-11-16", target: "2026-11-27" };
 
 /** The card's dates on GitHub. Replaced, never mutated: an answer is handed to
  *  the cache by reference. */
@@ -215,7 +217,7 @@ function mountBoard() {
       ),
     },
   );
-  const press = (): Promise<string> =>
+  const press = (dates: Dates = PRESS): Promise<string> =>
     view.result.current.shift
       .mutateAsync({
         repo,
@@ -223,7 +225,7 @@ function mountBoard() {
         itemId: ITEM,
         issueId: null,
         issueFieldIdByFieldId: {},
-        values: datesValues(PRESS),
+        values: datesValues(dates),
         query: null,
         archived: false,
         rich: false,
@@ -309,6 +311,7 @@ async function runDriver(driver: Driver): Promise<Observed> {
   await until(() => view.result.current.items.isSuccess, "the board loads");
   let pressed: Promise<string> = Promise.resolve("never pressed");
   let readsWhileHeld = -1;
+  let outcome = "never settled";
   try {
     act(() => {
       pressed = press();
@@ -320,9 +323,10 @@ async function runDriver(driver: Driver): Promise<Observed> {
     await hops(4);
     readsWhileHeld = heldReads() - before;
   } finally {
+    if (!onlineManager.isOnline()) act(() => onlineManager.setOnline(true));
     openGate();
+    outcome = await act(() => pressed);
   }
-  const outcome = await act(() => pressed);
   await hops(4);
   const readsAfterSettle = readsAfterLastWrite();
   const heldAfterSettle = shiftChasedLenses.size + shiftChasedRepos.size;
@@ -375,6 +379,7 @@ describe("a board lens a date-shift chase holds", () => {
     let pressed: Promise<string> = Promise.resolve("never pressed");
     let readsWhileHeld = -1;
     let pausedAtResume = "unread";
+    let outcome = "never settled";
     try {
       // Offline: the press patches and parks before its request, and a read of
       // the lens started after the patch parks too.
@@ -407,9 +412,10 @@ describe("a board lens a date-shift chase holds", () => {
       await hops(4);
       readsWhileHeld = heldReads() - before;
     } finally {
+      if (!onlineManager.isOnline()) act(() => onlineManager.setOnline(true));
       openGate();
+      outcome = await act(() => pressed);
     }
-    const outcome = await act(() => pressed);
     await hops(4);
     expect({
       pausedAtResume,
@@ -436,6 +442,7 @@ describe("a board lens a date-shift chase holds", () => {
     const { repo, view, client, press, cachedDates } = mountBoard();
     await until(() => view.result.current.items.isSuccess, "the board loads");
     let pressed: Promise<string> = Promise.resolve("never pressed");
+    let outcome = "never settled";
     let loadedMidWrite: Dates | null = null;
     try {
       // Offline: the press patches and parks before its request.
@@ -464,9 +471,11 @@ describe("a board lens a date-shift chase holds", () => {
       await until(() => cachedDates() !== null, "the lens loads mid-write");
       loadedMidWrite = cachedDates();
     } finally {
+      // A throw above must not tear down with the press parked or chasing.
+      if (!onlineManager.isOnline()) act(() => onlineManager.setOnline(true));
       openGate();
+      outcome = await act(() => pressed);
     }
-    const outcome = await act(() => pressed);
     await hops(4);
     expect({
       loadedMidWrite,
@@ -481,6 +490,74 @@ describe("a board lens a date-shift chase holds", () => {
       writes: [PRESS],
       server: PRESS,
       readsAfterSettle: 1,
+      cacheIsServer: true,
+    });
+    view.unmount();
+    client.clear();
+  });
+
+  it("still chases a press folded in after the collected lens's first load lands mid-write", async () => {
+    const { repo, view, client, press, cachedDates } = mountBoard();
+    await until(() => view.result.current.items.isSuccess, "the board loads");
+    let pressed: Promise<string> = Promise.resolve("never pressed");
+    let pressed2: Promise<string> = Promise.resolve("never pressed");
+    let outcome = "never settled";
+    let outcome2 = "never settled";
+    let loadedMidWrite: Dates | null = null;
+    let patched: Dates | null = null;
+    try {
+      act(() => onlineManager.setOnline(false));
+      act(() => {
+        pressed = press();
+      });
+      await until(
+        () =>
+          client
+            .getMutationCache()
+            .getAll()
+            .some((m) => m.state.isPaused),
+        "the press parks offline",
+      );
+      view.rerender({ query: OTHER_VIEW });
+      await hops(4);
+      act(() => client.removeQueries({ queryKey: lensKey(repo), exact: true }));
+      act(() => onlineManager.setOnline(true));
+      await until(() => log.includes("write:start"), "the write starts");
+      view.rerender({ query: null });
+      // The load lands BEFORE the second press: a press ahead of it would cancel
+      // that load in its onMutate and patch no card.
+      await until(() => cachedDates() !== null, "the lens loads mid-write");
+      loadedMidWrite = cachedDates();
+      act(() => {
+        pressed2 = press(PRESS2);
+      });
+      await until(
+        () => JSON.stringify(cachedDates()) === JSON.stringify(PRESS2),
+        "the second press patches the card",
+      );
+      patched = cachedDates();
+    } finally {
+      if (!onlineManager.isOnline()) act(() => onlineManager.setOnline(true));
+      openGate();
+      outcome = await act(() => pressed);
+      outcome2 = await act(() => pressed2);
+    }
+    await hops(4);
+    expect({
+      loadedMidWrite,
+      patched,
+      outcome,
+      outcome2,
+      writes: writes(),
+      server,
+      cacheIsServer: JSON.stringify(cachedDates()) === JSON.stringify(server),
+    }).toEqual({
+      loadedMidWrite: OLD,
+      patched: PRESS2,
+      outcome: "converged",
+      outcome2: "folded",
+      writes: [PRESS, PRESS2],
+      server: PRESS2,
       cacheIsServer: true,
     });
     view.unmount();

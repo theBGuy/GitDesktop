@@ -9,6 +9,9 @@ export const FILE_FILTER_SURFACES = {
   "local-pr-files": { scope: "local-pr-files", claimFocusFilter: false },
   session: { scope: "session", claimFocusFilter: false },
   "pr-commits": { scope: "pr-commits", claimFocusFilter: false },
+  "pr-files": { scope: "pr-files", claimFocusFilter: false },
+  stash: { scope: "stash", claimFocusFilter: false },
+  "stash-recoverable": { scope: "stash-recoverable", claimFocusFilter: false },
 } as const;
 export type FileFilterSurface = keyof typeof FILE_FILTER_SURFACES;
 

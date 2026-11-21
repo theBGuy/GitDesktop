@@ -204,13 +204,24 @@ async function typeInto(
   await user.type(field, text);
 }
 
+/** One input event per value where the keystrokes are incidental: each typed
+ *  character re-renders the whole dialog. */
+async function pasteInto(
+  user: ReturnType<typeof userEvent.setup>,
+  field: HTMLElement,
+  text: string,
+) {
+  await user.clear(field);
+  await user.paste(text);
+}
+
 describe("a row's Dates editor", () => {
   // Control: drop the editor container's Escape handling; the dialog's own
   // dismiss asks to close (onOpenChange(false)) and the editor stays open.
   it("opens on D in the author field and closes on Escape back to the row", async () => {
     const { user, onOpenChange } = renderDialog();
     await loaded();
-    rowOf(C).focus();
+    act(() => rowOf(C).focus());
     await user.keyboard("d");
     expect(dateButton(C)).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByLabelText("Author date")).toHaveFocus();
@@ -226,14 +237,14 @@ describe("a row's Dates editor", () => {
     await loaded();
     await user.click(dateButton(C));
     const field = screen.getByLabelText("Author date");
-    await typeInto(user, field, "2026-02-30 10:00:00 +01:00");
+    await pasteInto(user, field, "2026-02-30 10:00:00 +01:00");
     expect(screen.getByText("February 2026 has 28 days.")).toBeInTheDocument();
     expect(field).toHaveAttribute("aria-invalid", "true");
     expect(held(primary())).toBe(true);
     expect(primary()).toHaveAccessibleDescription(
       `Fix the date on ${C.hash.slice(0, 7)} first.`,
     );
-    await typeInto(user, field, "2026-11-03T11:00+0100");
+    await pasteInto(user, field, "2026-11-03T11:00+0100");
     expect(field).not.toHaveAttribute("aria-invalid");
     expect(held(primary())).toBe(false);
     await user.tab();
@@ -741,7 +752,7 @@ describe("busy and reseed", () => {
     );
     const { user } = renderDialog();
     await loaded();
-    rowOf(B).focus();
+    act(() => rowOf(B).focus());
     await user.keyboard("d");
     expect(live()).toHaveTextContent("This commit's dates can't be read");
     expect(screen.queryByLabelText("Author date")).toBeNull();
@@ -764,7 +775,7 @@ describe("busy and reseed", () => {
       screen.getByLabelText("Author date"),
       "2026-11-03 11:00:00 +01:00",
     );
-    rowOf(D).focus();
+    act(() => rowOf(D).focus());
     await user.keyboard("{Shift>}{ArrowDown}{ArrowDown}{/Shift}");
     expect(strip()).not.toBeNull();
     rerender([commit("e", "Fifth"), ...COMMITS]);

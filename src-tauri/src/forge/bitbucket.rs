@@ -25,7 +25,7 @@ use tauri_plugin_http::reqwest;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::encode_query_value;
-use crate::forge::gitlab::null_to_default;
+use crate::forge::gitlab::{delete_flag, null_to_default};
 use crate::forge::http::{
     self, BbCredentials, BbOpKind, BB_API_BASE, BB_HOST, KEY_DISPLAY_NAME, KEY_EMAIL, KEY_TOKEN,
     KEY_USERNAME,
@@ -1055,6 +1055,9 @@ struct BbPr {
     /// ISO-8601 open time (`created_on`); "" when absent or null.
     #[serde(default, deserialize_with = "null_to_default")]
     created_on: String,
+    /// The PR's own "Close source branch" choice. Raw JSON, read through `delete_flag`.
+    #[serde(default)]
+    close_source_branch: Option<serde_json::Value>,
 }
 
 fn view_head_sha(pr: &BbPr) -> &str {
@@ -2021,6 +2024,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         active_lock_reason: None,
         viewer_can_comment: None,
         viewer_can_react: None,
+        delete_source_branch: delete_flag(pr.close_source_branch.as_ref()),
     })
 }
 
@@ -3463,6 +3467,75 @@ fn merge_payload(
     payload
 }
 
+const BB_DECLINED_REFUSAL: &str =
+    "This pull request was declined on Bitbucket, so nothing was merged.";
+const BB_SUPERSEDED_REFUSAL: &str =
+    "This pull request was superseded on Bitbucket, so nothing was merged.";
+const BB_MERGED_REFUSAL: &str =
+    "This pull request was already merged on Bitbucket, so there was nothing left to merge.";
+const BB_UNREACHABLE_LEAD: &str = "Couldn't reach Bitbucket to confirm this pull request is still open, so nothing was merged. Try again.";
+const BB_UNCONFIRMED_LEAD: &str = "Couldn't confirm this pull request is still open on Bitbucket, so nothing was merged. Try again.";
+
+/// The state-only read's request path.
+fn pr_merge_state_path(base: &str, number: u64) -> String {
+    format!("{base}/pullrequests/{number}?fields=state")
+}
+
+/// The state-only read ahead of the merge POST.
+async fn pr_merge_state_read(
+    creds: &BbCredentials,
+    base: &str,
+    number: u64,
+) -> Result<Vec<u8>, http::BbGetFailure> {
+    http::bb_get_json_bytes(creds, &pr_merge_state_path(base, number), BbOpKind::Read).await
+}
+
+/// `OPEN` or an unknown state lets the merge go; `DECLINED`, `SUPERSEDED` and `MERGED`
+/// refuse (matched exactly, as `map_bb_pr_state` does), and so does a read that failed
+/// or didn't answer with a JSON object.
+fn bb_merge_guard_outcome(read: Result<Vec<u8>, http::BbGetFailure>) -> AppResult<()> {
+    let body = read.map_err(bb_merge_guard_failed)?;
+    // Strict UTF-8: a lossy decode turns an invalid byte in `state` into an unknown state,
+    // which would proceed.
+    let value = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(value) if value.is_object() => value,
+        Ok(_) => {
+            return Err(AppError::Bitbucket(format!(
+                "{BB_UNCONFIRMED_LEAD}\ncould not parse Bitbucket pull request: the answer was not a JSON object"
+            )))
+        }
+        Err(e) => {
+            return Err(AppError::Bitbucket(format!(
+                "{BB_UNCONFIRMED_LEAD}\ncould not parse Bitbucket pull request: {e}"
+            )))
+        }
+    };
+    let refusal = match value.get("state").and_then(serde_json::Value::as_str) {
+        Some("DECLINED") => BB_DECLINED_REFUSAL,
+        Some("SUPERSEDED") => BB_SUPERSEDED_REFUSAL,
+        Some("MERGED") => BB_MERGED_REFUSAL,
+        _ => return Ok(()),
+    };
+    Err(AppError::Bitbucket(refusal.into()))
+}
+
+/// A failed state read refuses the merge. A transport failure (sending or reading the
+/// body) leads with "Couldn't reach", which the frontend's network rewrite keeps; any
+/// other failure, an HTTP answer included, leads with "Couldn't confirm"; a missing
+/// account passes through as itself.
+fn bb_merge_guard_failed(failure: http::BbGetFailure) -> AppError {
+    let (lead, e) = match failure {
+        http::BbGetFailure::Transport(e) => (BB_UNREACHABLE_LEAD, e),
+        http::BbGetFailure::Other(e) => (BB_UNCONFIRMED_LEAD, e),
+    };
+    let detail = match e {
+        AppError::BitbucketNotConfigured => return e,
+        AppError::Bitbucket(text) => text,
+        other => crate::forge::error_detail(other),
+    };
+    AppError::Bitbucket(format!("{lead}\n{detail}"))
+}
+
 /// Merge a pull request (`POST …/pullrequests/{n}/merge`). Bitbucket has no
 /// expected-hash guard (the caller's `sha` is dropped upstream); `close_source_branch`
 /// auto-deletes the source branch. Small repos merge SYNCHRONOUSLY (200); large/slow
@@ -3484,6 +3557,7 @@ pub async fn merge_pr(
     let text = message.as_ref().map(bb_merge_message).transpose()?;
     let creds = http::load_credentials().await?;
     let base = repo_base(repo_path).await?;
+    bb_merge_guard_outcome(pr_merge_state_read(&creds, &base, number).await)?;
     let path = format!("{base}/pullrequests/{number}/merge");
     let payload = merge_payload(merge_strategy, delete_branch, text.as_deref());
     let (status, location, body) =
@@ -7073,6 +7147,27 @@ mod tests {
         assert_eq!(owner(""), None);
     }
 
+    /// A non-boolean `close_source_branch` reads as unknown and never fails the parse.
+    #[test]
+    fn pr_close_source_branch_reads_only_booleans() {
+        let read = |field: &str| {
+            let pr: BbPr = serde_json::from_str(&format!(
+                r#"{{"id":7,"state":"OPEN",
+                    "source":{{"branch":{{"name":"feat"}}}},
+                    "destination":{{"branch":{{"name":"main"}}}}{field}}}"#
+            ))
+            .unwrap_or_else(|e| panic!("{field}: {e}"));
+            delete_flag(pr.close_source_branch.as_ref())
+        };
+        assert_eq!(read(r#","close_source_branch":true"#), Some(true));
+        assert_eq!(read(r#","close_source_branch":false"#), Some(false));
+        assert_eq!(read(r#","close_source_branch":null"#), None);
+        assert_eq!(read(""), None);
+        for odd in [r#""yes""#, "1", "{}"] {
+            assert_eq!(read(&format!(r#","close_source_branch":{odd}"#)), None);
+        }
+    }
+
     /// A fork PR's source repo differs from its destination; an unfielded payload
     /// (either name absent) must read as same-repo, never as a fork.
     #[test]
@@ -8752,6 +8847,276 @@ mod tests {
             merge_payload("squash", true, Some("t\n\nb")),
             serde_json::json!({"type":"pullrequest","merge_strategy":"squash","close_source_branch":true,"message":"t\n\nb"})
         );
+    }
+
+    #[test]
+    fn bb_merge_guard_outcome_refuses_all_but_an_open_or_unknown_pull_request() {
+        let outcome = |body: &str| bb_merge_guard_outcome(Ok(body.as_bytes().to_vec()));
+        let refused = |body: &str| match outcome(body) {
+            Err(AppError::Bitbucket(t)) => t,
+            other => panic!("{body}: {other:?}"),
+        };
+        assert!(outcome(r#"{"state":"OPEN"}"#).is_ok());
+        assert_eq!(refused(r#"{"state":"DECLINED"}"#), BB_DECLINED_REFUSAL);
+        assert_eq!(refused(r#"{"state":"SUPERSEDED"}"#), BB_SUPERSEDED_REFUSAL);
+        assert_eq!(refused(r#"{"state":"MERGED"}"#), BB_MERGED_REFUSAL);
+        for body in [
+            r#"{"state":null}"#,
+            "{}",
+            r#"{"state":5}"#,
+            r#"{"state":"Open"}"#,
+            r#"{"state":"declined"}"#,
+        ] {
+            assert!(outcome(body).is_ok(), "{body}");
+        }
+        for body in ["[]", "\"x\"", "null", "not json", ""] {
+            let text = refused(body);
+            assert_eq!(text.lines().next(), Some(BB_UNCONFIRMED_LEAD), "{body}");
+            assert!(text.lines().nth(1).is_some_and(|l| !l.is_empty()), "{body}");
+        }
+    }
+
+    /// An invalid UTF-8 byte anywhere in the body, the state value included, is a failed
+    /// read, never an unknown state that proceeds.
+    #[test]
+    fn bb_merge_guard_outcome_refuses_a_body_that_is_not_utf8() {
+        for body in [
+            &b"{\"state\":\"DECLIN\xFFED\"}"[..],
+            b"{\"state\":\"OPEN\",\"title\":\"\xC3\"}",
+        ] {
+            match bb_merge_guard_outcome(Ok(body.to_vec())) {
+                Err(AppError::Bitbucket(t)) => {
+                    assert_eq!(t.lines().next(), Some(BB_UNCONFIRMED_LEAD), "{body:?}")
+                }
+                other => panic!("{body:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The lead follows the failure's variant, never its text: an HTTP answer whose
+    /// message ends in a transport suffix still reads as unconfirmed.
+    #[test]
+    fn bb_merge_guard_outcome_splits_unreachable_from_unconfirmed() {
+        use http::BbGetFailure::{Other, Transport};
+        let refused = |f: http::BbGetFailure| match bb_merge_guard_outcome(Err(f)) {
+            Err(AppError::Bitbucket(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        let sent = "Bitbucket request failed: error sending request: connection failed";
+        assert_eq!(
+            refused(Transport(AppError::Bitbucket(sent.into()))),
+            format!("{BB_UNREACHABLE_LEAD}\n{sent}")
+        );
+        assert_eq!(
+            refused(Other(AppError::Bitbucket(sent.into()))),
+            format!("{BB_UNCONFIRMED_LEAD}\n{sent}")
+        );
+        assert_eq!(
+            refused(Other(AppError::Command("spawn".into()))),
+            format!("{BB_UNCONFIRMED_LEAD}\nspawn")
+        );
+        for failure in [
+            Transport(AppError::BitbucketNotConfigured),
+            Other(AppError::BitbucketNotConfigured),
+        ] {
+            assert!(matches!(
+                bb_merge_guard_outcome(Err(failure)),
+                Err(AppError::BitbucketNotConfigured)
+            ));
+        }
+    }
+
+    /// One-shot local server: checks the complete request target is the state-only read of
+    /// pull request `number` in repository `w/r`, answers it with `response`, then closes.
+    async fn serve_once(number: u64, response: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/repositories/w/r", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            let line = String::from_utf8_lossy(&request);
+            let target = line.split(' ').nth(1).unwrap_or_default();
+            assert_eq!(
+                target,
+                format!("/repositories/w/r/pullrequests/{number}?fields=state"),
+                "request target"
+            );
+            stream.write_all(&response).await.unwrap();
+            stream.shutdown().await.ok();
+        });
+        (base, server)
+    }
+
+    fn http_reply(status: &str, body: &[u8]) -> Vec<u8> {
+        let mut reply = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(body);
+        reply
+    }
+
+    fn fixture_creds() -> BbCredentials {
+        BbCredentials {
+            email: "fixture".into(),
+            token: "fixture".into(),
+        }
+    }
+
+    /// Bounds every fixture wait, so a broken setup fails instead of hanging.
+    const FIXTURE_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The guard over a state read from `base`, through a client that ignores proxy
+    /// settings so the read reaches the local fixture.
+    async fn guard_over(base: &str, number: u64) -> (AppResult<()>, std::time::Duration) {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let url = pr_merge_state_path(base, number);
+        let started = std::time::Instant::now();
+        let read = tokio::time::timeout(
+            FIXTURE_BOUND,
+            http::bb_get_json_bytes_with(&client, &fixture_creds(), &url, BbOpKind::Read),
+        )
+        .await
+        .expect("the state read hung");
+        (bb_merge_guard_outcome(read), started.elapsed())
+    }
+
+    async fn join_server(server: tokio::task::JoinHandle<()>) {
+        tokio::time::timeout(FIXTURE_BOUND, server)
+            .await
+            .expect("the fixture server hung")
+            .unwrap();
+    }
+
+    /// Over the wire: a 400 whose server text ends in the transport suffix is an HTTP
+    /// answer, and an invalid byte inside the state value refuses rather than proceeds.
+    #[tokio::test]
+    async fn bb_merge_guard_reads_answers_strictly_and_by_response() {
+        let body = br#"{"type":"error","error":{"message":"upstream: connection failed"}}"#;
+        let (base, server) = serve_once(1, http_reply("400 Bad Request", body)).await;
+        let (outcome, _) = guard_over(&base, 1).await;
+        join_server(server).await;
+        match outcome {
+            Err(AppError::Bitbucket(t)) => {
+                assert_eq!(t.lines().next(), Some(BB_UNCONFIRMED_LEAD), "{t}");
+                assert!(t.ends_with(": connection failed"), "{t}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let (base, server) =
+            serve_once(42, http_reply("200 OK", b"{\"state\":\"DECLIN\xFFED\"}")).await;
+        let (outcome, _) = guard_over(&base, 42).await;
+        join_server(server).await;
+        match outcome {
+            Err(AppError::Bitbucket(t)) => {
+                assert_eq!(t.lines().next(), Some(BB_UNCONFIRMED_LEAD), "{t}")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        for number in [1, 42] {
+            let (base, server) =
+                serve_once(number, http_reply("200 OK", br#"{"state":"OPEN"}"#)).await;
+            let (outcome, _) = guard_over(&base, number).await;
+            join_server(server).await;
+            assert!(outcome.is_ok(), "{number}: {outcome:?}");
+        }
+    }
+
+    /// A refused connection is unreachable. Port zero cannot be claimed by another
+    /// listener between setup and connect.
+    #[tokio::test]
+    async fn bb_merge_guard_reads_no_response_as_unreachable() {
+        let (outcome, elapsed) = guard_over("http://127.0.0.1:0/repositories/w/r", 1).await;
+        match outcome {
+            Err(AppError::Bitbucket(t)) => {
+                assert_eq!(t.lines().next(), Some(BB_UNREACHABLE_LEAD), "{t}")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(elapsed < FIXTURE_BOUND, "{elapsed:?}");
+    }
+
+    /// Pins the refusal copy; the help guide's merge paragraph paraphrases it.
+    #[test]
+    fn bb_merge_refusal_consts_keep_their_text() {
+        assert_eq!(
+            BB_DECLINED_REFUSAL,
+            "This pull request was declined on Bitbucket, so nothing was merged."
+        );
+        assert_eq!(
+            BB_SUPERSEDED_REFUSAL,
+            "This pull request was superseded on Bitbucket, so nothing was merged."
+        );
+        assert_eq!(BB_MERGED_REFUSAL, "This pull request was already merged on Bitbucket, so there was nothing left to merge.");
+        assert_eq!(BB_UNREACHABLE_LEAD, "Couldn't reach Bitbucket to confirm this pull request is still open, so nothing was merged. Try again.");
+        assert_eq!(BB_UNCONFIRMED_LEAD, "Couldn't confirm this pull request is still open on Bitbucket, so nothing was merged. Try again.");
+    }
+
+    const BB_GUARD: &str =
+        "bb_merge_guard_outcome(pr_merge_state_read(&creds, &base, number).await)?;";
+
+    /// Over a flattened merge body: the state guard follows the repo base and precedes
+    /// the payload and the POST.
+    fn merge_pr_guards_state_first(body: &str) -> bool {
+        let at = |needle: &str| body.find(needle);
+        let (Some(base), Some(guard), Some(payload), Some(send)) = (
+            at("repo_base("),
+            at(BB_GUARD),
+            at("merge_payload("),
+            at("bb_send_request_split("),
+        ) else {
+            return false;
+        };
+        body.matches(BB_GUARD).count() == 1 && base < guard && guard < payload && guard < send
+    }
+
+    #[test]
+    fn merge_pr_reads_state_before_the_merge_post() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("bitbucket.rs"),
+            "merge_pr",
+        ));
+        assert!(merge_pr_guards_state_first(&body), "{body}");
+        let removed = body.replacen(&format!("{BB_GUARD} "), "", 1);
+        let moved = {
+            let from = removed.find("bb_send_request_split(").unwrap();
+            let at = from + removed[from..].find(';').unwrap() + 1;
+            format!("{} {BB_GUARD}{}", &removed[..at], &removed[at..])
+        };
+        let mutants = [
+            ("removed", removed),
+            ("after the POST", moved),
+            (
+                "fail-open .ok()",
+                body.replacen(BB_GUARD, &BB_GUARD.replace(")?;", ").ok();"), 1),
+            ),
+            (
+                "fail-open let _",
+                body.replacen(
+                    BB_GUARD,
+                    &format!("let _ = {};", BB_GUARD.trim_end_matches("?;")),
+                    1,
+                ),
+            ),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}");
+            assert!(!merge_pr_guards_state_first(&mutant), "{what}: {mutant}");
+        }
     }
 
     #[test]

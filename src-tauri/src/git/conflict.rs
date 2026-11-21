@@ -712,7 +712,7 @@ pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::runner::{run_git, TEST_GIT_HANG_GUARD};
+    use crate::git::runner::{run_git, TestGitEnv, TEST_GIT_HANG_GUARD};
 
     #[tokio::test]
     async fn private_temp_diff_contents_concurrent_calls_stay_separate() {
@@ -1498,7 +1498,7 @@ mod tests {
             let ran = std::sync::Arc::clone(&ran);
             std::sync::Arc::new(move || {
                 let status = std::process::Command::new("git")
-                    .envs(crate::git::runner::TEST_GIT_ENV)
+                    .test_git_env()
                     .args(["add", "--", "file.txt"])
                     .current_dir(&repo)
                     .status()

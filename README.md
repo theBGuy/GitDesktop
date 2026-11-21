@@ -310,7 +310,10 @@ arrows, and a branch marked Keep local wears a `kept local` chip.
   GitHub. A promotion-branches list marks pull requests from those branches
   as promotions: their PRs stop offering the update from the base, and the
   branch menus withhold the one-click update from the default branch, so
-  promotion flows keep their direction.
+  promotion flows keep their direction. A personal **After merging** option
+  starts the merge dialog with the head branch's delete ticked, except for
+  forks, the default branch, promotion and agent-session branches, and
+  branches a rule blocks from deletion.
 
 ### History
 
@@ -323,13 +326,14 @@ history and line blame are reachable from any file list (History, pull
 requests, Compare) or the command palette, pinned at that commit or branch
 where it applies; each blame line's commit gets a hover-card preview and a
 click to jump to it in History. The file list beside a diff filters by path:
-on a commit's files, in Compare, on a pull request's Commits tab, on local
-pull requests and in an agent session's changes, type in the field above the
-list, or press `Ctrl`/`⌘`+`F` while the list or the diff has focus, or
-anywhere on the Compare tab while it lists files. Commits are dated by when
-they were written (the author date), so a range you rebase or reword keeps
-its dates, and the commit detail names the committed date too when the two
-are a minute or more apart.
+on a commit's files, in Compare, on a pull request's Files and Commits tabs,
+on local pull requests, in View stashes, in Recover lost work and in an
+agent session's changes, type in the field above the list, or press
+`Ctrl`/`⌘`+`F` while the list or the diff has focus, or anywhere on the
+Compare tab while it lists files. Commits are dated by when they were
+written (the author date), so a range you rebase or reword keeps its dates,
+and the commit detail names the committed date too when the two are a
+minute or more apart.
 
 - **Interactive rebase** ⭐: an *Edit history* editor to reword, squash,
   fixup, drop, or reorder unpushed commits behind an atomic replay engine

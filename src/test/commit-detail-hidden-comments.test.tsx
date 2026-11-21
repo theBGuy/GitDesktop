@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -217,6 +218,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unmount on the fake clock: setup.ts's cleanup runs after this hook, and the
+  // last query observer leaving would arm a real gc timer that outlives the case.
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
   expect(unmockedCommands).toEqual([]);
 });
 
@@ -503,10 +509,15 @@ describe("CommitDetailView's Show whitespace focus", () => {
     renderView(A, true);
     await waitFor(() => expect(showButtons()).toHaveLength(1));
     await setGate(false);
+    // The press arms the landing's bound as a timeout and a performance.now()
+    // deadline; the clock goes fake only now so the initial load runs on real
+    // timers. waitFor moves it via the stub.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    vi.stubGlobal("jest", { advanceTimersByTime: vi.advanceTimersByTime });
     fireEvent.click(showButtons()[0]);
     await waitFor(() => expect(showButtons()).toHaveLength(0));
     // Past LANDING_TIMEOUT_MS (2000 ms).
-    await act(() => new Promise((r) => setTimeout(r, 2200)));
+    await act(() => vi.advanceTimersByTimeAsync(2200));
     await setGate(true);
     await waitFor(() =>
       expect(
@@ -515,7 +526,7 @@ describe("CommitDetailView's Show whitespace focus", () => {
     );
     await settle();
     expect(document.activeElement).toBe(sink());
-  }, 10_000);
+  });
 });
 
 describe("drawnDiffFor", () => {

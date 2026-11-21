@@ -606,7 +606,7 @@ export function ProjectFieldsEditor({
                 py-2 contains the Checkbox touch-target's 8px vertical bleed
                 (after:-inset-y-2) — without it the pseudo adds scrollable overflow
                 and Windows draws a scrollbar for even one row. */}
-            <div className="max-h-[70vh] space-y-3 overflow-y-auto px-1 py-2">
+            <div className="relative max-h-[70vh] space-y-3 overflow-y-auto px-1 py-2">
               {boards.map((board) => (
                 <BoardSection
                   key={board.itemId}

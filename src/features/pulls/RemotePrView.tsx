@@ -31,6 +31,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DetailRailFilterStatus } from "@/components/detail-rail";
 import { DetailTitleRow } from "@/components/detail-title-row";
 import { DiffStat } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -58,6 +59,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  FILE_FILTER_SURFACES,
+  useFileListFilter,
+} from "@/components/use-file-list-filter";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommitsList } from "@/features/conversations/CommitsList";
 import {
@@ -127,6 +132,7 @@ import {
   isDeletionBlocked,
   isMergeMethodAllowed,
   isPromotionBranch,
+  mergeDeleteStartsTicked,
 } from "@/lib/branch-rules/match";
 import {
   useEffectiveBranchRules,
@@ -139,6 +145,7 @@ import {
   isPrArchivedRefusal,
   presentError,
 } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
 import {
   gitFetch,
   type MergeStrategy,
@@ -193,6 +200,7 @@ import {
   useForgeStatus,
   useGlArmAutoMerge,
   useGlCancelAutoMerge,
+  useGlMergingWatch,
   useGlMrMergeState,
   useGlMrTimeStats,
   useMergeMessageDefaults,
@@ -231,6 +239,7 @@ import {
   useUnrequestChangesPr,
   writeAccessReason,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import {
   detectStackOffer,
   isNativeStack,
@@ -269,7 +278,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import type { PrSection } from "@/lib/pulls/pr-section";
-import { PR_NOUN } from "@/lib/pulls/pr-state";
+import { PR_NOUN, prStateWord } from "@/lib/pulls/pr-state";
 import {
   type ClearReviewDraftsVars,
   LOCAL_REVIEW_WRITES_FAMILY,
@@ -293,7 +302,11 @@ import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
-import { MergePrDialog } from "./MergePrDialog";
+import {
+  type DeleteBranchBlock,
+  MergePrDialog,
+  mergeDialogFinalFocus,
+} from "./MergePrDialog";
 import {
   MERGE_LABEL,
   MERGE_METHOD_RULE_REASON,
@@ -435,6 +448,22 @@ function isServerMergeDisabled(pr: PrDetails, s: MergeStrategy): boolean {
  *  unknown. */
 const MERGE_GUARD_MISSING_REASON =
   "Reload to merge — couldn't load the head commit to guard the merge";
+
+/** The open merge dialog's hold once the request stopped reading OPEN, by its
+ *  state; any state not listed is no longer open. */
+const MERGE_NOT_OPEN_REASON: Partial<Record<string, (noun: string) => string>> =
+  {
+    MERGING: (noun) => `This ${noun} is already being merged.`,
+  };
+const mergeNoLongerOpen = (noun: string) => `This ${noun} is no longer open.`;
+
+/** Own keys only: a forge string such as `toString` falls to the default. */
+export function mergeNotOpenReason(state: string, noun: string): string {
+  const reason = Object.hasOwn(MERGE_NOT_OPEN_REASON, state)
+    ? MERGE_NOT_OPEN_REASON[state]
+    : undefined;
+  return (reason ?? mergeNoLongerOpen)(noun);
+}
 
 /** Defensive fallback for a `busy` hold whose term `composerReason` doesn't
  *  (yet) name — coverage holds today, but this keeps the four sites that
@@ -1099,6 +1128,18 @@ export function RemotePrView({
       ? shownNumber
       : null,
   );
+  // A GitLab MR mid-merge (MERGING) watches its own slim merge-state read until the
+  // lock ends; a gate of its own, since the auto-merge read above wants OPEN.
+  useGlMergingWatch(
+    repoPath,
+    repoTab === "pulls" &&
+      provider === "gitlab" &&
+      hold.interactive &&
+      !detailsPlaceholder &&
+      details.data?.state === "MERGING"
+      ? shownNumber
+      : null,
+  );
   const armAutoMerge = useGlArmAutoMerge(repoPath);
   const cancelAutoMerge = useGlCancelAutoMerge(repoPath);
   const isOpenPr = details.data?.state === "OPEN";
@@ -1525,12 +1566,18 @@ export function RemotePrView({
   useHotkeyAction(
     "pr-ready-for-review",
     () => {
-      if (shownIsDraft !== true || detailsStale) return;
+      if (
+        shownIsDraft !== true ||
+        details.data?.state !== "OPEN" ||
+        detailsStale
+      )
+        return;
       void markReadyForReview();
     },
     isSelectedPr &&
       draftPairVisible &&
       shownIsDraft === true &&
+      details.data?.state === "OPEN" &&
       !busy &&
       !detailsStale,
   );
@@ -2229,8 +2276,8 @@ export function RemotePrView({
     string | null
   >(null);
   const [mergeOpen, setMergeOpen] = useState(false);
-  // The cleanup note a queued merge came back with (a head-branch deletion that
-  // failed), carried on the chip's tooltip. Keyed so it can never paint onto
+  // The note a queued merge came back with (why it isn't confirmed merged yet),
+  // carried on the chip's tooltip. Keyed so it can never paint onto
   // another pull request; the queue record itself lives in the store, which is
   // why the chip survives a switch away and back while this detail doesn't.
   const [queuedWarning, setQueuedWarning] = useState<{
@@ -3073,15 +3120,19 @@ export function RemotePrView({
     pr != null &&
     defaultBranch.data != null &&
     pr.headRefName === defaultBranch.data;
-  const headDeletionBlocked =
-    pr != null && isDeletionBlocked(rulesConfig, pr.headRefName);
-  // Branch rules load async, so `headDeletionBlocked` can flip true after the user
-  // already ticked "delete branch" — drop the choice then. The dialog's own `checked`
-  // override already keeps the render correct; this keeps the underlying state honest
-  // (it can't linger stale-true behind the now-disabled checkbox).
+  // An agent-session head is never deleted (Resume needs it), whatever the rules say.
+  const headDeletionBlock = ((): DeleteBranchBlock | null => {
+    if (pr == null) return null;
+    if (isSessionBranchName(pr.headRefName)) return "session";
+    return isDeletionBlocked(rulesConfig, pr.headRefName) ? "rule" : null;
+  })();
+  const headDeletionBlocked = headDeletionBlock !== null;
+  // Rules and the default branch answer after the open, so either guard can turn on
+  // over a tick: drop it then, so no stale true lingers behind a disabled or hidden
+  // box and a later answer that lifts the guard finds it unticked.
   useEffect(() => {
-    if (headDeletionBlocked) setDeleteBranch(false);
-  }, [headDeletionBlocked]);
+    if (headDeletionBlocked || headIsDefault) setDeleteBranch(false);
+  }, [headDeletionBlocked, headIsDefault]);
   const fileSections = useMemo(
     () => splitUnifiedDiff(prDiff.data ?? ""),
     [prDiff.data],
@@ -3150,11 +3201,25 @@ export function RemotePrView({
     setSelectedCommitOid(null);
     closePerPrDialogs();
   }
-  // Default to the first changed file until the user picks one.
-  const effectivePath =
-    selectedPath && pr?.files.some((f) => f.path === selectedPath)
-      ? selectedPath
-      : (pr?.files[0]?.path ?? null);
+  // The open file feeds the diff and the composer as well as the rail. `settled`
+  // leaves out the hold: a held PR's details are its own, and counting the hold
+  // would move its open file onto `files[0]` while it is held.
+  const openPathRef = useRef<string | null>(null);
+  const fileFilter = useFileListFilter({
+    ...FILE_FILTER_SURFACES["pr-files"],
+    files: pr?.files ?? [],
+    settled: pr !== undefined && !detailsPlaceholder,
+    picked: selectedPath,
+    onPick: (path) => {
+      if (path !== openPathRef.current)
+        useUiStore.getState().noteUserInteraction();
+      setSelectedPath(path);
+    },
+  });
+  useLayoutEffect(() => {
+    openPathRef.current = fileFilter.openPath;
+  }, [fileFilter.openPath]);
+  const effectivePath = fileFilter.openPath;
 
   // GitLab's merge sends a stale-view `sha` guard sourced from the forge-reported head.
   // Without one we can't guard, so GitLab disables Merge rather than merge unguarded on
@@ -3187,7 +3252,7 @@ export function RemotePrView({
       case offlineHold !== undefined:
         return offlineHold;
       case mergeNotOpen:
-        return `This ${prNoun} is no longer open.`;
+        return mergeNotOpenReason(pr?.state ?? "", prNoun);
       case mergeGuardMissing:
         return MERGE_GUARD_MISSING_REASON;
       default:
@@ -3432,6 +3497,11 @@ export function RemotePrView({
     },
     [hostRef],
   );
+  // A landing (mount, or an `<Activity>` show, which replays this setup) takes
+  // focus that was lost: a reveal leaves it on the hidden tab's control.
+  useLayoutEffect(() => {
+    if (focusIsLost()) viewRef.current?.focus({ preventScroll: true });
+  }, []);
   // No answer for the shown PR yet. Its placeholder is never painted here: past the
   // hold it is the PR the hold left, and it would flash back over the new one. A
   // tab arrival that lags the live selection shows this frame too, never the PR
@@ -3492,8 +3562,42 @@ export function RemotePrView({
       .querySelector<HTMLElement>(`[data-row="${member}"][aria-current="true"]`)
       ?.focus();
   }, [hold.holding, showsLoadingFrame, shownNumber]);
-  // Every arm renders inside the same host and frame, so the frame's focus sink
-  // survives an arm swap and the hold dims whichever arm the held PR showed.
+  // A swap that unmounts the focused node (another PR shown, or an arm change)
+  // would drop focus to <body>; land it on the host. The arms are tested in the
+  // render's own order. Change-only, so a mount never takes focus from elsewhere.
+  const viewArm = (() => {
+    switch (true) {
+      case showsLoadingFrame:
+        return "loading";
+      case detailPane === "offline":
+        return "offline";
+      case detailPane === "error" || !pr:
+        return "error";
+      case Boolean(resolve):
+        return "resolve";
+      default:
+        return "content";
+    }
+  })();
+  const viewFrame = `${viewArm}:${hold.shownKey}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      viewRef.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  // A files read with nothing to draw: the Files tab shows its notice alone.
+  const filesMissing =
+    pr !== undefined && pr.filesUnknown && pr.files.length === 0;
+  const filesRailShown =
+    section === "files" &&
+    !showsLoadingFrame &&
+    pr !== undefined &&
+    !filesMissing;
+  // Every arm but the resolve view renders inside the same host and frame, so the
+  // frame's focus sink survives an arm swap and the hold dims whichever arm the
+  // held PR showed. The resolve view replaces the sections: host node, no frame.
   const framed = (content: ReactNode) => (
     <div
       ref={setHostNode}
@@ -3501,6 +3605,12 @@ export function RemotePrView({
       className="flex h-full flex-col outline-none"
       {...heldParentProps(hold.holding)}
     >
+      {/* Busy only during a hold, whose inert frame blocks edits through the field;
+          a refresh of the held PR can still change the count. */}
+      <DetailRailFilterStatus
+        filter={fileFilter.rail}
+        blank={!filesRailShown}
+      />
       <HeldFrame
         holding={hold.holding}
         className="flex h-full min-h-0 flex-col"
@@ -3620,7 +3730,9 @@ export function RemotePrView({
           ) : (
             <>
               <Badge variant={rowOpen ? "default" : "secondary"}>
-                {row.isDraft ? "Draft" : row.state.toLowerCase()}
+                {row.isDraft && row.state === "OPEN"
+                  ? "Draft"
+                  : prStateWord(row.state)}
               </Badge>
               {author ? (
                 <ForgeUserAvatar login={author} ghHost={ghHost} decorative />
@@ -4088,7 +4200,21 @@ export function RemotePrView({
       mergeAuto === auto;
     if (!kept) {
       setMergeStrategy(strategy);
-      setDeleteBranch(false);
+      // Decided once at open: a later answer can only drop the tick, never add
+      // one, since a box that flips on while the user reaches for it gets
+      // unticked by the click.
+      setDeleteBranch(
+        mergeDeleteStartsTicked({
+          pref: rulesConfig.deleteHeadAfterMerge,
+          rulesSettled: !rulesSettling,
+          defaultBranchKnown: defaultBranch.data != null,
+          headIsDefault,
+          deletionBlocked: headDeletionBlocked,
+          promotion: promotionKind === "configured",
+          crossRepository: pr?.crossRepository,
+          forgeDeleteFlag: pr?.deleteSourceBranch,
+        }),
+      );
       setMergeAuto(auto);
       mergeDraft.reset();
       setMergeFailure(null);
@@ -4149,7 +4275,14 @@ export function RemotePrView({
   // Finish/Discard in place of the PR's normal sections and footer.
   if (resolve) {
     return (
-      <div className="flex h-full flex-col">
+      <div
+        ref={setHostNode}
+        tabIndex={-1}
+        className="flex h-full flex-col outline-none"
+      >
+        {/* The framed arms' first child too, so leaving this view keeps the
+            status node rather than mounting one that already holds text. */}
+        <DetailRailFilterStatus filter={fileFilter.rail} blank />
         <header className="space-y-2 border-b px-4 py-3">
           <DetailTitleRow
             heading={
@@ -4162,7 +4295,7 @@ export function RemotePrView({
             }
           >
             <Badge variant="secondary" className="capitalize">
-              {pr.state.toLowerCase()}
+              {prStateWord(pr.state)}
             </Badge>
           </DetailTitleRow>
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -4242,8 +4375,6 @@ export function RemotePrView({
     paused: details.isPaused,
     onRetry: () => void details.refetch(),
   });
-  // A files read with nothing to draw: the Files tab shows its notice alone.
-  const filesMissing = pr.filesUnknown && pr.files.length === 0;
   // Whether the header's +/- totals are unreadable: always with no rows to show, and
   // with a partial list wherever the provider sums its totals from those rows.
   const totalsUnknown =
@@ -4547,7 +4678,9 @@ export function RemotePrView({
         />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant={pr.state === "OPEN" ? "default" : "secondary"}>
-            {pr.isDraft ? "Draft" : pr.state.toLowerCase()}
+            {pr.isDraft && pr.state === "OPEN"
+              ? "Draft"
+              : prStateWord(pr.state)}
           </Badge>
           {pr.locked === true && (
             <Badge variant="secondary">
@@ -5437,9 +5570,8 @@ export function RemotePrView({
           {!filesMissing && (
             <ThreadReplyHoldContext value={conversationHold.composer}>
               <PrFilesPane
-                files={pr.files}
+                filter={fileFilter}
                 binaryPaths={binaryPaths}
-                effectivePath={effectivePath}
                 onSelectPath={pickPath}
                 fileDiff={fileDiff}
                 isPending={prDiff.isPending}
@@ -5544,7 +5676,7 @@ export function RemotePrView({
               title={
                 queuedWarning?.key === queuedKey
                   ? queuedWarning.text
-                  : "Merges when the queue reaches it"
+                  : "GitHub accepted the merge but hasn't reported it merged yet"
               }
             >
               <ClockCountdownIcon className="size-3.5 shrink-0" />
@@ -5707,11 +5839,16 @@ export function RemotePrView({
           checked: deleteBranch,
           onChange: setDeleteBranch,
           headIsDefault,
-          blocked: headDeletionBlocked,
+          blocked: headDeletionBlock,
         }}
         pending={mergeAuto ? armAutoMergePending : mergePending}
         heldReason={mergeDialogHold}
         onConfirm={confirmMerge}
+        // A landed merge unmounts the footer holding the Merge trigger, so the
+        // close lands on the framed view itself instead of <body>.
+        finalFocus={(popup) =>
+          mergeDialogFinalFocus(openFooterRef.current, viewRef.current, popup)
+        }
         auto={mergeAuto}
         stackNotice={stackMerge?.notice}
         confirmLabel={stackMerge?.confirmLabel}

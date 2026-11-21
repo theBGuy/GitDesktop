@@ -1233,6 +1233,10 @@ export function ProjectsBoardPanel({
   // picks for itself if nothing was picked since, so a late answer never
   // overrides a choice the user made while it was out.
   const pickGenerationRef = useRef(0);
+  // Bumped by each view-creating request (New view, Duplicate view) past its
+  // offline refusal, before its write: only the latest request's continuation
+  // picks its view, even when that latest request fails.
+  const viewCreateRequestRef = useRef(0);
   // A layout picked in View options for the view on screen, transient until
   // "Save layout to view" writes it. Keyed on the view it was picked for, and
   // cleared by every view pick, so it never follows the user to another view.
@@ -3682,6 +3686,7 @@ export function ProjectsBoardPanel({
       // Its continuation picks the new view: the epoch moves before the write,
       // as a create's submit does. A rename picks nothing and leaves it.
       useUiStore.getState().noteUserInteraction();
+      const request = ++viewCreateRequestRef.current;
       let created: ProjectViewDef;
       try {
         created = await createView.mutateAsync({
@@ -3696,7 +3701,8 @@ export function ProjectsBoardPanel({
       if (session === lifecycleSessionRef.current) closeLifecycle();
       if (
         stillShowing(repo, run.projectId) &&
-        generation === pickGenerationRef.current
+        generation === pickGenerationRef.current &&
+        request === viewCreateRequestRef.current
       )
         setPendingViewPick(created);
       return;
@@ -3750,6 +3756,7 @@ export function ProjectsBoardPanel({
       // Its continuation picks the copy: the epoch moves before the write, as a
       // create's submit does.
       useUiStore.getState().noteUserInteraction();
+      const request = ++viewCreateRequestRef.current;
       let created: ProjectViewDef;
       try {
         created = await duplicateView.mutateAsync({
@@ -3765,7 +3772,11 @@ export function ProjectsBoardPanel({
       } catch {
         return;
       }
-      if (stillShowing(repo, board) && generation === pickGenerationRef.current)
+      if (
+        stillShowing(repo, board) &&
+        generation === pickGenerationRef.current &&
+        request === viewCreateRequestRef.current
+      )
         setPendingViewPick(created);
     });
   }
@@ -6341,7 +6352,7 @@ export function ProjectsBoardPanel({
                           <RadioGroup
                             // Scrolls at its own edge: the server offers up to 50
                             // views, and a popup that tall would run off screen.
-                            className="max-h-56 gap-0 overflow-y-auto"
+                            className="max-h-56 gap-0 overflow-y-auto pb-2"
                             aria-labelledby={viewLabelId}
                             value={view?.id ?? NO_VIEW_ROW_ID}
                             onValueChange={(next) => {

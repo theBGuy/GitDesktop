@@ -10,6 +10,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import type { FileListFilter } from "@/components/use-file-list-filter";
 import type { MentionSource } from "@/features/conversations/useMentionCandidates";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import {
@@ -121,12 +122,12 @@ function DiffThreadAnchor({
 }
 
 /** The "Files" sub-tab: a file list down the left, the selected file's diff on
- *  the right. Presentational — the parent owns the selection + diff query.
+ *  the right. Presentational — the parent owns the selection + diff query
+ *  and the file filter.
  *  Review threads anchored to the selected file render under their exact line. */
 export function PrFilesPane({
-  files,
+  filter,
   binaryPaths,
-  effectivePath,
   onSelectPath,
   fileDiff,
   isPending,
@@ -151,11 +152,10 @@ export function PrFilesPane({
   mentions,
   blameRev,
 }: {
-  files: PrFile[];
+  filter: FileListFilter<PrFile>;
   /** Rows to show as binary (`binaryRowPaths`: 0/0 forge counts over a marker
    *  section); absent/empty = no rows flagged. */
   binaryPaths?: ReadonlySet<string>;
-  effectivePath: string | null;
   onSelectPath: (path: string) => void;
   fileDiff: ComponentProps<typeof DiffContent>["data"];
   isPending: boolean;
@@ -191,8 +191,8 @@ export function PrFilesPane({
     repoPath && blameRev && headPresent.data === true ? blameRev : undefined;
   // Arrow keys walk the file list, mirroring the app's other diff lists.
   const onFilesKeyDown = listKeyboardNav({
-    items: files,
-    activeIndex: files.findIndex((f) => f.path === effectivePath),
+    items: filter.visible,
+    activeIndex: filter.activeIndex,
     onActivate: (file) => onSelectPath(file.path),
     rowKey: (file) => file.path,
     rowAttr: "data-path",
@@ -201,20 +201,21 @@ export function PrFilesPane({
   // The file's diff swaps through the pane's two-slot hold, within this pull
   // request; another one re-targets the shown slot in place.
   const diffEntity = `${lens ?? ""}#${number ?? ""}`;
-  const diffTarget = effectivePath
-    ? keyedPaneView(repoPath ?? "", diffEntity, effectivePath, effectivePath)
+  const openPath = filter.openPath;
+  const diffTarget = openPath
+    ? keyedPaneView(repoPath ?? "", diffEntity, openPath, openPath)
     : placeholderPaneView(diffEntity);
   const diffSlots = useFileSlots(diffTarget);
 
-  const fileRows = files.map((file) => (
+  const fileRows = filter.visible.map((file) => (
     <button
       type="button"
       key={file.path}
       data-path={file.path}
-      aria-current={effectivePath === file.path || undefined}
+      aria-current={openPath === file.path || undefined}
       className={cn(
         "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
-        effectivePath === file.path
+        openPath === file.path
           ? "bg-accent text-accent-foreground"
           : "hover:bg-muted/60",
       )}
@@ -234,7 +235,7 @@ export function PrFilesPane({
 
   return (
     <DetailRailRow>
-      <DetailRail ariaLabel="Changed files">
+      <DetailRail ariaLabel="Changed files" filter={filter.rail}>
         {/* overflow-hidden contains the list's natural height (vendored Root is
             `relative`-only) so a long file list can't leak a window scrollbar. */}
         <ScrollArea className="min-h-0 flex-1 overflow-hidden">

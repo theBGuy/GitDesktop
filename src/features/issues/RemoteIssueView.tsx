@@ -86,6 +86,7 @@ import {
 import { copyText } from "@/lib/clipboard";
 import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
 import { presentError } from "@/lib/error-summary";
+import { focusIsLost } from "@/lib/focus-lost";
 import type { LockReason, MinimizeReason } from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
@@ -694,6 +695,11 @@ export function RemoteIssueView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // A landing (mount, or an `<Activity>` show, which replays this setup) takes
+  // focus that was lost: a reveal leaves it on the hidden tab's control.
+  useLayoutEffect(() => {
+    if (focusIsLost()) focusHost.current?.focus({ preventScroll: true });
+  }, []);
   // Every arm draws inside the same host and frame, so React keeps both nodes
   // (and the frame's focus sink) through each swap, and a Retry's focus lands
   // on the host.

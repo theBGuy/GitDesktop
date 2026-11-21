@@ -114,7 +114,7 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Ten dependency-free Node scripts guard convention classes a past audit
+Eleven dependency-free Node scripts guard convention classes a past audit
 already paid to close once. Run them before pushing:
 
 ```sh
@@ -122,7 +122,7 @@ already paid to close once. Run them before pushing:
 # IPC surface drift · skill-mirror drift ·
 # Tauri npm/crate parity · lockfile singleton dedupe · AppImage env twins ·
 # installed-only suites enforced · record-scoped pending reads ·
-# guard self-tests
+# workflow Node setup and job timeouts · guard self-tests
 pnpm run checks
 ```
 
@@ -130,7 +130,7 @@ They run as the `guards` job in [`quality.yml`](.github/workflows/quality.yml),
 a required check on master, and cover banned frontend UI and state patterns
 (hover-revealed row actions, hand-rolled modifier keys, bare `.mutate(` calls
 anywhere under `src/`, `setQueryData(key, undefined)`, inline clip-measured
-tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
+tooltips), the thirteen Rust invariants (one line each in the list below),
 blog OG-card references (every post's `ogImage` must resolve to a committed
 card plus its `.webp` sibling — a missing file ships as a 404 social card),
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
@@ -145,19 +145,40 @@ the Rust child-environment tables, and that every node suite which reads
 `frontend.yml`'s installed, enforced step (otherwise its skipped tests run
 in no CI job), and that the detail views one mounted instance reuses across
 records don't read a write's pending state from a mutation observer (which
-would show one record's in-flight write on the next).
+would show one record's in-flight write on the next), and that every job
+that runs steps carries a `timeout-minutes` bound and a job running Node
+sets it up from `.node-version` first.
+
+The Rust invariants, one letter per check in
+[`check-rust-invariants.mjs`](scripts/check-rust-invariants.mjs):
+
+- A. refspec templates
+- B. secret-shaped argv
+- C. sync `#[tauri::command]`
+- D. stderr-only `AppError::Git`
+- E. compare basehead
+- F. short ref names
+- G. bare branch revs
+- H. merge into a checkout without the ignored-file guard
+- I. test-held update-marker branch names
+- J. gh exit read as absence
+- K. external diff drivers
+- L. test git spawns on the product timeout
+- M. local branch ref delete outside the primitive
 
 The pattern, Rust-invariant, surface, and pending-read checks carry allowlists;
-the AppImage environment-twins check carries an exemption map. They ratchet one
-way (Tauri parity and lockfile dedupe carry none — there is nothing to exempt).
-Adding an entry is a reviewed change like any other: it needs an inline
-rationale naming what makes that site safe, and it isn't the way to quiet a
-fresh violation. The ratchet is enforced, not just documented — an entry that
-no longer suppresses anything (its site gone, or its command back in live use)
-fails the gate as a stale allowlist entry, so the PR that removes the site
-removes its entry too. An AppImage exemption is live only while its variable is
-allowed by the guard and absent from the child-environment tables; otherwise it
-fails as stale.
+the AppImage environment-twins and workflow Node-setup checks carry exemption
+maps. They ratchet one way (Tauri parity and lockfile dedupe carry none — there
+is nothing to exempt). Adding an entry is a reviewed change like any other: it
+needs an inline rationale naming what makes that site safe, and it isn't the
+way to quiet a fresh violation. The ratchet is enforced, not just documented —
+an entry that no longer suppresses anything (its site gone, or its command back
+in live use) fails the gate as a stale allowlist entry, so the PR that removes
+the site removes its entry too. An AppImage exemption is live only while its
+variable is allowed by the guard and absent from the child-environment tables;
+otherwise it fails as stale. The workflow map waives only a container job or a
+composite action running Node, never a setup-node mistake or a missing bound,
+and an entry goes stale once its site no longer fails a rule it may waive.
 
 Skill-mirror drift declares its skips rather than allowlisting sites: the ones
 rewritten per harness, and the ones living in a single tree, each entry naming

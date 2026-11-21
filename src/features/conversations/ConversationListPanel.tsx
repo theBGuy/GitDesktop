@@ -21,6 +21,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
+import { focusIsLost } from "@/lib/focus-lost";
 import { cn } from "@/lib/utils";
 import { ListCapNote, LoadMoreRow } from "./LoadMoreRow";
 import {
@@ -453,6 +454,11 @@ export function ConversationListPanel<
   remoteCapped?: boolean;
   /** Create dialogs etc. rendered after the list. */
   children?: ReactNode;
+  /** The detail pane's item key: `detailKeyOf` of RepositoryView's deferred
+   *  selection (null = nothing shown). When it turns null with focus lost, the
+   *  list host takes focus; omitted, the list takes none when its detail closes
+   *  (a Retry's rescue still lands on the same host). */
+  detailKey?: string | null;
 }) {
   const {
     stateFilter,
@@ -520,6 +526,7 @@ export function ConversationListPanel<
     remoteCount,
     remoteCapped,
     children,
+    detailKey,
   } = props;
 
   const remoteRow = (item: R) => (
@@ -625,6 +632,27 @@ export function ConversationListPanel<
     !remoteCollapsed &&
       (remoteState === "not-ready" || remoteState === "error"),
   );
+  // Closing the detail unmounts whatever held focus there; the list is where
+  // the keyboard continues. Runs in the commit that unmounts it (the key is the
+  // deferred one the pane renders from), and takes only focus that was lost.
+  // A clear made while the tab is hidden is seen on its next show (layout
+  // effects replay then), so the list takes lost focus at that landing.
+  const listHost = useRef<HTMLDivElement | null>(null);
+  const { hostRef: rescueHostRef } = remoteRescue;
+  const setListHost = useCallback(
+    (node: HTMLDivElement | null) => {
+      listHost.current = node;
+      rescueHostRef(node);
+    },
+    [rescueHostRef],
+  );
+  const lastDetailKey = useRef(detailKey);
+  useLayoutEffect(() => {
+    const was = lastDetailKey.current;
+    lastDetailKey.current = detailKey;
+    if (was == null || detailKey !== null) return;
+    if (focusIsLost()) listHost.current?.focus({ preventScroll: true });
+  }, [detailKey]);
   const remoteContent = ((): ReactNode => {
     switch (remoteState) {
       case "offline":
@@ -872,7 +900,7 @@ export function ConversationListPanel<
         <div
           // The host every remote arm swaps inside, so a Retry's focus lands
           // here, where the arrow keys still reach the list's nav.
-          ref={remoteRescue.hostRef}
+          ref={setListHost}
           tabIndex={-1}
           className="outline-none"
           onKeyDown={onListKeyDown}

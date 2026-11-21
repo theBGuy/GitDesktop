@@ -19,7 +19,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const TEST_GIT_HANG_GUARD: Duration = Duration::from_secs(120);
 /// The env `run_git_spawn` applies to every git child of a test build, so git run
 /// through it discovers no system, global or XDG config. A test that spawns git
-/// itself must pass it with `cmd.envs(TEST_GIT_ENV)`; without it that git reads the
+/// itself calls `.test_git_env()` ([`TestGitEnv`]); without it that git reads the
 /// developer's config. The NOSYSTEM pair closes the system config and attributes,
 /// `GIT_CONFIG_GLOBAL` the global config file, and `XDG_CONFIG_HOME` the default
 /// global ignore and attributes files. A caller's own pairs are applied after these
@@ -28,14 +28,73 @@ pub(crate) const TEST_GIT_HANG_GUARD: Duration = Duration::from_secs(120);
 /// Windows reads `/dev/null` there as an empty file and fails a write with "could not
 /// lock config file", creating nothing, when the drive has no `\dev` folder
 /// (measured, 2.51.1). Never `GIT_CONFIG_COUNT` here: the submodule tests set it
-/// process-wide, and a pair here would override theirs.
+/// process-wide, and a pair here would override theirs. The runner then removes
+/// [`TEST_GIT_ENV_REMOVED`]: `GIT_CONFIG` has no neutral value (an empty one fails every
+/// `git config` read) and `GIT_CONFIG_PARAMETERS` would inject a parent `git -c`'s keys.
+/// The repository variables (git(1) ENVIRONMENT "The Git Repository", plus the
+/// `GIT_PREFIX` and `GIT_QUARANTINE_PATH` git exports to hooks) would aim a test's git
+/// at another repository. Both lists stay private so every test git takes them through
+/// [`TestGitEnv`].
 #[cfg(test)]
-pub(crate) const TEST_GIT_ENV: [(&str, &str); 4] = [
+const TEST_GIT_ENV: [(&str, &str); 4] = [
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_ATTR_NOSYSTEM", "1"),
     ("GIT_CONFIG_GLOBAL", "/dev/null"),
     ("XDG_CONFIG_HOME", "/dev/null"),
 ];
+/// Inherited config and repository redirects removed from every test-build git spawned
+/// through the runner or [`TestGitEnv`], after [`TEST_GIT_ENV`] and before the caller's
+/// pairs. Bound: git's `local_repo_env` at v2.51.1 minus `GIT_CONFIG_COUNT`, plus
+/// `GIT_TEMPLATE_DIR` and the names below it. `GIT_CONFIG_COUNT` stays because the
+/// submodule tests set it process-wide; `GIT_CEILING_DIRECTORIES` stays because it only
+/// narrows discovery and a site sets it before `.test_git_env()`.
+#[cfg(test)]
+const TEST_GIT_ENV_REMOVED: [&str; 21] = [
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INDEX_VERSION",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_DEFAULT_HASH",
+    "GIT_DEFAULT_REF_FORMAT",
+    "GIT_PREFIX",
+    "GIT_QUARANTINE_PATH",
+];
+/// Gives a test-build git the hermetic env: `TEST_GIT_ENV`'s pairs, then
+/// `TEST_GIT_ENV_REMOVED`'s removals. Call it before the site's own `.env`s, which win.
+#[cfg(test)]
+pub(crate) trait TestGitEnv {
+    fn test_git_env(&mut self) -> &mut Self;
+}
+#[cfg(test)]
+impl TestGitEnv for std::process::Command {
+    fn test_git_env(&mut self) -> &mut Self {
+        self.envs(TEST_GIT_ENV);
+        for key in TEST_GIT_ENV_REMOVED {
+            self.env_remove(key);
+        }
+        self
+    }
+}
+#[cfg(test)]
+impl TestGitEnv for Command {
+    fn test_git_env(&mut self) -> &mut Self {
+        self.as_std_mut().test_git_env();
+        self
+    }
+}
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Adding and removing a worktree both write or delete a whole checkout, so their
 /// cost is proportional to the tree rather than fixed. A node_modules-scale
@@ -507,7 +566,7 @@ async fn run_git_spawn(
         .env("LC_ALL", "C");
     // Before the caller's pairs, which win over it.
     #[cfg(test)]
-    cmd.envs(TEST_GIT_ENV);
+    cmd.test_git_env();
     cmd.envs(envs.iter().copied());
     cmd.stdin(if input.is_some() {
         Stdio::piped()
@@ -1255,6 +1314,7 @@ mod stdin_tests {
             let mut cmd = Command::new(&git);
             cmd.current_dir(dir.path())
                 .args(["config", "--get", "gitdesktopFixture.poison"])
+                .test_git_env()
                 .env("GIT_CONFIG_SYSTEM", &config)
                 .env_remove("GIT_CONFIG_NOSYSTEM");
             if suppress {
@@ -1589,16 +1649,16 @@ mod config_tests {
             "the default global attributes reached the runner"
         );
 
-        // The fixture is live: without the seam (the NOSYSTEM pair kept, so a system
-        // excludesFile or attributesFile cannot mask it) git reads all three rules.
+        // The fixture is live: with only the seam's global and XDG arms lifted (the
+        // NOSYSTEM pair kept, so a system excludesFile or attributesFile cannot mask
+        // it) git reads all three rules.
         let git = git_bin().await.expect("resolve git");
         let direct = |args: &'static [&'static str]| {
             let mut cmd = Command::new(&git);
             cmd.args(args)
                 .current_dir(&fx.repo)
+                .test_git_env()
                 .envs(home_env)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_ATTR_NOSYSTEM", "1")
                 .env_remove("GIT_CONFIG_GLOBAL")
                 .env_remove("XDG_CONFIG_HOME")
                 .stdin(Stdio::null());
@@ -1789,6 +1849,264 @@ mod config_tests {
         assert_eq!(write.code, 0, "{}", write.stderr);
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("fixture = 1"), "{text:?}");
+    }
+
+    const INHERITED_PARAMS: &str = "'gdfixture.param'='inherited'";
+
+    /// Child half of `an_inherited_git_config_never_reaches_the_runner`, run in a
+    /// re-executed test binary whose environment carries both variables; passes
+    /// trivially on its own, since only the parent sets [`PROBE_MARKER`].
+    #[tokio::test]
+    #[ignore = "run by an_inherited_git_config_never_reaches_the_runner"]
+    async fn inherited_config_probe() {
+        if std::env::var_os(PROBE_MARKER).is_none() {
+            return;
+        }
+        for key in ["gdfixture.file", "gdfixture.param"] {
+            let out = run_git_raw(None, &["config", "--get", key], TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap_or_else(|e| panic!("git config --get {key}: {e}"));
+            assert_eq!(
+                (out.code, out.stdout_lossy()),
+                (1, String::new()),
+                "{key} reached the runner"
+            );
+        }
+        println!("{PROBE_SENTINEL}: inherited_config_probe");
+    }
+
+    /// Pins `TEST_GIT_ENV_REMOVED`: an inherited `GIT_CONFIG` or
+    /// `GIT_CONFIG_PARAMETERS` never reaches a runner git. Inheritance needs a parent
+    /// environment, which a test can't set in-process without racing every other
+    /// test's env reads, so the probe runs in a re-executed copy of this binary.
+    #[tokio::test]
+    async fn an_inherited_git_config_never_reaches_the_runner() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-runner-inherit-")
+            .tempdir()
+            .expect("create temp dir");
+        let file = dir.path().join("inherited.config");
+        std::fs::write(&file, "[gdfixture]\n\tfile = inherited\n").unwrap();
+
+        // The fixture is live: a git given the seam's env and then one variable reads
+        // that key. One variable per read, since a set `GIT_CONFIG` makes `git config`
+        // read that file alone, command-line parameters included (measured, 2.51.1).
+        let file_str = file.to_string_lossy().into_owned();
+        let git = git_bin().await.expect("resolve git");
+        for (key, var, value) in [
+            ("gdfixture.file", "GIT_CONFIG", file_str.as_str()),
+            ("gdfixture.param", "GIT_CONFIG_PARAMETERS", INHERITED_PARAMS),
+        ] {
+            let out = Command::new(&git)
+                .args(["config", "--get", key])
+                .test_git_env()
+                .env(var, value)
+                .current_dir(dir.path())
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output();
+            let out = tokio::time::timeout(TEST_GIT_HANG_GUARD, out)
+                .await
+                .expect("git hung")
+                .expect("spawn git");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                "inherited",
+                "the {key} fixture is not live: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // A non-repo cwd, so the probe's `run_git_raw(None, …)` reads no repo config.
+        let exe = std::env::current_exe().expect("current test binary");
+        let child = Command::new(exe)
+            .args([
+                "--exact",
+                "git::runner::config_tests::inherited_config_probe",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .current_dir(dir.path())
+            .env(PROBE_MARKER, "1")
+            .env("GIT_CONFIG", &file)
+            .env("GIT_CONFIG_PARAMETERS", INHERITED_PARAMS)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(TEST_GIT_HANG_GUARD, child)
+            .await
+            .expect("the probe binary hung")
+            .expect("spawn the probe binary");
+        assert_probe_passed(&out, "inherited_config_probe");
+    }
+
+    /// Set by a parent for its re-executed child; a child without it skips its checks.
+    const PROBE_MARKER: &str = "GD_TEST_GIT_ENV_PROBE";
+    /// Printed by a child that ran its checks, followed by its name.
+    const PROBE_SENTINEL: &str = "git-env probe checked";
+
+    /// libtest exits 0 with "0 passed" on a filter that matches nothing, and a child
+    /// that skipped its checks passes too, so the sentinel must also be printed.
+    fn assert_probe_passed(out: &std::process::Output, probe: &str) {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success()
+                && stdout.contains("1 passed")
+                && stdout.contains(&format!("{PROBE_SENTINEL}: {probe}")),
+            "probe failed ({:?})\nstdout:\n{stdout}\nstderr:\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Child half of `an_inherited_git_dir_never_reaches_the_runner`, run from the inner
+    /// repository with the outer one's `GIT_DIR` and `GIT_INDEX_FILE` inherited; passes
+    /// trivially on its own, since only the parent sets [`PROBE_MARKER`].
+    #[tokio::test]
+    #[ignore = "run by an_inherited_git_dir_never_reaches_the_runner"]
+    async fn inherited_repository_probe() {
+        if std::env::var_os(PROBE_MARKER).is_none() {
+            return;
+        }
+        for (args, answer) in [
+            (&["rev-parse", "--git-dir"][..], ".git"),
+            (&["ls-files"][..], "inner.txt"),
+        ] {
+            let out = run_git_raw(None, args, TEST_GIT_HANG_GUARD)
+                .await
+                .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            assert_eq!(
+                (out.code, out.stdout_lossy().trim()),
+                (0, answer),
+                "git {args:?} read another repository"
+            );
+        }
+        println!("{PROBE_SENTINEL}: inherited_repository_probe");
+    }
+
+    /// Pins `TEST_GIT_ENV_REMOVED`'s repository arm: an inherited `GIT_DIR` or
+    /// `GIT_INDEX_FILE` never aims a runner git at another repository, re-executed for
+    /// the same reason as `an_inherited_git_config_never_reaches_the_runner`.
+    #[tokio::test]
+    async fn an_inherited_git_dir_never_reaches_the_runner() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-runner-inherit-repo-")
+            .tempdir()
+            .expect("create temp dir");
+        let mut repos = Vec::new();
+        for name in ["outer", "inner"] {
+            let repo = dir.path().join(name);
+            std::fs::create_dir(&repo).unwrap();
+            std::fs::write(repo.join(format!("{name}.txt")), "x\n").unwrap();
+            let path = repo.to_string_lossy().into_owned();
+            for args in [
+                &["init", "-q"][..],
+                &["add", "--", &format!("{name}.txt")][..],
+            ] {
+                run_git(Some(&path), args, TEST_GIT_HANG_GUARD)
+                    .await
+                    .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            }
+            repos.push(repo);
+        }
+        let (outer, inner) = (&repos[0], &repos[1]);
+        let git_dir = outer.join(".git");
+        let index = git_dir.join("index");
+
+        // The fixture is live: a git given the seam's env and then one variable reads
+        // the outer repository from the inner one's folder.
+        let git = git_bin().await.expect("resolve git");
+        let git_dir_str = git_dir.to_string_lossy().into_owned();
+        for (args, var, value, answer) in [
+            (
+                &["rev-parse", "--git-dir"][..],
+                "GIT_DIR",
+                &git_dir,
+                git_dir_str.as_str(),
+            ),
+            (&["ls-files"][..], "GIT_INDEX_FILE", &index, "outer.txt"),
+        ] {
+            let out = Command::new(&git)
+                .args(args)
+                .test_git_env()
+                .env(var, value)
+                .current_dir(inner)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output();
+            let out = tokio::time::timeout(TEST_GIT_HANG_GUARD, out)
+                .await
+                .expect("git hung")
+                .expect("spawn git");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim(),
+                answer,
+                "the {var} fixture is not live: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let exe = std::env::current_exe().expect("current test binary");
+        let child = Command::new(exe)
+            .args([
+                "--exact",
+                "git::runner::config_tests::inherited_repository_probe",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .current_dir(inner)
+            .env(PROBE_MARKER, "1")
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_INDEX_FILE", &index)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(TEST_GIT_HANG_GUARD, child)
+            .await
+            .expect("the probe binary hung")
+            .expect("spawn the probe binary");
+        assert_probe_passed(&out, "inherited_repository_probe");
+    }
+
+    /// git's `local_repo_env` (environment.c at v2.51.1), its macros resolved through
+    /// environment.h at the same tag.
+    const GIT_LOCAL_REPO_ENV: [&str; 15] = [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+    ];
+
+    /// Every repository-local name git itself clears is removed, except
+    /// `GIT_CONFIG_COUNT` (the submodule tests set it process-wide), and so is the
+    /// template dir.
+    #[test]
+    fn removed_env_covers_gits_local_repo_env() {
+        for name in GIT_LOCAL_REPO_ENV
+            .into_iter()
+            .filter(|n| *n != "GIT_CONFIG_COUNT")
+            .chain(["GIT_TEMPLATE_DIR"])
+        {
+            assert!(
+                TEST_GIT_ENV_REMOVED.contains(&name),
+                "{name} is not removed"
+            );
+        }
+        assert!(!TEST_GIT_ENV_REMOVED.contains(&"GIT_CONFIG_COUNT"));
+        assert!(!TEST_GIT_ENV_REMOVED.contains(&"GIT_CEILING_DIRECTORIES"));
     }
 }
 
@@ -2163,7 +2481,7 @@ mod tree_kill_tests {
         let mut cmd = Command::new(git_bin().await.expect("resolve git"));
         cmd.args(COMMIT)
             .current_dir(&fx.repo)
-            .envs(TEST_GIT_ENV)
+            .test_git_env()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

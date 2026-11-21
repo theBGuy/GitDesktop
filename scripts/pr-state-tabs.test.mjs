@@ -26,7 +26,15 @@ import {
 const row = (number, state) => ({ number, state });
 
 /** Every forge state shape the tabs must file, casing traps included. */
-const REMOTE_STATES = ["OPEN", "MERGED", "CLOSED", "LOCKED", "", "Merged"];
+const REMOTE_STATES = [
+  "OPEN",
+  "MERGED",
+  "CLOSED",
+  "MERGING",
+  "WEIRD",
+  "",
+  "Merged",
+];
 const LOCAL_STATUSES = ["open", "merged", "closed", "wip", "OPEN", ""];
 
 test("remote: MERGED alone is the Merged tab's", () => {
@@ -34,7 +42,8 @@ test("remote: MERGED alone is the Merged tab's", () => {
     OPEN: false,
     MERGED: true,
     CLOSED: false,
-    LOCKED: false,
+    MERGING: false,
+    WEIRD: false,
     "": false,
     Merged: false,
   };
@@ -47,7 +56,8 @@ test("remote: every state but OPEN and MERGED is the Closed (unmerged) tab's", (
     OPEN: false,
     MERGED: false,
     CLOSED: true,
-    LOCKED: true,
+    MERGING: true,
+    WEIRD: true,
     "": true,
     Merged: true,
   };
@@ -96,7 +106,7 @@ test("rows: a Merged page keeps merged rows only, a Closed page drops merged and
     row(1, "OPEN"),
     row(2, "MERGED"),
     row(3, "CLOSED"),
-    row(4, "LOCKED"),
+    row(4, "MERGING"),
     row(5, ""),
     row(6, "Merged"),
   ];
@@ -158,7 +168,7 @@ test("placeholder: a non-empty page that files down to nothing serves no placeho
 test("align: a remote PR's state picks its tab exactly", () => {
   assert.equal(prAlignTab("OPEN"), "open");
   assert.equal(prAlignTab("MERGED"), "merged");
-  for (const state of ["CLOSED", "LOCKED", "", "Merged", "open"])
+  for (const state of ["CLOSED", "MERGING", "WEIRD", "", "Merged", "open"])
     assert.equal(prAlignTab(state), "unmerged", state);
 });
 
@@ -266,7 +276,13 @@ const ok = (locked, state) => ({ status: "ok", locked, state });
 const settle = (tab) => ({ do: "settle", tab });
 const WAIT = { do: "wait" };
 const DISARM = { do: "disarm" };
-const PROBES = [IDLE, PENDING, FAILED, ok(true, "CLOSED"), ok(false, "MERGED")];
+const PROBES = [
+  IDLE,
+  PENDING,
+  FAILED,
+  ok(true, "MERGING"),
+  ok(false, "MERGED"),
+];
 
 test("align step: a provider that can't lock settles its own tab at once", () => {
   for (const state of REMOTE_STATES)
@@ -290,7 +306,7 @@ test("align step: GitLab OPEN and MERGED never consult the probe", () => {
 });
 
 test("align step: a would-be Closed waits on an unanswered probe", () => {
-  for (const state of ["CLOSED", "LOCKED", ""])
+  for (const state of ["CLOSED", "MERGING", ""])
     for (const probe of [IDLE, PENDING])
       for (const pollsLeft of [0, 5])
         assert.deepEqual(
@@ -315,11 +331,11 @@ test("align step: a failure after a locked answer never settles Closed", () => {
 test("align step: locked waits on its polls, then disarms", () => {
   for (const saw of [false, true]) {
     assert.deepEqual(
-      prAlignStep("CLOSED", true, ok(true, "CLOSED"), 1, saw),
+      prAlignStep("CLOSED", true, ok(true, "MERGING"), 1, saw),
       WAIT,
     );
     assert.deepEqual(
-      prAlignStep("CLOSED", true, ok(true, "CLOSED"), 0, saw),
+      prAlignStep("CLOSED", true, ok(true, "MERGING"), 0, saw),
       DISARM,
     );
   }
@@ -364,7 +380,7 @@ function runLadder(answers, budget = 5) {
 }
 
 test("align ladder: locked six times disarms on the fifth re-read", () => {
-  const locked = ok(true, "CLOSED");
+  const locked = ok(true, "MERGING");
   assert.deepEqual(runLadder(Array(7).fill(locked)), {
     step: DISARM,
     reads: 6,
@@ -372,23 +388,50 @@ test("align ladder: locked six times disarms on the fifth re-read", () => {
 });
 
 test("align ladder: locked, then failures until the budget is spent, disarms", () => {
-  const answers = [ok(true, "CLOSED"), ...Array(6).fill(FAILED)];
+  const answers = [ok(true, "MERGING"), ...Array(6).fill(FAILED)];
   assert.deepEqual(runLadder(answers), { step: DISARM, reads: 6 });
 });
 
 test("align ladder: a failure between locked answers rides on to the merge", () => {
   const answers = [
-    ok(true, "CLOSED"),
+    ok(true, "MERGING"),
     FAILED,
-    ok(true, "CLOSED"),
+    ok(true, "MERGING"),
     ok(false, "MERGED"),
   ];
   assert.deepEqual(runLadder(answers), { step: settle("merged"), reads: 4 });
 });
 
 test("align ladder: locked, then opened, lands on Open", () => {
-  assert.deepEqual(runLadder([ok(true, "CLOSED"), ok(false, "OPEN")]), {
+  assert.deepEqual(runLadder([ok(true, "MERGING"), ok(false, "OPEN")]), {
     step: settle("open"),
     reads: 2,
   });
+});
+
+// GitLab's mid-merge state files exactly as CLOSED in every list and align predicate.
+test("MERGING files as CLOSED in every tab and align step", () => {
+  assert.equal(prAlignTab("MERGING"), prAlignTab("CLOSED"));
+  for (const filter of ["open", "closed", "merged", "unmerged"])
+    assert.equal(
+      remoteStateMatches("MERGING", filter),
+      remoteStateMatches("CLOSED", filter),
+      filter,
+    );
+  const probes = [
+    IDLE,
+    PENDING,
+    FAILED,
+    ok(true, "MERGING"),
+    ok(false, "MERGED"),
+    ok(false, "CLOSED"),
+  ];
+  for (const probe of probes)
+    for (const saw of [false, true])
+      for (const polls of [0, 1])
+        assert.deepEqual(
+          prAlignStep("MERGING", true, probe, polls, saw),
+          prAlignStep("CLOSED", true, probe, polls, saw),
+          JSON.stringify({ probe, saw, polls }),
+        );
 });

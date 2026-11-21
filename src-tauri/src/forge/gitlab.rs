@@ -776,13 +776,15 @@ fn project_path_from_url(url: &str) -> AppResult<String> {
     })
 }
 
-/// Map GitLab's MR state onto the neutral `"OPEN"/"CLOSED"/"MERGED"` the frontend
-/// expects (it treats `locked` like closed).
+/// Map GitLab's MR state onto the neutral `"OPEN"/"CLOSED"/"MERGED"/"MERGING"`. Read by
+/// `from_glab_mr`'s rows (the list legs request opened/closed/merged, never locked), the
+/// MR detail read and `merge_state_from`; `locked` (a merge running) is never closed.
 fn map_mr_state(state: &str) -> String {
     match state {
         "opened" => "OPEN".to_string(),
         "merged" => "MERGED".to_string(),
-        "closed" | "locked" => "CLOSED".to_string(),
+        "closed" => "CLOSED".to_string(),
+        "locked" => "MERGING".to_string(),
         other => other.to_ascii_uppercase(),
     }
 }
@@ -797,6 +799,12 @@ where
     T: Default + Deserialize<'de>,
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// A PR/MR's delete-source-branch flag, read from a field kept as raw JSON so a
+/// non-boolean value reads as unknown instead of failing the whole detail parse.
+pub(crate) fn delete_flag(raw: Option<&serde_json::Value>) -> Option<bool> {
+    raw.and_then(serde_json::Value::as_bool)
 }
 
 /// A GitLab user as embedded in MR/note payloads.
@@ -1790,7 +1798,7 @@ pub async fn list_prs_page(
 
 /// The PR-list state's GitLab server states. `locked` is never requested: GitLab's
 /// `state=closed` omits locked MRs, so a transiently locked MR (which
-/// [`map_mr_state`] renders as CLOSED) is absent from the unmerged list by design.
+/// [`map_mr_state`] renders as MERGING) is absent from the unmerged list by design.
 fn mr_list_states(state: &str) -> AppResult<&'static [&'static str]> {
     match state {
         "open" => Ok(&["opened"]),
@@ -2247,6 +2255,10 @@ struct GlabMrChanges {
     /// The MR's conversation is locked (only project members may comment).
     #[serde(default, deserialize_with = "null_to_default")]
     discussion_locked: bool,
+    /// The MR's own "Delete source branch" choice (`should_remove_source_branch` stays
+    /// null until a merge, so it can't stand in). Raw JSON, read through `delete_flag`.
+    #[serde(default)]
+    force_remove_source_branch: Option<serde_json::Value>,
 }
 
 /// The MR's head pipeline and its owning project, which can differ from the target.
@@ -2843,6 +2855,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         viewer_can_comment,
         // GitLab has no separate emoji permission; a lock blocks both for non-members.
         viewer_can_react: viewer_can_comment,
+        delete_source_branch: delete_flag(mr.force_remove_source_branch.as_ref()),
     })
 }
 
@@ -7440,6 +7453,81 @@ async fn project_merge_shape(repo_path: &str, enc: &str) -> AppResult<GlMergeSha
     merge_shape_from(&out.stdout_lossy())
 }
 
+const GL_CLOSED_REFUSAL: &str = "This merge request was closed on GitLab, so nothing was merged. Reopen it if you still want to merge it.";
+const GL_MERGED_REFUSAL: &str =
+    "This merge request was already merged on GitLab, so there was nothing left to merge.";
+const GL_LOCKED_REFUSAL: &str = "This merge request is already being merged on GitLab, so this merge wasn't sent. Check it again in a moment to see the result.";
+const GL_UNREACHABLE_LEAD: &str = "Couldn't reach GitLab to confirm this merge request is still open, so nothing was merged. Try again.";
+const GL_UNCONFIRMED_LEAD: &str = "Couldn't confirm this merge request is still open on GitLab, so nothing was merged. Try again.";
+
+/// Reads the merge request ahead of its first write. Its own function so the write
+/// roster never sees this GET inside the merge body.
+async fn mr_guard_read(repo_path: &str, enc: &str, number: u64) -> AppResult<GlabOutput> {
+    run_glab(
+        Some(repo_path),
+        &["api", &format!("projects/{enc}/merge_requests/{number}")],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+}
+
+/// Reads GitLab's raw `state`, not `map_mr_state`'s neutral value:
+/// `opened` or an unknown state lets the merge go; `closed`, `merged` and `locked`
+/// refuse, and so does a read that failed or didn't answer with a JSON object.
+fn gl_merge_guard_outcome(read: AppResult<GlabOutput>) -> AppResult<()> {
+    let out = read.map_err(gl_merge_guard_failed)?;
+    // Strict UTF-8: a lossy decode turns an invalid byte in `state` into an unknown state,
+    // which would proceed.
+    let value = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+        Ok(value) if value.is_object() => value,
+        Ok(_) => {
+            return Err(AppError::Glab(gl_error_message(
+                GL_UNCONFIRMED_LEAD,
+                "could not parse the merge request: the answer was not a JSON object".into(),
+            )))
+        }
+        Err(e) => {
+            return Err(AppError::Glab(gl_error_message(
+                GL_UNCONFIRMED_LEAD,
+                format!("could not parse the merge request: {e}"),
+            )))
+        }
+    };
+    let refusal = match value.get("state").and_then(serde_json::Value::as_str) {
+        Some("closed") => GL_CLOSED_REFUSAL,
+        Some("merged") => GL_MERGED_REFUSAL,
+        Some("locked") => GL_LOCKED_REFUSAL,
+        _ => return Ok(()),
+    };
+    Err(AppError::Glab(refusal.into()))
+}
+
+/// A failed state read refuses the merge. A transport cause leads with "Couldn't reach",
+/// which the frontend's network rewrite keeps; a missing glab passes through as itself.
+fn gl_merge_guard_failed(e: AppError) -> AppError {
+    let (lead, detail) = match e {
+        AppError::GlabNotFound => return e,
+        AppError::Timeout(s) => (
+            GL_UNREACHABLE_LEAD,
+            format!("GitLab CLI timed out after {s}s."),
+        ),
+        AppError::Glab(text) => {
+            let offline = matches!(
+                crate::forge::session::classify_glab_failure(&text.to_lowercase()),
+                crate::forge::session::GlabFailure::Offline
+            );
+            let lead = if offline {
+                GL_UNREACHABLE_LEAD
+            } else {
+                GL_UNCONFIRMED_LEAD
+            };
+            (lead, text)
+        }
+        other => (GL_UNCONFIRMED_LEAD, crate::forge::error_detail(other)),
+    };
+    AppError::Glab(gl_error_message(lead, detail))
+}
+
 fn merge_shape_from(body: &str) -> AppResult<GlMergeShape> {
     serde_json::from_str(body)
         .map_err(|e| gl_unreadable("the project's merge settings", e.to_string()))
@@ -7575,6 +7663,9 @@ async fn merge_mr_inner(
     };
     // From here `squash` is the value sent, in both PUTs.
     let squash = shape.map_or(squash, |s| gl_policy_squash(&s.squash_option, squash));
+    // The state guard is the last read before the first write, so the settings read's
+    // wait can't widen the window in which the merge request closes unseen.
+    gl_merge_guard_outcome(mr_guard_read(repo_path, &enc, number).await)?;
     // GitLab's merge-time `squash` / `should_remove_source_branch` params can SET but not
     // CLEAR the MR's persisted `squash` / `remove_source_branch` attributes (and the
     // deferred merge reads them inconsistently) — so the attributes are set first and a
@@ -7684,7 +7775,7 @@ pub struct GitLabMrMergeState {
     /// MR.head_pipeline.web_url; "" when no pipeline.
     pub pipeline_url: String,
     /// MR.state is "locked": GitLab holds the MR while a merge runs, and
-    /// [`map_mr_state`] files that state under CLOSED.
+    /// [`map_mr_state`] maps that state to MERGING.
     pub locked: bool,
     /// MR.state through [`map_mr_state`]; "" when GitLab sent none.
     pub state: String,
@@ -18736,7 +18827,7 @@ mod tests {
     fn mr_state_maps_to_neutral() {
         assert_eq!(map_mr_state("opened"), "OPEN");
         assert_eq!(map_mr_state("closed"), "CLOSED");
-        assert_eq!(map_mr_state("locked"), "CLOSED");
+        assert_eq!(map_mr_state("locked"), "MERGING");
         assert_eq!(map_mr_state("merged"), "MERGED");
     }
 
@@ -18783,7 +18874,7 @@ mod tests {
     }
 
     /// `locked` is the raw mid-merge state alone; `state` is the neutral mapping the
-    /// list reads, so a locked MR still says CLOSED there.
+    /// slim merge-state read returns, so a locked MR says MERGING there.
     #[test]
     fn mr_merge_state_reports_the_lock_beside_the_neutral_state() {
         let read = |state: serde_json::Value| {
@@ -18792,7 +18883,7 @@ mod tests {
             )
         };
         for (raw, locked, state) in [
-            ("locked", true, "CLOSED"),
+            ("locked", true, "MERGING"),
             ("merged", false, "MERGED"),
             ("closed", false, "CLOSED"),
             ("opened", false, "OPEN"),
@@ -18834,7 +18925,7 @@ mod tests {
             ]
         );
         assert_eq!(wire["locked"], serde_json::json!(true));
-        assert_eq!(wire["state"], serde_json::json!("CLOSED"));
+        assert_eq!(wire["state"], serde_json::json!("MERGING"));
     }
 
     /// `has_conflicts` OUTRANKS `detailed_merge_status`: the detailed status
@@ -19490,6 +19581,180 @@ mod tests {
         match merge_shape_unknown(AppError::InvalidArgument("m".into())) {
             AppError::Glab(t) => assert_eq!(t, format!("{lead}m")),
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// A successful glab run that printed `stdout`, as `run_glab` returns it.
+    fn glab_read(stdout: &[u8]) -> AppResult<GlabOutput> {
+        Ok(GlabOutput {
+            stdout: stdout.to_vec(),
+            stderr: String::new(),
+            code: 0,
+        })
+    }
+
+    #[test]
+    fn gl_merge_guard_outcome_refuses_all_but_an_open_or_unknown_merge_request() {
+        let outcome = |body: &str| gl_merge_guard_outcome(glab_read(body.as_bytes()));
+        let refused = |body: &str| match outcome(body) {
+            Err(AppError::Glab(t)) => t,
+            other => panic!("{body}: {other:?}"),
+        };
+        assert!(
+            outcome(r#"{"iid":1,"state":"opened","detailed_merge_status":"mergeable"}"#).is_ok()
+        );
+        assert_eq!(
+            refused(r#"{"iid":1,"state":"closed","detailed_merge_status":"not_open"}"#),
+            GL_CLOSED_REFUSAL
+        );
+        assert_eq!(
+            refused(r#"{"iid":1,"state":"merged","detailed_merge_status":"not_open"}"#),
+            GL_MERGED_REFUSAL
+        );
+        assert_eq!(refused(r#"{"iid":1,"state":"locked"}"#), GL_LOCKED_REFUSAL);
+        for body in [
+            r#"{"state":"reopened"}"#,
+            r#"{"state":null}"#,
+            "{}",
+            r#"{"state":5}"#,
+            r#"{"state":"Closed"}"#,
+        ] {
+            assert!(outcome(body).is_ok(), "{body}");
+        }
+        for body in ["[]", "\"x\"", "null", "not json", ""] {
+            let text = refused(body);
+            assert_eq!(text.lines().next(), Some(GL_UNCONFIRMED_LEAD), "{body}");
+            assert!(text.lines().nth(1).is_some_and(|l| !l.is_empty()), "{body}");
+        }
+    }
+
+    /// An invalid UTF-8 byte anywhere in the body, the state value included, is a failed
+    /// read, never an unknown state that proceeds.
+    #[test]
+    fn gl_merge_guard_outcome_refuses_a_body_that_is_not_utf8() {
+        for body in [
+            &b"{\"state\":\"clos\xFFed\"}"[..],
+            b"{\"state\":\"opened\",\"title\":\"\xC3\"}",
+        ] {
+            match gl_merge_guard_outcome(glab_read(body)) {
+                Err(AppError::Glab(t)) => {
+                    assert_eq!(t.lines().next(), Some(GL_UNCONFIRMED_LEAD), "{body:?}")
+                }
+                other => panic!("{body:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn gl_merge_guard_outcome_splits_unreachable_from_unconfirmed() {
+        let refused = |e: AppError| match gl_merge_guard_outcome(Err(e)) {
+            Err(AppError::Glab(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            refused(AppError::Timeout(30)),
+            format!("{GL_UNREACHABLE_LEAD}\nGitLab CLI timed out after 30s.")
+        );
+        let offline = r#"Get "https://gitlab.com/api/v4/projects/1/merge_requests/1": dial tcp 140.82.112.6:443: i/o timeout"#;
+        assert_eq!(
+            refused(AppError::Glab(offline.into())),
+            format!("{GL_UNREACHABLE_LEAD}\n{offline}")
+        );
+        // A throttle that also names a network failure is not a transport failure.
+        let limited = "glab: 429 Too Many Requests: connection refused";
+        assert_eq!(
+            refused(AppError::Glab(limited.into())),
+            format!("{GL_UNCONFIRMED_LEAD}\n{limited}")
+        );
+        let missing = "glab: 404 Not Found (HTTP 404)";
+        assert_eq!(
+            refused(AppError::Glab(missing.into())),
+            format!("{GL_UNCONFIRMED_LEAD}\n{missing}")
+        );
+        assert_eq!(
+            refused(AppError::Command("spawn failed".into())),
+            format!("{GL_UNCONFIRMED_LEAD}\nspawn failed")
+        );
+        assert!(matches!(
+            gl_merge_guard_outcome(Err(AppError::GlabNotFound)),
+            Err(AppError::GlabNotFound)
+        ));
+    }
+
+    /// Pins the refusal copy; the help guide's merge paragraph paraphrases it.
+    #[test]
+    fn gl_merge_refusal_consts_keep_their_text() {
+        assert_eq!(GL_CLOSED_REFUSAL, "This merge request was closed on GitLab, so nothing was merged. Reopen it if you still want to merge it.");
+        assert_eq!(
+            GL_MERGED_REFUSAL,
+            "This merge request was already merged on GitLab, so there was nothing left to merge."
+        );
+        assert_eq!(GL_LOCKED_REFUSAL, "This merge request is already being merged on GitLab, so this merge wasn't sent. Check it again in a moment to see the result.");
+        assert_eq!(GL_UNREACHABLE_LEAD, "Couldn't reach GitLab to confirm this merge request is still open, so nothing was merged. Try again.");
+        assert_eq!(GL_UNCONFIRMED_LEAD, "Couldn't confirm this merge request is still open on GitLab, so nothing was merged. Try again.");
+    }
+
+    const MR_GUARD: &str = "gl_merge_guard_outcome(mr_guard_read(repo_path, &enc, number).await)?;";
+    const MR_ATTR_PUT: &str = "\"PUT\", &mr_endpoint";
+    const MR_MERGE_PUT: &str = "json_body_args(\"PUT\", &endpoint)";
+
+    /// Over a flattened merge body: the state guard runs, propagating its refusal, after
+    /// the project-shape read and before the attributes PUT and the merge PUT.
+    fn merge_body_guards_state_first(body: &str) -> bool {
+        let at = |needle: &str| body.find(needle);
+        let (Some(guard), Some(shape), Some(attr), Some(merge)) = (
+            at(MR_GUARD),
+            at("project_merge_shape("),
+            at(MR_ATTR_PUT),
+            at(MR_MERGE_PUT),
+        ) else {
+            return false;
+        };
+        body.matches(MR_GUARD).count() == 1
+            && !body.contains(&format!("let _ = {}", MR_GUARD.trim_end_matches("?;")))
+            && shape < guard
+            && guard < attr
+            && guard < merge
+    }
+
+    #[test]
+    fn merge_mr_inner_reads_state_before_any_write() {
+        let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let body = flat(&crate::github::repo_meta::tests::wiring_body(
+            include_str!("gitlab.rs"),
+            "merge_mr_inner",
+        ));
+        assert!(merge_body_guards_state_first(&body), "{body}");
+        let removed = body.replacen(&format!("{MR_GUARD} "), "", 1);
+        let moved_after = |anchor: &str| {
+            let from = removed.find(anchor).unwrap();
+            let at = from + removed[from..].find(';').unwrap() + 1;
+            format!("{} {MR_GUARD}{}", &removed[..at], &removed[at..])
+        };
+        let shape_read = "let read = project_merge_shape(";
+        let mutants = [
+            ("removed", removed.clone()),
+            (
+                "before the shape read",
+                removed.replacen(shape_read, &format!("{MR_GUARD} {shape_read}"), 1),
+            ),
+            ("after the attributes run", moved_after(MR_ATTR_PUT)),
+            (
+                "fail-open .ok()",
+                body.replacen(MR_GUARD, &MR_GUARD.replace(")?;", ").ok();"), 1),
+            ),
+            (
+                "fail-open let _",
+                body.replacen(
+                    MR_GUARD,
+                    &format!("let _ = {};", MR_GUARD.trim_end_matches("?;")),
+                    1,
+                ),
+            ),
+        ];
+        for (what, mutant) in mutants {
+            assert_ne!(mutant, body, "{what}");
+            assert!(!merge_body_guards_state_first(&mutant), "{what}: {mutant}");
         }
     }
 
@@ -21126,9 +21391,34 @@ mod tests {
     }
 
     #[test]
+    fn mr_changes_delete_source_branch_reads_only_booleans() {
+        // A non-boolean flag reads as unknown and never fails the detail parse.
+        let base = r#""iid": 1, "web_url": "u", "title": "t", "target_branch": "main",
+            "source_branch": "f", "state": "opened""#;
+        let read = |field: &str| {
+            let mr: GlabMrChanges = serde_json::from_str(&format!("{{ {base}{field} }}"))
+                .unwrap_or_else(|e| panic!("{field}: {e}"));
+            delete_flag(mr.force_remove_source_branch.as_ref())
+        };
+        assert_eq!(read(r#", "force_remove_source_branch": true"#), Some(true));
+        assert_eq!(
+            read(r#", "force_remove_source_branch": false"#),
+            Some(false)
+        );
+        assert_eq!(read(r#", "force_remove_source_branch": null"#), None);
+        assert_eq!(read(""), None);
+        for odd in [r#""yes""#, "1", "{}"] {
+            assert_eq!(
+                read(&format!(r#", "force_remove_source_branch": {odd}"#)),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn mr_poll_state_maps_locked_to_open() {
         // `locked` is a transient mid-merge state — the poll must treat it as OPEN,
-        // NOT closed (map_mr_state maps it to CLOSED for the list panel, but firing a
+        // NOT closed (map_mr_state maps it to MERGING for the detail view, but firing a
         // spurious "closed" notification while GitLab locks the MR to merge is wrong).
         assert_eq!(map_mr_poll_state("opened"), "OPEN");
         assert_eq!(map_mr_poll_state("locked"), "OPEN");

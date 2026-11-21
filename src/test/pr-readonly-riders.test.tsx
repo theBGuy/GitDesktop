@@ -38,6 +38,7 @@ import {
   ReviewThreadCard,
   ThreadReplyHoldContext,
 } from "@/features/pulls/ReviewThreads";
+import { TabPanel } from "@/features/repository/TabPanel";
 import { attachmentDiscard, attachmentStage } from "@/lib/attachments/api";
 import {
   forgeAddReaction,
@@ -48,6 +49,7 @@ import {
   forgePrUnrequestChanges,
   forgePrView,
   forgeStatus,
+  gitRemotes,
 } from "@/lib/git/api";
 import {
   type ForgeStatus,
@@ -56,6 +58,7 @@ import {
   type PrThreadOut,
   type ReviewThreadOut,
 } from "@/lib/git/types";
+import { lensKey } from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -94,7 +97,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitBranches: vi.fn(async () => []),
   gitDefaultBranch: vi.fn(async () => "main"),
   gitRemotes: vi.fn(async () => ["origin"]),
-  gitStatus: vi.fn(async () => ({
+  // The resolve worktree holds one conflicted file; every other tree is clean.
+  gitStatus: vi.fn(async (repoPath: string) => ({
     branch: {
       name: "main",
       detached: false,
@@ -105,9 +109,32 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
       upstreamGone: false,
       upstreamRemote: null,
     },
-    entries: [],
+    entries:
+      repoPath === "C:/wt/resolve-7"
+        ? [{ path: "src/a.ts", staged: null, unstaged: "conflicted" }]
+        : [],
   })),
   readRepoBranchRules: vi.fn(async () => null),
+  // The GitHub fork's extra reads (the landing-focus frame cases).
+  forgeRepoLabels: vi.fn(async () => []),
+  ghTokenScopes: vi.fn(async () => ({ scopes: [], classic: false })),
+  ghItemProjects: vi.fn(async () => ({ items: [], truncated: false })),
+  gitRemoteUrl: vi.fn(async () => "https://github.com/owner/repo.git"),
+  forgePrListPage: vi.fn(async () => ({ rows: [], capped: false })),
+  // The conflict-resolution cases; read only on the Pull requests tab.
+  forgePrMergeability: vi.fn(async () => ({
+    state: "conflicting",
+    detail: null,
+  })),
+  gitConflictPreview: vi.fn(async () => ({ status: "unknown", conflicts: [] })),
+  gitFindRemotePrResolve: vi.fn(async () => null),
+  gitMergeRemotePr: vi.fn(async () => ({
+    status: "conflicts",
+    conflicts: ["src/a.ts"],
+    worktreePath: "C:/wt/resolve-7",
+    worktreeId: "wt-7",
+    pushedSha: null,
+  })),
 }));
 // The raw path is the resolver's own "no identity" answer.
 vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
@@ -139,17 +166,41 @@ vi.mock("@/lib/attachments/api", () => ({
   attachmentDiscard: vi.fn(async () => undefined),
 }));
 // The view's lens, which a test flips to re-render the same number on another
-// lens; the real lens gate needs a signed-in GitHub fork this harness lacks.
+// lens. With `real` set the real gate answers instead, for the cases that
+// serve a signed-in GitHub fork and flip the lens through its cache.
 const lensNow = vi.hoisted(() => ({
   value: "origin" as "origin" | "upstream",
+  real: false,
 }));
-vi.mock("@/lib/repo-lens/queries", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/repo-lens/queries")>()),
-  useRepoLens: () => lensNow.value,
-}));
+vi.mock("@/lib/repo-lens/queries", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/repo-lens/queries")>();
+  return {
+    ...actual,
+    useRepoLens: (repo: string) =>
+      // biome-ignore lint/correctness/useHookAtTopLevel: `real` is set before a test renders, so one mount always takes the same arm
+      lensNow.real ? actual.useRepoLens(repo) : lensNow.value,
+  };
+});
 vi.mock("@/lib/jira/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/jira/store")>()),
   getJiraLink: vi.fn(async () => null),
+}));
+// The resolve worktree's one conflicted file, as its editor reads it.
+vi.mock("@/lib/git/conflict", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
+  conflictSides: vi.fn(async () => ({
+    working: "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n",
+    base: "base\n",
+    ours: "ours\n",
+    theirs: "theirs\n",
+    aiIgnored: { ignored: false, unreadable: false },
+    workingExists: true,
+    workingUndecodable: false,
+    undecodable: false,
+    workingHash: "deadbeef",
+    workingMatchesSurvivor: null,
+  })),
 }));
 
 const REPO = "C:/repo";
@@ -177,6 +228,83 @@ const GITLAB = {
     mrRequestChanges: true,
     mrThreadReply: true,
     mrCommentEdit: true,
+  },
+} as unknown as ForgeStatus;
+
+/** A signed-in GitHub fork: with an `upstream` remote, the lens gate passes. */
+const GITHUB_FORK = {
+  ...GITLAB,
+  provider: "github",
+  host: "github.com",
+  capabilities: {
+    pullRequests: true,
+    draftPrs: true,
+    issues: true,
+    labels: true,
+    milestones: true,
+    reactions: true,
+    discussions: true,
+    stars: true,
+    ci: true,
+    webhooks: true,
+    approvals: true,
+    securityFindings: true,
+  },
+  // Every flag GitHub's `Implemented::for_provider` turns on (forge/model.rs).
+  implemented: {
+    pullRequests: true,
+    issues: true,
+    ci: true,
+    releases: true,
+    insights: true,
+    repoActions: true,
+    publish: true,
+    repoSettings: true,
+    issueComment: true,
+    issueState: true,
+    mrComment: true,
+    mrState: true,
+    mrCommentEdit: true,
+    issueCommentEdit: true,
+    mrMerge: true,
+    issueLabels: true,
+    mrLabels: true,
+    issueAssignees: true,
+    issueCreate: true,
+    mrCreate: true,
+    ciRerun: true,
+    ciJobRerun: true,
+    ciCancel: true,
+    ciDispatch: true,
+    releaseCreate: true,
+    releaseEdit: true,
+    mrAssignees: true,
+    mrReviewers: true,
+    issueEdit: true,
+    mrEdit: true,
+    issueMilestone: true,
+    issueReactions: true,
+    mrReactions: true,
+    issueLock: true,
+    issueTransfer: true,
+    issueDelete: true,
+    mrReviewThreads: true,
+    mrThreadReply: true,
+    mrThreadResolve: true,
+    mrThreadCommentEdit: true,
+    commitComments: true,
+    mrThreadCreate: true,
+    mrReviewSubmit: true,
+    repoSearch: true,
+    repoForkByName: true,
+    repoStar: true,
+    repoReadme: true,
+    forkActivity: true,
+    forkCompare: true,
+    listFilterMine: true,
+    listFilterAuthor: true,
+    listFilterTeam: true,
+    reviewGrouping: true,
   },
 } as unknown as ForgeStatus;
 
@@ -278,6 +406,7 @@ beforeEach(() => {
   vi.mocked(forgePrRequestChanges).mockClear();
   closePr.mockClear();
   lensNow.value = "origin";
+  lensNow.real = false;
   useConfirm.setState({ request: null, requestHold: null });
   useUiStore.setState({ repoPath: REPO });
   spies = [
@@ -671,11 +800,13 @@ async function mounted() {
   return client;
 }
 
-/** `mounted`, with a re-render of the same view onto another number. */
-async function mountedWith() {
+/** `mounted`, with a re-render of the same view onto another number;
+ *  `seed` fills the client's cache before the first render. */
+async function mountedWith(seed?: (client: QueryClient) => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  seed?.(client);
   const view = (number: number) => (
     <QueryClientProvider client={client}>
       <RemotePrView repoPath={REPO} number={number} />
@@ -1317,5 +1448,194 @@ describe("a refused reaction on the pull request body", () => {
     expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toMatch(
       /^Couldn't reach GitHub/,
     );
+  });
+});
+
+describe("RemotePrView landing focus", () => {
+  /** The view's tabIndex -1 host: the root its wrapper renders. */
+  const host = () => screen.getByTestId("view").firstElementChild;
+  const outsideInput = () => {
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.focus();
+    return input;
+  };
+  afterEach(() => document.body.replaceChildren());
+
+  /** A board card in one tab, the PR view in another, one tab shown. */
+  function Tabs({ viewShown, qc }: { viewShown: boolean; qc: QueryClient }) {
+    return (
+      <QueryClientProvider client={qc}>
+        <TabPanel active={!viewShown}>
+          <button type="button">card</button>
+        </TabPanel>
+        <TabPanel active={viewShown}>
+          <div data-testid="view">
+            <RemotePrView repoPath={REPO} number={7} />
+          </div>
+        </TabPanel>
+      </QueryClientProvider>
+    );
+  }
+  const client = () =>
+    new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const visibleView = () => (
+    <QueryClientProvider client={client()}>
+      <div data-testid="view">
+        <RemotePrView repoPath={REPO} number={7} />
+      </div>
+    </QueryClientProvider>
+  );
+
+  // The landing assertions read the commit that landed the view, before the
+  // details answer and an arm change could run the frame rescue.
+  it("takes focus a reveal leaves on the hidden tab's card", () => {
+    const qc = client();
+    const { rerender } = render(<Tabs viewShown={false} qc={qc} />);
+    expect(host()).toHaveAttribute("tabindex", "-1");
+    screen.getByRole("button", { name: "card" }).focus();
+    rerender(<Tabs viewShown qc={qc} />);
+    expect(document.activeElement).toBe(host());
+  });
+
+  it("takes it again on a second visit to the same instance", () => {
+    const qc = client();
+    const { rerender } = render(<Tabs viewShown qc={qc} />);
+    expect(document.activeElement).toBe(host());
+    rerender(<Tabs viewShown={false} qc={qc} />);
+    const card = screen.getByRole("button", { name: "card" });
+    card.focus();
+    expect(document.activeElement).toBe(card);
+    rerender(<Tabs viewShown qc={qc} />);
+    expect(document.activeElement).toBe(host());
+  });
+
+  it("leaves focus on a visible element outside through a reveal", () => {
+    const qc = client();
+    const { rerender } = render(<Tabs viewShown={false} qc={qc} />);
+    const input = outsideInput();
+    rerender(<Tabs viewShown qc={qc} />);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("takes focus on mount while focus is on <body>", () => {
+    expect(document.activeElement).toBe(document.body);
+    render(visibleView());
+    expect(document.activeElement).toBe(host());
+  });
+
+  it("leaves a focused visible input alone on mount", () => {
+    const input = outsideInput();
+    render(visibleView());
+    expect(document.activeElement).toBe(input);
+  });
+
+  /** A signed-in GitHub fork, so the real gate offers the upstream lens; the
+   *  upstream read never answers. */
+  function forkWithPendingUpstream() {
+    lensNow.real = true;
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB_FORK);
+    vi.mocked(gitRemotes).mockResolvedValueOnce(["origin", "upstream"]);
+    vi.mocked(forgePrView).mockImplementation(async (_repo, _number, lens) =>
+      lens === "upstream"
+        ? new Promise<PrDetails>(() => undefined)
+        : pr({ url: "https://github.com/owner/repo/pull/7" }),
+    );
+  }
+  const seedOrigin = (qc: QueryClient) =>
+    qc.setQueryData(lensKey(REPO), "origin");
+  const toUpstream = (qc: QueryClient) =>
+    act(() => {
+      qc.setQueryData(lensKey(REPO), "upstream");
+    });
+
+  it("lands on the host when a frame change unmounts the focused control", async () => {
+    // The upstream lens never answers and has no placeholder to keep (the lens
+    // is an identity axis), so its loading frame replaces origin's content.
+    forkWithPendingUpstream();
+    const { client, rerender } = await mountedWith(seedOrigin);
+    const focused = box();
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
+    toUpstream(client);
+    rerender(7);
+    // The loading frame's composer is another node: the content arm's left.
+    expect(focused.isConnected).toBe(false);
+    // The host is the root of render()'s container.
+    expect(document.activeElement).toHaveAttribute("tabindex", "-1");
+    expect(document.activeElement?.parentElement?.parentElement).toBe(
+      document.body,
+    );
+  });
+
+  it("leaves focus on a visible element outside through a frame change", async () => {
+    forkWithPendingUpstream();
+    const { client, rerender } = await mountedWith(seedOrigin);
+    const focused = box();
+    const input = outsideInput();
+    toUpstream(client);
+    rerender(7);
+    // The loading frame's composer is another node: the content arm's left.
+    expect(focused.isConnected).toBe(false);
+    expect(document.activeElement).toBe(input);
+  });
+
+  describe("the conflict-resolution view", () => {
+    // The view owns the live selection on the Pull requests tab, as when opened.
+    beforeEach(() =>
+      useUiStore.setState({
+        repoTab: "pulls",
+        selectedPr: { kind: "remote", id: "7" },
+      }),
+    );
+    afterEach(() =>
+      useUiStore.setState({ repoTab: "changes", selectedPr: null }),
+    );
+
+    /** Presses the banner's Resolve and waits for the resolve view. */
+    async function resolveFrom(qc: QueryClient) {
+      const { rerender } = render(<Tabs viewShown qc={qc} />);
+      const press = await screen.findByRole(
+        "button",
+        { name: "Resolve conflicts" },
+        { timeout: 3000 },
+      );
+      await waitFor(() => expect(press).not.toHaveAttribute("aria-disabled"));
+      press.focus();
+      fireEvent.click(press);
+      await screen.findByRole("option", { name: /a\.ts/ });
+      expect(press.isConnected).toBe(false);
+      return rerender;
+    }
+    /** The resolve view's root: the host, holding the PR's title row and no
+     *  comment box (the content arm's). */
+    const expectOnResolveRoot = () => {
+      const root = host();
+      expect(document.activeElement).toBe(root);
+      expect(root).toHaveAttribute("tabindex", "-1");
+      expect(root).toContainElement(
+        screen.getByRole("heading", { name: /Merge request seven/ }),
+      );
+      expect(screen.queryByRole("textbox", { name: "Leave a comment" })).toBe(
+        null,
+      );
+    };
+
+    it("lands the focus the unmounted Resolve button dropped on the resolve root", async () => {
+      await resolveFrom(client());
+      expectOnResolveRoot();
+    });
+
+    it("takes focus on <body> back to the resolve root when its tab is shown again", async () => {
+      const qc = client();
+      const rerender = await resolveFrom(qc);
+      rerender(<Tabs viewShown={false} qc={qc} />);
+      // jsdom keeps focus on the hidden host through blur(); a removed focused
+      // node is what drops it to <body>.
+      outsideInput().remove();
+      expect(document.activeElement).toBe(document.body);
+      rerender(<Tabs viewShown qc={qc} />);
+      expectOnResolveRoot();
+    });
   });
 });

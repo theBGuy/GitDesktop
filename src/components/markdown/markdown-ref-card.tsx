@@ -28,7 +28,7 @@ import {
   type PrDetails,
   type RemoteLens,
 } from "@/lib/git/types";
-import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
+import { type PrNoun, prPill, prStateWord } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -397,7 +397,7 @@ function RefCardBody({
           <span aria-hidden="true">{OPEN_OR_DRAFT_VISIBLE}</span>
         ) : (
           <span className="capitalize" aria-hidden="true">
-            {item.isDraft ? "draft" : item.state.toLowerCase()}
+            {item.isDraft ? "draft" : prStateWord(item.state)}
           </span>
         )}
         <span className="text-muted-foreground tabular-nums">{label}</span>

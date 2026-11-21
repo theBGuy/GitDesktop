@@ -3,48 +3,51 @@
 // helpers or navigators in the panel; the wait drawn as busy on all three
 // surfaces; the opener recorded through the hook's `noteOpener`; a held Enter
 // on a table or roadmap row opening once and a held key on a group header
-// toggling once; every open route and the arrival announcer reaching the hook
-// (App mounting the announcer once); App mounting the open repository's lens
+// toggling once; a double click on a roadmap title opening once; every open
+// route and the arrival announcer reaching the hook (App mounting the
+// announcer once); App mounting the open repository's lens
 // keeper once outside every view condition, in the return that renders every
 // view able to cover an open repository; the open context the hook reads; the
 // user's project and view picks (and the creates and the delete whose
 // continuations pick) and the view delete, each moving the epoch first; the
-// Projects anchor provider registered once for the Projects tab; and the
-// arguments it hands boardAnchorAnswer. The panel can't render under jsdom, so
+// Projects anchor provider registered once for the Projects tab; the
+// arguments it hands boardAnchorAnswer; and the latest view-creating request
+// owning the view pick. The panel can't render under jsdom, so
 // its wiring is read from source; the open hook's behaviour is pinned in
 // src/test/board-card-open.test.tsx, the anchor answer's in
 // src/test/board-return.test.tsx.
 //
-// Each check fails closed on a file it can't read or a shape it can't find, and each
-// has an in-memory mutant that must turn it red. Files are read with CRLF folded to
-// LF, so a Windows checkout and the CI's LF checkout give the same verdicts.
+// Each check fails closed on a file it can't read or a shape it can't find,
+// and each has an in-memory mutant that must turn it red. Files are read with
+// CRLF folded to LF, so a Windows checkout and the CI's LF checkout give the
+// same verdicts.
 //
 // CONTRACT. These are source-shape pins. Green means each pinned shape is
 // present, the stated number of times, at the named site, in the stated textual
-// order. P2's surface compares, P10, P11, P12, P14, P14b and P15 read code with
-// comments stripped; the other reads are of raw text, where a shape left in a
-// comment can count (P1 fails on a name in a comment by design). No panel code
-// is run (P12 alone models the two outcomes of the lens ternary it matched), so
-// they cannot see what a pinned expression computes once more is written around
-// it (`=== openingItemId && false`), which paths reach a pinned statement from
-// outside its own block (a narrowed key test around onTableKeyDown's guarded
-// toggle), what runs between a note and its call other than a `return` (a
-// `throw`, or the call put under a condition), what a pinned name is read from
-// (the slug read behind the memo's `repoSlug`), or a new site of another shape
-// (a pick or a view write outside the listed handlers). The typecheck catches
-// an unread `noteOpener` parameter and a narrowed chord's dead compare. A count
-// of a literal attribute also counts a longer attribute that ends in the pinned
-// text (`data-onOpen={openItem}`), the same accepted limit as a copy left in a
-// comment: P2's panel side, P6, P8 and P13. P11's `onValueChange` handlers and
-// its `onClear` count, and P2's surface `item=` and `busy=` reads, are matched
-// at an attribute boundary and do not, though a namespaced attribute
-// (`x:onValueChange={…}`) still passes it. Stripped code still holds string
-// literals, so a copy of a pinned shape inside a string counts as the shape:
-// P11's picks (`void "switchProject(created.id)"`), its hotkey line and its
-// refusal token, and P10's and P15's tag and import counts (P15's view tags
-// included). P15 reads the keeper's tag at brace depth zero of App's last
-// `return (…)`, counting every brace (one inside a string counts); it cannot
-// see a condition inside the keeper itself
+// order. P2's surface compares, P4b, P10, P11, P12, P14, P14b, P15 and P16 read
+// code with comments stripped; the other reads are of raw text, where a shape
+// left in a comment can count (P1 fails on a name in a comment by design). No
+// panel code is run (P12 alone models the two outcomes of the lens ternary it
+// matched), so they cannot see what a pinned expression computes once more is
+// written around it (`=== openingItemId && false`), which paths reach a pinned
+// statement from outside its own block (a narrowed key test around
+// onTableKeyDown's guarded toggle), what runs between a note and its call other
+// than a `return` (a `throw`, or the call put under a condition), what a pinned
+// name is read from (the slug read behind the memo's `repoSlug`), or a new site
+// of another shape (a pick or a view write outside the listed handlers). The
+// typecheck catches an unread `noteOpener` parameter and a narrowed chord's
+// dead compare. A count of a literal attribute also counts a longer attribute
+// that ends in the pinned text (`data-onOpen={openItem}`), the same accepted
+// limit as a copy left in a comment: P2's panel side, P6, P8 and P13. P11's
+// `onValueChange` handlers and its `onClear` count, and P2's surface `item=`
+// and `busy=` reads, are matched at an attribute boundary and do not, though a
+// namespaced attribute (`x:onValueChange={…}`) still passes it. Stripped code
+// still holds string literals, so a copy of a pinned shape inside a string
+// counts as the shape: P11's picks (`void "switchProject(created.id)"`), its
+// hotkey line and its refusal token, and P10's and P15's tag and import counts
+// (P15's view tags included). P15 reads the keeper's tag at brace depth zero of
+// App's last `return (…)`, counting every brace (one inside a string counts);
+// it cannot see a condition inside the keeper itself
 // (src/test/open-repo-lens-keeper.test.tsx covers what the keeper holds) or a
 // wrapper component that mounts it. It reads the covering views by their tags,
 // so it cannot see an early return that renders none of them
@@ -59,8 +62,18 @@
 // name at any depth of the call's arguments; it cannot see who else writes or
 // spends `openerRef` (a bracket-spelled spend included), a `return` between the
 // spend and the call, or what `boardAnchorAnswer` does with it (the table in
-// src/test/board-return.test.tsx does). An equivalent rewrite turns a pin red
-// by design: re-point the pin.
+// src/test/board-return.test.tsx does). P4b reads the roadmap's `e.detail <= 1`
+// in the `if` beside its title test, not what `detail` a real click carries
+// (the card's and the table's guards are exercised in
+// src/test/board-card-chord-space.test.tsx and
+// src/test/board-table-title-click.test.tsx). P16 reads the counter by name and
+// its bump and compare by their spelled text, and counts every use of that name
+// in each view create (its bump and its compare, nothing else), and holds each
+// create to one use of the name `setPendingViewPick`, so it cannot see a write
+// to the ref or a pick through another name, a compare written around
+// (`|| true`), or a `return` between the bump and the write. A pick whose
+// name is spelled with a Unicode escape (`setPendingView\u0050ick`) is not
+// seen. An equivalent rewrite turns a pin red by design: re-point the pin.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -238,6 +251,43 @@ function checkP4(panel) {
       errors.push(`onTableKeyDown's ${name}( is not skipped on e.repeat`);
   }
   return errors;
+}
+
+/** The condition of the `if (…)` that directly guards the first `call` in
+ *  `block` (the call comes AFTER the condition, with nothing but whitespace
+ *  between them), or null. A call inside the condition is not guarded by it. */
+function guardOf(block, call) {
+  const at = block.search(call);
+  if (at === -1) return null;
+  const heads = [...block.slice(0, at).matchAll(/(?<![\w$])if\s*\(/g)];
+  const head = heads[heads.length - 1];
+  if (head === undefined) return null;
+  const cond = balanced(block, head.index + head[0].length - 1);
+  if (cond === null) return null;
+  const end = head.index + head[0].length - 1 + cond.length;
+  if (at < end) return null;
+  return block.slice(end, at).trim() === "" ? cond : null;
+}
+
+const ROADMAP_DETAIL = /\be\.detail\s*<=\s*1\b/;
+
+/** P4b: the roadmap grid's click opens a row's item only on the first click of a
+ *  gesture, so a double click on a title opens it once. Its guard sits in the
+ *  same `if` as the title test, ahead of the one `onActivate(` call. */
+function checkP4b(roadmap) {
+  const body = functionBody(uncommented(roadmap), "handleClick");
+  if (body === null) return ["the roadmap has no function handleClick("];
+  const calls = count(body, "onActivate(");
+  if (calls !== 1)
+    return [`the roadmap's handleClick calls onActivate( ${calls} times`];
+  const cond = guardOf(body, /(?<![\w$.])onActivate\(/);
+  if (cond === null || !cond.includes("[data-title-open]"))
+    return ["the roadmap's onActivate( is not guarded by its title-open test"];
+  if (!ROADMAP_DETAIL.test(cond))
+    return [
+      "the roadmap's title open is not skipped on a later click of one gesture (e.detail <= 1)",
+    ];
+  return [];
 }
 
 /** useCardOpen('s argument text, or null. */
@@ -831,6 +881,90 @@ function checkP14b(panel) {
   return [];
 }
 
+const VIEW_REQUEST_DECL = "const viewCreateRequestRef = useRef(0);";
+const VIEW_REQUEST_BUMP = /const request = \+\+viewCreateRequestRef\.current;/;
+const VIEW_REQUEST_COMPARE = /\brequest === viewCreateRequestRef\.current\b/;
+
+/** The two view-creating requests: where each one's block is, and its write. */
+const VIEW_CREATES = [
+  {
+    what: "the new view's submit",
+    block: newViewBranch,
+    write: /\bcreateView\.mutateAsync\(/,
+  },
+  {
+    what: "the view duplicate",
+    block: (text) => verbBody(text, "duplicateCurrentView", "duplicate-view"),
+    write: /\bduplicateView\.mutateAsync\(/,
+  },
+];
+
+/** Why one view-creating `block` doesn't bump the request counter as a plain
+ *  statement after its last offline refusal and ahead of its write, or doesn't
+ *  hold its pick to that request, or null. */
+function bumpsAndHolds(block, write) {
+  const at = block.search(write);
+  if (at === -1) return `has no ${write.source}`;
+  const bumps = block.match(new RegExp(VIEW_REQUEST_BUMP.source, "g")) ?? [];
+  if (bumps.length !== 1)
+    return `bumps the view-create request ${bumps.length} times, want 1`;
+  const bump = block.search(VIEW_REQUEST_BUMP);
+  let depth = 0;
+  for (let i = 0; i < bump; i++) {
+    if ("{([".includes(block[i])) depth += 1;
+    else if ("})]".includes(block[i])) depth -= 1;
+  }
+  if (depth !== 1 || !/[{;}]$/.test(block.slice(0, bump).trimEnd()))
+    return "bumps the view-create request inside a nested block or expression";
+  const refusals = [...block.matchAll(new RegExp(REFUSAL.source, "g"))];
+  const last = refusals[refusals.length - 1];
+  if (last === undefined) return `has no ${REFUSAL.source}`;
+  if (bump < last.index + last[0].length)
+    return `bumps the view-create request before the refusal ${REFUSAL.source}, which it must follow`;
+  if (bump > at) return `bumps the view-create request after ${write.source}`;
+  // Whole identifiers only: a `$` or word character on either side is another name.
+  const picks =
+    block.match(/(?<![\w$])setPendingViewPick(?![\w$])/g)?.length ?? 0;
+  if (picks !== 1) return `names setPendingViewPick ${picks} times, want 1`;
+  const cond = guardOf(block, /(?<![\w$])setPendingViewPick\(created\)/);
+  if (cond === null) return "picks setPendingViewPick(created) under no if (…)";
+  for (const need of [
+    /\bstillShowing\(/,
+    /\bgeneration === pickGenerationRef\.current\b/,
+    VIEW_REQUEST_COMPARE,
+  ])
+    if (!need.test(cond)) return `picks without ${need.source}`;
+  const named = block.match(/\bviewCreateRequestRef\b/g)?.length ?? 0;
+  if (named !== 2)
+    return `names viewCreateRequestRef ${named} times, want 2 (its bump and its compare)`;
+  return null;
+}
+
+/** P16: the latest view-creating request owns the view pick, even when it fails:
+ *  New view and Duplicate view each bump one counter after their offline refusal
+ *  (a refused request writes nothing, so it retires nothing) and before their
+ *  write, and each continuation picks only while its request is still the latest,
+ *  beside its board and pick-generation checks. Inside each, the counter is named
+ *  only by that bump and that compare; nothing else names it. */
+function checkP16(panel) {
+  const src = uncommented(panel);
+  const errors = [];
+  let rest = src;
+  for (const { what, block, write } of VIEW_CREATES) {
+    const text = block(src);
+    const why = text === null ? "can't be found" : bumpsAndHolds(text, write);
+    if (why !== null) errors.push(`${what} ${why}`);
+    if (text !== null) rest = rest.replace(text, "");
+  }
+  const decls = count(rest, VIEW_REQUEST_DECL);
+  const named = rest.match(/\bviewCreateRequestRef\b/g)?.length ?? 0;
+  if (decls !== 1 || named !== 1)
+    errors.push(
+      `outside the two view creates, viewCreateRequestRef is named ${named} times and declared ${decls} times, want its one declaration`,
+    );
+  return errors;
+}
+
 const panel = read(PANEL);
 const app = read("src/App.tsx");
 const surfaces = Object.fromEntries(
@@ -971,6 +1105,27 @@ test("P4: onTableKeyDown skips the open and the header toggle on a repeated key"
     assert.notEqual(bare, panel, `${name}: no change`);
     assert.notDeepEqual(checkP4(bare), [], `${name} unguarded`);
   }
+});
+
+test("P4b: the roadmap's title click opens once per multi-click gesture", () => {
+  const roadmap = surfaces.ProjectsRoadmapView;
+  assert.deepEqual(checkP4b(roadmap), []);
+  const guard = /\s*&&\s*e\.detail\s*<=\s*1\b/;
+  const body = functionBody(roadmap, "handleClick");
+  const why =
+    "the roadmap's title open is not skipped on a later click of one gesture (e.detail <= 1)";
+  const mutants = {
+    "the guard dropped": within(roadmap, body, (b) => b.replace(guard, "")),
+    "the guard widened to a double click": within(roadmap, body, (b) =>
+      b.replace(/e\.detail\s*<=\s*1/, "e.detail <= 2"),
+    ),
+    "the guard left only in a comment": within(roadmap, body, (b) =>
+      b.replace(guard, " // && e.detail <= 1\n"),
+    ),
+  };
+  for (const [label, m] of Object.entries(mutants))
+    assert.deepEqual(checkP4b(m), [why], label);
+  assert.deepEqual(checkP4b(roadmap.replace(/\n/g, "\r\n")), []);
 });
 
 test("P5: the panel hands the hook its arrival announcer", () => {
@@ -1538,11 +1693,135 @@ test("P14b: the panel registers readBoardAnchor once, for the Projects tab", () 
   assert.deepEqual(checkP14b(panel.replace(/\n/g, "\r\n")), []);
 });
 
+test("P16: the latest view-creating request owns the view pick", () => {
+  assert.deepEqual(checkP16(panel), []);
+  const BUMP_LINE =
+    /const request = \+\+viewCreateRequestRef\.current;[^\S\n]*\n[^\S\n]*/;
+  const BUMP = "const request = ++viewCreateRequestRef.current;";
+  const REFUSE = "if (refuseWhileOffline()) return;";
+  const TRY_END = /\} catch \{\s*return;\s*\}/;
+  const drop = (b) => b.replace(BUMP_LINE, "");
+  const NAMED_THRICE =
+    "names viewCreateRequestRef 3 times, want 2 (its bump and its compare)";
+  const edits = {
+    "bump removed": [drop, "bumps the view-create request 0 times, want 1"],
+    "compare removed": [
+      (b) => b.replace(/\s*&&\s*request === viewCreateRequestRef\.current/, ""),
+      "picks without \\brequest === viewCreateRequestRef\\.current\\b",
+    ],
+    "bump above the offline refusal": [
+      (b) => drop(b).replace(REFUSE, () => `${BUMP}\n${REFUSE}`),
+      "bumps the view-create request before the refusal \\brefuseWhileOffline\\(\\), which it must follow",
+    ],
+    "bump below the write": [
+      (b) => drop(b).replace(TRY_END, (end) => `${end}\n${BUMP}`),
+      null,
+    ],
+    "the counter reset before the bump": [
+      (b) =>
+        b.replace(BUMP, () => `viewCreateRequestRef.current = 0;\n${BUMP}`),
+      NAMED_THRICE,
+    ],
+    "the counter written after the await": [
+      (b) =>
+        b.replace(
+          TRY_END,
+          (end) => `${end}\nviewCreateRequestRef.current = request;`,
+        ),
+      NAMED_THRICE,
+    ],
+    "a second, unguarded pick": [
+      (b) =>
+        b.replace(
+          "setPendingViewPick(created);",
+          () => "setPendingViewPick(created);\nsetPendingViewPick(created);",
+        ),
+      "names setPendingViewPick 2 times, want 1",
+    ],
+    "a second pick through an optional call": [
+      (b) =>
+        b.replace(
+          "setPendingViewPick(created);",
+          () => "setPendingViewPick(created);\nsetPendingViewPick?.(created);",
+        ),
+      "names setPendingViewPick 2 times, want 1",
+    ],
+    "a second pick spaced from its parenthesis": [
+      (b) =>
+        b.replace(
+          "setPendingViewPick(created);",
+          () => "setPendingViewPick(created);\nsetPendingViewPick (created);",
+        ),
+      "names setPendingViewPick 2 times, want 1",
+    ],
+    "a guarded decoy name ahead of an unguarded pick": [
+      (b) =>
+        b.replace(
+          "setPendingViewPick(created);",
+          () => "$setPendingViewPick(created);\nsetPendingViewPick(created);",
+        ),
+      "picks setPendingViewPick(created) under no if (…)",
+    ],
+    "a decoy name inside the guard, ahead of an unguarded pick": [
+      (b) =>
+        b.replace(
+          /\s*\)\s*setPendingViewPick\(created\);/,
+          () =>
+            " &&\n$setPendingViewPick(created)\n) {}\nsetPendingViewPick(created);",
+        ),
+      "picks setPendingViewPick(created) under no if (…)",
+    ],
+    "the pick moved into its own guard's condition": [
+      (b) => {
+        const pick = b.indexOf("setPendingViewPick(created);");
+        const at = b.lastIndexOf("stillShowing(", pick);
+        const moved = `${b.slice(0, at)}(setPendingViewPick(created), ${b.slice(at)}`;
+        return moved.replace(
+          /\)\s*setPendingViewPick\(created\);/,
+          () => ")) {}",
+        );
+      },
+      "picks setPendingViewPick(created) under no if (…)",
+    ],
+  };
+  for (const { what, block, write } of VIEW_CREATES)
+    for (const [label, [edit, message]] of Object.entries(edits)) {
+      const m = within(panel, block(panel), edit);
+      const why =
+        message ?? `bumps the view-create request after ${write.source}`;
+      assert.deepEqual(checkP16(m), [`${what} ${why}`], `${what}: ${label}`);
+    }
+  // A longer name that starts with the pick's is another identifier.
+  for (const { what, block } of VIEW_CREATES) {
+    const m = within(panel, block(panel), (b) =>
+      b.replace(
+        "setPendingViewPick(created);",
+        () =>
+          "setPendingViewPick(created);\nconst marks = { setPendingViewPick$done: true };",
+      ),
+    );
+    assert.deepEqual(checkP16(m), [], what);
+  }
+  // A third handler naming the counter (a rename bumping it) is seen outside
+  // the two view creates.
+  const renamed = within(panel, functionBody(panel, "submitViewName"), (b) =>
+    b.replace(
+      'if (run?.kind !== "rename-view") return;',
+      () => `if (run?.kind !== "rename-view") return;\n${BUMP}`,
+    ),
+  );
+  assert.deepEqual(checkP16(renamed), [
+    "outside the two view creates, viewCreateRequestRef is named 2 times and declared 1 times, want its one declaration",
+  ]);
+  assert.deepEqual(checkP16(panel.replace(/\n/g, "\r\n")), []);
+});
+
 test("the checks fail closed on a shape they can't find", () => {
   assert.notDeepEqual(checkP1(""), []);
   assert.notDeepEqual(checkP2("", surfaces), []);
   assert.notDeepEqual(checkP3(""), []);
   assert.notDeepEqual(checkP4(""), []);
+  assert.notDeepEqual(checkP4b(""), []);
   for (const check of [
     checkP5,
     checkP6,
@@ -1556,6 +1835,7 @@ test("the checks fail closed on a shape they can't find", () => {
     checkP14,
     checkP14b,
     checkP15,
+    checkP16,
   ])
     assert.notDeepEqual(check(""), []);
   assert.throws(() => read("src/features/projects/__no_such_file__.tsx"));

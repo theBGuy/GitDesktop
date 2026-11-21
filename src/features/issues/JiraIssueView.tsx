@@ -742,7 +742,7 @@ export function JiraLabelsPopover({
                     Add “{trimmed}”
                   </button>
                 )}
-                <div className="mt-1 max-h-56 overflow-y-auto">
+                <div className="mt-1 max-h-56 overflow-y-auto pb-2">
                   {/* A failure's retry row sits under the options instead. */}
                   {options.length === 0 && !canCreate && !labelsFailed && (
                     <p className="px-1 py-1 text-xs text-muted-foreground">

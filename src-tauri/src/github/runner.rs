@@ -237,7 +237,12 @@ pub(crate) async fn gh_host_for_repo(repo_path: &str) -> Option<String> {
     let url = crate::git::remote::git_remote_url(repo_path.to_string(), "origin".to_string())
         .await
         .ok()?;
-    for host in gh_host_candidates(&url) {
+    gh_host_for_url(&url).await
+}
+
+/// [`gh_host_for_repo`] over an `origin` URL the caller already read.
+pub(crate) async fn gh_host_for_url(url: &str) -> Option<String> {
+    for host in gh_host_candidates(url) {
         if gh_stored_login(&host).await {
             return Some(host);
         }
@@ -969,6 +974,43 @@ pub(crate) async fn run_gh_on_host(
     let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
     let gh = gh_bin().await?;
     gh_output_ok(run_gh_raw_resolved(&gh, repo_path, host, args, timeout).await?)
+}
+
+/// `run_gh_raw` on a host the caller resolved once, so every call of one flow reaches the
+/// same host; `None` sends no `GH_HOST`.
+pub(crate) async fn run_gh_raw_on_host(
+    repo_path: Option<&str>,
+    host: Option<&str>,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
+    let gh = gh_bin().await?;
+    run_gh_raw_resolved(&gh, repo_path, host, args, timeout).await
+}
+
+/// `run_gh_input_raw` on a host the caller resolved once; `None` sends no `GH_HOST`.
+pub(crate) async fn run_gh_input_raw_on_host(
+    repo_path: Option<&str>,
+    host: Option<&str>,
+    args: &[&str],
+    input: &str,
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
+    let gh = gh_bin().await?;
+    let epoch = gh_auth_epoch();
+    run_gh_gated(&gh, host, args, rate_gate(), epoch, || {
+        spawn_gh_resolved(
+            &gh,
+            repo_path.map(std::path::Path::new),
+            host,
+            args,
+            Some(input),
+            timeout,
+        )
+    })
+    .await
 }
 
 // GitHub requires waiting for the primary reset; an unknown reset gets a short hold.
@@ -4035,37 +4077,125 @@ mod tests {
         assert!(out.stderr.contains("refused"), "stderr: {}", out.stderr);
     }
 
+    /// Each argument's trimmed byte span in the first `callee` call (`callee` ends in `(`),
+    /// split at top-level commas so the call's line layout doesn't matter.
+    fn call_arg_spans(body: &str, callee: &str) -> Option<Vec<(usize, usize)>> {
+        let start = body.find(callee)? + callee.len();
+        let (mut depth, mut spans) = (0usize, vec![(start, start)]);
+        for (i, c) in body[start..].char_indices() {
+            let at = start + i;
+            match c {
+                ')' if depth == 0 => {
+                    spans.last_mut()?.1 = at;
+                    let trimmed = spans.into_iter().map(|(a, b)| {
+                        let lead = body[a..b].len() - body[a..b].trim_start().len();
+                        (a + lead, a + lead + body[a..b].trim().len())
+                    });
+                    return Some(trimmed.filter(|(a, b)| a < b).collect());
+                }
+                ',' if depth == 0 => {
+                    spans.last_mut()?.1 = at;
+                    spans.push((at + 1, at + 1));
+                }
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The host-pinned runners hand the caller's `host`, and every other argument, to the
+    /// gate and the spawn under the auth-epoch guard, and never resolve a host of their own.
+    #[test]
+    fn the_on_host_runners_forward_the_pinned_host() {
+        let source = include_str!("runner.rs");
+        let args = |body: &str, callee: &str| -> Vec<String> {
+            let spans = call_arg_spans(body, callee).unwrap_or_default();
+            spans
+                .iter()
+                .map(|&(a, b)| body[a..b].split_whitespace().collect())
+                .collect()
+        };
+        let with_arg = |body: &str, callee: &str, n: usize, to: &str| {
+            let (a, b) = call_arg_spans(body, callee).expect(callee)[n];
+            format!("{}{to}{}", &body[..a], &body[b..])
+        };
+        let resolves =
+            |body: &str| body.contains("gh_host_for_repo(") || body.contains("gh_host_for_url(");
+        const SPAWN: &str = "spawn_gh_resolved(";
+        const GATE: &str = "run_gh_gated(";
+        const RAW: &str = "run_gh_raw_resolved(";
+        const GUARD: &str = "let _epoch_bump = auth_epoch_guard(";
+        // Bound to a name so the bump lives for the whole call, not just its statement.
+        let guarded = |body: &str| args(body, GUARD) == ["&GH_AUTH_EPOCH", "args"];
+        let unguarded = |body: &str| body.replacen(GUARD, "let _epoch_bump = (", 1);
+
+        let input =
+            crate::github::repo_meta::tests::wiring_body(source, "run_gh_input_raw_on_host");
+        let input_routed = |body: &str| {
+            let (spawn, gate) = (args(body, SPAWN), args(body, GATE));
+            spawn
+                == [
+                    "&gh",
+                    "repo_path.map(std::path::Path::new)",
+                    "host",
+                    "args",
+                    "Some(input)",
+                    "timeout",
+                ]
+                && gate.len() == 6
+                && gate[..5] == ["&gh", "host", "args", "rate_gate()", "epoch"]
+                && gate[5].starts_with("||")
+                && gate[5].contains(SPAWN)
+                && body.contains("let epoch = gh_auth_epoch();")
+                && guarded(body)
+                && !body.contains("write_all")
+                && !resolves(body)
+        };
+        assert!(input_routed(&input), "{input}");
+        for (what, mutant) in [
+            ("dropped cwd", with_arg(&input, SPAWN, 1, "None")),
+            ("dropped spawn host", with_arg(&input, SPAWN, 2, "None")),
+            ("dropped input", with_arg(&input, SPAWN, 4, "None")),
+            ("spawn timeout", with_arg(&input, SPAWN, 5, "GH_TIMEOUT")),
+            ("dropped gate host", with_arg(&input, GATE, 1, "None")),
+            ("other gate", with_arg(&input, GATE, 3, "&OTHER_GATE")),
+            ("gate epoch", with_arg(&input, GATE, 4, "0")),
+            ("no guard", unguarded(&input)),
+            (
+                "inline write",
+                format!("{input}\nstdin.write_all(input.as_bytes())"),
+            ),
+            ("own resolve", format!("{input}\ngh_host_for_url(url)")),
+        ] {
+            assert_ne!(mutant, input, "{what}");
+            assert!(!input_routed(&mutant), "{what} must flip");
+        }
+
+        let raw = crate::github::repo_meta::tests::wiring_body(source, "run_gh_raw_on_host");
+        let raw_routed = |body: &str| {
+            args(body, RAW) == ["&gh", "repo_path", "host", "args", "timeout"]
+                && guarded(body)
+                && !resolves(body)
+        };
+        assert!(raw_routed(&raw), "{raw}");
+        for (what, mutant) in [
+            ("dropped host", with_arg(&raw, RAW, 2, "None")),
+            ("raw timeout", with_arg(&raw, RAW, 4, "GH_TIMEOUT")),
+            ("no guard", unguarded(&raw)),
+            ("own resolve", format!("{raw}\ngh_host_for_repo(repo)")),
+        ] {
+            assert_ne!(mutant, raw, "{what}");
+            assert!(!raw_routed(&mutant), "{what} must flip");
+        }
+    }
+
     /// The stdin runner resolves the real gh, so it is pinned to the seam the stand-in
     /// children above exercise rather than run.
     #[test]
     fn the_stdin_runner_exchanges_through_the_shared_seam() {
-        // Each argument's trimmed byte span in the seam call, split at top-level commas so
-        // the call's line layout doesn't matter.
-        let arg_spans = |body: &str| -> Option<Vec<(usize, usize)>> {
-            let start = body.find("spawn_gh_resolved(")? + "spawn_gh_resolved(".len();
-            let (mut depth, mut spans) = (0usize, vec![(start, start)]);
-            for (i, c) in body[start..].char_indices() {
-                let at = start + i;
-                match c {
-                    ')' if depth == 0 => {
-                        spans.last_mut()?.1 = at;
-                        let trimmed = spans.into_iter().map(|(a, b)| {
-                            let lead = body[a..b].len() - body[a..b].trim_start().len();
-                            (a + lead, a + lead + body[a..b].trim().len())
-                        });
-                        return Some(trimmed.filter(|(a, b)| a < b).collect());
-                    }
-                    ',' if depth == 0 => {
-                        spans.last_mut()?.1 = at;
-                        spans.push((at + 1, at + 1));
-                    }
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    _ => {}
-                }
-            }
-            None
-        };
+        let arg_spans = |body: &str| call_arg_spans(body, "spawn_gh_resolved(");
         let args = |body: &str| -> Vec<String> {
             let spans = arg_spans(body).unwrap_or_default();
             let text = spans.iter().map(|&(a, b)| &body[a..b]);

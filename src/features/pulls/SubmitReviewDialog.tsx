@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
-import { reviewMayHavePosted } from "@/lib/error-summary";
+import { presentError, reviewMayHavePosted } from "@/lib/error-summary";
 import type { ReviewVerdict } from "@/lib/git/api";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
@@ -34,7 +34,6 @@ import {
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
-import { errorMessage } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
@@ -94,9 +93,9 @@ function dropAsked(asked: RefObject<ConfirmRequest | null>) {
  * changes disabled-with-reason until the provider allows them), an optional summary
  * (REQUIRED for Request changes), and a submit that posts the pending drafts as
  * one batch review. On success it clears the drafts, closes, and toasts the
- * posted count; on error it stays open and surfaces the error verbatim (it may
- * disclose partial posting on GitLab/Bitbucket, so it's shown untruncated).
- * Usable with zero drafts too (a plain verdict + summary review).
+ * posted count; on error it stays open and shows the error's one-line summary,
+ * which keeps a partial-posting headline from GitLab/Bitbucket ahead of any
+ * rewrite. Usable with zero drafts too (a plain verdict + summary review).
  */
 export function SubmitReviewDialog({
   repoPath,
@@ -272,9 +271,8 @@ export function SubmitReviewDialog({
       });
     } catch (e) {
       // The post itself failed — keep the dialog open, Submit re-armed, and show
-      // the message verbatim (on GitLab/Bitbucket it can disclose partial posting,
-      // which the user needs to see in full). Unmounted mid-submit, that surface is
-      // gone, so the failure rides a toast rather than vanishing.
+      // the error's one-line summary, partial-posting headline included. Unmounted
+      // mid-submit, that surface is gone, so the failure rides a toast instead.
       // Set outside the guard: a tab hide also clears `mounted` while the dialog
       // stays open. A verdict alone has nothing a second post could duplicate.
       // Limit: a "Posted 0 of N" or "Saved 0 of N" failure with no summary asks.
@@ -282,7 +280,7 @@ export function SubmitReviewDialog({
         (sentSummary !== undefined || comments.length > 0) &&
         reviewMayHavePosted(e);
       if (mounted.current) {
-        setError(errorMessage(e));
+        setError(presentError(e).summary);
       } else {
         toastError(e);
       }

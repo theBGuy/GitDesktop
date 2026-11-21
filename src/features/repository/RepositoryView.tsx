@@ -47,6 +47,7 @@ import { CommitBox } from "@/features/commit/CommitBox";
 import { CommitDialog } from "@/features/commit/CommitDialog";
 import { BranchDiffView } from "@/features/compare/BranchDiffView";
 import { ComparePanel } from "@/features/compare/ComparePanel";
+import { detailKeyOf } from "@/features/conversations/detail-key";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffRestingFallback } from "@/features/diff/DiffRestingFallback";
 import { DiscussionsPanel } from "@/features/discussions/DiscussionsPanel";
@@ -916,10 +917,16 @@ export function RepositoryView() {
               <ComparePanel repoPath={repoPath} />
             </TabPanel>
             <TabPanel active={sidebarTabActive("pulls")}>
-              <PullRequestsPanel repoPath={repoPath} />
+              <PullRequestsPanel
+                repoPath={repoPath}
+                detailKey={detailKeyOf(deferredPr)}
+              />
             </TabPanel>
             <TabPanel active={sidebarTabActive("issues")}>
-              <IssuesPanel repoPath={repoPath} />
+              <IssuesPanel
+                repoPath={repoPath}
+                detailKey={detailKeyOf(deferredIssue)}
+              />
             </TabPanel>
             <TabPanel active={sidebarTabActive("projects")}>
               {/* The board fills the content pane, so this tab has no list of

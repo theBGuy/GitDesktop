@@ -620,7 +620,7 @@ fn time_year() -> String {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
-    use crate::git::runner::GitOutput;
+    use crate::git::runner::{GitOutput, TestGitEnv};
 
     #[tokio::test]
     async fn non_repo_directory_keeps_the_input_path() {
@@ -631,7 +631,7 @@ mod identity_tests {
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(&path)
             .env("GIT_CEILING_DIRECTORIES", path.parent().unwrap())
-            .envs(crate::git::runner::TEST_GIT_ENV)
+            .test_git_env()
             .env("LC_ALL", "C")
             .output()
             .await
