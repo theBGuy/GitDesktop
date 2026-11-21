@@ -2,6 +2,7 @@ import { StopIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { AnimatePresence, m } from "motion/react";
 import {
   useEffect,
+  useEffectEvent,
   useId,
   useImperativeHandle,
   useLayoutEffect,
@@ -11,10 +12,15 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { usePlanStore } from "@/features/plan/store";
+import { useResearchStore } from "@/features/research/store";
 import { clampHighlight } from "@/features/shortcuts/palette-highlight";
 import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { estimateRunCost } from "@/lib/ai/cost";
-import type { ContainerStatus } from "@/lib/ai/sandbox";
+import {
+  type ContainerStatus,
+  OPENCODE_IMAGE_OUTDATED_NOTE,
+} from "@/lib/ai/sandbox";
 import { useContainerStatus } from "@/lib/ai/sandbox-queries";
 import {
   buildPrompt,
@@ -47,6 +53,31 @@ import {
 } from "./AgentPickers";
 import { EnsembleRunDialog } from "./EnsembleRunDialog";
 import { type AgentSession, type PendingTask, useSessionsStore } from "./store";
+
+/** Records a composer built from its own start state (a Settings jump or an
+ *  unmount). Anything else on `pendingTask` is a handoff, never overwritten. */
+const startStateStashes = new WeakSet<PendingTask>();
+
+/** Whether SessionView would still render SessionActivation for `repoPath` (its
+ *  render rules: repo view open, nothing of this repo selected). */
+function newTaskSurfaceShown(repoPath: string): boolean {
+  const ui = useUiStore.getState();
+  if (ui.view !== "repo" || ui.repoPath !== repoPath) return false;
+  const sessions = useSessionsStore.getState();
+  const plans = usePlanStore.getState();
+  const research = useResearchStore.getState();
+  return !(
+    sessions.sessions.some(
+      (s) => s.id === sessions.activeId && s.repoPath === repoPath,
+    ) ||
+    plans.runs.some(
+      (r) => r.id === plans.activePlanId && r.repoPath === repoPath,
+    ) ||
+    research.runs.some(
+      (r) => r.id === research.activeResearchId && r.repoPath === repoPath,
+    )
+  );
+}
 
 const MAX_MENTIONS = 8;
 
@@ -139,6 +170,14 @@ function isolationNoteFor({
     return {
       tone: "warn",
       text: imageMissingAgentText(agent),
+      settingsAction: true,
+    };
+  // Replaces the generic "doesn't match" line for opencode: one rebuild fixes both,
+  // and that claim is false when the selection didn't change.
+  if (status.opencodeOutdated && agent === "opencode" && perAgentCopy)
+    return {
+      tone: "warn",
+      text: OPENCODE_IMAGE_OUTDATED_NOTE,
       settingsAction: true,
     };
   if (!status.imageMatches)
@@ -253,6 +292,11 @@ export function SessionComposer({
   // composer ever stops unmounting on the jump (e.g. an <Activity> refactor) a
   // LATER handoff record still consumes normally. Dies with the unmount today.
   const stashedRef = useRef<PendingTask | null>(null);
+  // Set by a submit that hands the draft to a new session or a Best-of-N run: the
+  // composer then unmounts under that session, and the next new task starts from
+  // defaults. A start that made nothing releases it, and so does a new draft
+  // (typing or an example chip).
+  const startedRef = useRef(false);
 
   const running = session?.running ?? false;
   const model = session ? session.model : startModelForAgent;
@@ -296,6 +340,76 @@ export function SessionComposer({
     }),
     [],
   );
+
+  // The start state as a pendingTask record: the one builder for the Settings jump
+  // and the unmount stash, so both restore through the consume effect below.
+  const buildStash = (): PendingTask => {
+    const task: PendingTask = {
+      repoPath,
+      prompt: draft,
+      // null = no explicit pick, so there's nothing to restore — collapse to absent.
+      // For agent that's load-bearing: the jump lands on the panel hosting Default
+      // agent, so an unpicked composer must follow a value changed there, not pin
+      // the stale derived one.
+      isolation: startIsolation ?? undefined,
+      agent: startAgentPick ?? undefined,
+      model: startModel,
+      // Pinned even when the agent isn't: the model has to come back knowing
+      // which agent it was for, or the restore can't tell it still fits.
+      modelAgent: startModelAgent ?? undefined,
+      effort: startEffort,
+      mode,
+      // Verbatim: null here MEANS "follow the default set", so it must survive.
+      mcpServers: startMcp,
+    };
+    startStateStashes.add(task);
+    return task;
+  };
+
+  // Leaving with a start state (an overlay view such as Settings, closing the
+  // repo, selecting a session, plan or research run, or an <Activity> hide) keeps
+  // it on pendingTask for the next new-task composer of this repo. A record for
+  // another repo is never consumed here; it stays until a later write replaces it.
+  const stashOnLeave = useEffectEvent((stillInDocument: boolean) => {
+    if (session || startedRef.current) return;
+    if (
+      draft === "" &&
+      startModel === "" &&
+      startModelAgent === null &&
+      startEffort === "" &&
+      startAgentPick === null &&
+      startMcp === null &&
+      startIsolation === null &&
+      mode === "single"
+    )
+      return;
+    const { pendingTask: current, setPendingTask: put } =
+      useSessionsStore.getState();
+    // The jump's record is already there, or a handoff is waiting: keep either.
+    if (
+      current &&
+      (current === stashedRef.current || !startStateStashes.has(current))
+    )
+      return;
+    // Unmounted while SessionView still shows the new-task surface: only a
+    // SessionActivation mode switch does that, and a record there would make its
+    // handoff effect force Delegate mode straight back.
+    if (!stillInDocument && newTaskSurfaceShown(repoPath)) return;
+    const task = buildStash();
+    stashedRef.current = task;
+    put(task);
+  });
+  useEffect(() => {
+    // Read at setup: refs detach before an unmount's cleanup, and the node stays
+    // in the document only when an <Activity> hide (or StrictMode) runs it.
+    const node = ref.current;
+    // Shown again after a hide: this instance kept its state, so it takes back the
+    // record the hide left (the consume effect skips that one by identity).
+    const own = stashedRef.current;
+    const store = useSessionsStore.getState();
+    if (own && store.pendingTask === own) store.setPendingTask(null);
+    return () => stashOnLeave(node?.isConnected ?? false);
+  }, []);
 
   // Seed the new-session composer from a handoff ("Implement this issue" / the
   // plan canvas's "Implement now"). Only the activation composer (no session)
@@ -414,6 +528,11 @@ export function SessionComposer({
   // radio value below, so the warn line and the Send gate can never disagree.
   const resolvedStartIsolation: Isolation = startIsolation ?? globalIsolation;
   const effectiveIsolation = !session ? resolvedStartIsolation : undefined;
+  // What the effort row asks with: never the "worktree" fallback before
+  // settings resolved, since the run may start containerized.
+  const effortIsolation: Isolation | null = session
+    ? session.isolation
+    : (startIsolation ?? (settings.data ? globalIsolation : null));
   const isContainer = effectiveIsolation === "container";
   // Container readiness, probed lazily and shared with Settings → AI (same query
   // key, so one Docker/Podman check serves both). Only while a new session is
@@ -482,27 +601,10 @@ export function SessionComposer({
     // consume effect would eat the record in that window and there'd be nothing
     // left to restore; holding the record itself skips it by IDENTITY, so the
     // remounted composer (fresh ref) consumes normally.
-    const task: PendingTask = {
-      repoPath,
-      prompt: draft,
-      // null = no explicit pick, so there's nothing to restore — collapse to absent.
-      // For agent that's load-bearing: the jump lands on the panel hosting Default
-      // agent, so an unpicked composer must follow a value changed there, not pin
-      // the stale derived one.
-      isolation: startIsolation ?? undefined,
-      agent: startAgentPick ?? undefined,
-      model: startModel,
-      // Pinned even when the agent isn't: the model has to come back knowing
-      // which agent it was for, or the restore can't tell it still fits.
-      modelAgent: startModelAgent ?? undefined,
-      effort: startEffort,
-      mode,
-      // Verbatim: null here MEANS "follow the default set", so it must survive.
-      mcpServers: startMcp,
-    };
+    const task = buildStash();
     stashedRef.current = task;
     setPendingTask(task);
-    openSettings("ai");
+    openSettings("ai", "agent-sandbox");
   };
   // Servers the chosen agent can actually run (Codex = local/stdio only).
   const mcpServersForAgent = useMemo(
@@ -585,8 +687,9 @@ export function SessionComposer({
 
   const dispatch = (text: string) => {
     if (session) send(session.id, text);
-    else
-      start(
+    else {
+      startedRef.current = true;
+      void start(
         repoPath,
         text,
         startModelForAgent,
@@ -602,7 +705,10 @@ export function SessionComposer({
           : undefined,
         // Absent unless explicitly picked — start() then reads the global setting.
         startIsolation ?? undefined,
-      );
+      ).then((id) => {
+        if (id === null) startedRef.current = false;
+      });
+    }
   };
 
   // Expand a known `/command` client-side (no CLI parses `/cmd` headless) so the
@@ -668,6 +774,7 @@ export function SessionComposer({
     const mcp = mcpUsable
       ? effectiveMcp.filter((id) => mcpServersForAgent.some((s) => s.id === id))
       : undefined;
+    startedRef.current = true;
     void startEnsemble(
       repoPath,
       pendingEnsemble,
@@ -675,7 +782,9 @@ export function SessionComposer({
       mcp,
       // Every arm runs the same way — arms differ by agent/model/effort only.
       startIsolation ?? undefined,
-    );
+    ).then((ids) => {
+      if (ids.length === 0) startedRef.current = false;
+    });
     clearDraft();
     setPendingEnsemble("");
   };
@@ -708,6 +817,7 @@ export function SessionComposer({
   const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
     const caret = e.target.selectionStart ?? value.length;
+    startedRef.current = false;
     setDraft(value);
     setHistIndex(null); // typing detaches from history browsing
     syncMention(value, caret);
@@ -854,7 +964,10 @@ export function SessionComposer({
               <button
                 key={ex}
                 type="button"
-                onClick={() => setDraft(ex)}
+                onClick={() => {
+                  startedRef.current = false;
+                  setDraft(ex);
+                }}
                 className="border px-2 py-1 text-[11px] text-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none"
               >
                 {ex}
@@ -984,6 +1097,11 @@ export function SessionComposer({
               <ComposerOptions
                 effort={session || mode === "single" ? effort : undefined}
                 onEffort={session || mode === "single" ? onEffort : undefined}
+                effortFor={
+                  session || mode === "single"
+                    ? { agent, model, isolation: effortIsolation }
+                    : undefined
+                }
                 mode={!session ? mode : undefined}
                 onMode={!session ? setMode : undefined}
                 isolation={
@@ -1067,6 +1185,7 @@ export function SessionComposer({
           effort: startEffort,
         }}
         estimate={costEstimate}
+        isolation={startIsolation ?? (settings.data ? globalIsolation : null)}
         // Only a containerized run can fail on image membership; undefined means
         // the arms run on the host, where every agent is fair game — or settings
         // never loaded (an errored load doesn't hold submit), where a defined []

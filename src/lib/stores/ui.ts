@@ -120,6 +120,12 @@ export type SettingsTarget =
   | "editor"
   | "terminal"
   | "updates";
+/** Elements inside a Settings panel a deep link can land on, each keyed to the
+ *  panel that hosts it: the anchor applies only while that panel is active. */
+export const SETTINGS_ANCHOR_PANEL = {
+  "agent-sandbox": "ai",
+} as const satisfies Record<string, SettingsTarget>;
+export type SettingsAnchor = keyof typeof SETTINGS_ANCHOR_PANEL;
 
 export interface SelectedPr {
   kind: "local" | "remote";
@@ -309,6 +315,10 @@ export interface UiState {
   /** Settings section to jump to when opening Settings; null = leave as-is.
    *  Consumed (and cleared) by SettingsScreen once applied. */
   settingsTarget: SettingsTarget | null;
+  /** Element in that section to scroll to and focus; null = the panel's top.
+   *  Consumed once by its host, or dropped by SettingsScreen when the active panel
+   *  isn't the anchor's, so a later visit never re-scrolls. */
+  settingsAnchor: SettingsAnchor | null;
   /** Whether the MCP-registry browser (Settings → MCP servers) is open. In the store so the
    *  command palette can deep-link to it in one atomic navigation, whether or not the panel
    *  is mounted yet. */
@@ -595,8 +605,9 @@ export interface UiState {
    *  transition sets elsewhere. Pass the full 40-char hash; CommitDetailView fetches by
    *  hash, so any reachable commit resolves even if history hasn't paged that far. */
   openCommit: (hash: string) => void;
-  openSettings: (target?: SettingsTarget) => void;
+  openSettings: (target?: SettingsTarget, anchor?: SettingsAnchor) => void;
   clearSettingsTarget: () => void;
+  clearSettingsAnchor: () => void;
   /** Navigate to Settings → MCP servers and open the registry browser, atomically. */
   openMcpBrowse: () => void;
   setMcpBrowseOpen: (open: boolean) => void;
@@ -1079,6 +1090,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     view: "welcome",
     previousView: "welcome",
     settingsTarget: null,
+    settingsAnchor: null,
     mcpBrowseOpen: false,
     activityOpen: false,
     reconnectTarget: null,
@@ -1485,18 +1497,20 @@ export const useUiStore = create<UiState>()((set, get) => {
         compareCommitHash: hash,
         interactionEpoch: s.interactionEpoch + 1,
       })),
-    openSettings: (target) => {
+    openSettings: (target, anchor) => {
       bumpEpochNow();
       startViewTransition(() => {
         const { view } = get();
         set({
           view: "settings",
           settingsTarget: target ?? null,
+          settingsAnchor: anchor ?? null,
           previousView: isOverlayView(view) ? get().previousView : view,
         });
       });
     },
     clearSettingsTarget: () => set({ settingsTarget: null }),
+    clearSettingsAnchor: () => set({ settingsAnchor: null }),
     // One atomic update (inside the view transition) so the browse flag isn't
     // clobbered by the deferred set the transition schedules.
     openMcpBrowse: () => {
@@ -1506,6 +1520,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         set({
           view: "settings",
           settingsTarget: "mcp-servers",
+          settingsAnchor: null,
           mcpBrowseOpen: true,
           previousView: isOverlayView(view) ? get().previousView : view,
         });

@@ -30,11 +30,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { type AgentKind, isAgentKind } from "@/lib/ai/agent";
+import {
+  EFFORT_UNAVAILABLE_SUFFIX,
+  type EffortControlState,
+  effortSelectItems,
+  useEffortControl,
+} from "@/lib/ai/effort-levels";
 import { modelPickerEmptyText, useAgentModels } from "@/lib/ai/models";
 import { EFFORT_LEVEL_LABELS, EFFORT_LEVELS } from "@/lib/ai/review-effort";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import type { McpServer } from "@/lib/settings/api";
 import { useUiStore } from "@/lib/stores/ui";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 // The agent / model / effort pickers, shared by the task composer, the plan
@@ -135,47 +145,124 @@ export function ModelPicker({
 
 const DEFAULT_EFFORT = "default";
 
-/** Labels for the effort Select — without them Base UI shows the raw stored
- *  value ("xhigh") in the trigger. Same `items` contract as the settings selects,
- *  and the popup renders from it too so the two can never drift. */
-const EFFORT_ITEMS: Record<string, string> = {
-  [DEFAULT_EFFORT]: "Default",
-  ...EFFORT_LEVEL_LABELS,
-};
+/** The effort Select's no-level row. Labels come from `effortSelectItems`:
+ *  without an `items` map Base UI shows the raw stored value ("xhigh") in the
+ *  trigger, and the popup renders from the same map so the two can never drift. */
+const DEFAULT_EFFORT_ITEM = { key: DEFAULT_EFFORT, label: "Default" };
 
 /** Reasoning/effort level for the next turn. Mapped per-CLI in Rust (Codex
  *  `model_reasoning_effort`, Copilot `--effort`, Claude a thinking keyword). The
- *  gauge icon marks it as effort so the collapsed value isn't mistaken for a model. */
+ *  gauge icon marks it as effort so the collapsed value isn't mistaken for a model.
+ *  With a `control`, blocked levels stay listed as disabled `(unavailable)` rows
+ *  and the stored level is kept; a whole-blocked picker is held by readOnly + a
+ *  gated open state, never Base UI's `disabled`, which drops it from the tab
+ *  order. `describedBy` names the caller's line, passed only while it renders. */
 export function EffortPicker({
   value,
   onChange,
+  control,
+  describedBy,
 }: {
   value: string;
   onChange: (e: string) => void;
+  control?: EffortControlState;
+  describedBy?: string;
 }) {
+  const items = effortSelectItems(DEFAULT_EFFORT_ITEM, control);
+  const held = control?.allBlocked ?? false;
+  const [open, setOpen] = useState(false);
+  if (held && open) setOpen(false);
   return (
     <Select
-      items={EFFORT_ITEMS}
+      items={items}
       value={value || DEFAULT_EFFORT}
-      onValueChange={(v) => onChange(v === DEFAULT_EFFORT ? "" : String(v))}
+      // Defense in depth: Base UI also commits through paths with no disabled
+      // check (its hidden-input autofill), so a blocked level is refused here.
+      onValueChange={(v) => {
+        const next = v === DEFAULT_EFFORT ? "" : String(v);
+        if (next === value || control?.blocked[next] !== undefined) return;
+        onChange(next);
+      }}
+      readOnly={held}
+      open={open}
+      onOpenChange={(next) => {
+        if (!held) setOpen(next);
+      }}
     >
       <SelectTrigger
         size="sm"
         aria-label="Reasoning effort"
-        className="w-auto gap-1 border-0 text-muted-foreground shadow-none hover:bg-muted dark:bg-transparent"
+        aria-disabled={held || undefined}
+        aria-describedby={describedBy}
+        className={cn(
+          "w-auto gap-1 border-0 text-muted-foreground shadow-none hover:bg-muted dark:bg-transparent",
+          ARIA_DISABLED_CLASS,
+        )}
       >
         <GaugeIcon className="size-3.5" />
         <SelectValue />
       </SelectTrigger>
-      <SelectContent>
-        {Object.entries(EFFORT_ITEMS).map(([level, label]) => (
-          <SelectItem key={level} value={level}>
+      <SelectContent className="min-w-48">
+        {Object.entries(items).map(([level, label]) => (
+          <SelectItem
+            key={level}
+            value={level}
+            disabled={
+              control?.blocked[level === DEFAULT_EFFORT ? "" : level] !==
+              undefined
+            }
+          >
             {label}
           </SelectItem>
         ))}
       </SelectContent>
     </Select>
   );
+}
+
+/** The one-line caveat under a picker (the Isolation readiness note, an effort
+ *  reason): `warn` = full-contrast text + filled icon, `muted` = muted text. */
+function CaveatLine({
+  id,
+  tone,
+  text,
+}: {
+  id: string;
+  tone: "warn" | "muted";
+  text: string;
+}) {
+  return (
+    <p
+      id={id}
+      className={cn(
+        "flex items-start gap-1.5 text-[11px]",
+        tone === "warn" ? "text-foreground" : "text-muted-foreground",
+      )}
+    >
+      {/* Icon + text, never color alone. */}
+      {tone === "warn" && (
+        <WarningCircleIcon
+          weight="fill"
+          className="mt-px size-3.5 shrink-0"
+          aria-hidden
+        />
+      )}
+      <span className="min-w-0 break-words">{text}</span>
+    </p>
+  );
+}
+
+/** The effort control's reason line, or nothing for a null line. Its id is the
+ *  control's `aria-describedby` only while it renders. */
+export function EffortNote({
+  id,
+  line,
+}: {
+  id: string;
+  line: EffortControlState["line"];
+}) {
+  if (!line) return null;
+  return <CaveatLine id={id} tone={line.tone} text={line.text} />;
 }
 
 /** How a new task runs: one session, or best-of-N across several arms. */
@@ -186,35 +273,57 @@ export type RunMode = "single" | "ensemble";
  *  dropdown, fully keyboard-operable: the ARIA radiogroup pattern, so the group is
  *  ONE tab stop (roving tabindex on the checked option) and the arrow keys move the
  *  selection with focus following it. Clicking is unchanged. */
+interface SegmentedOption<T extends string> {
+  value: T;
+  label: string;
+  /** Why the option can't be picked: it stays in place, focusable but inert. */
+  blockedReason?: string;
+  /** Ends a blocked option's accessible name with "(unavailable)". */
+  markBlocked?: boolean;
+}
+
 function Segmented<T extends string>({
   value,
   onChange,
   options,
   ariaLabel,
   describedBy,
+  held = false,
 }: {
   value: T;
   onChange: (v: T) => void;
-  options: { value: T; label: string }[];
+  options: SegmentedOption<T>[];
   ariaLabel: string;
   /** Id of a caveat rendered beside the group (e.g. the Isolation readiness note),
    *  so arrowing between options announces the warning with the selection. */
   describedBy?: string;
+  /** Every option is blocked for one reason, which the group's description
+   *  carries: options then render no reason node of their own. */
+  held?: boolean;
 }) {
   const groupRef = useRef<HTMLDivElement>(null);
-  // The tab stop. A value outside `options` (shouldn't happen) still leaves the
-  // group reachable rather than trapping the keyboard past it.
+  const open = (i: number) => options[i].blockedReason === undefined;
+  // The tab stop: the checked option (even a blocked one, so a stored level
+  // stays reachable), else the first open one. A value outside `options` still
+  // leaves the group reachable rather than trapping the keyboard past it.
   const checked = options.findIndex((o) => o.value === value);
-  const roving = checked < 0 ? 0 : checked;
+  const firstOpen = options.findIndex((o) => o.blockedReason === undefined);
+  const roving = checked >= 0 ? checked : Math.max(firstOpen, 0);
 
-  // Arrow keys select-and-focus the neighbour, wrapping at the ends. The buttons
-  // are stable DOM children, so the new target can be focused straight away — the
-  // re-render then hands it the tab stop.
+  // Arrow keys select-and-focus the next open option in the pressed direction,
+  // wrapping at the ends; with none, the press changes nothing. The buttons are
+  // stable, so the target can be focused straight away; the re-render then hands
+  // it the tab stop.
   const move = (delta: number) => {
-    const next = (roving + delta + options.length) % options.length;
-    onChange(options[next].value);
-    const btn = groupRef.current?.children[next];
-    if (btn instanceof HTMLElement) btn.focus();
+    const n = options.length;
+    for (let step = 1; step < n; step++) {
+      const next = (((roving + delta * step) % n) + n) % n;
+      if (!open(next)) continue;
+      onChange(options[next].value);
+      const btn = groupRef.current?.querySelectorAll('[role="radio"]')[next];
+      if (btn instanceof HTMLElement) btn.focus();
+      return;
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
@@ -235,41 +344,179 @@ function Segmented<T extends string>({
       role="radiogroup"
       aria-label={ariaLabel}
       aria-describedby={describedBy}
+      aria-disabled={held || undefined}
       className="flex overflow-hidden rounded-none border border-input"
     >
       {options.map((o, i) => (
-        <button
+        <SegmentedButton
           key={o.value}
-          type="button"
-          role="radio"
-          aria-checked={value === o.value}
-          tabIndex={i === roving ? 0 : -1}
-          onClick={() => onChange(o.value)}
+          option={o}
+          first={i === 0}
+          checked={value === o.value}
+          tabStop={i === roving}
+          held={held}
+          onPick={() => onChange(o.value)}
           onKeyDown={onKeyDown}
-          className={cn(
-            "flex-1 px-1.5 py-1 text-[11px] transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring",
-            i > 0 && "border-l border-input",
-            value === o.value
-              ? "bg-accent font-medium text-accent-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-        >
-          {o.label}
-        </button>
+        />
       ))}
     </div>
   );
 }
 
+/** One radio of `Segmented`, its own component so the disabled-reason hook runs
+ *  per option. A blocked option is `aria-disabled` (never native `disabled`, so
+ *  it keeps focus); the hook withholds its click, which a raw button's Enter and
+ *  Space arrive as. */
+function SegmentedButton<T extends string>({
+  option,
+  first,
+  checked,
+  tabStop,
+  held,
+  onPick,
+  onKeyDown,
+}: {
+  option: SegmentedOption<T>;
+  first: boolean;
+  checked: boolean;
+  tabStop: boolean;
+  held: boolean;
+  onPick: () => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLButtonElement>) => void;
+}) {
+  const blocked = option.blockedReason !== undefined;
+  const reason = useDisabledReason({
+    disabled: blocked,
+    reason: option.blockedReason,
+    onClick: onPick,
+  });
+  return (
+    <span
+      className={cn(
+        "flex flex-1",
+        !first && "border-l border-input",
+        blocked && "cursor-not-allowed",
+      )}
+      title={reason.wrapperTitle}
+    >
+      <button
+        type="button"
+        role="radio"
+        aria-checked={checked}
+        tabIndex={tabStop ? 0 : -1}
+        onKeyDown={onKeyDown}
+        {...reason.nativeProps}
+        // Held: the group's description already is every option's reason.
+        aria-describedby={held ? undefined : reason.describedBy}
+        aria-label={
+          blocked && option.markBlocked
+            ? `${option.label}${EFFORT_UNAVAILABLE_SUFFIX}`
+            : undefined
+        }
+        className={cn(
+          "flex-1 px-1.5 py-1 text-[11px] transition-colors outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          ARIA_DISABLED_CLASS,
+          checked
+            ? "bg-accent font-medium text-accent-foreground"
+            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        )}
+      >
+        {/* Struck through as the non-color mark of a level this model lacks. */}
+        <span className={cn(blocked && !held && "line-through")}>
+          {option.label}
+        </span>
+      </button>
+      {/* `hidden` rather than sr-only: a description may point at hidden text,
+          and an sr-only sibling would be read again as page text. */}
+      {!held && reason.blockedReason !== null && (
+        <span id={reason.reasonId} hidden>
+          {reason.blockedReason}
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** The empty value is this surface's "no level" row — the composer stores an
  *  absent effort as `""`, not the Select's `"default"` sentinel. */
-const EFFORT_OPTIONS: { value: string; label: string }[] = [
+const EFFORT_OPTIONS: SegmentedOption<string>[] = [
   { value: "", label: "Auto" },
   ...EFFORT_LEVELS.map((value) => ({
     value,
     label: EFFORT_LEVEL_LABELS[value],
   })),
 ];
+
+/** The effort radios for a control state. Only the four levels take the
+ *  "(unavailable)" mark; the no-level option is held with them, never marked. */
+function effortOptions(
+  control: EffortControlState | undefined,
+): SegmentedOption<string>[] {
+  if (!control) return EFFORT_OPTIONS;
+  return EFFORT_OPTIONS.map((o) => {
+    const blockedReason = control.blocked[o.value];
+    return blockedReason === undefined
+      ? o
+      : { ...o, blockedReason, markBlocked: o.value !== "" };
+  });
+}
+
+/** The Options popover's effort row. `control` absent = today's control. */
+function EffortField({
+  value,
+  onChange,
+  control,
+}: {
+  value: string;
+  onChange: (e: string) => void;
+  control?: EffortControlState;
+}) {
+  const noteId = useId();
+  const line = control?.line ?? null;
+  return (
+    <OptionField
+      icon={<GaugeIcon className="size-3.5" />}
+      label="Reasoning effort"
+    >
+      <Segmented
+        ariaLabel="Reasoning effort"
+        value={value}
+        onChange={onChange}
+        options={effortOptions(control)}
+        held={control?.allBlocked}
+        describedBy={line ? noteId : undefined}
+      />
+      <EffortNote id={noteId} line={line} />
+    </OptionField>
+  );
+}
+
+/** The effort row asking which levels the model offers. Mounts with the
+ *  popover's content, so the CLI is spawned only once Options opens. */
+function EffortFieldForModel({
+  value,
+  onChange,
+  effortFor,
+}: {
+  value: string;
+  onChange: (e: string) => void;
+  effortFor: EffortFor;
+}) {
+  // A null isolation asks nothing yet; the same field stays mounted, so a
+  // focused radio keeps focus when the isolation resolves.
+  const control = useEffortControl(
+    effortFor.isolation === null
+      ? null
+      : {
+          kind: effortFor.agent,
+          binPath: null,
+          model: effortFor.model,
+          isolation: effortFor.isolation,
+        },
+    value,
+  );
+  return <EffortField value={value} onChange={onChange} control={control} />;
+}
 
 const RUN_MODE_OPTIONS: { value: RunMode; label: string }[] = [
   { value: "single", label: "Single" },
@@ -339,9 +586,18 @@ function OptionField({
  * session, strict "only these" for Claude, the container/host caveats) are
  * unchanged — see the call site.
  */
+/** What the composer's run would pass, so the effort row can ask which levels
+ *  the model offers. `isolation` is null while it isn't known yet. */
+interface EffortFor {
+  agent: AgentKind;
+  model: string;
+  isolation: Isolation | null;
+}
+
 export function ComposerOptions({
   effort,
   onEffort,
+  effortFor,
   mode,
   onMode,
   isolation,
@@ -349,6 +605,8 @@ export function ComposerOptions({
 }: {
   effort?: string;
   onEffort?: (e: string) => void;
+  /** Turns on the per-model effort state. Absent = today's effort control. */
+  effortFor?: EffortFor;
   mode?: RunMode;
   onMode?: (m: RunMode) => void;
   /** New-session isolation override. `isOverride` = the pick differs from the
@@ -432,19 +690,17 @@ export function ComposerOptions({
               />
             </OptionField>
           )}
-          {effort !== undefined && onEffort && (
-            <OptionField
-              icon={<GaugeIcon className="size-3.5" />}
-              label="Reasoning effort"
-            >
-              <Segmented
-                ariaLabel="Reasoning effort"
+          {effort !== undefined &&
+            onEffort &&
+            (effortFor ? (
+              <EffortFieldForModel
                 value={effort}
                 onChange={onEffort}
-                options={EFFORT_OPTIONS}
+                effortFor={effortFor}
               />
-            </OptionField>
-          )}
+            ) : (
+              <EffortField value={effort} onChange={onEffort} />
+            ))}
           {isolation && (
             <OptionField
               icon={<ShieldCheckIcon className="size-3.5" />}
@@ -458,25 +714,11 @@ export function ComposerOptions({
                 describedBy={isolation.note ? isolationNoteId : undefined}
               />
               {isolation.note && (
-                <p
+                <CaveatLine
                   id={isolationNoteId}
-                  className={cn(
-                    "flex items-start gap-1.5 text-[11px]",
-                    isolation.note.tone === "warn"
-                      ? "text-foreground"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  {/* Icon + text, never color alone. */}
-                  {isolation.note.tone === "warn" && (
-                    <WarningCircleIcon
-                      weight="fill"
-                      className="mt-px size-3.5 shrink-0"
-                      aria-hidden
-                    />
-                  )}
-                  <span>{isolation.note.text}</span>
-                </p>
+                  tone={isolation.note.tone}
+                  text={isolation.note.text}
+                />
               )}
               {isolation.note?.settingsAction && (
                 <Button

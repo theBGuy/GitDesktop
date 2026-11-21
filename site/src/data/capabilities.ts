@@ -965,6 +965,12 @@ export const capabilities: Capability[] = [
   {
     group: "AI · agents & sessions",
     ai: true,
+    label:
+      "opencode 1.x and 2.x — effort levels follow the model (tested with opencode 2.2.0 to 2.3.2)",
+  },
+  {
+    group: "AI · agents & sessions",
+    ai: true,
     label: "Watch the agent work step by step, with an inline diff per edit",
   },
   {

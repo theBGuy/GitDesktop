@@ -1611,6 +1611,21 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `useListedBranchTips` (`queries/branches.ts`) does: the first successful read
   wins, names that appear later are read when they appear, and the action holds
   while a read is pending or failed, so it never acts on a value re-read since.
+- **Agent stream notices** — a store that consumes `runAgentSession` passes
+  each `notice` event to `noticeEffect` (`src/lib/ai/agent.ts`) and applies
+  its result: a `note` transcript segment in the turn it arrived in, and on
+  `replaceNativeSession` a run-local flag that lets the next `nativeSession`
+  of that run replace the stored id under the store's ownership gate, while
+  the notice alone never drops the id. The conversation-id token is opaque and
+  never parsed.
+- **Per-model effort levels** — every effort picker renders from
+  `useEffortControl` (`src/lib/ai/effort-levels.ts`) with the kind, binary
+  path, model and isolation its run will pass. Unavailable levels stay listed
+  and disabled with one reason line, a stored level is kept, and a
+  Select-based picker marks a blocked level in its option text (the vendored
+  Select does not skip a disabled item on arrow keys). A new picker joins the
+  set that `git grep -E "EFFORT_LEVELS|EFFORT_LEVEL_LABELS|REVIEW_EFFORTS" -- src`
+  closes.
 
 ## Rust / Tauri conventions
 
@@ -1695,13 +1710,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   before it can reap (an agent run's Stop) calls `terminate()` on Windows, or
   signals the group on unix, and still disarms only after a reap. Adopters:
   the git runner (`run_git_spawn`), the gh and glab runners, host-mode agent
-  runs, and the login-shell probes, which arm their `setsid` child and never
-  call `prepare`. Unarmed on purpose: the gh/glab sign-in child in
-  forge/session.rs and the two console launchers. Not armed yet:
-  the PTY children and their `taskkill` path (pty.rs `kill_tree`),
-  mcp.rs `run_client_cli`, agent_sandbox.rs `run_build`, hooks.rs
-  `git_run_hook_manager` and agent.rs `run_capture_parts` (the CLI probes,
-  the model listing and the container runtime commands). Tree tests build
+  runs, the opencode 2.x captured commands (agent.rs `capture_tree`: the lock
+  read-back, the model listing and catalog, the sign-in export, and the
+  container probe and import clients), and the login-shell probes, which arm
+  their `setsid` child and never call `prepare`. Unarmed on purpose: the
+  gh/glab sign-in child in forge/session.rs and the two console launchers.
+  Not armed yet: the PTY children and their `taskkill` path (pty.rs
+  `kill_tree`), mcp.rs `run_client_cli`, agent_sandbox.rs `run_build`,
+  hooks.rs `git_run_hook_manager` and agent.rs `run_capture_parts` (the CLI
+  version and sign-in probes, the opencode 1.x, codex and copilot model
+  listings, and the container runtime commands). Tree tests build
   on the fixtures in `proc_tree::test_support` (`Holder`, `wait_until`,
   `HANG_GUARD`, `started_within`, `remove_when_free`): they observe the
   holder start and die and never sleep for either, and a survivor is proven
